@@ -20,9 +20,6 @@ import {
   hasHelpFlag,
   loadConfig,
   printUsage,
-  busConnector,
-  mailboxConnector,
-  notifyConnector,
   registerConnector,
   meshSection,
   querySection,
@@ -38,32 +35,21 @@ import {
   type DocType,
   type FacadeMap,
 } from '@broject/core';
-import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
+import { ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
-import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt';
-import {
-  DRILL_PLAN_VERSION,
-  drillConnector,
-  drillSection,
-  parseDrillPlan,
-  type DrillPlan,
-} from '@broject/drill';
+import { DEBT_PLAN_VERSION, parseDebtPlan, type DebtPlan } from '@broject/debt';
+import { DRILL_PLAN_VERSION, drillSection, parseDrillPlan, type DrillPlan } from '@broject/drill';
 import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro';
-import { learnConnector, learnSection } from '@broject/learn';
+import { learnSection } from '@broject/learn';
 import { loopSection } from '@broject/loop';
-import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github';
-import { gitlabConnector } from '@broject/gitlab';
-import { linearConnector } from '@broject/linear';
-import { jiraConnector, jiraDcConnector } from '@broject/jira';
 import {
   applyQueryPlan,
-  atlassianConnector,
   parseQueryPlan,
   PLAN_VERSION as QUERY_PLAN_VERSION,
   type QueryPlan,
 } from '@broject/query';
-import { guardConnector, guardSection } from '@broject/guard';
-import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge';
+import { guardSection } from '@broject/guard';
+import { judgeSection } from '@broject/judge';
 import { runAcpCommand } from './commands/acp.ts';
 import { runAcpWorkerCommand } from './commands/acp-worker.ts';
 import { applyActPlan, runActCommand } from './commands/act.ts';
@@ -78,7 +64,6 @@ import { runNotifyCommand } from './commands/notify.ts';
 import { runOtelCommand } from './commands/otel.ts';
 import { otelSection } from '@broject/otel';
 import { rigSection } from './commands/rig-config.ts';
-import { rigConnector } from './commands/rig-pulse.ts';
 import { runRigCommand } from './commands/rig.ts';
 import { runSinksCommand } from './commands/sinks.ts';
 import { runQueryCommand } from './commands/query.ts';
@@ -93,8 +78,6 @@ import { runPluginsCommand } from './commands/plugins.ts';
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDoctorCommand } from './commands/doctor.ts';
 import { driveSection } from './commands/drive-config.ts';
-import { driveConnector } from './commands/drive-pulse.ts';
-import { loopConnector } from './commands/loop-pulse.ts';
 import { runDaemonCommand } from './commands/daemon.ts';
 import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
@@ -116,7 +99,6 @@ import { skillsSection } from './commands/skills-config.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
-import { watchConnector } from './commands/watch-pulse.ts';
 import { watchSection } from './commands/watch-config.ts';
 import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runAgentsCommand } from './commands/agents.ts';
@@ -130,76 +112,20 @@ import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
 import { runRouterCommand } from './commands/router.ts';
-import { runSpecCommand, sddConnector } from './commands/spec.ts';
-import { sessionCapConnector } from './commands/session-cap.ts';
+import { runSpecCommand } from './commands/spec.ts';
 import { runExecCommand } from './commands/exec.ts';
-import { herdrConnector } from './commands/herdr-connector.ts';
 import { runStackCommand } from './commands/stack.ts';
 import { runStampCommand } from './commands/buildstamp.ts';
-import { SPEC_CONNECTORS } from './spec-connectors.ts';
 import { runSweepCommand } from './commands/sweep.ts';
 import { runSyncCommand } from './commands/sync.ts';
 import { runTraceCommand } from './commands/trace.ts';
 import { telemetrySection } from './commands/trace-config.ts';
-import { runWorkCommand, workConnector } from './commands/work.ts';
+import { runWorkCommand } from './commands/work.ts';
 import { runContractCommand } from './commands/contract.ts';
-
-// Built-in connectors register at module load, ahead of external
-// plugins — registry order is the fallback precedence, and an external
-// connector must not shadow a built-in system. Registration order also
-// decides stop-gate block priority: drill > work > act.
-registerConnector(githubConnector);
-registerConnector(gitlabConnector);
-// external merge queues — opt-in only (`connectors.mergeQueue`), they
-// provide nothing but the queue facade so nothing detects them
-registerConnector(mergifyConnector);
-registerConnector(graphiteConnector);
-// queries-facade provider — opt-in only (a step names it or
-// connectors.queries pins it); nothing about a repo detects Atlassian
-registerConnector(atlassianConnector);
-// Linear — tasks + tasksAsync + queries, all name-only pins
-// (connectors.tasks=linear); a repo's remote can't name a Linear team
-registerConnector(linearConnector);
-// Jira — tasks + tasksAsync over the atlassian CLI's REST surface,
-// name-only pins (connectors.tasks=jira); a remote can't name a project
-registerConnector(jiraConnector);
-// Jira Data Center/Server — the same tasks facade on the v2 REST
-// surface (name-keyed users, string bodies, /search), name-only
-registerConnector(jiraDcConnector);
-registerConnector(drillConnector);
-registerConnector(workConnector);
-registerConnector(actConnector);
-// the pulse's rearm nudge — same family as act's dead-watch flags
-registerConnector(watchConnector);
-// the installed merge path's rearm checkpoint — drive.json's owner
-registerConnector(driveConnector);
-registerConnector(loopConnector);
-registerConnector(rigConnector);
-registerConnector(debtConnector);
-registerConnector(sddConnector);
-// the host-wide session cap — refuses a session start at the cap
-registerConnector(sessionCapConnector);
-registerConnector(notifyConnector);
-// pane report-back — env-gated inside the connector; outside herdr
-// every probe is a no-op (spec bro-84zrj)
-registerConnector(herdrConnector);
-registerConnector(learnConnector);
-registerConnector(systemoneConnector);
-registerConnector(llmJudgeConnector);
-// the builtins' home — guard defs contributed here shadow by name
-// behind config defs, so a project's `guard.defs` always wins a rename
-registerConnector(guardConnector);
-// events facade providers — registry order is the fallback precedence,
-// so `mailbox` first: `bro notify` must keep working with no broker and
-// no config. The bus is opt-in via `connectors.events` in bro.config.json.
-registerConnector(mailboxConnector);
-registerConnector(busConnector);
-// specs facade providers — registry order is detection precedence:
-// native first (its matchDir claims the configured sdd.dir), then
-// tool-layout matchers, agent last (explicit pick only, never detects)
-for (const c of SPEC_CONNECTORS) {
-  registerConnector(c);
-}
+// Built-in connector registration lives in connectors.ts — shared with
+// the slim hook entry (dist/hooks.js) so `bro hooks` never needs this
+// registry's import graph. Side-effect import: order is the contract.
+import './connectors.ts';
 
 /** The telemetry plane's usage — the plane had no help of its own, and
  *  `bro telemetry --help` ran the report. */

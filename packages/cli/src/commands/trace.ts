@@ -13,9 +13,11 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { hooksDir, safeId } from '@broject/learn';
-import { hasHelpFlag, printUsage, withFileLock } from '@broject/core';
+import { hasHelpFlag, loadConfig, printUsage, withFileLock } from '@broject/core';
 import { VERSION } from '../version.ts';
-import { loadBroConfig } from '../plugins.ts';
+// .telemetry resolves through core's loadConfig with the section schema
+// below — NOT loadBroConfig from ../plugins.ts, whose import evaluates
+// the whole PLUGINS registry on every hook event (specs/bro-36sx7.7.md)
 import {
   resolveOtlp,
   telemetrySection,
@@ -418,7 +420,7 @@ export async function exportTraces(opts: {
     opts.otlp ??
     resolveOtlp(
       (telemetrySection as (r: unknown) => TelemetryConfig)(
-        (loadBroConfig(opts.dir) as Record<string, unknown>).telemetry
+        (loadConfig(opts.dir, { telemetry: telemetrySection }) as Record<string, unknown>).telemetry
       ).otlp
     );
   const result: ExportResult = {
@@ -484,7 +486,9 @@ export function maybeSpawnTraceFlush(
       return;
     }
     const cfg = resolveOtlp(
-      telemetrySection((loadBroConfig(dir) as Record<string, unknown>).telemetry).otlp,
+      telemetrySection(
+        (loadConfig(dir, { telemetry: telemetrySection }) as Record<string, unknown>).telemetry
+      ).otlp,
       env
     );
     if (cfg.endpoint === '') {

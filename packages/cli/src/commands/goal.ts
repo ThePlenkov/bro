@@ -30,14 +30,19 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   hasHelpFlag,
+  loadConfig,
   LockTimeout,
   printUsage,
   withFileLock,
   type JudgeAnswer,
 } from '@broject/core';
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
-import { loadBroConfig } from '../plugins.ts';
-import type { GoalConfig } from './goal-config.ts';
+// .goal resolves through core's loadConfig with goal-config's own
+// section schema — NOT loadBroConfig from ../plugins.ts: goal.ts is
+// lazy-imported on the hook path (session-start/stop), where the
+// registry import would cold-load every plugin anyway
+// (specs/bro-36sx7.7.md)
+import { goalSection, type GoalConfig } from './goal-config.ts';
 
 export type GoalStatus = 'active' | 'paused' | 'achieved' | 'impossible' | 'budget' | 'cleared';
 
@@ -187,7 +192,7 @@ export function sessionGoal(dir: string, sessionId: string): GoalRecord | null {
 
 function goalConfig(dir: string): GoalConfig {
   try {
-    return (loadBroConfig(dir) as Record<string, unknown>).goal as GoalConfig;
+    return (loadConfig(dir, { goal: goalSection }) as Record<string, unknown>).goal as GoalConfig;
   } catch {
     return { maxTurns: 25, judge: true };
   }

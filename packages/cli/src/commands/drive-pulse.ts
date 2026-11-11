@@ -18,7 +18,8 @@
  * is type-level; the probe lazy-imports the supervisor machinery —
  * hook events only ever run after the graph settles.
  */
-import type { Connector, ConnectorCtx } from '@broject/core'
+import type { Connector, ConnectorCtx } from '@broject/core';
+import { readDriveMarker } from './want-marker.ts';
 
 /** One checkpoint for every lifecycle event: decide, bring up, report.
  *  `supervisorUp` re-decides under `daemon.up.lock`, so a racing
@@ -30,20 +31,28 @@ import type { Connector, ConnectorCtx } from '@broject/core'
  *  probe must never break the hook event it rode in on. */
 async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
   try {
-    const { driveRearm, supervisorUp } = await import('./daemon.ts')
-    const r = driveRearm(dir)
-    if (r.kind !== 'rearm') {
-      return []
+    // quiescence gate — an absent want-marker makes the rearm decision
+    // definitionally quiet (`driveRearm` returns 'quiet' for marker
+    // null), so the supervisor machinery — daemon.ts, and through it the
+    // command registry — never loads on an unarmed repo's hook events
+    // (specs/bro-36sx7.7.md). Armed repos pay the import once, as before.
+    if (readDriveMarker(dir) === null) {
+      return [];
     }
-    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true })
+    const { driveRearm, supervisorUp } = await import('./daemon.ts');
+    const r = driveRearm(dir);
+    if (r.kind !== 'rearm') {
+      return [];
+    }
+    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true });
     return up.kind === 'spawned'
       ? [
           `drive supervisor rearmed on ${where} — spawned ` +
             `\`bro daemon run --every ${r.everySec}\` (pid ${up.pid})`,
         ]
-      : []
+      : [];
   } catch {
-    return []
+    return [];
   }
 }
 
@@ -51,10 +60,10 @@ export const driveConnector: Connector = {
   name: 'drive',
   hooks: () => ({
     sessionStart(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'session start')
+      return supervisorCheckpoint(ctx.dir, 'session start');
     },
     postTool(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'tool call')
+      return supervisorCheckpoint(ctx.dir, 'tool call');
     },
   }),
-}
+};

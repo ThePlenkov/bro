@@ -669,6 +669,41 @@ while [ ! -f "$DIR/packages/cli/dist/index.js" ]; do
   DIR="$PARENT"
 done
 
+# Resolve `bro` on PATH to the slim hooks entry beside its dist/index.js
+# — npm links the bin at <pkg>/dist/index.js, so hooks.js is its sibling
+# (specs/bro-36sx7.7.md). A shim that doesn't resolve to a dist file (a
+# wrapper script, a different layout) or a dist built before hooks.js
+# existed prints nothing and the caller falls back to `bro hooks`.
+bro_hooks_js() {
+  _b=$(command -v bro 2>/dev/null) || return 1
+  # a bare name means a function/builtin, not a PATH file — only a
+  # resolved path can point into a package dist
+  case "$_b" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  # chase the symlink chain — npm .bin entries link into the package;
+  # plain `readlink` is POSIX (no -f, which macOS lacks). Bounded so a
+  # link cycle can't spin the launcher.
+  _n=0
+  while [ -L "$_b" ] && [ "$_n" -lt 40 ]; do
+    _n=$((_n + 1))
+    _l=$(readlink "$_b" 2>/dev/null) || return 1
+    case "$_l" in
+      /*) _b=$_l ;;
+      *)  _b=$(dirname -- "$_b")/$_l ;;
+    esac
+  done
+  [ -L "$_b" ] && return 1
+  case "$_b" in
+    */dist/index.js) ;;
+    *) return 1 ;;
+  esac
+  _h=${_b%/index.js}/hooks.js
+  [ -f "$_h" ] || return 1
+  printf '%s\n' "$_h"
+}
+
 # silence on Cursor's beforeShellExecution is a deny — when no binary
 # answered (the watchdog expired the run, or nothing could run), the
 # launcher itself emits the no-opinion
@@ -744,7 +779,14 @@ hook_spool_end() {
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   _rc=0
   hook_spool_start
-  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@" || _rc=$?
+  # prefer the slim hooks entry — same dispatch minus the PLUGINS
+  # registry cold-load; a dist built before it existed falls back to
+  # the full CLI spelling
+  if [ -f "$DIR/packages/cli/dist/hooks.js" ]; then
+    run_bounded node "$DIR/packages/cli/dist/hooks.js" "$@" || _rc=$?
+  else
+    run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@" || _rc=$?
+  fi
   # BRO_HOOKS_NO_FALLBACK=1 — the latency bench pins it so the in-tree
   # dist result IS the measurement: a nonzero exit or an expired
   # deadline is the error, never a PATH-bro swap. Never set it on a
@@ -778,7 +820,15 @@ fi
 if command -v bro >/dev/null 2>&1; then
   _rc=0
   [ "$HOOK_SPOOL_STARTED" = 1 ] || hook_spool_start
-  run_bounded bro hooks "$@" || _rc=$?
+  # the resolved bro bin's own dist/hooks.js is the same slim entry the
+  # repo-dist branch prefers — published installs reach it here, where
+  # no packages/cli/dist exists under the plugin root
+  _hooks_js=$(bro_hooks_js)
+  if [ -n "$_hooks_js" ] && command -v node >/dev/null 2>&1; then
+    run_bounded node "$_hooks_js" "$@" || _rc=$?
+  else
+    run_bounded bro hooks "$@" || _rc=$?
+  fi
   # run_bounded already journaled the kill into killed.jsonl — the
   # spool end rows here are the start/end pairing, not a second kill
   # row (kody: two killed.jsonl rows per kill)
