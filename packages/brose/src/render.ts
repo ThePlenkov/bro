@@ -5,12 +5,16 @@
  */
 import type { Template } from './template.ts';
 
+import { ownValue } from './own.ts';
+
 const PLACEHOLDER = /\{\{\s*([\w.-]+)\s*\}\}/g;
 
 export function render(template: Template | string, values: Record<string, unknown> = {}): string {
   const body = typeof template === 'string' ? template : template.body;
   return body.replace(PLACEHOLDER, (_m, key: string) => {
-    const v = values[key];
+    // ownValue — a `{{__proto__}}` placeholder must not render the
+    // prototype chain.
+    const v = ownValue(values, key);
     return v === undefined || v === null ? '' : String(v);
   });
 }

@@ -46,7 +46,9 @@ export interface Template {
  *  registered version. `brotocol/spec@1` → `{name: 'brotocol/spec'}`. */
 export function parseTemplateRef(ref: string): TemplateRef {
   const m = /^(.*)@(\d+)$/.exec(ref.trim());
-  return m === null ? { name: ref.trim() } : { name: m[1]!, version: Number.parseInt(m[2]!, 10) };
+  return m === null
+    ? { name: ref.trim() }
+    : { name: m.at(1) ?? '', version: Number.parseInt(m.at(2) ?? '0', 10) };
 }
 
 // Versions are non-negative integers — `name@-1` would register but
@@ -65,7 +67,7 @@ export function parseTemplate(content: string, path?: string): Template {
       `not a template (frontmatter needs name + integer version)${path ? `: ${path}` : ''}`
     );
   }
-  const fields: Record<string, FieldSpec> = {};
+  const fieldEntries: [string, FieldSpec][] = [];
   if (fm.data.fields !== undefined && fm.data.fields !== null) {
     if (typeof fm.data.fields !== 'object' || Array.isArray(fm.data.fields)) {
       throw new Error(`template fields must be a map${path ? `: ${path}` : ''}`);
@@ -75,9 +77,10 @@ export function parseTemplate(content: string, path?: string): Template {
       if (!parsed.success) {
         throw new Error(`template field '${key}' is malformed${path ? `: ${path}` : ''}`);
       }
-      fields[key] = parsed.data;
+      fieldEntries.push([key, parsed.data]);
     }
   }
+  const fields = Object.fromEntries(fieldEntries);
   const doc = parseContent(content);
   return {
     name: fm.data.name as string,

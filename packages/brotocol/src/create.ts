@@ -7,7 +7,7 @@
  * overwrite.
  */
 import { basename, dirname, join, resolve } from 'node:path';
-import { create as broseCreate, createRegistry } from '@broject/brose';
+import { create as broseCreate, createRegistry, type FieldSpec, ownValue } from '@broject/brose';
 import { ioExists, ioWrite, resolveIn } from './io.ts';
 import { type Doc, docSuffix, type Protocol } from './protocol.ts';
 import { get, scan } from './scan.ts';
@@ -32,14 +32,15 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
   // brose emits only declared `fields:` — force the protocol's id/parent
   // fields into the frontmatter even when the template doesn't declare
   // them, so the written doc carries its identity.
+  const ownField = (key: string): FieldSpec => ownValue<FieldSpec>(resolved.fields, key) ?? {};
   const t = {
     ...resolved,
     fields: {
       ...resolved.fields,
-      [protocol.idField]: resolved.fields[protocol.idField] ?? {},
+      [protocol.idField]: ownField(protocol.idField),
       ...(protocol.parentField === undefined
         ? {}
-        : { [protocol.parentField]: resolved.fields[protocol.parentField] ?? {} }),
+        : { [protocol.parentField]: ownField(protocol.parentField) }),
     },
   };
   const suffix = docSuffix(protocol.docGlob);
@@ -57,7 +58,7 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
     if (p.isDirDoc) {
       base = dirname(p.path);
     } else if (protocol.parentField !== undefined) {
-      values[protocol.parentField] = p.id;
+      Object.assign(values, { [protocol.parentField]: p.id });
     }
   }
   const name =

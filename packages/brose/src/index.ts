@@ -8,6 +8,7 @@ export {
   type ParsedDoc,
   type SectionNode,
 } from './parse.ts';
+export { ownValue } from './own.ts';
 export { render } from './render.ts';
 export {
   createRegistry,

@@ -8,7 +8,7 @@
 import type { Dirent } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { ioRead, ioReadDir } from './io.ts';
-import { parseFrontmatter } from '@broject/brose';
+import { ownValue, parseFrontmatter } from '@broject/brose';
 import { type Doc, docSuffix, globMatch, type ParentEdge, type Protocol } from './protocol.ts';
 
 const posix = (p: string): string => p.split(sep).join('/');
@@ -42,9 +42,10 @@ function makeDoc(
     // scan can't read is a file the scan doesn't see.
     return undefined;
   }
-  const declared = fm.data[protocol.idField];
+  const declared = ownValue(fm.data, protocol.idField);
   const id = typeof declared === 'string' && declared !== '' ? declared : fallbackId;
-  const parent = protocol.parentField === undefined ? undefined : fm.data[protocol.parentField];
+  const parent =
+    protocol.parentField === undefined ? undefined : ownValue(fm.data, protocol.parentField);
   let parentId: string | undefined;
   let parentEdge: ParentEdge = 'none';
   if (typeof parent === 'string' && parent !== '') {

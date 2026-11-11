@@ -9,6 +9,7 @@
  */
 import { isDeepStrictEqual } from 'node:util';
 import { ioRead } from './io.ts';
+import { ownValue } from './own.ts';
 import { z } from 'zod';
 import { flatSections, parseContent, type SectionNode } from './parse.ts';
 import {
@@ -63,8 +64,7 @@ const titleMatch = (tpl: string, doc: string): boolean => {
     .map((p, i, a) => (i === 0 ? p.trimStart() : i === a.length - 1 ? p.trimEnd() : p));
   let cursor = 0;
   let sawLiteral = false;
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i] ?? '';
+  for (const [i, p] of parts.entries()) {
     if (p === '') {
       continue;
     }
@@ -78,7 +78,7 @@ const titleMatch = (tpl: string, doc: string): boolean => {
     sawLiteral = true;
     cursor = pos + p.length;
   }
-  const last = parts[parts.length - 1] ?? '';
+  const last = parts.at(-1) ?? '';
   if (last !== '') {
     return cursor === text.length;
   }
@@ -92,9 +92,10 @@ function checkFields(
   out: Diagnostic[]
 ): void {
   for (const [key, spec] of Object.entries(t.fields)) {
-    // own-property only — `in` would see `constructor`/`toString` on
-    // the prototype and treat a missing required field as present.
-    const present = Object.hasOwn(doc.frontmatter, key) && doc.frontmatter[key] !== null;
+    // own-property only — a prototype key like `constructor` must not
+    // read as a present field; the descriptor is the single safe read.
+    const desc = Object.getOwnPropertyDescriptor(doc.frontmatter, key);
+    const present = desc !== undefined && desc.value !== null;
     const line = doc.keyLines.get(key) ?? 1;
     if (!present) {
       if (spec.required === true) {
@@ -108,8 +109,10 @@ function checkFields(
       }
       continue;
     }
-    const value = doc.frontmatter[key];
-    if (spec.type !== undefined && !FIELD_TYPE[spec.type].safeParse(value).success) {
+    const value = desc?.value;
+    const typeCheck =
+      spec.type === undefined ? undefined : ownValue<z.ZodType>(FIELD_TYPE, spec.type);
+    if (typeCheck !== undefined && !typeCheck.safeParse(value).success) {
       out.push({
         severity: 'error',
         rule: 'field-type',
@@ -153,15 +156,16 @@ function checkSections(
     const earlier = have.findIndex(
       (h, i) => i <= di && h.level === req.level && titleMatch(req.title, h.title)
     );
-    const anchor = di >= 0 ? have[di]!.line + 2 : doc.bodyOffset + 1;
+    const anchor = di >= 0 ? (have.at(di)?.line ?? 0) + 2 : doc.bodyOffset + 1;
+    const misplaced = earlier === -1 ? undefined : have.at(earlier);
     out.push(
-      earlier !== -1
+      misplaced !== undefined
         ? {
             severity: 'error',
             rule: 'section-order',
-            message: `section '${req.title}' appears out of order (line ${have[earlier]!.line + 1})`,
+            message: `section '${req.title}' appears out of order (line ${(misplaced.line ?? 0) + 1})`,
             path,
-            line: have[earlier]!.line + 1,
+            line: (misplaced.line ?? 0) + 1,
           }
         : {
             severity: 'error',

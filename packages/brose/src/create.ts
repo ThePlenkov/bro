@@ -5,6 +5,7 @@
  * to overwrite without `{force: true}`.
  */
 import { ioExists, ioWrite } from './io.ts';
+import { ownValue } from './own.ts';
 import { dumpFrontmatter } from './frontmatter.ts';
 import { render } from './render.ts';
 import { createRegistry, type Registry, type Template } from './template.ts';
@@ -28,19 +29,19 @@ export function create(
     throw new Error(`unknown template '${templateRef}'`);
   }
   const missing = Object.entries(t.fields)
-    .filter(([k, spec]) => spec.required === true && values[k] === undefined)
+    .filter(([k, spec]) => spec.required === true && ownValue(values, k) === undefined)
     .map(([k]) => k);
   if (missing.length > 0) {
     throw new Error(
       `missing required field${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`
     );
   }
-  const fm: Record<string, unknown> = { template: `${t.name}@${t.version}` };
-  for (const key of Object.keys(t.fields)) {
-    if (values[key] !== undefined) {
-      fm[key] = values[key];
-    }
-  }
+  const fm = Object.fromEntries([
+    ['template', `${t.name}@${t.version}`],
+    ...Object.keys(t.fields)
+      .map(k => [k, ownValue(values, k)] as const)
+      .filter((e): e is readonly [string, unknown] => e[1] !== undefined),
+  ]);
   return `---\n${dumpFrontmatter(fm)}---\n\n${render(t, values)}`;
 }
 
