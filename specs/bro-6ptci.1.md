@@ -62,7 +62,7 @@ at `watchdog.ts` (`runWatchdogCommand`), types at
     number}`
   - `WatchdogWorktrees {count: int}`
   - `WatchdogSlot {slug: string, beadId: string, pid: int|null,
-    state: enum[running, dead], silentMs: int|null}`
+    state: enum[running, dead], silentMs: number|null}`
 - Every plane/slot object is `additionalProperties: false` — the
   emit is closed-world (explicit field mapping at the slots site,
   fixed literals elsewhere), so a field rename SHOULD fail validation
