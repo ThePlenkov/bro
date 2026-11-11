@@ -228,16 +228,19 @@ function pipelineFor(call: StageCall, deps: FleetDeps): PipelineProvenance | und
   };
 }
 
+/** `orch` must be a declared ORCH_MODES member — the orch vocabulary
+ *  is route's, and a non-member ctx value is not a routing answer:
+ *  it never reaches the spawn. */
+const isOrchMode = (v: unknown): v is RouteOrch =>
+  typeof v === 'string' && (ORCH_MODES as readonly string[]).includes(v);
+
 /** route's journaled routing fields → the request's flat hints —
- *  strings only; `orch` must be a declared ORCH_MODES member or it
- *  is not a routing answer and never reaches the spawn. */
+ *  strings only. */
 function routingFor(call: StageCall): Partial<FleetSpawnRequest> {
   const out: Partial<FleetSpawnRequest> = {};
-  // `orch` validates against the route vocabulary — a non-member
-  // never spawns through an orch surface the formula doesn't declare
   const orch = call.ctx['orch'];
-  if (typeof orch === 'string' && orch !== '' && (ORCH_MODES as readonly string[]).includes(orch)) {
-    out.orch = orch as RouteOrch;
+  if (isOrchMode(orch)) {
+    out.orch = orch;
   }
   for (const key of ROUTING_CTX_KEYS) {
     if (key === 'orch') {
@@ -404,6 +407,26 @@ function checkItem(obs: AgentInfo, call: StageCall): void {
   }
 }
 
+/** The post-spawn registry read must be THIS attempt's generation —
+ *  a previous worker's terminal entry would settle the intent on
+ *  dead work. `runId` is the per-attempt token; `spawnedAt` the
+ *  generation stamp covering runId-less (remote, pre-runId) entries.
+ *  Incomparable generations keep the trust — the binding's
+ *  latest-per-step contract makes staleness a narrow race, and a
+ *  wrong 'same' only defers settlement to the next wake's recheck. */
+function sameAttempt(obs: AgentInfo, worker: AgentInfo): boolean {
+  if (obs.id !== worker.id) {
+    return false;
+  }
+  if (obs.runId !== undefined && worker.runId !== undefined) {
+    return obs.runId === worker.runId;
+  }
+  if (obs.spawnedAt !== undefined && worker.spawnedAt !== undefined) {
+    return obs.spawnedAt === worker.spawnedAt;
+  }
+  return true;
+}
+
 /** One observation → 'pending' or the settling verdict+payload —
  *  the single mapper invoke's post-spawn read and recheck share. */
 async function settle(call: StageCall, obs: AgentInfo, deps: FleetDeps): Promise<EngineOutcome> {
@@ -474,10 +497,13 @@ export function workStage(deps: FleetDeps): EngineHandler {
       } catch (err) {
         return spawnRefusal(err, call, deps);
       }
-      // one post-spawn read settles an instant death in the same wake;
-      // a seam that can't see its own spawn yet falls back to the
-      // spawn's own AgentInfo (state 'spawned' → pending either way)
-      const obs = (await deps.observe(call)) ?? worker;
+      // one post-spawn read settles an instant death in the same wake —
+      // but only THIS attempt's generation counts: a stale
+      // previous-attempt entry would settle the intent on dead work,
+      // so a generation mismatch falls back to the spawn's own
+      // AgentInfo (state 'spawned' → pending either way)
+      const read = await deps.observe(call);
+      const obs = read !== undefined && sameAttempt(read, worker) ? read : worker;
       return settle(call, obs, deps);
     },
     async recheck(call: StageCall): Promise<EngineOutcome | undefined> {

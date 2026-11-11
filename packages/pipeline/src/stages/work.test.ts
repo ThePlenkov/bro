@@ -263,6 +263,22 @@ describe('work — exit taxonomy', () => {
     }
   });
 
+  test('the post-spawn read must be this attempt — a stale generation cannot settle', async () => {
+    // spawn minted runId r2; the registry still answers the previous
+    // attempt's terminal entry (runId r1) — settling on it would mark
+    // unexecuted work done, so invoke falls back to the spawn's own
+    // 'spawned' AgentInfo → pending
+    const sp = spawnSpy(agent({ state: 'spawned', runId: 'r2' }));
+    const ob = observeSpy(agent({ state: 'exited', cause: 'ok', runId: 'r1' }));
+    const res = await invoke(deps(sp.fn, ob.fn));
+    assert.equal(res, 'pending');
+    // same generation reads through — an instant death still settles
+    const sp2 = spawnSpy(agent({ state: 'spawned', runId: 'r2' }));
+    const ob2 = observeSpy(agent({ state: 'exited', cause: 'ok', runId: 'r2' }));
+    const res2 = settled(await invoke(deps(sp2.fn, ob2.fn)));
+    assert.equal(res2.verdict, 'done');
+  });
+
   test('done carries nested worker provenance + diff — never flat route keys', async () => {
     const obs = agent({
       state: 'exited',
