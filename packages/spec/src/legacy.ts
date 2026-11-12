@@ -8,16 +8,10 @@
  * to KEY-N `*.spec.md` docs. Shared by both connectors; lives here so
  * `@broject/spec` owns the whole SpecStore surface.
  */
-import {
-  type Dirent,
-  existsSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  statSync,
-} from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, type SpecNode } from '@broject/core';
+import { ioExists, ioRead, ioReadDir, ioRealPath, ioStat } from './io.ts';
 
 /** Repo root for ctx.dir — worktree-aware: a spec committed on the
  *  feature branch is found from a linked worktree, not the main one. */
@@ -52,7 +46,7 @@ export function specDirAbs(dir: string, specDir: string): string | null {
     return null;
   }
   try {
-    const real = realpathSync(abs);
+    const real = ioRealPath(abs);
     return real === root || real.startsWith(root + sep) ? abs : null;
   } catch {
     // abs does not exist yet — but an existing ANCESTOR could be a
@@ -61,7 +55,7 @@ export function specDirAbs(dir: string, specDir: string): string | null {
     // would-be path against the root before allowing the write.
     let realRoot = root;
     try {
-      realRoot = realpathSync(root);
+      realRoot = ioRealPath(root);
     } catch {
       /* root always exists — the fallback keeps the lexical compare */
     }
@@ -73,7 +67,7 @@ export function specDirAbs(dir: string, specDir: string): string | null {
         return abs; // no existing ancestor — the lexical check already held
       }
       try {
-        const real = realpathSync(parent);
+        const real = ioRealPath(parent);
         const candidate = join(real, basename(probe), ...missing);
         return candidate === realRoot || candidate.startsWith(realRoot + sep) ? abs : null;
       } catch {
@@ -123,7 +117,7 @@ export function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
   ): void => {
     let entries: Dirent[];
     try {
-      entries = readdirSync(dirAbs, { withFileTypes: true });
+      entries = ioReadDir(dirAbs);
     } catch {
       return;
     }
@@ -133,7 +127,7 @@ export function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
       if (e.isDirectory()) {
         const candidates = [`${e.name}.spec.md`, ...INDEX_NAMES].filter(n => {
           try {
-            return statSync(join(abs, n)).isFile();
+            return ioStat(join(abs, n)).isFile();
           } catch {
             return false;
           }
@@ -145,7 +139,7 @@ export function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
         // file carries no spec identity either.
         const populated = candidates.find(n => {
           try {
-            return readFileSync(join(abs, n), 'utf8').trim().length > 0;
+            return ioRead(join(abs, n)).trim().length > 0;
           } catch {
             return false;
           }
@@ -205,7 +199,7 @@ export function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
 function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
   const nonEmpty = (n: ResolvedSpec): boolean => {
     try {
-      return readFileSync(n.abs, 'utf8').trim() !== '';
+      return ioRead(n.abs).trim() !== '';
     } catch {
       return false;
     }
@@ -223,7 +217,7 @@ function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
 /** Resolve an id to its spec node — file or dir spec, at any depth. */
 export function findSpec(dir: string, specDir: string, id: string): ResolvedSpec | undefined {
   const base = specDirAbs(dir, specDir);
-  if (base === null || !existsSync(base) || !validBeadId(id)) {
+  if (base === null || !ioExists(base) || !validBeadId(id)) {
     return undefined;
   }
   return preferSpec(indexSpecDir(base, specDir).filter(n => n.id === id));
@@ -233,7 +227,7 @@ export function findSpec(dir: string, specDir: string, id: string): ResolvedSpec
 export function hasSpecFile(dir: string, specDir: string, id: string): boolean {
   try {
     const node = findSpec(dir, specDir, id);
-    return node !== undefined && readFileSync(node.abs, 'utf8').trim() !== '';
+    return node !== undefined && ioRead(node.abs).trim() !== '';
   } catch {
     return false;
   }
@@ -250,9 +244,9 @@ function edgeVia(fm: string | undefined, positional: string | undefined): SpecNo
  *  edge. Frontmatter only: a body mention is prose, not structure. */
 function specParent(path: string): string | undefined {
   try {
-    const head = readFileSync(path, 'utf8').slice(0, 2000);
+    const head = ioRead(path).slice(0, 2000);
     const fm = /^---\n([\s\S]*?)\n---/.exec(head);
-    const m = /^parent:\s*([\w.-]+)\s*$/m.exec(fm ? fm[1]! : '');
+    const m = /^parent:\s*([\w.-]+)\s*$/m.exec(fm?.[1] ?? '');
     return m?.[1];
   } catch {
     return undefined;
@@ -298,13 +292,13 @@ const quoteEnd = (t: string, q: string, from: number): number => {
 
 /** The index just past a quoted scalar's closing quote starting at
  *  `start` (t[start] is the quote), or -1 when it never closes. */
-const closeQuote = (t: string, start: number): number => quoteEnd(t, t[start]!, start + 1);
+const closeQuote = (t: string, start: number): number => quoteEnd(t, t.charAt(start), start + 1);
 
 /** The quote char `t` ends inside, or '' — a quoted scalar wrapped
  *  across lines continues on the next fragment. */
 const openQuoteAtEnd = (t: string): string => {
   for (let i = 0; i < t.length; i++) {
-    const ch = t[i]!;
+    const ch = t.charAt(i);
     if ((ch === '"' || ch === "'") && opensScalar(t, i)) {
       const end = closeQuote(t, i);
       if (end === -1) {
@@ -323,7 +317,7 @@ const openQuoteAtEnd = (t: string): string => {
  *  -1 when the scalar runs to the end. */
 const commentStart = (t: string, flow: boolean): number => {
   for (let i = 0; i < t.length; i++) {
-    const ch = t[i]!;
+    const ch = t.charAt(i);
     if (flow && (ch === '"' || ch === "'") && opensScalar(t, i)) {
       const end = closeQuote(t, i);
       if (end === -1) {
@@ -361,7 +355,7 @@ const flowItems = (s: string): string[] => {
   const items: string[] = [];
   let cur = '';
   for (let i = 0; i < s.length; i++) {
-    const ch = s[i]!;
+    const ch = s.charAt(i);
     if ((ch === '"' || ch === "'") && opensScalar(s, i)) {
       const end = closeQuote(s, i);
       if (end !== -1) {
@@ -388,7 +382,7 @@ const flowItems = (s: string): string[] => {
 const flowJoin = (inline: string, body: string[]): string => {
   let inQuote = openQuoteAtEnd(inline);
   for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
-    const frag = body[j]!.trim();
+    const frag = (body[j] ?? '').trim();
     if (inQuote !== '') {
       const end = quoteEnd(frag, inQuote, 0);
       if (end === -1) {
@@ -444,12 +438,12 @@ const scopeItems = (inline: string, body: string[]): string[] => {
  *  id-keyed lookup can resolve a different same-id file. */
 export function specScope(path: string): string[] {
   try {
-    const head = readFileSync(path, 'utf8');
+    const head = ioRead(path);
     const fm = /^---\n([\s\S]*?)\n---/.exec(head);
     if (fm === null) {
       return [];
     }
-    const lines = fm[1]!.split('\n');
+    const lines = (fm[1] ?? '').split('\n');
     // `owns:` is the brotocol field, `scope:` the legacy one — the
     // connector's id-keyed scope() prefers owns the same way; an empty
     // owns falls through to scope rather than declaring nothing
@@ -462,7 +456,7 @@ export function specScope(path: string): string[] {
         continue;
       }
       const items = scopeItems(
-        yamlScalar(lines[i]!.replace(/^[A-Za-z_-]+:\s*/, '')),
+        yamlScalar((lines[i] ?? '').replace(/^[A-Za-z_-]+:\s*/, '')),
         lines.slice(i + 1)
       );
       if (items.length > 0) {
