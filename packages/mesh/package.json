@@ -47,7 +47,10 @@
       "test": {
         "inputs": [
           "default",
-          "envGates"
+          "envGates",
+          {
+            "dependentTasksOutputFiles": "**/*"
+          }
         ]
       }
     }

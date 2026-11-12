@@ -9,17 +9,40 @@
         "default",
         {
           "externalDependencies": ["typescript"]
+        },
+        {
+          "dependentTasksOutputFiles": "**/*"
         }
       ]
     },
     "test": {
       "dependsOn": ["^build", "build"],
-      "cache": true
+      "cache": true,
+      "inputs": [
+        "default",
+        {
+          "dependentTasksOutputFiles": "**/*"
+        }
+      ]
     },
     "test:e2e": {
       "dependsOn": ["^build", "build"],
       "cache": true,
-      "inputs": ["default", "envGates"]
+      "inputs": [
+        "default",
+        "envGates",
+        {
+          "dependentTasksOutputFiles": "**/*"
+        }
+      ]
+    },
+    "build": {
+      "dependsOn": [
+        {
+          "target": "^build",
+          "transitive": true
+        }
+      ]
     }
   },
   "namedInputs": {

@@ -48,7 +48,10 @@
       "test": {
         "inputs": [
           "default",
-          "{workspaceRoot}/skills/**/*"
+          "{workspaceRoot}/skills/**/*",
+          {
+            "dependentTasksOutputFiles": "**/*"
+          }
         ]
       }
     }
