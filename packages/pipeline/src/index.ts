@@ -229,3 +229,14 @@ export {
   TRACE_TRAILERS,
   trailerBlock,
 } from './trace.ts';
+export type {
+  PipelineRunView,
+  ResolvedRun,
+  ResumeAnchor,
+  WakeAction,
+  WakeDeps,
+  WakeProbes,
+  WakeReport,
+  WakeRunReport,
+} from './wake.ts';
+export { scanPipelineRuns, wakePipeline } from './wake.ts';

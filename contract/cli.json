@@ -209,7 +209,7 @@
     "pipeline": {
       "name": "pipeline",
       "group": "pipeline",
-      "summary": "Pipeline customer surface — run|accept|answer",
+      "summary": "Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker",
       "spellings": ["pipeline"],
       "aliases": [],
       "hidden": false,
@@ -257,6 +257,19 @@
             "exits": {
               "0": "answers recorded on the run channel",
               "1": "no run awaiting answers or an unreadable file",
+              "2": "usage"
+            }
+          },
+          "wake": {
+            "flags": {
+              "--engines <module>": "engine map module replacing the built-in production map — exports engines (EngineMap or (dir)=>EngineMap)",
+              "--formula <file>": "formula TOML for every run (default: the <runId>.formula.toml sidecar)",
+              "--formula-dir <dir>": "formula TOML dir — the file whose sha matches formula_sha wins",
+              "--json": "emit the WakeReport as JSON"
+            },
+            "exits": {
+              "0": "pass complete — per-run actions reported (woken|waiting|unresolved|skipped|failed)",
+              "1": "the wake pass itself failed (pipeline plane unreadable)",
               "2": "usage"
             }
           }

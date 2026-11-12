@@ -398,12 +398,16 @@ function recordsOf(run: Run): JournalRow[] {
  *    mean the flow suspended or ended — not moving, occupying nothing;
  *  - alert row → parked out of the active set — neither.
  */
-interface FlowTail {
+export interface FlowTail {
   moving: boolean;
   stage?: string;
 }
 
-function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
+/** One flow's occupancy tail — exported for the waker's saturated-park
+ *  probe: it must count seats with the SAME rule the runner enforces
+ *  (the emit customer-wait exception included), never a re-derivation
+ *  that could drift. */
+export function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
   const last = records.at(-1);
   if (last === undefined || last.alert !== undefined) {
     return { moving: false };
