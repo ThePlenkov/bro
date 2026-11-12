@@ -336,6 +336,10 @@ function runClient(
           CLAUDE_CONFIG_DIR: live.configDir,
           ANTHROPIC_BASE_URL: baseUrl,
           ANTHROPIC_AUTH_TOKEN: live.endpoint.token,
+          // the check IS probe traffic (bro-5xm9g): the marker lets the
+          // conductor ride its per-lane probe session instead of paying
+          // a fresh session/new every run — real turns are untouched
+          ANTHROPIC_CUSTOM_HEADERS: 'x-bro-probe: live-check',
         },
       }
     );
