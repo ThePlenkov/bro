@@ -170,7 +170,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'act',
     group: 'review',
-    summary: 'Open-PR loop: status|threads|resolve|reply|merge',
+    summary: 'Open-PR loop: status|threads|resolve|reply|merge|dismiss',
     run: runActCommand,
     skill: 'act',
     configKey: 'act',
@@ -187,6 +187,18 @@ export const PLUGINS: BroPlugin[] = [
             2: 'no open PR for the current branch',
           },
           json: 'schemas/cli/act-status.schema.json',
+        },
+        dismiss: {
+          flags: {
+            '--pr <n>': 'the PR whose stale veto reviews to dismiss — default: the current branch',
+            '--dry-run': 'list the stale vetoes without dismissing',
+            '--message <t>': 'the dismissal note the host records',
+          },
+          exits: {
+            0: 'stale vetoes dismissed (or none standing)',
+            1: 'host cannot enumerate/dismiss reviews, PR not OPEN, or a dismissal failed',
+            2: 'usage — no PR for the current branch',
+          },
         },
       },
     },

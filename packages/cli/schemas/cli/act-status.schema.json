@@ -66,6 +66,7 @@
           "items": { "type": "string" }
         },
         "reviewDecision": { "type": "string" },
+        "vetoReviews": { "type": "array" },
         "humanApproval": { "type": "boolean" },
         "humanApprovalReason": { "type": "string" },
         "humanApprovalApprovers": { "type": "array" },

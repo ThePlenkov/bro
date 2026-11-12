@@ -34,6 +34,7 @@ import type {
   ReviewThread,
   ScanOpts,
   StackMembership,
+  VetoReview,
 } from '@broject/core';
 
 // graphql/REST paths need owner+repo separately — split the facade's
@@ -564,8 +565,12 @@ function prUpdatedAt(t: PrTarget): string | null {
 
 /** One decision review — the approval probe needs the head sha it was
  *  submitted against, who authored it (User vs Bot), and when, for the
- *  latest-per-reviewer fold. Exported for tests — the verdict is pure. */
+ *  latest-per-reviewer fold; the veto probe additionally needs the
+ *  node `id` — the dismissal handle. Exported for tests — the verdict
+ *  is pure. */
 export interface PrReviewNode {
+  /** The review's GraphQL node id (PRR_…) — the dismiss handle. */
+  id?: string;
   state?: string;
   submittedAt?: string;
   commit?: { oid?: string } | null;
@@ -663,7 +668,7 @@ export function headApprovalVerdict(
 }
 
 function reviewsQuery(afterClause: string): string {
-  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{state submittedAt commit{oid} author{__typename login}}}}}}`;
+  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{id state submittedAt commit{oid} author{__typename login}}}}}}`;
 }
 
 /** `, after: "…"` — the cursor is host data interpolated into a GraphQL
@@ -780,6 +785,208 @@ async function humanApprovedAsync(t: PrTarget, opts?: ApprovalProbeOpts): Promis
     cursor = step.next;
   }
   return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha };
+}
+
+// --- standing veto reviews (bro-n1foa) -----------------------------------------
+//
+// reviewDecision=CHANGES_REQUESTED is a host veto the thread axis can't
+// see — the gate blocks on it, and this probe answers WHICH review(s)
+// stand and whether each is stale (every referenced thread resolved +
+// outdated → dismissible via dismissPullRequestReview).
+
+/** The standing CHANGES_REQUESTED reviews — the latest decision review
+ *  per reviewer folded exactly like headApprovalVerdict (later
+ *  submittedAt wins; a same-stamp tie falls to list order — the host
+ *  emits oldest-first; DISMISSED enters the fold as a revocation).
+ *  Differences from the approval fold, both deliberate: unattributable
+ *  authors key on the review id so each stands alone (the veto axis
+ *  doesn't need proven-human — a deleted account's objection still
+ *  blocks the host merge), and bots count (kody-ai's verdict was the
+ *  motivating case). A review with no node id can't be dismissed — it
+ *  drops out of the result rather than poisoning the list. Exported
+ *  for tests — the fold is pure. */
+export function standingVetoes(nodes: readonly PrReviewNode[]): PrReviewNode[] {
+  const latest = new Map<string, { node: PrReviewNode; at: string; i: number }>();
+  nodes.forEach((n, i) => {
+    const state = n.state;
+    if (state !== 'APPROVED' && state !== 'CHANGES_REQUESTED' && state !== 'DISMISSED') {
+      return;
+    }
+    const login = n.author?.login;
+    const key = login !== undefined && login !== '' ? login.toLowerCase() : `id:${n.id ?? i}`;
+    const at = n.submittedAt ?? '';
+    const prev = latest.get(key);
+    if (prev === undefined || at > prev.at || (at === prev.at && i > prev.i)) {
+      latest.set(key, { node: n, at, i });
+    }
+  });
+  return [...latest.values()]
+    .map(v => v.node)
+    .filter(n => n.state === 'CHANGES_REQUESTED' && n.id !== undefined);
+}
+
+/** One reviewThreads page for the veto probe — slimmer than
+ *  ThreadPage: only the resolved/outdated flags and each comment's
+ *  review attribution are read. */
+interface VetoThreadPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: Array<{
+    isResolved: boolean;
+    isOutdated: boolean;
+    comments: {
+      nodes: Array<{ pullRequestReview?: { id?: string } | null }>;
+    };
+  }>;
+}
+
+function vetoThreadsQuery(afterClause: string): string {
+  return `
+    query($o: String!, $r: String!, $pr: Int!, $n: Int!) {
+      repository(owner: $o, name: $r) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: $n${afterClause}) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              isResolved
+              isOutdated
+              comments(first: 100) {
+                nodes { pullRequestReview { id } }
+              }
+            }
+          }
+        }
+      }
+    }`;
+}
+
+function parseVetoThreadPage(raw: string, pr: number): VetoThreadPage {
+  const parsed = JSON.parse(raw) as {
+    data?: { repository?: { pullRequest?: { reviewThreads?: VetoThreadPage } } };
+    errors?: unknown;
+  };
+  if (parsed.errors) {
+    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`);
+  }
+  const threads = parsed.data?.repository?.pullRequest?.reviewThreads;
+  if (!threads) {
+    throw new Error(`pull request #${pr} not found`);
+  }
+  // fail closed like reviewsPageStep — a page missing its pagination
+  // or nodes is "unanswerable", never "complete with zero threads"
+  if (
+    threads.pageInfo === undefined ||
+    typeof threads.pageInfo.hasNextPage !== 'boolean' ||
+    threads.nodes === undefined
+  ) {
+    throw new Error(
+      `pull request #${pr}: reviewThreads page incomplete — veto staleness unanswerable`
+    );
+  }
+  return threads;
+}
+
+/** Every review thread with the set of review ids its comments were
+ *  submitted under — the veto→thread attribution. Comments that aren't
+ *  part of a submitted review answer null and attribute to nothing. */
+async function vetoThreads(
+  t: PrTarget
+): Promise<Array<{ resolved: boolean; outdated: boolean; reviewIds: Set<string> }>> {
+  const { owner, name } = parts(t.repo);
+  const out: Array<{ resolved: boolean; outdated: boolean; reviewIds: Set<string> }> = [];
+  let cursor = '';
+  for (;;) {
+    const afterClause = cursor ? gqlAfter(cursor) : '';
+    const raw = await ghAsync([
+      'api',
+      'graphql',
+      '-f',
+      `query=${vetoThreadsQuery(afterClause)}`,
+      '-f',
+      `o=${owner}`,
+      '-f',
+      `r=${name}`,
+      '-F',
+      `pr=${t.pr}`,
+      '-F',
+      'n=100',
+    ]);
+    const page = parseVetoThreadPage(raw, t.pr);
+    for (const n of page.nodes) {
+      const reviewIds = new Set<string>();
+      for (const c of n.comments.nodes) {
+        const id = c.pullRequestReview?.id;
+        if (id !== undefined) {
+          reviewIds.add(id);
+        }
+      }
+      out.push({ resolved: n.isResolved, outdated: n.isOutdated, reviewIds });
+    }
+    // same advance-or-throw rule as reviewsPageStep: hasNextPage with
+    // a missing/repeating cursor is a stuck host, not a last page —
+    // and a truncated thread list would wrongly mark a live veto stale
+    if (page.pageInfo.hasNextPage !== true) {
+      break;
+    }
+    const next = page.pageInfo.endCursor;
+    if (!next || next === cursor) {
+      throw new Error(`pull request #${t.pr}: reviewThreads pagination did not advance`);
+    }
+    cursor = next;
+  }
+  return out;
+}
+
+/** The standing CHANGES_REQUESTED reviews with staleness — the
+ *  `vetoReviews` facade read. Reviews and attributed threads are two
+ *  paginated connections (they can't share one query), both fail
+ *  closed through the same page-step discipline as the approval probe:
+ *  a truncated page throws, and the caller degrades the whole answer
+ *  rather than reporting a partial veto list. */
+async function vetoReviews(t: PrTarget): Promise<VetoReview[]> {
+  const { owner, name } = parts(t.repo);
+  const nodes: PrReviewNode[] = [];
+  let cursor = '';
+  for (;;) {
+    const afterClause = cursor ? gqlAfter(cursor) : '';
+    const page = (
+      await ghJsonAsync<ReviewsPage>([
+        'api',
+        'graphql',
+        '-f',
+        `query=${reviewsQuery(afterClause)}`,
+        '-f',
+        `o=${owner}`,
+        '-f',
+        `r=${name}`,
+        '-F',
+        `pr=${t.pr}`,
+      ])
+    ).data?.repository?.pullRequest;
+    const step = reviewsPageStep(t.pr, cursor, page);
+    nodes.push(...step.nodes);
+    if (step.next === null) {
+      break;
+    }
+    cursor = step.next;
+  }
+  const vetoes = standingVetoes(nodes);
+  if (vetoes.length === 0) {
+    return [];
+  }
+  const threads = await vetoThreads(t);
+  return vetoes.map(v => {
+    const refs = threads.filter(th => th.reviewIds.has(v.id!));
+    return {
+      id: v.id!,
+      author: v.author?.login ?? 'unknown',
+      submittedAt: v.submittedAt ?? '',
+      commitSha: v.commit?.oid ?? '',
+      threads: refs.length,
+      // vacuous truth at 0 — a body-only veto left no thread evidence,
+      // which is exactly the stale case the #931 evidence review was
+      stale: refs.every(th => th.resolved && th.outdated),
+    };
+  });
 }
 
 async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
@@ -1642,6 +1849,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     prMetaAsync,
     humanApproved,
     humanApprovedAsync,
+    vetoReviews,
     checksAsync,
     checkAnnotationsAsync,
     reviewedShasAsync,
@@ -1690,6 +1898,16 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       graphql(
         'mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}',
         { t: id, b: body }
+      );
+    },
+    dismissReview(_t, reviewId, message) {
+      // message is NON_NULL on DismissPullRequestReviewInput — the
+      // contract's required param means a caller always sends one;
+      // the review node id is globally unique, so the target rides
+      // the signature for host symmetry, not the mutation
+      graphql(
+        'mutation($reviewId:ID!,$message:String!){dismissPullRequestReview(input:{pullRequestReviewId:$reviewId,message:$message}){pullRequestReview{id state}}}',
+        { reviewId, message }
       );
     },
     retargetPr(t, base) {

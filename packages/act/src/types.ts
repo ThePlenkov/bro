@@ -2,7 +2,7 @@
  * act domain types — the open-PR review loop. Ported from the act skill's
  * pr-state.ts, same semantics minus the shell plumbing.
  */
-import type { CheckInfo, ReviewThread } from '@broject/core';
+import type { CheckInfo, ReviewThread, VetoReview } from '@broject/core';
 import type { ReopenedThread } from './reopened.ts';
 
 export type { CheckInfo as PrCheck };
@@ -56,6 +56,13 @@ export interface PrActState {
    *  can't say. Probed lazily via the facade's optional reviewDecision
    *  when meta doesn't carry it (GitLab approvals are a second call). */
   reviewDecision?: string;
+  /** The standing CHANGES_REQUESTED reviews with thread staleness —
+   *  the dismissible set behind a veto (bro-n1foa). Probed lazily via
+   *  the facade's optional vetoReviews ONLY when reviewDecision reads
+   *  CHANGES_REQUESTED: undefined means "no veto standing, the probe
+   *  didn't run, or the host can't enumerate" — the gate blocks on
+   *  reviewDecision regardless and only loses the enumeration detail. */
+  vetoReviews?: VetoReview[];
   /** Who landed the PR — the host's merge record (GitHub's
    *  `mergedBy.login`). undefined when the host can't say (or the PR
    *  isn't merged): the landed verdict then names the landing without

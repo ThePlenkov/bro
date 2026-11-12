@@ -517,3 +517,60 @@ describe('fetchPrActState — the gate never counts itself', () => {
     assert.equal(s.ciPending, 0);
   });
 });
+
+describe('fetchPrActState — the veto-review probe (bro-n1foa)', () => {
+  const vetoMeta: PrMeta = { ...meta, reviewDecision: 'CHANGES_REQUESTED' };
+  const veto = {
+    id: 'PRR_1',
+    author: 'kody-ai',
+    submittedAt: '2026-10-01T00:00:00Z',
+    commitSha: SHA,
+    threads: 15,
+    stale: true,
+  };
+
+  test('a standing veto enumerates its reviews into state', async () => {
+    const rev = fakeRev([], []);
+    rev.prMeta = () => vetoMeta;
+    rev.vetoReviews = async () => [veto];
+    const s = await fetchPrActState(rev, target, {});
+    assert.equal(s.reviewDecision, 'CHANGES_REQUESTED');
+    assert.deepEqual(s.vetoReviews, [veto]);
+  });
+
+  test('non-veto decisions never pay the probe — laziness is the contract', async () => {
+    const rev = fakeRev([], []);
+    let calls = 0;
+    rev.vetoReviews = async () => {
+      calls += 1;
+      return [veto];
+    };
+    rev.prMeta = () => ({ ...meta, reviewDecision: 'APPROVED' });
+    await fetchPrActState(rev, target, {});
+    assert.equal(calls, 0);
+    // no decision at all — same
+    rev.prMeta = () => meta;
+    const s = await fetchPrActState(rev, target, {});
+    assert.equal(calls, 0);
+    assert.equal(s.vetoReviews, undefined);
+  });
+
+  test('a throwing probe degrades to undefined — the gate still blocks on reviewDecision', async () => {
+    const rev = fakeRev([], []);
+    rev.prMeta = () => vetoMeta;
+    rev.vetoReviews = async () => {
+      throw new Error('pagination broke');
+    };
+    const s = await fetchPrActState(rev, target, {});
+    assert.equal(s.reviewDecision, 'CHANGES_REQUESTED');
+    assert.equal(s.vetoReviews, undefined);
+  });
+
+  test('a host without the probe leaves vetoReviews undefined', async () => {
+    const rev = fakeRev([], []);
+    rev.prMeta = () => vetoMeta;
+    const s = await fetchPrActState(rev, target, {});
+    assert.equal(s.reviewDecision, 'CHANGES_REQUESTED');
+    assert.equal(s.vetoReviews, undefined);
+  });
+});

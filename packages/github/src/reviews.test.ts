@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { facade, registerConnector, type ApprovalVerdict } from '@broject/core';
 import { githubConnector, githubReview } from './index.ts';
-import { headApprovalVerdict, mergeAsync, type PrReviewNode } from './reviews.ts';
+import { headApprovalVerdict, mergeAsync, standingVetoes, type PrReviewNode } from './reviews.ts';
 
 const WIN32 = process.platform === 'win32';
 
@@ -54,6 +54,12 @@ case "$1 $2" in
           *'after: "'*) echo "\${FAKE_GH_REVIEWS_P2:-{\\}}";;
           *) echo "\${FAKE_GH_REVIEWS_P1:-{\\}}";;
         esac ;;
+      *"pullRequestReview { id }"*) case "$@" in
+          *'after: "'*) echo "\${FAKE_GH_VETO_THREADS_P2:-{\\}}";;
+          *) echo "\${FAKE_GH_VETO_THREADS:-{\\}}";;
+        esac ;;
+      *"dismissPullRequestReview"*) if [ -n "$FAKE_GH_DISMISS_ERR" ]; then echo "$FAKE_GH_DISMISS_ERR" >&2; exit 1; fi
+          echo '{"data":{"dismissPullRequestReview":{"pullRequestReview":{"id":"PRR_dismissed","state":"DISMISSED"}}}}' ;;
       *) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
     esac ;;
   "api -X") if [ "$3" = "PUT" ]; then case "$4" in
@@ -1252,5 +1258,292 @@ describe('githubReview humanApproved', { skip: WIN32 }, () => {
     } finally {
       fake.restore();
     }
+  });
+});
+
+// --- standing veto reviews (bro-n1foa) ---------------------------------------
+
+const vnode = (
+  id: string | undefined,
+  login: string | null,
+  typename: string,
+  state: string,
+  sha: string,
+  at: string
+): PrReviewNode => ({
+  ...(id !== undefined ? { id } : {}),
+  state,
+  submittedAt: at,
+  commit: { oid: sha },
+  author: login === null ? null : { __typename: typename, login },
+});
+
+describe('standingVetoes', () => {
+  test('the latest decision review per reviewer decides — a newer objection stands over an older approval', () => {
+    const vetoes = standingVetoes([
+      vnode('PRR_1', 'alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+      vnode('PRR_2', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
+    ]);
+    assert.deepEqual(
+      vetoes.map(v => v.id),
+      ['PRR_2']
+    );
+  });
+
+  test('a re-approval or a dismissal clears that reviewer\u2019s veto', () => {
+    assert.deepEqual(
+      standingVetoes([
+        vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01')),
+        vnode('PRR_2', 'alice', 'User', 'APPROVED', HEAD_SHA, T('02')),
+      ]),
+      []
+    );
+    assert.deepEqual(
+      standingVetoes([
+        vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01')),
+        vnode('PRR_2', 'alice', 'User', 'DISMISSED', HEAD_SHA, T('02')),
+      ]),
+      []
+    );
+  });
+
+  test('every reviewer\u2019s standing objection counts — bots included (the kody-ai case)', () => {
+    const vetoes = standingVetoes([
+      vnode('PRR_1', 'kody-ai', 'Bot', 'CHANGES_REQUESTED', HEAD_SHA, T('01')),
+      vnode('PRR_2', 'bob', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
+      vnode('PRR_3', 'carol', 'User', 'APPROVED', HEAD_SHA, T('03')),
+    ]);
+    assert.deepEqual(vetoes.map(v => v.id).sort(), ['PRR_1', 'PRR_2']);
+  });
+
+  test('unattributable authors stand alone — keyed on the review id, never merged', () => {
+    const vetoes = standingVetoes([
+      vnode('PRR_1', null, 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01')),
+      vnode('PRR_2', null, 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
+    ]);
+    assert.equal(vetoes.length, 2);
+  });
+
+  test('a review with no node id drops out — it cannot be dismissed safely', () => {
+    const vetoes = standingVetoes([
+      vnode(undefined, 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01')),
+      vnode('PRR_2', 'bob', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
+    ]);
+    assert.deepEqual(
+      vetoes.map(v => v.id),
+      ['PRR_2']
+    );
+  });
+
+  test('commented and pending reviews never veto', () => {
+    assert.deepEqual(
+      standingVetoes([
+        vnode('PRR_1', 'alice', 'User', 'COMMENTED', HEAD_SHA, T('01')),
+        vnode('PRR_2', 'bob', 'User', 'PENDING', HEAD_SHA, T('02')),
+      ]),
+      []
+    );
+  });
+});
+
+describe('githubReview vetoReviews', { skip: WIN32 }, () => {
+  const vpage = (headSha: string, nodes: PrReviewNode[], next: string | null) =>
+    JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            headRefOid: headSha,
+            reviews: {
+              pageInfo: { hasNextPage: next !== null, endCursor: next },
+              nodes,
+            },
+          },
+        },
+      },
+    });
+
+  const tpage = (
+    nodes: Array<{
+      resolved: boolean;
+      outdated: boolean;
+      reviewIds: string[];
+    }>,
+    next: string | null = null
+  ) =>
+    JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: next !== null, endCursor: next },
+              nodes: nodes.map(n => ({
+                isResolved: n.resolved,
+                isOutdated: n.outdated,
+                comments: {
+                  nodes: n.reviewIds.map(id => ({ pullRequestReview: { id } })),
+                },
+              })),
+            },
+          },
+        },
+      },
+    });
+
+  test('a veto whose referenced threads all resolved+outdated reads stale', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'kody-ai', 'Bot', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    const threads = tpage([
+      { resolved: true, outdated: true, reviewIds: ['PRR_1'] },
+      { resolved: true, outdated: true, reviewIds: ['PRR_1'] },
+      // another review's live thread must not stain this veto
+      { resolved: false, outdated: false, reviewIds: ['PRR_other'] },
+    ]);
+    await withFakeGhAsync(
+      async () => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.equal(got.length, 1);
+        assert.deepEqual(got[0], {
+          id: 'PRR_1',
+          author: 'kody-ai',
+          submittedAt: T('01'),
+          commitSha: HEAD_SHA,
+          threads: 2,
+          stale: true,
+        });
+      },
+      { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: threads }
+    );
+  });
+
+  test('resolved-but-current and unresolved threads keep the veto live', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [
+        vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01')),
+        vnode('PRR_2', 'bob', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
+      ],
+      null
+    );
+    const threads = tpage([
+      // alice: resolved but NOT outdated — a "won't fix" on live code
+      { resolved: true, outdated: false, reviewIds: ['PRR_1'] },
+      // bob: outdated but still open
+      { resolved: false, outdated: true, reviewIds: ['PRR_2'] },
+    ]);
+    await withFakeGhAsync(
+      async () => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.equal(got.length, 2);
+        assert.equal(got.find(v => v.id === 'PRR_1')!.stale, false);
+        assert.equal(got.find(v => v.id === 'PRR_2')!.stale, false);
+      },
+      { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: threads }
+    );
+  });
+
+  test('a body-only veto references zero threads — stale by vacuous truth', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    const threads = tpage([{ resolved: false, outdated: false, reviewIds: ['PRR_other'] }]);
+    await withFakeGhAsync(
+      async () => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.equal(got.length, 1);
+        assert.equal(got[0]!.threads, 0);
+        assert.equal(got[0]!.stale, true);
+      },
+      { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: threads }
+    );
+  });
+
+  test('no standing veto returns [] without paying the threads read', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'APPROVED', HEAD_SHA, T('01'))],
+      null
+    );
+    await withFakeGhAsync(
+      async log => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.deepEqual(got, []);
+        // the veto→thread attribution query never fired — laziness is the
+        // contract: only a standing CHANGES_REQUESTED pays for it
+        assert.doesNotMatch(readFileSync(log, 'utf8'), /pullRequestReview/);
+      },
+      { FAKE_GH_REVIEWS_P1: p1 }
+    );
+  });
+
+  test('paginates the threads connection for attribution', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    const t1 = tpage([], 'tcur2');
+    const t2 = tpage([{ resolved: true, outdated: true, reviewIds: ['PRR_1'] }]);
+    await withFakeGhAsync(
+      async log => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.equal(got[0]!.threads, 1);
+        assert.equal(got[0]!.stale, true);
+        assert.match(readFileSync(log, 'utf8'), /after: "tcur2"/);
+      },
+      { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: t1, FAKE_GH_VETO_THREADS_P2: t2 }
+    );
+  });
+
+  test('a truncated threads page throws — staleness is unanswerable, never assumed', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    // pageInfo missing entirely — the fail-closed shape parseThreadPage
+    // rejects for the thread axis applies here too
+    const broken = JSON.stringify({
+      data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+    });
+    await withFakeGhAsync(
+      async () => {
+        await assert.rejects(
+          githubReview().vetoReviews!(target) as Promise<unknown>,
+          /reviewThreads page incomplete/
+        );
+      },
+      { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: broken }
+    );
+  });
+});
+
+describe('githubReview dismissReview', { skip: WIN32 }, () => {
+  test('issues dismissPullRequestReview with the review node id and message', () => {
+    withFakeGh({}, log => {
+      githubReview().dismissReview!(
+        target,
+        'PRR_kwDOUamqtM8AAAABWay27Q',
+        'stale — threads resolved'
+      );
+      const calls = readFileSync(log, 'utf8');
+      assert.match(calls, /dismissPullRequestReview/);
+      // the node id + message travel as GraphQL variables, not inlined
+      assert.match(calls, /reviewId=PRR_kwDOUamqtM8AAAABWay27Q/);
+      assert.match(calls, /message=stale — threads resolved/);
+    });
+  });
+
+  test('a host error propagates — the caller reports the real failure', () => {
+    withFakeGh({ FAKE_GH_DISMISS_ERR: 'review not found' }, () => {
+      assert.throws(
+        () => githubReview().dismissReview!(target, 'PRR_x', 'msg'),
+        /gh api failed|review not found/
+      );
+    });
   });
 });

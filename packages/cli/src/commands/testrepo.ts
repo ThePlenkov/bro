@@ -1036,6 +1036,8 @@ const facade = {
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
       // who landed it — the host's merge record (GitHub's mergedBy.login)
       mergedBy: per.mergedBy ?? s.mergedBy,
+      // the review verdict axis (bro-n1foa) — seeded flat or per-PR
+      reviewDecision: per.reviewDecision ?? s.reviewDecision,
       ...over,
     }
   }),
@@ -1113,6 +1115,33 @@ const facade = {
   }),
   resolveThread: () => {},
   replyThread: () => {},
+  // the standing-veto probe + dismissal (bro-n1foa) — host.json carries
+  // the reviews verbatim under vetoReviews; dismissReview records the
+  // call and clears the entry, moving reviewDecision when the last
+  // veto lifts so a post-dismiss act status reads the new world
+  vetoReviews: async (t) =>
+    withState((s) => {
+      const per = s.prs
+        ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
+        : {}
+      return ((per.vetoReviews ?? s.vetoReviews) ?? []).map((v) => ({ ...v }))
+    }),
+  dismissReview: (t, reviewId, message) =>
+    withState((s) => {
+      s.dismissals = (s.dismissals ?? []).concat([{ pr: t.pr, review: reviewId, message }])
+      const drop = (list) => (list ?? []).filter((v) => v.id !== reviewId)
+      const settle = (entry) => {
+        const vetoes = drop(entry.vetoReviews)
+        entry.vetoReviews = vetoes
+        if (vetoes.length === 0 && entry.reviewDecision === 'CHANGES_REQUESTED') {
+          entry.reviewDecision = 'REVIEW_REQUIRED'
+        }
+      }
+      if (s.prs) {
+        for (const p of Object.values(s.prs)) settle(p)
+      }
+      settle(s)
+    }),
   // per-PR labels/body — the prs map's entries carry them; the flat
   // single-PR path uses s.labels/s.prBody (spec bro-c650l ownership)
   labels: (t) => {
