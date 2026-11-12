@@ -247,3 +247,27 @@ of KEY-N protocol docs and ~340 legacy bead specs.
   doc (zero-byte `.spec.md` is a stub, matching `hasSpecFile`);
   `scope()` no longer borrows a same-id legacy file's scope; dir-doc
   containment uses the platform separator.
+
+## Run 7: stop gate — `bro hooks stop` with armed claim (real)
+
+- Setup: transient bead `bro-3k283` (in_progress, no spec — `spec
+  check` → MISSING), `BRO_BEAD_ID` env pin, `.task` marker
+  `sddgate-probe-1.task` in the common hooks dir, `sdd.mode=gate`,
+  `modes.default=code`.
+- `bro hooks stop` → `{"decision":"block","reason":"bro: claimed
+  beads open: bro-3k283 … — close (bd close <id>) or release the
+  claim before stopping"}` — the gate FIRED, but with the tasks
+  connector's reason, not SDD's.
+- Direct probe of `sddConnector.hooks().stopGate(ctx)` (real beads
+  store + marker + brose resolution) → correct contribution:
+  `{aspect:'task', block:'bro: SDD — claimed beads without a spec:
+  bro-3k283 … — write a spec for "bro-3k283" (`bro spec new
+  bro-3k283`), add a spec: link, or label 'trivial'}`.
+- **Finding (arbitration, → bro-3bgbs):** `stopGateOutcome` returns
+  on the first armed block in aspect order; the tasks connector's
+  own-claims block shares aspect `task` and identical preconditions,
+  so it always wins and `takeStopGateBlock` (keyed by aspect) demotes
+  the SDD block to a hint on every stop — the spec-first reason is
+  unreachable through the emit path. Session-start/promptSubmit
+  nudges still carry the signal; the gate-mode stop block needs
+  same-aspect concatenation or its own aspect.
