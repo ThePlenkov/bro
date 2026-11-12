@@ -23,25 +23,25 @@
  * is written, no branch is protected — the session knows what it pushed,
  * the bus only knows the branch moved.
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { gitCommonDir } from '@broject/core'
-import type { EventInput } from '@broject/core'
-import { liveWorkEntries } from './proc-owner.ts'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { gitCommonDir } from '@broject/core';
+import type { EventInput } from '@broject/core';
+import { liveWorkEntries } from '@broject/rig';
 
 /** The drive's own head memory — one file per PR under
  *  `<git-common>/bro/drive/heads/`. */
 export function headMemoryPath(root: string, repo: string, pr: number): string | null {
-  const common = gitCommonDir(root)
+  const common = gitCommonDir(root);
   if (common === null || common === '') {
-    return null
+    return null;
   }
   // injective on purpose, like the act-state cache's slug: a
   // sanitizing one maps distinct valid names together ('a-b/c' and
   // 'a/b-c' both → 'a-b-c'), handing one repo's head memory to the
   // other at the same PR number
-  const slug = encodeURIComponent(repo)
-  return join(common, 'bro', 'drive', 'heads', `${slug}-${pr}.json`)
+  const slug = encodeURIComponent(repo);
+  return join(common, 'bro', 'drive', 'heads', `${slug}-${pr}.json`);
 }
 
 /** The last head SHA the drive saw for a PR — undefined on the first
@@ -51,16 +51,16 @@ export async function readHeadMemory(
   repo: string,
   pr: number
 ): Promise<string | undefined> {
-  const path = headMemoryPath(root, repo, pr)
+  const path = headMemoryPath(root, repo, pr);
   if (path === null) {
-    return undefined
+    return undefined;
   }
   try {
-    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
-    const sha = (parsed as { sha?: unknown } | null)?.sha
-    return typeof sha === 'string' && sha !== '' ? sha : undefined
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+    const sha = (parsed as { sha?: unknown } | null)?.sha;
+    return typeof sha === 'string' && sha !== '' ? sha : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
@@ -72,15 +72,15 @@ export async function writeHeadMemory(
   pr: number,
   sha: string
 ): Promise<void> {
-  const path = headMemoryPath(root, repo, pr)
+  const path = headMemoryPath(root, repo, pr);
   if (path === null) {
-    return
+    return;
   }
   try {
-    await mkdir(dirname(path), { recursive: true })
-    const tmp = `${path}.${process.pid}.tmp`
-    await writeFile(tmp, JSON.stringify({ sha, at: new Date().toISOString() }))
-    await rename(tmp, path)
+    await mkdir(dirname(path), { recursive: true });
+    const tmp = `${path}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify({ sha, at: new Date().toISOString() }));
+    await rename(tmp, path);
   } catch {
     // fail-open — the signal is advisory
   }
@@ -89,24 +89,24 @@ export async function writeHeadMemory(
 /** The live sessions that armed a PR — the detail lines of every live
  *  `.act` marker, with the session that wrote it. */
 export function sessionArmedPrs(hooksDir: string, pr: number): string[] {
-  const want = `#${pr}`
-  const out = new Set<string>()
+  const want = `#${pr}`;
+  const out = new Set<string>();
   for (const entry of liveWorkEntries(hooksDir, ['.act'])) {
     if (entry.detail === want && entry.session !== undefined) {
-      out.add(entry.session)
+      out.add(entry.session);
     }
   }
-  return [...out]
+  return [...out];
 }
 
 /** The event a moved head publishes to the session that armed the PR.
  *  Keyed per PR+head so a repeat of the same head coalesces. */
 export function foreignPushEvent(opts: {
-  pr: number
-  link: string
-  from: string
-  to: string
-  session: string
+  pr: number;
+  link: string;
+  from: string;
+  to: string;
+  session: string;
 }): EventInput {
   return {
     topic: 'drive',
@@ -119,7 +119,7 @@ export function foreignPushEvent(opts: {
       `${opts.link} moved: head ${short(opts.from)} → ${short(opts.to)}. ` +
       'If that was not your push, another writer touched your branch — ' +
       'the bus reports the move, it does not undo it.',
-  }
+  };
 }
 
-const short = (sha: string): string => (sha.length > 8 ? sha.slice(0, 8) : sha)
+const short = (sha: string): string => (sha.length > 8 ? sha.slice(0, 8) : sha);

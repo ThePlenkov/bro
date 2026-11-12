@@ -33,7 +33,7 @@ import {
 import { loopSection } from '@broject/loop';
 import { loadBroConfig } from '../plugins.ts';
 import { collectLoopRuns } from './loop-state.ts';
-import { detailMatches, hooksDirOf, liveWorkEntries, registryEntryState } from './proc-owner.ts';
+import { detailMatches, hooksDirOf, liveWorkEntries, registryEntryState } from '@broject/rig';
 import { readBeads } from './status.ts';
 import { parseWorktreePorcelain, worktreeClaim } from './work.ts';
 

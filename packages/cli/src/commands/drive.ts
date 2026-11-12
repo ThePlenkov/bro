@@ -64,13 +64,10 @@
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
 import { spawn } from 'node:child_process';
-import { existsSync, type FSWatcher, realpathSync, statSync, watch } from 'node:fs';
+import { existsSync, type FSWatcher, realpathSync, watch } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
-  acquireAgentRegistryLock,
-  acquireFileLock,
-  agentRegistryPath,
   awaitFileLock,
   busSocketPath,
   busSubscribe,
@@ -84,7 +81,6 @@ import {
   holdRoleLease,
   localLeaseStore,
   projectId,
-  patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
   SpawnError,
@@ -146,17 +142,12 @@ import {
 } from './drive-config.ts';
 import { loadBroConfig } from '../plugins.ts';
 import {
-  claimLockPath,
   deleteMergedLocalBranch,
   mainWorktree,
   parseWorktreePorcelain,
   reapLoopLitter,
   removeMergedWorktree,
-  worktreeClaimInfo,
-  worktreeIdleMs,
-  worktreePathFor,
   type LitterReap,
-  type WorktreeClaimInfo,
 } from './work.ts';
 import { LEARN_RETRO_CLOSEOUT, type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
@@ -288,321 +279,62 @@ function fleetBranches(root: string, prefix: string, remote: boolean): string[] 
     .map(s => (remote ? s.replace(/^origin\//, '') : s));
 }
 
-/** work/bro-x → bro-x; stack/name/3-bro-x → 3-bro-x. */
-export function branchSlug(branch: string): string {
-  return branch.split('/').pop() ?? branch;
-}
-
 // --- occupancy --------------------------------------------------------------------
 
-// The marker/registry occupancy plane (detailMatches, liveWorkDetails,
-// hooksDirOf, registryEntryState) lives in proc-owner.ts — work.ts's
-// litter sweep needs the same verdicts and can't reach drive.ts
-// (drive imports work). Re-exported here so existing importers keep
-// working.
+// The marker/registry occupancy plane and the whole occupancy verdict
+// ladder moved to @broject/rig with the fleet-lifecycle extraction
+// (bro-jamp7) — work.ts's litter sweep needs the same verdicts and
+// can't reach drive.ts (drive imports work). Re-exported here so
+// existing importers keep working.
 import {
   agentProcessesIn,
-  detailMatches,
+  ensureFixerBead,
+  ensureFixerWorktree,
+  fixerAttemptSpent,
+  fixerBeadFor,
+  fixerPrFromRef,
+  FIXER_LABEL,
+  freshOccupancy,
+  greenOccupancy,
   hooksDirOf,
   liveWorkEntries,
-  registryEntryState,
-  type ProcHit,
+  occupied,
+  recordFixerAttempt,
+  retireOrphanedWorktree,
+  supervisedBy,
+  supervisorFresh,
+  acquireOccupancyLocks,
+  type OccupancyCtx,
   type WorkEntry,
-} from './proc-owner.ts';
+} from '@broject/rig';
 export {
   agentProcessesIn,
+  branchSlug,
   detailMatches,
+  ensureFixerWorktree,
+  fixerAttemptSpent,
+  fixerBeadFor,
+  fixerRef,
+  FIXER_LABEL,
+  freshOccupancy,
+  greenOccupancy,
   liveWorkDetails,
   liveWorkEntries,
+  occupied,
+  occupancyProofs,
   processesRootedIn,
+  recordFixerAttempt,
+  registryAgents,
   registryEntryState,
-} from './proc-owner.ts';
-export type { ProcHit, WorkEntry };
+  supervisedBy,
+  supervisorFresh,
+} from '@broject/rig';
+export type { OccProof, OccupancyCtx, ProcHit, WorkEntry } from '@broject/rig';
 
-export interface OccupancyCtx {
-  /** All backends' agents for the pass. */
-  agents: AgentInfo[];
-  /** The PR's fixer bead, when one exists — its live agent is our own
-   *  fixer, reported as such rather than as a foreign occupant. */
-  fixerBead?: string;
-  branch: string;
-  worktree?: string;
-  /** Live session-marker detail lines with their activity stamps. */
-  workDetails: WorkEntry[];
-  /** Injectable /proc scan — tests pass a stub. */
-  scanProc?: (worktree: string) => ProcHit[];
-  /** Injectable worktree-claim probe — tests pass a stub. */
-  scanClaim?: (worktree: string) => WorktreeClaimInfo | undefined;
-  /** Injectable worktree-activity probe — the /proc-hit plane's TTL
-   *  input (spec bro-ihnlv). Defaults to worktreeIdleMs. */
-  treeIdleMs?: (worktree: string) => number;
-  /** The PR being judged — the supervision plane keys on it. */
-  pr?: number;
-  /** Watch-marker snapshot — a live foreign marker is a supervisor
-   *  already owning this PR's gate (bro-0aa87). */
-  watches?: ListedWatch[];
-}
-
-/** A live watch marker from a non-drive watcher (a `loop` heartbeat, an
- *  `act wait`, a convoy supervisor) means the PR's gate already has an
- *  owner — drive exists for UNSUPERVISED PRs, so these are occupants.
- *  Drive-kind markers self-exclude: a second `bro drive` shares the
- *  fixer bead / merge slot machinery instead of starving this pass by
- *  mutual exclusion. */
-export function supervisedBy(
-  watches: ListedWatch[] | undefined,
-  pr: number | undefined
-): ListedWatch | undefined {
-  if (watches === undefined || pr === undefined) {
-    return undefined;
-  }
-  return watches.find(
-    l => l.alive && l.watch.pr === pr && watchMarkerKind(l.file, l.watch) !== 'drive'
-  );
-}
-
-/** One occupancy proof — the live-owner detail occupied() reports plus
- *  the last proven activity stamp (bro-ihnlv). `activeAtMs` is the
- *  freshest timestamp the plane can prove: an agent's log or spawn
- *  record, a marker's mtime, the worktree's own churn. Undefined means
- *  the plane shows a live claim but no activity — unverifiable, which
- *  the merge path may never trust forever. */
-export interface OccProof {
-  detail: string;
-  activeAtMs?: number;
-}
-
-/** An agent's last proven activity — its output log's mtime or the
- *  spawn record's stamp, whichever is fresher. Both ride the registry:
- *  a backend that never names a log still bounds by spawnedAt, and an
- *  append-mode log must not predate a respawn (same pair loop-state's
- *  silentMs reads). */
-function agentActivityMs(a: AgentInfo): number | undefined {
-  let at: number | undefined;
-  if (a.log !== undefined) {
-    try {
-      at = statSync(a.log).mtimeMs;
-    } catch {
-      // no log yet — the spawn stamp still applies
-    }
-  }
-  const spawned = a.spawnedAt === undefined ? Number.NaN : Date.parse(a.spawnedAt);
-  if (!Number.isNaN(spawned)) {
-    at = at === undefined ? spawned : Math.max(at, spawned);
-  }
-  return at;
-}
-
-function fileMtimeMs(path: string): number | undefined {
-  try {
-    return statSync(path).mtimeMs;
-  } catch {
-    return undefined;
-  }
-}
-
-/** fixer-plane proof — fixer agents spawn with molStep = the fixer
- *  bead's id, so this match names our own worker, reported as the
- *  fixer, not a foreign occupant. */
-function fixerProof(opts: OccupancyCtx, live: AgentInfo[]): OccProof | undefined {
-  if (opts.fixerBead === undefined) {
-    return undefined;
-  }
-  const fixer = live.find(a => a.molStep === opts.fixerBead);
-  return fixer === undefined
-    ? undefined
-    : { detail: `fixer agent live on ${opts.fixerBead}`, activeAtMs: agentActivityMs(fixer) };
-}
-
-/** supervisor-plane proof — a live foreign watch marker on this PR. */
-function supervisorProof(opts: OccupancyCtx): OccProof | undefined {
-  const sup = supervisedBy(opts.watches, opts.pr);
-  return sup === undefined
-    ? undefined
-    : {
-        detail: `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`,
-        activeAtMs: fileMtimeMs(sup.file),
-      };
-}
-
-/** worktree-plane proofs — a live agent rooted in the tree, then the
- *  tree's own claim marker. */
-function* worktreeProofs(opts: OccupancyCtx, live: AgentInfo[]): Generator<OccProof> {
-  if (opts.worktree === undefined) {
-    return;
-  }
-  const wt = resolve(opts.worktree);
-  const agent = live.find(a => typeof a.worktree === 'string' && resolve(a.worktree) === wt);
-  if (agent !== undefined) {
-    yield {
-      detail: `agent ${agent.id} live in ${basename(opts.worktree)}`,
-      activeAtMs: agentActivityMs(agent),
-    };
-  }
-  const claim = (opts.scanClaim ?? worktreeClaimInfo)(opts.worktree);
-  if (claim !== undefined) {
-    yield {
-      detail:
-        `worktree ${basename(opts.worktree)} claimed` +
-        (claim.detail === '' ? '' : ` by ${claim.detail}`),
-      activeAtMs: claim.mtimeMs,
-    };
-  }
-}
-
-/** marker-plane proof — several markers can name the same work; the
- *  freshest stamp is the honest activity bound (a stale marker beside
- *  a fresh one is a live session, not residue). */
-function markerProof(opts: OccupancyCtx): OccProof | undefined {
-  const slug = branchSlug(opts.branch);
-  const detail = opts.workDetails
-    .filter(e => detailMatches(e.detail, { branch: opts.branch, slug, worktree: opts.worktree }))
-    .reduce<WorkEntry | undefined>(
-      (best, e) =>
-        best === undefined ||
-        (e.mtimeMs ?? Number.NEGATIVE_INFINITY) > (best.mtimeMs ?? Number.NEGATIVE_INFINITY)
-          ? e
-          : best,
-      undefined
-    );
-  return detail === undefined
-    ? undefined
-    : { detail: `session armed work on ${detail.detail}`, activeAtMs: detail.mtimeMs };
-}
-
-/** /proc-plane proof — a live process is proof of life at scan time,
- *  not of work: the worktree's own churn (index/HEAD/dir mtimes) is
- *  the silence bound, a process parked in an untouched tree is a
- *  stale owner. */
-function procProof(opts: OccupancyCtx, now: number): OccProof | undefined {
-  if (opts.worktree === undefined || opts.scanProc === undefined) {
-    return undefined;
-  }
-  const hit = opts.scanProc(opts.worktree)[0];
-  if (hit === undefined) {
-    return undefined;
-  }
-  const idle = (opts.treeIdleMs ?? worktreeIdleMs)(opts.worktree);
-  return {
-    detail: `process ${hit.pid} live in ${basename(opts.worktree)}`,
-    activeAtMs: Number.isFinite(idle) ? now - idle : undefined,
-  };
-}
-
-/** The occupancy ladder as lazy proofs — one source for occupied()'s
- *  first-match verdict and the merge path's freshness check. Yields in
- *  the established order (fixer → supervisor → worktree → markers →
- *  /proc); a plane's stat costs only once the ladder reaches it, so a
- *  first-proof read keeps occupied()'s short-circuit. */
-export function* occupancyProofs(
-  opts: OccupancyCtx,
-  now: number = Date.now()
-): Generator<OccProof> {
-  const live = opts.agents.filter(a => a.state === 'running' || a.state === 'spawned');
-  const fixer = fixerProof(opts, live);
-  if (fixer !== undefined) {
-    yield fixer;
-  }
-  const sup = supervisorProof(opts);
-  if (sup !== undefined) {
-    yield sup;
-  }
-  yield* worktreeProofs(opts, live);
-  const detail = markerProof(opts);
-  if (detail !== undefined) {
-    yield detail;
-  }
-  const proc = procProof(opts, now);
-  if (proc !== undefined) {
-    yield proc;
-  }
-}
-
-/** Why a PR's worktree is owned right now — undefined = orphaned, the
- *  driver's whole reason to exist. A live agent or session ALWAYS wins
- *  the argument: skipped pass, never double-work on one branch. */
-export function occupied(opts: OccupancyCtx): string | undefined {
-  return occupancyProofs(opts).next().value?.detail;
-}
-
-/** The merge-path occupancy verdict (bro-ihnlv): the freshest proof
- *  inside `ttlMs` keeps the PR 'green-occupied' — a live owner lands
- *  its own merge. Every proof stale or unverifiable means the owner is
- *  silent: the PR counts as orphaned (same class as a branch-less one)
- *  and drive adopts it. `stale` reports occupied()'s own verdict so the
- *  adopt detail names who went quiet; `silentMs` is the freshest
- *  provable silence — undefined when nothing could be stamped at all. */
-export function greenOccupancy(
-  opts: OccupancyCtx,
-  ttlMs: number,
-  now: number = Date.now()
-): { fresh?: string; stale?: string; silentMs?: number } {
-  const proofs = [...occupancyProofs(opts, now)];
-  if (proofs.length === 0) {
-    return {};
-  }
-  const best = proofs.reduce<OccProof | undefined>(
-    (acc, p) =>
-      acc === undefined ||
-      (p.activeAtMs ?? Number.NEGATIVE_INFINITY) > (acc.activeAtMs ?? Number.NEGATIVE_INFINITY)
-        ? p
-        : acc,
-    undefined
-  );
-  if (best?.activeAtMs !== undefined && now - best.activeAtMs <= ttlMs) {
-    return { fresh: best.detail };
-  }
-  return {
-    stale: proofs[0]?.detail,
-    silentMs: best?.activeAtMs === undefined ? undefined : Math.max(0, now - best.activeAtMs),
-  };
-}
-
-/** A supervisor marker still vetoing a merge must be fresh — a stale
- *  one is the very silence the TTL adopts against, and letting it veto
- *  would resurrect the forever-wait this bound exists to kill
- *  (bro-ihnlv). An unreadable stamp stays conservative: veto once more,
- *  adoption re-judges next pass. */
-export function supervisorFresh(
-  sup: ListedWatch,
-  ttlMs: number,
-  now: number = Date.now()
-): boolean {
-  const at = fileMtimeMs(sup.file);
-  return at === undefined || now - at <= ttlMs;
-}
-
+// The occupancy verdict ladder (OccupancyCtx, occupancyProofs,
+// occupied, greenOccupancy, supervisorFresh) lives in @broject/rig —
+// imported above for the pass code and re-exported for compat.
 // --- fixer bead ---------------------------------------------------------------------
-
-/** One persistent bead per PR — the fixer's molStep, so facade dedup
- *  and respawn (same agentId on rebind) come free. */
-export const FIXER_LABEL = 'fixer';
-export const fixerRef = (pr: number): string => `drive:pr:${pr}`;
-
-/** The open fixer bead for a PR — external_ref upsert across passes. */
-export function fixerBeadFor(store: TaskStore, pr: number): TaskRow | undefined {
-  const ref = fixerRef(pr);
-  return store
-    .list({ labels: [FIXER_LABEL], all: true })
-    .find(r => r.external_ref === ref && r.status !== 'closed');
-}
-
-function ensureFixerBead(store: TaskStore, pr: number, link: string, branch: string): TaskRow {
-  return (
-    fixerBeadFor(store, pr) ??
-    store.create({
-      title: `review fixer — PR #${pr}`,
-      description:
-        `Spawned by \`bro drive\` — work the gate state on ${link} ` +
-        `(branch \`${branch}\`): review threads, a conflict rebase, ` +
-        `failing checks, or SAST findings — whichever the spawn prompt ` +
-        `orders. Push, never merge.`,
-      type: 'task',
-      labels: [FIXER_LABEL],
-      externalRef: fixerRef(pr),
-    })
-  );
-}
 
 function closeFixer(store: TaskStore, id: string, reason: string): void {
   try {
@@ -621,94 +353,6 @@ function closeFixer(store: TaskStore, id: string, reason: string): void {
 }
 
 // --- fixer worktree + prompt ---------------------------------------------------------
-
-/** <local> vs origin/<branch> is linear — one contains the other, so a
- *  checkout of it can always reach the remote tip (ahead/equal already
- *  does, behind fast-forwards). Divergence is refused to every fixer
- *  path: a rebase replaying a tip that misses remote commits drops them
- *  when the lease push lands (the lease itself passes — the tracking
- *  ref was just refreshed by the fetch). Missing refs — no remote, an
- *  unborn branch — pass: nothing to check against. */
-function remoteLinear(root: string, local: string, branch: string): boolean {
-  const remote = `origin/${branch}`;
-  if (
-    gitTry(['-C', root, 'rev-parse', '--verify', remote]).code !== 0 ||
-    gitTry(['-C', root, 'rev-parse', '--verify', local]).code !== 0
-  ) {
-    return true;
-  }
-  return (
-    gitTry(['-C', root, 'merge-base', '--is-ancestor', remote, local]).code === 0 ||
-    gitTry(['-C', root, 'merge-base', '--is-ancestor', local, remote]).code === 0
-  );
-}
-
-/** A standing checkout's refresh to origin/<branch>'s tip — the same ff
- *  the create path runs. Divergence is excluded by remoteLinear before
- *  the loop, so a ff refusal is a dirty or mid-merge tree — reported,
- *  never clobbered. No remote ref passes: nothing to be stale against. */
-function ffToRemoteTip(dir: string, branch: string): boolean {
-  const remote = `origin/${branch}`;
-  if (gitTry(['-C', dir, 'rev-parse', '--verify', remote]).code !== 0) {
-    return true;
-  }
-  return gitTry(['-C', dir, 'merge', '--ff-only', remote, '--quiet']).code === 0;
-}
-
-/** A standing checkout of <branch> at <dir> — handed over once it can
- *  reach the remote tip: a standing checkout can still lag commits
- *  pushed since it was made, so it fast-forwards like the create path.
- *  undefined when the dir stands on another branch (foreign — never
- *  clobbered). */
-function reuseFixerWorktree(
-  dir: string,
-  branch: string
-): { path?: string; err?: string } | undefined {
-  const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
-  if (on !== branch) {
-    return undefined;
-  }
-  if (!ffToRemoteTip(dir, branch)) {
-    return { err: `${dir} can't fast-forward to origin/${branch}` };
-  }
-  return { path: dir };
-}
-
-/** The fresh `<repo>--<slug>` checkout: the existing local branch, else
- *  a new one at origin/<branch>'s tip — the orphan-PR shape. */
-function addFixerWorktree(
-  mainRoot: string,
-  dir: string,
-  branch: string
-): { path?: string; created?: boolean; err?: string } {
-  const add = gitTry(['-C', mainRoot, 'worktree', 'add', dir, branch]);
-  if (add.code === 0) {
-    // the fetch refreshed origin/<branch>, not the local ref the
-    // worktree just checked out — ff or the fixer works a stale tip;
-    // a refusal means the branch moved mid-call — retire the dir we
-    // just made rather than hand over a tip that can't cover it
-    if (!ffToRemoteTip(dir, branch)) {
-      gitTry(['-C', mainRoot, 'worktree', 'remove', dir]);
-      return { err: `${branch} moved while its worktree was being added` };
-    }
-    emitLifecycle(mainRoot, {
-      kind: 'worktree',
-      to: 'created',
-      detail: { via: 'drive', worktree: dir, branch },
-    });
-    return { path: dir, created: true };
-  }
-  const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`]);
-  if (retry.code === 0) {
-    emitLifecycle(mainRoot, {
-      kind: 'worktree',
-      to: 'created',
-      detail: { via: 'drive', worktree: dir, branch },
-    });
-    return { path: dir, created: true };
-  }
-  return { err: retry.err || add.err };
-}
 
 /** The base the rebase must land on — the ref, its tip, and what the
  *  fixer has to do about it (bro-by8d3). */
@@ -776,82 +420,6 @@ function remoteList(dir: string): string[] {
     .map(r => r.trim())
     .filter(r => r !== '');
   return [...names.filter(r => r === 'origin'), ...names.filter(r => r !== 'origin')];
-}
-
-/** The PR's fixer checkout: the branch's existing worktree, else a fresh
- *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
- *  caller can retire it when the work evaporates. A dir standing on
- *  another branch is never clobbered: distinct branches sharing the
- *  final slug (work/x vs loop/x) fall back to the branch-namespaced
- *  `<repo>--work-x` path instead of refusing as foreign. Either path is
- *  handed over only once it can reach origin/<branch>'s tip — a fixer
- *  rebasing a stale tip omits the commits pushed since, and the lease
- *  push drops them on the PR.
- *
- *  `guard` is the occupancy answer for a candidate checkout (bro-by8d3):
- *  a checkout a live session owns is never refreshed — the branch of
- *  another writer is not moved, not even by a fast-forward. The guard
- *  closes the window BEFORE the mutation; the spawn's locked re-check
- *  closes it before the spawn. */
-export function ensureFixerWorktree(
-  mainRoot: string,
-  branch: string,
-  opts?: {
-    /** The occupancy answer for a candidate checkout — asked UNDER the
-     *  occupancy locks, right before the refresh (bro-by8d3). */
-    guard?: (dir: string) => string | undefined;
-    /** The occupancy locks — held across the guard AND the refresh, so
-     *  a claim cannot land between them (a claimant writes its registry
-     *  entry + .work marker under the same locks). */
-    lock?: (dir: string) => () => void;
-  }
-): { path?: string; created?: boolean; err?: string; occupied?: string } {
-  // fetch first — an orphaned PR's remote head may be newer than ours;
-  // a branch diverged from it is refused outright: no checkout of it
-  // can keep both histories
-  gitTry(['-C', mainRoot, 'fetch', 'origin', branch, '--quiet']);
-  if (!remoteLinear(mainRoot, branch, branch)) {
-    return { err: `${branch} diverged from origin/${branch}` };
-  }
-  for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
-    const dir = worktreePathFor(mainRoot, name);
-    if (existsSync(dir)) {
-      // a dir standing on ANOTHER branch is not this branch's checkout:
-      // it is never clobbered, and it must not consume the occupancy
-      // guard either — the namespaced fallback still has to be tried
-      const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
-      if (on !== branch) {
-        continue;
-      }
-      // the guard and the refresh share the occupancy locks: a session
-      // that claims this checkout after the guard would have its branch
-      // moved under it
-      let release: () => void = () => {};
-      try {
-        release = opts?.lock?.(dir) ?? (() => {});
-      } catch (err) {
-        // a lock we can't take is indistinguishable from an active claimer
-        return { occupied: `occupancy re-check failed — ${errText(err)}` };
-      }
-      try {
-        const owner = opts?.guard?.(dir);
-        if (owner !== undefined) {
-          return { occupied: owner };
-        }
-        const r = reuseFixerWorktree(dir, branch);
-        if (r !== undefined) {
-          return r;
-        }
-      } finally {
-        release();
-      }
-      continue;
-    }
-    return addFixerWorktree(mainRoot, dir, branch);
-  }
-  return {
-    err: `every worktree path for ${branch} is held by a foreign branch`,
-  };
 }
 
 /** The fixer's work order — unresolved threads at spawn time (the prompt
@@ -1151,157 +719,6 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
   }
 }
 
-/** The agents plane for the in-lock occupancy refresh — a registry
- *  re-read, never conn.list(): a backend liveness probe (a slow
- *  `gc session list` runs ~30s) inside the hold would outlast the 20s
- *  lock wait and time out `bro work enter` stamps and competing spawns
- *  (bro-taq6). The registry is written under the lock we hold, so the
- *  read catches every spawn that landed during the wait. */
-export function registryAgents(dir: string): AgentInfo[] {
-  const reg = agentRegistryPath(dir);
-  const home = reg === null ? null : join(dirname(reg), 'agents');
-  return Object.entries(readAgentRegistry(dir)).map(([molStep, e]) => ({
-    id: e.agentId,
-    spawnedAt: typeof e.spawnedAt === 'string' ? e.spawnedAt : undefined,
-    molStep,
-    backend: e.backend,
-    pid: typeof e.pid === 'number' ? e.pid : undefined,
-    state: registryEntryState(home, e),
-    worktree: typeof e.worktree === 'string' ? e.worktree : undefined,
-    log: typeof e.log === 'string' ? e.log : undefined,
-  }));
-}
-
-/** Fresh occupancy inputs — the pass-level snapshot predates the
- *  thread refetch by seconds, long enough for a claim to land unseen.
- *  Call under the occupancy locks: a pre-lock snapshot can still miss a
- *  claim that lands while the registry lock is being waited on. Cheap
- *  planes only — registry, .work markers — so the hold stays far under
- *  the 20s lock wait (bro-taq6). 'spawned' is registryEntryState's
- *  "nothing cheap could prove" — a pid-less remote-backend entry
- *  inherits the pass's real probe when it's the same agent GENERATION
- *  (a lost fixer stays respawn-able); an entry the pass never saw, a
- *  re-minted agentId, or a respawned same-id entry (a fresh spawnedAt)
- *  keeps the conservative live verdict — the pass's probe measured a
- *  dead generation, not this run (cubic). A thrown registry read
- *  (readAgentRegistry rethrows EACCES/EIO) is degradation, not
- *  emptiness — it falls back to the pass snapshot the way
- *  collectAgents did rather than propagate an 'error' verdict out
- *  of the lock-held section. */
-export function freshOccupancy(
-  dir: string,
-  known: AgentInfo[]
-): Pick<PassWork, 'agents' | 'workDetails' | 'watches'> {
-  const byStep = new Map(known.map(a => [a.molStep, a]));
-  let fresh: AgentInfo[];
-  try {
-    fresh = registryAgents(dir);
-  } catch {
-    fresh = known;
-  }
-  const agents = fresh.map(a => {
-    const seen = byStep.get(a.molStep);
-    return a.state === 'spawned' &&
-      seen !== undefined &&
-      seen.id === a.id &&
-      seen.spawnedAt !== undefined &&
-      seen.spawnedAt === a.spawnedAt
-      ? { ...a, state: seen.state }
-      : a;
-  });
-  const hooks = hooksDirOf(dir);
-  return {
-    agents,
-    workDetails: hooks === null ? [] : liveWorkEntries(hooks),
-    // listWatches is a cheap local read — a supervisor that stamped its
-    // heartbeat while the lock was being waited on is caught here
-    watches: listWatches(dir),
-  };
-}
-
-/** Lock order is registry → claim, everywhere, and the registry lock
- *  is THE shared occupancy lock every claimant plane serializes on
- *  (bro-qry9): a spawning claimant writes its registry entry + agent
- *  .work marker under it, `bro work enter` stamps its claim under it
- *  (then the worktree's own claim lock), and a session's .work arm
- *  writes under it too. Occupancy-check→remove / check→spawn sections
- *  hold BOTH so a claim lands before the probe or after the action —
- *  never between. The spawn path re-acquires the registry lock
- *  re-entrantly, which is why registry must come first. */
-function acquireOccupancyLocks(dir: string, wt: string | undefined): () => void {
-  const releaseReg = acquireAgentRegistryLock(dir);
-  let releaseClaim: () => void = () => {};
-  try {
-    const claimLock = wt === undefined ? null : claimLockPath(wt);
-    if (claimLock !== null) {
-      releaseClaim = acquireFileLock(claimLock, { label: `${basename(wt!)} claim lock` });
-    }
-  } catch (err) {
-    // a thrown claim acquire must not strand the registry lock — a busy
-    // worktree would otherwise wedge every agent operation this process
-    releaseReg();
-    throw err;
-  }
-  return () => {
-    releaseClaim();
-    releaseReg();
-  };
-}
-
-/** Remove a just-created fixer worktree iff still orphaned — the
- *  occupancy refresh, probe, and `git worktree remove` all run under
- *  both occupancy locks (see acquireOccupancyLocks). Refreshing inside
- *  the hold matters: the lock wait itself is a window where a claimant
- *  can land a registry entry a pre-lock snapshot would miss. Returns
- *  the occupancy detail when the tree is owned or a lock can't be
- *  taken, undefined when retired. */
-async function retireIfOrphaned(
-  ctx: Ctx,
-  pr: number,
-  wt: string,
-  branch: string,
-  fixer: TaskRow | undefined,
-  known: AgentInfo[]
-): Promise<string | undefined> {
-  let release: () => void;
-  try {
-    release = acquireOccupancyLocks(ctx.mainRoot, wt);
-  } catch (err) {
-    // a lock we can't take is indistinguishable from an active claimer —
-    // occupied is always the safe verdict
-    return `occupancy re-check failed — ${errText(err)}`;
-  }
-  try {
-    const fresh = freshOccupancy(ctx.mainRoot, known);
-    const occ = occupied({
-      agents: fresh.agents,
-      fixerBead: fixer?.id,
-      branch,
-      worktree: wt,
-      workDetails: fresh.workDetails,
-      scanProc: agentProcessesIn,
-      pr,
-      watches: fresh.watches,
-    });
-    if (occ !== undefined) {
-      return occ;
-    }
-    // the work evaporated after we checked out — retire the dir we
-    // just added or it lingers as an orphaned fixer worktree
-    const rm = gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt]);
-    if (rm.code === 0) {
-      emitLifecycle(ctx.mainRoot, {
-        kind: 'worktree',
-        to: 'removed',
-        detail: { via: 'drive', worktree: wt, branch, reason: 'orphaned' },
-      });
-    }
-    return undefined;
-  } finally {
-    release();
-  }
-}
-
 async function spawnFixer(
   ctx: Ctx,
   pr: number,
@@ -1347,11 +764,11 @@ async function spawnFixer(
       // re-check occupancy before retiring a dir we just added — another
       // owner could claim it during the thread refetch, and `git
       // worktree remove` on a clean tree deletes even a live cwd. The
-      // refresh + check + remove all run inside retireIfOrphaned under
+      // refresh + check + remove all run inside retireOrphanedWorktree under
       // both occupancy locks: a claimant writes its registry entry +
       // .work marker under the same locks, so a claim lands before the
       // check or after the remove — never between
-      const retire = await retireIfOrphaned(ctx, pr, wt, state.headRef, fixer, known);
+      const retire = retireOrphanedWorktree(ctx.mainRoot, pr, wt, state.headRef, fixer?.id, known);
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire };
       }
@@ -1506,95 +923,6 @@ interface FixerSpawn {
    *  an identical replay. Thread fixers stay undeduped: new threads
    *  land on an unmoved head, so replay there is real work. */
   attempt?: { head: string; cls: string };
-}
-
-/** The attempt record on the fixer bead's registry entry — one head,
- *  the blocker classes whose OWN run exited ok on it (`spent`), and
- *  the class the entry's `cause` currently describes (`current`).
- *  Per-class, never shared: a later ok run must not spend a class
- *  whose own run crashed, and a crash must not un-spend a class that
- *  earned its ok. A head move resets the record (a pushed head earns
- *  a fresh round); a `down`/reap of the entry clears it (operator
- *  semantics). */
-interface FixerAttempt {
-  head: string;
-  spent: string[];
-  current: string;
-}
-
-function fixerAttemptOf(entry: AgentRegistryEntry | undefined): FixerAttempt | undefined {
-  const v = entry?.fixerAttempt;
-  if (typeof v !== 'object' || v === null) {
-    return undefined;
-  }
-  const a = v as Partial<FixerAttempt> & { classes?: unknown };
-  const strings = (xs: unknown): string[] =>
-    Array.isArray(xs) ? xs.filter((c): c is string => typeof c === 'string') : [];
-  if (typeof a.head !== 'string') {
-    return undefined;
-  }
-  if (Array.isArray(a.spent) && typeof a.current === 'string') {
-    return { head: a.head, spent: strings(a.spent), current: a.current };
-  }
-  // pre-split shape {head, classes} — every class shared the entry's
-  // one cause; its best reading is 'all spent iff the cause was ok'
-  if (Array.isArray(a.classes)) {
-    return { head: a.head, spent: entry?.cause === 'ok' ? strings(a.classes) : [], current: '' };
-  }
-  return undefined;
-}
-
-/** The dedup verdict: this (head, class) already ran a fixer that
- *  exited clean — the same prompt on the same head is deterministic
- *  replay. A class is spent when its own ok exit promoted it into
- *  `spent`, or it's the entry's `current` class and `cause` reads
- *  'ok' (the connector harvests cause at .exit time): only 'ok' is a
- *  deliberated verdict — crash/lost/unclassified exits keep respawn
- *  semantics, and rate_limited/quota are refused downstream by the
- *  spawn guard. `stopped` lifts the dedup like it lifts a budget
- *  wall — `bro agents down` is the operator's manual clear. */
-export function fixerAttemptSpent(
-  entry: AgentRegistryEntry | undefined,
-  head: string,
-  cls: string
-): boolean {
-  if (entry === undefined || entry.stopped === true) {
-    return false;
-  }
-  const a = fixerAttemptOf(entry);
-  if (a?.head !== head) {
-    return false;
-  }
-  return a.spent.includes(cls) || (a.current === cls && entry.cause === 'ok');
-}
-
-/** Stamp the attempt on the fixer bead's entry — runs inside the
- *  spawn's locked section right after the spawn write (the lock is
- *  re-entrant; the patch merges so connector fields survive).
- *  `prevEntry` is the entry read BEFORE `spawnStepAgent` reset
- *  `cause` — the run that just finished promotes its `current` class
- *  into `spent` iff that cause was 'ok'; a crashed class stays
- *  respawn-able, which is the whole point of tracking per class. */
-export function recordFixerAttempt(
-  dir: string,
-  molStep: string,
-  prevEntry: AgentRegistryEntry | undefined,
-  head: string,
-  cls: string
-): void {
-  const prev = fixerAttemptOf(prevEntry);
-  const sameHead = prev?.head === head && prevEntry?.stopped !== true;
-  const spent = sameHead ? [...(prev?.spent ?? [])] : [];
-  if (
-    sameHead &&
-    prevEntry?.cause === 'ok' &&
-    prev !== undefined &&
-    prev.current !== '' &&
-    !spent.includes(prev.current)
-  ) {
-    spent.push(prev.current);
-  }
-  patchAgentRegistry(dir, molStep, { fixerAttempt: { head, spent, current: cls } });
 }
 
 /** Cheap pre-check for the locked dedup inside spawnFixerAgent — a
@@ -1873,7 +1201,7 @@ async function spawnRebaseFixer(
     if (lane.created !== true) {
       return;
     }
-    await retireIfOrphaned(ctx, pr, wt, state.headRef, fixer, known);
+    retireOrphanedWorktree(ctx.mainRoot, pr, wt, state.headRef, fixer?.id, known);
   };
   // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are
   // as old as the last fetch anybody in the repo ran, and the drive lane
@@ -2733,11 +2061,10 @@ function openFleetPrs(ctx: Ctx): { prs: Set<number>; complete: boolean } {
  *  its fixer bead hangs open forever after the merge/close. */
 async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
   for (const row of ctx.store.list({ labels: [FIXER_LABEL], all: true })) {
-    const m = /^drive:pr:(\d+)$/.exec(row.external_ref ?? '');
-    if (m === null || row.status === 'closed' || prs.has(Number(m[1]))) {
+    const pr = fixerPrFromRef(row.external_ref);
+    if (pr === undefined || row.status === 'closed' || prs.has(pr)) {
       continue;
     }
-    const pr = Number(m[1]);
     const link = ctx.rev.prLink(ctx.repo, pr);
     try {
       const st = await fetchPrActState(

@@ -27,7 +27,7 @@ import {
   type ClaimResult,
   type SessionKey,
 } from '@broject/core';
-import { agentOwner } from './proc-owner.ts';
+import { agentOwner } from '@broject/rig';
 
 export interface RoleSession {
   host: string;

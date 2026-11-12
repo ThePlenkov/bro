@@ -203,7 +203,7 @@ import {
   readyBeads,
 } from './next.ts';
 import type { NextPlan } from './next-plan.ts';
-import { processesRootedIn } from './proc-owner.ts';
+import { processesRootedIn } from '@broject/rig';
 import { rigNext } from './rig-next.ts';
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
 import { runSyncCommand } from './sync.ts';

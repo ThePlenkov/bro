@@ -30,7 +30,7 @@ import {
   type ExternalActivityPlane,
   type ExternalProbeCtx,
 } from '@broject/core';
-import { hooksDirOf } from '../commands/proc-owner.ts';
+import { hooksDirOf } from '@broject/rig';
 
 /** The marker suffixes a session arm writes — `.work` (session armed
  *  work) and `.task` (a claim arm). Both mean an agent is working this

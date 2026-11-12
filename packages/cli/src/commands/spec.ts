@@ -158,7 +158,7 @@ async function sddHooksDir(ctx: ConnectorCtx): Promise<string | null> {
 
 /** A sibling .task marker's live window when it carries no resolvable
  *  owner — the armed-work nudge's horizon (LIVE_SESSION_MS /
- *  proc-owner LIVE_MARKER_MS). */
+ *  @broject/rig LIVE_MARKER_MS). */
 const LIVE_CLAIM_MS = 24 * 60 * 60 * 1000;
 
 /** One marker's side of the claim ledger: this agent's when the file

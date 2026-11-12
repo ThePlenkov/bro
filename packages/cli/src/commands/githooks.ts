@@ -30,7 +30,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { facade, gitTry, loadConfig, markerLive } from '@broject/core';
-import { agentOwner } from './proc-owner.ts';
+import { agentOwner } from '@broject/rig';
 import {
   REFGUARD_HOOK_MARK,
   REFGUARD_HOOK_NAME,

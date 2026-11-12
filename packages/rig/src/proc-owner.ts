@@ -764,10 +764,10 @@ export { markerLive, markerOwner } from '@broject/core';
 // --- marker-dir occupancy plane ---------------------------------------------------
 //
 // The pieces below judge "is a session/agent still alive behind this
-// claim?" — shared by drive's occupancy pass, the loop litter sweep's
-// dead-claim release, and watch/status check-ins. They live here
-// because drive.ts and work.ts import each other transitively and
-// proc-owner is the leaf both can reach.
+// claim?" — shared by the drive occupancy pass, the litter sweep's
+// dead-claim release, and watch/status check-ins. They moved here with
+// the fleet-lifecycle extraction (bro-jamp7) from the CLI's
+// proc-owner.ts — same verdicts, now owned by the rig package.
 
 /** The freshness horizon for `.work` markers — same as hooks.ts's
  *  LIVE_SESSION_MS: a marker younger than this names a live session. */
