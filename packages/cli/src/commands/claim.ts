@@ -34,6 +34,7 @@ import {
   sessionIdFromEnv,
   sessionProject,
   type ClaimFacade,
+  type ClaimResult,
   type ClaimRow,
   type SessionKey,
 } from '@broject/core';
@@ -64,42 +65,53 @@ export interface ClaimArgs {
   json: boolean;
 }
 
+/** `--ttl` parse — non-negative seconds; 0 means no expiry. */
+function parseTtlSec(argv: string[]): number | undefined {
+  const ttlRaw = flag(argv, '--ttl');
+  if (ttlRaw === undefined) {
+    return undefined;
+  }
+  const ttlSec = Number(ttlRaw);
+  if (!Number.isFinite(ttlSec) || ttlSec < 0) {
+    throw new CommandError(
+      `error: --ttl must be a non-negative number of seconds\n${USAGE}`,
+      EXIT.usage
+    );
+  }
+  return ttlSec;
+}
+
+/** A `--name <value>` flag that must not be blank. */
+function nonEmptyFlag(argv: string[], name: string): string | undefined {
+  const v = flag(argv, name);
+  if (v !== undefined && v.trim() === '') {
+    throw new CommandError(`error: ${name} requires a non-empty value`, EXIT.usage);
+  }
+  return v;
+}
+
 /** Parsed `bro claim` argv — strict positionals; the first positional
- *  is the subcommand (release|list) or the resource itself. */
+ *  is the subcommand (release|list) or the resource itself. Three
+ *  positionals cover `release task bro-1` — the sub plus a two-word
+ *  shorthand; a fourth is always a stray. */
 export function claimArgs(argv: string[]): ClaimArgs {
   const rest = positionals(argv, new Set(['--session', '--host', '--ttl', '--resource']), {
     boolFlags: new Set(['--json', '--project', '--exclusive', '--shared']),
     strict: true,
   });
-  if (rest.length > 2) {
-    throw new CommandError(`error: unexpected argument "${rest[2]}"\n${USAGE}`, EXIT.usage);
+  if (rest.length > 3) {
+    throw new CommandError(`error: unexpected argument "${rest[3]}"\n${USAGE}`, EXIT.usage);
   }
   const first = rest[0];
   const sub =
     first === 'release' || first === 'list' ? first : first === undefined ? 'list' : 'claim';
-  const ttlRaw = flag(argv, '--ttl');
-  let ttlSec: number | undefined;
-  if (ttlRaw !== undefined) {
-    ttlSec = Number(ttlRaw);
-    if (!Number.isFinite(ttlSec) || ttlSec < 0) {
-      throw new CommandError(
-        `error: --ttl must be a non-negative number of seconds\n${USAGE}`,
-        EXIT.usage
-      );
-    }
-  }
+  const ttlSec = parseTtlSec(argv);
   if (argv.includes('--exclusive') && argv.includes('--shared')) {
     throw new CommandError('error: --exclusive and --shared are mutually exclusive', EXIT.usage);
   }
-  const session = flag(argv, '--session');
-  const host = flag(argv, '--host');
+  const session = nonEmptyFlag(argv, '--session');
+  const host = nonEmptyFlag(argv, '--host');
   const resourcePrefix = flag(argv, '--resource');
-  if (session !== undefined && session.trim() === '') {
-    throw new CommandError('error: --session requires a non-empty value', EXIT.usage);
-  }
-  if (host !== undefined && host.trim() === '') {
-    throw new CommandError('error: --host requires a non-empty value', EXIT.usage);
-  }
   return {
     sub,
     pos: rest,
@@ -164,24 +176,26 @@ function currentBranch(dir: string): string | undefined {
   }
 }
 
-/** Expand a resource argument to a URI — shorthands resolve against
- *  `dir`; anything already `scheme:`-shaped passes through. */
-export function expandResourceArg(arg: string, dir: string): string {
-  const a = arg.trim();
-  if (/^[a-z][a-z0-9-]*:\S+/i.test(a)) {
-    return a;
+/** `branch` shorthand — the checked-out branch name, or a usage
+ *  error when HEAD is detached/unresolvable. */
+function branchResource(dir: string): string {
+  const b = currentBranch(dir);
+  if (b === undefined) {
+    throw new CommandError('error: no current branch — pass branch:<name>', EXIT.usage);
   }
-  const project = sessionProject(dir);
+  return `branch:${b}`;
+}
+
+/** Bare (scheme-less) single-word resources — `worktree`/`branch`
+ *  resolve against dir; the value-needing heads throw their usage
+ *  errors here too (defensive — expandResourceWords intercepts the
+ *  two-word forms first). */
+function expandBareResource(a: string, dir: string): string {
   switch (a) {
     case 'worktree':
       return `worktree:${dir}`;
-    case 'branch': {
-      const b = currentBranch(dir);
-      if (b === undefined) {
-        throw new CommandError('error: no current branch — pass branch:<name>', EXIT.usage);
-      }
-      return `branch:${b}`;
-    }
+    case 'branch':
+      return branchResource(dir);
     case 'role':
       throw new CommandError('error: role needs a name — `bro claim role <name>`', EXIT.usage);
     case 'task':
@@ -193,60 +207,90 @@ export function expandResourceArg(arg: string, dir: string): string {
         EXIT.usage
       );
     default:
-      break;
+      return a;
   }
-  // two-token shorthands arrive as "role orchestrator" / "task bro-x" /
-  // "pr 12" / "path src/**" — the caller splits on whitespace itself
-  return a;
 }
 
-/** `bro claim role orchestrator` / `task bro-x` / `pr 12` / `path g` —
- *  the two-word forms, resolved here so expandResourceArg stays
- *  single-arg pure. */
+/** Expand a resource argument to a URI — shorthands resolve against
+ *  `dir`; anything already `scheme:`-shaped passes through. */
+export function expandResourceArg(arg: string, dir: string): string {
+  const a = arg.trim();
+  if (/^[a-z][a-z0-9-]*:\S+/i.test(a)) {
+    return a;
+  }
+  return expandBareResource(a, dir);
+}
+
+function prNumberUri(n: string): string {
+  if (!/^\d+$/.test(n)) {
+    throw new CommandError('error: # needs a PR number — `bro claim #<n>`', EXIT.usage);
+  }
+  return `pr:${n}`;
+}
+
+function roleResourceUri(value: string, dir: string): string {
+  if (value === '') {
+    throw new CommandError('error: role needs a name — `bro claim role <name>`', EXIT.usage);
+  }
+  const project = sessionProject(dir);
+  if (project === undefined) {
+    throw new CommandError('error: project unresolvable — cannot scope the role claim', EXIT.error);
+  }
+  return `role:${value}@${project}`;
+}
+
+function taskResourceUri(value: string): string {
+  if (value === '') {
+    throw new CommandError('error: task needs an id — `bro claim task <id>`', EXIT.usage);
+  }
+  return `task:${value}`;
+}
+
+function prResourceUri(value: string): string {
+  if (!/^\d+$/.test(value)) {
+    throw new CommandError('error: pr needs a number — `bro claim pr <n>`', EXIT.usage);
+  }
+  return `pr:${value}`;
+}
+
+function pathResourceUri(value: string): string {
+  if (value === '') {
+    throw new CommandError('error: path needs a glob — `bro claim path <glob>`', EXIT.usage);
+  }
+  return `path:${value}`;
+}
+
+/** `bro claim role orchestrator` / `task bro-x` / `pr 12` / `path g` /
+ *  `#7` — the shorthand words, resolved here so expandResourceArg
+ *  stays single-arg pure. An unrecognized MULTI-word positional is a
+ *  malformed shorthand (`claim worktree /x`), never a resource — URIs
+ *  carry no spaces — so it is a usage error, not a literal claim. */
 export function expandResourceWords(words: string[], dir: string): string {
   if (words.length === 0) {
     throw new CommandError(`error: claim needs a resource\n${USAGE}`, EXIT.usage);
   }
   const [head, ...rest] = words;
-  const value = rest.join(' ').trim();
-  const project = sessionProject(dir);
   if (head.startsWith('#')) {
-    const n = head.slice(1);
-    if (!/^\d+$/.test(n)) {
-      throw new CommandError('error: # needs a PR number — `bro claim #<n>`', EXIT.usage);
-    }
-    return `pr:${n}`;
+    return prNumberUri(head.slice(1));
   }
+  const value = rest.join(' ').trim();
   switch (head) {
     case 'role':
-      if (value === '') {
-        throw new CommandError('error: role needs a name — `bro claim role <name>`', EXIT.usage);
-      }
-      if (project === undefined) {
+      return roleResourceUri(value, dir);
+    case 'task':
+      return taskResourceUri(value);
+    case 'pr':
+      return prResourceUri(value);
+    case 'path':
+      return pathResourceUri(value);
+    default:
+      if (words.length > 1) {
         throw new CommandError(
-          'error: project unresolvable — cannot scope the role claim',
-          EXIT.error
+          `error: unrecognized resource "${words.join(' ')}" — pass a <scheme>:<rest> URI or a known shorthand\n${USAGE}`,
+          EXIT.usage
         );
       }
-      return `role:${value}@${project}`;
-    case 'task':
-      if (value === '') {
-        throw new CommandError('error: task needs an id — `bro claim task <id>`', EXIT.usage);
-      }
-      return `task:${value}`;
-    case 'pr': {
-      if (!/^\d+$/.test(value)) {
-        throw new CommandError('error: pr needs a number — `bro claim pr <n>`', EXIT.usage);
-      }
-      return `pr:${value}`;
-    }
-    case 'path':
-      if (value === '') {
-        throw new CommandError('error: path needs a glob — `bro claim path <glob>`', EXIT.usage);
-      }
-      return `path:${value}`;
-    default:
-      return expandResourceArg(words.join(' '), dir);
+      return expandResourceArg(head, dir);
   }
 }
 
@@ -263,6 +307,24 @@ function fmtLeaseUntil(ms: number | null, now: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
+/** '—' for absent values, else the string form. */
+function dashCell(v: unknown): string {
+  return v === null || v === undefined || v === '' ? '—' : String(v);
+}
+
+function claimCell(r: ClaimRow, k: string, now: number): string {
+  if (k === 'sid') {
+    return r.sid.length > 14 ? `${r.sid.slice(0, 14)}…` : r.sid;
+  }
+  if (k === 'lease') {
+    return fmtLeaseUntil(r.leaseUntil, now);
+  }
+  if (k === 'exclusive') {
+    return r.exclusive ? 'yes' : 'no';
+  }
+  return dashCell(r[k as keyof ClaimRow]);
+}
+
 function claimTableLines(rows: ClaimRow[], now: number): string[] {
   const cols: [keyof ClaimRow | 'lease', string][] = [
     ['resource', 'RESOURCE'],
@@ -273,20 +335,7 @@ function claimTableLines(rows: ClaimRow[], now: number): string[] {
     ['lease', 'LEASE'],
     ['detail', 'DETAIL'],
   ];
-  const cell = (r: ClaimRow, k: string): string => {
-    if (k === 'sid') {
-      return r.sid.length > 14 ? `${r.sid.slice(0, 14)}…` : r.sid;
-    }
-    if (k === 'lease') {
-      return fmtLeaseUntil(r.leaseUntil, now);
-    }
-    if (k === 'exclusive') {
-      return r.exclusive ? 'yes' : 'no';
-    }
-    const v = r[k as keyof ClaimRow];
-    return v === null || v === undefined || v === '' ? '—' : String(v);
-  };
-  const cells = rows.map(r => cols.map(([k]) => cell(r, k)));
+  const cells = rows.map(r => cols.map(([k]) => claimCell(r, k, now)));
   const widths = cols.map(([, h], i) => Math.max(h.length, ...cells.map(c => c[i]!.length)));
   const line = (vals: string[]) =>
     vals
@@ -316,83 +365,77 @@ function requireSession(sess: ResolvedSession): SessionKey {
   return sessionKey(sess);
 }
 
-export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Promise<void> {
-  if (hasHelpFlag(argv)) {
-    printUsage(USAGE, EXIT.ok);
-  }
-  const args = claimArgs(argv);
-  const dir = deps.dir ?? process.cwd();
-  const env = deps.env ?? process.env;
-  const now = deps.now ?? Date.now();
-  const claims = claimsFacadeFor(dir, deps);
-  const sess = resolveSession(args, env);
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
-  if (args.sub === 'list') {
-    const project = args.project ? sessionProject(dir) : undefined;
-    let rows: ClaimRow[];
-    try {
-      rows = await claims.list({
-        ...(project !== undefined ? { project } : {}),
-        ...(args.resourcePrefix !== undefined ? { resource: args.resourcePrefix } : {}),
-        ...(sess.ok && sess.sid !== '' && args.session !== undefined
-          ? { session: sessionKey(sess) }
-          : {}),
-      });
-    } catch (err) {
-      throw new CommandError(
-        `error: claims unavailable — ${err instanceof Error ? err.message : String(err)}`,
-        EXIT.error
-      );
-    }
-    // --project with no project id matches nothing, like `bro sessions --project`
-    if (args.project && project === undefined) {
-      rows = [];
-    }
-    if (args.json) {
-      console.log(JSON.stringify({ claims: rows, warnings: [] }, null, 2));
-      return;
-    }
-    if (rows.length === 0) {
-      console.log('no live claims');
-      return;
-    }
-    for (const line of claimTableLines(rows, now)) {
-      console.log(line);
-    }
+async function runClaimList(
+  args: ClaimArgs,
+  claims: ClaimFacade,
+  sess: ResolvedSession,
+  dir: string,
+  now: number
+): Promise<void> {
+  const project = args.project ? sessionProject(dir) : undefined;
+  let rows: ClaimRow[];
+  try {
+    rows = await claims.list({
+      ...(project !== undefined ? { project } : {}),
+      ...(args.resourcePrefix !== undefined ? { resource: args.resourcePrefix } : {}),
+      ...(sess.ok && sess.sid !== '' && args.session !== undefined
+        ? { session: sessionKey(sess) }
+        : {}),
+    });
+  } catch (err) {
+    throw new CommandError(`error: claims unavailable — ${errText(err)}`, EXIT.error);
+  }
+  // --project with no project id matches nothing, like `bro sessions --project`
+  if (args.project && project === undefined) {
+    rows = [];
+  }
+  if (args.json) {
+    console.log(JSON.stringify({ claims: rows, warnings: [] }, null, 2));
     return;
   }
-
-  const key = requireSession(sess);
-  // the resource words: `claim worktree` → ['worktree'];
-  // `release worktree` → ['worktree'] (subcommand token dropped);
-  // `claim role orchestrator` keeps both words for the shorthand.
-  const words = (args.sub === 'claim' ? args.pos : args.pos.slice(1)).filter(w => w !== '');
-  if (words.length === 0) {
-    throw new CommandError(`error: ${args.sub} needs a resource\n${USAGE}`, EXIT.usage);
-  }
-  const uri = expandResourceWords(words, dir);
-
-  if (args.sub === 'release') {
-    try {
-      await claims.release(uri, key);
-    } catch (err) {
-      throw new CommandError(
-        `error: release failed — ${err instanceof Error ? err.message : String(err)}`,
-        EXIT.error
-      );
-    }
-    if (args.json) {
-      console.log(JSON.stringify({ released: uri, session: key }, null, 2));
-      return;
-    }
-    console.log(`released ${uri} for ${key.host}-${key.sid}`);
+  if (rows.length === 0) {
+    console.log('no live claims');
     return;
   }
+  for (const line of claimTableLines(rows, now)) {
+    console.log(line);
+  }
+}
 
-  // claim
-  const resource = uri;
+async function runClaimRelease(
+  args: ClaimArgs,
+  claims: ClaimFacade,
+  key: SessionKey,
+  uri: string,
+  dir: string
+): Promise<void> {
+  try {
+    // dir rides along so a task:* release resolves the same store a
+    // dir-scoped claim wrote to even when the session row has no cwd
+    await claims.release(uri, key, { dir });
+  } catch (err) {
+    throw new CommandError(`error: release failed — ${errText(err)}`, EXIT.error);
+  }
+  if (args.json) {
+    console.log(JSON.stringify({ released: uri, session: key }, null, 2));
+    return;
+  }
+  console.log(`released ${uri} for ${key.host}-${key.sid}`);
+}
+
+async function runClaimAcquire(
+  args: ClaimArgs,
+  claims: ClaimFacade,
+  key: SessionKey,
+  resource: string,
+  dir: string
+): Promise<void> {
   const owner = agentOwner();
-  let result;
+  let result: ClaimResult;
   try {
     result = await claims.claim(resource, key, {
       ...(args.ttlSec !== undefined ? { ttlMs: args.ttlSec * 1000 } : {}),
@@ -401,10 +444,7 @@ export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Pro
       dir,
     });
   } catch (err) {
-    throw new CommandError(
-      `error: claim failed — ${err instanceof Error ? err.message : String(err)}`,
-      EXIT.error
-    );
+    throw new CommandError(`error: claim failed — ${errText(err)}`, EXIT.error);
   }
   if (args.json) {
     console.log(
@@ -426,4 +466,36 @@ export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Pro
   if (!result.ok) {
     process.exitCode = EXIT.error;
   }
+}
+
+export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    printUsage(USAGE, EXIT.ok);
+  }
+  const args = claimArgs(argv);
+  const dir = deps.dir ?? process.cwd();
+  const env = deps.env ?? process.env;
+  const claims = claimsFacadeFor(dir, deps);
+  const sess = resolveSession(args, env);
+
+  if (args.sub === 'list') {
+    await runClaimList(args, claims, sess, dir, deps.now ?? Date.now());
+    return;
+  }
+
+  const key = requireSession(sess);
+  // the resource words: `claim worktree` → ['worktree'];
+  // `release worktree` → ['worktree'] (subcommand token dropped);
+  // `claim role orchestrator` keeps both words for the shorthand.
+  const words = (args.sub === 'claim' ? args.pos : args.pos.slice(1)).filter(w => w !== '');
+  if (words.length === 0) {
+    throw new CommandError(`error: ${args.sub} needs a resource\n${USAGE}`, EXIT.usage);
+  }
+  const uri = expandResourceWords(words, dir);
+
+  if (args.sub === 'release') {
+    await runClaimRelease(args, claims, key, uri, dir);
+    return;
+  }
+  await runClaimAcquire(args, claims, key, uri, dir);
 }

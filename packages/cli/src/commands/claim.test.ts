@@ -38,7 +38,12 @@ test('claimArgs parses subs, flags, and positionals', () => {
   assert.equal(lst.project, true);
   assert.equal(lst.resourcePrefix, 'role:');
   assert.equal(claimArgs([]).sub, 'list');
+  // `release task bro-1` — sub + two-word shorthand = three positionals
+  const relTask = claimArgs(['release', 'task', 'bro-1']);
+  assert.equal(relTask.sub, 'release');
+  assert.deepEqual(relTask.pos, ['release', 'task', 'bro-1']);
   assert.throws(() => claimArgs(['claim', 'a', 'b', 'c']));
+  assert.throws(() => claimArgs(['release', 'task', 'bro-1', 'extra']));
 });
 
 test('expandResourceWords maps shorthands and passes URIs through', () => {
@@ -52,6 +57,10 @@ test('expandResourceWords maps shorthands and passes URIs through', () => {
   assert.equal(expandResourceWords(['worktree:/elsewhere'], dir), 'worktree:/elsewhere');
   assert.throws(() => expandResourceWords(['task'], dir));
   assert.throws(() => expandResourceWords(['pr', 'x'], dir));
+  // an unrecognized multi-word positional is a malformed shorthand,
+  // never a literal resource URI containing spaces
+  assert.throws(() => expandResourceWords(['worktree', '/some/path'], dir));
+  assert.throws(() => expandResourceWords(['bogus', 'two', 'words'], dir));
 });
 
 test('runClaimCommand claims and releases through the facade', async () => {

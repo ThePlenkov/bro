@@ -37,9 +37,9 @@ import {
   type ClaimFacade,
   type ClaimOptions,
   type ClaimQuery,
+  type ClaimReleaseOptions,
   type ClaimResult,
   type ClaimRow,
-  type ResourceUri,
 } from './claims.ts';
 import type { SessionKey, SessionRow } from './ledger.ts';
 
@@ -150,9 +150,62 @@ function taskConflict(resource: string, assignee: string): ClaimRow {
   };
 }
 
+/** The store refused between our read and its write — re-read the
+ *  holder so the conflict names who actually won. */
+function taskClaimAfterRefusal(
+  ts: TaskStore,
+  resource: string,
+  id: string,
+  actor: string
+): ClaimResult {
+  const after = ts.get<TaskRow>(id);
+  const holder = (after?.assignee ?? '').trim();
+  return holder === '' || holder === actor
+    ? { ok: false, conflict: null }
+    : { ok: false, conflict: taskConflict(resource, holder) };
+}
+
 function isClosedStatus(status: string | undefined): boolean {
   const s = (status ?? '').toLowerCase();
   return s === 'closed' || s === 'done' || s === 'cancelled' || s === 'canceled';
+}
+
+/** Release guard — only OUR claim on an OPEN bead may be reopened;
+ *  a missing row or a foreign assignee is never ours to clear, and a
+ *  closed bead keeps its assignee (reopening would resurrect it). */
+function taskReleasable(ts: TaskStore, id: string, actor: string): boolean {
+  const row = ts.get<TaskRow>(id);
+  if (row === undefined) {
+    return false;
+  }
+  if ((row.assignee ?? '').trim() !== actor) {
+    return false;
+  }
+  return !isClosedStatus(row.status);
+}
+
+/** Does this standing row block our claim? Same-session rows renew
+ *  instead of conflicting; a conflict needs either side exclusive. */
+function blocksClaim(row: ClaimDbRow, session: SessionKey, exclusive: boolean): boolean {
+  if (row.host === session.host && row.sid === session.sid) {
+    return false;
+  }
+  return exclusive || row.exclusive;
+}
+
+/** `task:*` delegation needs a project dir — opts.dir wins (CLI
+ *  callers pass their cwd), else the session row's ledger cwd. */
+async function taskDirFor(
+  s: LedgerStore,
+  session: SessionKey,
+  o: { dir?: string }
+): Promise<string | undefined> {
+  if (o.dir !== undefined && o.dir.trim() !== '') {
+    return o.dir;
+  }
+  const rows = await s.sessions({ host: session.host, sid: session.sid });
+  const cwd = rows[0]?.cwd;
+  return cwd === undefined || cwd === null || cwd.trim() === '' ? undefined : cwd;
 }
 
 /** claimsFacade — lazy sqlite handle like ledgerFacade: the store
@@ -229,12 +282,8 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     }
     const s = await store();
     fresh(s);
-    let dir = o.dir;
+    const dir = await taskDirFor(s, session, o);
     if (dir === undefined) {
-      const rows = await s.sessions({ host: session.host, sid: session.sid });
-      dir = rows[0]?.cwd ?? undefined;
-    }
-    if (dir === undefined || dir === '') {
       throw new Error(
         `task claim ${resource} needs a project dir — the session has no ledger cwd; pass opts.dir`
       );
@@ -246,7 +295,10 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
       return { ok: false, conflict: null };
     }
     const assignee = (row.assignee ?? '').trim();
-    if (assignee === actor) {
+    // actor '' is "unverifiable, never a match" (TaskStore.actor) —
+    // empty==empty must not read as already-ours: it would return ok
+    // without ever calling ts.claim, reporting a hold that never was
+    if (actor !== '' && assignee === actor) {
       return { ok: true };
     }
     if (assignee !== '') {
@@ -256,40 +308,31 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
       ts.claim(id);
       return { ok: true };
     } catch {
-      // the store refused between our read and its write — re-read the
-      // holder so the conflict names who actually won
-      const after = ts.get<TaskRow>(id);
-      const holder = (after?.assignee ?? '').trim();
-      return holder === '' || holder === actor
-        ? { ok: false, conflict: null }
-        : { ok: false, conflict: taskConflict(resource, holder) };
+      return taskClaimAfterRefusal(ts, resource, id, actor);
     }
   };
 
-  const taskRelease = async (resource: string, session: SessionKey): Promise<void> => {
+  const taskRelease = async (
+    resource: string,
+    session: SessionKey,
+    o: ClaimReleaseOptions
+  ): Promise<void> => {
     const id = resource.slice(TASK_PREFIX.length).trim();
     if (id === '') {
       return;
     }
     const s = await store();
     fresh(s);
-    let dir: string | undefined;
-    const rows = await s.sessions({ host: session.host, sid: session.sid });
-    dir = rows[0]?.cwd ?? undefined;
-    if (dir === undefined || dir === '') {
+    // same dir rule as taskClaim — a claim made with opts.dir must be
+    // releasable without a ledger session row carrying a cwd
+    const dir = await taskDirFor(s, session, o);
+    if (dir === undefined) {
       return; // no project to resolve the store against — nothing to release
     }
     const ts = tasksForDir(dir);
     const actor = ts.actor?.() ?? '';
-    if (actor === '') {
+    if (actor === '' || !taskReleasable(ts, id, actor)) {
       return;
-    }
-    const row = ts.get<TaskRow>(id);
-    if (row === undefined || (row.assignee ?? '').trim() !== actor) {
-      return; // not ours — never clear a foreign claim
-    }
-    if (isClosedStatus(row.status)) {
-      return; // a closed bead keeps its assignee — release would resurrect it
     }
     try {
       ts.reopen(id);
@@ -315,13 +358,14 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
       const ttlMs = o.ttlMs === undefined ? CLAIM_DEFAULT_TTL_MS : o.ttlMs;
       const nowMs = ctx.now;
       // conflict check + write are one critical section — two sessions
-      // racing `role:orchestrator@<project>` must not both read "free"
+      // racing `role:orchestrator@<project>` must not both read "free".
+      // withLock serializes across processes; a store that omits it
+      // runs the same ops unserialized — the fallback must EXECUTE,
+      // never skip to a false ok (ClaimsStoreOps contract).
       let outcome: ClaimResult = { ok: true };
-      s.claims.withLock?.(() => {
+      const critical = (): void => {
         const standing = sweep(s, s.claims.resourceRows(uri), ctx);
-        const blocker = standing.find(
-          r => !(r.host === session.host && r.sid === session.sid) && (exclusive || r.exclusive)
-        );
+        const blocker = standing.find(r => blocksClaim(r, session, exclusive));
         if (blocker !== undefined) {
           outcome = { ok: false, conflict: toClaimRow(blocker) };
           return;
@@ -339,17 +383,22 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
           detail: o.detail ?? null,
           nowMs,
         });
-      });
+      };
+      if (s.claims.withLock === undefined) {
+        critical();
+      } else {
+        s.claims.withLock(critical);
+      }
       return outcome;
     },
 
-    async release(resource, session): Promise<void> {
+    async release(resource, session, o = {}): Promise<void> {
       const uri = resource.trim();
       if (uri === '') {
         return;
       }
       if (uri.startsWith(TASK_PREFIX)) {
-        await taskRelease(uri, session);
+        await taskRelease(uri, session, o);
         return;
       }
       const s = await store();

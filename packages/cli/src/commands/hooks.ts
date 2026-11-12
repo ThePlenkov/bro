@@ -716,8 +716,11 @@ function resolveHookSessionMode(root: string, sessionId: string, raw: unknown): 
  *  acquires `role:orchestrator@<project>` first — a live foreign holder
  *  leaves the mode file UNWRITTEN and reports the conflict as a context
  *  line (the hook can't fail the tool call, but it can refuse the
- *  bind). Every other mode releases the role claim this session may
- *  hold. Returns warning lines for the caller's context payload. */
+ *  bind). The role claim and the mode file must agree: the claim is
+ *  released only after a non-orchestrate write LANDS (a failed write
+ *  leaves the old mode standing, so its role stays), and a fresh
+ *  orchestrate acquire is undone when the write cannot land. Returns
+ *  warning lines for the caller's context payload. */
 async function bindModeCommand(cmd: string, sessionId: string, dir: string): Promise<string[]> {
   if (sessionId === '' || cmd === '') {
     return [];
@@ -727,44 +730,87 @@ async function bindModeCommand(cmd: string, sessionId: string, dir: string): Pro
     return [];
   }
   const sessionKey = { host: hookHost, sid: sessionId };
-  if (mode === 'orchestrate') {
-    const agentId = process.env.BRO_AGENT_ID;
-    if (agentId !== undefined && agentId !== '') {
-      return [
-        'bro mode orchestrate refused — BRO_AGENT_ID is set; spawned workers never orchestrate',
-      ];
+  const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
+  if (refusal !== null) {
+    return [refusal];
+  }
+  return finishModeBind(mode, dir, sessionKey);
+}
+
+/** Write the bound mode file + ledger projection, then reconcile the
+ *  role claim with what actually landed (see bindModeCommand's
+ *  contract). Always resolves — a bind never fails the tool call. */
+async function finishModeBind(
+  mode: Mode,
+  dir: string,
+  sessionKey: { host: string; sid: string }
+): Promise<string[]> {
+  const file = modeFilePath(process.env, sessionKey.host, sessionKey.sid);
+  const wrote = writeBoundModeFile(file, mode, dir);
+  if (!wrote) {
+    // the mode was not applied — undo a fresh orchestrate acquire, and
+    // release anyway when no mode file exists at all (the session then
+    // resolves its default, never orchestrate, so any role claim is
+    // stale). A FAILED write on a non-orchestrate bind keeps the role:
+    // the old file may still say orchestrate.
+    if (mode === 'orchestrate' || file === null) {
+      await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
     }
-    const role = await acquireOrchestratorRole(dir, sessionKey).catch(() => ({
-      ok: false as const,
-      conflict: null,
-    }));
-    if (!role.ok) {
-      const c = role.conflict;
-      return [
-        `bro mode orchestrate refused — the orchestrator role is held by ${
-          c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
-        }; mode unchanged`,
-      ];
-    }
-  } else {
+    return [];
+  }
+  if (mode !== 'orchestrate') {
     await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
   }
-  const file = modeFilePath(process.env, hookHost, sessionId);
+  void ledgerFacade()
+    .setMode({ host: sessionKey.host, sid: sessionKey.sid }, mode)
+    .catch(() => {});
+  return [];
+}
+
+/** `orchestrate` binds are exclusive per project — acquire the role
+ *  claim before the mode file lands; returns the refusal line, or null
+ *  when the bind may proceed (non-orchestrate modes need no acquire). */
+async function bindOrchestrateRole(
+  mode: Mode,
+  dir: string,
+  sessionKey: { host: string; sid: string }
+): Promise<string | null> {
+  if (mode !== 'orchestrate') {
+    return null;
+  }
+  const agentId = process.env.BRO_AGENT_ID;
+  if (agentId !== undefined && agentId !== '') {
+    return 'bro mode orchestrate refused — BRO_AGENT_ID is set; spawned workers never orchestrate';
+  }
+  const role = await acquireOrchestratorRole(dir, sessionKey).catch(() => ({
+    ok: false as const,
+    conflict: null,
+  }));
+  if (role.ok) {
+    return null;
+  }
+  const c = role.conflict;
+  return `bro mode orchestrate refused — the orchestrator role is held by ${
+    c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
+  }; mode unchanged`;
+}
+
+/** The mode-file write half of the bind — false when no state dir
+ *  resolves or the write throws; the ledger is only projected after a
+ *  landed write (hooks keep reading the old file otherwise). */
+function writeBoundModeFile(file: string | null, mode: Mode, dir: string): boolean {
   if (file === null) {
-    return [];
+    return false;
   }
   try {
     writeModeFile(file, mode, hookProjectIdFor(dir) ?? '');
+    return true;
   } catch {
     // binding is best-effort — and a failed write must NOT project the
     // requested mode into the ledger: hooks keep reading the old file,
     // so the ledger would claim a mode nothing runs
-    return [];
+    return false;
   }
-  void ledgerFacade()
-    .setMode({ host: hookHost, sid: sessionId }, mode)
-    .catch(() => {});
-  return [];
 }
 
 /** The session repo's project id for snapshot paths — resolved lazily

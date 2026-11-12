@@ -265,6 +265,7 @@ async function runSet(
   const project = sessionProject(dir);
   const warnings: string[] = [];
   const sessionKey = { host: sess.host, sid: sess.sid };
+  let roleAcquired = false;
   // orchestrate is exclusive per project (specs/sessions/bro-izpyk.md):
   // the mode write is gated on the role:orchestrator@<project> claim —
   // a live foreign holder refuses the set, a dead/unclaimed role is
@@ -289,8 +290,19 @@ async function runSet(
         EXIT.error
       );
     }
+    roleAcquired = true;
   }
-  writeModeFile(file, args.mode, project);
+  try {
+    writeModeFile(file, args.mode, project);
+  } catch (err) {
+    // the mode was not applied — undo the role acquire so the claim
+    // and the mode file never disagree; a stranded claim would block
+    // the next orchestrator for up to the TTL
+    if (roleAcquired) {
+      await releaseOrchestratorRole(dir, sessionKey);
+    }
+    throw err;
+  }
   await ledgerSetMode(ledger, sess.host, sess.sid, args.mode, warnings);
   // leaving orchestrate (or never holding it) releases the role claim —
   // best-effort; a stuck row dies with its TTL/pid anyway

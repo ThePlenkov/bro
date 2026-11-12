@@ -80,7 +80,12 @@ test('pid-less TTL-expired claim dies with a silent session', async () => {
   assert.equal((await c.list({ resource: 'path:src/**' })).length, 0);
 });
 
-test('task:* delegates to the tasks store — bd claim stays truth', async () => {
+let taskFixtureN = 0;
+/** Shared task:* fixture — an in-memory TaskStore whose actor is
+ *  `actor` (default 'me'), behind a fresh claims facade on its own
+ *  ledger db so release's session-cwd lookup has a file to seed. */
+function taskClaimsFixture(actor = 'me') {
+  taskFixtureN += 1;
   const beads = new Map<string, TaskRow>([
     ['bro-1', { id: 'bro-1', status: 'open' } as TaskRow],
     ['bro-2', { id: 'bro-2', status: 'in_progress', assignee: 'other-agent' } as TaskRow],
@@ -110,27 +115,47 @@ test('task:* delegates to the tasks store — bd claim stays truth', async () =>
     deps: () => [],
     neighbors: () => [],
     link: () => {},
-    actor: () => 'me',
+    actor: () => actor,
   } as unknown as TaskStore;
-
-  const dbPath = join(root, 'claims-task.db');
+  const dbPath = join(root, `claims-task-${taskFixtureN}.db`);
   const c = facade({ dbPath, tasksForDir: () => ts });
+  return { c, dbPath, beads, claimed, reopened };
+}
+
+test('task:* claim delegates to the tasks store — bd claim stays truth', async () => {
+  const f = taskClaimsFixture();
   const dir = { dir: '/repo' };
   // unassigned → delegates claim()
-  assert.equal((await c.claim('task:bro-1', A, dir)).ok, true);
-  assert.deepEqual(claimed, ['bro-1']);
+  assert.equal((await f.c.claim('task:bro-1', A, dir)).ok, true);
+  assert.deepEqual(f.claimed, ['bro-1']);
   // foreign-held → conflict naming the assignee, no write
-  const refused = await c.claim('task:bro-2', A, dir);
+  const refused = await f.c.claim('task:bro-2', A, dir);
   assert.equal(refused.ok, false);
   assert.equal(refused.conflict?.sid, 'other-agent');
   // ours → idempotent ok
-  assert.equal((await c.claim('task:bro-3', A, dir)).ok, true);
+  assert.equal((await f.c.claim('task:bro-3', A, dir)).ok, true);
   // missing → ok:false, no conflict
-  assert.deepEqual(await c.claim('task:nope', A, dir), { ok: false, conflict: null });
+  assert.deepEqual(await f.c.claim('task:nope', A, dir), { ok: false, conflict: null });
+});
 
+test('task:* claim with an unverifiable actor still attempts the claim', async () => {
+  // actor '' is "unverifiable, never a match" — empty assignee must
+  // not short-circuit to ok without calling ts.claim
+  const f = taskClaimsFixture('');
+  const dir = { dir: '/repo' };
+  assert.equal((await f.c.claim('task:bro-1', A, dir)).ok, true);
+  assert.deepEqual(f.claimed, ['bro-1']);
+  // a standing foreign assignee still conflicts — '' never matches
+  const refused = await f.c.claim('task:bro-2', A, dir);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.conflict?.sid, 'other-agent');
+});
+
+test('task:* release reopens only our claim, resolved via the session cwd', async () => {
+  const f = taskClaimsFixture();
   // release resolves the project dir from the session row's cwd —
   // seed one through the store's append path on the same db file
-  const h = await openLedgerStore(dbPath);
+  const h = await openLedgerStore(f.dbPath);
   assert.equal(h.ok, true);
   if (!h.ok) return;
   try {
@@ -146,14 +171,22 @@ test('task:* delegates to the tasks store — bd claim stays truth', async () =>
       },
     ]);
     // ours → reopen clears the assignee
-    await c.release('task:bro-3', A);
-    assert.deepEqual(reopened, ['bro-3']);
+    await f.c.release('task:bro-3', A);
+    assert.deepEqual(f.reopened, ['bro-3']);
     // a foreign-held bead is never cleared by our release
-    await c.release('task:bro-2', A);
-    assert.deepEqual(reopened, ['bro-3']);
+    await f.c.release('task:bro-2', A);
+    assert.deepEqual(f.reopened, ['bro-3']);
   } finally {
     h.store.close();
   }
+});
+
+test('task:* release honors opts.dir without a session cwd', async () => {
+  const f = taskClaimsFixture();
+  // no session row at all — the dir opt alone resolves the store,
+  // the same fallback claim() already had
+  await f.c.release('task:bro-3', A, { dir: '/repo' });
+  assert.deepEqual(f.reopened, ['bro-3']);
 });
 
 test('claims list filters by session and resource prefix', async () => {
@@ -165,4 +198,16 @@ test('claims list filters by session and resource prefix', async () => {
   assert.equal(mine.length, 2);
   const wt = await c.list({ resource: 'worktree:' });
   assert.equal(wt.length, 2);
+});
+
+test('resource prefix matching treats LIKE metachars literally', async () => {
+  const c = facade();
+  await c.claim('path:src/my_file', A);
+  await c.claim('path:src/myXfile', B);
+  // unescaped, the `_` in my_file would wildcard-match myXfile
+  const rows = await c.list({ resource: 'path:src/my_file' });
+  assert.deepEqual(
+    rows.map(r => r.sid),
+    ['sess-a']
+  );
 });

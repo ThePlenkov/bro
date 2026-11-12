@@ -489,6 +489,7 @@ export type {
   ClaimFacade,
   ClaimOptions,
   ClaimQuery,
+  ClaimReleaseOptions,
   ClaimResult,
   ClaimRow,
   ResourceUri,

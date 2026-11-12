@@ -552,6 +552,28 @@ function pairMs(
   return startTs !== undefined && tsMs >= startTs ? tsMs - startTs : undefined;
 }
 
+/** claims heartbeat (bro-izpyk.3): any hook event from the holder
+ *  renews its leases — push every ttl-bearing claim of this session
+ *  out to event-time + its own ttl. No-expiry claims (ttl_ms NULL)
+ *  are untouched; dead rows are the sweeper's problem, not ours.
+ *  One rule, two callers: ingestSessionRow and
+ *  ClaimsStoreOps.renewSession — keep them on this single statement. */
+function renewClaimsHeartbeat(
+  db: SqliteDatabase,
+  host: string,
+  sid: string,
+  nowMs: number
+): number {
+  return (
+    db
+      .prepare(
+        `UPDATE claims SET lease_until = ? + ttl_ms
+         WHERE host = ? AND sid = ? AND ttl_ms IS NOT NULL`
+      )
+      .run(nowMs, host, sid).changes ?? 0
+  );
+}
+
 /** Session upsert for one record — only rows carrying a sid touch the
  *  sessions table (v1 rows and sid-less v2 rows skip it). */
 function ingestSessionRow(
@@ -576,14 +598,7 @@ function ingestSessionRow(
     lastSeen: tsMs,
     spawnedBy: rec.agent,
   });
-  // claims heartbeat (bro-izpyk.3): any hook event from the holder
-  // renews its leases — push every ttl-bearing claim of this session
-  // out to event-time + its own ttl. No-expiry claims (ttl_ms NULL)
-  // are untouched; dead rows are the sweeper's problem, not ours.
-  db.prepare(
-    `UPDATE claims SET lease_until = ? + ttl_ms
-     WHERE host = ? AND sid = ? AND ttl_ms IS NOT NULL`
-  ).run(tsMs, rec.host, rec.sid);
+  renewClaimsHeartbeat(db, rec.host, rec.sid, tsMs);
   st.counts.sessions += 1;
 }
 
@@ -670,8 +685,18 @@ function migrateClaimsColumns(db: SqliteDatabase): void {
   const cols = db.prepare(`PRAGMA table_info(claims)`).all() as Array<{ name: string }>;
   const have = new Set(cols.map(c => c.name));
   for (const [name, type] of CLAIMS_ADDED_COLUMNS) {
-    if (!have.has(name)) {
+    if (have.has(name)) {
+      continue;
+    }
+    try {
       db.exec(`ALTER TABLE claims ADD COLUMN ${name} ${type}`);
+    } catch (err) {
+      // two openers can both see the column missing — the loser's
+      // ALTER fails duplicate-column, which is the benign race, not
+      // a reason to refuse the ledger
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) {
+        throw err;
+      }
     }
   }
 }
@@ -747,8 +772,10 @@ function buildClaimsOps(db: SqliteDatabase): ClaimsStoreOps {
         params.push(q.sid);
       }
       if (q.resourcePrefix !== undefined) {
-        where.push('resource LIKE ?');
-        params.push(`${q.resourcePrefix}%`);
+        // LIKE metachars in the prefix are literal — resource URIs
+        // legitimately carry `_`/`%` (path:src/my_file, pr:100%)
+        where.push("resource LIKE ? ESCAPE '\\'");
+        params.push(`${q.resourcePrefix.replace(/[\\%_]/g, '\\$&')}%`);
       }
       const sql = `SELECT ${CLAIM_COLS} FROM claims${
         where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''
@@ -763,14 +790,7 @@ function buildClaimsOps(db: SqliteDatabase): ClaimsStoreOps {
       ).map(claimDbRow);
     },
     renewSession(host, sid, nowMs) {
-      return (
-        db
-          .prepare(
-            `UPDATE claims SET lease_until = ? + ttl_ms
-             WHERE host = ? AND sid = ? AND ttl_ms IS NOT NULL`
-          )
-          .run(nowMs, host, sid).changes ?? 0
-      );
+      return renewClaimsHeartbeat(db, host, sid, nowMs);
     },
     withLock(fn) {
       db.exec('BEGIN IMMEDIATE');

@@ -86,8 +86,15 @@ export interface ClaimOptions {
   dir?: string;
 }
 
+export interface ClaimReleaseOptions {
+  /** Fallback project dir for `task:*` delegation — the same role
+   *  ClaimOptions.dir plays on claim: release carries no other opts,
+   *  so the CLI passes its cwd here when the session row has none. */
+  dir?: string;
+}
+
 export interface ClaimFacade {
   claim(resource: ResourceUri, session: SessionKey, opts?: ClaimOptions): Promise<ClaimResult>;
-  release(resource: ResourceUri, session: SessionKey): Promise<void>;
+  release(resource: ResourceUri, session: SessionKey, opts?: ClaimReleaseOptions): Promise<void>;
   list(q?: ClaimQuery): Promise<ClaimRow[]>;
 }
