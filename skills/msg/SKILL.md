@@ -43,7 +43,7 @@ receive it the notify way.
 | `bro msg orchestrator <text>`                            | The role — sessions with no agentId                               |
 | `bro msg --kind ask --in-reply-to <ref> <target> <text>` | Typed/threaded — kind is a label, never a grant                   |
 | `bro msg --key <k> <target> <text>`                      | Coalesce — a pending same-key drop from this source is superseded |
-| `bro task give <session                                  | role> "title"`                                                    | Create + assign a bead, then message the session — the task twin |
+| `bro task give <session\|role> "title"`                  | Create + assign a bead, then message the session — the task twin  |
 
 ## Policy
 
