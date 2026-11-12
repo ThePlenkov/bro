@@ -2144,41 +2144,58 @@ async function emitStopGate(input: HookInput): Promise<void> {
   await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP]);
 }
 
-/** One contribution's verdict in priority order: an armed block fires
- *  the session's one-shot for that aspect — a spent marker demotes the
- *  block to a hint the stop-hint dedup keeps from re-waking the host;
- *  an armed-but-clean contribution shows its hint; ambient state stays
- *  passive. */
-function stopGateVerdict(
-  c: GateContribution,
-  armed: Set<string>,
-  sessionId: string
-): { block?: string; hint?: string } {
-  if (!armed.has(c.aspect)) {
-    return { hint: c.passive };
-  }
-  if (c.block) {
-    return takeStopGateBlock(sessionId, c.aspect) ? { block: c.block } : { hint: c.block };
-  }
-  return { hint: c.armedHint ?? c.passive };
-}
-
-/** The contribution walk of the stop gate — first block in aspect
- *  order wins the emit; every non-block verdict's hint rides along so
- *  a block still drops them (they journal as verdict rows regardless). */
-function stopGateOutcome(
+/** The contribution walk of the stop gate — the first ASPECT (in
+ *  GATE_PRIORITY order) holding an armed block wins the emit, and
+ *  every block that aspect produced rides ONE reason: the session
+ *  armed the aspect, not the individual probe, so same-aspect blocks
+ *  concatenate instead of the registry-first shadowing the rest
+ *  (bro-3bgbs — the claims gate's 'task' block used to make the SDD
+ *  spec-missing block unreachable). The aspect's one-shot is spent
+ *  once for the joined block; a spent marker demotes every block to a
+ *  hint, and every non-block verdict's hint rides along so a block
+ *  still drops them (they journal as verdict rows regardless). */
+export function stopGateOutcome(
   contributions: GateContribution[],
   armed: Set<string>,
   sessionId: string
 ): { block?: string; hints: string[] } {
   const hints: string[] = [];
-  for (const c of contributions) {
-    const verdict = stopGateVerdict(c, armed, sessionId);
-    if (verdict.block !== undefined) {
-      return { block: verdict.block, hints };
+  for (let i = 0; i < contributions.length; ) {
+    // same-aspect contributions sit adjacent after the rank sort —
+    // they are one gate, not competitors
+    let j = i + 1;
+    while (j < contributions.length && contributions[j]!.aspect === contributions[i]!.aspect) {
+      j++;
     }
-    if (verdict.hint !== undefined) {
-      hints.push(verdict.hint);
+    const group = contributions.slice(i, j);
+    i = j;
+    const aspect = group[0]!.aspect;
+    if (!armed.has(aspect)) {
+      for (const c of group) {
+        if (c.passive !== undefined) {
+          hints.push(c.passive);
+        }
+      }
+      continue;
+    }
+    const blockers = group.filter(c => c.block !== undefined);
+    if (blockers.length === 0) {
+      for (const c of group) {
+        const hint = c.armedHint ?? c.passive;
+        if (hint !== undefined) {
+          hints.push(hint);
+        }
+      }
+      continue;
+    }
+    if (takeStopGateBlock(sessionId, aspect)) {
+      return { block: blockers.map(c => c.block!).join('\n'), hints };
+    }
+    for (const c of group) {
+      const hint = c.block ?? c.armedHint ?? c.passive;
+      if (hint !== undefined) {
+        hints.push(hint);
+      }
     }
   }
   return { hints };

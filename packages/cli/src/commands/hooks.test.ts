@@ -25,10 +25,11 @@ import {
   armDetail,
   otherLiveWork,
   recordGuardEvents,
+  stopGateOutcome,
   takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
-import { procStat } from '@broject/core';
+import { procStat, type GateContribution } from '@broject/core';
 import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts';
 
 function foreignLock(lock: string): ChildProcess {
@@ -386,6 +387,74 @@ describe('classifySkillMutation', () => {
 describe('readArmed', () => {
   test('returns an empty set for a session with no marker', () => {
     assert.equal(readArmed('definitely-no-such-session-id').size, 0);
+  });
+});
+
+describe('stopGateOutcome', () => {
+  test('same-aspect blocks concatenate — no registry-first shadowing (bro-3bgbs)', () => {
+    const { root, main } = initRepo('bro-stop-outcome-');
+    inside(main, root, () => {
+      // the claims gate and the SDD gate both answer aspect 'task' with
+      // identical preconditions — the first used to shadow the second
+      // entirely, so the spec-missing reason never reached the user
+      const contributions: GateContribution[] = [
+        { aspect: 'task', block: 'bro: claimed beads open: b1 — close or release' },
+        { aspect: 'task', block: 'bro: SDD — b1 has no spec — write one first' },
+        { aspect: 'task', armedHint: 'bro: foreign claim ambient' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['task']), 'outcome-join');
+      assert.equal(
+        out.block,
+        'bro: claimed beads open: b1 — close or release\nbro: SDD — b1 has no spec — write one first'
+      );
+      // the aspect's one-shot was spent ONCE for the joined block
+      assert.equal(takeStopGateBlock('outcome-join', 'task'), false);
+    });
+  });
+
+  test('aspect priority preserved — a winning aspect leaves later one-shots unspent', () => {
+    const { root, main } = initRepo('bro-stop-priority-');
+    inside(main, root, () => {
+      // contributions arrive rank-sorted (emitStopGateBody sorts) —
+      // 'work' outranks 'task', so only the work reason emits and the
+      // task gate keeps its shot for a later stop
+      const contributions: GateContribution[] = [
+        { aspect: 'work', block: 'uncommitted work in wt' },
+        { aspect: 'task', block: 'claimed beads open: b1' },
+        { aspect: 'task', block: 'SDD: b1 missing spec' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['work', 'task']), 'outcome-priority');
+      assert.equal(out.block, 'uncommitted work in wt');
+      assert.equal(takeStopGateBlock('outcome-priority', 'task'), true);
+    });
+  });
+
+  test('a spent one-shot demotes every same-aspect block to a hint', () => {
+    const { root, main } = initRepo('bro-stop-demote-');
+    inside(main, root, () => {
+      const contributions: GateContribution[] = [
+        { aspect: 'task', block: 'claims open: b1' },
+        { aspect: 'task', block: 'SDD: b1 missing spec' },
+      ];
+      const armed = new Set(['task']);
+      assert.ok(stopGateOutcome(contributions, armed, 'outcome-demote').block);
+      const again = stopGateOutcome(contributions, armed, 'outcome-demote');
+      assert.equal(again.block, undefined);
+      assert.deepEqual(again.hints, ['claims open: b1', 'SDD: b1 missing spec']);
+    });
+  });
+
+  test('unarmed aspects stay passive; armed clean contributions show armedHint', () => {
+    const { root, main } = initRepo('bro-stop-passive-');
+    inside(main, root, () => {
+      const contributions: GateContribution[] = [
+        { aspect: 'act', armedHint: 'review threads open', passive: 'pr ambient' },
+        { aspect: 'task', block: 'claims open: b1', passive: 'ambient claims' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['act']), 'outcome-passive');
+      assert.equal(out.block, undefined);
+      assert.deepEqual(out.hints, ['review threads open', 'ambient claims']);
+    });
   });
 });
 
