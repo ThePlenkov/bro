@@ -48,6 +48,7 @@ import {
   writeModeFile,
   type LedgerFacade,
   type Mode,
+  type SessionKey,
   type SessionRow,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
@@ -250,6 +251,43 @@ async function runGet(
   }
 }
 
+/** orchestrate is exclusive per project (specs/sessions/bro-izpyk.md):
+ *  the mode write is gated on the role:orchestrator@<project> claim —
+ *  a live foreign holder refuses the set, a dead/unclaimed role is
+ *  taken. Spawned workers (BRO_AGENT_ID) never orchestrate — the same
+ *  veto isOrchestratorSession encodes for the supervisor guards.
+ *  Returns true when this call took the claim — the caller releases
+ *  it if the mode write fails so claim and file never disagree. */
+async function ensureOrchestratorClaim(
+  mode: Mode,
+  dir: string,
+  sessionKey: SessionKey,
+  env: NodeJS.ProcessEnv
+): Promise<boolean> {
+  if (mode !== 'orchestrate') {
+    return false;
+  }
+  const agentId = env.BRO_AGENT_ID;
+  if (agentId !== undefined && agentId !== '') {
+    throw new CommandError(
+      'error: BRO_AGENT_ID is set — spawned workers never orchestrate; ' +
+        'the orchestrator session owns supervisor duties',
+      EXIT.usage
+    );
+  }
+  const role = await acquireOrchestratorRole(dir, sessionKey);
+  if (!role.ok) {
+    const c = role.conflict;
+    throw new CommandError(
+      `error: orchestrator role already held by ${
+        c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
+      } — that session runs supervisor duties for this project`,
+      EXIT.error
+    );
+  }
+  return true;
+}
+
 async function runSet(
   args: ModeArgs & { mode: Mode },
   sess: ResolvedSession,
@@ -265,33 +303,7 @@ async function runSet(
   const project = sessionProject(dir);
   const warnings: string[] = [];
   const sessionKey = { host: sess.host, sid: sess.sid };
-  let roleAcquired = false;
-  // orchestrate is exclusive per project (specs/sessions/bro-izpyk.md):
-  // the mode write is gated on the role:orchestrator@<project> claim —
-  // a live foreign holder refuses the set, a dead/unclaimed role is
-  // taken. Spawned workers (BRO_AGENT_ID) never orchestrate — the same
-  // veto isOrchestratorSession encodes for the supervisor guards.
-  if (args.mode === 'orchestrate') {
-    const agentId = env.BRO_AGENT_ID;
-    if (agentId !== undefined && agentId !== '') {
-      throw new CommandError(
-        'error: BRO_AGENT_ID is set — spawned workers never orchestrate; ' +
-          'the orchestrator session owns supervisor duties',
-        EXIT.usage
-      );
-    }
-    const role = await acquireOrchestratorRole(dir, sessionKey);
-    if (!role.ok) {
-      const c = role.conflict;
-      throw new CommandError(
-        `error: orchestrator role already held by ${
-          c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
-        } — that session runs supervisor duties for this project`,
-        EXIT.error
-      );
-    }
-    roleAcquired = true;
-  }
+  const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env);
   try {
     writeModeFile(file, args.mode, project);
   } catch (err) {

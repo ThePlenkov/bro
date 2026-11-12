@@ -22,11 +22,11 @@
  * `task:*` never touches the claims table — the facade delegates to the
  * tasks store and the bd claim stays the source of truth.
  */
-import { execFileSync } from 'node:child_process';
 import {
   CommandError,
   EXIT,
   facade,
+  gitTry,
   hasHelpFlag,
   hookHostOf,
   loadConfig,
@@ -164,16 +164,12 @@ function claimsFacadeFor(dir: string, deps: ClaimDeps): ClaimFacade {
 }
 
 function currentBranch(dir: string): string | undefined {
-  try {
-    const out = execFileSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return out === '' || out === 'HEAD' ? undefined : out;
-  } catch {
+  const r = gitTry(['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], 3000);
+  if (r.code !== 0) {
     return undefined;
   }
+  const out = r.out.trim();
+  return out === '' || out === 'HEAD' ? undefined : out;
 }
 
 /** `branch` shorthand — the checked-out branch name, or a usage
@@ -336,10 +332,12 @@ function claimTableLines(rows: ClaimRow[], now: number): string[] {
     ['detail', 'DETAIL'],
   ];
   const cells = rows.map(r => cols.map(([k]) => claimCell(r, k, now)));
-  const widths = cols.map(([, h], i) => Math.max(h.length, ...cells.map(c => c[i]!.length)));
+  const widths = cols.map(([, h], i) =>
+    Math.max(h.length, ...cells.map(c => c.at(i)?.length ?? 0))
+  );
   const line = (vals: string[]) =>
     vals
-      .map((v, i) => v.padEnd(widths[i]!))
+      .map((v, i) => v.padEnd(widths.at(i) ?? v.length))
       .join('  ')
       .trimEnd();
   return [line(cols.map(([, h]) => h)), ...cells.map(c => line(c))];

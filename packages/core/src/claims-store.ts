@@ -204,7 +204,7 @@ async function taskDirFor(
     return o.dir;
   }
   const rows = await s.sessions({ host: session.host, sid: session.sid });
-  const cwd = rows[0]?.cwd;
+  const cwd = rows.at(0)?.cwd;
   return cwd === undefined || cwd === null || cwd.trim() === '' ? undefined : cwd;
 }
 
