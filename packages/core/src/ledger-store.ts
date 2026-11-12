@@ -920,8 +920,10 @@ export interface DrainOptions {
  *  (same file, same identity) but differs on any recreated file, so
  *  `ino:birthtime` pins the cursor to the file's actual lineage.
  *  Filesystems reporting birthtime 0 fall back to the bare inode —
- *  no worse than the pre-fix key. */
-function spoolCursorKey(st: { ino: number; birthtimeMs: number }): string {
+ *  no worse than the pre-fix key. Exported so read-side probes
+ *  (doctor's drain-freshness row, bro-izpyk.1.3) compute identical
+ *  keys instead of drifting a second copy. */
+export function spoolCursorKey(st: { ino: number; birthtimeMs: number }): string {
   return st.birthtimeMs > 0 ? `${st.ino}:${st.birthtimeMs}` : String(st.ino);
 }
 

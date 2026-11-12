@@ -6,7 +6,10 @@ import {
   type SpoolRow,
 } from '@broject/core';
 
-const MAX_SPOOL_BYTES = 1024 * 1024;
+/** Spool rotation bound — `rotateHookSpool` drops `.1` past this size.
+ *  Exported so doctor's drain-freshness row (bro-izpyk.1.3) can warn at
+ *  a fraction of the bound instead of duplicating the number. */
+export const MAX_SPOOL_BYTES = 1024 * 1024;
 const DEFAULT_WATCHDOG_SECONDS = 8;
 const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
 const DURATION_UNIT_MS = new Map<string, number>([
@@ -366,7 +369,10 @@ function parseDurationMs(value: string): number | undefined {
   return Number.isFinite(duration) ? duration : undefined;
 }
 
-function watchdogSeconds(env: NodeJS.ProcessEnv): number {
+/** `BRO_HOOK_WATCHDOG_S` env → seconds, default 8 — the same bound
+ *  run.sh enforces and `bro hooks status` reads. Exported for doctor's
+ *  killed-start row so the two surfaces can't disagree on the horizon. */
+export function hookSpoolWatchdogSeconds(env: NodeJS.ProcessEnv): number {
   const value = env.BRO_HOOK_WATCHDOG_S;
   if (value !== undefined && /^\d+$/.test(value)) {
     const parsed = Number(value);
@@ -420,7 +426,7 @@ export function renderHookSpoolStatus(
   const rows = readHookSpool(resolveHookSpoolPath(env), {
     sinceMs: args.sinceMs,
     nowMs,
-    watchdogSeconds: watchdogSeconds(env),
+    watchdogSeconds: hookSpoolWatchdogSeconds(env),
   });
   if (rows.length === 0) {
     return args.json ? '[]' : 'no hook runs recorded';

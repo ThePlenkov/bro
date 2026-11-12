@@ -12,8 +12,23 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { doctorExitCode, runDoctorChecks, type DoctorCheck } from './doctor.ts';
-import { doltManifest, doltStoreCommit, procStat, scrubEnv, testGit } from '@broject/core';
+import {
+  doctorExitCode,
+  runDoctorChecks,
+  sessionLedgerChecks,
+  type DoctorCheck,
+} from './doctor.ts';
+import {
+  doltManifest,
+  doltStoreCommit,
+  ledgerDbPath,
+  ledgerFacade,
+  openLedgerStore,
+  procStat,
+  scrubEnv,
+  testGit,
+  type LedgerFacade,
+} from '@broject/core';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -343,6 +358,85 @@ const fakeSourceCheckout = (dir: string): string => {
   commitAt(dir);
   return entry;
 };
+
+// --- session-ledger rows (bro-izpyk.1.3) ------------------------------------
+// The ledger checks take deps.env/deps.ledger/deps.now so fixtures pin
+// every probe path inside the tmp dir — the dev machine's real
+// ~/.cursor, ~/.codex, ~/.claude and XDG state can't leak verdicts.
+
+/** Env for sessionLedgerChecks — an explicit allowlist, never a
+ *  `...process.env` spread: ambient BRO_* pins (watchdog, spool) and
+ *  whatever else the dev shell carries must not leak verdicts. Every
+ *  homedir() fallback the probes can hit is pinned under `dir` —
+ *  os.homedir() reads the real home, not env.HOME, so the adapter
+ *  dirs get their own keys (XDG_CONFIG_HOME for opencode/kilo,
+ *  PI_CODING_AGENT_DIR/OMP_AGENT_DIR for pi/omp). `over` tweaks one key. */
+function ledgerEnv(dir: string, over: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return {
+    HOME: dir,
+    XDG_STATE_HOME: join(dir, 'state'),
+    XDG_DATA_HOME: join(dir, 'data'),
+    XDG_CONFIG_HOME: join(dir, 'config'),
+    CLAUDE_CONFIG_DIR: join(dir, 'claude'),
+    CODEX_HOME: join(dir, 'codex'),
+    PI_CODING_AGENT_DIR: join(dir, 'pi-agent'),
+    OMP_AGENT_DIR: join(dir, 'omp-agent'),
+    BRO_HOOK_SPOOL: join(dir, 'state', 'bro', 'hooks.spool'),
+    ...over,
+  };
+}
+
+/** A real sqlite ledger at the env-pinned path — reads drain the
+ *  (absent) fixture spool as a no-op, so only appended rows show. */
+function fixtureLedger(env: NodeJS.ProcessEnv): LedgerFacade {
+  return ledgerFacade({ dbPath: ledgerDbPath(env), env });
+}
+
+/** Every facade read rejects — the fail-open probe must degrade to a
+ *  skip row, never throw. */
+const brokenLedger = (): LedgerFacade => ({
+  append: async () => {
+    throw new Error('boom');
+  },
+  sessions: async () => {
+    throw new Error('boom');
+  },
+  installs: async () => {
+    throw new Error('boom');
+  },
+  stats: async () => {
+    throw new Error('boom');
+  },
+  setMode: async () => {
+    throw new Error('boom');
+  },
+});
+
+/** Claude wiring evidence — `plugins/installed_plugins.json` under the
+ *  pinned CLAUDE_CONFIG_DIR, the registry shape the real client writes. */
+function claudeWiring(dir: string): void {
+  const plugins = join(dir, 'claude', 'plugins');
+  mkdirSync(plugins, { recursive: true });
+  writeFileSync(
+    join(plugins, 'installed_plugins.json'),
+    JSON.stringify({ plugins: { 'bro@bro': { installPath: '/x' } } })
+  );
+}
+
+/** v1 spool rows — `ts` is epoch seconds per the wire format. */
+const spoolStart = (tsSec: number, id: string, host: string, event: string): string =>
+  `v1\t${tsSec}\tstart\t${id}\t${host}\t${event}\t/w\n`;
+const spoolEnd = (tsSec: number, id: string, host: string, event: string): string =>
+  `v1\t${tsSec}\tend\t${id}\t${host}\t${event}\t0\tok\t/w\n`;
+
+/** Write the fixture spool (parent dirs included) at the env-pinned
+ *  BRO_HOOK_SPOOL path. */
+function writeSpool(dir: string, content: string): string {
+  const path = join(dir, 'state', 'bro', 'hooks.spool');
+  mkdirSync(join(dir, 'state', 'bro'), { recursive: true });
+  writeFileSync(path, content);
+  return path;
+}
 
 describe('bro doctor', () => {
   test('healthy env — every probe ok, exit 0', () => {
@@ -2002,4 +2096,253 @@ describe('bro doctor', () => {
         assert.ok(!warns.some(c => c.detail.includes('$schema')), JSON.stringify(warns));
       }
     ));
+
+  // --- session-ledger rows (bro-izpyk.1.3) ----------------------------------
+
+  test('ledger-silent: a wired host with an empty ledger warns', async () =>
+    withEnv({}, async dir => {
+      claudeWiring(dir);
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /claude \(plugin bro@bro\)/);
+      assert.match(c.detail, /no ledger rows in 7d/);
+    }));
+
+  test('ledger-silent: recent ledger activity clears the warn', async () =>
+    withEnv({}, async dir => {
+      claudeWiring(dir);
+      const env = ledgerEnv(dir);
+      const ledger = fixtureLedger(env);
+      await ledger.append([{ kind: 'install', host: 'claude', seenAt: Date.now() }]);
+      const checks = await sessionLedgerChecks(dir, { env, ledger });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+      assert.match(c.detail, /1 wired host\(s\) fired within 7d/);
+    }));
+
+  test('ledger-silent: rows older than the window still warn', async () =>
+    withEnv({}, async dir => {
+      claudeWiring(dir);
+      const env = ledgerEnv(dir);
+      const ledger = fixtureLedger(env);
+      await ledger.append([
+        { kind: 'install', host: 'claude', seenAt: Date.now() - 10 * 86_400_000 },
+      ]);
+      const checks = await sessionLedgerChecks(dir, { env, ledger });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /claude/);
+    }));
+
+  test('ledger-silent: no wiring anywhere reports ok, not a warn', async () =>
+    withEnv({}, async dir => {
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+      assert.match(c.detail, /no bro host wiring detected/);
+    }));
+
+  test('ledger-silent: a throwing ledger degrades to skip, never an error', async () =>
+    withEnv({}, async dir => {
+      const checks = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        ledger: brokenLedger(),
+      });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'skip', JSON.stringify(c));
+      assert.match(c.detail, /ledger unavailable/);
+    }));
+
+  test('ledger-silent: user-level settings.local.json wiring counts', async () =>
+    withEnv({}, async dir => {
+      // CLAUDE_CONFIG_DIR/settings.local.json — the file the probe
+      // missed before; the launcher signature alone is the evidence
+      mkdirSync(join(dir, 'claude'), { recursive: true });
+      writeFileSync(
+        join(dir, 'claude', 'settings.local.json'),
+        JSON.stringify({
+          hooks: { PreToolUse: [{ hooks: [{ command: 'bash /p/hooks/run.sh' }] }] },
+        })
+      );
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /claude \(settings hooks\)/);
+    }));
+
+  test('ledger-silent: an unparseable claude registry skips — wiring unknown, not absent', async () =>
+    withEnv({}, async dir => {
+      mkdirSync(join(dir, 'claude', 'plugins'), { recursive: true });
+      writeFileSync(join(dir, 'claude', 'plugins', 'installed_plugins.json'), '{not json');
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'skip', JSON.stringify(c));
+      assert.match(c.detail, /claude plugin registry unreadable/);
+    }));
+
+  test('ledger-silent: an unparseable devin lockfile skips the same way', async () =>
+    withEnv({}, async dir => {
+      const lockDir = join(dir, 'data', 'devin', 'cli', 'plugins');
+      mkdirSync(lockDir, { recursive: true });
+      writeFileSync(join(lockDir, 'lock.json'), 'not-json{');
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'skip', JSON.stringify(c));
+      assert.match(c.detail, /devin plugin lockfile unreadable/);
+    }));
+
+  test('ledger-killed: three unpaired starts past the watchdog warn with the count', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      const ts = Math.floor(now / 1000) - 60;
+      writeSpool(dir, [1, 2, 3].map(i => spoolStart(ts, `k${i}`, 'devin', 'PreToolUse')).join(''));
+      const checks = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        now,
+        ledger: brokenLedger(),
+      });
+      const c = byName(checks, 'ledger-killed');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /3 hook starts killed by hosts in 24h/);
+      assert.match(c.detail, /devin PreToolUse/);
+    }));
+
+  test('ledger-killed: a paired start+end and a lone kill stay under the warn floor', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      const ts = Math.floor(now / 1000) - 60;
+      writeSpool(
+        dir,
+        spoolStart(ts, 'p1', 'devin', 'PreToolUse') +
+          spoolEnd(ts + 1, 'p1', 'devin', 'PreToolUse') +
+          spoolStart(ts, 'k1', 'devin', 'PostToolUse')
+      );
+      const checks = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        now,
+        ledger: brokenLedger(),
+      });
+      const c = byName(checks, 'ledger-killed');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+      assert.match(c.detail, /1 killed start\(s\) in 24h — below the warn threshold/);
+    }));
+
+  test('ledger-killed: spooling disabled or no spool file skips honestly', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      const off = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir, { BRO_HOOK_SPOOL: '0' }),
+        now,
+        ledger: brokenLedger(),
+      });
+      assert.match(byName(off, 'ledger-killed').detail, /spooling disabled/);
+      assert.equal(byName(off, 'ledger-killed').status, 'skip');
+      const missing = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        now,
+        ledger: brokenLedger(),
+      });
+      const c = byName(missing, 'ledger-killed');
+      assert.equal(c.status, 'skip');
+      assert.match(c.detail, /no spool file/);
+    }));
+
+  test('ledger-drain: a large spool with a stale ledger warns', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      // unparseable bytes still count as pending — the cursor is a byte
+      // offset, not a row count; 300KiB clears the 256KiB warn floor
+      writeSpool(dir, `${'x'.repeat(300 * 1024)}\n`);
+      const env = ledgerEnv(dir);
+      const dbPath = ledgerDbPath(env);
+      const opened = await openLedgerStore(dbPath);
+      assert.ok(opened.ok);
+      opened.close();
+      // fold+drop the WAL sidecars so only the main file's mtime speaks,
+      // then age it past the 24h staleness bound
+      rmSync(`${dbPath}-wal`, { force: true });
+      rmSync(`${dbPath}-shm`, { force: true });
+      const stale = new Date(now - 2 * 86_400_000);
+      utimesSync(dbPath, stale, stale);
+      const checks = await sessionLedgerChecks(dir, { env, now, ledger: brokenLedger() });
+      const c = byName(checks, 'ledger-drain');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /hooks\.spool .* pending/);
+      assert.match(c.detail, /ledger last written 2d ago/);
+    }));
+
+  test('ledger-drain: a large spool with no ledger at all warns as never-written', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      writeSpool(dir, `${'x'.repeat(300 * 1024)}\n`);
+      const checks = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        now,
+        ledger: brokenLedger(),
+      });
+      const c = byName(checks, 'ledger-drain');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /ledger last written never/);
+    }));
+
+  test('ledger-drain: a small backlog under the byte floor stays ok', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      writeSpool(dir, `${'x'.repeat(500)}\n`);
+      const checks = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        now,
+        ledger: brokenLedger(),
+      });
+      const c = byName(checks, 'ledger-drain');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+      assert.match(c.detail, /ledger keeping up — 501B spool bytes pending/);
+    }));
+
+  test('ledger-drain: spooling disabled or no spool file skips honestly', async () =>
+    withEnv({}, async dir => {
+      const now = Date.now();
+      const off = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir, { BRO_HOOK_SPOOL: '0' }),
+        now,
+        ledger: brokenLedger(),
+      });
+      const c = byName(off, 'ledger-drain');
+      assert.equal(c.status, 'skip');
+      assert.match(c.detail, /spooling disabled/);
+      const missing = await sessionLedgerChecks(dir, {
+        env: ledgerEnv(dir),
+        now,
+        ledger: brokenLedger(),
+      });
+      assert.match(byName(missing, 'ledger-drain').detail, /no spool file/);
+    }));
+
+  test('ledger-adapters: in-process adapters are named as ledger-blind', async () =>
+    withEnv({}, async dir => {
+      // pi's local-scope target — any content is a non-absent row
+      mkdirSync(join(dir, '.pi', 'extensions'), { recursive: true });
+      writeFileSync(join(dir, '.pi', 'extensions', 'bro.ts'), '// fixture\n');
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-adapters');
+      assert.equal(c.status, 'skip', JSON.stringify(c));
+      assert.match(c.detail, /pi adapter\(s\) installed/);
+      assert.match(c.detail, /bypass the hook spool/);
+    }));
+
+  test('ledger-adapters: no adapters installed skips quietly', async () =>
+    withEnv({}, async dir => {
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-adapters');
+      assert.equal(c.status, 'skip');
+      assert.match(c.detail, /no client adapters installed/);
+    }));
 });
