@@ -17,6 +17,7 @@ import type {
   PrTarget,
   ReviewFacade,
   ReviewThread,
+  VetoReview,
 } from '@broject/core';
 import type { CheckHistory } from './check-history.ts';
 import { docsOnlyPr, effectiveMaxRounds } from './docs.ts';
@@ -546,11 +547,19 @@ async function fetchState(
   // decision and every host without the probe leaves it undefined. A
   // failed probe degrades to undefined like reviewedShas: the gate
   // still blocks on reviewDecision itself, only the dismiss detail is
-  // lost (act dismiss re-probes directly and reports the real error)
-  const vetoReviews =
-    reviewDecision === 'CHANGES_REQUESTED' && rev.vetoReviews !== undefined
-      ? await rev.vetoReviews(target).catch((): undefined => undefined)
-      : undefined;
+  // lost (act dismiss re-probes directly and reports the real error).
+  // try/catch, not .catch-on-promise: the facade contract types the
+  // probe Promise-returning but a non-async impl can throw BEFORE its
+  // promise exists — a sync throw would escape the whole fetch (the
+  // orSync .then rule, applied to a probe with no sync twin)
+  let vetoReviews: VetoReview[] | undefined;
+  if (reviewDecision === 'CHANGES_REQUESTED' && rev.vetoReviews !== undefined) {
+    try {
+      vetoReviews = await rev.vetoReviews(target);
+    } catch {
+      vetoReviews = undefined;
+    }
+  }
   // the allowlist the verdict was probed under — cached entries must
   // not serve a caller trusting a different set (usable() compares)
   const humanApprovalApprovers = requireApproval ? [...(opts?.approvers ?? [])] : undefined;

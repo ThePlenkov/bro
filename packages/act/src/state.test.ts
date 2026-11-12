@@ -566,6 +566,21 @@ describe('fetchPrActState — the veto-review probe (bro-n1foa)', () => {
     assert.equal(s.vetoReviews, undefined);
   });
 
+  test('a SYNCHRONOUSLY throwing probe degrades the same way — the fetch survives', async () => {
+    // codeant-ai on PR #1020: the facade contract types the probe
+    // Promise-returning, but a non-async impl can throw before its
+    // promise exists — .catch-on-promise alone let that escape the
+    // whole state fetch
+    const rev = fakeRev([], []);
+    rev.prMeta = () => vetoMeta;
+    rev.vetoReviews = () => {
+      throw new Error('host exploded before returning a promise');
+    };
+    const s = await fetchPrActState(rev, target, {});
+    assert.equal(s.reviewDecision, 'CHANGES_REQUESTED');
+    assert.equal(s.vetoReviews, undefined);
+  });
+
   test('a host without the probe leaves vetoReviews undefined', async () => {
     const rev = fakeRev([], []);
     rev.prMeta = () => vetoMeta;
