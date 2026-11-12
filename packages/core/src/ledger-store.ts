@@ -167,8 +167,13 @@ export interface IngestContext {
 }
 
 export interface FileBatch {
-  /** Inode key — survives the hooks.spool → hooks.spool.1 rename. */
+  /** Cursor key — inode (+birthtime) survives the hooks.spool →
+   *  hooks.spool.1 rename. */
   ino: string;
+  /** Cursor value observed when the batch was read — the ingest
+   *  transaction skips the batch when the stored cursor moved on
+   *  (a concurrent drain already ingested it). */
+  start: number;
   /** Byte offset after the last complete line ingested. */
   offset: number;
   rows: SpoolRow[];
@@ -622,10 +627,16 @@ function buildStore(db: SqliteDatabase): LedgerStore {
       pruned: 0,
     };
     const state: IngestState = { counts, pairStarts: new Map(), days: new Set() };
-    const cursor = loadCursor();
     db.exec('BEGIN IMMEDIATE');
     try {
+      // reload inside the write lock — a concurrent drain that beat us
+      // here already advanced the cursor; re-ingesting its batches
+      // would double every count (no uniqueness on events)
+      const cursor = loadCursor();
       for (const batch of batches) {
+        if ((cursor[batch.ino] ?? 0) !== batch.start) {
+          continue;
+        }
         for (const rec of batch.rows) {
           ingestRecord(db, rec, ctx, state);
         }
@@ -902,6 +913,18 @@ export interface DrainOptions {
   watchdogSeconds?: number;
 }
 
+/** Cursor identity for a spool file — inode alone is not enough:
+ *  rotation frees the live inode and the filesystem may hand it to
+ *  the next spool file, whose earlier bytes would then read as
+ *  "already consumed". birthtime survives the spool → spool.1 rename
+ *  (same file, same identity) but differs on any recreated file, so
+ *  `ino:birthtime` pins the cursor to the file's actual lineage.
+ *  Filesystems reporting birthtime 0 fall back to the bare inode —
+ *  no worse than the pre-fix key. */
+function spoolCursorKey(st: { ino: number; birthtimeMs: number }): string {
+  return st.birthtimeMs > 0 ? `${st.ino}:${st.birthtimeMs}` : String(st.ino);
+}
+
 /** Read new complete lines from each spool file into FileBatches —
  *  inode-keyed offsets, partial-tail holdback. Batches with zero
  *  parseable rows still advance the cursor: consumed garbage must not
@@ -919,8 +942,9 @@ function readBatches(store: LedgerStore, spoolPath: string): FileBatch[] {
     if (!st.isFile()) {
       continue;
     }
-    const ino = String(st.ino);
-    let offset = cursor[ino] ?? 0;
+    const ino = spoolCursorKey(st);
+    const seen = cursor[ino] ?? 0;
+    let offset = seen;
     if (st.size < offset) {
       offset = 0; // truncated/recreated under the same inode
     }
@@ -950,7 +974,12 @@ function readBatches(store: LedgerStore, spoolPath: string): FileBatch[] {
       .slice(0, -1)
       .map(line => parseSpoolLine(line))
       .filter((r): r is SpoolRow => r !== undefined);
-    batches.push({ ino, offset: offset + Buffer.byteLength(complete, 'utf8'), rows });
+    batches.push({
+      ino,
+      start: seen,
+      offset: offset + Buffer.byteLength(complete, 'utf8'),
+      rows,
+    });
   }
   return batches;
 }

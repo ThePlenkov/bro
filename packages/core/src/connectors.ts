@@ -539,10 +539,14 @@ const gitConnector: Connector = {
  *  dir, fed lazily by the hook-spool drain. Machine-scoped, not
  *  project-scoped: ctx.dir is irrelevant, env paths decide. The designed
  *  default backend (epic spec's facade table) — never opt-in, and the
- *  only provider until a remote/jsonl backend registers. */
+ *  only provider until a remote/jsonl backend registers. The facade
+ *  memoizes: each instance lazily opens its own SQLite handle and
+ *  LedgerFacade has no close — a per-resolution facade would leak one
+ *  WAL connection per call in a long-lived process. */
+let ledgerSingleton: LedgerFacade | undefined;
 const ledgerConnector: Connector = {
   name: 'ledger',
-  ledger: () => ledgerFacade(),
+  ledger: () => (ledgerSingleton ??= ledgerFacade()),
 };
 
 // --- registry ------------------------------------------------------------------
