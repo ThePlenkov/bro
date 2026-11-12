@@ -263,8 +263,7 @@ describe('specState', () => {
       // molecule ship-beads are convoy scaffolding — exempt like chores
       assert.equal(specState(row({ issue_type: 'molecule' }), nativeAt(dir, 'specs')), 'exempt');
       // an empty scaffold does not satisfy the rule
-      mkdirSync(join(dir, 'specs'));
-      writeFileSync(join(dir, 'specs', 'b1.md'), '  \n');
+      writeSpecs(dir, { 'b1.md': '  \n' });
       assert.equal(specState(row(), nativeAt(dir, 'specs')), 'missing');
       // coverage reads the working tree — an uncommitted spec file counts
       writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n');
@@ -280,8 +279,7 @@ describe('specState', () => {
 
   test('a declared spec: link outranks a discovered spec file', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs'));
-      writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n');
+      writeSpecs(dir, { 'b1.md': '# spec\n' });
       // both evidences present → the declaration wins
       assert.equal(
         specState(row({ description: 'design: spec: specs/b1.md' }), nativeAt(dir, 'specs')),
@@ -336,8 +334,7 @@ describe('sddConnector', () => {
 
   test('own claim with a spec file never blocks', async () => {
     await withRepo({ claims: ['b1'] }, async dir => {
-      mkdirSync(join(dir, 'specs'));
-      writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n');
+      writeSpecs(dir, { 'b1.md': '# spec\n' });
       const h = probe(dir);
       assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
       assert.deepEqual(await h.stopGate!(ctx(dir)), []);
@@ -555,14 +552,13 @@ describe('sddConnector', () => {
         assert.match(grown[0] ?? '', /b2 two/);
         assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
         // a spec shrinks the set → the change reports too
-        mkdirSync(join(dir, 'specs'));
-        writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n');
+        writeSpecs(dir, { 'b1.md': '# spec\n' });
         const shrunk = await h.promptSubmit!(ctx(dir), 'p');
         assert.match(shrunk[0] ?? '', /b2 two/);
         assert.doesNotMatch(shrunk[0] ?? '', /b1/);
         // resolved entirely — the empty set records, so the claim
         // returning reports again
-        writeFileSync(join(dir, 'specs', 'b2.md'), '# spec\n');
+        writeSpecs(dir, { 'b2.md': '# spec\n' });
         assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
         rmSync(join(dir, 'specs', 'b2.md'));
         assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b2 two/);
@@ -675,7 +671,7 @@ describe('sddConnector under a non-beads tasks connector', () => {
 describe('specs facade resolution', () => {
   test('bare repo resolves to native', async () => {
     await withRepo({ config: {} }, dir => {
-      assert.match(specStore(dir).policy(), /specs\/<id>\.md/);
+      assert.match(specStore(dir).policy(), /specs\/<id>\.spec\.md/);
     });
   });
 
@@ -708,17 +704,31 @@ describe('specs facade resolution', () => {
 });
 
 describe('spec coverage across linked worktrees', () => {
+  /** One-commit fixture + linked `work/b1` worktree; fn gets the linked
+   *  path and the dir is swept after (fn may remove it early — a stale
+   *  admin record is a case under test). */
+  const withLinkedWt = async (
+    dir: string,
+    fn: (wt: string) => void | Promise<void>
+  ): Promise<void> => {
+    // worktree add needs one commit — the fixture repo is init-only
+    testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty']);
+    const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'));
+    try {
+      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1']);
+      await fn(wt);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  };
+
   /** Coverage asks "does this bead have a spec anywhere in the
    *  project's checkouts" — a spec on the bead's feature branch in a
    *  sibling worktree counts (bro-3rhzs; the bro-zkpju nag was the
    *  false positive this kills). */
   test('a spec in a linked worktree counts — and silences the nag', async () => {
     await withRepo({ claims: ['b1'] }, async dir => {
-      // worktree add needs one commit — the fixture repo is init-only
-      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty']);
-      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'));
-      try {
-        testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1']);
+      await withLinkedWt(dir, async wt => {
         // the spec exists ONLY in the sibling worktree's specs/ dir —
         // this checkout's own specs/ stays empty
         writeSpecs(wt, { 'b1.md': '# b1\n' });
@@ -733,20 +743,17 @@ describe('spec coverage across linked worktrees', () => {
         const r = await capture(dir, ['check']);
         assert.equal(r.exit, 0);
         assert.match(r.out.join('\n'), /^b1\tspec\t/m);
-      } finally {
-        rmSync(wt, { recursive: true, force: true });
-      }
+      });
     });
   });
 
   test('a stale worktree admin entry fails open to a plain miss', async () => {
     await withRepo({ claims: ['b1'] }, async dir => {
-      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty']);
-      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'));
-      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1']);
-      // dir gone but the admin record remains — resolution must not throw
-      rmSync(wt, { recursive: true, force: true });
-      assert.equal(specStore(dir).hasSpec('b1'), false);
+      await withLinkedWt(dir, wt => {
+        // dir gone but the admin record remains — resolution must not throw
+        rmSync(wt, { recursive: true, force: true });
+        assert.equal(specStore(dir).hasSpec('b1'), false);
+      });
     });
   });
 
@@ -801,10 +808,11 @@ describe('spec coverage across linked worktrees', () => {
 describe('native spec tree', () => {
   test('tree() links children via parent frontmatter', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs'));
-      writeFileSync(join(dir, 'specs', 'epic.md'), '# epic\n');
-      writeFileSync(join(dir, 'specs', 'child.md'), '---\nparent: epic\n---\n# child\n');
-      writeFileSync(join(dir, 'specs', 'sib.md'), '# sib\n');
+      writeSpecs(dir, {
+        'epic.md': '# epic\n',
+        'child.md': '---\nparent: epic\n---\n# child\n',
+        'sib.md': '# sib\n',
+      });
       const nodes = specStore(dir).tree();
       assert.deepEqual(
         nodes.map(n => [n.id, n.parent]),
@@ -835,24 +843,24 @@ describe('dir specs — the tree IS the filetree', () => {
       mkdirSync(join(dir, 'specs', 'cap'), { recursive: true });
       // a bare dir is not a spec yet — index file required
       assert.equal(spec.hasSpec('cap'), false);
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '  \n');
+      writeSpecs(dir, { 'cap/spec.md': '  \n' });
       // an empty index does not count
       assert.equal(spec.hasSpec('cap'), false);
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
+      writeSpecs(dir, { 'cap/spec.md': '# cap\n' });
       assert.equal(spec.hasSpec('cap'), true);
-      mkdirSync(join(dir, 'specs', 'other'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'other', 'README.md'), '# other\n');
+      writeSpecs(dir, { 'other/README.md': '# other\n' });
       assert.equal(spec.hasSpec('other'), true);
     });
   });
 
   test('nested entries take their enclosing dir spec as parent', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap', 'sub'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'leaf.md'), '# leaf\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'sub', 'spec.md'), '# sub\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'sub', 'deep.md'), '# deep\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/leaf.md': '# leaf\n',
+        'cap/sub/spec.md': '# sub\n',
+        'cap/sub/deep.md': '# deep\n',
+      });
       const nodes = specStore(dir).tree();
       assert.deepEqual(Object.fromEntries(nodes.map(n => [n.id, n.parent])), {
         cap: undefined,
@@ -865,10 +873,11 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('frontmatter parent wins over position', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'cross.md'), '---\nparent: other\n---\n# cross\n');
-      writeFileSync(join(dir, 'specs', 'other.md'), '# other\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/cross.md': '---\nparent: other\n---\n# cross\n',
+        'other.md': '# other\n',
+      });
       const nodes = specStore(dir).tree();
       assert.equal(nodes.find(n => n.id === 'cross')?.parent, 'other');
     });
@@ -876,10 +885,11 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('.md inside a non-index dir is content, not a spec', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap', 'assets', 'nested'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'assets', 'diagram.md'), '# diagram\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'assets', 'nested', 'spec.md'), '# nested\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/assets/diagram.md': '# diagram\n',
+        'cap/assets/nested/spec.md': '# nested\n',
+      });
       const ids = specStore(dir)
         .tree()
         .map(n => n.id);
@@ -891,9 +901,7 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('hasSpec resolves a bead spec nested under a capability dir', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'sdd'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'sdd', 'spec.md'), '# sdd\n');
-      writeFileSync(join(dir, 'specs', 'sdd', 'b1.md'), '# b1 spec\n');
+      writeSpecs(dir, { 'sdd/spec.md': '# sdd\n', 'sdd/b1.md': '# b1 spec\n' });
       const spec = specStore(dir);
       assert.equal(spec.hasSpec('b1'), true);
       assert.equal(spec.hasSpec('b2'), false);
@@ -902,13 +910,11 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('frontmatter on a dir-spec index beats its positional parent', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap', 'sub'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
-      writeFileSync(
-        join(dir, 'specs', 'cap', 'sub', 'spec.md'),
-        '---\nparent: other\n---\n# sub\n'
-      );
-      writeFileSync(join(dir, 'specs', 'other.md'), '# other\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/sub/spec.md': '---\nparent: other\n---\n# sub\n',
+        'other.md': '# other\n',
+      });
       const nodes = specStore(dir).tree();
       assert.equal(nodes.find(n => n.id === 'sub')?.parent, 'other');
     });
@@ -916,20 +922,66 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('spec.md wins over README.md when a dir carries both', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'README.md'), '# readme\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# spec\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# spec\n',
+        'cap/README.md': '# readme\n',
+      });
       const nodes = specStore(dir).tree();
       assert.equal(nodes.find(n => n.id === 'cap')?.path, join('specs', 'cap', 'spec.md'));
     });
   });
 
+  test('an empty .spec.md index does not hide a populated legacy index', async () => {
+    await withRepo({ config: {} }, dir => {
+      writeSpecs(dir, { 'cap/cap.spec.md': '', 'cap/spec.md': '# cap\n' });
+      const spec = specStore(dir);
+      assert.equal(spec.hasSpec('cap'), true);
+      assert.equal(spec.tree().find(n => n.id === 'cap')?.path, join('specs', 'cap', 'spec.md'));
+    });
+  });
+
+  test('an empty index enables no child discovery; whitespace-only index does not hide a populated legacy index', async () => {
+    await withRepo({ config: {} }, dir => {
+      writeSpecs(dir, { 'group/group.spec.md': '  \n', 'group/bro-123.md': '# bro-123\n' });
+      const spec = specStore(dir);
+      // whitespace-only index → the dir is unindexed; a plain .md is content
+      assert.equal(spec.hasSpec('bro-123'), false);
+      // a populated legacy index is not hidden by the empty .spec.md
+      writeSpecs(dir, { 'group/spec.md': '# group\n' });
+      const spec2 = specStore(dir);
+      assert.equal(spec2.hasSpec('bro-123'), true);
+      assert.equal(
+        spec2.tree().find(n => n.id === 'group')?.path,
+        join('specs', 'group', 'spec.md')
+      );
+    });
+  });
+
+  test('.spec.md inside an unindexed dir still counts — plain .md stays a part', async () => {
+    await withRepo({ config: {} }, dir => {
+      // unindexed dir: collectFiles is off — marker files still count
+      writeSpecs(dir, { 'group/foo.spec.md': '# foo\n', 'group/notes.md': '# notes\n' });
+      const spec = specStore(dir);
+      assert.equal(spec.hasSpec('foo'), true);
+      assert.equal(spec.hasSpec('notes'), false);
+      // inside an unindexed subdir of a dir spec the marker child
+      // hangs off the nearest spec ancestor
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/assets/leaf.spec.md': '# leaf\n',
+      });
+      const nodes = specStore(dir).tree();
+      assert.equal(nodes.find(n => n.id === 'leaf')?.parent, 'cap');
+    });
+  });
+
   test('an invalid-id dir walks through — nested specs stay attached', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap', 'bad name', 'inner'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'bad name', 'spec.md'), '# invalid id\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'bad name', 'inner', 'spec.md'), '# inner\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/bad name/spec.md': '# invalid id\n',
+        'cap/bad name/inner/spec.md': '# inner\n',
+      });
       const nodes = specStore(dir).tree();
       assert.equal(nodes.find(n => n.id === 'inner')?.parent, 'cap');
       assert.equal(
@@ -941,10 +993,11 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('a child file reusing the dir id is skipped — no self-parent', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'foo'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'foo', 'spec.md'), '# foo\n');
-      writeFileSync(join(dir, 'specs', 'foo', 'foo.md'), '# dup\n');
-      writeFileSync(join(dir, 'specs', 'foo', 'leaf.md'), '# leaf\n');
+      writeSpecs(dir, {
+        'foo/spec.md': '# foo\n',
+        'foo/foo.md': '# dup\n',
+        'foo/leaf.md': '# leaf\n',
+      });
       const nodes = specStore(dir).tree();
       assert.deepEqual(nodes.map(n => n.id).sort(), ['foo', 'leaf']);
     });
@@ -952,9 +1005,10 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('a non-selected index name inside a dir spec is a child spec', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
-      writeFileSync(join(dir, 'specs', 'cap', 'README.md'), '# readme child\n');
+      writeSpecs(dir, {
+        'cap/spec.md': '# cap\n',
+        'cap/README.md': '# readme child\n',
+      });
       const nodes = specStore(dir).tree();
       assert.equal(nodes.find(n => n.id === 'README')?.parent, 'cap');
     });
@@ -962,14 +1016,13 @@ describe('dir specs — the tree IS the filetree', () => {
 
   test('scaffold --parent into a dir spec writes positionally, no frontmatter', async () => {
     await withRepo({ config: {} }, dir => {
-      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true });
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
+      writeSpecs(dir, { 'cap/spec.md': '# cap\n' });
       const spec = specStore(dir);
       const p = spec.scaffold!('child', { title: 'c', parent: 'cap' });
-      assert.equal(p, join(dir, 'specs', 'cap', 'child.md'));
+      assert.equal(p, join(dir, 'specs', 'cap', 'child.spec.md'));
       assert.doesNotMatch(readFileSync(p, 'utf8'), /parent:/);
       // flat-file parents still get the frontmatter edge
-      writeFileSync(join(dir, 'specs', 'flat.md'), '# flat\n');
+      writeSpecs(dir, { 'flat.md': '# flat\n' });
       const q = spec.scaffold!('child2', { parent: 'flat' });
       assert.match(readFileSync(q, 'utf8'), /^parent: flat$/m);
     });
@@ -1070,7 +1123,9 @@ describe('bro spec init', () => {
       const cfg = JSON.parse(readFileSync(join(dir, 'bro.config.json'), 'utf8'));
       assert.equal(cfg.sdd.mode, 'remind');
       assert.equal(cfg.connectors?.specs, undefined);
-      assert.ok(readFileSync(join(dir, 'specs', 'project.md'), 'utf8').includes('spec of specs'));
+      assert.ok(
+        readFileSync(join(dir, 'specs', 'project.spec.md'), 'utf8').includes('spec of specs')
+      );
     });
   });
 
