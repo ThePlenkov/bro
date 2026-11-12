@@ -109,3 +109,10 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
 - 2026-11-12 — v2 rewrite: full asset inventory — /bro+/act commands,
   8 bro_* tools with pinned argv, skills dedup, RPC methods/events,
   TUI slots, shell.env.
+- 2026-11-12 — v3: `index.ts` now ships as a `bundleAdapter` bundle
+  (adapter-core folded, `@opencode/plugin` external, `rpc.ts`
+  inlined — the emitted `rpc.ts` remains for `tui.tsx`). Local
+  spawn/probe/parse helpers deleted; the shared CLI ladder now probes
+  a pinned `options.command` like every other tier, tool/command
+  reads run under `RUN_TIMEOUT_MS` (60s, was 15s), and resolution
+  retries a failed answer after `RESOLVE_RETRY_MS`.

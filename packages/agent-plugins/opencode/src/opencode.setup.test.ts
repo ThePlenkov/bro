@@ -32,7 +32,7 @@ const at = process.argv.indexOf('hooks')
 const event = at >= 0 ? (process.argv[at + 1] ?? '') : process.argv.slice(2).join(' ')
 let payload = {}
 try { payload = JSON.parse(readFileSync(0, 'utf8')) } catch {}
-if (process.env.BRO_STUB_LOG && at >= 0) {
+if (process.env.BRO_STUB_LOG && at >= 0 && process.argv[at + 1]) {
   appendFileSync(process.env.BRO_STUB_LOG, JSON.stringify({ event, payload, cwd: process.cwd() }) + '\\n')
 }
 const map = process.env.BRO_STUB_MAP ? JSON.parse(process.env.BRO_STUB_MAP) : {}

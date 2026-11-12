@@ -39,44 +39,26 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import {
   HOOK_TIMEOUT_MS,
   REHYDRATION_TIMEOUT_MS,
+  RESOLVE_RETRY_MS,
+  RUN_TIMEOUT_MS,
   boardLines,
   broEnabled,
-  callHookDetailed,
+  callHook,
   contextOf,
+  createCommandResolver,
   hookEmitEnv,
-  hookFailureText,
   resolveCommand,
   statusCrumb,
   statusJson,
   type BoardStatus,
   type Command,
   type HookControl,
-  type HookFailure,
-  type HookResult,
-  type ResolveOptions,
 } from './core.ts';
+
+export { RESOLVE_RETRY_MS, RUN_TIMEOUT_MS };
 
 /** The board's widget key — one slot, owned by bro. */
 export const BOARD_KEY = 'bro';
-
-/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
- *  board refresh are interactive reads, and a wedged dolt lock can
- *  stall them forever. The kill takes the detached process group
- *  down, so a dolt child dies with its parent. */
-export const RUN_TIMEOUT_MS = 60_000;
-
-/** How long a failed CLI resolution stays cached before a retry —
- *  PATH, a local install or npx can appear mid-session, but
- *  re-probing the npx rung on every keystroke would be worse than
- *  the outage. */
-export const RESOLVE_RETRY_MS = 60_000;
-
-/** How often a dead stop probe may warn. The gate is fail-open by
- *  contract — a missing CLI or a broken hook must be LOUD once (the
- *  operator cannot otherwise tell "nothing armed" from "the gate never
- *  ran"), then quiet: a persistently-broken install cannot spam a
- *  notification at every stop event. */
-export const GATE_DIAG_INTERVAL_MS = 15 * 60_000;
 
 /** The context shape this API lineage shares.
  *
@@ -115,8 +97,6 @@ export interface BroHostShape<Ctx extends BroContext> {
   kind: string;
   /** The host's stop event. */
   stop: string;
-  /** The host's event carrying the submitted user prompt, when it has one. */
-  userInput?: string;
   /** Register a handler. */
   on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void;
   /** Paint the board. */
@@ -151,7 +131,7 @@ export function sharedBinding<Ctx extends BroContext>(
   host: BroHostShape<Ctx>
 ): BroHostBinding<Ctx> {
   return {
-    events: { ...LINEAGE_EVENTS, stop: host.stop, userInput: host.userInput },
+    events: { ...LINEAGE_EVENTS, stop: host.stop },
     on: host.on,
     sessionId(ctx) {
       return ctx.sessionManager.getSessionId() ?? '';
@@ -173,11 +153,8 @@ export function sharedBinding<Ctx extends BroContext>(
     stopAlreadyRefused: host.stopAlreadyRefused,
     stopAborted: host.stopAborted,
     promptOf(event) {
-      const turn = event as { prompt?: unknown; text?: unknown };
-      if (typeof turn.prompt === 'string') {
-        return turn.prompt;
-      }
-      return typeof turn.text === 'string' ? turn.text : '';
+      const turn = event as { prompt?: string };
+      return typeof turn.prompt === 'string' ? turn.prompt : '';
     },
     inject(text) {
       return {
@@ -216,7 +193,6 @@ export interface BroHostBinding<Ctx = unknown> {
     stop?: string;
     turnEnd?: string;
     sessionShutdown?: string;
-    userInput?: string;
   };
   /** Register a handler. */
   on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void;
@@ -315,22 +291,12 @@ export interface BroDriver {
   readonly api: unknown;
 }
 
-/** Swappable guts for the driver — tests pin a resolver rather than
- *  spawning the real CLI ladder. Production callers pass nothing. */
-export interface BroDriverDeps {
-  resolve?(opts: ResolveOptions): Promise<Command | null>;
-}
-
 /**
  * Wire bro into a host. `api` is the host's own extension API — the
  * driver passes it through so the client can register commands and
  * tools without a second channel.
  */
-export function createBroDriver<Ctx>(
-  host: BroHostBinding<Ctx>,
-  api: BroHostApi<Ctx>,
-  deps: BroDriverDeps = {}
-): BroDriver {
+export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<Ctx>): BroDriver {
   let board: BoardStatus | null = null;
   /** Monotonic token — a refresh that finishes after a newer one
    *  started must not overwrite the newer snapshot. */
@@ -360,59 +326,11 @@ export function createBroDriver<Ctx>(
    *  let through, and a NEW session starts with a fresh gate (the
    *  flag dies with its session instead of leaking into the next). */
   let gatedSession: string | undefined;
-  /** Prompt-submit probes run when the host receives input, not when the
-   * agent starts. Keep their answers until that input's turn begins. */
-  const promptNudges = new Map<string, Promise<string>>();
 
-  /** Resolve the CLI once. Probing costs a spawn even where bro is
-   *  inert, so it stays lazy. A *failed* resolution is not permanent:
-   *  PATH, a local install or npx can appear mid-session, so a null
-   *  answer expires after RESOLVE_RETRY_MS instead of poisoning the
-   *  whole extension instance. */
-  let resolved: Promise<Command | null> | undefined;
-  let resolvedFailedAt: number | undefined;
-  const resolve = deps.resolve ?? resolveCommand;
-  const command = (): Promise<Command | null> => {
-    if (
-      resolved !== undefined &&
-      (resolvedFailedAt === undefined || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)
-    ) {
-      return resolved;
-    }
-    resolvedFailedAt = undefined;
-    resolved = resolve({ npxPin: host.npxPin }).then(cmd => {
-      if (cmd === null) {
-        resolvedFailedAt = Date.now();
-      }
-      return cmd;
-    });
-    return resolved;
-  };
-
-  /** Probe one bro hook — the verdict plus the failure class when the
-   *  probe could not run. A bro-disabled dir is healthy silence (both
-   *  fields null), never a failure: the repo simply didn't opt in. */
-  const probeResult = async (
-    event: string,
-    payload: unknown,
-    cwd: string,
-    timeoutMs = HOOK_TIMEOUT_MS
-  ): Promise<HookResult> => {
-    if (!broEnabled(cwd)) {
-      return { control: null, failure: null };
-    }
-    const cmd = await command();
-    return cmd === null
-      ? { control: null, failure: { kind: 'no-cli' } }
-      : callHookDetailed({
-          command: cmd,
-          event,
-          payload,
-          cwd,
-          timeoutMs,
-          extraEnv: host.hookEnv,
-        });
-  };
+  /** Resolve the CLI once — the shared lazy+retrying resolver. Probing
+   *  costs a spawn even where bro is inert, so it stays lazy; a failed
+   *  resolution expires instead of poisoning the extension instance. */
+  const command = createCommandResolver({ npxPin: host.npxPin });
 
   /** Probe one bro hook. Fail-open: every failure is "no opinion". */
   const probe = async (
@@ -420,7 +338,13 @@ export function createBroDriver<Ctx>(
     payload: unknown,
     cwd: string,
     timeoutMs = HOOK_TIMEOUT_MS
-  ): Promise<HookControl | null> => (await probeResult(event, payload, cwd, timeoutMs)).control;
+  ): Promise<HookControl | null> => {
+    if (!broEnabled(cwd)) {
+      return null;
+    }
+    const cmd = await command();
+    return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+  };
 
   const paint = (ctx: Ctx): void => {
     if (!host.canPaint(ctx)) {
@@ -590,21 +514,15 @@ export function createBroDriver<Ctx>(
   bind(host.events.beforeAgentStart, async (event, ctx) => {
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
-    let nudge = promptNudges.get(sessionId);
-    promptNudges.delete(sessionId);
-    // Hosts without a user-input event (omp) never populate the cache —
-    // keep the pre-capture behavior: probe prompt-submit at start.
-    if (nudge === undefined && host.events.userInput === undefined) {
-      const prompt = host.promptOf(event);
-      nudge = probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf);
-    }
+    const prompt = host.promptOf(event);
+    const nudge = probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf);
 
     const parts: string[] = [];
     const hydrationText = await consumeHydration(sessionId, cwd);
     if (hydrationText !== '') {
       parts.push(hydrationText);
     }
-    const nudgeText = nudge === undefined ? '' : (await nudge).trim();
+    const nudgeText = (await nudge).trim();
     if (nudgeText !== '') {
       parts.push(nudgeText);
     }
@@ -612,20 +530,6 @@ export function createBroDriver<Ctx>(
       return undefined;
     }
     return host.inject(parts.join('\n\n'));
-  });
-
-  bind(host.events.userInput, (event, ctx) => {
-    const prompt = host.promptOf(event);
-    if (prompt === '') {
-      return undefined;
-    }
-    const sessionId = host.sessionId(ctx);
-    const cwd = host.cwd(ctx);
-    promptNudges.set(
-      sessionId,
-      probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf)
-    );
-    return undefined;
   });
 
   // post-tool: the arming markers + nudges live in bro; the nudge text
@@ -651,32 +555,24 @@ export function createBroDriver<Ctx>(
     return host.appendToolResult(event, text);
   });
 
-  /** The last gate diagnostic stamp — one warn per interval per driver
-   *  instance. In-process on purpose: the diagnostic's own contract is
-   *  "never break the gate", and in-memory state is the only store that
-   *  cannot itself fail (a marker file could). A driver reload simply
-   *  re-arms the window. */
-  let gateDiagAt = 0;
-  const gateDiag = (ctx: Ctx, failure: HookFailure): void => {
-    const now = Date.now();
-    if (now - gateDiagAt < GATE_DIAG_INTERVAL_MS) {
-      return;
+  // the stop gate: bro decides, the host refuses. The host's own
+  // "already refused" flag goes back to bro so bro's one-shot rule
+  // applies — the driver never loops the gate itself.
+  const stopGate = async (event: unknown, ctx: Ctx, sessionId: string): Promise<unknown> => {
+    // an aborted or errored turn ends — the gate exists to keep
+    // unfinished WORK in the session, never to resurrect a cancelled turn
+    if (host.stopAborted?.(event) === true) {
+      return undefined;
     }
-    gateDiagAt = now;
-    try {
-      host.notify(
-        ctx,
-        `bro stop gate did not run — ${hookFailureText(failure)}; the stop is unguarded`,
-        'warning'
-      );
-    } catch {
-      // a throwing notify must never turn fail-open into fail-closed
-    }
-  };
-
-  /** The healthy probe's verdict: a block refuses the stop; anything
-   *  else lets it land — surfacing bro's hint when it left one. */
-  const stopVerdict = (ctx: Ctx, sessionId: string, control: HookControl | null): unknown => {
+    const already = gatedSession === sessionId || host.stopAlreadyRefused(event);
+    const control = await probe(
+      'stop',
+      {
+        session_id: sessionId,
+        stop_hook_active: already,
+      },
+      host.cwd(ctx)
+    );
     if (control?.decision !== 'block') {
       const hint = contextOf(control);
       if (hint !== '') {
@@ -688,34 +584,6 @@ export function createBroDriver<Ctx>(
     const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
     void refreshBoard(ctx).catch(() => {});
     return host.refuseStop(reason === '' ? 'unfinished bro work' : reason);
-  };
-
-  // the stop gate: bro decides, the host refuses. The host's own
-  // "already refused" flag goes back to bro so bro's one-shot rule
-  // applies — the driver never loops the gate itself.
-  const stopGate = async (event: unknown, ctx: Ctx, sessionId: string): Promise<unknown> => {
-    // an aborted or errored turn ends — the gate exists to keep
-    // unfinished WORK in the session, never to resurrect a cancelled turn
-    if (host.stopAborted?.(event) === true) {
-      return undefined;
-    }
-    const already = gatedSession === sessionId || host.stopAlreadyRefused(event);
-    const { control, failure } = await probeResult(
-      'stop',
-      {
-        session_id: sessionId,
-        stop_hook_active: already,
-      },
-      host.cwd(ctx)
-    );
-    // a failed probe looks exactly like "nothing armed" — the gate is
-    // fail-open by contract, but the operator must hear once that the
-    // gate never ran
-    if (failure !== null) {
-      gateDiag(ctx, failure);
-      return undefined;
-    }
-    return stopVerdict(ctx, sessionId, control);
   };
 
   /** In-flight stop probes by session id — two concurrent stops must
