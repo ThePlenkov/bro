@@ -31,7 +31,7 @@ And nothing drains the spool: no `LedgerFacade` contract exists in
 Bump the wire version to `v2` with a wider row. Both phases share one prefix;
 `cwd` stays last so embedded tabs survive (readers re-join the tail):
 
-```
+```text
 start: v2 <ts> start <id> <host> <sid> <event> <pid> <ppid> <agent> <adapter> <proot> <launcher> <cwd>
 end:   v2 <ts> end   <id> <host> <sid> <event> <pid> <ppid> <agent> <adapter> <proot> <launcher> <rc> <outcome> <cwd>
 ```
