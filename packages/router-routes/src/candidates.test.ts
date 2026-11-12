@@ -217,6 +217,14 @@ test('isRepoRelativePath — absolute, ~, and .. never pass', () => {
   assert.ok(!isRepoRelativePath('C:\\repo\\file.ts'));
   assert.ok(!isRepoRelativePath('\\\\server\\share'));
   assert.ok(!isRepoRelativePath('a/..\\b'));
+  // a SINGLE leading backslash is a Windows root-relative path — the
+  // matcher's separator fold would strip it and match `foo`-shaped
+  // globs, so it must die at validation (bro-0ykhg.2 review)
+  assert.ok(!isRepoRelativePath('\\src\\x.ts'));
+  assert.ok(!isRepoRelativePath('\\foo'));
+  assert.ok(!isRepoRelativePath('\\C:\\repo\\f.ts'));
+  // drive-relative `C:foo` (no separator) is never repo-relative either
+  assert.ok(!isRepoRelativePath('C:foo/bar.ts'));
 });
 
 test('duplicated pins count once — they are one restriction, not many', () => {

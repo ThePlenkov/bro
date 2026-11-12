@@ -165,7 +165,13 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
       const escLow = new Set(esc.lowConfidence);
       const mergedAnswers = { ...res.answers };
       for (const [key, answer] of Object.entries(esc.answers)) {
-        if (!escLow.has(key) && low.has(key) && Object.hasOwn(mergedAnswers, key)) {
+        // the key must have been low-confidence in T2 and confident in
+        // T3 — whether or not T2 emitted an answer entry for it: a
+        // low-confidence flag with no answer still accepts the
+        // escalate verdict, and the lowConfidence filter below clears
+        // the flag only when this merge actually landed one
+        // (bro-0ykhg.2 review)
+        if (!escLow.has(key) && low.has(key)) {
           Object.defineProperty(mergedAnswers, key, {
             value: answer,
             enumerable: true,

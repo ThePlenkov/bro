@@ -436,6 +436,62 @@ test('recallOutcomeRows filters contenders inside the SQL window', async () => {
   assert.equal(unfiltered.length, 2);
 });
 
+test('recallOutcomeRows breaks bm25 ties deterministically — recency, then id', async () => {
+  const s = await store('recalldet');
+  const table = {
+    kind: 'route',
+    routes: {
+      a: { chain: [{ provider: 'a' }] },
+      b: { chain: [{ provider: 'b' }] },
+      c: { chain: [{ provider: 'c' }] },
+    },
+  };
+  const tableHash = contentHash(table);
+  // identical task text → identical FTS documents → identical bm25
+  const text = 'identical task text — every row scores the same';
+  const a = await journal(s, { taskText: text, table, route: 'a' });
+  const b = await journal(s, { taskText: text, table, route: 'b' });
+  const c = await journal(s, { taskText: text, table, route: 'c' });
+  for (const id of [a, b, c]) {
+    await recordOutcome(s, report(id, { rounds: 1 }), verified);
+  }
+  // pin `at` out of insertion order — b newest; a and c tie on `at`, so
+  // the decision-id tiebreak decides between them (bro-0ykhg.2 review)
+  const stamp = (id: string, at: number): void => {
+    s.db.$client.prepare('update outcomes set at = ? where decision_id = ?').run(at, id);
+  };
+  stamp(a, 1000);
+  stamp(b, 3000);
+  stamp(c, 1000);
+  const routeOf = new Map([
+    [a, 'a'],
+    [b, 'b'],
+    [c, 'c'],
+  ]);
+  const tied = [a, c].sort();
+  const expected = [b, ...tied].map(id => routeOf.get(id));
+
+  const query = {
+    contextId: 'repo:test',
+    text: 'identical task text',
+    tableHash,
+    formulaHash: null,
+  };
+  const rows = await recallOutcomeRows(s.db, query);
+  assert.deepEqual(
+    rows.map(r => r.route),
+    expected,
+    'bm25 ties resolve by at desc, then decision_id asc'
+  );
+  // and the order is stable across repeated reads — the LIMIT window
+  // can never pick a different subset for the same request
+  const again = await recallOutcomeRows(s.db, query);
+  assert.deepEqual(
+    again.map(r => r.route),
+    expected
+  );
+});
+
 test('recallOutcomeRows sanitizes prose — FTS syntax never reaches MATCH', async () => {
   const s = await store('recallfts');
   const table = { kind: 'route', routes: { pro: { chain: [{ provider: 'a' }] } } };

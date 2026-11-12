@@ -818,8 +818,11 @@ function ftsQueryText(text: string): string {
  *  formula-less outcomes), verified rows only. Failures come back too:
  *  the caller counts them separately, they never vote positively.
  *  Same-named routes in different contexts can never share votes —
- *  context_id is part of the WHERE, not a post-filter. Empty or
- *  broken recall returns [] — the cascade passes through. */
+ *  context_id is part of the WHERE, not a post-filter. bm25 ties
+ *  resolve by recency then decision id, so the LIMIT window picks the
+ *  same subset on every run — identical requests recall identical
+ *  votes (bro-0ykhg.2 review). Empty or broken recall returns [] —
+ *  the cascade passes through. */
 export async function recallOutcomeRows(
   db: StoreFace['db'],
   query: {
@@ -859,7 +862,7 @@ export async function recallOutcomeRows(
          join outcomes o on o.decision_id = f.decision_id
          where outcomes_fts match ? and o.context_id = ? and o.verified = 1
            and o.table_hash = ? and o.formula_hash is ?${routeFilter}
-         order by bm25(outcomes_fts)
+         order by bm25(outcomes_fts), o.at desc, o.decision_id
          limit ?`
       )
       .all(...args) as Array<{

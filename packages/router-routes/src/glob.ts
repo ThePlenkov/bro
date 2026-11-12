@@ -118,14 +118,16 @@ export function matchGlob(pattern: string, path: string): boolean {
 /** Is `path` a safe repo-relative path — no absolute form, no `..`
  *  escape, no empty segments? Validation for caller-supplied paths:
  *  a path that could name outside the repo never reaches the matcher.
- *  Windows absolute forms (`C:/…`, `C:\…`, UNC `\\…`) reject too — a
- *  drive letter is never a repo-relative first segment (bro-0ykhg.2
- *  review). */
+ *  Windows absolute forms reject too — a drive letter (`C:…`, with or
+ *  without a separator) or ANY leading `\` (root-relative `\foo` or UNC
+ *  `\\host\share`) is never repo-relative, and the matcher's separator
+ *  fold would otherwise strip the leading `\` and silently match
+ *  `foo`-shaped globs (bro-0ykhg.2 review). */
 export function isRepoRelativePath(path: string): boolean {
-  if (path === '' || path.startsWith('/') || path.startsWith('~') || path.startsWith('\\\\')) {
+  if (path === '' || path.startsWith('/') || path.startsWith('~') || path.startsWith('\\')) {
     return false;
   }
-  if (/^[A-Za-z]:[\\/]/.test(path)) {
+  if (/^[A-Za-z]:/.test(path)) {
     return false;
   }
   return !path.split(/[\\/]/).some(s => s === '..');
