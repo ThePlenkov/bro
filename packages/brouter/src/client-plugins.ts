@@ -172,6 +172,9 @@ function askPlugin(): CommandPlugin {
         question,
         ...(routes === undefined ? {} : { routes }),
         ...(formula === undefined ? {} : { formula }),
+        // --no-cache bypasses the decision cache for this ask
+        // (bro-0ykhg.3) — entries stay, only the consult is skipped
+        ...(argv.includes('--no-cache') ? { noCache: true } : {}),
         ...(slices === undefined ? {} : { slices }),
       };
       const outcome = await runAsk(request, dir);

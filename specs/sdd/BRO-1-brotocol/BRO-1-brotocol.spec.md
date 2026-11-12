@@ -6,6 +6,8 @@ status: draft
 area: sdd
 owns:
   - packages/core/src/specs.ts
+  - packages/spec
+  - packages/cli/src/connectors.ts
   - packages/cli/src/spec-connectors.ts
   - packages/cli/src/spec-drift.ts
   - packages/cli/src/commands/spec.ts

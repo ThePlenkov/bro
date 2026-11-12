@@ -10,6 +10,13 @@
  * record, not a gate.
  */
 export {
+  cacheGeneration,
+  invalidateCacheKey,
+  readCacheEntry,
+  writeCacheEntry,
+  type CacheEntry,
+} from './cache.ts';
+export {
   canonicalJson,
   contentHash,
   findDecisions,
@@ -65,6 +72,8 @@ export {
 } from './privacy.ts';
 export { routerStorePath } from './path.ts';
 export {
+  decisionCache,
+  decisionCacheGen,
   decisions,
   limits,
   migrations,

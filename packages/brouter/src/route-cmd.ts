@@ -25,6 +25,7 @@ import type { Explanation } from '@broject/core';
 import { unservedChains, isRepoRelativePath } from '@broject/router-routes';
 import type { FeatureValue, RouteTask } from '@broject/router-routes';
 import { chainModelFacts, costFacts, healthFacts, routeFacts } from './explain.ts';
+import { formatCacheAge } from './decision-cache.ts';
 import { windowCounters } from './ledger.ts';
 import { decideRoute } from './route-decide.ts';
 import { formulaPath, reportUnserved, routeTablePath } from './routes-cmd.ts';
@@ -151,6 +152,16 @@ function render(
       );
     }
   }
+  // the decision cache's verdict — consulted or not, hit or miss
+  // (bro-0ykhg.3); absent entirely when the cache is off
+  const cache = decision.cache;
+  if (cache !== undefined) {
+    console.log(
+      cache.hit
+        ? `cache: hit (age ${formatCacheAge(cache.ageMs ?? 0)}, key ${cache.key.slice(0, 12)}…)`
+        : `cache: miss (key ${cache.key.slice(0, 12)}…, generation ${cache.generation})`
+    );
+  }
   const formula = decision.formula;
   if (formula !== undefined) {
     const answers =
@@ -264,6 +275,9 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
     task: shape,
     text: task,
     kind: 'route',
+    // --no-cache bypasses the consult AND the write for this decision
+    // (bro-0ykhg.3) — the entries themselves stay
+    ...(argv.includes('--no-cache') ? { noCache: true } : {}),
     ...(router === undefined ? {} : { router }),
     ...(formula === undefined ? {} : { formula }),
   });

@@ -19,7 +19,11 @@ the cache is a mode of the router, never required.
   the normalized full task text and carried T0 fields/features (`exact`)
   or the scoped T1 recall cluster (`recall`). `judgeConfigHash` covers the
   effective judge provider, model, parameters and escalation configuration,
-  never credential material. Keys are available before T2; inferred
+  never credential material. `key_json` is stored data, so it keeps the
+  ledger's retention contract: with `taskTextRetentionDays: 0` the exact
+  text lands as its sha256 — hashes and structured inputs persist, free
+  text never does (a retention flip changes the key by construction).
+  Keys are available before T2; inferred
   answers belong only in the value, not the lookup key. Recall misses when
   no eligible cluster exists; .2's context and success rules still apply.
 - **value** — the stage answers (not the route): the code re-runs filters,

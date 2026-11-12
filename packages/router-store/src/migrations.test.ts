@@ -5,14 +5,34 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { getTableConfig } from 'drizzle-orm/sqlite-core';
 import { migrateStore, migrationIds } from './migrations.ts';
-import { limits, migrations, sessions, usage } from './schema.ts';
+import {
+  decisionCache,
+  decisionCacheGen,
+  decisions,
+  limits,
+  migrations,
+  outcomeReports,
+  outcomes,
+  sessions,
+  usage,
+} from './schema.ts';
 import { openStore } from './store.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'router-migrations-test-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
 /** The tables the drizzle schema declares — the drift test walks them. */
-const TABLES = [usage, limits, sessions, migrations];
+const TABLES = [
+  usage,
+  limits,
+  sessions,
+  decisions,
+  outcomes,
+  outcomeReports,
+  decisionCache,
+  decisionCacheGen,
+  migrations,
+];
 
 test('the schema and the SQL agree — every table, every column', async () => {
   const handle = openStore(join(scratch, 'drift.db'));

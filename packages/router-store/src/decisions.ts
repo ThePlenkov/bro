@@ -65,6 +65,15 @@ export interface DecisionInput {
   model?: string;
   /** who picked — 'table', 'model', 'formula', 'cache' */
   picked?: string;
+  /** the decision cache key consulted — the sha256 the cache row is
+   *  keyed by (spec bro-0ykhg.3); absent when the cache was off */
+  cacheKey?: string;
+  /** the key's generation at decision time — journaled for hits and
+   *  fresh writes alike */
+  cacheGeneration?: number;
+  /** the success predicate the decision's formula declared — the label
+   *  a verified outcome is judged by for cache invalidation */
+  successPredicate?: string;
   /** the run links known at journal time — bead id, worker, run, PR */
   beadId?: string;
   worker?: string;
@@ -99,6 +108,9 @@ export interface DecisionRow {
   provider: string | null;
   model: string | null;
   picked: string | null;
+  cacheKey: string | null;
+  cacheGeneration: number | null;
+  successPredicate: string | null;
   beadId: string | null;
   worker: string | null;
   runId: string | null;
@@ -166,6 +178,9 @@ export async function recordDecision(store: StoreFace, input: DecisionInput): Pr
         provider: input.provider ?? null,
         model: input.model ?? null,
         picked: input.picked ?? null,
+        cacheKey: input.cacheKey ?? null,
+        cacheGeneration: input.cacheGeneration ?? null,
+        successPredicate: input.successPredicate ?? null,
         beadId: input.beadId ?? null,
         worker: input.worker ?? null,
         runId: input.runId ?? null,

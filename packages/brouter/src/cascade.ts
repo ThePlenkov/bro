@@ -19,7 +19,12 @@ import type {
   RouteCandidate,
   RouteTable,
 } from '@broject/router-routes';
-import type { RecallOutcomeRow, SuccessPredicate } from '@broject/router-store';
+import {
+  canonicalJson,
+  contentHash,
+  type RecallOutcomeRow,
+  type SuccessPredicate,
+} from '@broject/router-store';
 import {
   type RecallTuning,
   recallDecision,
@@ -65,6 +70,11 @@ export interface T1Result {
   /** contender names in recall order — candidates not reordered keep
    *  their standing at the tail */
   order: string[];
+  /** the scoped recall cluster — a hash of the eligible voting rows,
+   *  the decision cache's 'recall'-mode key component (bro-0ykhg.3).
+   *  Absent when no eligible evidence exists: a 'recall' cache then
+   *  misses cleanly rather than sharing an empty answer */
+  cluster?: string;
   stage: CascadeStage;
   note: string;
 }
@@ -76,6 +86,7 @@ function t1Result(opts: {
   contenders: readonly string[];
   order: string[];
   decided?: string;
+  cluster?: string;
   note: string;
   stageNote?: string;
   latencyMs: number;
@@ -84,6 +95,7 @@ function t1Result(opts: {
   return {
     ...(decided === undefined ? {} : { decided }),
     order: opts.order,
+    ...(opts.cluster === undefined ? {} : { cluster: opts.cluster }),
     stage: stageRecord(
       'T1',
       opts.contenders,
@@ -169,9 +181,23 @@ export async function runT1(opts: RunT1Opts): Promise<T1Result> {
     contenders: opts.contenders,
     order,
     ...(verdict.decided === undefined ? {} : { decided: verdict.decided }),
+    // the cluster is the EVIDENCE's identity — the same eligible rows
+    // hash the same for any task that retrieved them, so 'recall'-mode
+    // cache entries are shared across similar tasks; a new verified
+    // outcome entering the window changes the hash and misses the memo
+    ...(eligible.length === 0 ? {} : { cluster: recallClusterHash(eligible) }),
     note: verdict.note,
     latencyMs,
   });
+}
+
+/** The recall cluster — canonical JSON over the eligible rows'
+ *  identities, sorted so row order never splits the hash. Two tasks
+ *  retrieving the same evidence share the cluster; fresh evidence
+ *  always produces a new one. */
+function recallClusterHash(rows: readonly RecallOutcomeRow[]): string {
+  const parts = rows.map(row => canonicalJson([row.route, row.result, row.rounds, row.at])).sort();
+  return contentHash(parts);
 }
 
 /** The invoke gate — should T2 (the judge) be ASKED? `always` asks on

@@ -68,7 +68,7 @@ import {
   type TaskStoreAsync,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
-import { specDirAbs, validBeadId } from '../spec-connectors.ts';
+import { hasSpecDoc, repoRoot, specDirAbs, validBeadId } from '@broject/spec';
 import { driftEnv, driftRow, specLinkPath, SPEC_LINK } from '../spec-drift.ts';
 import { flag, positionals } from './args.ts';
 
@@ -672,9 +672,11 @@ function sectionObj(v: unknown): Record<string, unknown> {
 }
 
 /** Config merge — write the detected tool + sdd.mode without clobbering
- *  unrelated sections the repo already set. `native` clears a stale
- *  connectors.specs override — init to native must actually resolve
- *  native, not leave a prior pick in force. */
+ *  unrelated sections the repo already set. An absent connector clears
+ *  a stale connectors.specs override — auto-detected native must not
+ *  leave a prior pick in force. An explicit `--tool native` instead
+ *  pins `connectors.specs: "native"`: absence now means auto-detect,
+ *  and a `*.spec.md` tree would resolve `brose` over the user's choice. */
 function writeConfig(dir: string, patch: { sddMode: string; connector?: string }): string {
   const path = join(dir, 'bro.config.json');
   let cfg: Record<string, unknown> = {};
@@ -685,7 +687,7 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
   }
   cfg.sdd = { ...sectionObj(cfg.sdd), mode: patch.sddMode };
   const connectors = sectionObj(cfg.connectors);
-  if (patch.connector === undefined || patch.connector === 'native') {
+  if (patch.connector === undefined) {
     delete connectors.specs;
   } else {
     connectors.specs = patch.connector;
@@ -702,16 +704,26 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
 /** Project-layout detection for `spec init` — the order is the claim
  *  precedence the connectors use. */
 function detectSpecTool(dir: string): string {
-  if (existsSync(join(dir, '.specify'))) {
+  // tool layouts live at the checkout root — a subdirectory invocation
+  // must not miss them and mislabel the repo 'brose'/'native'
+  const root = repoRoot(dir);
+  if (existsSync(join(root, '.specify'))) {
     return 'speckit';
   }
-  if (existsSync(join(dir, 'openspec'))) {
+  if (existsSync(join(root, 'openspec'))) {
     return 'openspec';
   }
+  const specDir = specDirAbs(dir, loadConfig(dir).sdd.dir);
+  if (specDir !== null && existsSync(specDir) && hasSpecDoc(specDir)) {
+    return 'brose';
+  }
+  // a populated spec dir without *.spec.md is a legacy/native tree;
+  // an absent dir resolves to native at runtime — the registry's
+  // no-match fallback — so init names the same tool the facade picks
   return 'native';
 }
 
-const SPEC_TOOLS = ['native', 'speckit', 'openspec', 'agent'];
+const SPEC_TOOLS = ['native', 'brose', 'speckit', 'openspec', 'agent'];
 
 function cmdInit(dir: string, tool: string | undefined): void {
   const detected = tool ?? detectSpecTool(dir);
@@ -721,7 +733,9 @@ function cmdInit(dir: string, tool: string | undefined): void {
   }
   const cfgPath = writeConfig(dir, {
     sddMode: 'remind',
-    connector: detected === 'native' ? undefined : detected,
+    // auto-detected native leaves the key absent (auto agrees);
+    // an explicit --tool always pins, native included
+    connector: detected === 'native' && tool === undefined ? undefined : detected,
   });
   const specDir = loadConfig(dir).sdd.dir;
   if (

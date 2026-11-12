@@ -19,6 +19,21 @@ import type { FormulaTrace } from './formula.ts';
 import type { CascadeTrace } from './stages.ts';
 import type { Route, RouteTable } from './types.ts';
 
+/** The decision cache's provenance (spec bro-0ykhg.3) — which memo
+ *  entry the decision consulted, and whether it answered. The cache
+ *  stores stage ANSWERS, never the route: a hit replays them and the
+ *  filters, health and chain re-run exactly as on a fresh ask. */
+export interface RouteCacheInfo {
+  /** true when the entry answered — the judge was not asked */
+  hit: boolean;
+  /** the cache key hash — the lookup identity invalidation targets */
+  key: string;
+  /** the key's generation at decision time */
+  generation: number;
+  /** how old the answering entry was — present on hits only */
+  ageMs?: number;
+}
+
 /** The verdict — the route, its chain, and the why. */
 export interface RouteDecision {
   /** the route that serves the task — absent when none fits */
@@ -41,6 +56,9 @@ export interface RouteDecision {
   /** the cascade's stage record — every rung's before/after, latency,
    *  and who decided (bro-0ykhg.2) */
   cascade?: CascadeTrace;
+  /** the decision cache's provenance — present when the cache was
+   *  consulted (bro-0ykhg.3) */
+  cache?: RouteCacheInfo;
 }
 
 /** What a caller may hand the resolver beyond the table, task and
@@ -58,6 +76,8 @@ export interface ResolveExtras {
   formula?: FormulaTrace;
   /** the cascade's stage record — rides onto the decision */
   cascade?: CascadeTrace;
+  /** the decision cache's provenance — rides onto the decision */
+  cache?: RouteCacheInfo;
 }
 
 /** Why the winner won — the static order, the chooser, or a refusal. */
@@ -104,6 +124,7 @@ export function resolveRoute(
       picked: 'static',
       ...(extras?.formula === undefined ? {} : { formula: extras.formula }),
       ...(extras?.cascade === undefined ? {} : { cascade: extras.cascade }),
+      ...(extras?.cache === undefined ? {} : { cache: extras.cache }),
     };
   }
   // a missing hook and a hook that named nothing are DIFFERENT states:
@@ -133,5 +154,6 @@ export function resolveRoute(
     picked,
     ...(extras?.formula === undefined ? {} : { formula: extras.formula }),
     ...(extras?.cascade === undefined ? {} : { cascade: extras.cascade }),
+    ...(extras?.cache === undefined ? {} : { cache: extras.cache }),
   };
 }
