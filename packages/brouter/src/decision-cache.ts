@@ -235,9 +235,10 @@ export async function buildCacheKey(
   if (judge === undefined) {
     return undefined;
   }
-  const contextId = decisionContextId(input.dir, {
-    ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
-  });
+  const contextId = decisionContextId(
+    input.dir,
+    input.tablePath === undefined ? {} : { tablePath: input.tablePath }
+  );
   const key = {
     v: 1,
     contextId,
