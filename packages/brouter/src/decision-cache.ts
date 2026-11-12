@@ -10,7 +10,9 @@
  * The key is canonical JSON (never string concatenation) of
  * `{contextId, formulaHash, tableHash, shape, judgeConfigHash}` plus
  * the task's identity — the normalized full text and carried T0
- * fields under `exact`, the scoped T1 recall cluster under `recall`.
+ * fields under `exact` (hashed, never verbatim, when
+ * `taskTextRetentionDays: 0` — key_json is stored data), the scoped
+ * T1 recall cluster under `recall`.
  * `judgeConfigHash` covers the effective judge provider, model,
  * parameters and escalation configuration — never credential material
  * (the runtime `apiKey` a proxied entry carries is stripped, and env
@@ -42,7 +44,7 @@ import {
   writeCacheEntry,
   type StoreFace,
 } from '@broject/router-store';
-import { decisionContextId } from './context.ts';
+import { decisionContextId, taskTextRetentionDays } from './context.ts';
 import { decisionProvider } from './decision-model.ts';
 
 /** The cache modes a decision can run — 'off' never reaches this file. */
@@ -244,12 +246,29 @@ export async function buildCacheKey(
     shape: input.shape,
     judge,
     mode: input.mode,
-    task:
-      input.mode === 'exact'
-        ? { text: normalizeTaskText(input.text), fields: normalizeTask(input.task) }
-        : { cluster: input.cluster },
+    task: exactTask(input),
   };
   return { keyJson: canonicalJson(key), keyHash: contentHash(key), contextId };
+}
+
+/** The task slot of the key — under 'recall' the scoped cluster (a
+ *  hash already), under 'exact' the normalized text plus the carried
+ *  fields. `key_json` is STORED, so it honors the same retention
+ *  contract the decision ledger keeps (context.ts): with
+ *  `taskTextRetentionDays: 0` the text lands as its sha256 — hashes
+ *  and structured inputs persist, free text never does. The fields
+ *  ride along unchanged: the ledger keeps taskJson/featuresJson under
+ *  retention 0 too. A retention flip changes the key by construction —
+ *  old text-bearing rows miss and expire rather than serve. */
+function exactTask(input: CacheKeyInput): Record<string, unknown> {
+  if (input.mode === 'recall') {
+    return { cluster: input.cluster };
+  }
+  const text = normalizeTaskText(input.text);
+  const fields = normalizeTask(input.task);
+  return taskTextRetentionDays(input.dir) === 0
+    ? { textHash: textHash(text), fields }
+    : { text, fields };
 }
 
 /** What a lookup answers — the generation the write must match, plus

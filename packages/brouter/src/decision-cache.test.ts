@@ -291,6 +291,54 @@ describe('the key', () => {
     assert.notEqual(recall.keyHash, exact.keyHash);
   });
 
+  test('buildCacheKey — retention 0 hashes the text, never stores it', async () => {
+    const dir = scratchDir();
+    const tp = tablePath();
+    const prompt = 'rotate the leaked token sk-live-123';
+    const config = (retention?: number) =>
+      writeFileSync(
+        join(dir, 'bro.config.json'),
+        JSON.stringify({
+          providers: { j: { type: 'cli', command: 'true' } },
+          ...(retention === undefined ? {} : { brouter: { taskTextRetentionDays: retention } }),
+        })
+      );
+    const input = {
+      dir,
+      tablePath: tp,
+      table: TABLE,
+      text: prompt,
+      task: { labels: ['security'] },
+      router: { provider: 'j', mode: 'enforce' as const },
+      shape: 'none' as const,
+      mode: 'exact' as const,
+    };
+    // retention 0 — key_json is stored data, so it keeps the ledger's
+    // contract: hashes and structured inputs persist, free text never
+    config(0);
+    const kept = await buildCacheKey(input);
+    assert.ok(kept !== undefined);
+    assert.equal(kept.keyJson.includes(prompt), false);
+    assert.equal(kept.keyJson.includes('sk-live-123'), false);
+    const taskPart = (JSON.parse(kept.keyJson) as { task: Record<string, unknown> }).task;
+    assert.equal(taskPart.text, undefined);
+    assert.match(String(taskPart.textHash), /^[0-9a-f]{64}$/);
+    // the fields are structured inputs — the ledger keeps them under
+    // retention 0 too, so the key does
+    assert.deepEqual(taskPart.fields, { labels: ['security'] });
+    // the hash still identifies the task — same input, same key
+    const again = await buildCacheKey(input);
+    assert.equal(again?.keyHash, kept.keyHash);
+    // and the retention posture is part of the key: flipping it misses
+    // every text-bearing row written before
+    config(undefined);
+    const defaulted = await buildCacheKey(input);
+    assert.ok(defaulted !== undefined);
+    assert.notEqual(defaulted.keyHash, kept.keyHash);
+    const defaultTask = (JSON.parse(defaulted.keyJson) as { task: Record<string, unknown> }).task;
+    assert.equal(defaultTask.text, 'rotate the leaked token sk-live-123');
+  });
+
   test('the value codec round-trips and rejects garbage', () => {
     const pick = { kind: 'pick' as const, pick: 'a' };
     assert.deepEqual(decodeCacheValue(encodeCacheValue(pick)), pick);
