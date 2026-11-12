@@ -24,8 +24,8 @@ import {
   type RecallTuning,
   recallDecision,
   recallOutcomeRowsScoped,
+  recallVotingWindow,
   recallVotes,
-  votableRecallRows,
 } from './recall.ts';
 
 /** The invoke modes — `brouter.router.invoke`, 'ambiguous' the default. */
@@ -69,11 +69,38 @@ export interface T1Result {
   note: string;
 }
 
-/** Run T1 — fetch the scoped recall rows (or take the test seam's),
- *  label them by the success predicate, intersect with the contenders,
- *  and decide-or-reorder. Never throws: broken recall passes through
- *  with an empty order note. */
-export async function runT1(opts: {
+/** One T1 result — the stage record plus the pass-on order. `after`
+ *  is the decided singleton or the full reorder; the stage note may
+ *  differ from the result note (the unavailable case says more). */
+function t1Result(opts: {
+  contenders: readonly string[];
+  order: string[];
+  decided?: string;
+  note: string;
+  stageNote?: string;
+  latencyMs: number;
+}): T1Result {
+  const decided = opts.decided;
+  return {
+    ...(decided === undefined ? {} : { decided }),
+    order: opts.order,
+    stage: stageRecord(
+      'T1',
+      opts.contenders,
+      decided === undefined ? opts.order : [decided],
+      opts.latencyMs,
+      {
+        ...(decided === undefined ? {} : { decided }),
+        note: opts.stageNote ?? opts.note,
+      }
+    ),
+    note: opts.note,
+  };
+}
+
+/** runT1's inputs — the decision context plus the test seam's
+ *  pre-fetched rows. */
+interface RunT1Opts {
   dir: string;
   tablePath?: string;
   table: RouteTable;
@@ -85,66 +112,66 @@ export async function runT1(opts: {
   predicate: SuccessPredicate;
   /** test seam — pre-fetched rows; production reads the store */
   rows?: RecallOutcomeRow[];
-}): Promise<T1Result> {
+}
+
+/** The recall read — the test seam's rows or the scoped store query;
+ *  undefined when the store did not answer. */
+async function fetchRecallRows(opts: RunT1Opts): Promise<RecallOutcomeRow[] | undefined> {
+  if (opts.rows !== undefined) {
+    return opts.rows;
+  }
+  return recallOutcomeRowsScoped(
+    {
+      dir: opts.dir,
+      table: opts.table,
+      ...(opts.tablePath === undefined ? {} : { tablePath: opts.tablePath }),
+      ...(opts.formulaText === undefined ? {} : { formulaText: opts.formulaText }),
+    },
+    opts.text,
+    // fetch a window wider than k — the scope filters narrow it, the
+    // vote count is what k bounds. Contender names AND the predicate's
+    // unlabelled shape go into the SQL itself so dead-route and
+    // unvotable rows never occupy the window (bro-0ykhg.2 review)
+    {
+      limit: opts.tuning.k * 4,
+      ...(opts.contenders.length === 0 ? {} : { routes: opts.contenders }),
+      predicate: opts.predicate,
+    }
+  );
+}
+
+/** Run T1 — fetch the scoped recall rows (or take the test seam's),
+ *  label them by the success predicate, intersect with the contenders,
+ *  and decide-or-reorder. Never throws: broken recall passes through
+ *  with an empty order note. */
+export async function runT1(opts: RunT1Opts): Promise<T1Result> {
   const started = Date.now();
-  const rows =
-    opts.rows ??
-    (await recallOutcomeRowsScoped(
-      {
-        dir: opts.dir,
-        table: opts.table,
-        ...(opts.tablePath === undefined ? {} : { tablePath: opts.tablePath }),
-        ...(opts.formulaText === undefined ? {} : { formulaText: opts.formulaText }),
-      },
-      opts.text,
-      // fetch a window wider than k — the scope filters narrow it, the
-      // vote count is what k bounds. The contender names AND the
-      // predicate's unlabelled shape go into the SQL itself so dead-route
-      // and unvotable rows never occupy the window (bro-0ykhg.2 review)
-      opts.tuning.k * 4,
-      opts.contenders.length === 0 ? undefined : opts.contenders,
-      opts.predicate
-    ));
+  const rows = await fetchRecallRows(opts);
   const latencyMs = Date.now() - started;
   if (rows === undefined) {
-    return {
+    return t1Result({
+      contenders: opts.contenders,
       order: [...opts.contenders],
-      stage: stageRecord('T1', opts.contenders, opts.contenders, latencyMs, {
-        note: 'recall unavailable — the store did not answer',
-      }),
       note: 'recall unavailable',
-    };
+      stageNote: 'recall unavailable — the store did not answer',
+      latencyMs,
+    });
   }
   // only the top-k ELIGIBLE rows vote — the wider fetch exists so the
   // scope filters (context/table/formula/verified) can narrow it, and
-  // rows naming routes that are no longer contenders never consume a
-  // slot. Unlabelled rows are excluded BEFORE the slice too: they vote
-  // for nothing, so they must not occupy a voting slot either
+  // unlabelled or dead-route rows never occupy a voting slot either
   // (bro-0ykhg.2 review). Agreement and reorder must read the SAME
   // top-k the tuning names; lower-ranked rows would dilute the vote.
-  const allowed = new Set(opts.contenders);
-  const eligible = votableRecallRows(
-    rows.filter(r => r.route !== null && allowed.has(r.route)),
-    opts.predicate
-  ).slice(0, opts.tuning.k);
+  const eligible = recallVotingWindow(rows, opts.contenders, opts.tuning.k, opts.predicate);
   const { votes, order } = recallVotes(eligible, opts.contenders, opts.predicate);
   const verdict = recallDecision(votes, opts.tuning, opts.contenders);
-  if (verdict.decided !== undefined) {
-    return {
-      decided: verdict.decided,
-      order,
-      stage: stageRecord('T1', opts.contenders, [verdict.decided], latencyMs, {
-        decided: verdict.decided,
-        note: verdict.note,
-      }),
-      note: verdict.note,
-    };
-  }
-  return {
+  return t1Result({
+    contenders: opts.contenders,
     order,
-    stage: stageRecord('T1', opts.contenders, order, latencyMs, { note: verdict.note }),
+    ...(verdict.decided === undefined ? {} : { decided: verdict.decided }),
     note: verdict.note,
-  };
+    latencyMs,
+  });
 }
 
 /** The invoke gate — should T2 (the judge) be ASKED? `always` asks on

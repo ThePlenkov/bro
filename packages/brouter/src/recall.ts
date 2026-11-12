@@ -87,14 +87,15 @@ export interface RecallScope {
 export async function recallOutcomeRowsScoped(
   scope: RecallScope,
   text: string,
-  limit: number,
-  /** the current contender route names — pushed into the SQL so the
-   *  limit window only ever holds eligible rows (bro-0ykhg.2 review) */
-  routes?: readonly string[],
-  /** the success predicate — pushed into the SQL too, so the window's
-   *  unlabelled shape never occupies a slot ahead of votable evidence
+  /** the recall window — the fetch limit plus the SQL-side narrowing:
+   *  contender route names and the success predicate's votable shape,
+   *  so the limit only ever holds eligible labelled evidence
    *  (bro-0ykhg.2 review) */
-  predicate?: SuccessPredicate
+  query: {
+    limit: number;
+    routes?: readonly string[];
+    predicate?: SuccessPredicate;
+  }
 ): Promise<RecallOutcomeRow[] | undefined> {
   try {
     const contextId = decisionContextId(scope.dir, {
@@ -113,9 +114,9 @@ export async function recallOutcomeRowsScoped(
         text,
         tableHash,
         formulaHash,
-        ...(routes === undefined ? {} : { routes }),
-        ...(predicate === undefined ? {} : { predicate }),
-        limit,
+        ...(query.routes === undefined ? {} : { routes: query.routes }),
+        ...(query.predicate === undefined ? {} : { predicate: query.predicate }),
+        limit: query.limit,
       });
     } finally {
       handle.close();
@@ -153,6 +154,23 @@ export function votableRecallRows(
   return rows.filter(
     r => labelOutcome({ result: r.result, rounds: r.rounds }, predicate) !== 'unlabelled'
   );
+}
+
+/** The top-k rows allowed to occupy the voting window — contender
+ *  routes only, the predicate's unlabelled shape removed BEFORE the
+ *  slice, so dead-route and unvotable rows can never crowd real
+ *  evidence out of the k slots (bro-0ykhg.2 review). */
+export function recallVotingWindow(
+  rows: RecallOutcomeRow[],
+  contenders: readonly string[],
+  k: number,
+  predicate: SuccessPredicate = DEFAULT_SUCCESS_PREDICATE
+): RecallOutcomeRow[] {
+  const allowed = new Set(contenders);
+  return votableRecallRows(
+    rows.filter(r => r.route !== null && allowed.has(r.route)),
+    predicate
+  ).slice(0, k);
 }
 
 /** The votes over the recalled rows — only rows naming a CURRENT

@@ -210,7 +210,7 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
           ? {}
           : {
               usage: {
-                ...(res.usage ?? {}),
+                ...res.usage,
                 ...(inputTokens === undefined ? {} : { inputTokens }),
                 ...(costUsd === undefined ? {} : { costUsd }),
               },
