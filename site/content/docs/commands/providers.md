@@ -4,11 +4,6 @@ title: Providers
 description: The named provider registry — model-plane connections that judge and fleet consume by name.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 A provider is a named entry in the `providers` section of
 [`bro.config.json`](/docs/configuration#providers) — `{ type,
 …connection }`. Consumers pick **by name**; the name carries no

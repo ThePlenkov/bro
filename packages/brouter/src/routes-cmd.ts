@@ -7,8 +7,13 @@
  * prints is exactly what a task resolves against.
  */
 import { flag, loadConfig } from '@broject/core';
-import { readRouteTable, unservedChains } from '@broject/router-routes';
-import type { RouteTable, ServedDeclaration, UnservedChain } from '@broject/router-routes';
+import {
+  readFormula,
+  readRouteTable,
+  unservedChains,
+  validateFormulaTable,
+} from '@broject/router-routes';
+import type { Formula, RouteTable, ServedDeclaration, UnservedChain } from '@broject/router-routes';
 
 /** Where the table lives — the flag wins over the declared path. */
 export function routeTablePath(dir: string, argv: string[]): string | undefined {
@@ -17,6 +22,16 @@ export function routeTablePath(dir: string, argv: string[]): string | undefined 
     return declared;
   }
   return loadConfig(dir).brouter?.routes;
+}
+
+/** Where the formula lives — the flag wins over `brouter.formula`, the
+ *  same precedence the table's own path keeps. */
+export function formulaPath(dir: string, argv: string[]): string | undefined {
+  const declared = flag(argv, '--formula');
+  if (declared !== undefined) {
+    return declared;
+  }
+  return loadConfig(dir).brouter?.formula;
 }
 
 /** One route, as the table renders it. */
@@ -51,6 +66,24 @@ function readTable(path: string): RouteTable {
   }
 }
 
+/** The formula — read and cross-checked against the table, or the
+ *  problems printed and fatal. Undefined when none is declared: a table
+ *  without a formula is the pick shape's world, and its `match.features`
+ *  can only be fed by caller-supplied task features. */
+function readDeclaredFormula(path: string | undefined, table: RouteTable): Formula | undefined {
+  if (path === undefined) {
+    return undefined;
+  }
+  try {
+    const formula = readFormula(path);
+    validateFormulaTable(formula, table, path);
+    return formula;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+}
+
 /** What the operator declared the router serves — the served universe. */
 function declaredModels(dir: string): ServedDeclaration {
   return loadConfig(dir).brouter?.models ?? {};
@@ -74,12 +107,24 @@ export function reportUnserved(unserved: UnservedChain[]): void {
 
 /** `routes validate` — the table's problems, or the green light.
  *
- *  Two questions, in this order: does the table hold together (its own
- *  schema), and does it name models the router actually serves (the
- *  declaration in `brouter.models`). */
-function validate(table: RouteTable, declared: ServedDeclaration): void {
+ *  Three questions, in this order: does the table hold together (its own
+ *  schema), does it name models the router actually serves (the
+ *  declaration in `brouter.models`), and — when a formula is declared —
+ *  does the formula's contract agree with the table it routes? */
+function validate(
+  table: RouteTable,
+  declared: ServedDeclaration,
+  formulaPathValue: string | undefined
+): void {
   reportUnserved(unservedChains(table, declared));
-  console.log(`the table is valid — ${table.routes.length} route(s), schema v${table.version}`);
+  const formula = readDeclaredFormula(formulaPathValue, table);
+  const formulaNote =
+    formula === undefined
+      ? ''
+      : `, formula "${formula.shape}" — ${Object.keys(formula.questions).length} question(s), ${formula.filters.length} filter(s)`;
+  console.log(
+    `the table is valid — ${table.routes.length} route(s), schema v${table.version}${formulaNote}`
+  );
 }
 
 /** The routes surface — `brouter routes list|validate`. */
@@ -89,7 +134,8 @@ export function runRoutesCommand(argv: string[]): void {
     console.error(`brouter routes: unknown verb "${verb}" — list | validate`);
     process.exit(2);
   }
-  const path = routeTablePath(process.cwd(), argv);
+  const dir = process.cwd();
+  const path = routeTablePath(dir, argv);
   if (path === undefined) {
     console.error(
       'brouter routes: no route table — pass --routes <file> or set brouter.routes in bro.config.json'
@@ -98,7 +144,7 @@ export function runRoutesCommand(argv: string[]): void {
   }
   const table = readTable(path);
   if (verb === 'validate') {
-    validate(table, declaredModels(process.cwd()));
+    validate(table, declaredModels(dir), formulaPath(dir, argv));
     return;
   }
   list(table);

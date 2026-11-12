@@ -13,6 +13,9 @@
       "summary": "agent plane — workers, serve, the board",
       "members": [
         "fleet",
+        "sessions",
+        "mode",
+        "claim",
         "delegate",
         "agents",
         "status",
@@ -109,7 +112,7 @@
     "act": {
       "name": "act",
       "group": "review",
-      "summary": "Open-PR loop: status|threads|resolve|reply|merge",
+      "summary": "Open-PR loop: status|threads|resolve|reply|merge|dismiss",
       "spellings": ["act", "review act"],
       "aliases": [],
       "hidden": false,
@@ -130,6 +133,18 @@
               "2": "no open PR for the current branch"
             },
             "json": "schemas/cli/act-status.schema.json"
+          },
+          "dismiss": {
+            "flags": {
+              "--pr <n>": "the PR whose stale veto reviews to dismiss — default: the current branch",
+              "--dry-run": "list the stale vetoes without dismissing",
+              "--message <t>": "the dismissal note the host records"
+            },
+            "exits": {
+              "0": "stale vetoes dismissed — or none standing/eligible (live vetoes are never dismissed)",
+              "1": "host cannot enumerate/dismiss reviews, PR not OPEN, or a dismissal failed",
+              "2": "usage — no PR for the current branch"
+            }
           }
         }
       },
@@ -198,7 +213,7 @@
         "flags": {
           "--json": "the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`"
         },
-        "json": "schemas/cli/watchdog.json",
+        "json": "schemas/cli/watchdog.schema.json",
         "exits": {
           "0": "brief printed (human or --json)",
           "2": "unknown flag — usage on stderr"
@@ -209,13 +224,31 @@
     "pipeline": {
       "name": "pipeline",
       "group": "pipeline",
-      "summary": "Pipeline customer surface — accept|answer write the verdict store",
+      "summary": "Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker",
       "spellings": ["pipeline"],
       "aliases": [],
       "hidden": false,
       "plan": false,
       "contract": {
         "subs": {
+          "run": {
+            "flags": {
+              "--formula <file>": "REQUIRED — the pipeline formula (TOML) every run drives",
+              "--engines <module>": "path to a module exporting engines (EngineMap or (dir)=>EngineMap)",
+              "--customer <id>": "the recorded customer — default: $BRO_CUSTOMER, else the bd actor",
+              "--label <label>": "the queue label to scan (default pipeline)",
+              "--item <id>": "explicit bead id (repeatable) — bypasses the label scan",
+              "--limit <n>": "cap how many candidates this invocation scans",
+              "--max-in-flight <n>": "machine in-flight cap — narrows limits.in_flight (0 = uncapped)",
+              "--dry-run": "report what WOULD start without invoking runPipeline",
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "scan completed — per-item outcomes in the report",
+              "1": "customer-unresolved or a run-level failure",
+              "2": "usage or an unloadable formula/engines module"
+            }
+          },
           "accept": {
             "flags": {
               "--notes <text>": "the customer's notes — required on rejected (the fix scope)",
@@ -241,6 +274,19 @@
               "1": "no run awaiting answers or an unreadable file",
               "2": "usage"
             }
+          },
+          "wake": {
+            "flags": {
+              "--engines <module>": "engine map module replacing the built-in production map — exports engines (EngineMap or (dir)=>EngineMap)",
+              "--formula <file>": "formula TOML for every run (default: the <runId>.formula.toml sidecar)",
+              "--formula-dir <dir>": "formula TOML dir — the file whose sha matches formula_sha wins",
+              "--json": "emit the WakeReport as JSON"
+            },
+            "exits": {
+              "0": "pass complete — per-run actions reported (woken|waiting|unresolved|skipped|failed)",
+              "1": "the wake pass itself failed (pipeline plane unreadable)",
+              "2": "usage"
+            }
           }
         }
       },
@@ -249,7 +295,7 @@
     "fleet": {
       "name": "fleet",
       "group": "fleet",
-      "summary": "Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]",
+      "summary": "Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]; hosts [--json]",
       "spellings": ["fleet"],
       "aliases": [],
       "hidden": false,
@@ -260,10 +306,110 @@
           "--live": "TTY dashboard repaint loop (needs a TTY)",
           "--every N": "repaint cadence seconds — implies --live"
         },
+        "subs": {
+          "hosts": {
+            "flags": {
+              "--json": "{hosts, projects, generatedAt} — hosts × installs + sessions per project over the session ledger"
+            },
+            "json": "schemas/cli/fleet-hosts.schema.json",
+            "exits": {
+              "0": "board printed",
+              "1": "ledger unavailable",
+              "2": "usage"
+            }
+          }
+        },
         "json": "schemas/cli/fleet.schema.json",
         "exits": {
           "0": "fleet printed",
           "2": "usage — --live without TTY, --every out of range, --json + --live"
+        }
+      },
+      "external": false
+    },
+    "sessions": {
+      "name": "sessions",
+      "group": "fleet",
+      "summary": "Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree [--json]",
+      "spellings": ["sessions", "fleet sessions"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "{sessions, warnings} — epoch-ms times, full sids",
+          "--project": "only sessions of the current project — the default is machine-wide",
+          "--all": "every session on the machine — the default",
+          "--host <h>": "only sessions of this host (claude, codex, devin, …)",
+          "--live": "only sessions whose derived state is live"
+        },
+        "json": "schemas/cli/sessions.schema.json",
+        "exits": {
+          "0": "sessions printed",
+          "1": "ledger unavailable",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
+    "mode": {
+      "name": "mode",
+      "group": "fleet",
+      "summary": "Per-session behaviour mode — observe | plan | code | review | orchestrate; get, set, list, clear, render snapshots [--json]",
+      "spellings": ["mode", "fleet mode"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "mode payload as JSON — get: {session, warnings}; list: {modes, warnings}",
+          "--session <sid>": "target session id — default: session env / hook identity",
+          "--host <h>": "target host (claude, codex, cursor, devin, …)",
+          "--mode <m>": "render only this mode (bro mode render)"
+        },
+        "subs": {
+          "get": {},
+          "list": {},
+          "clear": {},
+          "render": {}
+        },
+        "json": "schemas/cli/mode.schema.json",
+        "exits": {
+          "0": "mode printed/set/cleared/rendered — or hook-binding notice",
+          "1": "ledger unavailable",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
+    "claim": {
+      "name": "claim",
+      "group": "fleet",
+      "summary": "Session resource claims — leases on worktree/branch/task/pr/path/role URIs in the session ledger [--json]",
+      "spellings": ["claim", "fleet claim"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "claim → {ok,resource,session,conflict}; release → {released,session}; list → {claims,warnings}",
+          "--session <sid>": "claiming session id — default: session env / hook identity",
+          "--host <h>": "claiming host (claude, codex, devin, …)",
+          "--ttl <sec>": "lease seconds — default 24h; 0 = no expiry",
+          "--exclusive": "refuse every other live holder (role:* default)",
+          "--shared": "allow co-claims unless the standing claim is exclusive",
+          "--project": "list only claims of the current project id",
+          "--resource <prefix>": "list only claims whose URI starts with this prefix"
+        },
+        "subs": {
+          "release": {},
+          "list": {}
+        },
+        "json": "schemas/cli/claim.schema.json",
+        "exits": {
+          "0": "claimed/released/listed — a refused claim exits 1 with the standing holder",
+          "1": "claims store unavailable, usage error, or claim refused",
+          "2": "usage"
         }
       },
       "external": false
@@ -553,7 +699,7 @@
     "learn": {
       "name": "learn",
       "group": "self",
-      "summary": "Self-improvement loop — lessons: add|list|show|forget|capture|probe",
+      "summary": "Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe",
       "spellings": ["learn", "self learn"],
       "aliases": [],
       "hidden": false,
@@ -565,7 +711,7 @@
     "goal": {
       "name": "goal",
       "group": "work",
-      "summary": "Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict",
+      "summary": "Session-scoped completion goal — status|pause|resume|clear, or <condition> to set; hooks remind + judge-verdict",
       "spellings": ["goal", "work goal"],
       "aliases": [],
       "hidden": false,
@@ -957,6 +1103,7 @@
       "spellings": ["mesh"],
       "aliases": [],
       "hidden": false,
+      "skill": "mesh",
       "configKey": "mesh",
       "plan": false,
       "external": false

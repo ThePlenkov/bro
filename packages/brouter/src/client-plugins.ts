@@ -17,7 +17,7 @@ import type { ClientOutcome, ClientRequest } from './commands.ts';
 import { runClient } from './commands.ts';
 import { BOOL_FLAGS, endpointFor, type RouterPolicy, VALUE_FLAGS } from './policy.ts';
 import { CLIENTS } from './registry.ts';
-import { routeTablePath } from './routes-cmd.ts';
+import { formulaPath, routeTablePath } from './routes-cmd.ts';
 import { formatSettingsDiff } from './settings-diff.ts';
 
 /** The lane flags every agent command reads — the provider, the model and
@@ -165,11 +165,13 @@ function askPlugin(): CommandPlugin {
       }
       const dir = process.cwd();
       const routes = routeTablePath(dir, argv);
+      const formula = formulaPath(dir, argv);
       const slices = explainSlicesOrExit(argv);
       const request = {
         ...laneFlags(argv),
         question,
         ...(routes === undefined ? {} : { routes }),
+        ...(formula === undefined ? {} : { formula }),
         ...(slices === undefined ? {} : { slices }),
       };
       const outcome = await runAsk(request, dir);

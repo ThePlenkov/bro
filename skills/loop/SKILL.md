@@ -65,6 +65,17 @@ current provider. `fallthrough` moves forward to the first un-walled
 provider without wrapping; `park` keeps the step blocked on its current
 provider.
 
+**Model matrix** — `fleet.matrix` (spec `specs/bro-v0pvd.1.md`) is the
+shadow-only capability router: before each spawn ONE judge `decide()`
+scores the task's complexity (ordered scale, default low→medium→high)
+and picks its mode (default planning/coding/review/fix); deterministic
+code then filters `fleet.matrix.models` rows by declared `modes` +
+`complexity` ceilings and journals the pick as a `route-matrix` verdict
+in the judge journal — `no-fit` when nothing can take the task. The
+lane never changes: shadow journals what it WOULD have spawned, the
+static resolution above stays authoritative, and `mode: "enforce"` is
+refused loudly until the follow-up bead lands pick→lane resolution.
+
 **Route table** — declare `brouter.routes` and the loop asks the ROUTER's
 own table instead: the bead's class label is the task's `type`, its
 priority the task's band, and the table's `chain` names the models (the
@@ -182,6 +193,14 @@ guards are independent, both must hold.
   deferred snooze for `loop.parkedWakeMin` (default 2h — then it wakes
   to `open` on the next ready read; `0` ices it until `bd undefer`),
   and the worktree stays as the resume cache.
+- **A provider wall is waited on the provider's clock, never churned** —
+  a `rate_limited` worker death carrying a `resetAt` snoozes the claim
+  until the reset (then it wakes and a fresh worker respawns — no
+  attempt burned waiting), and a `rate_limited`/`quota` wall derived at
+  spawn admission either holds pushes until the reset or parks the
+  clump when no reset was reported. The shared exit-cause taxonomy —
+  the same contract convoy supervision runs — decides. Only a `rate_limited` reset
+  at settlement is waited on; quota, reset-less, and stopped exits keep the flat cooldown.
 - **The open-PR set is bounded** — `loop.maxOpen` (default 1, serial) caps how
   many gates sit on the stack; `loop.maxOpenTotal` (default 10) is a hard
   ceiling on all open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-`). When

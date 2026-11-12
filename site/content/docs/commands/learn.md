@@ -4,11 +4,6 @@ title: bro self learn
 description: Triggered lessons with evidence, confidence, and a memory that knows when to speak.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 `bro self learn` stores durable lessons for the moments they matter. A lesson
 is a rule plus a trigger: hook events and optional terms, commands, paths,
 tools, or failed-tool evidence decide when it surfaces.
@@ -21,6 +16,7 @@ tools, or failed-tool evidence decide when it surfaces.
 | `bro self learn list [--json] [--source X] [--confidence X]`                                    | List lessons, optionally filtered                                                             |
 | `bro self learn show <id>`                                                                      | Print one lesson as JSON                                                                      |
 | `bro self learn forget <id>`                                                                    | Remove a lesson                                                                               |
+| `bro self learn promote <id>`                                                                   | Graduate a lesson to a rule-edit bead — carries the rule, trigger, and evidence               |
 | `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run] [--json]` | Distill finished artifacts into lessons                                                       |
 | `bro self learn probe <question>`                                                               | Ask the store first; a hit prints ranked lessons and a miss records the gap                   |
 
@@ -28,6 +24,12 @@ tools, or failed-tool evidence decide when it surfaces.
 `--lesson`, `--on`, `--match-terms`, `--match-commands`,
 `--match-paths`, `--match-tools`, `--match-errors`, `--budget`, and
 optional `--evidence`.
+
+`bro self learn promote <id>` graduates a lesson into a rule-edit bead:
+the bead carries the rule, its trigger, and its evidence, and the edit
+lands through the normal spec/PR path (skills/ or rules files). The
+lesson records `promotedTo` and keeps firing until the rule lands —
+promote never edits the rules files itself.
 Manual evidence uses `K:R`: the supported kinds are `bead`, `pr`, `session`,
 `command`, and `text`.
 

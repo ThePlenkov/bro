@@ -26,8 +26,13 @@ import { join, resolve } from 'node:path';
 import { checkBeads } from './bd.ts';
 import { loadConfig } from './config.ts';
 import { gitTry, gitTryAsync, gitWorktreeRoots } from './git.ts';
+import { cacheKey, hookCacheDir, isJsonData, readCacheFile, writeCacheFile } from './hook-cache.ts';
 import { markerOwner } from './proc.ts';
 import type { EventsFacade } from './events.ts';
+import type { ClaimFacade } from './claims.ts';
+import { claimsFacade } from './claims-store.ts';
+import type { LedgerFacade, Mode } from './ledger.ts';
+import { ledgerFacade } from './ledger-store.ts';
 import type { QueryFacade } from './queries.ts';
 import type { JudgeFacade } from './judge.ts';
 import type { MergeQueueFacade, ReviewFacade } from './review.ts';
@@ -60,6 +65,13 @@ export interface ConnectorCtx {
    *  doesn't want to resolve it — ownership then falls back to the
    *  sessionId-only match. */
   owner?: { pid: number; start: string } | null;
+  /** The firing session's resolved mode (specs/bro-izpyk.2.md) — the
+   *  hook resolves file > `modes.default` > `observe` once per event
+   *  and stamps it here so every collector can apply each connector's
+   *  `activeIn` declaration. `undefined` = unrestricted: library
+   *  callers (the acp proxy, tests) that never resolved a mode keep
+   *  today's behavior — every probe runs. */
+  mode?: Mode;
 }
 
 /** Capability → facade type. Optional on Connector; required here once
@@ -87,6 +99,15 @@ export interface FacadeMap {
   /** Stacked-change ops — chain hints, post-merge cascade ownership,
    *  native whole-chain merge (spec bro-r6vge). */
   stacks: StackFacade;
+  /** Machine-wide session/hook ledger — installs, sessions, events,
+   *  stats, modes (epic spec specs/sessions/bro-izpyk.md; impl
+   *  specs/bro-izpyk.1.1.md). Default backend: node:sqlite under
+   *  $XDG_STATE_HOME/bro/, drained lazily from the hook spool. */
+  ledger: LedgerFacade;
+  /** Session leases on resource URIs — contract landed in F1a, first
+   *  provider in bro-izpyk.3: the ledger connector's sqlite `claims`
+   *  table (claims-store.ts), `task:*` delegated to the tasks facade. */
+  claims: ClaimFacade;
 }
 
 export type MaybePromise<T> = T | Promise<T>;
@@ -197,6 +218,8 @@ export interface Connector {
   events?(ctx: ConnectorCtx): EventsFacade;
   queries?(ctx: ConnectorCtx): QueryFacade;
   stacks?(ctx: ConnectorCtx): StackFacade;
+  ledger?(ctx: ConnectorCtx): LedgerFacade;
+  claims?(ctx: ConnectorCtx): ClaimFacade;
   /** Only ever picked BY NAME (`"connectors": {"<kind>": "<name>"}`) —
    *  never by detection, and never a reason to warn about ambiguity on
    *  its own. A transport that must be opted into (it needs a daemon, or
@@ -209,6 +232,14 @@ export interface Connector {
    *  exclusion, same as `optIn`. */
   optInFacades?: (keyof FacadeMap)[];
   hooks?(ctx: ConnectorCtx): ConnectorHooks;
+  /** Mode gating for the hook probes (specs/bro-izpyk.2.md) — which
+   *  session modes each probe kind may run in. A kind absent from the
+   *  map (or the whole field absent) runs in EVERY mode, preserving
+   *  pre-modes behavior for connectors that never declare it. `observe`
+   *  is the implicit default mode, so a connector that wants passive
+   *  sessions to stay cheap declares the active modes explicitly.
+   *  `ctx.mode === undefined` (library callers) bypasses the gate. */
+  activeIn?: Partial<Record<keyof ConnectorHooks, readonly Mode[]>>;
   /** Declarative prompt contributions (spec specs/sessions/bro-nkn6.md)
    *  — pure declarations the guard engine evaluates centrally; a
    *  connector never evaluates its own `when`. */
@@ -502,6 +533,15 @@ const beadsConnector: Connector = {
       }
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): ready-queue context serves every
+  // active mode; claimed-work nudges and the own-claims stop gate are
+  // code-plane behavior — plan/review sessions coordinate through their
+  // own surfaces, and observe runs nothing here.
+  activeIn: {
+    sessionStart: ['plan', 'code', 'review', 'orchestrate'],
+    parallelWork: ['code', 'orchestrate'],
+    stopGate: ['code', 'orchestrate'],
+  },
 };
 
 // --- built-in: git ---------------------------------------------------------------
@@ -518,9 +558,29 @@ const gitConnector: Connector = {
   stacks: ctx => gitStacks(ctx.dir),
 };
 
+// --- built-in: ledger ---------------------------------------------------------
+
+/** The machine-wide session ledger — node:sqlite under the XDG state
+ *  dir, fed lazily by the hook-spool drain. Machine-scoped, not
+ *  project-scoped: ctx.dir is irrelevant, env paths decide. The designed
+ *  default backend (epic spec's facade table) — never opt-in, and the
+ *  only provider until a remote/jsonl backend registers. The facade
+ *  memoizes: each instance lazily opens its own SQLite handle and
+ *  LedgerFacade has no close — a per-resolution facade would leak one
+ *  WAL connection per call in a long-lived process. */
+let ledgerSingleton: LedgerFacade | undefined;
+/** The claims plane shares the ledger's sqlite home — same memoization
+ *  rule: one WAL connection per process, never per resolution. */
+let claimsSingleton: ClaimFacade | undefined;
+const ledgerConnector: Connector = {
+  name: 'ledger',
+  ledger: () => (ledgerSingleton ??= ledgerFacade()),
+  claims: () => (claimsSingleton ??= claimsFacade()),
+};
+
 // --- registry ------------------------------------------------------------------
 
-const registry: Connector[] = [beadsConnector, gitConnector];
+const registry: Connector[] = [beadsConnector, gitConnector, ledgerConnector];
 
 /** Names that were in the registry at boot — unregisterConnector refuses
  *  to drop them: removing a built-in breaks facade resolution for every
@@ -731,6 +791,10 @@ export function facade<K extends keyof FacadeMap>(
       return pick.queries!(ctx) as FacadeMap[K];
     case 'stacks':
       return pick.stacks!(ctx) as FacadeMap[K];
+    case 'ledger':
+      return pick.ledger!(ctx) as FacadeMap[K];
+    case 'claims':
+      return pick.claims!(ctx) as FacadeMap[K];
     default:
       throw new Error(`connector "${pick.name}" does not provide "${String(kind)}"`);
   }
@@ -990,20 +1054,43 @@ function taskStoreFromPick(pick: Connector, dir: string): TaskStoreAsync {
 
 /** Every registered connector's hook probes paired with its name —
  *  hooks collect, never pick: each system reports its own ambient
- *  state. The name rides along so perf rows can blame a connector. */
-export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: ConnectorHooks }[] {
-  const out: { name: string; hooks: ConnectorHooks }[] = [];
+ *  state. The name rides along so perf rows can blame a connector, and
+ *  `activeIn` rides along so collectors can apply mode gating without a
+ *  second registry lookup. */
+export function connectorHooks(ctx: ConnectorCtx): {
+  name: string;
+  hooks: ConnectorHooks;
+  activeIn?: Connector['activeIn'];
+}[] {
+  const out: { name: string; hooks: ConnectorHooks; activeIn?: Connector['activeIn'] }[] = [];
   for (const c of registry) {
     try {
       const h = c.hooks?.(ctx);
       if (h) {
-        out.push({ name: c.name, hooks: h });
+        out.push({ name: c.name, hooks: h, activeIn: c.activeIn });
       }
     } catch {
       // a wedged connector contributes no probes — fail-open
     }
   }
   return out;
+}
+
+/** Whether `kind` may run for this connector under `mode` — the
+ *  `activeIn` contract (specs/bro-izpyk.2.md): no declaration or no
+ *  ctx.mode means unrestricted; a declared kind list must contain the
+ *  mode. `observe` sessions therefore only ever see probes a connector
+ *  explicitly opened to them (or never gated at all). */
+export function connectorHookActive(
+  activeIn: Connector['activeIn'],
+  kind: keyof ConnectorHooks,
+  mode: Mode | undefined
+): boolean {
+  if (mode === undefined || activeIn === undefined) {
+    return true;
+  }
+  const modes = activeIn[kind];
+  return modes === undefined || modes.includes(mode);
 }
 
 /** One collected guard declaration — `guard` set means it validated;
@@ -1022,8 +1109,132 @@ export interface CollectedGuard {
 /** All guard declarations in resolution order — config defs first,
  *  then connectors in registry order; a duplicate name loses to the
  *  earlier declaration (warn + annotated, never silently). Connector
- *  contributions fail open: throws and malformed entries are skipped. */
+ *  contributions fail open: throws and malformed entries are skipped.
+ *
+ *  Hook-path cache (spec bro-gwh2a): the collected set is replayed from
+ *  a per-(dir, session, defs, contributor-set) record under
+ *  `<git-common>/bro/hooks/cache/` when the fingerprint holds — each
+ *  hook invocation is a fresh process, so without it the same
+ *  declarations are collected and the same dedup warnings emitted on
+ *  EVERY call. Collection itself stays cheap; the win is warnings
+ *  firing once per fingerprint instead of once per event, plus skipped
+ *  connector `guards()` calls. A connector that computes contributions
+ *  per call is an anti-pattern (guard clauses exist for per-event
+ *  dynamism) — the TTL bounds even that to COLLECTED_GUARDS_TTL_MS. */
 export function collectGuards(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
+  const cached = readCollectedGuards(ctx, defs);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const collected = collectGuardsLive(ctx, defs);
+  writeCollectedGuards(ctx, defs, collected);
+  return collected;
+}
+
+/** Bounds the one thing the fingerprint can't see — a connector
+ *  `guards()` whose result varies behind an unchanged config. */
+const COLLECTED_GUARDS_TTL_MS = 5 * 60_000;
+
+interface CollectedGuardsRecord {
+  v: 1;
+  dir: string;
+  sessionId: string;
+  defsHash: string;
+  contributors: string;
+  ts: number;
+  collected: CollectedGuard[];
+}
+
+/** The fingerprint inputs: defs serialize to a content hash (config
+ *  edits invalidate immediately), contributor names capture registry
+ *  changes (external plugin load, test register/unregister). `file`
+ *  is the record's path — undefined key means "cache off, run live". */
+function collectedGuardsKey(
+  ctx: ConnectorCtx,
+  defs: Guard[]
+): (Omit<CollectedGuardsRecord, 'ts' | 'collected'> & { file: string }) | undefined {
+  const dir = resolve(ctx.dir);
+  const cacheDir = hookCacheDir(dir);
+  if (cacheDir === null || !isJsonData(defs)) {
+    // no repo/disabled → no cache; a def that can't round-trip can't
+    // be fingerprinted
+    return undefined;
+  }
+  const sessionId = ctx.sessionId ?? '';
+  return {
+    v: 1,
+    dir,
+    sessionId,
+    defsHash: cacheKey(JSON.stringify(defs)),
+    contributors: registry
+      .filter(c => c.guards !== undefined)
+      .map(c => c.name)
+      .join(','),
+    file: join(cacheDir, `guards-collected-${cacheKey(`${dir}|${sessionId}`)}.json`),
+  };
+}
+
+/** A replayed row must carry the collectRow contract: `source` plus a
+ *  still-valid `guard` or a `problems` list — a hand-edited or stale
+ *  record can't feed the engine a malformed declaration. */
+function isCollectedRow(row: unknown): row is CollectedGuard {
+  if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+    return false;
+  }
+  const r = row as Record<string, unknown>;
+  return (
+    typeof r.source === 'string' &&
+    (r.guard === undefined || guardProblems(r.guard).length === 0) &&
+    (r.name === undefined || typeof r.name === 'string') &&
+    (r.problems === undefined ||
+      (Array.isArray(r.problems) && r.problems.every(p => typeof p === 'string'))) &&
+    (r.guard !== undefined || r.problems !== undefined)
+  );
+}
+
+function readCollectedGuards(ctx: ConnectorCtx, defs: Guard[]): CollectedGuard[] | undefined {
+  try {
+    const key = collectedGuardsKey(ctx, defs);
+    if (key === undefined) {
+      return undefined;
+    }
+    const rec = readCacheFile(key.file);
+    if (
+      rec === undefined ||
+      rec.v !== 1 ||
+      rec.dir !== key.dir ||
+      rec.sessionId !== key.sessionId ||
+      rec.defsHash !== key.defsHash ||
+      rec.contributors !== key.contributors ||
+      typeof rec.ts !== 'number' ||
+      Date.now() - rec.ts >= COLLECTED_GUARDS_TTL_MS ||
+      !Array.isArray(rec.collected) ||
+      !isJsonData(rec.collected) ||
+      !rec.collected.every(isCollectedRow)
+    ) {
+      return undefined;
+    }
+    return rec.collected as CollectedGuard[];
+  } catch {
+    return undefined; // any cache failure → live collect (fail-open)
+  }
+}
+
+function writeCollectedGuards(ctx: ConnectorCtx, defs: Guard[], collected: CollectedGuard[]): void {
+  try {
+    const key = collectedGuardsKey(ctx, defs);
+    if (key === undefined || !isJsonData(collected)) {
+      return;
+    }
+    const { file, ...fingerprint } = key;
+    const record: CollectedGuardsRecord = { ...fingerprint, ts: Date.now(), collected };
+    writeCacheFile(file, record, 'guards-collected-');
+  } catch {
+    // caching is best-effort — a failed write degrades to re-collect
+  }
+}
+
+function collectGuardsLive(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
   const seen = new Set<string>();
   const out: CollectedGuard[] = [];
   const push = (source: string, guard?: Guard, problems?: string[], name?: string): void => {
@@ -1158,36 +1369,39 @@ export type ProbeReporter = (rows: ProbeTiming[]) => void;
  *  budget, not N; output order stays registry order. */
 async function collectLines(
   ctx: ConnectorCtx,
+  kind: keyof ConnectorHooks,
   probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>,
   onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
   const rows = await Promise.all(
-    connectorHooks(ctx).map(async ({ name, hooks }) => {
-      const t0 = Date.now();
-      try {
-        const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
-          () => probe(hooks),
-          PROBE_TIMED_OUT
-        );
-        return {
-          name,
-          lines: r === PROBE_TIMED_OUT ? [] : (r ?? []),
-          timing: {
-            connector: name,
-            ms: Date.now() - t0,
-            ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
-          },
-          settled: r !== PROBE_TIMED_OUT,
-        };
-      } catch {
-        return {
-          name,
-          lines: [] as string[],
-          timing: { connector: name, ms: Date.now() - t0, failed: true as const },
-          settled: false,
-        };
-      }
-    })
+    connectorHooks(ctx)
+      .filter(({ activeIn }) => connectorHookActive(activeIn, kind, ctx.mode))
+      .map(async ({ name, hooks }) => {
+        const t0 = Date.now();
+        try {
+          const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
+            () => probe(hooks),
+            PROBE_TIMED_OUT
+          );
+          return {
+            name,
+            lines: r === PROBE_TIMED_OUT ? [] : (r ?? []),
+            timing: {
+              connector: name,
+              ms: Date.now() - t0,
+              ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+            },
+            settled: r !== PROBE_TIMED_OUT,
+          };
+        } catch {
+          return {
+            name,
+            lines: [] as string[],
+            timing: { connector: name, ms: Date.now() - t0, failed: true as const },
+            settled: false,
+          };
+        }
+      })
   );
   onProbe?.(rows.map(r => r.timing));
   return {
@@ -1207,7 +1421,7 @@ export function sessionStartProbe(
   ctx: ConnectorCtx,
   onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
-  return collectLines(ctx, h => h.sessionStart?.(ctx), onProbe);
+  return collectLines(ctx, 'sessionStart', h => h.sessionStart?.(ctx), onProbe);
 }
 
 /** Collect parallel-work signals from all connectors. */
@@ -1220,7 +1434,7 @@ export function parallelWorkProbe(
   ctx: ConnectorCtx,
   onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
-  return collectLines(ctx, h => h.parallelWork?.(ctx), onProbe);
+  return collectLines(ctx, 'parallelWork', h => h.parallelWork?.(ctx), onProbe);
 }
 
 /** Collect prompt-submit context from all connectors. */
@@ -1229,13 +1443,14 @@ export async function promptContextLines(
   prompt: string,
   onProbe?: ProbeReporter
 ): Promise<string[]> {
-  return (await collectLines(ctx, h => h.promptSubmit?.(ctx, prompt), onProbe)).lines;
+  return (await collectLines(ctx, 'promptSubmit', h => h.promptSubmit?.(ctx, prompt), onProbe))
+    .lines;
 }
 
 /** Collect post-tool context lines from all connectors — mailbox
  *  drains and other per-event probes. */
 export async function postToolLines(ctx: ConnectorCtx, onProbe?: ProbeReporter): Promise<string[]> {
-  return (await collectLines(ctx, h => h.postTool?.(ctx), onProbe)).lines;
+  return (await collectLines(ctx, 'postTool', h => h.postTool?.(ctx), onProbe)).lines;
 }
 
 /** Fire every connector's taskFinish probe — the `bro exec` report-back
@@ -1247,22 +1462,24 @@ export async function taskFinishProbes(
   onProbe?: ProbeReporter
 ): Promise<void> {
   const rows = await Promise.all(
-    connectorHooks(ctx).map(async ({ name, hooks }) => {
-      const t0 = Date.now();
-      try {
-        const r = await probeWithTimeout<void | typeof PROBE_TIMED_OUT>(
-          () => hooks.taskFinish?.(ctx, report),
-          PROBE_TIMED_OUT
-        );
-        return {
-          connector: name,
-          ms: Date.now() - t0,
-          ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
-        };
-      } catch {
-        return { connector: name, ms: Date.now() - t0, failed: true as const };
-      }
-    })
+    connectorHooks(ctx)
+      .filter(({ activeIn }) => connectorHookActive(activeIn, 'taskFinish', ctx.mode))
+      .map(async ({ name, hooks }) => {
+        const t0 = Date.now();
+        try {
+          const r = await probeWithTimeout<void | typeof PROBE_TIMED_OUT>(
+            () => hooks.taskFinish?.(ctx, report),
+            PROBE_TIMED_OUT
+          );
+          return {
+            connector: name,
+            ms: Date.now() - t0,
+            ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+          };
+        } catch {
+          return { connector: name, ms: Date.now() - t0, failed: true as const };
+        }
+      })
   );
   onProbe?.(rows);
 }
@@ -1275,28 +1492,30 @@ export async function stopGateContributions(
   onProbe?: ProbeReporter
 ): Promise<GateContribution[]> {
   const rows = await Promise.all(
-    connectorHooks(ctx).map(async ({ name, hooks }) => {
-      const t0 = Date.now();
-      try {
-        const r = await probeWithTimeout<GateContribution[] | undefined | typeof PROBE_TIMED_OUT>(
-          () => hooks.stopGate?.(ctx),
-          PROBE_TIMED_OUT
-        );
-        return {
-          contributions: r === PROBE_TIMED_OUT ? [] : (r ?? []),
-          timing: {
-            connector: name,
-            ms: Date.now() - t0,
-            ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
-          },
-        };
-      } catch {
-        return {
-          contributions: [] as GateContribution[],
-          timing: { connector: name, ms: Date.now() - t0, failed: true as const },
-        };
-      }
-    })
+    connectorHooks(ctx)
+      .filter(({ activeIn }) => connectorHookActive(activeIn, 'stopGate', ctx.mode))
+      .map(async ({ name, hooks }) => {
+        const t0 = Date.now();
+        try {
+          const r = await probeWithTimeout<GateContribution[] | undefined | typeof PROBE_TIMED_OUT>(
+            () => hooks.stopGate?.(ctx),
+            PROBE_TIMED_OUT
+          );
+          return {
+            contributions: r === PROBE_TIMED_OUT ? [] : (r ?? []),
+            timing: {
+              connector: name,
+              ms: Date.now() - t0,
+              ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+            },
+          };
+        } catch {
+          return {
+            contributions: [] as GateContribution[],
+            timing: { connector: name, ms: Date.now() - t0, failed: true as const },
+          };
+        }
+      })
   );
   onProbe?.(rows.map(r => r.timing));
   return rows.flatMap(r => r.contributions);
@@ -1312,15 +1531,17 @@ export async function preToolVerdicts(
   // parallel probes, registry-order merge — a wedged connector can't
   // stall the queue and verdict order stays the config's
   const verdicts = await Promise.all(
-    connectorHooks(ctx).map(async ({ hooks }) => {
-      try {
-        return (
-          (await probeWithTimeout(() => hooks.preTool?.(ctx, { tool, input }), undefined)) ?? []
-        );
-      } catch {
-        return []; // fail-open
-      }
-    })
+    connectorHooks(ctx)
+      .filter(({ activeIn }) => connectorHookActive(activeIn, 'preTool', ctx.mode))
+      .map(async ({ hooks }) => {
+        try {
+          return (
+            (await probeWithTimeout(() => hooks.preTool?.(ctx, { tool, input }), undefined)) ?? []
+          );
+        } catch {
+          return []; // fail-open
+        }
+      })
   );
   return verdicts.flat();
 }

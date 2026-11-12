@@ -46,8 +46,7 @@
         },
         "selfCheck": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
+          "pattern": "^$|\\S"
         },
         "maxRounds": {
           "type": "integer",
@@ -187,6 +186,11 @@
           "minLength": 1,
           "pattern": "\\S"
         },
+        "formula": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
         "router": {
           "type": "object",
           "properties": {
@@ -201,6 +205,37 @@
                 "enforce",
                 "off"
               ]
+            },
+            "invoke": {
+              "enum": [
+                "always",
+                "ambiguous",
+                "never"
+              ]
+            },
+            "escalate": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "recall": {
+              "type": "object",
+              "properties": {
+                "k": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "minAgreement": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 1
+                },
+                "minRows": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false,
@@ -208,6 +243,15 @@
             "provider",
             "mode"
           ]
+        },
+        "contextId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "taskTextRetentionDays": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -438,6 +482,75 @@
             "provider",
             "mode"
           ]
+        },
+        "matrix": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "mode": {
+              "enum": [
+                "shadow",
+                "enforce",
+                "off"
+              ]
+            },
+            "complexity": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            },
+            "modes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            },
+            "models": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "modes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "complexity": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "profile": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
         },
         "providerCaps": {
           "type": "object",
@@ -1007,6 +1120,21 @@
         },
         "specLinked": {
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "modes": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "enum": [
+            "observe",
+            "plan",
+            "code",
+            "review",
+            "orchestrate"
+          ]
         }
       },
       "additionalProperties": false
@@ -1640,6 +1768,15 @@
         "acpStallMs": {
           "type": "integer",
           "minimum": 0
+        },
+        "acpCooldownMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acpCwd": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         }
       },
       "additionalProperties": false

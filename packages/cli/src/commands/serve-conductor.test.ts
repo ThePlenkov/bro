@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   agent,
   type SessionConfigOption,
@@ -14,9 +14,9 @@ import {
   type StopReason,
 } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
-import { otelJournal, type AcpTerminals } from '@broject/providers';
-import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts';
-import type { ConductorConfig } from './serve-conductor.ts';
+import { AcpLaneCooldown, otelJournal, type AcpTerminals } from '@broject/providers';
+import { conductorConfig, conductorProxy, parseReply, sweepSessions } from './serve-conductor.ts';
+import type { ConductorConfig, ConvSession } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 import { scrubEnv } from '@broject/core';
 
@@ -256,6 +256,43 @@ describe('conductorConfig', () => {
     // wrap the watchdog into firing at once
     const hugeStall = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: '9999999999' }, dir);
     assert.equal(hugeStall?.acpStallMs, 2_147_483_647);
+  });
+  test('the session workspace pin reads the config, and the env pin wins', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', acpCwd: '/srv/acp-workspace' },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    assert.equal(conductorConfig({}, dir)?.acpCwd, '/srv/acp-workspace');
+    // the env pin is the operator's explicit knob — it wins
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: '/env/workspace' }, dir)?.acpCwd,
+      '/env/workspace'
+    );
+    // a blank env pin falls back to the file's value
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: '   ' }, dir)?.acpCwd,
+      '/srv/acp-workspace'
+    );
+    // a relative pin resolves against the listener's cwd — session/new
+    // requires an absolute cwd (review bro-sx4hr)
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: 'rel/ws' }, dir)?.acpCwd,
+      resolve('rel/ws')
+    );
+    // unset everywhere → undefined — the host listener's default anchor applies
+    const bare = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(bare, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp' },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    assert.equal(conductorConfig({}, bare)?.acpCwd, undefined);
   });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(
@@ -1716,6 +1753,183 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.match(fake.prompts[2] ?? '', /more/);
     }));
 
+  test('a named session outlives the anonymous TTL — probes reuse across cadence', () => {
+    // bro-5xm9g: a ~16min probe cadence vs the 10min fingerprint TTL
+    // evicted every probe's session — each paid a fresh session/new
+    // (~11k input tokens). Named (h:) sessions asked for persistence
+    // explicitly and get the longer TTL.
+    const now = 1_000_000_000;
+    const mk = (lastSeen: number): ConvSession =>
+      ({
+        busy: false,
+        lastSeen,
+        live: { dispose() {} },
+        releaseCap: () => {},
+      }) as unknown as ConvSession;
+    const sessions = new Map<string, ConvSession>([
+      ['f:abc', mk(now - 11 * 60_000)],
+      ['h:bro-live-check', mk(now - 11 * 60_000)],
+      ['h:old', mk(now - 61 * 60_000)],
+      // the lane's probe session is persistent-keyed too — the probe
+      // cadence (~16min) outlives the anonymous TTL by design
+      ['probe:dv-acp', mk(now - 11 * 60_000)],
+      ['probe:stale', mk(now - 61 * 60_000)],
+    ]);
+    sweepSessions(sessions, now);
+    assert.equal(sessions.has('f:abc'), false, 'fingerprint past the 10m TTL evicts');
+    assert.equal(
+      sessions.has('h:bro-live-check'),
+      true,
+      'named session at 11m survives — the probe reuses it'
+    );
+    assert.equal(sessions.has('h:old'), false, 'named session still bounded by its own TTL');
+    assert.equal(sessions.has('probe:dv-acp'), true, 'probe session at 11m survives');
+    assert.equal(sessions.has('probe:stale'), false, 'probe session bounded by the named TTL');
+  });
+
+  test('x-bro-probe rides the lane probe session — warm probes reuse it', () =>
+    withConductor({ replyText: 'ok', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const probe = { headers: { 'x-bro-probe': 'live-check' } };
+      // two DIFFERENT probe bodies — independent liveness turns, not
+      // continuations: the conversation proofs must not apply (bro-5xm9g)
+      assert.equal((await post(url, [{ role: 'user', content: 'ping one' }], probe)).status, 200);
+      assert.equal((await post(url, [{ role: 'user', content: 'ping two' }], probe)).status, 200);
+      // ONE session/new served both probes — the second rode the warm
+      // session instead of paying a fresh open + context re-ingest
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 2);
+      // each probe sent its FULL body — no tail slicing, no replay
+      assert.match(fake.prompts[1] ?? '', /ping two/);
+      // a probe never echoes a session pin — probe: keys are not h:
+      const r = await post(url, [{ role: 'user', content: 'ping three' }], probe);
+      assert.equal(r.headers.get('x-bro-session'), null);
+    }));
+
+  test('a probe session never serves a real conversation', () =>
+    withConductor({ replyText: 'ok', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const probe = { headers: { 'x-bro-probe': 'health' } };
+      assert.equal((await post(url, [{ role: 'user', content: 'same body' }], probe)).status, 200);
+      // a real turn carrying the SAME body opens its own session — the
+      // probe key is not a conversation key and vice versa
+      assert.equal((await post(url, [{ role: 'user', content: 'same body' }])).status, 200);
+      assert.equal(fake.sessions.length, 2);
+      assert.equal(fake.prompts.length, 2);
+    }));
+
+  test('probe turns journal probe:true under the probe namespace', () =>
+    (async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-probe-journal-'));
+      const journalPath = join(dir, 'turns.jsonl');
+      otelJournal(journalPath);
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+      const { url, close } = await listen(
+        deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+      );
+      try {
+        const probe = { headers: { 'x-bro-probe': 'live-check' } };
+        const postProbe = (content: string) =>
+          fetch(`${url}/v1/messages`, {
+            method: 'POST',
+            headers: { ...auth, 'content-type': 'application/json', ...probe.headers },
+            body: JSON.stringify({ messages: [{ role: 'user', content }], stream: false }),
+          });
+        await postProbe('first');
+        await postProbe('second');
+        const rows = readFileSync(journalPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map(l => JSON.parse(l) as Record<string, unknown>);
+        const turns = rows.filter(r => r.event === 'conductor.turn');
+        assert.equal(turns.length, 2);
+        assert.equal(turns[0]?.session_reused, false);
+        assert.equal(turns[1]?.session_reused, true, 'the warm probe reused the session');
+        for (const t of turns) {
+          assert.equal(t.probe, true);
+          assert.equal(t.probe_label, 'live-check');
+          assert.equal(t.session_key_ns, 'probe');
+        }
+      } finally {
+        await close();
+        otelJournal(undefined);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })());
+
+  test('a probe on a walled lane is refused before any session opens', async () => {
+    // arm the lane's wall up front — the probe must take the early
+    // exit, not the session-open refusal every other turn takes
+    const cooldown = new AcpLaneCooldown({ cooldownMs: 60_000 });
+    cooldown.noteWall('rate limit', { retryAfterSec: 30 });
+    const cfg: ConductorConfig = { ...CFG, cooldown };
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json', 'x-bro-probe': 'health' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'ping' }], stream: false }),
+      });
+      assert.equal(r.status, 429);
+      assert.ok(Number(r.headers.get('retry-after')) > 0);
+      assert.match(await r.text(), /probe skipped/);
+      // the early gate fired before wire.link — NO session/new at all
+      assert.equal(fake.sessions.length, 0);
+      // a real turn on the same walled lane still takes the
+      // session-open refusal — probe gating never touches real turns
+      const real = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'ping' }], stream: false }),
+      });
+      assert.equal(real.status, 429);
+      assert.doesNotMatch(await real.text(), /probe skipped/);
+    } finally {
+      await close();
+    }
+  });
+
+  test('GET /v1/models caches the lane catalog — burst reads pay one session/new', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const r1 = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(r1.status, 200);
+      const sessionsAfterFirst = fake.sessions.length;
+      assert.ok(sessionsAfterFirst > 0, 'the catalog read opened a session');
+      const r2 = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(r2.status, 200);
+      // the second read rode the 60s cache — no second session/new
+      assert.equal(fake.sessions.length, sessionsAfterFirst);
+    } finally {
+      await close();
+    }
+  });
+
+  test('concurrent cold /v1/models reads share one catalog session/new', async () => {
+    // delayNewMs holds session/new open — both requests are inside the
+    // read before either can populate the cache; single-flight must
+    // collapse them into one catalogModels (review on bro-5xm9g)
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], delayNewMs: 150 });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch(`${url}/v1/models`, { headers: auth }),
+        fetch(`${url}/v1/models`, { headers: auth }),
+      ]);
+      assert.equal(r1.status, 200);
+      assert.equal(r2.status, 200);
+      assert.equal(fake.sessions.length, 1, 'one catalog read served both requests');
+    } finally {
+      await close();
+    }
+  });
+
   test('an edited prefix under a pinned key evicts and restarts', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
       const pin = { headers: { 'x-bro-session': 's' } };
@@ -2480,6 +2694,33 @@ describe('serve /v1/* — one gateway, many providers', () => {
       // and neither lane replayed the other's turn
       assert.equal(dv.prompts.length, 1);
       assert.equal(oc.prompts.length, 1);
+    }));
+
+  test('probes on two lanes ride two probe sessions — probe:<entry> keys', () =>
+    withGateway(async ({ dv, oc, url }) => {
+      const probe = (model: string) =>
+        fetch(`${url}/v1/messages`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json', 'x-bro-probe': 'live-check' },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: 'ping' }],
+            stream: false,
+          }),
+        });
+      // one probe per lane — each lane's dedicated probe session opens
+      assert.equal((await probe('dv-acp/swe-x')).status, 200);
+      assert.equal((await probe('oc-acp/gpt-5')).status, 200);
+      assert.equal(dv.sessions.length, 1);
+      assert.equal(oc.sessions.length, 1);
+      // a second probe on each lane reuses — probe:<entry> never
+      // crosses providers and never pays a second session/new
+      assert.equal((await probe('dv-acp/swe-x')).status, 200);
+      assert.equal((await probe('oc-acp/gpt-5')).status, 200);
+      assert.equal(dv.sessions.length, 1);
+      assert.equal(oc.sessions.length, 1);
+      assert.equal(dv.prompts.length, 2);
+      assert.equal(oc.prompts.length, 2);
     }));
 
   test('a healthy lane with an empty catalog is not an outage', () =>

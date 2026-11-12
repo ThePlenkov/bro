@@ -590,6 +590,7 @@ describe('gascity connector', () => {
     assert.deepEqual(conn.capabilities(), {
       attach: true,
       respawn: true,
+      workers: false,
       supervisor: 'required',
     });
   });

@@ -4,11 +4,6 @@ title: Fleet & supervision
 description: Read the fleet, supervise agents, drive orphaned PRs, and expose a local web facade.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 Fleet commands separate the read plane from the write plane. `bro fleet`
 and `bro review watch` report what needs attention; `bro fleet agents` and `bro review drive`
 take the deliberate actions.

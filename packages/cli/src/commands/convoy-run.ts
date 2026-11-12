@@ -24,7 +24,6 @@ import {
   agentEntryBlocked,
   agentRegistryPath,
   AgentNotFound,
-  BATCH_MARKER_ENV,
   facade,
   loadConfig,
   readAgentRegistry,
@@ -50,6 +49,7 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { flag, positionals } from './args.ts';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import { spawnStepAgent, type StepSpawnRequest } from './agents.ts';
 import { registryEntryState } from './drive.ts';
 import { mainWorktree } from './work.ts';
@@ -116,6 +116,8 @@ export function runnerPrompt(molId: string, repo: string): string {
     "a spec, read it from specs/ first. Run the molecule to 'state: complete' — do NOT",
     'stop at gates you can settle yourself; a real human gate means exit cleanly and',
     'let the runner report the mol gated.',
+    '',
+    LEARN_RETRO_CLOSEOUT,
   ].join('\n');
 }
 
@@ -127,11 +129,11 @@ export function runnerPrompt(molId: string, repo: string): string {
  *  marker is the only thing a caller owns here. */
 export function runnerSpawnReq(molId: string, dir: string, beads: string): StepSpawnRequest {
   return {
+    lane: 'batch',
     molStep: molId,
     worktree: dir,
     prompt: runnerPrompt(molId, dir),
     beadsDir: beads,
-    env: { [BATCH_MARKER_ENV]: '1' },
   };
 }
 

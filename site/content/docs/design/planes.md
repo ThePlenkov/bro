@@ -4,11 +4,6 @@ title: Planes — one facade-out contract
 description: A fixed catalog of domain planes with declared row types and verbs, served identically over REST, SSE and MCP — bro as a service over all agents.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 bro already answers every orchestration question — what's gated, who's
 working, what's next — but each answer lives behind a different CLI
 verb with its own output shape. Every thin client (TUI, IDE, MCP host,

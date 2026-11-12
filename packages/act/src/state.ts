@@ -17,6 +17,7 @@ import type {
   PrTarget,
   ReviewFacade,
   ReviewThread,
+  VetoReview,
 } from '@broject/core';
 import type { CheckHistory } from './check-history.ts';
 import { docsOnlyPr, effectiveMaxRounds } from './docs.ts';
@@ -258,7 +259,12 @@ function advisoryFilter(
   alerts.push(
     alive
       ? `advisory check "${c.name}" failing (${streak}/${rule.consecutiveFailures} consecutive) — not yet proven flaky`
-      : `advisory check "${c.name}" failing with no thread activity in ${rule.threadWindowDays}d — the reviewer may be down`
+      : isSast(c.name)
+        ? // a scanner's verdict lives in the check output/dashboard, not
+          // review threads — thread silence proves nothing; the alert
+          // must name the failure, not guess at a dead reviewer
+          `advisory check "${c.name}" failing — scanner verdicts live in the check output, not threads; read the check before classifying`
+        : `advisory check "${c.name}" failing with no thread activity in ${rule.threadWindowDays}d — the reviewer may be down`
   );
   return false;
 }
@@ -536,6 +542,24 @@ async function fetchState(
     : verdict;
   const humanApproval = approvalProbe?.approved;
   const humanApprovalReason = approvalProbe?.reason;
+  // the veto enumeration is lazy the same way — only a standing
+  // CHANGES_REQUESTED pays the reviews+threads read; every other
+  // decision and every host without the probe leaves it undefined. A
+  // failed probe degrades to undefined like reviewedShas: the gate
+  // still blocks on reviewDecision itself, only the dismiss detail is
+  // lost (act dismiss re-probes directly and reports the real error).
+  // try/catch, not .catch-on-promise: the facade contract types the
+  // probe Promise-returning but a non-async impl can throw BEFORE its
+  // promise exists — a sync throw would escape the whole fetch (the
+  // orSync .then rule, applied to a probe with no sync twin)
+  let vetoReviews: VetoReview[] | undefined;
+  if (reviewDecision === 'CHANGES_REQUESTED' && rev.vetoReviews !== undefined) {
+    try {
+      vetoReviews = await rev.vetoReviews(target);
+    } catch {
+      vetoReviews = undefined;
+    }
+  }
   // the allowlist the verdict was probed under — cached entries must
   // not serve a caller trusting a different set (usable() compares)
   const humanApprovalApprovers = requireApproval ? [...(opts?.approvers ?? [])] : undefined;
@@ -598,6 +622,7 @@ async function fetchState(
     docsOnly: isDocsOnly,
     alerts,
     reviewDecision,
+    vetoReviews,
     mergedBy: meta.mergedBy,
     humanApproval,
     humanApprovalReason,

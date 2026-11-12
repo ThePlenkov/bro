@@ -8,5 +8,5 @@ description: "Post a request to a repo or peer — delivers into same-machine ch
 | | |
 | --- | --- |
 | group | `mesh` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 

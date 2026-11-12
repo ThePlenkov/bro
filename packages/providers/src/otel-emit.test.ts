@@ -123,6 +123,113 @@ describe('otel emit transport', () => {
     );
   });
 
+  test('resource carries the spawn identity dims (spec bro-xgejl.1)', async () => {
+    // every emitted span/log inherits these — the fleet-worker trace
+    // resolves session/agent/bead/provider/model/worktree/branch/repo
+    // from resource attributes alone
+    const saved: Record<string, string | undefined> = {};
+    const dims: Record<string, string> = {
+      BRO_SESSION_ID: 'sess-test-1',
+      BRO_AGENT_ID: 'agent-test-1',
+      BRO_BEAD_ID: 'bro-test.1',
+      BRO_AGENT_PROVIDER: 'devin',
+      BRO_AGENT_MODEL: 'swe-2',
+      BRO_WORKTREE: '/wt/test',
+      BRO_BRANCH: 'work/test',
+      BRO_REPO: '/repo/main',
+    };
+    for (const [k, v] of Object.entries(dims)) {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    }
+    try {
+      otelSpan('emit.test.identity').end();
+      await until(
+        () => hits.some(h => h.path === '/v1/traces' && h.body.includes('emit.test.identity')),
+        'identity span on the wire'
+      );
+      const hit = hits.find(h => h.path === '/v1/traces' && h.body.includes('emit.test.identity'))!;
+      const body = JSON.parse(hit.body) as {
+        resourceSpans: {
+          resource: { attributes: { key: string; value: Record<string, unknown> }[] };
+        }[];
+      };
+      const attrs = new Map(
+        body.resourceSpans[0]!.resource.attributes.map(a => [a.key, Object.values(a.value)[0]])
+      );
+      assert.equal(attrs.get('bro.session.id'), 'sess-test-1');
+      assert.equal(attrs.get('bro.agent.id'), 'agent-test-1');
+      assert.equal(attrs.get('bro.bead.id'), 'bro-test.1');
+      assert.equal(attrs.get('bro.agent.provider'), 'devin');
+      assert.equal(attrs.get('bro.agent.model'), 'swe-2');
+      assert.equal(attrs.get('bro.worktree'), '/wt/test');
+      assert.equal(attrs.get('bro.branch'), 'work/test');
+      assert.equal(attrs.get('bro.repo'), '/repo/main');
+      assert.equal(attrs.get('service.instance.id'), String(process.pid));
+      assert.equal(typeof attrs.get('bro.cwd'), 'string');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  test('unset identity dims are absent — never empty strings', async () => {
+    const saved: Record<string, string | undefined> = {};
+    for (const k of [
+      'BRO_SESSION_ID',
+      'BRO_AGENT_ID',
+      'BRO_BEAD_ID',
+      'BRO_AGENT_PROVIDER',
+      'BRO_AGENT_MODEL',
+      'BRO_WORKTREE',
+      'BRO_BRANCH',
+      'BRO_REPO',
+      'BRO_BEAD',
+      'BRO_PROVIDER',
+      'BRO_MODEL',
+    ]) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    try {
+      otelSpan('emit.test.noidentity').end();
+      await until(
+        () => hits.some(h => h.path === '/v1/traces' && h.body.includes('emit.test.noidentity')),
+        'bare span on the wire'
+      );
+      const hit = hits.find(
+        h => h.path === '/v1/traces' && h.body.includes('emit.test.noidentity')
+      )!;
+      const body = JSON.parse(hit.body) as {
+        resourceSpans: { resource: { attributes: { key: string }[] } }[];
+      };
+      const keys = body.resourceSpans[0]!.resource.attributes.map(a => a.key);
+      for (const k of [
+        'bro.session.id',
+        'bro.agent.id',
+        'bro.bead.id',
+        'bro.agent.provider',
+        'bro.agent.model',
+        'bro.worktree',
+        'bro.branch',
+        'bro.repo',
+      ]) {
+        assert.ok(!keys.includes(k), `${k} emitted with no env source`);
+      }
+      // service identity still lands — the process itself is known
+      assert.ok(keys.includes('service.name'));
+      assert.ok(keys.includes('service.instance.id'));
+      assert.ok(keys.includes('bro.cwd'));
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   test('BRO_TELEMETRY=0 emits nothing and spawns nothing', async () => {
     const n0 = hits.length;
     const saved = process.env.BRO_TELEMETRY;

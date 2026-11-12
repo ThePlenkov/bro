@@ -134,3 +134,98 @@ test('a written table reads back from the disk', () => {
   assert.equal(table.routes.length, 1);
   assert.equal(table.routes[0]?.name, 'edit');
 });
+
+test('match.features parses scalars and lists into the features namespace', () => {
+  const table = routeTable({
+    ...VALID,
+    routes: {
+      edit: {
+        match: { features: { mode: 'coding', tier: ['low', 'mid'], needs_ui: true, effort: 2 } },
+        chain: ['p'],
+      },
+    },
+  });
+  assert.deepEqual(table.routes[0]?.match.features, {
+    mode: 'coding',
+    tier: ['low', 'mid'],
+    needs_ui: true,
+    effort: 2,
+  });
+});
+
+test('a match.features value that is not a scalar or list is an error', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { match: { features: { mode: { nested: 1 } } }, chain: ['p'] } },
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0]!, /routes\.edit\.match\.features\.mode/);
+});
+
+test('an empty match.features list is an error', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { match: { features: { mode: [] } }, chain: ['p'] } },
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0]!, /routes\.edit\.match\.features\.mode/);
+});
+
+test('match.labels/paths/repo parse into the carried-field pins', () => {
+  const table = routeTable({
+    ...VALID,
+    routes: {
+      edit: {
+        match: {
+          labels: ['bug', 'ui'],
+          paths: ['packages/cli/**', 'web/**'],
+          repo: 'ThePlenkov/bro',
+        },
+        chain: ['p'],
+      },
+    },
+  });
+  assert.deepEqual(table.routes[0]?.match.labels, ['bug', 'ui']);
+  assert.deepEqual(table.routes[0]?.match.paths, ['packages/cli/**', 'web/**']);
+  assert.equal(table.routes[0]?.match.repo, 'ThePlenkov/bro');
+});
+
+test('a non-string labels/paths entry or non-string repo is an error', () => {
+  const badLabels = problems({
+    ...VALID,
+    routes: { edit: { match: { labels: ['bug', 7] }, chain: ['p'] } },
+  });
+  assert.ok(badLabels.some(p => /routes\.edit\.match\.labels/.test(p)));
+  const badPaths = problems({
+    ...VALID,
+    routes: { edit: { match: { paths: 'web/**' }, chain: ['p'] } },
+  });
+  assert.ok(badPaths.some(p => /routes\.edit\.match\.paths/.test(p)));
+  const badRepo = problems({
+    ...VALID,
+    routes: { edit: { match: { repo: 42 }, chain: ['p'] } },
+  });
+  assert.ok(badRepo.some(p => /routes\.edit\.match\.repo/.test(p)));
+});
+
+test('an empty labels/paths list pins nothing — an error, write no key', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { match: { labels: [] }, chain: ['p'] } },
+  });
+  assert.ok(found.some(p => /routes\.edit\.match\.labels/.test(p)));
+});
+
+test('a paths glob that is not repo-relative is an error', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { match: { paths: ['/packages/cli/**', 'web/**'] }, chain: ['p'] } },
+  });
+  assert.ok(found.some(p => /routes\.edit\.match\.paths/.test(p)));
+  // '..' escapes reject too
+  const escape = problems({
+    ...VALID,
+    routes: { edit: { match: { paths: ['../outside/**'] }, chain: ['p'] } },
+  });
+  assert.ok(escape.some(p => /routes\.edit\.match\.paths/.test(p)));
+});

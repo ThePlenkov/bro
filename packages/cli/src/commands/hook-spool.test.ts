@@ -8,6 +8,7 @@ import {
   readHookSpool,
   renderHookSpoolStatus,
   rotateHookSpool,
+  spoolRotationPending,
 } from './hook-spool.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'bro-hook-spool-test-'));
@@ -59,6 +60,22 @@ test('rotation replaces .1 after the spool grows past 1 MiB', () => {
   assert.equal(readFileSync(`${path}.1`, 'utf8'), body);
 });
 
+test('spoolRotationPending mirrors the rotator bound — over 1 MiB only', () => {
+  const path = spoolPath();
+  const env = { BRO_HOOK_SPOOL: path };
+  assert.equal(spoolRotationPending(env), false, 'missing spool is not pending');
+
+  writeFileSync(path, 'small');
+  assert.equal(spoolRotationPending(env), false);
+
+  writeFileSync(path, 'x'.repeat(1024 * 1024 + 1));
+  assert.equal(spoolRotationPending(env), true);
+
+  assert.equal(spoolRotationPending({ BRO_HOOK_SPOOL: '0' }), false, 'disabled resolves null');
+});
+
+const EMPTY_OUTCOMES = { ok: 0, nonzero: 0, watchdog: 0, 'no-cli': 0, fastpath: 0, killed: 0 };
+
 test('the reader merges a start in .1 with its end in the current spool', () => {
   const path = spoolPath();
   writeFileSync(`${path}.1`, `${start({ ts: 100, id: 'shared' })}\n`);
@@ -71,7 +88,7 @@ test('the reader merges a start in .1 with its end in the current spool', () => 
       count: 1,
       p50: 3,
       p95: 3,
-      outcomes: { ok: 1, nonzero: 0, watchdog: 0, 'no-cli': 0 },
+      outcomes: { ...EMPTY_OUTCOMES, ok: 1 },
       killed: 0,
     },
   ]);
@@ -159,7 +176,7 @@ test('status JSON is an array of host/event rows and no-cli is counted', () => {
       count: 1,
       p50: 2,
       p95: 2,
-      outcomes: { ok: 1, nonzero: 0, watchdog: 0, 'no-cli': 0 },
+      outcomes: { ...EMPTY_OUTCOMES, ok: 1 },
       killed: 0,
     },
     {
@@ -168,10 +185,71 @@ test('status JSON is an array of host/event rows and no-cli is counted', () => {
       count: 1,
       p50: null,
       p95: null,
-      outcomes: { ok: 0, nonzero: 0, watchdog: 0, 'no-cli': 1 },
+      outcomes: { ...EMPTY_OUTCOMES, 'no-cli': 1 },
       killed: 0,
     },
   ]);
+});
+
+// v2 rows carry sid/pid/ppid/agent/adapter/proot/launcher between host
+// and event — the reader only needs id/host/event/rc/outcome, so the
+// enriched fields are skipped by position, never parsed
+function v2Start({ ts, id, host = 'cursor', event = 'post-tool', cwd = '/repo' }: StartFixture) {
+  return `v2\t${ts}\tstart\t${id}\t${host}\tsid-1\t${event}\t123\t1\tagent-1\t0.3.0\t/plugin\ttmux\t${cwd}`;
+}
+
+function v2End({
+  ts,
+  id,
+  outcome = 'ok',
+  rc = 0,
+  host = 'cursor',
+  event = 'post-tool',
+  cwd = '/repo',
+}: EndFixture) {
+  return `v2\t${ts}\tend\t${id}\t${host}\tsid-1\t${event}\t123\t1\tagent-1\t0.3.0\t/plugin\ttmux\t${rc}\t${outcome}\t${cwd}`;
+}
+
+test('v2 rows aggregate alongside v1 — mixed spool stays one table', () => {
+  const path = spoolPath();
+  writeFileSync(
+    path,
+    [
+      start({ ts: 100, id: 'v1-ok' }),
+      end({ ts: 102, id: 'v1-ok' }),
+      v2Start({ ts: 100, id: 'v2-ok' }),
+      v2End({ ts: 105, id: 'v2-ok' }),
+      '',
+    ].join('\n')
+  );
+
+  const rows = readHookSpool(path, { sinceMs: 0, nowMs: 200_000 });
+  assert.equal(rows.length, 1);
+  assert.equal(rows.at(0)?.count, 2);
+  assert.equal(rows.at(0)?.outcomes.ok, 2);
+});
+
+test('v2 fastpath ends count in their own bucket; canonical aliases fold', () => {
+  const path = spoolPath();
+  writeFileSync(
+    path,
+    [
+      v2Start({ ts: 100, id: 'fp', event: 'post-tool' }),
+      v2End({ ts: 100, id: 'fp', event: 'post-tool', outcome: 'fastpath' }),
+      v2End({ ts: 101, id: 'to', event: 'stop', outcome: 'timeout', host: 'devin' }),
+      v2End({ ts: 102, id: 'err', event: 'stop', outcome: 'error', host: 'devin' }),
+      v2End({ ts: 103, id: 'kil', event: 'stop', outcome: 'killed', host: 'devin' }),
+      '',
+    ].join('\n')
+  );
+
+  const rows = readHookSpool(path, { sinceMs: 0, nowMs: 200_000 });
+  const cursor = rows.find(r => r.host === 'cursor');
+  const devin = rows.find(r => r.host === 'devin');
+  assert.equal(cursor?.outcomes.fastpath, 1);
+  assert.equal(devin?.outcomes.watchdog, 1); // timeout → watchdog
+  assert.equal(devin?.outcomes.nonzero, 1); // error → nonzero
+  assert.equal(devin?.outcomes.killed, 1);
 });
 
 test('missing or disabled spool reports no recorded runs', () => {

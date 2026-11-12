@@ -14,11 +14,15 @@
  * Lives in its own leaf module for the same reason `watchConnector`
  * lives in watch-pulse.ts: plugins.ts registers connectors at module
  * eval time, so a connector can never sit inside the plugins↔commands
- * import cycle — its const would TDZ. This module's only static import
- * is type-level; the probe lazy-imports the supervisor machinery —
- * hook events only ever run after the graph settles.
+ * import cycle — its const would TDZ. This module's only static value
+ * import is the probe bound constant; the probe lazy-imports the
+ * supervisor machinery — hook events only ever run after the graph
+ * settles.
  */
-import type { Connector, ConnectorCtx } from '@broject/core'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, type Connector, type ConnectorCtx } from '@broject/core';
+import { readDriveMarker } from './want-marker.ts';
+import { isOrchestratorSession } from './watch-pulse.ts';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
 
 /** One checkpoint for every lifecycle event: decide, bring up, report.
  *  `supervisorUp` re-decides under `daemon.up.lock`, so a racing
@@ -28,22 +32,50 @@ import type { Connector, ConnectorCtx } from '@broject/core'
  *  could be uninstalled while the spawn queued — 'disarmed' instead of
  *  a supervisor nobody asked for. A failure anywhere stays silent: a
  *  probe must never break the hook event it rode in on. */
-async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
+async function supervisorCheckpoint(
+  dir: string,
+  where: string,
+  sessionId?: string
+): Promise<string[]> {
   try {
-    const { driveRearm, supervisorUp } = await import('./daemon.ts')
-    const r = driveRearm(dir)
-    if (r.kind !== 'rearm') {
-      return []
+    // orchestrator gate first — workers never rearm, and env-checking
+    // before the marker read keeps their checkpoint at zero git cost
+    // (driveRearm re-checks it; this only preserves the order it had
+    // when the whole decision lived inside daemon.ts)
+    if (!isOrchestratorSession()) {
+      return [];
     }
-    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true })
+    // quiescence gate — an absent want-marker makes the rearm decision
+    // definitionally quiet (`driveRearm` returns 'quiet' for marker
+    // null), so the supervisor machinery — daemon.ts, and through it the
+    // command registry — never loads on an unarmed repo's hook events
+    // (specs/bro-36sx7.7.md). Armed repos pay the import once, as before.
+    // The probe is bounded HERE only: this read is the hook path's git
+    // budget; the marker reads downstream (driveRearm, supervisorUp's
+    // requireMarker) hit the warm gitCommonDir cache this probe fills,
+    // while operator paths keep the unbounded default (want-marker.ts).
+    if (readDriveMarker(dir, GIT_SYNC_PROBE_TIMEOUT_MS) === null) {
+      return [];
+    }
+    const { driveRearm, supervisorUp } = await import('./daemon.ts');
+    const r = driveRearm(dir);
+    if (r.kind !== 'rearm') {
+      return [];
+    }
+    // role gate (bro-izpyk.3) — the exclusive orchestrator claim decides
+    // who may resurrect the supervisor; unclaimed stays fail-open
+    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+      return [];
+    }
+    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true });
     return up.kind === 'spawned'
       ? [
           `drive supervisor rearmed on ${where} — spawned ` +
             `\`bro daemon run --every ${r.everySec}\` (pid ${up.pid})`,
         ]
-      : []
+      : [];
   } catch {
-    return []
+    return [];
   }
 }
 
@@ -51,10 +83,17 @@ export const driveConnector: Connector = {
   name: 'drive',
   hooks: () => ({
     sessionStart(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'session start')
+      return supervisorCheckpoint(ctx.dir, 'session start', ctx.sessionId);
     },
     postTool(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'tool call')
+      return supervisorCheckpoint(ctx.dir, 'tool call', ctx.sessionId);
     },
   }),
-}
+  // mode gating (specs/bro-izpyk.2.md): supervisor rearm is a code+
+  // plane duty — orchestrate dispatches, code executes; passive modes
+  // never checkpoint.
+  activeIn: {
+    sessionStart: ['code', 'orchestrate'],
+    postTool: ['code', 'orchestrate'],
+  },
+};

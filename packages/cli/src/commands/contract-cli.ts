@@ -1,10 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { BroPlugin } from '@broject/core';
+import { planes, type BroPlugin } from '@broject/core';
 import { flag } from './args.ts';
 import { buildDump, type ContractDump } from './contract-dump.ts';
+import { planeParityProblems } from './contract-parity.ts';
 import { asDoc, asDump, parseBreaking, reconcileContract } from './contract-reconcile.ts';
 import { emptyDoc, type ContractDoc, type ContractProblem } from './contract-shared.ts';
+// registration side-effect — the catalog is empty without it; every
+// plane op must mirror a CLI contract entry (spec bro-xiq2m)
+import '../planes/index.ts';
 
 /** A JSON fixture/snapshot — read + parse, exit 2 on garbage. Typed at
  *  the parse site so no call-site cast can smuggle `undefined` through
@@ -111,6 +115,9 @@ function cmdGate(
     existsSync(breakingPath) ? readFileSync(breakingPath, 'utf8') : ''
   );
   const { doc, problems } = reconcileContract(committed, live, announced);
+  // transports are adapters over this contract — a plane op with no
+  // CLI twin forks the surface the same way an unannounced removal does
+  problems.push(...planeParityProblems(planes(process.cwd()), live));
   if (sub === 'gen') {
     cmdGen(contractPath, committedRaw, doc, problems);
     return;

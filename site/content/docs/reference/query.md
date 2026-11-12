@@ -8,7 +8,7 @@ description: "Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind =
 | | |
 | --- | --- |
 | group | `plan` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `query` |
 | config | `query` in bro.config |
 | plan | `kind = "query"` (v1) |

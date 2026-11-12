@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,14 +12,27 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js'
 const scratch = mkdtempSync(join(tmpdir(), 'brouter-route-surface-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
+/** An empty XDG config home — the operator's ~/.config/bro must never
+ *  leak a brouter.router into a suite that asserts the no-model path. */
+const xdg = join(scratch, 'xdg');
+mkdirSync(xdg, { recursive: true });
+/** A cwd outside every checkout — no bro.config.* project layer reaches
+ *  the spawned CLI either (bro.config.local.* is machine-local). */
+const plain = join(scratch, 'plain');
+mkdirSync(plain, { recursive: true });
+
 /** Run the CLI — a real process, so the exit codes are the real ones. The
  *  router's own state is isolated: the ledger is the operator's, not the
- *  test's. */
+ *  test's, and neither is the decision model's config. */
 function run(args: string[], cwd?: string): { code: number; stdout: string; stderr: string } {
   const proc = spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
-    ...(cwd === undefined ? {} : { cwd }),
-    env: { ...process.env, XDG_STATE_HOME: join(scratch, 'state') },
+    cwd: cwd ?? plain,
+    env: {
+      ...process.env,
+      XDG_STATE_HOME: join(scratch, 'state'),
+      XDG_CONFIG_HOME: xdg,
+    },
   });
   return { code: proc.status ?? -1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
 }
@@ -217,4 +230,171 @@ test('the explain surface speaks JSON when asked', t => {
   const explanation = JSON.parse(out.stdout);
   assert.equal(explanation.slices.model[0].value, 'devin-acp');
   assert.ok(explanation.slices.route.length > 0);
+});
+
+/** A formula file on disk — the operator's own md. */
+function formulaFile(body: string): string {
+  const file = join(scratch, `formula-${Math.random().toString(36).slice(2)}.md`);
+  writeFileSync(file, body);
+  return file;
+}
+
+const FORMULA_TABLE = [
+  'kind = "route"',
+  'version = 1',
+  '',
+  '[routes.pro]',
+  'match = { features = { tier = "pro" } }',
+  'chain = [{ provider = "devin-acp", model = "swe-2-max" }]',
+  '',
+  '[routes.fallback]',
+  'chain = [{ provider = "kilo-free" }]',
+  '',
+].join('\n');
+
+const FEATURES_FORMULA = [
+  '---',
+  'kind: formula',
+  'version: 1',
+  'shape: features',
+  'questions:',
+  '  tier: { type: choice, options: [free, pro] }',
+  '---',
+  'The rubric the decision model reads.',
+].join('\n');
+
+test('a declared formula routes — unresolved inputs keep the safe candidates', t => {
+  if (!existsSync(CLI)) return t.skip();
+  // no brouter.router configured — the formula's questions stay
+  // unanswered, the feature-pinned route cannot serve, the fallback wins
+  const out = run([
+    'route',
+    'ship',
+    'the',
+    'feature',
+    '--routes',
+    tableFile(FORMULA_TABLE),
+    '--formula',
+    formulaFile(FEATURES_FORMULA),
+  ]);
+  assert.equal(out.code, 0);
+  assert.match(out.stdout, /route: fallback/);
+  assert.match(out.stdout, /formula: features — no answers/);
+  assert.match(out.stdout, /note: no decision model/);
+});
+
+test('the explain surface prints the formula — answers, filters, scores', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const out = run([
+    'route',
+    'ship',
+    'the',
+    'feature',
+    '--routes',
+    tableFile(FORMULA_TABLE),
+    '--formula',
+    formulaFile(FEATURES_FORMULA),
+    '--explain=route',
+  ]);
+  assert.equal(out.code, 0);
+  assert.match(out.stdout, /^route$/m);
+  assert.match(out.stdout, /formula: features/);
+  assert.match(out.stdout, /formula note: no decision model/);
+  // the feature-pinned route reports why it did not serve
+  assert.match(out.stdout, /rejected: pro: the task carries no feature tier/);
+});
+
+test('an invalid formula fails loud — every problem named', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const bad = formulaFile(['---', 'kind: formula', 'shape: sideways', '---', 'rubric'].join('\n'));
+  const out = run(['route', 'ship', 'it', '--routes', tableFile(FORMULA_TABLE), '--formula', bad]);
+  assert.equal(out.code, 1);
+  assert.match(out.stderr, /must be one of features\|pick\|score/);
+});
+
+test('routes validate cross-checks the formula against the table', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const good = run([
+    'routes',
+    'validate',
+    '--routes',
+    tableFile(FORMULA_TABLE),
+    '--formula',
+    formulaFile(FEATURES_FORMULA),
+  ]);
+  assert.equal(good.code, 0);
+  assert.match(good.stdout, /the table is valid/);
+  assert.match(good.stdout, /formula "features" — 1 question\(s\), 0 filter\(s\)/);
+
+  // a match key the formula never declares is a named problem
+  const badTable = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.pro]',
+      'match = { features = { undeclared = "x" } }',
+      'chain = [{ provider = "devin-acp" }]',
+      '',
+    ].join('\n')
+  );
+  const bad = run([
+    'routes',
+    'validate',
+    '--routes',
+    badTable,
+    '--formula',
+    formulaFile(FEATURES_FORMULA),
+  ]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /names no question the formula declares/);
+});
+
+test('the route surface reads labels, paths, repo, and features (bro-0ykhg.2)', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const table = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.ui]',
+      'match = { labels = ["ui"], paths = ["web/**"] }',
+      'chain = [{ provider = "devin-acp", model = "swe-2-max" }]',
+      '',
+      '[routes.repo]',
+      'match = { repo = "ThePlenkov/bro" }',
+      'chain = [{ provider = "kilo-free" }]',
+      '',
+      '[routes.fallback]',
+      'chain = [{ provider = "omp" }]',
+      '',
+    ].join('\n')
+  );
+  // labels + a matching path land the ui route
+  const ui = run([
+    'route',
+    'ship',
+    'it',
+    '--routes',
+    table,
+    '--labels',
+    'ui,bug',
+    '--paths',
+    'web/app.tsx',
+  ]);
+  assert.equal(ui.code, 0);
+  assert.match(ui.stdout, /^route: ui$/m);
+  // the repo id alone lands the repo-pinned route
+  const repo = run(['route', 'ship', 'it', '--routes', table, '--repo', 'ThePlenkov/bro']);
+  assert.match(repo.stdout, /^route: repo$/m);
+  // a label without its path pin falls to the catch-all
+  const bare = run(['route', 'ship', 'it', '--routes', table, '--labels', 'ui']);
+  assert.match(bare.stdout, /^route: fallback$/m);
+  // a non-repo-relative path fails loud
+  const badPath = run(['route', 'ship', 'it', '--routes', table, '--paths', '../escape.ts']);
+  assert.equal(badPath.code, 1);
+  assert.match(badPath.stderr, /repo-relative/);
+  // malformed feature JSON fails loud
+  const badFeatures = run(['route', 'ship', 'it', '--routes', table, '--features', '{bad']);
+  assert.equal(badFeatures.code, 1);
 });

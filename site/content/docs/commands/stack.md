@@ -4,11 +4,6 @@ title: bro flow stack + bro work
 description: Stacked bead→worktree→PR chains, and the sibling worktrees they ride on.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 ## `bro flow stack`
 
 A named stack is an ordered bead → worktree → PR chain. Each member starts

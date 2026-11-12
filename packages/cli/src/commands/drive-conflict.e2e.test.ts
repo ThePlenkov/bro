@@ -49,7 +49,7 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
       writeHostState(f.hostState, { prs: conflicting });
 
       const first = verdict(f.run(['--once', '--json']));
-      assert.equal(first.verdict, 'spawned', first.detail);
+      assert.equal(first.verdict, 'spawned', String(first.detail));
       assert.match(first.detail ?? '', /rebase fx-/);
 
       // the fixer is detached — wait for its rebase event AND its exit
@@ -90,7 +90,7 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
       writeHostState(f.hostState, { prs: conflicting });
 
       const first = verdict(f.run(['--once', '--json']));
-      assert.equal(first.verdict, 'spawned', first.detail);
+      assert.equal(first.verdict, 'spawned', String(first.detail));
 
       // the base tip is in the repo now — fetched by the drive, not by luck
       assert.equal(git(['rev-parse', 'origin/main'], f.main).trim(), tip);
@@ -160,7 +160,7 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
         ],
       });
       const v = verdict(f.run(['--once', '--json']));
-      assert.equal(v.verdict, 'spawned', v.detail);
+      assert.equal(v.verdict, 'spawned', String(v.detail));
       assert.match(v.detail ?? '', /^fx-/);
       // the spawned prompt is the thread work order, not the rebase one
       const agentsDir = join(f.main, '.git', 'bro', 'agents');

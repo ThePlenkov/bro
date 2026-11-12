@@ -149,3 +149,38 @@ test('a walled head drops out — the lane lands on the next entry', async () =>
     'the dropped entry rides with the verdict'
   );
 });
+
+test('bead labels and the repo id reach match.labels/match.repo (bro-0ykhg.2)', async () => {
+  const table = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.uiwork]',
+      'match = { labels = ["ui"] }',
+      'chain = [{ provider = "devin-acp", model = "swe-2-max" }]',
+      '',
+      '[routes.thisrepo]',
+      'match = { repo = "ThePlenkov/bro" }',
+      'chain = [{ provider = "kilo-free" }]',
+      '',
+      '[routes.fallback]',
+      'chain = [{ provider = "omp" }]',
+      '',
+    ].join('\n')
+  );
+  // labels + repo both carried — uiwork pins one label AND outscores on fit
+  const routed = await routeTableLane({
+    table,
+    labels: ['ui', 'bug'],
+    repo: 'ThePlenkov/bro',
+  });
+  assert.equal(routed?.class, 'uiwork');
+  assert.equal(routed?.provider, 'devin-acp');
+  // repo alone lands the repo-pinned route over the catch-all
+  const byRepo = await routeTableLane({ table, repo: 'ThePlenkov/bro' });
+  assert.equal(byRepo?.class, 'thisrepo');
+  // a different repo satisfies no repo pin — catch-all stands
+  const elsewhere = await routeTableLane({ table, repo: 'other/repo' });
+  assert.equal(elsewhere?.class, 'fallback');
+});

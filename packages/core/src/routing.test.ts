@@ -214,6 +214,7 @@ describe('deriveProviderWalls', () => {
         cause: 'rate_limited',
         // no rateGate configured → spawnedAt + the 30m default cooldown
         until: '2026-01-02T00:20:00.000Z',
+        bound: true,
       },
       // the provider's mark is honored but ISO-normalized like every bound
       {
@@ -244,6 +245,7 @@ describe('deriveProviderWalls', () => {
         account: 'devin',
         cause: 'rate_limited',
         until: '2026-01-02T00:15:00.000Z',
+        bound: true,
       },
     ]);
   });
@@ -290,12 +292,14 @@ describe('deriveProviderWalls', () => {
         account: 'kilo',
         cause: 'rate_limited',
         until: '2026-01-02T00:20:00.000Z',
+        bound: true,
       },
       {
         provider: 'openrouter',
         account: 'openrouter',
         cause: 'rate_limited',
         until: '2026-01-02T01:00:00.000Z',
+        bound: true,
       },
     ]);
   });
@@ -346,6 +350,7 @@ describe('deriveProviderWalls', () => {
       account: provider,
       cause: 'rate_limited' as const,
       until: '2026-01-02T00:20:00.000Z',
+      bound: true as const,
     }));
     assert.deepEqual(w, expected);
   });
@@ -372,6 +377,7 @@ describe('deriveProviderWalls', () => {
         account: 'devin',
         cause: 'rate_limited',
         until: '2026-01-02T00:28:00.000Z', // observedAt + 30m
+        bound: true,
       },
     ]);
   });
@@ -440,6 +446,7 @@ describe('deriveProviderWalls', () => {
         account: 'kilo',
         cause: 'rate_limited',
         until: '2026-01-02T00:20:00.000Z',
+        bound: true,
       },
     ]);
   });

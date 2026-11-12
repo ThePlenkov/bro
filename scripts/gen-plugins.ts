@@ -253,8 +253,14 @@ function cursorManifest() {
 }
 
 /** ${CURSOR_PLUGIN_ROOT} is a bare token so Cursor expands it before the
- * shell runs. Quoted, so a path with spaces survives. Fallback is bro on
- * PATH. Always exit 0. */
+ * shell runs. Quoted, so a path with spaces survives. The command is the
+ * thin contract every client shares — one root var, one direct run.sh
+ * call, fail-fast: the launcher owns root resolution, the run_bounded
+ * watchdog, the mode fast-paths, and the no-CLI answers, so a
+ * manifest-level `bro hooks` fallback would only bypass all of it
+ * unbounded. permission keeps its no-opinion — Cursor reads empty
+ * stdout as a deny, so a run.sh that cannot exec still answers `ask`.
+ * Always exit 0. */
 function cursorHookCommand(event) {
   // events are code-owned literals today; keep that a checked invariant —
   // the string lands in a shell command, so a future caller passing
@@ -262,9 +268,10 @@ function cursorHookCommand(event) {
   if (!/^[a-z-]+$/.test(event)) {
     throw new Error(`invalid hook event name: ${event}`);
   }
-  const noOpinion =
-    event === 'permission' ? String.raw`else printf '%s\n' '{"permission":"ask"}'; ` : '';
-  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1; then bro hooks ${event} || true; ${noOpinion}fi; exit 0`;
+  if (event === 'permission') {
+    return `"\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" permission || printf '%s\\n' '{"permission":"ask"}'`;
+  }
+  return `"\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true`;
 }
 
 function cursorHook(event, timeout, extra = {}) {
@@ -292,50 +299,31 @@ function cursorHooksJson() {
 }
 
 /** Devin's hook manifest is generated, not hand-written: the event map,
- * matchers, timeouts, and the bounded fallback live here so check:plugins
- * detects any drift instead of linting a JSON file. The command calls
- * `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` directly — the shared launcher owns
- * root resolution AND the watchdog. The fallback (P unset, e.g. an older
- * client that never exported the root var) is a `bro hooks` bounded by a
- * sleep/kill watcher pair — portable where GNU `timeout` is absent
- * (stock macOS), never able to outlive the hook budget. */
+ * matchers, timeouts, and the command shape live here so check:plugins
+ * detects any drift instead of linting a JSON file. Every command is the
+ * thin contract the Claude/Codex manifests already ship — one client
+ * var, one direct `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` call, fail-fast.
+ * The launcher owns plugin-root resolution, the run_bounded watchdog,
+ * the Tier-0 mode fast-paths, and every no-CLI answer; a manifest-level
+ * `bro hooks` fallback would bypass all of it — unbounded where no
+ * watcher wraps it, marginally inside the hook budget where one does —
+ * so there is none. */
 function devinHooksJson() {
-  // fallback anatomy (all three review findings):
-  //  1. `cmd &` under POSIX without job control reads stdin from /dev/null —
-  //     `bro hooks` takes its session payload from fd 0, so the stop gate
-  //     would go blind; fd3 preserves the payload into the async child.
-  //  2. the watcher polls kill -0 once a second and exits on its own the
-  //     tick after bro dies — `wait $w` reaps it with no orphan sleep; fds
-  //     off the hook pipe so a host reading to EOF doesn't eat the budget.
-  //  3. TERM at 8s, `pkill -TERM -P` sweeps bro's direct probe children
-  //     (bd/git) while still attached, KILL at 9s — under the 10s minimum
-  //     hook timeout; pkill absent degrades to the c-only kill.
-  const cmd = event =>
-    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
-    `if [ -x "$P/hooks/run.sh" ]; then "$P/hooks/run.sh" ${event} || true; ` +
-    `elif command -v bro >/dev/null 2>&1; then ` +
-    `( exec 3<&0; bro hooks ${event} <&3 3<&- & c=$!; ` +
-    `( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; ` +
-    `kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
-    `wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; exit 0`;
-  // post-tool is fire-and-forget telemetry — it must never block the
-  // agent's next turn, so neither path may keep the foreground waiting:
-  // stdin is captured to a tempfile first (a detached child cannot read
-  // the parent's pipe once the shell exits), then the hook runs in a
-  // detached subshell. A mktemp or cat failure drops the event: stdin
-  // has already been consumed by cat, so no fallback can replay the
-  // payload. The subshell is redirected off the hook's pipes so a host
-  // reading the hook pipe to EOF is not blocked by the detached work.
+  const cmd = event => `"\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} || true`;
+  // post-tool stays detached (#801): fire-and-forget telemetry must never
+  // block the agent's next turn — stdin is captured to a tempfile first
+  // (a detached child cannot read the parent's pipe once the shell
+  // exits), then run.sh runs in a subshell redirected off the hook's
+  // pipes so a host reading to EOF is not blocked by the detached work.
+  // A mktemp failure drops the event: with no tempfile there is nothing
+  // to detach on, and a synchronous run.sh would block the agent for the
+  // launcher's remaining watchdog budget — the exact stall this contract
+  // exists to prevent (codeant on PR #1025). A cat failure drops it too:
+  // stdin was already consumed, so no fallback can replay the payload.
   const cmdDetached = event =>
-    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
-    `if [ -x "$P/hooks/run.sh" ]; then ` +
     `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
-    `("$P/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
-    `else "$P/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; ` +
-    `elif command -v bro >/dev/null 2>&1; then ` +
-    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
-    `( bro hooks ${event} < "$_f" >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null; rm -f "$_f" ) </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
-    `else ( exec 3<&0; bro hooks ${event} <&3 3<&- >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; fi; exit 0`;
+    `("\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & ` +
+    `else rm -f "$_f"; fi; fi; exit 0`;
   const hook = (event, timeout, matcher = '', command = cmd) => ({
     matcher,
     hooks: [{ type: 'command', command: command(event), timeout }],
@@ -354,48 +342,56 @@ function devinHooksJson() {
 function opencodeReadme() {
   return `# bro — opencode plugin
 
-Agent's sidekick for opencode: the same lifecycle mechanics bro gives
-other clients, over opencode's native JS/TS plugin bus. \`bro.ts\` is a
-verbatim copy of \`packages/cli/src/opencode.ts\` — a self-contained
-module (node builtins only) generated by \`npm run gen:plugins\`;
-\`check:plugins\` fails when it drifts. It serves opencode V1
-(\`server\` → the classic hook map) and V2 (\`id\` + \`setup(ctx)\` —
-context/compaction/prompt session hooks, tool guard + result
-enrichment, permission evaluate, shell env, the bro tool namespace
-(\`bro_status\`, \`bro_convoy_status\`, \`bro_act_status\`, \`bro_fleet\`,
-\`bro_next\`, \`bro_drill_status\`, \`bro_review_threads\`), the \`/bro\`
-command, and the public event stream's stop gate. Enhanced compaction
-hooks inject bro context during compaction and log decisions; server
-logging surfaces important events.
+Agent's sidekick for opencode, over opencode's native V2 plugin bus
+(\`https://opencode.ai/docs/build/plugins\`). This directory is a **catalog
+plugin** — opencode loads a plugin as a DIRECTORY, and it raises the TUI
+half only for a package that also has a server, so the three modules here
+belong together:
 
-\`cli.ts\` is the V1 TUI half — a verbatim copy of
-\`packages/cli/src/opencode-tui.ts\` (\`./tui\` in the npm package).
-It adds a \`bro.status\` palette/slash command that runs \`bro status\`
-and shows the board as a toast, plus richer toasts on
-\`permission.asked\` and \`session.error\`.
+\`index.ts\` — the server half, a verbatim copy of
+\`packages/agent-plugins/opencode/src/opencode.ts\`. A \`Plugin.define({ id,
+setup })\` default export: the context/compaction/prompt session hooks, the
+tool guard + result enrichment, the permission evaluate hook, the shell env,
+the bro tool namespace (\`bro_status\`, \`bro_convoy_status\`, \`bro_act_status\`,
+\`bro_fleet\`, \`bro_next\`, \`bro_drill_status\`, \`bro_review_threads\`), the
+\`/bro\` and \`/act\` commands, bro's skills registered into opencode's skill
+registry, and the RPC registration (the \`bro\` contract: the \`board\`,
+\`notify\` and \`prompt\` methods plus the \`changed\` and \`attention\` events —
+the channel bro pushes state INTO opencode through).
 
-\`tui.tsx\` is the V2 TUI half — a verbatim copy of
-\`packages/cli/src/opencode-tui-v2.tsx\`, a SolidJS/OpenTUI module that
-opencode v2 discovers as a plugin *directory*: installed as
-\`plugins/bro/tui.tsx\` (v2 ignores the loose \`bro-cli.ts\` file — the
-V2 plugin carries the same \`/bro\` command and toasts). On top of that
-it claims the \`sidebar.content\` slot: a collapsible \`bro\` board —
-in-work beads, the backlog top, live fleet agents, watch heartbeat —
-fed by a 15s \`bro status --json\` poll plus session-event refreshes.
-Outside a bro rig the widget renders nothing.
+Skills: the plugin registers the skills it finds beside itself (the checkout
+layout). Installed as a directory, bro's skills reach opencode through
+opencode's own plane — \`~/.agents/skills/\`, where \`bro skills sync\` puts
+them — so the two paths never double-register.
+
+\`tui.tsx\` — the terminal half, a verbatim copy of
+\`packages/agent-plugins/opencode/src/tui.tsx\`. A SolidJS/OpenTUI module: the
+\`sidebar.content\` slot carries a collapsible \`bro\` board (in-work beads, the
+ready set, live fleet agents, the watch heartbeat), the \`session.panel\` slot
+the same board full width, \`bro.status\`/\`bro.board\` keymap commands, and the
+\`attention\` event renders a toast with a sound. The board arrives over RPC —
+the TUI never spawns bro itself, so the widget and the model tools can never
+disagree.
+
+\`rpc.ts\` — the typed contract both halves share, a verbatim copy of
+\`packages/agent-plugins/opencode/src/rpc.ts\`. The server registers it, the
+TUI calls it (\`context.client.rpc(Bro)\`), and any client can reach it over
+HTTP: \`POST /api/rpc/bro/<method>\` with \`{"input": {...}}\`.
+
+All three are generated by \`npm run gen:plugins\`; \`check:plugins\` fails when
+they drift.
 
 ## Install
 
 \`\`\`sh
 bro plugins install opencode            # both scopes
-bro plugins install opencode --global   # ~/.config/opencode/plugins/{bro.ts,bro-cli.ts,bro/tui.tsx}
-bro plugins install opencode --local    # <repo>/.opencode/plugins/{bro.ts,bro-cli.ts,bro/tui.tsx}
+bro plugins install opencode --global   # ~/.config/opencode/plugins/bro/
+bro plugins install opencode --local    # <repo>/.opencode/plugins/bro/
 \`\`\`
 
-Repo-distributed: this directory inside a bro clone is itself the
-adapter — point opencode at it, or let \`bro plugins install --local\`
-copy \`bro.ts\`, \`cli.ts\` (as \`bro-cli.ts\`) and \`tui.tsx\` (into
-\`plugins/bro/\`) into the project's \`.opencode/plugins/\`.
+Repo-distributed: this directory inside a bro clone is itself the adapter —
+point opencode at it, or let \`bro plugins install --local\` copy the three
+modules into the project's \`.opencode/plugins/bro/\`.
 
 The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
@@ -411,7 +407,7 @@ function kiloReadme() {
 Agent's sidekick for kilo: bro subcommands as a tool, session-start
 rehydration, a stop-gate warn on \`session.idle\`, and auto-approve for
 bro/bd shell calls — over kilo's native plugin bus. \`bro.ts\` is a
-verbatim copy of \`packages/cli/src/kilo.ts\`, generated by
+verbatim copy of \`packages/agent-plugins/kilo/src/kilo.ts\`, generated by
 \`npm run gen:plugins\`; \`check:plugins\` fails when it drifts.
 
 ## Install
@@ -442,7 +438,7 @@ function piReadme() {
 Agent's sidekick for pi: the live project board on pi's TUI plus the
 same lifecycle mechanics the shell adapters carry, over pi's in-process
 extension API. \`bro.ts\` is generated from
-\`packages/cli/src/adapter/pi.ts\` — the shared adapter core folded into
+\`packages/agent-plugins/*/src/pi.ts\` — the shared adapter core folded into
 one self-contained module (node builtins only) by
 \`npm run gen:plugins\`; \`check:plugins\` fails when it drifts.
 
@@ -523,7 +519,7 @@ function ompReadme() {
 Agent's sidekick for omp: the live project board on omp's TUI plus the
 same lifecycle mechanics the shell adapters carry, over omp's in-process
 extension API. \`bro.ts\` is generated from
-\`packages/cli/src/adapter/omp.ts\` — the shared adapter core folded into
+\`packages/agent-plugins/*/src/omp.ts\` — the shared adapter core folded into
 one self-contained module (node builtins only) by
 \`npm run gen:plugins\`; \`check:plugins\` fails when it drifts.
 
@@ -647,32 +643,35 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
 // content, or null for a hand-written file that must already exist
 const ADAPTERS = {
   'plugins/opencode/bro': {
-    'bro.ts': 'packages/cli/src/opencode.ts',
-    'cli.ts': 'packages/cli/src/opencode-tui.ts',
-    'tui.tsx': 'packages/cli/src/opencode-tui-v2.tsx',
+    // the v2 catalog plugin — one directory, three modules. opencode
+    // loads a plugin as a directory and raises the TUI half only for a
+    // package that also has a server, so they belong together.
+    'index.ts': 'packages/agent-plugins/opencode/src/opencode.ts',
+    'tui.tsx': 'packages/agent-plugins/opencode/src/tui.tsx',
+    'rpc.ts': 'packages/agent-plugins/opencode/src/rpc.ts',
     'README.md': [opencodeReadme()],
   },
   'plugins/kilo/bro': {
-    'bro.ts': 'packages/cli/src/kilo.ts',
+    'bro.ts': 'packages/agent-plugins/kilo/src/kilo.ts',
     'README.md': [kiloReadme()],
   },
   'plugins/pi/bro': {
     // BUNDLED, not copied: the adapter imports the shared core
-    // (packages/cli/src/adapter/), and the shipped file has to stand
+    // (packages/agent-plugins/*/src/), and the shipped file has to stand
     // alone — jiti loads it with no node_modules to resolve against.
-    'bro.ts': [await bundleAdapter('packages/cli/src/adapter/pi.ts')],
+    'bro.ts': [await bundleAdapter('packages/agent-plugins/pi/src/pi.ts')],
     'README.md': [piReadme()],
   },
   'plugins/omp/bro': {
     // BUNDLED, not copied: the adapter imports the shared core
-    // (packages/cli/src/adapter/), and the shipped file has to stand
+    // (packages/agent-plugins/*/src/), and the shipped file has to stand
     // alone — the host loads it with no node_modules to resolve
     // against. The bundle folds the core in; see scripts/bundle-adapter.ts.
-    'bro.ts': [await bundleAdapter('packages/cli/src/adapter/omp.ts')],
-    'modes.ts': 'packages/cli/src/adapter/omp-modes.ts',
+    'bro.ts': [await bundleAdapter('packages/agent-plugins/omp/src/omp.ts')],
+    'modes.ts': 'packages/agent-plugins/omp/src/omp-modes.ts',
     'package.json': [ompManifest()],
-    'WATCHDOG.md': 'packages/cli/src/adapter/omp-assets/WATCHDOG.md',
-    'hooks/pre/permission.ts': 'packages/cli/src/adapter/omp-hook.ts',
+    'WATCHDOG.md': 'packages/agent-plugins/omp/src/omp-assets/WATCHDOG.md',
+    'hooks/pre/permission.ts': 'packages/agent-plugins/omp/src/omp-hook.ts',
     'README.md': [ompReadme()],
   },
   'plugins/devin/bro': {
@@ -705,12 +704,10 @@ const VERSIONED_SOURCES = [
   'hooks/run.sh',
   'plugins/codex/bro/hooks/hooks.json',
   // the materialized opencode modules carry the npx fallback pin
-  'packages/cli/src/opencode.ts',
-  'packages/cli/src/opencode-tui.ts',
-  'packages/cli/src/opencode-tui-v2.tsx',
+  'packages/agent-plugins/opencode/src/opencode.ts',
   // the pi and omp extensions carry the same pin
-  'packages/cli/src/adapter/pi.ts',
-  'packages/cli/src/adapter/omp.ts',
+  'packages/agent-plugins/pi/src/pi.ts',
+  'packages/agent-plugins/omp/src/omp.ts',
 ];
 const PIN_RE = /@broject\/bro@[\w.:-]+/g;
 
@@ -929,11 +926,13 @@ if (!existsSync(join(ROOT, BRO_SKILL))) {
     'commands/bro.md',
     `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
   );
-  // opencode command dir (plural) — same body, opencode frontmatter.
-  emit(
-    '.opencode/commands/bro.md',
-    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
-  );
+  // opencode: /bro is handled by the plugin (TUI/V2 command). A file-based
+  // command here makes opencode expand/dump the template visibly — don't ship it.
+  const ocCmd = join(ROOT, '.opencode/commands/bro.md');
+  if (existsSync(ocCmd)) {
+    if (CHECK) drift.push('.opencode/commands/bro.md');
+    else rmSync(ocCmd, { force: true });
+  }
 }
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {

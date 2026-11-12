@@ -29,9 +29,13 @@ import { readFileSync } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
+  ActiveSession,
   AgentApp,
+  AgentCapabilities,
+  AuthMethod,
   ClientContext,
   ClientRequestHandler,
+  NewSessionResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionUpdate,
@@ -39,6 +43,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { pumpTurn } from './acp.ts';
 import { agentEventRecord } from './acp-events.ts';
+import { otelHeader, otelSpan } from './otel.ts';
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
@@ -65,16 +70,17 @@ export interface AcpWorkerSpec {
    *  read it (the BRO_AGENT_PROVIDER pin, when spawned managed). */
   provider?: string;
   /** Registry provenance callback — the driver reports the real
-   *  sessionId after session/new and the agent-REPORTED model after
+   *  sessionId after session open and the agent-REPORTED model after
    *  set_config_option: provenance says what ran, not what was asked. */
   record?: (patch: { acpSessionId?: string; model?: string }) => void;
-  /** Session-cleanup template run after the session ends —
-   *  `{sessionId}` substitutes the acp session id. ACP sessions land
-   *  in the agent CLI's history like any other; a worker session is
-   *  not the operator's personal history, so the provider may carry
-   *  e.g. `devin rm {sessionId} --force`. Advisory — a failed cleanup
-   *  logs, never changes the exit code. */
-  sessionRm?: string;
+  /** Resume target — the agent-CLI session a previous worker recorded
+   *  on this worktree (spec bro-5qsnr). The driver re-opens it via
+   *  session/load (or session/resume where that's what the agent
+   *  advertises) in the SAME cwd — sessions are cwd-keyed — and the
+   *  prompt lands as a follow-up turn on the coder's own context.
+   *  Every failure mode (no capability, gone session) falls back to
+   *  session/new: a cold fixer is the floor, never a spawn failure. */
+  resumeSessionId?: string;
   /** MCP servers to pass to session/new (opt-in per provider). */
   mcpServers?: unknown[];
   /** The in-process test seam — a fakeAcpAgent() app from
@@ -300,6 +306,75 @@ const UNADVERTISED_METHODS = [
   'mcp/message',
 ] as const;
 
+/** The SDK's attach is runtime-public but type-private — the only way
+ *  a loaded/resumed session gets the same update router + prompt pump
+ *  a session/new answer builds. */
+const attachSession = (ctx: ClientContext, response: NewSessionResponse): ActiveSession =>
+  (ctx as unknown as { attachSession(r: NewSessionResponse): ActiveSession }).attachSession(
+    response
+  );
+
+/** Session open (spec bro-5qsnr): a resume target becomes session/load
+ *  — or session/resume where that's what the agent advertises — in the
+ *  SAME cwd (sessions are cwd-keyed), and the prompt lands as a
+ *  follow-up turn on the coder's own context. The load response omits
+ *  `sessionId` (it IS the request's), so the attached
+ *  `NewSessionResponse` is fabricated around it. Every failure mode —
+ *  no advertised capability, a session the store no longer holds, an
+ *  old PR's id — ends in the session/new a non-resumed worker always
+ *  ran: a cold fixer is the floor, never a spawn failure. */
+async function openSession(
+  ctx: ClientContext,
+  spec: AcpWorkerSpec,
+  caps: AgentCapabilities | undefined,
+  authMethods: AuthMethod[],
+  mcpServers: unknown[],
+  log: (line: string) => void,
+  by: string
+): Promise<ActiveSession> {
+  const resumeId = spec.resumeSessionId;
+  if (resumeId !== undefined) {
+    const canLoad = caps?.loadSession === true;
+    const canResume = caps?.sessionCapabilities?.resume != null;
+    if (canLoad || canResume) {
+      try {
+        const res = canLoad
+          ? await ctx.request('session/load', {
+              sessionId: resumeId,
+              cwd: spec.cwd,
+              mcpServers: mcpServers as never,
+            })
+          : await ctx.request('session/resume', {
+              sessionId: resumeId,
+              cwd: spec.cwd,
+              mcpServers: mcpServers as never,
+            });
+        log(`resumes session ${resumeId}`);
+        return attachSession(ctx, {
+          sessionId: resumeId,
+          modes: res.modes,
+          configOptions: res.configOptions,
+        });
+      } catch (err) {
+        log(
+          `session ${resumeId} resume failed — ${errMsg(err)}; starting a fresh session (mcpServers forwarded)`
+        );
+      }
+    } else {
+      log(
+        `session ${resumeId} not resumable — no load/resume capability; starting a fresh session (mcpServers forwarded)`
+      );
+    }
+  }
+  return ctx
+    .buildSession({ cwd: spec.cwd, mcpServers: mcpServers as never })
+    .start()
+    .catch((err: unknown) => {
+      const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
+      throw new AcpWorkerError(`${by}: agent refused session${hint} — ${errMsg(err)}`);
+    });
+}
+
 /** Run one ACP worker to turn end. Returns the driver's exit code —
  *  0 on `end_turn`, non-zero on everything else. Never throws: the
  *  caller maps the code to the `.exit` file, and every failure mode
@@ -316,6 +391,22 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
   const log = spec.log ?? ((line: string) => console.log(line));
   const errOut = spec.err ?? ((text: string) => void process.stderr.write(text));
   const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`;
+
+  // acp.open/acp.turn/acp.session spans (spec bro-xgejl.1) — the fleet
+  // worker's trace leg: bro.cmd acp-worker → acp.open → acp.turn →
+  // acp.session → acp.tool*, all under the agent.spawn parent the
+  // spawn's TRACEPARENT env carried in. Ends are once-guarded — every
+  // failure path lands exactly one terminal status.
+  const openSpan = otelSpan('acp.open', { 'acp.by': by, 'acp.command': spec.command });
+  let openEnded = false;
+  const endOpen = (
+    more: Record<string, string | number | boolean> = {},
+    status: 'ok' | 'error' = 'ok'
+  ): void => {
+    if (openEnded) return;
+    openEnded = true;
+    openSpan.end(more, status);
+  };
 
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
@@ -375,15 +466,21 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
 
   const op = async (ctx: ClientContext): Promise<number> => {
     cx = ctx;
-    const init = await ctx.request('initialize', {
-      protocolVersion: PROTOCOL_VERSION,
-      clientInfo: { name: 'bro', version: '1' },
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-    });
+    const init = await ctx
+      .request('initialize', {
+        protocolVersion: PROTOCOL_VERSION,
+        clientInfo: { name: 'bro', version: '1' },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+      })
+      .catch((err: unknown) => {
+        endOpen({ error: errMsg(err) }, 'error');
+        throw err;
+      });
     if (init.protocolVersion !== PROTOCOL_VERSION) {
+      endOpen({ error: `protocol ${init.protocolVersion}` }, 'error');
       throw new AcpWorkerError(
         `${by}: agent negotiated protocol ${init.protocolVersion} — the driver speaks v${PROTOCOL_VERSION} only`
       );
@@ -393,17 +490,63 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     // its login methods — only an actual refusal at session/new names
     // auth as required
     const authMethods = init.authMethods ?? [];
-    const mcpServers = validatedMcpServers(
-      Array.isArray(spec.mcpServers) ? spec.mcpServers : undefined,
-      by
+    // open is established — its children (the agent child's hook
+    // descendants) parent under it via the TRACEPARENT pinned into the
+    // spawn env below. acp.session/acp.turn nest one level under open;
+    // session id lands on both once session/new answers (spec
+    // bro-xgejl.1)
+    endOpen({ 'acp.pid': child?.pid ?? 0 });
+    const turnSpan = otelSpan(
+      'acp.turn',
+      { 'acp.by': by, 'acp.requested_model': spec.model ?? '' },
+      { parent: openSpan.ctx }
     );
-    const session = await ctx
-      .buildSession({ cwd: spec.cwd, mcpServers: mcpServers as never })
-      .start()
-      .catch((err: unknown) => {
-        const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
-        throw new AcpWorkerError(`${by}: agent refused session${hint} — ${errMsg(err)}`);
-      });
+    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: turnSpan.ctx });
+    let sessEnded = false;
+    let turnEnded = false;
+    const endSess = (
+      more: Record<string, string | number | boolean> = {},
+      status: 'ok' | 'error' = 'ok'
+    ): void => {
+      if (sessEnded) return;
+      sessEnded = true;
+      sessSpan.end(more, status);
+    };
+    const endTurn = (
+      more: Record<string, string | number | boolean> = {},
+      status: 'ok' | 'error' = 'ok'
+    ): void => {
+      if (turnEnded) return;
+      turnEnded = true;
+      turnSpan.end(more, status);
+    };
+    let reportedModel: string | undefined;
+    let mcpServers: unknown[];
+    try {
+      mcpServers = validatedMcpServers(
+        Array.isArray(spec.mcpServers) ? spec.mcpServers : undefined,
+        by
+      );
+    } catch (err) {
+      endSess({ error: errMsg(err) }, 'error');
+      endTurn({ error: errMsg(err) }, 'error');
+      throw err;
+    }
+    // openSession owns the resume-or-new decision (bro-5qsnr); a throw
+    // here means no session ever attached — the spans end error
+    const session = await openSession(
+      ctx,
+      spec,
+      init.agentCapabilities,
+      authMethods,
+      mcpServers,
+      log,
+      by
+    ).catch((err: unknown) => {
+      endSess({ error: errMsg(err) }, 'error');
+      endTurn({ error: errMsg(err) }, 'error');
+      throw err;
+    });
     sessionId = session.sessionId;
     spec.record?.({ acpSessionId: session.sessionId });
     log(`session ${session.sessionId} (cwd ${spec.cwd})`);
@@ -431,11 +574,13 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
           });
         const served = res.configOptions?.find(o => o.id === modelOpt.id)?.currentValue;
         const reported = typeof served === 'string' ? served : spec.model;
+        reportedModel = reported;
         spec.record?.({ model: reported });
         log(`model ${reported}`);
       } else {
         const cur = modelOpt?.currentValue;
         if (typeof cur === 'string') {
+          reportedModel = cur;
           spec.record?.({ model: cur });
           log(`model ${cur} (agent default)`);
         }
@@ -482,12 +627,30 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         () => ({}),
         undefined,
         by,
-        undefined,
+        sessSpan.ctx,
         spec.cwd,
         drainTimeoutMs
       ).finally(flush);
       log(`turn stopped — ${r.stopReason}`);
+      endSess({ 'acp.session_id': session.sessionId });
+      endTurn({
+        'acp.session_id': session.sessionId,
+        ...(reportedModel === undefined ? {} : { 'acp.model': reportedModel }),
+        'acp.stop_reason': r.stopReason,
+        'acp.reply_len': r.text.length,
+      });
       return r.stopReason === 'end_turn' ? 0 : 1;
+    } catch (err) {
+      endSess({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
+      endTurn(
+        {
+          'acp.session_id': session.sessionId,
+          ...(reportedModel === undefined ? {} : { 'acp.model': reportedModel }),
+          error: errMsg(err),
+        },
+        'error'
+      );
+      throw err;
     } finally {
       session.dispose();
     }
@@ -505,7 +668,14 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         // loop.agent/agents.*.command already carry. Only DATA is
         // forbidden from the shell — everything else rides argv/params.
         cwd: spec.cwd,
-        env: { ...process.env, ...spec.env },
+        env: {
+          ...process.env,
+          ...spec.env,
+          // the agent child's own hook descendants parent under
+          // acp.open — same injection the fleet spawn sites perform
+          // (spec bro-xgejl.1)
+          TRACEPARENT: otelHeader(openSpan.ctx),
+        },
         // stdin is the request channel — 'ignore' would leave
         // proc.stdin null and the driver dead before initialize
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -536,6 +706,9 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       );
     }
   } catch (err) {
+    // covers connectWith/transport failures op never reached —
+    // initialize/protocol/refusal paths already ended their spans
+    endOpen({ error: errMsg(err) }, 'error');
     log(`acp-worker failed — ${errMsg(err)}`);
     return 1;
   } finally {
@@ -547,11 +720,6 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       clearTimeout(killTimer);
     }
     await retireAgentChild(child);
-    try {
-      armSessionCleanup(spec, sessionId, log);
-    } catch (err) {
-      log(`session cleanup arming failed — ${err instanceof Error ? err.message : String(err)}`);
-    }
   }
 }
 
@@ -574,37 +742,6 @@ async function retireAgentChild(child: ChildProcess | undefined): Promise<void> 
       setTimeout(res, 2000);
     });
   }
-}
-
-/** Arm the detached session-delete retrier. The acp server holds the
- *  session 'open' until our connection's pipes close — i.e. until THIS
- *  process exits — so the delete cannot run from inside the worker; a
- *  detached retrier outlives us and removes the session once the agent
- *  has fully exited. Operator-configured template — same trust
- *  boundary as spec.command (already sh -c'd). The template rides
- *  argv, never the script text; the session id must be a slug before
- *  it may substitute into a shell template. */
-function armSessionCleanup(
-  spec: AcpWorkerSpec,
-  sessionId: string | undefined,
-  log: (line: string) => void
-): void {
-  if (spec.sessionRm === undefined || sessionId === undefined) {
-    return;
-  }
-  if (!/^[\w.-]+$/.test(sessionId)) {
-    log(`session cleanup skipped — session id is not a safe slug`);
-    return;
-  }
-  const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId);
-  // absolute interpreter path — S4036: a PATH-resolved 'sh' can be
-  // shadowed by a writable dir on the worker's PATH.
-  spawn(
-    '/bin/sh',
-    ['-c', 'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done', 'bro-session-rm', rm],
-    { detached: true, stdio: 'ignore' }
-  ).unref();
-  log(`session ${sessionId} cleanup armed — deferred until worker exit`);
 }
 
 export type { StopReason };

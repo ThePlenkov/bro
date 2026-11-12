@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/fleet-hosts.schema.json",
+  "title": "bro fleet hosts --json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["hosts", "projects", "generatedAt", "warnings"],
+  "properties": {
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["host", "pluginRoots", "firstSeen", "lastSeen", "status", "sessions", "liveSessions", "events", "timeouts", "errors"],
+        "properties": {
+          "host": { "type": "string" },
+          "adapter": { "type": "string" },
+          "pluginRoots": { "type": "array", "items": { "type": "string" } },
+          "firstSeen": { "type": "number", "description": "epoch ms" },
+          "lastSeen": { "type": "number", "description": "epoch ms" },
+          "status": { "type": "string", "enum": ["firing", "quiet", "silent"] },
+          "sessions": { "type": "number" },
+          "liveSessions": { "type": "number" },
+          "events": { "type": "number" },
+          "p95": { "type": "number", "description": "worst daily p95 ms" },
+          "timeouts": { "type": "number" },
+          "errors": { "type": "number" },
+          "lastErrorDay": { "type": "string", "description": "UTC YYYY-MM-DD" }
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["project", "label", "sessions", "liveSessions", "hosts"],
+        "properties": {
+          "project": { "type": ["string", "null"] },
+          "label": { "type": "string" },
+          "sessions": { "type": "number" },
+          "liveSessions": { "type": "number" },
+          "hosts": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "generatedAt": { "type": "number", "description": "epoch ms" },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

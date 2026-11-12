@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
 import { describe, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { tmpDir } from './testrepo.ts';
@@ -18,12 +20,12 @@ import {
 function fixture(): {
   cwd: string;
   opts: MutateOpts;
+  globalDir: string;
+  localDir: string;
   globalPath: string;
   localPath: string;
   globalCliPath: string;
   localCliPath: string;
-  globalV2Path: string;
-  localV2Path: string;
 } {
   const cwd = tmpDir('bro-plugins-cwd-');
   const xdg = tmpDir('bro-plugins-xdg-');
@@ -42,12 +44,14 @@ function fixture(): {
   return {
     cwd,
     opts,
+    // the v2 catalog plugin — one directory, three modules
+    globalDir: join(xdg, 'opencode', 'plugins', 'bro'),
+    localDir: join(cwd, '.opencode', 'plugins', 'bro'),
+    // the v1-era loose modules
     globalPath: join(xdg, 'opencode', 'plugins', 'bro.ts'),
     localPath: join(cwd, '.opencode', 'plugins', 'bro.ts'),
     globalCliPath: join(xdg, 'opencode', 'plugins', 'bro-cli.ts'),
     localCliPath: join(cwd, '.opencode', 'plugins', 'bro-cli.ts'),
-    globalV2Path: join(xdg, 'opencode', 'plugins', 'bro', 'tui.tsx'),
-    localV2Path: join(cwd, '.opencode', 'plugins', 'bro', 'tui.tsx'),
   };
 }
 
@@ -63,31 +67,72 @@ describe('scopesOf', () => {
   });
 });
 
+describe('the client argument', () => {
+  test('a mistyped flag is a usage error, not a silent drop', () => {
+    // `--locla` used to vanish: every flag was dropped while the client
+    // name was read, so the command ran with the wrong scope and said
+    // nothing about the typo
+    assert.throws(
+      () => runPluginsCommand(['install', 'opencode', '--locla'], []),
+      (err: unknown) => {
+        const e = err as { code?: number; message?: string };
+        assert.equal(e.code, 2);
+        assert.match(String(e.message), /unknown option --locla/);
+        return true;
+      }
+    );
+  });
+
+  test('the known flags are accepted', () => {
+    const f = fixture();
+    const cwd = process.cwd();
+    const xdg = process.env.XDG_CONFIG_HOME;
+    process.chdir(f.cwd);
+    process.env.XDG_CONFIG_HOME = join(f.cwd, 'xdg');
+    try {
+      // a dry run mutates nothing, so the command returns without writing
+      runPluginsCommand(['install', 'opencode', '--dry-run', '--global'], []);
+    } finally {
+      process.chdir(cwd);
+      if (xdg === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = xdg;
+      }
+    }
+    assert.equal(existsSync(join(f.cwd, 'xdg')), false);
+  });
+});
+
 describe('isBroAdapter', () => {
   test('recognizes the shipped module (source and bundle shape)', () => {
-    const src = new URL('../opencode.ts', import.meta.url);
+    const src = join(repoRoot, 'packages/agent-plugins/opencode/src/opencode.ts');
     assert.ok(isBroAdapter(readFileSync(src, 'utf8')));
     // tsdown output: quotes collapse, identifiers survive
+    // modern (Plugin.define) and legacy (server:) bundle shapes
+    assert.ok(isBroAdapter('export default Plugin.define({id:"bro",setup:s})\n'));
     assert.ok(isBroAdapter('export default {id:"bro",server:BroPlugin}\n'));
     assert.ok(!isBroAdapter('export default {id:"other",server:x}\n'));
     assert.ok(!isBroAdapter('// hand-written empty plugin\n'));
   });
 
   test('recognizes the kilo module', () => {
-    assert.ok(isBroAdapter(readFileSync(new URL('../kilo.ts', import.meta.url), 'utf8')));
+    assert.ok(
+      isBroAdapter(readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8'))
+    );
   });
 
   test('recognizes the pi extension sentinel', () => {
     // the shipped adapter is the generated bundle (plugins/pi/bro/bro.ts);
     // the source binding carries the same sentinel
-    const src = new URL('../adapter/pi.ts', import.meta.url);
+    const src = join(repoRoot, 'packages/agent-plugins/pi/src/pi.ts');
     assert.ok(isBroAdapter(readFileSync(src, 'utf8')));
     assert.ok(isBroAdapter('const adapter={id:"bro",kind:"pi-extension"}\n'));
     assert.ok(!isBroAdapter('export default function x(){}\n'));
   });
 
   test('recognizes the omp extension sentinel', () => {
-    const src = new URL('../adapter/omp.ts', import.meta.url);
+    const src = join(repoRoot, 'packages/agent-plugins/omp/src/omp.ts');
     assert.ok(isBroAdapter(readFileSync(src, 'utf8')));
     assert.ok(isBroAdapter('const adapter={id:"bro",kind:"omp-extension"}\n'));
     // the kind token must be there too — the id claim alone is not ours
@@ -95,11 +140,16 @@ describe('isBroAdapter', () => {
   });
 
   test('recognizes the opencode TUI module', () => {
-    const src = new URL('../opencode-tui.ts', import.meta.url);
+    const src = join(repoRoot, 'packages/agent-plugins/opencode/src/tui.tsx');
     assert.ok(isBroAdapter(readFileSync(src, 'utf8')));
     assert.ok(isBroAdapter('export default {id:"bro.cli",kind:"opencode-tui"}\n'));
     // the cli id alone does not suffice — the kind token must be there too
     assert.ok(!isBroAdapter('export default {id:"bro.cli",setup(){}}\n'));
+  });
+
+  test('recognizes the opencode RPC contract module', () => {
+    const src = join(repoRoot, 'packages/agent-plugins/opencode/src/rpc.ts');
+    assert.ok(isBroAdapter(readFileSync(src, 'utf8')));
   });
 
   test('recognizes a stale-era adapter whose identifier moved (retro bro-g2f9)', () => {
@@ -123,32 +173,37 @@ describe('isBroAdapter', () => {
 });
 
 describe('plugins install/uninstall/list', () => {
-  test('install writes both scopes and both modules; a second run reports current', () => {
+  test('install materializes the v2 catalog plugin in both scopes; a second run reports current', () => {
     const f = fixture();
     const out = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
-      [
-        `installed:${f.globalPath}`,
-        `installed:${f.globalCliPath}`,
-        `installed:${f.globalV2Path}`,
-        `installed:${f.localPath}`,
-        `installed:${f.localCliPath}`,
-        `installed:${f.localV2Path}`,
-      ]
+      [`installed:${f.globalDir}`, `installed:${f.localDir}`]
     );
-    // materialized content is the shipped adapter source verbatim
-    const shipped = readFileSync(new URL('../opencode.ts', import.meta.url), 'utf8');
-    const shippedCli = readFileSync(new URL('../opencode-tui.ts', import.meta.url), 'utf8');
-    const shippedV2 = readFileSync(new URL('../opencode-tui-v2.tsx', import.meta.url), 'utf8');
-    assert.equal(readFileSync(f.globalPath, 'utf8'), shipped);
-    assert.equal(readFileSync(f.globalCliPath, 'utf8'), shippedCli);
-    assert.equal(readFileSync(f.globalV2Path, 'utf8'), shippedV2);
+    // the catalog plugin is ONE directory of three modules — the server
+    // entrypoint, the TUI half and the contract they share
+    const shipped = readFileSync(
+      join(repoRoot, 'packages/agent-plugins/opencode/src/opencode.ts'),
+      'utf8'
+    );
+    const shippedTui = readFileSync(
+      join(repoRoot, 'packages/agent-plugins/opencode/src/tui.tsx'),
+      'utf8'
+    );
+    const shippedRpc = readFileSync(
+      join(repoRoot, 'packages/agent-plugins/opencode/src/rpc.ts'),
+      'utf8'
+    );
+    assert.equal(readFileSync(join(f.globalDir, 'index.ts'), 'utf8'), shipped);
+    assert.equal(readFileSync(join(f.globalDir, 'tui.tsx'), 'utf8'), shippedTui);
+    assert.equal(readFileSync(join(f.globalDir, 'rpc.ts'), 'utf8'), shippedRpc);
+    // the server's own `./rpc.ts` import resolves inside the directory
+    assert.match(shipped, /from\s+['"]\.\/rpc\.ts['"]/);
 
     const again = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
-      ['current', 'current', 'current', 'current', 'current', 'current']
+      ['current', 'current']
     );
   });
 
@@ -179,24 +234,17 @@ describe('plugins install/uninstall/list', () => {
     );
   });
 
-  test('install on a stale adapter reports updated; list shows stale first', () => {
+  test('install on a stale module reports updated; list shows stale first', () => {
     const f = fixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true });
-    writeFileSync(f.globalPath, staleAdapter);
-    mkdirSync(join(f.cwd, '.opencode', 'plugins'), { recursive: true });
-    writeFileSync(f.localPath, staleAdapter);
+    mkdirSync(f.globalDir, { recursive: true });
+    writeFileSync(join(f.globalDir, 'index.ts'), staleAdapter);
+    mkdirSync(f.localDir, { recursive: true });
+    writeFileSync(join(f.localDir, 'index.ts'), staleAdapter);
 
     const rows = pluginRows(f.cwd, f.opts.env).filter(r => r.client === 'opencode');
     assert.deepEqual(
       rows.map(r => `${r.client}:${r.scope}:${r.state}`),
-      [
-        'opencode:global:stale',
-        'opencode:global:absent',
-        'opencode:global:absent',
-        'opencode:local:stale',
-        'opencode:local:absent',
-        'opencode:local:absent',
-      ]
+      ['opencode:global:stale', 'opencode:local:stale']
     );
     assert.deepEqual(
       pluginRows(f.cwd, f.opts.env)
@@ -207,14 +255,60 @@ describe('plugins install/uninstall/list', () => {
 
     const out = installClient('opencode', ['global'], f.opts);
     assert.equal(out[0]!.action, 'updated');
-    assert.equal(out[1]!.action, 'installed');
     assert.equal(
       pluginRows(f.cwd, f.opts.env)
         .filter(r => r.client === 'opencode')
         .map(r => `${r.scope}:${r.state}`)
         .join(','),
-      'global:installed,global:installed,global:installed,local:stale,local:absent,local:absent'
+      'global:installed,local:stale'
     );
+  });
+
+  test('the v1-era loose modules are removed when the catalog plugin lands', () => {
+    // a stale module in the plugins dir is still LOADED by opencode — it
+    // would shadow the current layout
+    const f = fixture();
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true });
+    writeFileSync(f.globalPath, staleAdapter);
+    writeFileSync(
+      f.globalCliPath,
+      '// older bro build\nexport default {id:"bro.cli",kind:"opencode-tui"}\n'
+    );
+    mkdirSync(join(f.cwd, '.opencode', 'plugins'), { recursive: true });
+    writeFileSync(f.localPath, staleAdapter);
+    writeFileSync(
+      f.localCliPath,
+      '// older bro build\nexport default {id:"bro.cli",kind:"opencode-tui"}\n'
+    );
+
+    const out = installClient('opencode', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.path}`),
+      [
+        `installed:${f.globalDir}`,
+        `removed:${f.globalPath}`,
+        `removed:${f.globalCliPath}`,
+        `installed:${f.localDir}`,
+        `removed:${f.localPath}`,
+        `removed:${f.localCliPath}`,
+      ]
+    );
+    assert.ok(!existsSync(f.globalPath));
+    assert.ok(!existsSync(f.localCliPath));
+    // the catalog plugin itself is untouched by the legacy sweep
+    assert.ok(existsSync(join(f.globalDir, 'index.ts')));
+  });
+
+  test('a foreign loose module is left alone', () => {
+    const f = fixture();
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true });
+    writeFileSync(f.globalPath, '// user-written plugin, no bro sentinel');
+    const out = installClient('opencode', ['global'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assert.equal(readFileSync(f.globalPath, 'utf8'), '// user-written plugin, no bro sentinel');
   });
 
   test('a stale adapter with a moved identifier still updates without --force', () => {
@@ -222,8 +316,11 @@ describe('plugins install/uninstall/list', () => {
     // the old ownership regex wanted `server: BroPlugin` literally and
     // refused the slot as foreign
     const f = fixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true });
-    writeFileSync(f.globalPath, '// older bro build\nexport default {id:"bro",server:bro}\n');
+    mkdirSync(f.globalDir, { recursive: true });
+    writeFileSync(
+      join(f.globalDir, 'index.ts'),
+      '// older bro build\nexport default {id:"bro",server:bro}\n'
+    );
     const out = installClient('opencode', ['global'], f.opts);
     assert.equal(out[0]!.action, 'updated');
   });
@@ -233,30 +330,22 @@ describe('plugins install/uninstall/list', () => {
     const out = installClient('opencode', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
       out.map(o => o.action),
-      [
-        'would-install',
-        'would-install',
-        'would-install',
-        'would-install',
-        'would-install',
-        'would-install',
-      ]
+      ['would-install', 'would-install']
     );
-    assert.ok(!existsSync(f.globalPath));
-    assert.ok(!existsSync(f.localPath));
-    assert.ok(!existsSync(f.globalCliPath));
-    assert.ok(!existsSync(f.localCliPath));
-    assert.ok(!existsSync(f.globalV2Path));
-    assert.ok(!existsSync(f.localV2Path));
+    assert.ok(!existsSync(f.globalDir));
+    assert.ok(!existsSync(f.localDir));
   });
 
   test('install refuses a foreign file at our slot without --force', () => {
     const f = fixture();
-    mkdirSync(join(f.cwd, '.opencode', 'plugins'), { recursive: true });
-    writeFileSync(f.localPath, '// user-written plugin, no bro sentinel');
+    mkdirSync(f.localDir, { recursive: true });
+    writeFileSync(join(f.localDir, 'index.ts'), '// user-written plugin, no bro sentinel');
     const out = installClient('opencode', ['local'], f.opts);
     assert.equal(out[0]!.action, 'refused');
-    assert.equal(readFileSync(f.localPath, 'utf8'), '// user-written plugin, no bro sentinel');
+    assert.equal(
+      readFileSync(join(f.localDir, 'index.ts'), 'utf8'),
+      '// user-written plugin, no bro sentinel'
+    );
     const forced = installClient('opencode', ['local'], { ...f.opts, force: true });
     assert.equal(forced[0]!.action, 'updated');
   });
@@ -264,38 +353,49 @@ describe('plugins install/uninstall/list', () => {
   test('uninstall removes ours, skips absent, refuses foreign without --force', () => {
     const f = fixture();
     installClient('opencode', ['global'], f.opts);
-    mkdirSync(join(f.cwd, '.opencode', 'plugins'), { recursive: true });
-    writeFileSync(f.localPath, '// foreign plugin');
+    mkdirSync(f.localDir, { recursive: true });
+    writeFileSync(join(f.localDir, 'index.ts'), '// foreign plugin');
     const refused = uninstallClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       refused.map(o => o.action),
-      // global bro.ts + bro-cli.ts + bro/tui.tsx removed, then
-      // the foreign local bro.ts refuses and its siblings are absent
-      ['removed', 'removed', 'removed', 'refused', 'absent', 'absent']
+      // the global catalog plugin is removed, then the foreign local
+      // module refuses
+      ['removed', 'refused']
     );
-    assert.ok(!existsSync(f.globalPath));
-    assert.ok(existsSync(f.localPath));
+    assert.ok(!existsSync(f.globalDir));
+    assert.ok(existsSync(join(f.localDir, 'index.ts')));
 
     const forced = uninstallClient('opencode', ['local'], { ...f.opts, force: true });
     assert.equal(forced[0]!.action, 'removed');
-    assert.ok(!existsSync(f.localPath));
+    assert.ok(!existsSync(join(f.localDir, 'index.ts')));
 
     const gone = uninstallClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       gone.map(o => o.action),
-      ['absent', 'absent', 'absent', 'absent', 'absent', 'absent']
+      ['absent', 'absent']
     );
   });
 
   test('uninstall refuses a stale/edited adapter without --force', () => {
     const f = fixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true });
-    writeFileSync(f.globalPath, staleAdapter);
+    mkdirSync(f.globalDir, { recursive: true });
+    writeFileSync(join(f.globalDir, 'index.ts'), staleAdapter);
     const out = uninstallClient('opencode', ['global'], f.opts);
     assert.equal(out[0]!.action, 'refused');
     assert.match(out[0]!.note ?? '', /stale or edited/);
     const forced = uninstallClient('opencode', ['global'], { ...f.opts, force: true });
     assert.equal(forced[0]!.action, 'removed');
+  });
+
+  test('uninstall keeps a module of the user that lives beside ours', () => {
+    const f = fixture();
+    installClient('opencode', ['global'], f.opts);
+    writeFileSync(join(f.globalDir, 'mine.ts'), '// user-written');
+    const out = uninstallClient('opencode', ['global'], f.opts);
+    assert.equal(out[0]!.action, 'removed');
+    // the directory stays — the user's own module is not ours to delete
+    assert.ok(existsSync(join(f.globalDir, 'mine.ts')));
+    assert.ok(!existsSync(join(f.globalDir, 'index.ts')));
   });
 
   test('list reflects install state per scope', () => {
@@ -304,24 +404,10 @@ describe('plugins install/uninstall/list', () => {
       pluginRows(f.cwd, f.opts.env)
         .filter(r => r.client === client)
         .map(r => `${r.client}:${r.scope}:${r.state}`);
-    assert.deepEqual(rowsFor('opencode'), [
-      'opencode:global:absent',
-      'opencode:global:absent',
-      'opencode:global:absent',
-      'opencode:local:absent',
-      'opencode:local:absent',
-      'opencode:local:absent',
-    ]);
+    assert.deepEqual(rowsFor('opencode'), ['opencode:global:absent', 'opencode:local:absent']);
     assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent']);
     installClient('opencode', ['local'], f.opts);
-    assert.deepEqual(rowsFor('opencode'), [
-      'opencode:global:absent',
-      'opencode:global:absent',
-      'opencode:global:absent',
-      'opencode:local:installed',
-      'opencode:local:installed',
-      'opencode:local:installed',
-    ]);
+    assert.deepEqual(rowsFor('opencode'), ['opencode:global:absent', 'opencode:local:installed']);
     assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent']);
   });
 
@@ -387,7 +473,7 @@ describe('plugins install/uninstall/list — kilo', () => {
     assert.equal(out[0]!.action, 'installed');
     assert.match(out[0]!.note ?? '', /registered/);
     // materialized content is the shipped adapter source verbatim
-    const shipped = readFileSync(new URL('../kilo.ts', import.meta.url), 'utf8');
+    const shipped = readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8');
     assert.equal(readFileSync(f.globalPath, 'utf8'), shipped);
     // a fresh manifest is created with kilo's own $schema line
     const m = f.manifest();
@@ -401,7 +487,7 @@ describe('plugins install/uninstall/list — kilo', () => {
     assert.equal(out[0]!.action, 'installed');
     assert.equal(
       readFileSync(f.localPath, 'utf8'),
-      readFileSync(new URL('../kilo.ts', import.meta.url), 'utf8')
+      readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8')
     );
     assert.ok(!existsSync(f.manifestPath));
   });

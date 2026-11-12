@@ -49,6 +49,7 @@ import type { OtelCtx } from './otel.ts';
 import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
 import { AcpTerminals } from './acp-terminal.ts';
 import { AcpDeadLoopError, type AcpGuardCtx } from './acp-guard.ts';
+import { AcpCooldownError } from './acp-cooldown.ts';
 import { objOr, remaining, splitShellWords } from './http.ts';
 import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
 import type { ProviderWireOpts } from './systemone.ts';
@@ -453,6 +454,14 @@ async function acpSessionOpen(
   sessionRequest?: NewSessionRequest,
   gc?: AcpGuardCtx
 ) {
+  // the wall cooldown speaks BEFORE the session opens (spec
+  // bro-i6811): the lane is under a provider wall, so this open would
+  // cost a session and a quota for nothing. The refusal is free — it
+  // happens before the spawn.
+  const wall = gc?.cooldown?.refusal();
+  if (wall !== undefined) {
+    throw new AcpCooldownError(wall);
+  }
   // the dead-loop guard speaks BEFORE the session opens: a refused
   // scope costs no session and no quota (spec bro-b961a). The charge
   // it hands back is THIS session's debt — the caller resolves it on
@@ -661,7 +670,16 @@ export async function acpConverse(
   const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' });
   return withAcp(by, entry, opts, deadline, async ctx => {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
-    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline);
+    // a refused/failed session open still owes both spans a terminal
+    // status — an un-ended span pins the trace leg open in the
+    // collector (review bro-xgejl.1)
+    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline).catch(
+      (err: unknown) => {
+        sessSpan.end({ error: errMsg(err) }, 'error');
+        span.end({ error: errMsg(err) }, 'error');
+        throw err;
+      }
+    );
     try {
       const model = await converseModel(
         ctx,
@@ -686,14 +704,15 @@ export async function acpConverse(
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
+        'acp.session_id': session.sessionId,
         'acp.model': model,
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
       });
       return { ...r, model, usage: acpUsage(r.response) };
     } catch (err) {
-      sessSpan.end({ error: errMsg(err) }, 'error');
-      span.end({ error: errMsg(err) }, 'error');
+      sessSpan.end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
+      span.end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
       throw err;
     } finally {
       session.dispose();
@@ -874,6 +893,12 @@ export async function pumpTurn(
   // explicit 0 still disables the watchdog.
   stallMs = 300_000
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
+  // an already-cancelled caller never gets a turn — the prompt send
+  // below would start billable agent work the later abort race can only
+  // interrupt mid-flight (tools may already have run)
+  if (signal?.aborted === true) {
+    throw new JudgeUnavailable(`${by}: caller aborted the turn`);
+  }
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
   plane.start(promptText(prompt));
@@ -1437,6 +1462,12 @@ export async function acpPooledTurn(
       breakPeer(err, peer);
       throw err;
     }
+    if (err instanceof AcpCooldownError) {
+      // the refusal cost no session (spec bro-i6811) — and the peer is
+      // fine: the LANE is cooling down, not the transport. Nothing is
+      // broken and nothing is charged.
+      throw err;
+    }
     // a stalled or failed turn counts against the peer the same — over
     // budget the loop lives in the child: kill it BEFORE the failure
     // surfaces, or further requests keep opening sessions on it
@@ -1556,7 +1587,8 @@ export async function acpSessionRetain(
       if (
         err instanceof JudgeUnavailable ||
         err instanceof AcpConfigError ||
-        err instanceof AcpDeadLoopError
+        err instanceof AcpDeadLoopError ||
+        err instanceof AcpCooldownError
       ) {
         return err;
       }
@@ -1634,6 +1666,10 @@ export async function acpSessionRetain(
           }
           if (err instanceof AcpDeadLoopError) {
             breakPeer(err, peer);
+          } else if (err instanceof AcpCooldownError) {
+            // the lane is cooling down (spec bro-i6811) — the peer is
+            // healthy and no session was opened, so nothing is broken
+            // and no churn is charged
           } else {
             // the peer's churn may now be systemic — kill it and name it
             guardFail(turn.guard, peer);
@@ -1650,6 +1686,12 @@ export async function acpSessionRetain(
     if (err instanceof AcpDeadLoopError) {
       // the refusal cost no session — a peer refusal breaks the peer
       breakPeer(err, peer);
+      throw err;
+    }
+    if (err instanceof AcpCooldownError) {
+      // the refusal cost no session (spec bro-i6811) — the lane is
+      // cooling down, the peer is fine: nothing is broken, nothing is
+      // charged, and the refusal reaches the caller as itself
       throw err;
     }
     // the peer's churn may now be systemic — a failed retain still
@@ -1761,7 +1803,7 @@ const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`;
 export function acpWorkerArgv(
   broBin: string[],
   entry: AcpEntry,
-  opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
+  opts: { model?: string; autoApprove?: boolean } = {}
 ): string[] {
   const command =
     entry.profile === undefined
@@ -1775,10 +1817,8 @@ export function acpWorkerArgv(
   if (opts.autoApprove ?? entry.autoApprove) {
     argv.push('--auto-approve');
   }
-  const sessionRm = opts.sessionRm ?? entry.sessionRm;
-  if (sessionRm !== undefined) {
-    argv.push('--session-rm', sessionRm);
-  }
+  // sessionRm never rides the worker argv — the template renders at
+  // PR settlement via settleAcpSessions (spec bro-5qsnr)
   return argv;
 }
 

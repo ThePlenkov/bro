@@ -3,7 +3,7 @@
 Agent's sidekick for pi: the live project board on pi's TUI plus the
 same lifecycle mechanics the shell adapters carry, over pi's in-process
 extension API. `bro.ts` is generated from
-`packages/cli/src/adapter/pi.ts` — the shared adapter core folded into
+`packages/agent-plugins/*/src/pi.ts` — the shared adapter core folded into
 one self-contained module (node builtins only) by
 `npm run gen:plugins`; `check:plugins` fails when it drifts.
 

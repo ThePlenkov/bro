@@ -73,6 +73,81 @@ describe('local lease store', () => {
     assert.equal(store.acquire('bead/x', remote, 100).ok, true);
   });
 
+  test('renew survives an uncontested expiry — a stalled holder is not a lost lease', () => {
+    let clock = 1_000;
+    const store = localLeaseStore('stall-renew', {
+      stateHome: root,
+      now: () => clock,
+      host: 'local',
+      pidAlive: () => true,
+    });
+    const local = { host: 'local', pid: 1, rig: 'rig' };
+    const acquired = store.acquire('role/drive', local, 100);
+    assert.equal(acquired.ok, true);
+    if (!acquired.ok) return;
+    // the event loop sat past expiresAt — spec bro-ldvw1: expiry is the
+    // contender signal, not the holder's self-destruct
+    clock += 250;
+    const renewed = store.renew(acquired.lease, 100);
+    assert.equal(renewed?.expiresAt, new Date(clock + 100).toISOString());
+    // the renewed row is live again — a contender still cannot acquire
+    assert.equal(store.acquire('role/drive', { ...local, pid: 2 }, 100).ok, false);
+  });
+
+  test('renew still refuses an expired lease a successor took', () => {
+    let clock = 1_000;
+    const store = localLeaseStore('stall-contested', {
+      stateHome: root,
+      now: () => clock,
+      host: 'local',
+      pidAlive: () => true,
+    });
+    const local = { host: 'local', pid: 1, rig: 'rig' };
+    const first = store.acquire('role/drive', local, 100);
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    clock += 250;
+    // the gap WAS contested — the successor's token wins, the stalled
+    // holder's renew mismatches and the role stays theirs
+    const second = store.acquire('role/drive', { ...local, pid: 2 }, 100);
+    assert.equal(second.ok, true);
+    assert.equal(store.renew(first.lease, 100), undefined);
+  });
+
+  test('renew refuses an expired lease whose recorded pid is dead', () => {
+    let clock = 1_000;
+    // the holder lives through acquire, then dies inside the stall —
+    // the shape a real holder-death mid-hold takes
+    let pidLive = true;
+    const store = localLeaseStore('stall-dead', {
+      stateHome: root,
+      now: () => clock,
+      host: 'local',
+      pidAlive: () => pidLive,
+    });
+    const acquired = store.acquire('role/drive', { host: 'local', pid: 1, rig: 'rig' }, 100);
+    assert.equal(acquired.ok, true);
+    if (!acquired.ok) return;
+    clock += 250;
+    pidLive = false;
+    assert.equal(store.renew(acquired.lease, 100), undefined);
+  });
+
+  test('renew tolerates expiry for a foreign-host holder it cannot probe', () => {
+    let clock = 1_000;
+    const store = localLeaseStore('stall-remote', {
+      stateHome: root,
+      now: () => clock,
+      host: 'local',
+      pidAlive: () => false,
+    });
+    const acquired = store.acquire('role/drive', { host: 'remote:x', pid: 1, rig: 'rig' }, 100);
+    assert.equal(acquired.ok, true);
+    if (!acquired.ok) return;
+    clock += 250;
+    assert.notEqual(store.renew(acquired.lease, 100), undefined);
+  });
+
   test('rejects mismatched tokens and encodes distinct keys', () => {
     const store = localLeaseStore('tokens', options);
     const acquired = store.acquire('a/b', holder, 100);
@@ -227,6 +302,29 @@ describe('role lease helper', () => {
     });
     await new Promise(resolve => setTimeout(resolve, 15));
     assert.deepEqual(exitCodes, [75]);
+  });
+
+  test('role lease survives an event-loop stall past TTL', async () => {
+    const store = localLeaseStore('role-stall', {
+      stateHome: root,
+      host: 'local',
+      pidAlive: () => true,
+    });
+    const exitCodes: number[] = [];
+    const held = await holdRoleLease(
+      store,
+      'drive',
+      { host: 'local', pid: process.pid, rig: 'rig' },
+      60,
+      { exit: code => exitCodes.push(code), log: () => undefined }
+    );
+    // the spawnSync stall shape — the renew interval cannot fire while
+    // the loop is blocked, so the stored lease expires under a live
+    // holder; the first post-stall renew must extend, not exit 75
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(exitCodes, []);
+    held.release();
   });
 
   test('aborts while waiting for another holder', async () => {

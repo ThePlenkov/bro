@@ -268,4 +268,12 @@ export const actConnector: Connector = {
       ];
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): the act gate is code-plane
+  // behavior — review sessions see it too (their mode IS the gate);
+  // plan/observe stay passive.
+  activeIn: {
+    sessionStart: ['code', 'review', 'orchestrate'],
+    promptSubmit: ['code', 'review', 'orchestrate'],
+    stopGate: ['code', 'review', 'orchestrate'],
+  },
 };

@@ -5,10 +5,11 @@
  *  mailbox rows, `life:<n>` (line position) for lifecycle rows.
  *  `drainMailbox` is deliberately unused — it consumes drops and
  *  rewires cursors, so it cannot back a read. */
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   addressedTo,
+  BUS_RING_LIMIT,
   busProbe,
   busSocketPath,
   busStatus,
@@ -23,8 +24,8 @@ import {
   type LifecycleRow,
   type PlaneCtx,
   type PlaneDescriptor,
-} from '@broject/core'
-import { argLimit, argNumber, argString, bounded, dispatchRead } from './helpers.ts'
+} from '@broject/core';
+import { argLimit, argNumber, argString, bounded, dispatchRead } from './helpers.ts';
 
 /** The topics that ride the stream — the channel registry the
  *  AsyncAPI doc in stream.ts projects. Generated, not authored: a
@@ -36,64 +37,64 @@ export const EVENTS_TOPICS = [
   { topic: 'drive', summary: 'drive supervision — fixer spawns, orphan merges' },
   { topic: 'mesh', summary: 'cross-repo request lifecycle — claims, dones' },
   { topic: 'agent', summary: 'in-turn activity — turn/tool_call/subagent/usage at the acp pump' },
-] as const
+] as const;
 
-type Payload = Record<string, unknown>
+type Payload = Record<string, unknown>;
 
 /** Defensive payload pulls — a peer publishing a newer envelope shape
  *  degrades to its discriminator, never throws. */
 const pOf = (e: { payload?: unknown }): Payload =>
-  (typeof e.payload === 'object' && e.payload !== null ? e.payload : {}) as Payload
+  (typeof e.payload === 'object' && e.payload !== null ? e.payload : {}) as Payload;
 
 const sOf = (p: Payload, k: string): string | undefined => {
-  const v = p[k]
-  return typeof v === 'string' && v !== '' ? v : undefined
-}
+  const v = p[k];
+  return typeof v === 'string' && v !== '' ? v : undefined;
+};
 
 const nOf = (p: Payload, k: string): number | undefined => {
-  const v = p[k]
-  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
-}
+  const v = p[k];
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+};
 
 function turnLine(who: string, p: Payload): string {
   if (sOf(p, 'phase') === 'start') {
-    return `${who}: turn started`
+    return `${who}: turn started`;
   }
-  const err = sOf(p, 'error')
+  const err = sOf(p, 'error');
   if (err !== undefined) {
-    return `${who}: turn failed — ${err}`
+    return `${who}: turn failed — ${err}`;
   }
-  const reason = sOf(p, 'stopReason')
-  return `${who}: turn stopped${reason !== undefined ? ` (${reason})` : ''}`
+  const reason = sOf(p, 'stopReason');
+  return `${who}: turn stopped${reason !== undefined ? ` (${reason})` : ''}`;
 }
 
 function toolCallLine(who: string, p: Payload): string {
-  const what = sOf(p, 'title') ?? sOf(p, 'name') ?? sOf(p, 'toolCallId') ?? 'tool'
-  let phase = 'finished'
+  const what = sOf(p, 'title') ?? sOf(p, 'name') ?? sOf(p, 'toolCallId') ?? 'tool';
+  let phase = 'finished';
   if (sOf(p, 'phase') === 'open') {
-    phase = 'started'
+    phase = 'started';
   } else {
-    const status = sOf(p, 'status')
+    const status = sOf(p, 'status');
     if (status !== undefined) {
-      phase = `finished (${status})`
+      phase = `finished (${status})`;
     }
   }
-  const kind = sOf(p, 'kind')
-  return `${who}: ${what} ${phase}${kind !== undefined ? ` [${kind}]` : ''}`
+  const kind = sOf(p, 'kind');
+  return `${who}: ${what} ${phase}${kind !== undefined ? ` [${kind}]` : ''}`;
 }
 
 function usageLine(who: string, p: Payload): string {
-  const cost = p['cost']
-  let costStr = ''
+  const cost = p['cost'];
+  let costStr = '';
   if (
     typeof cost === 'object' &&
     cost !== null &&
     typeof (cost as { amount?: unknown }).amount === 'number'
   ) {
     costStr =
-      ` ${(cost as { currency?: string }).currency ?? ''}${(cost as { amount: number }).amount}`.trim()
+      ` ${(cost as { currency?: string }).currency ?? ''}${(cost as { amount: number }).amount}`.trim();
   }
-  return `${who}: context ${nOf(p, 'used') ?? '?'}/${nOf(p, 'size') ?? '?'}${costStr === '' ? '' : ` (${costStr})`}`
+  return `${who}: context ${nOf(p, 'used') ?? '?'}/${nOf(p, 'size') ?? '?'}${costStr === '' ? '' : ` (${costStr})`}`;
 }
 
 /** One human line for an 'agent'-topic envelope — the "agent last did
@@ -101,80 +102,78 @@ function usageLine(who: string, p: Payload): string {
  *  Payload fields are read defensively: a peer publishing a newer
  *  shape degrades to its discriminator, never throws. */
 export function agentEventLine(e: { kind: string; key?: string; payload?: unknown }): string {
-  const p = pOf(e)
-  const who = e.key ?? 'agent'
+  const p = pOf(e);
+  const who = e.key ?? 'agent';
   switch (e.kind) {
     case 'turn':
-      return turnLine(who, p)
+      return turnLine(who, p);
     case 'tool_call':
-      return toolCallLine(who, p)
+      return toolCallLine(who, p);
     case 'subagent': {
-      const what = sOf(p, 'title') ?? sOf(p, 'sessionId') ?? '?'
-      return `${who}: subagent ${what} ${sOf(p, 'phase') ?? ''}`.trimEnd()
+      const what = sOf(p, 'title') ?? sOf(p, 'sessionId') ?? '?';
+      return `${who}: subagent ${what} ${sOf(p, 'phase') ?? ''}`.trimEnd();
     }
     case 'usage':
-      return usageLine(who, p)
+      return usageLine(who, p);
     default:
-      return `${who}: ${e.kind}`
+      return `${who}: ${e.kind}`;
   }
 }
 
-const VERBS = ['publish']
+const VERBS = ['publish'];
 
 /** Mailbox drops, listed not drained — `.seen-*` cursors and `.*.tmp`
  *  staging files are plumbing, not events. `to:`-addressed drops are
  *  gated by the drain's own addressing rule — a drop for another
  *  session or agent is not this reader's event. */
 function mailboxRows(dir: string, limit: number): EventRow[] {
-  const rows: EventRow[] = []
-  const me = mailboxIdentity()
+  const rows: EventRow[] = [];
+  const me = mailboxIdentity();
   for (const d of drainDirs(dir)) {
-    let names: string[]
+    let names: string[];
     try {
-      names = readdirSync(d)
+      names = readdirSync(d);
     } catch {
-      continue
+      continue;
     }
     for (const name of names) {
       if (!name.endsWith('.txt') || name.startsWith('.')) {
-        continue
+        continue;
       }
-      const path = join(d, name)
-      let text: string
-      let ts: string
+      const path = join(d, name);
+      let text: string;
+      let ts: string;
       try {
         // lstat — stat would follow a planted symlink and tail a
         // foreign file as if it were a drop
-        const st = lstatSync(path)
+        const st = lstatSync(path);
         if (!st.isFile()) {
-          continue
+          continue;
         }
-        ts = st.mtime.toISOString()
-        text = readFileSync(path, 'utf8')
+        ts = st.mtime.toISOString();
+        text = readFileSync(path, 'utf8');
       } catch {
-        continue
+        continue;
       }
-      const ev = mailboxEvent(text, path)
+      const ev = mailboxEvent(text, path);
       if (typeof ev.to === 'string' && ev.to !== '' && !addressedTo(ev.to, me)) {
-        continue
+        continue;
       }
-      rows.push({ ...ev, ts, id: name, origin: 'mailbox' })
+      rows.push({ ...ev, ts, id: name, origin: 'mailbox' });
     }
   }
-  return rows
-    .sort((a, b) => a.ts.localeCompare(b.ts))
-    .slice(-limit)
+  return rows.sort((a, b) => a.ts.localeCompare(b.ts)).slice(-limit);
 }
 
 const busRow = (r: EventRow | BusRecord): EventRow => {
-  const gen = 'gen' in r ? r.gen : undefined
-  const seq = 'seq' in r ? r.seq : undefined
+  const gen = 'gen' in r ? r.gen : undefined;
+  const seq = 'seq' in r ? r.seq : undefined;
   return {
     ...r,
     id: gen !== undefined && seq !== undefined ? `${gen}:${seq}` : `bus:${r.ts}`,
     origin: 'bus',
-  }
-}
+  };
+};
 
 /** Durable transition rows off `<git-common>/bro/events.jsonl` — the
  *  journal every writer (loop/act/drive/agents/work) appends through
@@ -185,68 +184,71 @@ function lifecycleRows(
   dir: string,
   opts: { limit?: number; kind?: string; bead?: string; pr?: number; since?: string }
 ): LifecycleRow[] {
-  return readLifecycle(dir, opts).map((r) => ({
+  return readLifecycle(dir, opts).map(r => ({
     ...r,
     id: `life:${r.seq}`,
     origin: 'lifecycle',
-  }))
+  }));
 }
 
 export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
-  const dir = ctx.dir
-  const socket = () => busSocketPath(dir)
-  const tail = async (a?: Record<string, unknown>) => {
-    const limit = argLimit(a, 'limit', 64, 512)
-    const since = argNumber(a, 'since')
-    const sock = socket()
-    let gapped = false
-    let reason: string | undefined
-    const rows: EventRow[] = []
+  const dir = ctx.dir;
+  const socket = () => busSocketPath(dir);
+  /** Collect merged rows for a caller-supplied window. `tail` clamps to
+   *  the list bound; `get` widens to the retained ring — a ref is a
+   *  lookup, not a page, so it must see every row the bus still holds. */
+  const collect = async (limit: number, since: number | undefined) => {
+    const sock = socket();
+    let gapped = false;
+    let reason: string | undefined;
+    const rows: EventRow[] = [];
     if (sock !== null) {
-      const res = await busProbe(sock, { since, limit, windowMs: 2_000 })
-      gapped = res.gapped
-      reason = res.reason
+      const res = await busProbe(sock, { since, limit, windowMs: 2_000 });
+      gapped = res.gapped;
+      reason = res.reason;
       for (const e of res.events) {
-        rows.push(busRow(e as BusRecord))
+        rows.push(busRow(e as BusRecord));
       }
     } else {
-      reason = 'no broker socket'
+      reason = 'no broker socket';
     }
-    const drops = mailboxRows(dir, limit + 1)
+    const drops = mailboxRows(dir, limit + 1);
     // the durable journal joins the transient view — its rows sort
     // beside bus/mailbox by ts; `since` stays a bus-ring cursor and
     // does NOT filter lifecycle rows
-    const life = lifecycleRows(dir, { limit: limit + 1 })
-    const merged = [...rows, ...drops, ...life].sort((a, b) => a.ts.localeCompare(b.ts))
+    const life = lifecycleRows(dir, { limit: limit + 1 });
+    const merged = [...rows, ...drops, ...life].sort((a, b) => a.ts.localeCompare(b.ts));
     // limit-truncation IS a gap — the mailbox facade's probe flags it
     // the same way; a client must never read a partial replay as complete
-    const truncated = merged.length > limit
+    const truncated = merged.length > limit;
     return {
       events: truncated ? merged.slice(-limit) : merged,
       gapped: gapped || truncated,
       ...(reason === undefined ? {} : { reason }),
-    }
-  }
+    };
+  };
+  const tail = (a?: Record<string, unknown>) =>
+    collect(argLimit(a, 'limit', 64, 512), argNumber(a, 'since'));
   /** The durable bead→land timeline alone — the read a metrics view
    *  (cycle-time, fix-rounds, WIP curve) is built on. `since` is an
    *  ISO timestamp here (unlike tail's bus-seq cursor). */
   const lifecycle = (a?: Record<string, unknown>) => {
-    const limit = argLimit(a, 'limit', 256, 2_000)
-    const since = argString(a, 'since')
+    const limit = argLimit(a, 'limit', 256, 2_000);
+    const since = argString(a, 'since');
     const rows = lifecycleRows(dir, {
       limit: limit + 1,
       kind: argString(a, 'kind'),
       bead: argString(a, 'bead'),
       pr: argNumber(a, 'pr'),
       ...(since !== undefined ? { since } : {}),
-    })
-    const truncated = rows.length > limit
+    });
+    const truncated = rows.length > limit;
     return {
       events: truncated ? rows.slice(-limit) : rows,
       gapped: truncated,
       ...(truncated ? { reason: 'limit-truncated — page with since' } : {}),
-    }
-  }
+    };
+  };
   /** 'agent' topic activity — the fleet's in-turn heartbeat read
    *  (bro-0ppt0): MCP `bro_events_activity` is how an orchestrator sees
    *  what its workers are doing between status polls. Broker-side
@@ -255,11 +257,11 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
    *  `acp:<sessionId>` fallback unbadged turns publish under. `latest`
    *  folds each subject's newest row into its one-line "last did X". */
   const activity = async (a?: Record<string, unknown>) => {
-    const limit = argLimit(a, 'limit', 64, 512)
-    const agent = argString(a, 'agent')
-    const sock = socket()
+    const limit = argLimit(a, 'limit', 64, 512);
+    const agent = argString(a, 'agent');
+    const sock = socket();
     if (sock === null) {
-      return { events: [] as EventRow[], latest: {}, reason: 'no broker socket' }
+      return { events: [] as EventRow[], latest: {}, reason: 'no broker socket' };
     }
     const res = await busProbe(sock, {
       limit,
@@ -271,29 +273,33 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
         topics: ['agent'],
         ...(agent !== undefined ? { keys: [agent] } : {}),
       },
-    })
-    const latest: Record<string, string> = {}
+    });
+    const latest: Record<string, string> = {};
     for (const e of res.events) {
       if (typeof e.key === 'string') {
-        latest[e.key] = agentEventLine(e)
+        latest[e.key] = agentEventLine(e);
       }
     }
     return {
-      events: res.events.map((e) => busRow(e as BusRecord)),
+      events: res.events.map(e => busRow(e as BusRecord)),
       latest,
       gapped: res.gapped,
       ...(res.reason === undefined ? {} : { reason: res.reason }),
-    }
-  }
+    };
+  };
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     tail,
     lifecycle,
     activity,
-  }
+  };
   return {
     name: 'events',
     reads: Object.keys(reads),
     verbs: VERBS,
+    /** CLI twins — `bro bus` serves the ring (and the lifecycle journal
+     *  mirrors onto it), `bro watch` renders the agent-activity cells
+     *  (spec bro-xiq2m). */
+    cli: { tail: 'bus', lifecycle: 'bus', activity: 'watch' },
     readArgs: {
       list: { type: 'object', properties: { limit: { type: 'integer' } } },
       tail: {
@@ -329,29 +335,31 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
      *  = a bus socket path, a mailbox, or the durable journal exists —
      *  drops and lifecycle rows land even with the broker down. */
     capabilities: async () => {
-      const sock = socket()
-      let stream = false
+      const sock = socket();
+      let stream = false;
       if (sock !== null) {
         stream = await bounded(
-          busStatus(sock).then((s) => s.running === true).catch(() => false),
+          busStatus(sock)
+            .then(s => s.running === true)
+            .catch(() => false),
           3_000,
           false
-        )
+        );
       }
-      const mail = drainDirs(dir).some((d) => existsSync(d))
-      const life = lifecyclePath(dir) !== null && existsSync(lifecyclePath(dir)!)
-      return { read: sock !== null || mail || life, stream, publish: false }
+      const mail = drainDirs(dir).some(d => existsSync(d));
+      const life = lifecyclePath(dir) !== null && existsSync(lifecyclePath(dir)!);
+      return { read: sock !== null || mail || life, stream, publish: false };
     },
-    list: async (f) => {
-      const limit = argLimit(f, 'limit', 64, 512)
-      const { events } = await tail({ limit })
-      return events
+    list: async f => {
+      const limit = argLimit(f, 'limit', 64, 512);
+      const { events } = await tail({ limit });
+      return events;
     },
-    get: async (ref) => {
-      const { events } = await tail({ limit: 512 })
-      return events.find((e) => e.id === ref)
+    get: async ref => {
+      const { events } = await collect(BUS_RING_LIMIT, undefined);
+      return events.find(e => e.id === ref);
     },
     read: (name, args) => dispatchRead('events', reads, name, args),
     exec: verbsNotWired('events', VERBS),
-  }
+  };
 }

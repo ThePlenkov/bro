@@ -14,7 +14,7 @@
  * config error, the same rule the fleet's router keeps.
  */
 import { isSystemoneFamily, loadConfig } from '@broject/core';
-import type { FleetRouter, ProviderEntry } from '@broject/core';
+import type { FleetRouter, JudgeFacade, ProviderEntry } from '@broject/core';
 import { readRouterEndpoint } from './gateway.ts';
 
 /** Where the decision model's provider points. */
@@ -92,5 +92,29 @@ export function requireTypedGrade(provider: DecisionProvider): void {
   throw new Error(
     `brouter.router.provider "${provider.name}" speaks prose (${wire}) — ` +
       'a typed judgment is required under "enforce"'
+  );
+}
+
+/** The decision judge — the chained facade over `brouter.router.provider`,
+ *  bound the one way every route decision binds it: the provider surface,
+ *  the grade check under "enforce", and the configured confidence bar.
+ *  Config errors (a prose surface under enforce, a missing provider)
+ *  throw — they are the operator's to fix, not a fail-open case. */
+export async function decisionJudge(dir: string, router: FleetRouter): Promise<JudgeFacade> {
+  const { chainedJudge, judgeConfig, providerJudge } = await import('@broject/judge');
+  const provider = decisionProvider(dir, router);
+  if (router.mode === 'enforce') {
+    requireTypedGrade(provider);
+  }
+  const jcfg = judgeConfig(dir).judge;
+  return chainedJudge(
+    providerJudge(provider.name, provider.entry, jcfg, {
+      keyField:
+        provider.kind === 'lane'
+          ? `providers.${provider.name}.apiKeyEnv`
+          : 'brouter.router.provider',
+    }),
+    undefined,
+    { confidence: jcfg.confidence, timeoutMs: jcfg.timeoutMs }
   );
 }

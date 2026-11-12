@@ -4,7 +4,6 @@
     "autoMerge": true
   },
   "act": {
-    "selfCheck": "act-gate",
     "ignoreChecks": ["kilo", "github-advanced-security", "sonarcloud", "codescene"],
     "docsPaths": ["*.md", "*.mdx", "*.rst", "docs/", "specs/", "site/content/"]
   },

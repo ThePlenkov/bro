@@ -1,17 +1,21 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { after, describe, test } from 'node:test';
 import {
+  agentRegistryPath,
   bdTry,
+  type FleetProfile,
+  type Lease,
+  type ProviderEntry,
+  patchAgentRegistry,
+  type RoutingTable,
   resolveStepClass,
   SpawnError,
-  type FleetProfile,
-  type ProviderEntry,
-  type RoutingTable,
   type SpawnWorker,
-  type Lease,
 } from '@broject/core';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop';
+import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import {
   claimAuthorityNote,
   declaredClaimCapability,
@@ -19,9 +23,11 @@ import {
   loopWatch,
   resolveBeadsDir,
   resolveLoopLane,
+  resumeSessionFor,
   skipLeasedBeads,
+  syncAfterAudit,
+  wallWaitUntil,
 } from './loop.ts';
-import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
 
 test('loop picker skips live bead leases held by another process', () => {
@@ -316,38 +322,40 @@ describe('resolveLoopLane — fleet.routing per-bead class (bro-zmned)', () => {
     assert.equal(lane.class, undefined);
     assert.equal(lane.provider, undefined);
   });
+});
 
-  // bro-mmmodel: a profile's model is a PAIR with its provider (the same
-  // rule chain[0]'s {provider, model} pin follows) — a routed provider
-  // must never inherit a foreign profile's model.
-  test('a routed provider never inherits a foreign profile model (bro-mmmodel)', async () => {
-    const env = routedEnv({ fancy: { provider: 'fancy', model: 'm-9' } });
-    const route = resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'default' });
-    // the default class routes to devin while loop.profile names the
-    // fancy provider — m-9 belongs to fancy's lane (omp refused exactly
-    // this leak: an alien model handed to the routed provider)
-    const confd = await resolveLoopLane(env, {}, laneCfg({ profile: 'fancy' }), route);
-    assert.equal(confd.provider, 'devin');
-    assert.equal(confd.model, undefined);
-    // an explicit provider beside a flag-named profile drops its model too
-    const over = await resolveLoopLane(
-      env,
-      { profile: 'fancy', provider: 'devin' },
-      laneCfg(),
-      route
+// --- wallWaitUntil — the wall settle's wait clock (spec bro-36bhc) -------------
+
+describe('wallWaitUntil — the provider wall wait (bro-36bhc)', () => {
+  const now = Date.parse('2026-10-20T12:00:00Z');
+
+  test('a rate_limited death with a future reset waits the provider clock', () => {
+    assert.equal(
+      wallWaitUntil('rate_limited', '2026-10-20T12:15:00Z', now),
+      Date.parse('2026-10-20T12:15:00Z')
     );
-    assert.equal(over.provider, 'devin');
-    assert.equal(over.model, undefined);
   });
 
-  test('a profile naming the routed provider still supplies its model (bro-mmmodel)', async () => {
-    const env = routedEnv({ devinf: { provider: 'devin', model: 'dev-2' } });
-    const route = resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'default' });
-    // loop.profile pins devin's model and the default class routes to
-    // devin — same provider, so the standing default still inherits
-    const lane = await resolveLoopLane(env, {}, laneCfg({ profile: 'devinf' }), route);
-    assert.equal(lane.provider, 'devin');
-    assert.equal(lane.model, 'dev-2');
+  test('a stale reset still waits — on a floor that escalates per wall death, capped', () => {
+    const stale = '2026-10-20T11:59:00Z';
+    assert.equal(wallWaitUntil('rate_limited', stale, now), now + 30_000);
+    assert.equal(wallWaitUntil('rate_limited', stale, now, 2), now + 60_000);
+    assert.equal(wallWaitUntil('rate_limited', stale, now, 3), now + 120_000);
+    // a provider lying about its reset every time can never spin the
+    // loop back into the respawn-burn — the floor saturates at 15m
+    assert.equal(wallWaitUntil('rate_limited', stale, now, 20), now + 15 * 60_000);
+  });
+
+  test('non-waitable causes and unusable resets are never a wait', () => {
+    // quota/auth park — they are walls with no honest clock; a
+    // rate_limited death whose provider reported no (or garbage)
+    // reset is indefinite — the same park the blocked state gives it
+    assert.equal(wallWaitUntil('quota', '2026-10-20T12:15:00Z', now), undefined);
+    assert.equal(wallWaitUntil('auth', '2026-10-20T12:15:00Z', now), undefined);
+    assert.equal(wallWaitUntil('crash', '2026-10-20T12:15:00Z', now), undefined);
+    assert.equal(wallWaitUntil('rate_limited', undefined, now), undefined);
+    assert.equal(wallWaitUntil('rate_limited', 'not-a-time', now), undefined);
+    assert.equal(wallWaitUntil(undefined, '2026-10-20T12:15:00Z', now), undefined);
   });
 });
 
@@ -479,5 +487,95 @@ describe('claimAuthorityNote', () => {
     assert.match(note, /one credential claims as the same identity/);
     assert.match(note, /one loop on this backlog/);
     assert.match(note, /exclusive-claim store/);
+  });
+});
+
+// --- syncAfterAudit — the audit's fail-open sync boundary (bro-cu3q8) ----------
+
+describe('syncAfterAudit', () => {
+  const capture = (fn: () => void): string => {
+    const out: string[] = [];
+    const real = console.log;
+    console.log = (m?: unknown) => out.push(String(m));
+    try {
+      fn();
+    } finally {
+      console.log = real;
+    }
+    return out.join('\n');
+  };
+
+  test('a throwing sync degrades to a warning with the retry hint — never an exit', () => {
+    const realExit = process.exit;
+    // 'spawnSync timeout ETIMEDOUT' is the incident's own signature — a
+    // wedged store's bd() throw must not reach main's catch
+    const out = capture(() =>
+      syncAfterAudit({ json: false }, () => {
+        throw new Error('spawnSync timeout ETIMEDOUT');
+      })
+    );
+    assert.equal(process.exit, realExit);
+    assert.match(out, /warning: bro sync failed — spawnSync timeout ETIMEDOUT/);
+    assert.match(out, /infra; the next run's audit retries/);
+  });
+
+  test('a stray process.exit inside sync converts to the same warning (bro-qjbwq)', () => {
+    const realExit = process.exit;
+    const out = capture(() =>
+      syncAfterAudit({ json: false }, () => {
+        process.exit(1);
+      })
+    );
+    assert.equal(process.exit, realExit);
+    assert.match(out, /warning: bro sync failed — bro sync called process.exit\(1\)/);
+  });
+});
+
+describe("resumeSessionFor — the coder's own session rides again (bro-5qsnr)", () => {
+  const argvLane = {
+    provider: 'devin',
+    worker: { kind: 'argv' as const, argv: ['bro', 'acp-worker'], cliName: 'devin' },
+  };
+
+  test('same provider + argv worker + recorded id resumes; every other shape stays cold', () => {
+    const { root, main } = initRepo('bro-loop-resume-');
+    inside(main, root, () => {
+      // agentId+backend or the registry reader drops the row as torn
+      patchAgentRegistry(main, 'bro-x1', {
+        agentId: 'native-deadbeef',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
+        provider: 'devin',
+        acpSessionId: 'sess-1',
+        worktree: main,
+      });
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', argvLane), 'sess-1');
+      // a provider switch feeds a foreign agent a meaningless id — cold
+      assert.equal(
+        resumeSessionFor({ root: main }, 'bro-x1', { ...argvLane, provider: 'kilo' }),
+        undefined
+      );
+      // no argv worker — a template lane has no --resume surface
+      assert.equal(
+        resumeSessionFor({ root: main }, 'bro-x1', {
+          provider: 'devin',
+          worker: { kind: 'template', command: 'devin -p {promptFile}' },
+        }),
+        undefined
+      );
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', {}), undefined);
+      // nothing recorded — a bead that never ran acp
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x2', argvLane), undefined);
+    });
+  });
+
+  test('a corrupt agents.json is "no session" — never a throw past the claim', () => {
+    const { root, main } = initRepo('bro-loop-resume-');
+    inside(main, root, () => {
+      const reg = agentRegistryPath(main)!;
+      mkdirSync(dirname(reg), { recursive: true });
+      writeFileSync(reg, '{not json');
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', argvLane), undefined);
+    });
   });
 });

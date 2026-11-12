@@ -364,12 +364,20 @@ export interface ProviderWall {
    *  missing mark never reads as indefinite, bro-uswqn). `quota`
    *  walls carry none: a quota death holds until it is stopped. */
   until?: string;
+  /** true when `until` is the lane's own cooldown bound, not a reset
+   *  the provider reported — a caller may hold for the provider's
+   *  word but never for a bound we invented (bro-36bhc: the convoy
+   *  contract parks on walls with no advertised end). */
+  bound?: true;
 }
 
 export interface AccountWall {
   account: string;
   cause: 'rate_limited' | 'quota';
   until?: string;
+  /** true when `until` is a locally-derived bound (TTL/cooldown), not
+   *  a reset the provider reported — see ProviderWall.bound */
+  bound?: true;
   resetAt?: string;
   provider?: string;
   rig?: string;
@@ -611,6 +619,9 @@ function accWall(
     account: typeof e.account === 'string' ? e.account : e.provider,
     cause: 'rate_limited',
     until,
+    // a death the provider gave no reset for produced a cooldown
+    // bound — callers holding for a reported reset must not wait on it
+    ...(parseTs(e.resetAt) === undefined ? { bound: true as const } : {}),
   };
 }
 
@@ -695,6 +706,10 @@ function accountWallFrom(
     provider: source.provider,
     cause,
     ...(until === undefined ? {} : { until }),
+    // cooldown-bounded horizons are not the provider's word — see bound
+    ...(until !== undefined && parseTs(source.resetAt) === undefined
+      ? { bound: true as const }
+      : {}),
     ...accountWallMetadata(source),
   };
 }

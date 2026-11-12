@@ -6,8 +6,10 @@
  * row as JSON. Three rows per event:
  *
  *   runsh:<event>   sh hooks/run.sh — the process plugin hosts exec
- *   dist:<event>    node packages/cli/dist/index.js — dispatch minus
- *                   the launcher, so run.sh's share is visible
+ *   dist:<event>    node packages/cli/dist/hooks.js — dispatch minus
+ *                   the launcher, so run.sh's share is visible; a dist
+ *                   built before the slim entry falls back to
+ *                   `index.js hooks` (specs/bro-36sx7.7.md)
  *   noop:<event>    BRO_HOOKS=0 sh hooks/run.sh — the machine-backend
  *                   skip; a spawned-agent tree pays ~nothing (bro-ddksm)
  *
@@ -43,6 +45,7 @@ import { HOOK_DISPATCH_ERR } from '../packages/cli/src/commands/hook-signal.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI_DIST = join(ROOT, 'packages', 'cli', 'dist', 'index.js');
+const CLI_HOOKS = join(ROOT, 'packages', 'cli', 'dist', 'hooks.js');
 const RUN_SH = join(ROOT, 'hooks', 'run.sh');
 
 /** Session-lifecycle events only — git-hook entries (prepare-commit-msg
@@ -242,7 +245,11 @@ interface Attempt {
 function attempt(spec: RowSpec, input: string | undefined, fx: Fixture): Attempt {
   const [command, args]: [string, string[]] =
     spec.lane === 'dist'
-      ? [process.execPath, [CLI_DIST, 'hooks', spec.event]]
+      ? existsSync(CLI_HOOKS)
+        ? // the slim entry run.sh prefers — argv is already the
+          // post-`hooks` spelling (specs/bro-36sx7.7.md)
+          [process.execPath, [CLI_HOOKS, spec.event]]
+        : [process.execPath, [CLI_DIST, 'hooks', spec.event]]
       : ['sh', [RUN_SH, spec.event]];
   const t0 = performance.now();
   const proc = spawnSync(command, args, {
@@ -474,7 +481,7 @@ function enforce(
 
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
-  if (!existsSync(CLI_DIST)) {
+  if (!existsSync(CLI_DIST) && !existsSync(CLI_HOOKS)) {
     console.error('bench-hooks: packages/cli/dist is missing — run `npm run build` first');
     process.exit(2);
   }

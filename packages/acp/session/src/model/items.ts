@@ -27,7 +27,7 @@ import {
   toolArg,
   toolContent,
 } from '../wire/index.ts';
-import { fmtUsage, isInternalBy, shortBy, TimeGutter } from './fmt.ts';
+import { fmtUsage, isInternalBy, shortBy, TimeGutter } from '../wire/fmt.ts';
 import { isJudgeTurn } from './verdict.ts';
 
 export type { ToolContent };

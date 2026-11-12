@@ -256,26 +256,15 @@ test('matrix conformance — omp pre-tool cell ships via its own module', async 
 
 // --- in-process plugin hosts ---------------------------------------------------
 
-test('matrix conformance — opencode plugin exposes its declared V1 hooks', async () => {
-  const plugin = (await import(join(repoRoot, 'plugins/opencode/bro/bro.ts'))) as {
-    default: { server: (input: unknown) => Promise<Record<string, unknown>>; setup: unknown };
+test('matrix conformance — opencode plugin exposes setup (modern API)', async () => {
+  // the v2 catalog plugin — the server entrypoint of the plugin dir
+  const plugin = (await import(join(repoRoot, 'plugins/opencode/bro/index.ts'))) as {
+    default: { id?: string; setup?: unknown; server?: unknown };
   };
-  const host = HOOK_MATRIX.hosts.opencode!;
-  const hooks = await plugin.default.server({ directory: tmp });
-  const v1 = new Set(Object.keys(hooks));
-  for (const [broEvent, cell] of Object.entries(host.events) as [
-    BroHookEvent,
-    NonNullable<HostEntry['events'][BroHookEvent]>,
-  ][]) {
-    // V1 literal keys are the cell's non-domain-shaped native names
-    const expected = cell.native.filter(n => !n.includes('('));
-    const check = cell.v2 === true ? [] : expected;
-    for (const native of check) {
-      assert.ok(v1.has(native), `opencode V1 does not expose ${native} for ${broEvent}`);
-    }
-  }
-  // V2 cells ride setup() — asserted present, exercised by opencode-v2.test.ts
+  assert.equal(plugin.default.id, 'bro');
   assert.equal(typeof plugin.default.setup, 'function');
+  assert.equal(plugin.default.server, undefined);
+  // hook/domain behavior is exercised by opencode.setup.test.ts
 });
 
 test('matrix conformance — kilo plugin exposes its declared hooks', async () => {

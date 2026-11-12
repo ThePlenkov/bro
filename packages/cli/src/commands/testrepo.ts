@@ -5,14 +5,13 @@
  *  duplication on new code. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { bdTry, handleOwner, pidAlive } from '@broject/core';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -20,7 +19,7 @@ import {
 import { devNull, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { usageWriter } from '@broject/core';
+import { bdTry, handleOwner, pidAlive, usageWriter } from '@broject/core';
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -74,7 +73,14 @@ export function tmpDir(prefix: string): string {
   if (!tmpSweepArmed) {
     tmpSweepArmed = true;
     process.once('exit', () => {
-      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+      // same contract as inside()/insideAsync(): a detached child still
+      // flushing (serve watchdog respawn, trace tail) makes a straggler
+      // write between readdir and rmdir — ENOTEMPTY, not a bug. Without
+      // retries one late write fails the whole file after every test
+      // passed (serve.e2e flake, run 43094960264).
+      for (const d of tmpDirs) {
+        rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
     });
   }
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -122,6 +128,19 @@ export const CLI_DIST = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
   '..',
+  'dist',
+  'index.js'
+);
+
+/** The built core bundle — the fake agent requires it so fixture writes
+ *  to agents.json go through the registry's own lock+atomic-write path
+ *  (require-of-ESM is unflagged on the >=22.18 floor). */
+const CORE_DIST = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  'core',
   'dist',
   'index.js'
 );
@@ -242,6 +261,25 @@ const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }
 const cmd = pos[0]
+const cmdName = cmd === undefined && args[0] === '--version' ? '--version' : cmd
+// FAKE_BD_WEDGE=<file> — a store-outage dial for failure-injection
+// tests (bro-cu3q8): the file lists wedged commands, one per line.
+// 'hang:<cmd>' sleeps past the caller's 15s budget so the spawn's own
+// timeout reports the real incident signature 'spawnSync <bin>
+// ETIMEDOUT'; a bare name (or '*') fails fast on the store's own
+// outage line — 'no beads database' is what callers classify as the
+// store-down shape, a generic refusal would read as a claim race.
+// Absent file → healthy store.
+const WEDGE = process.env.FAKE_BD_WEDGE
+if (WEDGE && fs.existsSync(WEDGE)) {
+  const spec = fs.readFileSync(WEDGE, 'utf8').split('\\n').map((l) => l.trim()).filter(Boolean)
+  const hit = spec.find((l) => l === cmdName || l === 'hang:' + cmdName || l === '*')
+  if (hit !== undefined) {
+    if (hit.startsWith('hang:')) { pause(20_000); process.exit(0) }
+    console.error('Error: no beads database found')
+    process.exit(1)
+  }
+}
 // one-shot claim-read failure injection (bro-etimout): a wedged store
 // past bd's 15s budget makes the throwing bd() ready call throw — a
 // non-zero exit throws identically for execFileSync callers. Scoped to
@@ -258,7 +296,7 @@ if (process.env.FAKE_BD_READY_FAILS && cmd === 'ready' && args.includes('--exclu
     fail('spawnSync timeout ETIMEDOUT')
   }
 }
-switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
+switch (cmdName) {
   case '--version':
     console.log('bd 0.0.0-fake')
     break
@@ -998,6 +1036,8 @@ const facade = {
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
       // who landed it — the host's merge record (GitHub's mergedBy.login)
       mergedBy: per.mergedBy ?? s.mergedBy,
+      // the review verdict axis (bro-n1foa) — seeded flat or per-PR
+      reviewDecision: per.reviewDecision ?? s.reviewDecision,
       ...over,
     }
   }),
@@ -1061,9 +1101,66 @@ const facade = {
     return new Map(keys.map((k) => [k, Object.hasOwn(all, k) ? all[k]! : 0]))
   }),
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
-  reviewThreads: async () => load().threads ?? [],
+  reviewThreads: async () => withState((s) => {
+    // readQueues.threads — the same mid-flight race scripting as
+    // readQueues.checks: each call shifts one list, so a test can
+    // script 'open at the gate snapshot, resolved at the fixer fetch'
+    // (the skipped fix round's no-spawn refund, bro-36bhc review)
+    const tq = s.readQueues?.threads
+    if (Array.isArray(tq) && tq.length > 0) {
+      s.readQueues.threads = tq.slice(1)
+      return tq[0]
+    }
+    return s.threads ?? []
+  }),
   resolveThread: () => {},
   replyThread: () => {},
+  // the standing-veto probe + dismissal (bro-n1foa) — host.json carries
+  // the reviews verbatim under vetoReviews; dismissReview records the
+  // call and clears the entry, moving reviewDecision when the last
+  // veto lifts so a post-dismiss act status reads the new world
+  vetoReviews: async (t) =>
+    withState((s) => {
+      // readQueues.vetoReviews — the same mid-flight race scripting as
+      // readQueues.threads: each call shifts one list, so a test can
+      // script 'stale at the first probe, live at the pre-dismissal
+      // re-read' (the TOCTOU narrowing, codeant/coderabbit round)
+      const vq = s.readQueues?.vetoReviews
+      if (Array.isArray(vq) && vq.length > 0) {
+        s.readQueues.vetoReviews = vq.slice(1)
+        return (vq[0] ?? []).map((v) => ({ ...v }))
+      }
+      const per = s.prs
+        ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
+        : {}
+      return ((per.vetoReviews ?? s.vetoReviews) ?? []).map((v) => ({ ...v }))
+    }),
+  dismissReview: (t, reviewId, message) =>
+    withState((s) => {
+      s.dismissals = (s.dismissals ?? []).concat([{ pr: t.pr, review: reviewId, message }])
+      const drop = (list) => (list ?? []).filter((v) => v.id !== reviewId)
+      const settle = (entry) => {
+        // settle the SAME effective list vetoReviews() resolves —
+        // entry.vetoReviews ?? s.vetoReviews — or an entry inheriting
+        // the flat list drops to [] and its surviving live vetoes
+        // vanish while reviewDecision still flips (codeant/coderabbit
+        // on PR #1020). The filtered result persists on the selected
+        // PR's entry only; s.vetoReviews stays for other inheritors.
+        const vetoes = drop(entry.vetoReviews ?? s.vetoReviews)
+        entry.vetoReviews = vetoes
+        if (vetoes.length === 0 && entry.reviewDecision === 'CHANGES_REQUESTED') {
+          entry.reviewDecision = 'REVIEW_REQUIRED'
+        }
+      }
+      // only the targeted PR's entry settles — a dismissal on PR 7 must
+      // never rewrite PR 8's standing veto (multi-PR gate fidelity)
+      if (s.prs) {
+        const p = Object.values(s.prs).find((p) => p.number === t.pr)
+        if (p) settle(p)
+      } else {
+        settle(s)
+      }
+    }),
   // per-PR labels/body — the prs map's entries carry them; the flat
   // single-PR path uses s.labels/s.prBody (spec bro-c650l ownership)
   labels: (t) => {
@@ -1263,6 +1360,22 @@ const sh = (cmd, args) => {
     }
   }
 }
+// learn/retro evidence for the exit-harvest check (spec bro-xkv42.2):
+// every exit — explicit or natural — leaves a retro bead born+closed
+// inside the run window, satisfying the artifact contract without
+// ever entering the ready queue. The 'exit' hook covers the break-out-
+// of-switch paths process.exit never sees; gated on FAKE_BD_DB so
+// real-bd fixtures don't write into a live store. Best-effort: a
+// wedged store must not kill the worker.
+process.on('exit', () => {
+  if (!process.env.FAKE_BD_DB) return
+  try {
+    const retro = JSON.parse(
+      sh('bd', ['create', '--title', 'retro: worker learn', '--labels', 'retro'])
+    )
+    sh('bd', ['close', String(retro.id)])
+  } catch {}
+})
 const prompt = retry(() => fs.readFileSync(promptFile, 'utf8'))
 const branch = sh('git', ['branch', '--show-current']).trim()
 // stdout line — proves the loop's spawn tee lands agent output in the
@@ -1369,6 +1482,43 @@ if (prompt.includes('SAST fixer')) {
   log(cleared ? 'cleared annotations' : 'left findings (noop)')
   process.exit(0)
 }
+// a per-bead provider wall (bro-36bhc): the worker dies exactly like a
+// provider-walled real run — the tail text on stderr is what the
+// exit-cause classifier reads (rate-limit words + reset), the exit code
+// only proves death. One-shot: consuming the wall lets the woken
+// re-claim's worker run the normal scenario — the "wait the reset, then
+// respawn" e2e gets its second act from the same fixture.
+const wall = (load().walls ?? {})[process.env.BRO_BEAD_ID]
+if (wall !== undefined) {
+  withState((s) => { delete s.walls[process.env.BRO_BEAD_ID] })
+  console.error(wall.tail)
+  log('walled')
+  process.exit(wall.exit ?? 1)
+}
+// a per-bead operator stop over a stale recorded death (bro-36bhc
+// review): the worker patches its OWN registry entry stopped:true while
+// a previous run's cause/resetAt stays on it — the settle must park on
+// the flat parkedWakeMin cooldown, never that stale wall deadline. The
+// patch goes through the registry's locked, atomic writer (same
+// read-modify-write the parent's spawns/down take): a hand-rolled
+// read+writeFileSync races that writer and loses updates, and a
+// swallowed error logged 'stop-marked' for a stop that never landed
+const stop = (load().stops ?? {})[process.env.BRO_BEAD_ID]
+if (stop !== undefined) {
+  const { patchAgentRegistry, readAgentRegistry, withAgentRegistryLock } =
+    require(${JSON.stringify(CORE_DIST)})
+  withAgentRegistryLock('.', () => {
+    if (readAgentRegistry('.')[process.env.BRO_BEAD_ID] !== undefined) {
+      patchAgentRegistry('.', process.env.BRO_BEAD_ID, {
+        stopped: true,
+        cause: stop.cause,
+        resetAt: stop.resetAt,
+      })
+    }
+  })
+  log('stop-marked')
+  process.exit(stop.exit ?? 1)
+}
 switch (scenario) {
   case 'land': {
     retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
@@ -1409,6 +1559,55 @@ switch (scenario) {
     sh('bd', ['close', process.env.BRO_BEAD_ID, '--reason', 'nothing to ship'])
     log('closed bead')
     break
+  case 'wall': {
+    // a provider rate wall that kills the FIRST spawn — wallDied marks
+    // the death so the post-reset respawn lands (bro-36bhc). The reset
+    // rides stderr like a real provider's rate-limit line, where the
+    // .stderr tail the classifier reads picks it up. The tail must NOT
+    // say 'Reached free model rate limit' — that phrase arms the
+    // classifier's Devin rolling-window grace (+10min), and a 10min
+    // wall can never fit the 60s e2e clock
+    const walled = withState((s) => {
+      if (s.wallDied === true) return false
+      s.wallDied = true
+      return true
+    })
+    if (walled) {
+      const resetAt = new Date(Date.now() + 1200).toISOString()
+      withState((s) => {
+        s.events = (s.events ?? []).concat([
+          { wallSpawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now(), resetAt },
+        ])
+      })
+      log('hit the rate wall til ' + resetAt)
+      console.error('HTTP 429 rate limit exceeded — resets at ' + resetAt)
+      process.exit(1)
+    }
+    retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
+    sh('git', ['add', '-A'])
+    sh('git', ['commit', '-qm', 'feat: the thing'])
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { spawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now() },
+      ])
+      markPrOpened(s)
+    })
+    log('opened pr')
+    peekLoop('worker-done')
+    break
+  }
+  case 'quota': {
+    // the wall with no advertised end — a quota death must park, never
+    // respawn into the account wall (bro-36bhc)
+    log('hit the quota wall')
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { wallSpawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now() },
+      ])
+    })
+    console.error('account quota exceeded — out of credits for this cycle')
+    process.exit(1)
+  }
   case 'fail':
     log('dying')
     process.exitCode = 3
@@ -1686,6 +1885,12 @@ export function driveFixture(prefix: string): DriveFixture {
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
       loop: { agent: `node ${host.agent}` },
+      // the pass's litter sweep is off here: these suites script exact
+      // host-read sequences (readQueues.meta), and since bro-imvu3 the
+      // sweep legitimately spends prMeta reads on bare label branches
+      // like the work/fx-a every test creates — one extra read shifts
+      // the queue and the gate sees the scripted 'bbb' head itself
+      drive: { litterSweepSec: 0 },
     })
   );
   const env = {
@@ -1753,7 +1958,7 @@ export function occupyBranch(main: string, branch: string): void {
  *  drive pass owes: no fixer bead, no spawn-log entry. */
 export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void {
   const v = driveVerdict(r);
-  assert.equal(v.verdict, want, v.detail);
+  assert.equal(v.verdict, want, String(v.detail));
   assert.equal(fixerRows(f.db).length, 0);
   assert.equal(spawnLog(f.main), '');
 }
@@ -1762,7 +1967,7 @@ export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void
  *  bead closed 'merged via …'. */
 export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unknown): void {
   const v = driveVerdict(r);
-  assert.equal(v.verdict, 'merged', v.detail);
+  assert.equal(v.verdict, 'merged', String(v.detail));
   assert.equal(bead(f.db, String(fixerId))?.status, 'closed');
   assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/);
 }

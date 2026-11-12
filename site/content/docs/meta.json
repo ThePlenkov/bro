@@ -20,6 +20,9 @@
     "---Extend---",
     "plugins",
     "packages",
+    "---Spec engine---",
+    "brose",
+    "brotocol",
     "---Design---",
     "...design"
   ]

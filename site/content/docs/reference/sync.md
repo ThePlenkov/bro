@@ -8,7 +8,7 @@ description: "Push/pull artifact dirs on refs/bro/data [--pull]"
 | | |
 | --- | --- |
 | group | `work` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `sync` |
 | config | `sync` in bro.config |
 | guide | [commands/utility](/docs/commands/utility) |

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   AgentNotFound,
-  BATCH_MARKER_ENV,
   SpawnError,
   type AgentCause,
   type AgentInfo,
@@ -10,6 +9,7 @@ import {
   type AgentState,
 } from '@broject/core';
 import type { ConvoyNext, Molecule } from '@broject/convoy';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import {
   runArgs,
   runnerPrompt,
@@ -157,6 +157,12 @@ describe('runnerPrompt', () => {
     assert.match(p, /\/repo\/here/);
     assert.match(p, /state: complete/);
     assert.match(p, /bro act merge/);
+  });
+
+  test('ends with the shared learn+retro closeout (bro-xkv42.1)', () => {
+    const p = runnerPrompt('bro-mol-x', '/repo/here');
+    assert.ok(p.includes(LEARN_RETRO_CLOSEOUT), 'closeout verbatim');
+    assert.ok(p.trimEnd().endsWith(LEARN_RETRO_CLOSEOUT), 'closeout is the last word');
   });
 });
 
@@ -544,7 +550,7 @@ describe('runnerSpawnReq', () => {
     assert.equal(req.molStep, 'm-1');
     assert.equal(req.worktree, '/repo');
     assert.equal(req.beadsDir, '/repo/.beads');
-    assert.equal(req.env?.[BATCH_MARKER_ENV], '1');
+    assert.equal(req.lane, 'batch');
     assert.match(req.prompt ?? '', /m-1/);
   });
 });

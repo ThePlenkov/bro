@@ -23,7 +23,7 @@
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
 import {
@@ -58,6 +58,10 @@ import {
   acpSessionRetain,
   AcpDeadLoopError,
   AcpDeadLoopGuard,
+  ACP_COOLDOWN_DEFAULT_MS,
+  AcpLaneCooldown,
+  AcpCooldownError,
+  armWallFromError,
   otelEvent,
   otelJournal,
   otelParent,
@@ -107,6 +111,12 @@ export interface ConductorConfig {
   catalog?: { name: string; entry: ProviderEntry };
   model?: string;
   cwd: string;
+  /** The session-workspace pin (spec bro-sx4hr) — `serve.acpCwd` /
+   *  `BRO_PROVIDER_ACP_CWD` names the cwd ACP sessions anchor at when
+   *  the listener has no repo root of its own (the host gateway). Only
+   *  the host listener consumes it — repo-scoped serve anchors at the
+   *  repo root regardless. */
+  acpCwd?: string;
   timeoutMs: number;
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
@@ -132,6 +142,15 @@ export interface ConductorConfig {
   /** The silence bound per turn, ms — a turn that produces no
    *  `session/update` for this long is ended. 0 disables the watchdog. */
   acpStallMs?: number;
+  /** The provider wall's cooldown (spec bro-i6811) — how long a lane
+   *  stays closed after the account refused a request. 0 disables the
+   *  cooldown (the lane spawns through walls as before). */
+  acpCooldownMs?: number;
+  /** The lane's wall cooldown — SHARED between the surfaces that ride
+   *  the same account: the conductor's default lane and the brokered
+   *  transport (/api/v1/acp). A wall that closed one must close the
+   *  other, or the retry storm simply moves to the other surface. */
+  cooldown?: AcpLaneCooldown;
   /** The idle window — the pooled peer is released after it (spec
    *  bro-7ira8). 0 disables the release; the /api/v1/acp transport keeps
    *  its peer (the client owns that conversation's lifetime). */
@@ -211,6 +230,33 @@ function stallWindow(env: NodeJS.ProcessEnv, fallback: number): number {
   return Number.isInteger(num) && num >= 0
     ? Math.min(num, MAX_TIMER_MS)
     : Math.min(fallback, MAX_TIMER_MS);
+}
+
+/** The provider wall's cooldown (spec bro-i6811) — the env pin wins
+ * over the file, and 0 is a deliberate "off" (the lane spawns through
+ * walls as before). A negative or fractional value is not a window at
+ * all, so the fallback wins — a fractional 0.5 must not floor into 0
+ * and silently switch the cooldown OFF. */
+function cooldownWindow(env: NodeJS.ProcessEnv, fallback: number): number {
+  const raw = env.BRO_PROVIDER_ACP_COOLDOWN_MS?.trim();
+  if (raw === undefined || raw === '') {
+    return Math.min(fallback, MAX_TIMER_MS);
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) && num >= 0
+    ? Math.min(num, MAX_TIMER_MS)
+    : Math.min(fallback, MAX_TIMER_MS);
+}
+
+/** The session-workspace pin (spec bro-sx4hr) — a path string, so only
+ *  a non-empty value counts; the env pin wins over the file like every
+ *  other serve knob. The pin lands in `session/new`'s cwd, which ACP
+ *  requires absolute — a relative value resolves against the listener's
+ *  working directory rather than reaching the wire relative. */
+function acpCwdPin(env: NodeJS.ProcessEnv, configured: string | undefined): string | undefined {
+  const raw = env.BRO_PROVIDER_ACP_CWD?.trim() || configured?.trim();
+  if (raw === undefined || raw === '') return undefined;
+  return resolve(raw);
 }
 
 /** The backend pin — env wins over the repo's serve.backend. Absent or
@@ -420,6 +466,7 @@ export function conductorConfig(
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
+    acpCwd: acpCwdPin(env, cfg.serve?.acpCwd),
     fast: resolveFastLane(env, cfg.serve),
     fastDisabled: fastLaneDisabled(env, cfg.serve),
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
@@ -433,8 +480,17 @@ export function conductorConfig(
       cfg.serve?.acpMaxAbandoned ?? 32
     ),
     acpStallMs: stallWindow(env, cfg.serve?.acpStallMs ?? 300_000),
+    // the wall cooldown (spec bro-i6811) — the env pin wins over the
+    // file, and 0 is a deliberate "off"
+    acpCooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
     idleReleaseMs: idleWindow(env, cfg.serve?.idleReleaseMs ?? 300_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
+    // the wall cooldown (spec bro-i6811) — ONE instance for the whole
+    // conductor: the default lane and the brokered transport ride the
+    // same account, so a wall that closed one must close the other.
+    cooldown: new AcpLaneCooldown({
+      cooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
+    }),
   };
 }
 
@@ -733,7 +789,7 @@ const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g;
 /** A live conversation: the retained session plus just enough client
  *  state to slice the next delta and to replay the last reply when a
  *  resent history carries nothing new. */
-interface ConvSession {
+export interface ConvSession {
   live: AcpRetainedSession;
   peer: AcpPeer;
   /** body.messages count fully accounted for — sent user turns AND
@@ -758,6 +814,11 @@ interface ConvSession {
   lastReply: ReplyView;
   busy: boolean;
   lastSeen: number;
+  /** Set on the lane's dedicated probe session (bro-5xm9g) — probes
+   *  are independent liveness turns, so the conversation proofs
+   *  (consumed/historyHash/replay) never apply; each probe sends its
+   *  full body on the retained session. */
+  probe?: true;
   /** The session-cap claim this session holds — released when the
    *  session is disposed (spec bro-b961a): a claim that outlived its
    *  session ate the cap's budget until the TTL expired it. */
@@ -776,7 +837,32 @@ interface ReplyView {
 }
 
 const CONV_TTL_MS = 10 * 60_000;
+/** Named (h:) sessions asked for persistence explicitly — a probe or
+ *  live-check that names itself wants reuse across its own cadence,
+ *  which routinely exceeds the anonymous TTL (bro-5xm9g: ~16min probe
+ *  cadence vs 10min TTL → every probe paid a fresh session/new, ~11k
+ *  input tokens of system+tool re-ingest each). An hour covers several
+ *  probe rounds while CONV_CAP still bounds the pool. */
+const CONV_TTL_NAMED_MS = 60 * 60_000;
 const CONV_CAP = 32;
+
+/** The telemetry namespace of a conversation key — `session_key_ns` on
+ *  conductor.turn splits named reuse traffic from anonymous probes so
+ *  quota burn is attributable (bro-5xm9g). `probe:` keys are the
+ *  lane's dedicated probe session — their own namespace, not 'named'. */
+const keyNs = (k: string | undefined): 'named' | 'fingerprint' | 'probe' | 'none' =>
+  k === undefined
+    ? 'none'
+    : k.startsWith('probe:')
+      ? 'probe'
+      : k.startsWith('h:')
+        ? 'named'
+        : 'fingerprint';
+
+/** Keys that outlive the anonymous TTL — named sessions asked for
+ *  persistence, and the lane's probe session exists precisely to be
+ *  reused across a probe cadence that exceeds 10 min. */
+const persistentKey = (k: string): boolean => k.startsWith('h:') || k.startsWith('probe:');
 
 /** What the fingerprint/history proofs hash: the canonical turn text
  *  PLUS a digest of any image payload — `serTurn` collapses images to
@@ -805,6 +891,19 @@ const hashTurns = (prefix: string, msgs: ClientMessage[], n: number, stopKey: st
 /** Prefix-only digest — chained requests carry no client history to
  *  hash, so the system+tools freshness is proven standalone. */
 const prefixSha = (prefix: string): string => createHash('sha256').update(prefix).digest('hex');
+
+/** The probe marker (bro-5xm9g) — `x-bro-probe` classifies the request
+ *  as probe traffic: health/live-check turns that must not each pay a
+ *  fresh `session/new` on a shared quota lane. The header's value is an
+ *  optional label for telemetry (`live-check`, `health`, …); absent or
+ *  empty reads as `probe`. Bounded — a label is a tag, not a payload. */
+function probeLabelOf(req: IncomingMessage): string | undefined {
+  const hdr = req.headers['x-bro-probe'];
+  const raw = Array.isArray(hdr) ? hdr[0] : hdr;
+  if (raw === undefined) return undefined;
+  const label = raw.trim().slice(0, 40);
+  return label === '' ? 'probe' : label;
+}
 
 /** Where the conversation id comes from: an explicit `x-bro-session`
  *  wins (clients that can pin); the fingerprint is the birth
@@ -835,7 +934,7 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
  *  `size` can't shrink the size-branch mid-iteration. The map is
  *  insertion-ordered and hits re-insert, so front-to-back IS
  *  least-recently-used — overflow evicts the coldest entries. */
-function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
+export function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
   let overflow = Math.max(0, sessions.size - CONV_CAP);
   for (const [k, s] of sessions) {
     // a session mid-turn is off-limits — disposing a live handle would
@@ -843,7 +942,7 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
     if (s.busy) {
       continue;
     }
-    if (now - s.lastSeen > CONV_TTL_MS || overflow-- > 0) {
+    if (now - s.lastSeen > (persistentKey(k) ? CONV_TTL_NAMED_MS : CONV_TTL_MS) || overflow-- > 0) {
       sessions.delete(k);
       disposeQuiet(s.live);
       releaseClaim(s);
@@ -1910,9 +2009,17 @@ interface TurnEnv {
   signal: AbortSignal;
   by: string;
   imageOk: boolean;
+  /** The request's probe label (bro-5xm9g) — set when the client sent
+   *  `x-bro-probe`; the turn rides the lane's dedicated probe session
+   *  instead of the conversation proofs. */
+  probe?: string;
   /** The lane's dead-loop guard (spec bro-b961a) — the churn measure
    *  behind every session this turn opens. */
   guard: AcpDeadLoopGuard;
+  /** The lane's wall cooldown (spec bro-i6811) — the lane is shared by
+   *  every conversation on it, so the wall that hit one conversation
+   *  closes the lane for all of them. */
+  cooldown: AcpLaneCooldown;
   /** The lane's pool — the turn marks it busy so the idle release
    *  (spec bro-7ira8) never fires under a running turn. */
   pool: AcpLinkPool;
@@ -2236,6 +2343,9 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
       busy: false,
       lastSeen: Date.now(),
+      // a probe-keyed open lands on the lane's probe session — the
+      // marker keeps later probes off the conversation proofs
+      probe: env.probe === undefined ? undefined : true,
       // the session holds the cap's slot until it is disposed
       releaseCap,
     };
@@ -2254,6 +2364,47 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   } finally {
     env.pendingOpens.delete(key);
   }
+}
+
+/** A probe turn (bro-5xm9g) — the lane's dedicated session, no
+ *  conversation proofs. Probes are independent liveness checks, not
+ *  continuations: each sends its FULL serialized body on the retained
+ *  session, so `consumed`/`historyHash`/replay never apply. A warm
+ *  probe skips `session/new` and the agent's context re-ingest — the
+ *  per-probe burn drops to prompt-size on an already-open session.
+ *  A cold, busy, or peer-dead probe takes `freshTurn` (which opens or
+ *  one-shots and marks the new conv `probe`). */
+async function probeTurn(env: TurnEnv): Promise<TurnOutcome> {
+  const key = env.key;
+  const cand = key !== undefined ? env.sessions.get(key) : undefined;
+  const warm = cand !== undefined && cand.peer === env.peer && !cand.busy && cand.probe === true;
+  if (warm) {
+    const prompt = serializeBlocks(env.body, env.imageOk);
+    const inputTokens = inputTokensOf(prompt);
+    cand.busy = true;
+    cand.lastSeen = Date.now();
+    try {
+      const reply = await cand.live.prompt(prompt, env.deadline, {
+        signal: env.signal,
+        by: env.by,
+        requestModel: env.requestModel,
+        parent: env.parent,
+        onUpdate: env.openStream?.(inputTokens),
+      });
+      return { reply, reused: true, inputTokens, replay: false, conv: cand };
+    } catch (err) {
+      // a failed turn poisons the session — evict so the next probe
+      // opens fresh rather than piling onto unknown state
+      evict(env.sessions, key, cand);
+      throw err;
+    }
+  }
+  // a stale candidate (dead peer, wrong class) retires before the fresh
+  // open — settleConv's overwrite would orphan its session handle
+  if (cand !== undefined && !cand.busy) {
+    evict(env.sessions, key, cand);
+  }
+  return await freshTurn(env, cand?.busy === true);
 }
 
 /** A chained request whose predecessor no longer resolves — expired,
@@ -2282,6 +2433,12 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
   env.pool.busy();
   try {
     sweepSessions(env.sessions, Date.now());
+    // probe traffic rides the lane's dedicated session — the
+    // conversation proofs below are for continuing conversations,
+    // and a probe is never one (bro-5xm9g)
+    if (env.probe !== undefined) {
+      return await probeTurn(env);
+    }
     const cand = env.key !== undefined ? env.sessions.get(env.key) : undefined;
     if (env.chained === true) {
       // chained routing is strict: the named predecessor must still sit
@@ -2358,6 +2515,19 @@ interface ProviderLane {
   /** The lane's dead-loop guard (spec bro-b961a) — one per lane, so a
    *  conversation's churn is counted against its own provider. */
   guard: AcpDeadLoopGuard;
+  /** The lane's wall cooldown (spec bro-i6811) — the provider's rate
+   *  wall closes the spawn path until it ends. */
+  cooldown: AcpLaneCooldown;
+  /** The lane's last successful catalog read (bro-5xm9g) — /v1/models
+   *  probes collapse to one `session/new` per window instead of one
+   *  per request. Failures are never cached: a lane that recovers is
+   *  re-read on the next request. */
+  catalogCache?: { at: number; rows: RoutedModel[] };
+  /** The lane's catalog read in flight (bro-5xm9g) — concurrent cold
+   *  /v1/models requests share it (single-flight) instead of each
+   *  paying a fresh child + `session/new`. A settled read leaves only
+   *  catalogCache (success) or nothing (failure) behind. */
+  catalogInflight?: Promise<LaneCatalog>;
 }
 
 /** A routing decision — the LANE that serves the request and the ROUTE
@@ -2415,6 +2585,41 @@ function requestModelOf(body: MessagesRequest): string | undefined {
   return m?.includes('/') ? m : undefined;
 }
 
+/** A provider wall on this lane (spec bro-i6811) — arm the cooldown so
+ *  the NEXT request is refused BEFORE a peer is spawned. Only the
+ *  account's own "no" closes the lane: a timeout, a bad model name or a
+ *  broken peer is a failure of this turn, not proof that the account is
+ *  under a wall.
+ *
+ *  The arming POLICY lives in the provider layer (`armWallFromError`),
+ *  so the conductor and the brokered transport cannot drift apart. */
+function armWall(lane: ProviderLane, err: unknown): void {
+  // the refusal is not a wall — re-arming on it would extend the wait
+  // forever, one client request at a time
+  if (err instanceof AcpCooldownError) {
+    otelEvent('conductor.cooldown', {
+      backend: lane.entry,
+      reason: err.reason,
+      retry_after: err.retryAfterSec,
+      walls: lane.cooldown.wallCount(),
+      refused: true,
+    });
+    return;
+  }
+  const armed = armWallFromError(lane.cooldown, err);
+  if (armed === undefined) {
+    return;
+  }
+  otelEvent('conductor.cooldown', {
+    backend: lane.entry,
+    reason: armed.wall.reason,
+    retry_after: armed.wall.retryAfterSec,
+    walls: lane.cooldown.wallCount(),
+    refused: false,
+    armed: armed.armed,
+  });
+}
+
 /** A failed turn — on an open SSE stream the failure travels as an
  *  in-stream error event (the wire's own dead-stream shape); pre-commit
  *  it is an anthropic-shaped HTTP status. */
@@ -2431,10 +2636,15 @@ function turnError(
   // the dead-loop refusal (spec bro-b961a) — the churn was stopped
   // before it cost a session; the client waits and tries again
   const deadLoop = err instanceof AcpDeadLoopError ? err : undefined;
+  // the cooldown refusal (spec bro-i6811) — the lane is under a
+  // provider wall; no session was opened, so the client waits out the
+  // retry-after and comes back
+  const cooling = err instanceof AcpCooldownError ? err : undefined;
   let liveType = 'api_error';
   if (avail) liveType = 'overloaded_error';
   if (rate) liveType = 'rate_limit_error';
   if (deadLoop) liveType = 'rate_limit_error';
+  if (cooling) liveType = 'rate_limit_error';
   if (live !== undefined) {
     live.error(liveType, `bro conductor: ${msg}`);
     res.end();
@@ -2461,6 +2671,13 @@ function turnError(
       opens: deadLoop.opens,
       budget: deadLoop.budget,
     });
+  }
+  if (cooling) {
+    // the lane is cooling down after a provider wall (spec bro-i6811):
+    // the refusal cost no session, and the retry-after says when the
+    // client may come back
+    status = 429;
+    res.setHeader('retry-after', String(cooling.retryAfterSec));
   }
   otelEvent('conductor.error', {
     backend,
@@ -2632,6 +2849,7 @@ function laneTurnEnv(
     parent: OtelCtx | undefined;
     requestModel: string | undefined;
     signal: AbortSignal;
+    probe?: string;
   }
 ): TurnEnv {
   return {
@@ -2653,7 +2871,9 @@ function laneTurnEnv(
     // share the agent, so they share the label too
     by: `conductor:${lane.entry}`,
     imageOk: peer.caps?.image === true,
+    probe: d.probe,
     guard: lane.guard,
+    cooldown: lane.cooldown,
     pool: lane.pool,
   };
 }
@@ -2667,6 +2887,10 @@ function guardCtx(env: TurnEnv): AcpGuardCtx {
     guard: env.guard,
     scope: env.key ?? `peer:${env.by}`,
     peer: env.by,
+    // the lane's wall cooldown rides along (spec bro-i6811) — the
+    // provider layer refuses the session open while the wall holds,
+    // so no client of this lane can spend a session on it
+    cooldown: env.cooldown,
   };
 }
 
@@ -2779,6 +3003,41 @@ function fastLaneOf(
   return cfg.fastDisabled === true ? { lane: 'session' } : { lane: 'session', unrouted: true };
 }
 
+/** The probe wall gate (bro-5xm9g) — a probe on a cooling lane is
+ *  refused BEFORE `wire.link()` would spawn the pooled peer: the probe
+ *  exists to measure the lane, and a lane that already said no has
+ *  nothing to measure. Answers the cooldown's own 429 + `retry-after`
+ *  and returns true; an open lane returns false and the turn proceeds. */
+function probeWallRefusal(
+  res: ServerResponse,
+  lane: ProviderLane,
+  route: string,
+  t0: number,
+  probe: string
+): boolean {
+  const wall = lane.cooldown.refusal();
+  if (wall === undefined) return false;
+  otelEvent('conductor.turn', {
+    backend: route,
+    probe: true,
+    probe_label: probe,
+    skipped: 'wall',
+    session_reused: false,
+    session_key_ns: 'probe',
+    input_tokens: 0,
+    output_tokens: 0,
+    duration_ms: Date.now() - t0,
+  });
+  res.setHeader('retry-after', String(wall.retryAfterSec));
+  apiError(
+    res,
+    429,
+    'rate_limit_error',
+    `bro conductor: probe skipped — the lane is cooling down (${wall.reason}) — retry in ${wall.retryAfterSec}s`
+  );
+  return true;
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2827,6 +3086,14 @@ async function messages(
   // records)
   const requestModel = requestModelOf(body);
   const { lane, route } = routeOf(wire, requestModel);
+  // probe traffic (bro-5xm9g) — `x-bro-probe` marks a health/live-check
+  // turn: it rides the lane's dedicated probe session (key
+  // `probe:<entry>`), never the conversation proofs, and a walled lane
+  // refuses it BEFORE a peer spawn — a probe exists to measure the
+  // lane, and a lane that already said no has nothing to measure
+  const probe = probeLabelOf(req);
+  const turnKey = probe === undefined ? key : `probe:${lane.entry}`;
+  if (probe !== undefined && probeWallRefusal(res, lane, route, t0, probe)) return;
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined;
@@ -2837,25 +3104,36 @@ async function messages(
     // a dropped client cancels the acp turn — no orphan devin session
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(lane, peer, { body, key, stopKey, parent, requestModel, signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key: turnKey,
+        stopKey,
+        parent,
+        requestModel,
+        signal: ac.signal,
+        probe,
+      }),
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
       // as an in-stream error event, the wire's own dead-stream shape.
       // The turn layer fires this only once a real pump is chosen — a
       // replay never opens the stream, a failed open still answers an
       // HTTP status.
-      openStream: messagesStreamOpener(res, lane, body, requestModel, key, stops, l => {
+      openStream: messagesStreamOpener(res, lane, body, requestModel, turnKey, stops, l => {
         live = l;
       }),
     });
   } catch (err) {
+    // the account's own "no" closes the lane (spec bro-i6811) — the
+    // next request is refused before it spends a session
+    armWall(lane, err);
     turnError(res, err, live, route, t0);
     return;
   }
   // a resend that carried nothing new — replay the recorded reply,
   // no agent round-trip was paid
   if (out.replay === true) {
-    respond(res, body, out.conv?.lastReply ?? EMPTY_VIEW, key);
+    respond(res, body, out.conv?.lastReply ?? EMPTY_VIEW, turnKey);
     return;
   }
   const reply = out.reply as PooledReply;
@@ -2889,7 +3167,7 @@ async function messages(
     // the conversation diverged from the client's view (bro-vfbyc)
     settleConv(
       lane.sessions,
-      key,
+      turnKey,
       out.conv,
       body,
       view,
@@ -2905,6 +3183,8 @@ async function messages(
     stop_reason: view.stopReason,
     stream: body.stream !== false,
     session_reused: out.reused,
+    session_key_ns: keyNs(turnKey),
+    ...(probe !== undefined ? { probe: true, probe_label: probe } : {}),
     input_tokens: inputTokens,
     output_tokens: live?.outputTokens() ?? estimateTokens(reply.text),
     duration_ms: Date.now() - t0,
@@ -2915,7 +3195,7 @@ async function messages(
     res.end();
     return;
   }
-  respond(res, body, view, key);
+  respond(res, body, view, turnKey);
 }
 
 /** Replay fallback shape — a replay always carries a conv, the empty
@@ -3451,6 +3731,17 @@ function openaiFailKind(
       retryAfter: '60',
     };
   }
+  if (err instanceof AcpCooldownError) {
+    // the lane is cooling down after a provider wall (spec bro-i6811):
+    // the refusal cost no session, so the client waits out the
+    // retry-after — the same class the guard's refusal uses
+    return {
+      status: 429,
+      stream: 'rate_limit_error',
+      wire: 'rate_limit_error',
+      retryAfter: String(err.retryAfterSec),
+    };
+  }
   if (RATE.test(msg)) {
     return {
       status: 429,
@@ -3811,6 +4102,8 @@ async function responses(
       }),
     });
   } catch (err) {
+    // the account's own "no" closes the lane (spec bro-i6811)
+    armWall(lane, err);
     openaiFail(res, err, live);
     return;
   }
@@ -3925,6 +4218,7 @@ function responsesDeliver(
     stop_reason: wireReason,
     stream: d.rreq.stream === true,
     session_reused: d.out.reused,
+    session_key_ns: keyNs(d.key),
     input_tokens: inputTokens,
     output_tokens: outTokens,
     duration_ms: Date.now() - d.t0,
@@ -4427,6 +4721,8 @@ async function chatCompletions(
           : undefined,
     });
   } catch (err) {
+    // the account's own "no" closes the lane (spec bro-i6811)
+    armWall(lane, err);
     openaiFail(res, err, live);
     return;
   }
@@ -4523,6 +4819,7 @@ function chatDeliver(
     stop_reason: stopReason,
     stream: d.creq.stream === true,
     session_reused: d.out.reused,
+    session_key_ns: keyNs(d.key),
     input_tokens: o.inputTokens,
     output_tokens: outTokens,
     duration_ms: Date.now() - d.t0,
@@ -4572,10 +4869,39 @@ interface LaneCatalog {
   failure?: string;
 }
 
+/** The catalog read's freshness bound (bro-5xm9g) — an acp catalog read
+ *  pays a fresh child + `session/new` per call, so probe-burst reads
+ *  collapse to one per window. Deliberately short: the catalog is live
+ *  data (the agent's own model options), and 60 s kills the burst a
+ *  client startup makes without going stale enough to matter. */
+const CATALOG_TTL_MS = 60_000;
+
 /** One lane's catalog rows — its own entry, or the catalog override for
  *  the DEFAULT lane. A lane that cannot be read yields a failure, not a
  *  throw: one provider being down must not blind the other's models. */
 async function laneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatalog> {
+  // a fresh cache entry answers without paying the read — the whole
+  // point of the cache is that /v1/models probes stop spawning
+  // sessions (bro-5xm9g)
+  const cached = lane.catalogCache;
+  if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) {
+    return { rows: cached.rows };
+  }
+  // single-flight: a cold read already in flight answers every
+  // concurrent request — a client's startup burst pays ONE
+  // catalogModels, not one per request
+  if (lane.catalogInflight !== undefined) return lane.catalogInflight;
+  const inflight = readLaneCatalog(lane, wire).finally(() => {
+    if (lane.catalogInflight === inflight) lane.catalogInflight = undefined;
+  });
+  lane.catalogInflight = inflight;
+  return inflight;
+}
+
+/** The lane's catalog read itself — the uncached half of laneCatalog.
+ *  A lane that cannot be read yields a failure, not a throw: one
+ *  provider being down must not blind the other's models. */
+async function readLaneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatalog> {
   // the catalog override answers for the default lane only — an
   // exposed lane advertises its own entry's models. The rows carry the
   // lane's PRIMARY route: a lane with two routes is advertised once, so
@@ -4594,13 +4920,15 @@ async function laneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatal
       acp: lane.opts.acp,
       deadline: Date.now() + lane.cfg.timeoutMs,
     });
-    return {
-      rows: rows.map(r => ({
-        ...r,
-        prefix: source.name,
-        modelId: r.id.slice(source.name.length + 1),
-      })),
-    };
+    const routed = rows.map(r => ({
+      ...r,
+      prefix: source.name,
+      modelId: r.id.slice(source.name.length + 1),
+    }));
+    // a success is the only thing worth caching — a failure answers
+    // fresh on the next read so a recovering lane re-advertises at once
+    lane.catalogCache = { at: Date.now(), rows: routed };
+    return { rows: routed };
   } catch (err) {
     // the lane names itself — by its ADVERTISED route, the public name a
     // client asked for. The acp layer's messages already carry the spawn
@@ -4842,7 +5170,12 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     entry: string,
     entryCfg: AcpEntry,
     laneCfg: ConductorConfig,
-    laneOpts: ProviderWireOpts
+    laneOpts: ProviderWireOpts,
+    // the lane's wall cooldown (spec bro-i6811) — the DEFAULT lane shares
+    // the conductor's instance with the brokered transport: the two
+    // surfaces ride the SAME account, so a wall that closed one must
+    // close the other. An exposed provider lane is its own account.
+    shared?: AcpLaneCooldown
   ): void => {
     // warm pool: one acp child serves every turn of its lane — spawn +
     // initialize is paid once per provider per listener; session/new
@@ -4875,6 +5208,14 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // until the window closes).
     const peerKey = `conductor:${entry}`;
     pool.onDeath(() => guard.forgetPeer({ scope: peerKey, peer: peerKey }));
+    // the lane's wall cooldown (spec bro-i6811) — a rate wall closes the
+    // spawn path: the next request is refused BEFORE a peer is spawned,
+    // so a retry storm costs no session and no quota.
+    const cooldown =
+      shared ??
+      new AcpLaneCooldown({
+        cooldownMs: laneCfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
+      });
     lanes.set(entry, {
       entry,
       routes: routesOf(entry),
@@ -4888,12 +5229,19 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // unmapped)
       pendingOpens: new Map<string, number>(),
       guard,
+      cooldown,
     });
   };
-  addLane(cfg.backend, cfg.entry, cfg, {
-    ...wireOpts,
-    acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
-  });
+  addLane(
+    cfg.backend,
+    cfg.entry,
+    cfg,
+    {
+      ...wireOpts,
+      acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
+    },
+    cfg.cooldown
+  );
   for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
     // an exposed lane serves ITS entry's own model — the default's env
     // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
@@ -4925,6 +5273,15 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   const link = async (entry: string, parent?: OtelCtx): Promise<AcpPeer> => {
     const lane = lanes.get(entry);
     if (lane === undefined) throw new Error(`bro conductor: no provider lane '${entry}'`);
+    // the lane is under a provider wall (spec bro-i6811) — the refusal
+    // costs no session and no quota, because it is spoken BEFORE the
+    // peer is spawned. The client waits out the retry-after and comes
+    // back; this is the whole point of the cooldown: the account said
+    // no, so bro does not spend a session to hear no again.
+    const wall = lane.cooldown.refusal();
+    if (wall !== undefined) {
+      throw new AcpCooldownError(wall);
+    }
     return lane.pool.link(parent);
   };
   const wire: WireCtx = { cfg, opts: wireOpts, link, lanes, routes };

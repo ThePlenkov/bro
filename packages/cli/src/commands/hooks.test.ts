@@ -25,10 +25,11 @@ import {
   armDetail,
   otherLiveWork,
   recordGuardEvents,
+  stopGateOutcome,
   takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
-import { procStat } from '@broject/core';
+import { procStat, type GateContribution } from '@broject/core';
 import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts';
 
 function foreignLock(lock: string): ChildProcess {
@@ -113,6 +114,31 @@ describe('hook journal and occupancy lock bounds', () => {
       }
     });
   });
+
+  test('journalCommand skips the hooks spelling — flushPerf owns that row', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const { root, main } = initRepo('bro-hooks-cmdskip-');
+    await insideAsync(main, root, async () => {
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const commands = join(common, 'bro', 'hooks', 'perf', 'commands.jsonl');
+      const telemetry = process.env.BRO_TELEMETRY;
+      delete process.env.BRO_TELEMETRY;
+      try {
+        // the hook path never pays the exit-handler journal write —
+        // no git spawn, no commands.jsonl row (bro-36sx7.9)
+        journalCommand('hooks', 1, 0);
+        assert.equal(existsSync(commands), false);
+        journalCommand('review', 1, 0);
+        const rows = readFileSync(commands, 'utf8');
+        assert.match(rows, /"connector":"review"/);
+        assert.doesNotMatch(rows, /"connector":"hooks"/);
+      } finally {
+        if (telemetry === undefined) delete process.env.BRO_TELEMETRY;
+        else process.env.BRO_TELEMETRY = telemetry;
+      }
+    });
+  });
 });
 
 describe('readCodexInstructions', () => {
@@ -169,6 +195,19 @@ describe('isSelfToolCommand', () => {
     assert.ok(!isSelfToolCommand('npx eslint bro.config.js'));
     assert.ok(!isSelfToolCommand('npx --package=bro prettier file.ts'));
     assert.ok(!isSelfToolCommand('npx --package=other-package bro'));
+  });
+
+  test('rejects npm protocol aliases — they resolve to a different package', () => {
+    // `name@npm:other` / `name@github:u/r` are alias specs, not versions —
+    // auto-approving them would run an arbitrary package as "bro"
+    assert.ok(!isSelfToolCommand('npx bro@npm:other status'));
+    assert.ok(!isSelfToolCommand('npx @broject/bro@npm:other status'));
+    assert.ok(!isSelfToolCommand('npx bro@github:u/r status'));
+    assert.ok(!isSelfToolCommand('npx bro@1.2.3/npm:other status'));
+    // bare versions and dist-tags still approve
+    assert.ok(isSelfToolCommand('npx bro@1.2.3 status'));
+    assert.ok(isSelfToolCommand('npx @broject/bro@latest status'));
+    assert.ok(isSelfToolCommand('npx bro@0.3.0-beta.1 status'));
   });
 
   test('rejects npx flags that change what runs or where it comes from', () => {
@@ -348,6 +387,89 @@ describe('classifySkillMutation', () => {
 describe('readArmed', () => {
   test('returns an empty set for a session with no marker', () => {
     assert.equal(readArmed('definitely-no-such-session-id').size, 0);
+  });
+});
+
+describe('stopGateOutcome', () => {
+  test('same-aspect blocks concatenate — no registry-first shadowing (bro-3bgbs)', () => {
+    const { root, main } = initRepo('bro-stop-outcome-');
+    inside(main, root, () => {
+      // the claims gate and the SDD gate both answer aspect 'task' with
+      // identical preconditions — the first used to shadow the second
+      // entirely, so the spec-missing reason never reached the user
+      const contributions: GateContribution[] = [
+        { aspect: 'task', block: 'bro: claimed beads open: b1 — close or release' },
+        { aspect: 'task', block: 'bro: SDD — b1 has no spec — write one first' },
+        { aspect: 'task', armedHint: 'bro: foreign claim ambient' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['task']), 'outcome-join');
+      assert.equal(
+        out.block,
+        'bro: claimed beads open: b1 — close or release\nbro: SDD — b1 has no spec — write one first'
+      );
+      // the aspect's one-shot was spent ONCE for the joined block
+      assert.equal(takeStopGateBlock('outcome-join', 'task'), false);
+    });
+  });
+
+  test('aspect priority preserved — a winning aspect leaves later one-shots unspent', () => {
+    const { root, main } = initRepo('bro-stop-priority-');
+    inside(main, root, () => {
+      // contributions arrive rank-sorted (emitStopGateBody sorts) —
+      // 'work' outranks 'task', so only the work reason emits and the
+      // task gate keeps its shot for a later stop
+      const contributions: GateContribution[] = [
+        { aspect: 'work', block: 'uncommitted work in wt' },
+        { aspect: 'task', block: 'claimed beads open: b1' },
+        { aspect: 'task', block: 'SDD: b1 missing spec' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['work', 'task']), 'outcome-priority');
+      assert.equal(out.block, 'uncommitted work in wt');
+      assert.equal(takeStopGateBlock('outcome-priority', 'task'), true);
+    });
+  });
+
+  test('a spent one-shot demotes every same-aspect block to a hint', () => {
+    const { root, main } = initRepo('bro-stop-demote-');
+    inside(main, root, () => {
+      const contributions: GateContribution[] = [
+        { aspect: 'task', block: 'claims open: b1' },
+        { aspect: 'task', block: 'SDD: b1 missing spec' },
+      ];
+      const armed = new Set(['task']);
+      assert.ok(stopGateOutcome(contributions, armed, 'outcome-demote').block);
+      const again = stopGateOutcome(contributions, armed, 'outcome-demote');
+      assert.equal(again.block, undefined);
+      assert.deepEqual(again.hints, ['claims open: b1', 'SDD: b1 missing spec']);
+    });
+  });
+
+  test('same-aspect blocks merge even when interleaved at the fallback rank', () => {
+    const { root, main } = initRepo('bro-stop-interleave-');
+    inside(main, root, () => {
+      // connector-owned aspects share the fallback rank — 'qa' can sit
+      // non-adjacent to itself across 'qb'; it is still ONE gate
+      const contributions: GateContribution[] = [
+        { aspect: 'qa', block: 'qa reason one' },
+        { aspect: 'qb', armedHint: 'qb ambient' },
+        { aspect: 'qa', block: 'qa reason two' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['qa']), 'outcome-interleave');
+      assert.equal(out.block, 'qa reason one\nqa reason two');
+    });
+  });
+
+  test('unarmed aspects stay passive; armed clean contributions show armedHint', () => {
+    const { root, main } = initRepo('bro-stop-passive-');
+    inside(main, root, () => {
+      const contributions: GateContribution[] = [
+        { aspect: 'act', armedHint: 'review threads open', passive: 'pr ambient' },
+        { aspect: 'task', block: 'claims open: b1', passive: 'ambient claims' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['act']), 'outcome-passive');
+      assert.equal(out.block, undefined);
+      assert.deepEqual(out.hints, ['review threads open', 'ambient claims']);
+    });
   });
 });
 

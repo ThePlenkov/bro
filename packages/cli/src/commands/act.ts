@@ -6,6 +6,10 @@
  *   threads [PR]           unresolved review threads, TSV
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
+ *   dismiss [PR] [--dry-run] [--message T]
+ *                          dismiss STALE veto reviews — a standing
+ *                          CHANGES_REQUESTED whose referenced threads
+ *                          are all resolved+outdated (bro-n1foa)
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
@@ -39,6 +43,7 @@ import {
   type ReviewFacade,
   type ReviewThread,
   type TaskRow,
+  type VetoReview,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
@@ -74,6 +79,7 @@ import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@b
 import { coveredBeadIds } from '@broject/loop';
 import { githubPrWake } from '@broject/github';
 import { collectReviewThreads, refreshDebtLedger, type CollectArgs } from './debt.ts';
+import { reconcileOutcomes, reportRoutedOutcome } from './outcome-report.ts';
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
@@ -100,7 +106,12 @@ Commands:
                                     reject/defer reasons
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
-        --unresolve                 resolve → unresolve instead`,
+        --unresolve                 resolve → unresolve instead
+  dismiss [PR] [--dry-run] [--message T]
+                                    Dismiss stale veto reviews — standing
+                                    CHANGES_REQUESTED reviews whose referenced
+                                    threads all resolved+outdated; a live veto
+                                    is refused (re-review is the reviewer's call)`,
     exitCode
   );
 }
@@ -113,6 +124,7 @@ const VALUE_FLAGS = new Set([
   '--interval',
   '--timeout',
   '--bead',
+  '--message',
 ]);
 
 /** How a resolved target may be used: 'read' — accept the auto row and
@@ -231,9 +243,39 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
       `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only} ` +
-      `reopened_threads=${gate.reopened_threads}`
+      `reopened_threads=${gate.reopened_threads}` +
+      // the host veto axis — a CHANGES_REQUESTED blocks merges with
+      // zero open threads; surface it only when it says something
+      (state.reviewDecision === undefined || state.reviewDecision === 'APPROVED'
+        ? ''
+        : ` review_decision=${state.reviewDecision}`)
   );
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`);
+  // the veto axis detail — which standing CHANGES_REQUESTED reviews are
+  // stale (dismissible) vs live; absent when the probe didn't run or
+  // the host can't enumerate (the blocker text covers that case)
+  for (const v of state.vetoReviews ?? []) {
+    console.log(
+      v.stale
+        ? // stale implies ≥1 referenced thread — zero refs reads live
+          `  veto: ${v.author} review ${v.id} — stale ` +
+            `(${v.threads} thread(s) resolved+outdated) ` +
+            `— \`bro act dismiss ${state.pr}\` clears it`
+        : `  veto: ${v.author} review ${v.id} — live (${
+            v.threads === 0
+              ? 'no referenced threads — body-only veto'
+              : `${v.threads} referenced thread(s) not all settled`
+          }) — wait for re-review`
+    );
+    // the review body can carry an objection no thread anchors — show
+    // ALL of it, untruncated, so a "stale" label is never read without
+    // the whole ask (VetoReview.body contract — codeant/coderabbit on
+    // PR #1020)
+    const body = vetoBodyText(v);
+    if (body !== '') {
+      console.log(`    body: "${body}"`);
+    }
+  }
   const live = listWatches(process.cwd()).filter(l => l.alive && l.watch.pr === state.pr);
   console.log(
     `watch=${live.length > 0 ? `live pid=${live[0]!.watch.pid}` : `none — \`bro act wait ${state.pr}\` arms one`}`
@@ -278,6 +320,14 @@ async function cmdWait(argv: string[]): Promise<void> {
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
   const rev = reviewHost(undefined, loadBroConfig().connectors);
   const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read');
+  // a watcher's startup drains the outcome outbox — intents a crashed
+  // merge/report pass left undelivered retry here (spec bro-0ykhg.4);
+  // housekeeping, never a gate on the wait itself
+  try {
+    await reconcileOutcomes(process.cwd());
+  } catch {
+    /* reconciliation is best-effort — the next pass retries */
+  }
   const act = loadBroConfig().act;
   const interval = Number(flag(argv, '--interval') ?? '60');
   const timeout = Number(flag(argv, '--timeout') ?? '45');
@@ -464,7 +514,13 @@ async function settleWait(
     await recordSettledVerdict(rev, t, res.state.url, settledLabel(res.state));
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state);
-    await harvestClosedPr(rev, t, res.state.state);
+    await harvestClosedPr(rev, t, res.state.state, argv);
+    // externally-landed merges report too — the already-merged
+    // reconciliation the spec wants (bro-0ykhg.4); own merges already
+    // reported inside cmdMerge and dedupe on the same event id
+    if (res.state.state === 'MERGED') {
+      await reportActOutcome(argv, t, res.state, 'merged');
+    }
     process.exitCode = 0;
     return;
   }
@@ -479,7 +535,7 @@ async function settleWait(
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state);
     if (!res.timedOut) {
-      await harvestClosedPr(rev, t, res.state.state);
+      await harvestClosedPr(rev, t, res.state.state, argv);
     }
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0;
     return;
@@ -1092,6 +1148,14 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
     ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors });
   }
   const t = resolvePr(rev, argv, 'strict');
+  // direct merges drain the outcome outbox too — a merge intent a
+  // crashed wait left behind retries here (spec bro-0ykhg.4);
+  // housekeeping, never a gate on the merge itself
+  try {
+    await reconcileOutcomes(process.cwd());
+  } catch {
+    /* reconciliation is best-effort — the next pass retries */
+  }
 
   const method = mergeMethod(argv);
   if (!method) {
@@ -1114,6 +1178,10 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
     return;
   }
   let mergedHead: { ref: string; sha: string } | undefined;
+  // the outcome report's measures — captured inside the merge slot,
+  // delivered after it releases (the router ack never extends the
+  // critical section; spec bro-0ykhg.4)
+  let outcomeState: PrActState | undefined;
   try {
     const act = loadBroConfig().act;
     // deliberately OFF the shared feed: this fetch IS the merge
@@ -1136,11 +1204,14 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
       // already landed still discharges the claim — the race where the
       // PR merged between the wait's last green poll and this fetch
       closeBeadIfLanded(argv, rev, t, state.state);
-      await harvestClosedPr(rev, t, state.state);
+      await harvestClosedPr(rev, t, state.state, argv);
       if (state.state === 'MERGED') {
         // the merge goal is satisfied — a landed PR is a verdict, not a
-        // lifecycle error (spec: specs/bro-0i1lm.md)
+        // lifecycle error (spec: specs/bro-0i1lm.md). The outcome
+        // report rides the same already-merged reconciliation (spec
+        // bro-0ykhg.4): whoever lands the PR, the router hears it once.
         console.log(landedLine(rev, t, state));
+        await reportActOutcome(argv, t, state, 'merged');
         return settledLabel(state);
       }
       console.error(
@@ -1172,6 +1243,7 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
       },
       queue
     );
+    outcomeState = state;
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot();
@@ -1186,6 +1258,11 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
     if (bead !== undefined) {
       closeLandedBead(rev, t, bead);
     }
+    // the routed task's verdict flows back to the router — the intent
+    // is durable in the outbox before this delivery attempt, so a crash
+    // here retries on the next reconcile, never re-merges (spec
+    // bro-0ykhg.4)
+    await reportActOutcome(argv, t, outcomeState, 'merged');
     if (argv.includes('--cleanup')) {
       cleanupAfterMerge(mergedHead.ref, mergedHead.sha);
     } else {
@@ -1314,6 +1391,40 @@ function clumpBranchLog(rev: ReviewFacade, t: PrTarget): string {
   return gitBranchLog(meta.headSha, meta.baseRef);
 }
 
+/** Report the routed task's terminal verdict back to the router (spec
+ *  bro-0ykhg.4): the decision id resolves through the bead's
+ *  `router:decision` pin or the journal's run-link reconciliation, the
+ *  intent lands in the durable outbox before delivery, and the router's
+ *  acknowledgement is what "reported" means — a store that cannot take
+ *  it leaves the intent for the next reconcile. Best-effort: the act
+ *  verdict never waits on the router. `rounds` counts act rounds —
+ *  fixRounds+1, so a clean first-round merge reports 1 (the
+ *  merged_first_round predicate's success shape). */
+async function reportActOutcome(
+  argv: string[],
+  t: PrTarget,
+  state: PrActState | undefined,
+  result: 'merged' | 'failed' | 'abandoned' | 'parked'
+): Promise<void> {
+  const bead = flag(argv, '--bead')?.split(',')[0]?.trim();
+  try {
+    await reportRoutedOutcome({
+      dir: process.cwd(),
+      ...(bead === undefined || bead === '' ? {} : { beadId: bead }),
+      pr: t.pr,
+      result,
+      ...(state === undefined
+        ? {}
+        : {
+            rounds: state.fixRounds + 1,
+            threads: state.threads.length,
+          }),
+    });
+  } catch {
+    /* the outbox is durable — a failed pass retries on reconcile */
+  }
+}
+
 /** The claim discharge owed even when the merge didn't happen here —
  *  an external merge (or the race past the last green poll) leaves
  *  `--bead` to release exactly as an own-merge would. */
@@ -1328,10 +1439,18 @@ function closeBeadIfLanded(argv: string[], rev: ReviewFacade, t: PrTarget, state
  *  closed branch are still review debt. A harvest failure reports to
  *  stderr but must never change the command's exit code: callers set
  *  their verdict unconditionally right after. */
-async function harvestClosedPr(rev: ReviewFacade, t: PrTarget, state: string): Promise<void> {
+async function harvestClosedPr(
+  rev: ReviewFacade,
+  t: PrTarget,
+  state: string,
+  argv: string[] = []
+): Promise<void> {
   if (state !== 'CLOSED') {
     return;
   }
+  // a closed-unmerged PR is the routed task's 'failed' terminal —
+  // reported through the same durable outbox (spec bro-0ykhg.4)
+  await reportActOutcome(argv, t, undefined, 'failed');
   try {
     await collectReviewThreads(rev, {
       repo: t.repo,
@@ -1688,6 +1807,149 @@ function cmdReply(argv: string[]): void {
   dropActState();
 }
 
+/** The dismissal note the host records — `--message` overrides; the
+ *  default names the rule that made the veto dismissible so the PR's
+ *  review history reads honestly afterwards. */
+const DEFAULT_DISMISS_MESSAGE = 'stale review — all referenced threads resolved (bro act dismiss)';
+
+/** The veto's body as a single display line — whitespace-collapsed and
+ *  NEVER truncated: `VetoReview.body` exists because a body-level
+ *  objection has no thread anchor, so every dismissal-decision surface
+ *  must show the whole text — any cutoff could hide the ask that
+ *  matters past it (codeant/coderabbit on PR #1020). */
+const vetoBodyText = (v: VetoReview): string => v.body?.replace(/\s+/g, ' ').trim() ?? '';
+
+/** One-line body note for veto display — the full text per vetoBodyText. */
+const vetoBodyNote = (v: VetoReview): string => {
+  const b = vetoBodyText(v);
+  return b === '' ? '' : ` — body: "${b}"`;
+};
+
+/**
+ * `bro act dismiss` — clear STALE standing veto reviews
+ * (reviewDecision=CHANGES_REQUESTED whose referenced threads are all
+ * resolved+outdated — bro-n1foa). The stale filter is the safety: a
+ * live veto is refused by construction, never by a flag the caller
+ * must remember — re-review is the reviewer's call, dismissal is only
+ * ever offered on settled evidence. Strict PR resolution: a mutation
+ * never guesses which PR's reviews to clear.
+ */
+async function cmdDismiss(argv: string[]): Promise<void> {
+  const cfg = loadBroConfig();
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors });
+  const rev = reviewHost(undefined, cfg.connectors);
+  const t = resolvePr(rev, argv, 'strict');
+  if (rev.vetoReviews === undefined || rev.dismissReview === undefined) {
+    console.error(
+      `error: ${rev.prLink(t.repo, t.pr)} — this review host cannot enumerate or dismiss reviews`
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // a mutation validates its target's lifecycle — dismissing reviews on
+  // a merged/closed PR clears nothing that still gates and only looks
+  // like it did something
+  const meta = rev.prMetaAsync !== undefined ? await rev.prMetaAsync(t) : rev.prMeta(t);
+  if (meta.state !== 'OPEN') {
+    console.error(
+      `error: ${rev.prLink(t.repo, t.pr)} is ${meta.state} — only OPEN PRs carry a live veto`
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // fresh probe, never the shared feed — the enumeration IS the
+  // decision input, same rule as the merge gate (bro-0tcrl)
+  const vetoes = await rev.vetoReviews(t);
+  const stale = vetoes.filter(v => v.stale);
+  // stale ⇒ ≥1 referenced thread — the count is always real here
+  const describe = (v: VetoReview): string =>
+    `${v.author}'s review ${v.id} — ${v.threads} thread(s) resolved+outdated`;
+  if (argv.includes('--dry-run')) {
+    if (stale.length === 0) {
+      console.log(
+        vetoes.length === 0
+          ? 'act dismiss: no standing veto reviews'
+          : `act dismiss: ${vetoes.length} veto(s) stand, none stale — nothing to dismiss`
+      );
+      return;
+    }
+    for (const v of stale) {
+      console.log(`would dismiss ${describe(v)}${vetoBodyNote(v)}`);
+    }
+    return;
+  }
+  if (stale.length === 0) {
+    console.log(
+      vetoes.length === 0
+        ? 'act dismiss: no standing veto reviews'
+        : `act dismiss: ${vetoes.length} veto(s) stand but none are stale — wait for re-review`
+    );
+    return;
+  }
+  // re-read immediately before mutating: a thread reopened (or a fresh
+  // objection posted) between the first probe and the dismissal loop
+  // must not be cleared off a stale snapshot — the window can't fully
+  // close without a host lock, but this narrows it to the mutation
+  // call itself (coderabbit on PR #1020). The fresh veto objects are
+  // the ones dismissed — author/threads may have moved too.
+  const fresh = await rev.vetoReviews(t);
+  const stillStale = new Map(fresh.filter(v => v.stale).map(v => [v.id, v]));
+  const toDismiss = stale
+    .map(v => stillStale.get(v.id))
+    .filter((v): v is VetoReview => v !== undefined);
+  for (const v of stale) {
+    if (!stillStale.has(v.id)) {
+      console.log(`act: ${describe(v)} no longer stale on re-read — skipped`);
+    }
+  }
+  if (toDismiss.length === 0) {
+    console.log('act dismiss: no veto still stale — nothing dismissed');
+    return;
+  }
+  const message = flag(argv, '--message') ?? DEFAULT_DISMISS_MESSAGE;
+  let failed = 0;
+  for (const candidate of toDismiss) {
+    // re-probe before EACH mutation, not only once before the loop: a
+    // thread reopened by an earlier dismissal in this same batch must
+    // not be cleared off the batch snapshot — the residual window
+    // narrows to this entry's own probe→mutation gap (no host lock
+    // closes it fully; codeant/coderabbit on PR #1020). The fresh
+    // veto object is the one dismissed — author/threads may have moved.
+    const probed = await rev.vetoReviews(t);
+    const v = probed.find(c => c.id === candidate.id && c.stale);
+    if (v === undefined) {
+      console.log(`act: ${describe(candidate)} no longer stale on re-read — skipped`);
+      continue;
+    }
+    // the body surfaces BEFORE the mutation — a body-level objection is
+    // invisible to the thread rule, so the operator/agent deciding the
+    // dismissal reads the whole review here
+    console.log(`dismissing ${describe(v)}${vetoBodyNote(v)}`);
+    try {
+      rev.dismissReview!(t, v.id, message);
+      console.log(`act: dismissed ${describe(v)}`);
+      emitLifecycle(process.cwd(), {
+        kind: 'verdict',
+        pr: t.pr,
+        to: 'dismissed',
+        detail: { via: 'act', review: v.id, author: v.author },
+      });
+    } catch (err) {
+      failed += 1;
+      console.error(
+        `act: dismissing ${describe(v)} failed — ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  // a dismissal moves reviewDecision — the shared feed's next read
+  // must fetch, not serve the pre-dismissal veto for up to a TTL
+  dropActState(t);
+  if (failed > 0) {
+    console.error(`act dismiss: ${failed} of ${toDismiss.length} dismissal(s) failed`);
+    process.exitCode = 1;
+  }
+}
+
 // a Map keeps the dispatch table off dynamic object indexing — a
 // runtime-keyed `COMMANDS[cmd]` retrieval-then-call trips
 // object-injection scanners
@@ -1699,6 +1961,7 @@ const COMMANDS = new Map<string, (argv: string[]) => void | Promise<void>>([
   ['threads', cmdThreads],
   ['resolve', cmdResolve],
   ['reply', cmdReply],
+  ['dismiss', cmdDismiss],
 ]);
 
 /** Defer a thread into a debt bead — the skill's mechanics as code:

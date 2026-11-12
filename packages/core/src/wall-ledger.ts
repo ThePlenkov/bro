@@ -321,6 +321,9 @@ export function readLedgerWalls(
           account,
           cause: row.cause,
           ...(row.resetAt === undefined ? {} : { resetAt: row.resetAt }),
+          // an expiry with no reported reset behind it is the ledger's
+          // own TTL bound — not a provider reset (see ProviderWall.bound)
+          ...(row.resetAt === undefined ? { bound: true as const } : {}),
           until: new Date(expiry).toISOString(),
           observedAt: row.observedAt,
           provider: row.provider,

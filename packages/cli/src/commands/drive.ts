@@ -64,7 +64,7 @@
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
 import { spawn } from 'node:child_process';
-import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
+import { existsSync, type FSWatcher, realpathSync, statSync, watch } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
@@ -99,7 +99,6 @@ import {
   type ReviewThread,
   type TaskRow,
   type TaskStore,
-  BATCH_MARKER_ENV,
   hasHelpFlag,
   printUsage,
 } from '@broject/core';
@@ -124,7 +123,7 @@ import {
   type PrStateCache,
 } from '@broject/act';
 import { annotateThreads, judgeConfig, judgeFacade } from '@broject/judge';
-import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
+import { loadAgentEnv, settleAcpSessions, type AgentConnectorEnv } from '../agent-connectors.ts';
 import { reconcileLanePause } from '../lane.ts';
 import { flag } from './args.ts';
 import { defaultBranch, runActCommand } from './act.ts';
@@ -136,6 +135,7 @@ import {
   writeHeadMemory,
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
+import { resolveAgentConnector } from '../agent-connectors.ts';
 import { collectAgents } from './fleet.ts';
 import { pluginLedgerDirs, projectFleet } from './herdr-projector.ts';
 import {
@@ -158,8 +158,9 @@ import {
   type LitterReap,
   type WorktreeClaimInfo,
 } from './work.ts';
-import { type LoopConfig } from '@broject/loop';
+import { LEARN_RETRO_CLOSEOUT, type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
+import { pipelineWakePass } from './pipeline.ts';
 import { rigNext, type RigNext } from './rig-next.ts';
 import { SELF_ENTRY } from './self-entry.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
@@ -898,6 +899,8 @@ export function buildFixerPrompt(opts: {
     '- NEVER merge — `bro drive` owns the merge on green.',
     '- Exit when threads are zero or all deferred/resolved with explanation.',
     '',
+    LEARN_RETRO_CLOSEOUT,
+    '',
   ].join('\n');
 }
 
@@ -1481,6 +1484,8 @@ export function buildRebaseFixerPrompt(opts: {
     "- If the conflicts genuinely can't be resolved without redesign, say so",
     '  as your final message — do not leave the rebase half-done.',
     '',
+    LEARN_RETRO_CLOSEOUT,
+    '',
   ].join('\n');
 }
 
@@ -1702,13 +1707,95 @@ async function spawnFixerAgent(ctx: Ctx, pr: number, s: FixerSpawn): Promise<PrV
     if (refused !== undefined) {
       return { pr, link, verdict: 'spawn-refused', detail: refused };
     }
+    // donor lookup (spec bro-5qsnr §4): while the coder's session
+    // lives, the fix order lands as a follow-up turn in THAT session.
+    // The fixer bead's own entry first, then any registry entry whose
+    // recorded worktree resolves to the fixer's, carrying an acpSessionId
+    // on a configured acp provider.
+    const isAcpProvider = (name: string | undefined): boolean => {
+      if (name === undefined) return false;
+      const p = ctx.env.providers?.[name];
+      return p?.type === 'acp';
+    };
+    const donors: AgentRegistryEntry[] = [];
+    const own = readAgentRegistry(ctx.mainRoot)[bead.id];
+    if (
+      own !== undefined &&
+      typeof own.acpSessionId === 'string' &&
+      own.acpSessionId !== '' &&
+      isAcpProvider(own.provider)
+    ) {
+      donors.push(own);
+    }
+    for (const [molStep, entry] of Object.entries(readAgentRegistry(ctx.mainRoot))) {
+      if (molStep === bead.id) continue;
+      if (typeof entry.acpSessionId !== 'string' || entry.acpSessionId === '') continue;
+      if (!isAcpProvider(entry.provider)) continue;
+      if (typeof entry.worktree !== 'string' || entry.worktree === '') continue;
+      try {
+        // identity, not spelling: two spellings that reach the same
+        // directory through different links are the same worktree —
+        // realpath is the truth, resolve() the fallback for a path
+        // that no longer exists (same shape as settleAcpSessions)
+        const entryResolved = resolve(entry.worktree);
+        const wtResolved = resolve(s.wt);
+        let entryReal: string;
+        try {
+          entryReal = realpathSync(entryResolved);
+        } catch {
+          entryReal = entryResolved;
+        }
+        let wtReal: string;
+        try {
+          wtReal = realpathSync(wtResolved);
+        } catch {
+          wtReal = wtResolved;
+        }
+        if (entryReal !== wtReal && entryResolved !== wtResolved) continue;
+      } catch {
+        continue;
+      }
+      donors.push(entry);
+    }
+    const donor = donors[0];
+    // A donor pins an ACP provider, which resolveSpawnProvider turns
+    // into an argv/ACP SpawnWorker. Backends that own their provider
+    // session (gascity's city.toml), dispatch remotely (copilot), or
+    // never spawn (devin) reject a worker-bearing spawn — so an ACP
+    // donor on such a backend would force a config refusal. Drop the
+    // donor (fresh spawn, no resume) when the resolved connector cannot
+    // run provider workers. (review #732)
+    let connectorAcceptsWorkers = true;
+    try {
+      const conn = resolveAgentConnector(
+        { dir: ctx.mainRoot },
+        { connector: ctx.connector },
+        ctx.env
+      );
+      connectorAcceptsWorkers = conn.capabilities().workers !== false;
+    } catch {
+      // an unresolvable connector cannot prove it runs provider workers
+      // — the conservative refusal is a fresh spawn without the donor,
+      // never a donor pinned onto a spawn that will refuse the config
+      connectorAcceptsWorkers = false;
+    }
+    const useDonor = connectorAcceptsWorkers;
+    const spawnProvider = useDonor ? donor?.provider : undefined;
+    const spawnResume = useDonor ? donor?.acpSessionId : undefined;
+    const spawnPrompt =
+      useDonor && donor !== undefined && typeof donor.acpSessionId === 'string'
+        ? `${s.prompt}\nSession: ${donor.acpSessionId}\n`
+        : s.prompt;
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
+        lane: 'batch',
         molStep: bead.id,
         worktree: s.wt,
-        prompt: s.prompt,
+        prompt: spawnPrompt,
         connector: ctx.connector,
-        env: { BRO_PR: String(pr), BRO_PR_URL: link, [BATCH_MARKER_ENV]: '1' },
+        provider: spawnProvider,
+        resumeSessionId: spawnResume,
+        env: { BRO_PR: String(pr), BRO_PR_URL: link },
       });
       if (s.attempt !== undefined) {
         recordFixerAttempt(ctx.mainRoot, bead.id, prevEntry, s.attempt.head, s.attempt.cls);
@@ -2048,6 +2135,8 @@ export function buildCiFixerPrompt(opts: {
     '  — a clean exit without a push marks this head as attempted, not',
     '  retried.',
     '',
+    LEARN_RETRO_CLOSEOUT,
+    '',
   ].join('\n');
 }
 
@@ -2117,6 +2206,8 @@ export function buildSastFixerPrompt(opts: {
     '  disputed severity gate) — say so as your final message and stop; a',
     '  clean exit without a push marks this head as attempted, not retried.',
     '- NEVER merge — `bro drive` owns the merge on green.',
+    '',
+    LEARN_RETRO_CLOSEOUT,
     '',
   ].join('\n');
 }
@@ -2304,6 +2395,11 @@ async function mergeAndRetire(
         after === undefined ? 'state re-probe failed' : `state ${after.state.toLowerCase()}`
       ),
     };
+  }
+  try {
+    settleAcpSessions(ctx.mainRoot, ctx.env, worktree ? { worktree } : {});
+  } catch {
+    // advisory
   }
   retireLanding(ctx, after, worktree);
   if (fixer) {
@@ -2540,6 +2636,14 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
   work.heads.set(pr, state.headSha);
   const fixer = fixerBeadFor(ctx.store, pr);
   if (state.state !== 'OPEN') {
+    try {
+      settleAcpSessions(ctx.mainRoot, ctx.env, {
+        worktree: work.worktreeByBranch.get(state.headRef),
+        molSteps: fixer ? [fixer.id] : undefined,
+      });
+    } catch {
+      // advisory
+    }
     if (fixer) {
       closeFixer(ctx.store, fixer.id, `${link} ${state.state.toLowerCase()} — fixer done`);
     }
@@ -2652,6 +2756,16 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         }
       );
       if (st.state !== 'OPEN') {
+        try {
+          const entry = readAgentRegistry(ctx.mainRoot)[row.id];
+          const wt = typeof entry?.worktree === 'string' ? entry.worktree : undefined;
+          settleAcpSessions(ctx.mainRoot, ctx.env, {
+            molSteps: [row.id],
+            ...(wt !== undefined ? { worktree: wt } : {}),
+          });
+        } catch {
+          // advisory
+        }
         closeFixer(ctx.store, row.id, `${link} ${st.state.toLowerCase()} — fixer done`);
         say(ctx, `drive ${link} settled (${st.state.toLowerCase()}) — fixer ${row.id} closed`);
       }
@@ -2913,6 +3027,37 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     await sweepSettledFixers(ctx, prs);
   } finally {
     herdrProjectorTick(ctx);
+  }
+  // the pipeline run-waker (bro-v0pvd.3) — journaled runs resume when
+  // their awaited input may have settled (customer records, provider
+  // walls, fleet capacity, the PR-settle seam, crash residue). Script-
+  // first, rides this cadence on the production engine map (.10) and
+  // the <runId>.formula.toml sidecar convention. A throwing pass must
+  // not kill the driver — same rule as the PR loop above.
+  try {
+    const wake = await pipelineWakePass(ctx.mainRoot);
+    if (wake.locked) {
+      say(ctx, 'pipeline wake: another pass holds the lock — skipped');
+    } else {
+      const woken = wake.runs.filter(r => r.action === 'woken').length;
+      const failed = wake.runs.filter(r => r.action === 'failed');
+      const unreadable = wake.unreadable ?? [];
+      if (woken > 0 || failed.length > 0 || unreadable.length > 0) {
+        // name the runs/files an operator must look at — a bare count
+        // leaves an unreadable journal or a failed resume invisible
+        const details = [
+          ...failed.map(r => `${r.runId}/${r.item}: ${r.detail ?? 'failed'}`),
+          ...unreadable.map(f => `unreadable ${f}`),
+        ];
+        say(
+          ctx,
+          `pipeline wake: ${woken} woken, ${failed.length} failed of ${wake.runs.length} anchor(s)` +
+            (details.length > 0 ? ` — ${details.join('; ')}` : '')
+        );
+      }
+    }
+  } catch (err) {
+    say(ctx, `warning: pipeline wake failed — ${errText(err)}`);
   }
 }
 

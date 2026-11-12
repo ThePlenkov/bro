@@ -1,4 +1,5 @@
 ---
+
 name: wtf
 description: "Use when the user invokes /wtf or vents sharp frustration at the agent's own work. Thin wrapper over the bro CLI — `bro wtf` captures the complaint as a bead, `bro self retrospect record` stores a TOML retro plan and fans prevention actions out to beads. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
@@ -13,13 +14,13 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro wtf <complaint>` / `bro self retrospect capture <complaint>` | Open a `wtf` bead — the user's complaint **verbatim** + a git/cwd snapshot |
-| `bro self retrospect schema` | Print the commented plan template — the schema lives in the CLI, not here |
-| `bro self retrospect record <plan.toml>` | Validate the plan → close a `retro` bead with the analysis memo → each `[[actions]]` item becomes an open `prevention` bead labeled `sink:<sink>` → the wtf is closed (`retro.wtf`, `--wtf`, or the only open one — auto-linked) |
-| `bro self retrospect status` | **Exit gate** — exit 1 while any wtf stays unanswered |
-| `bro self retrospect list` | Retro beads + open wtf beads |
+| Command                                                           | What it does                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro wtf <complaint>` / `bro self retrospect capture <complaint>` | Open a `wtf` bead — the user's complaint **verbatim** + a git/cwd snapshot                                                                                                                                                       |
+| `bro self retrospect schema`                                      | Print the commented plan template — the schema lives in the CLI, not here                                                                                                                                                        |
+| `bro self retrospect record <plan.toml>`                          | Validate the plan → close a `retro` bead with the analysis memo → each `[[actions]]` item becomes an open `prevention` bead labeled `sink:<sink>` → the wtf is closed (`retro.wtf`, `--wtf`, or the only open one — auto-linked) |
+| `bro self retrospect status`                                      | **Exit gate** — exit 1 while any wtf stays unanswered                                                                                                                                                                            |
+| `bro self retrospect list`                                        | Retro beads + open wtf beads                                                                                                                                                                                                     |
 
 ## Policy
 
@@ -42,7 +43,11 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
   `record` auto-answers the only open wtf; with several open, set
   `retro.wtf` or pass `--wtf` to pick.
 - **The gate decides, not you.** Resume normal work only when
-  `bro self retrospect status` exits 0.
+  `bro self retrospect status` exits 0. An open wtf is answered
+  regardless of who captured it or which session it blames — a
+  foreign/infra wtf gets an honest retro ("not this session's defect;
+  the real defect is X") routed to `sink:backlog`, never stepped
+  around by self-classifying it as someone else's.
 - **Route by sink.** `sink:backlog` stays queued; `sink:memory` → persist
   to user or project memory (scope decides); `sink:agentic-documents` →
   update AGENTS.md/rules/skill files directly; `sink:upstream-issue` →

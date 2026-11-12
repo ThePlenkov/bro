@@ -12,11 +12,66 @@
  */
 import { healthKey, unknownFact } from '@broject/core';
 import type { ExplainFact, HealthSnapshot } from '@broject/core';
-import type { RouteDecision } from '@broject/router-routes';
+import type { FormulaTrace, RouteDecision } from '@broject/router-routes';
 
 /** The chain's entry, rendered — the honest id. */
 function chainId(entry: { provider: string; model?: string }): string {
   return entry.model === undefined ? entry.provider : `${entry.provider}/${entry.model}`;
+}
+
+/** Who pinned the route — the provenance the verdict fact names. */
+function pickedSource(picked: RouteDecision['picked']): string {
+  if (picked === 'model') {
+    return 'the decision model';
+  }
+  if (picked === 'formula') {
+    return 'the formula';
+  }
+  if (picked === 'recall') {
+    return 'outcome recall';
+  }
+  return 'the table';
+}
+
+/** The cascade's facts — who decided and what each stage kept (spec
+ *  bro-0ykhg.2). Every rung reports its before/after and its cost, so
+ *  the explanation shows exactly where candidates were won or lost. */
+function cascadeFacts(decision: RouteDecision): ExplainFact[] {
+  const cascade = decision.cascade;
+  if (cascade === undefined) {
+    return [];
+  }
+  const facts: ExplainFact[] = [
+    {
+      label: 'decided by',
+      value: cascade.decidedBy ?? 'rules',
+      because:
+        cascade.decidedBy === 'recall'
+          ? 'similar verified outcomes agreed above the recall thresholds'
+          : cascade.decidedBy === 'judge' || cascade.decidedBy === 'escalate'
+            ? 'the judge answered and its verdict was trusted'
+            : // rules also stands when the judge WAS asked but could not
+              // be trusted — shadow mode, a failed call, no confident
+              // pick, or invoke=never (bro-0ykhg.2 review)
+              'no trusted model pick — the rules left the safe order standing',
+      source: 'the cascade',
+    },
+  ];
+  for (const stage of cascade.stages) {
+    const removed = stage.before.filter(n => !stage.after.includes(n));
+    facts.push({
+      label: stage.stage,
+      value: `${stage.after.length} of ${stage.before.length} contender(s)`,
+      because:
+        (stage.note ??
+          (removed.length === 0
+            ? 'the set passed through unchanged'
+            : `removed ${removed.join(', ')}`)) +
+        (stage.decided !== undefined ? ` — decided ${stage.decided}` : ''),
+      source: `cascade ${stage.latencyMs}ms`,
+    });
+  }
+  return facts;
 }
 
 /** The verdict's own facts — the route and the chain it names. */
@@ -26,7 +81,7 @@ function verdictFacts(decision: RouteDecision): ExplainFact[] {
       label: 'route',
       value: decision.route?.name ?? '(none)',
       because: decision.reason,
-      source: decision.picked === 'model' ? 'the decision model' : 'the table',
+      source: pickedSource(decision.picked),
     },
     {
       label: 'chain',
@@ -73,13 +128,99 @@ function rejectFacts(decision: RouteDecision): ExplainFact[] {
   }));
 }
 
-/** The route's facts — the decision, its candidates, and every reject. */
+/** The formula's head fact — which file, which shape. */
+function formulaHeadFacts(trace: FormulaTrace): ExplainFact[] {
+  const file = trace.file === undefined ? '' : ` (${trace.file})`;
+  return [
+    {
+      label: 'formula',
+      value: trace.shape,
+      because: `the routing formula${file} decided this task`,
+      source: 'the formula',
+    },
+  ];
+}
+
+/** The formula's input facts — each answer with its probability, and
+ *  the filters that fired. These are what the match READ: the answers
+ *  first, then the candidates they produced. */
+function formulaInputFacts(trace: FormulaTrace): ExplainFact[] {
+  const facts: ExplainFact[] = [];
+  for (const answer of trace.answers) {
+    const dim = answer.lowConfidence === true ? ' — below the confidence bar, not applied' : '';
+    const p = answer.probability === undefined ? '' : `, p=${answer.probability.toFixed(2)}`;
+    const c = answer.confidence === undefined ? '' : `, confidence=${answer.confidence.toFixed(2)}`;
+    facts.push({
+      label: `answer: ${answer.id}`,
+      value: answer.value,
+      because: `the decision model's answer${p}${c}${dim}`,
+      source: 'the decision model',
+    });
+  }
+  for (const fired of trace.filtered) {
+    facts.push({
+      label: `filtered: ${fired.route}`,
+      value: fired.reason,
+      because: 'a hard filter removed it — code-owned, the model cannot override',
+      source: 'the formula',
+    });
+  }
+  return facts;
+}
+
+/** The formula's score facts — every candidate's row, and the note
+ *  saying why the formula did not decide outright. */
+function formulaScoreFacts(trace: FormulaTrace): ExplainFact[] {
+  const facts: ExplainFact[] = [];
+  for (const score of trace.scores ?? []) {
+    const parts = [`p=${score.p.toFixed(3)} (n=${score.n})`];
+    if (score.costUsd !== undefined) {
+      parts.push(`cost=$${score.costUsd.toFixed(4)}`);
+    }
+    if (score.wallSec !== undefined) {
+      parts.push(`latency=${score.wallSec.toFixed(1)}s`);
+    }
+    facts.push({
+      label: `score: ${score.route}`,
+      value: score.score === undefined ? parts.join(', ') : `${score.score.toFixed(3)}`,
+      because:
+        score.score === undefined
+          ? `the formula's inputs — ${parts.join(', ')}`
+          : `P(success) − λ·cost − μ·latency = ${parts.join(', ')}`,
+      source: 'the formula',
+    });
+  }
+  if (trace.note !== undefined) {
+    facts.push({
+      label: 'formula note',
+      value: trace.note,
+      because: 'why the formula did not decide outright',
+      source: 'the formula',
+    });
+  }
+  return facts;
+}
+
+/** The formula's facts — the whole trace as the route slice prints it:
+ *  the shape, the answers and fired filters, the score rows, the note. */
+export function formulaFacts(trace: FormulaTrace): ExplainFact[] {
+  return [...formulaHeadFacts(trace), ...formulaInputFacts(trace), ...formulaScoreFacts(trace)];
+}
+
+/** The route's facts — the decision, the formula's answers, the match
+ *  they produced (candidates and rejects), and the score detail. The
+ *  order is the story: verdict → inputs → match → scores. */
 export function routeFacts(decision: RouteDecision): ExplainFact[] {
+  const trace = decision.formula;
   return [
     ...verdictFacts(decision),
+    ...cascadeFacts(decision),
     ...chainFacts(decision),
+    ...(trace === undefined ? [] : formulaHeadFacts(trace)),
+    ...(trace === undefined ? [] : formulaInputFacts(trace)),
     ...candidateFacts(decision),
     ...rejectFacts(decision),
+    ...(trace === undefined ? [] : formulaScoreFacts(trace)),
   ];
 }
 

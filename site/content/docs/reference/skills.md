@@ -10,7 +10,7 @@ description: "Agent-skill deps — skills.install sources materialise into .agen
 | | |
 | --- | --- |
 | group | `self` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 | skill | `skills` |
 | config | `skills` in bro.config |
 

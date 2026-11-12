@@ -48,6 +48,7 @@ export {
   beadsDir,
   beadsDirAsync,
   beadsStoreStamp,
+  beadsStoreStampAt,
   beadsStoreStampAsync,
   checkBeads,
   evidenceKind,
@@ -173,8 +174,26 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export {
+  DEFAULT_MATRIX_COMPLEXITY,
+  DEFAULT_MATRIX_MODES,
+  fleetMatrix,
+  matrixVerdict,
+} from './matrix.ts';
+export type { FleetMatrix, FleetMatrixModel, MatrixVerdict } from './matrix.ts';
 export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
 export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
+export {
+  DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
+  laneBudgetAdmit,
+  laneBudgetCheck,
+  laneBudgetDir,
+  laneBudgetKey,
+  laneBudgetLevel,
+  laneBudgetPause,
+  laneBudgetResume,
+} from './lane-budget.ts';
+export type { LaneBudgetLevel, LaneBudgetOpts, LaneWorkBudget } from './lane-budget.ts';
 export {
   BrouterConfigError,
   brouterStaticCatalog,
@@ -186,7 +205,10 @@ export type {
   BrouterConfig,
   BrouterModels,
   BrouterRoute,
+  BrouterRouter,
   ModelRoute,
+  RouterInvoke,
+  RouterRecall,
 } from './brouter.ts';
 export { healthKey } from './router-health.ts';
 export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
@@ -336,6 +358,7 @@ export type {
   ReviewFacade,
   ReviewThread,
   ScanOpts,
+  VetoReview,
 } from './review.ts';
 export {
   countMergesInRange,
@@ -354,6 +377,7 @@ export type {
 } from './stacks.ts';
 export {
   collectGuards,
+  connectorHookActive,
   connectorHooks,
   connectors,
   ensureAuth,
@@ -387,6 +411,97 @@ export {
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';
+export {
+  drainHookSpool,
+  drainIntoStore,
+  ledgerDbPath,
+  ledgerFacade,
+  openLedgerStore,
+  sessionProject,
+  spoolCursorKey,
+} from './ledger-store.ts';
+export type {
+  DrainIntoResult,
+  DrainOptions,
+  DrainResult,
+  FileBatch,
+  IngestContext,
+  IngestResult,
+  LedgerStore,
+  LedgerStoreResult,
+} from './ledger-store.ts';
+export {
+  hookSpoolFiles,
+  isSpoolOutcome,
+  parseSpoolLine,
+  resolveHookSpoolPath,
+  SPOOL_OUTCOMES,
+} from './hook-spool.ts';
+export type { SpoolOutcome, SpoolRow } from './hook-spool.ts';
+export { isMode, MODES } from './ledger.ts';
+export {
+  broStateDir,
+  hookHostOf,
+  inboxPath,
+  listModeFiles,
+  MODE_SNAPSHOT_EVENTS,
+  MODE_SNAPSHOT_TTL_MS,
+  modeFilePath,
+  modeSessionsDir,
+  parseModeCommand,
+  readModeFile,
+  readModeSnapshot,
+  removeModeFile,
+  safeSessionFilePart,
+  sessionFileStem,
+  sessionIdFromEnv,
+  sessionMode,
+  SESSION_ENV_VARS,
+  snapshotEventPath,
+  snapshotFresh,
+  snapshotModeDir,
+  snapshotStampPath,
+  touchSnapshotStamp,
+  writeModeFile,
+  writeModeSnapshot,
+} from './modes.ts';
+export type {
+  ModeFileEntry,
+  ModeSnapshotEvent,
+  ModeSource,
+  SessionModeResolution,
+} from './modes.ts';
+export type {
+  HookStat,
+  InstallRow,
+  LedgerEventRow,
+  LedgerFacade,
+  LedgerInstallRow,
+  LedgerRow,
+  LedgerSessionRow,
+  Mode,
+  SessionKey,
+  SessionQuery,
+  SessionRow,
+  SessionState,
+  StatsQuery,
+} from './ledger.ts';
+export { claimsFacade } from './claims-store.ts';
+export type { ClaimsFacadeOptions } from './claims-store.ts';
+export {
+  CLAIM_DEFAULT_TTL_MS,
+  ORCHESTRATOR_ROLE_NAME,
+  orchestratorRoleUri,
+} from './claims.ts';
+export type {
+  ClaimFacade,
+  ClaimOptions,
+  ClaimQuery,
+  ClaimReleaseOptions,
+  ClaimResult,
+  ClaimRow,
+  ResourceUri,
+} from './claims.ts';
 export { holdRoleLease, localLeaseStore, RoleLeaseAbortedError } from './leases.ts';
 export type {
   HoldRoleLeaseOptions,
@@ -486,6 +601,7 @@ export type {
 export {
   AgentNotFound,
   AGENT_CAUSES,
+  AGENT_LEARN_CHECKS,
   acquireAgentRegistryLock,
   agentEntryBlocked,
   agentExitFileName,
@@ -498,15 +614,18 @@ export {
   entryRunId,
   INSTANT_DEATH_MS,
   isAgentCause,
+  isAgentLearnCheck,
   mintAgentId,
   mintRunId,
   patchAgentRegistry,
+  patchAgentRegistryIf,
   probeStep,
   RATE_BACKOFF_BASE_MS,
   RATE_BACKOFF_CAP_MS,
   rateDeathBackoff,
   readAgentRegistry,
   removeAgentRegistryEntries,
+  agentRegistryLockDepth,
   rebindStep,
   RESET_MARK_MARGIN_MS,
   SpawnError,
@@ -519,6 +638,7 @@ export type {
   AgentCause,
   AgentConnector,
   AgentInfo,
+  AgentLearnCheck,
   AgentRegistryEntry,
   AgentState,
   ExitClassification,

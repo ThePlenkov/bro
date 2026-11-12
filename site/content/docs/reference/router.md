@@ -10,6 +10,6 @@ description: "The model router — the served catalog and the clients it renders
 | | |
 | --- | --- |
 | group | `utility` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 | skill | `brouter` |
 

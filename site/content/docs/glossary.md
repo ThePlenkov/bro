@@ -4,11 +4,6 @@ title: Glossary
 description: One line per concept — the vocabulary bro uses everywhere, defined once.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 ## Work items
 
 - **bead** — one unit of work in the `bd` store; the atom every bro workflow is made of.

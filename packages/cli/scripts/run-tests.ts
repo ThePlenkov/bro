@@ -66,11 +66,14 @@ if (pattern.includes('.e2e')) {
     } as ReturnType<typeof spawnSync>;
   }
   if (build.status !== 0) {
-    // Fallback: try building from package dir if nx not available in expected form
+    // Fallback: try building from package dir if nx not available in expected form.
+    // No positional entry — tsdown.config.ts owns the entry list (index,
+    // plugin, config-schema, hooks); passing src/index.ts here would override
+    // it and emit a single-entry dist missing dist/hooks.js (bro-36sx7.7).
     let build2: ReturnType<typeof spawnSync>;
     try {
       const tsdownEntry = join(dirname(require.resolve('tsdown/package.json')), 'dist', 'run.mjs');
-      build2 = spawnSync(process.execPath, [tsdownEntry, 'src/index.ts'], {
+      build2 = spawnSync(process.execPath, [tsdownEntry], {
         stdio: 'inherit',
         cwd: join(pkgDir, '..'),
       });

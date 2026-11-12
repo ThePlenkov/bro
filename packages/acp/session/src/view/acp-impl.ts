@@ -33,7 +33,7 @@ import {
   type ToolCallItem,
 } from '@broject/acp-model';
 import type { ArchiveRow, PaneLed } from '../archive/index.ts';
-import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../model/fmt.ts';
+import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../wire/fmt.ts';
 import {
   dumpContent,
   dumpItems,
@@ -581,6 +581,14 @@ export class AcpImpl implements PaneImpl {
    *  verdict mode paints (a silent agent's idle clock starts at its
    *  last closed turn, not at pane open). */
   private lastStopTs: string | undefined;
+  /** The newest journal ts seen at all — the disconnect verdict's
+   *  stand-in for "entered this state at" (an exit has no dedicated
+   *  stamp; the last row before it is the closest truth). */
+  private lastActivityTs: string | undefined;
+  /** The ts of the row that opened the current requires_action
+   *  posture — the permission clock's start. Rows that keep the
+   *  ask open (tool updates, chunks) must not move it. */
+  private actionTs: string | undefined;
   private lastStopError = false;
   /** leader sid → the `origin|error` keys its storm already rowed —
    *  N identical failures print ONE `── turn failed ──` and stay
@@ -598,6 +606,7 @@ export class AcpImpl implements PaneImpl {
 
   feed(row: ArchiveRow): void /* NOSONAR typescript:S3776 */ {
     this.launchTs ??= row.ts;
+    if (row.ts !== undefined) this.lastActivityTs = row.ts;
     // the provider label is any `acp provider 'X'`/`provider:X` by —
     // conductor rows name the orchestrator, not the model
     if (row.by !== undefined && /^(?:acp provider|provider:)/.test(row.by)) {
@@ -661,9 +670,15 @@ export class AcpImpl implements PaneImpl {
         if (arg !== undefined) this.args.set(u.toolCallId, arg);
       }
     }
+    const wasAction = this.session.state === 'requires_action';
     const orderLen = this.session.order.length;
     for (const ev of eventsOf(row)) {
       this.session = reduce(this.session, ev);
+    }
+    // the blocked clock starts when the ask lands — a stamp-less
+    // entry degrades to the bare 'permission' mode
+    if (!wasAction && this.session.state === 'requires_action') {
+      this.actionTs = row.ts;
     }
     // birth stamps ride the row that produced the item — order is
     // append-only, so born sids are the tail slice
@@ -701,13 +716,26 @@ export class AcpImpl implements PaneImpl {
    *  blocked, requires_action is the permission posture. */
   get verdict(): { led: PaneLed; mode: string } | undefined {
     const s = this.session;
+    // terminal postures carry the status-entry stamp — "since" is the
+    // question a finished/blocked row must answer (a live turn's clock
+    // is its own startedAt, already painted)
+    const since = (base: string, ts: string | undefined): string => {
+      const when = ts === undefined ? '' : fmtWhen(ts);
+      return when === '' ? base : `${base} · since ${when}`;
+    };
     if (s.replaying) return { led: { state: 'working' }, mode: 'replaying' };
     if (s.connection === 'disconnected') {
-      return { led: { state: 'blocked' }, mode: 'agent exited' };
+      return {
+        led: { state: 'blocked' },
+        mode: since('agent exited', this.lastActivityTs ?? this.lastStopTs),
+      };
     }
     switch (s.state) {
       case 'requires_action':
-        return { led: { state: 'blocked' }, mode: 'permission' };
+        return {
+          led: { state: 'blocked' },
+          mode: since('permission', this.actionTs),
+        };
       case 'running':
         return {
           led: { state: 'working' },
@@ -718,12 +746,17 @@ export class AcpImpl implements PaneImpl {
         };
       default: {
         if (this.lastStopError) {
-          return { led: { state: 'blocked' }, mode: 'turn error' };
+          return {
+            led: { state: 'blocked' },
+            mode: since('turn error', this.lastStopTs),
+          };
         }
         let mode = 'idle';
         if (this.lastStopTs !== undefined) {
           mode = `since ${fmtWhen(this.lastStopTs)}`;
         } else if (s.stopReason !== null) {
+          // a stamp-less stop has no honest clock — last activity is
+          // a mid-turn row, not the completion time
           mode = 'turn complete';
         }
         return { led: { state: 'idle' }, mode };

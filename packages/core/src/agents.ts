@@ -31,7 +31,7 @@ import type { Lease } from './leases.ts';
 import type { OnWall } from './routing.ts';
 import { acquireFileLock } from './filelock.ts';
 import { BD_NO_STORE } from './bd.ts';
-import { gitTry } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry } from './git.ts';
 import { taskStoreAt } from './tasks.ts';
 
 export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped' | 'blocked';
@@ -44,6 +44,16 @@ export type AgentCause = (typeof AGENT_CAUSES)[number];
 
 export const isAgentCause = (v: unknown): v is AgentCause =>
   typeof v === 'string' && (AGENT_CAUSES as readonly string[]).includes(v);
+
+/** Exit-harvest learn/retro verdict (spec bro-xkv42.2): `ok` =
+ *  qualifying evidence found, `miss` = proven absent, `skipped` = the
+ *  check could not run honestly (budget wall, remote lane, unreadable
+ *  store) — never a miss on unproven absence. */
+export const AGENT_LEARN_CHECKS = ['ok', 'miss', 'skipped'] as const;
+export type AgentLearnCheck = (typeof AGENT_LEARN_CHECKS)[number];
+
+export const isAgentLearnCheck = (v: unknown): v is AgentLearnCheck =>
+  typeof v === 'string' && (AGENT_LEARN_CHECKS as readonly string[]).includes(v);
 
 export interface ExitClassification {
   cause: AgentCause;
@@ -501,6 +511,9 @@ export interface SpawnSpec {
    *  provider; stamped into the registry and pinned into the worker's
    *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
   /** Pipeline provenance — stamped into the registry and pinned into
    *  the worker's env (BRO_FORMULA feeds the `BRO-Formula` commit
    *  trailer). Absent on non-formula spawns. */
@@ -585,6 +598,13 @@ export interface AgentInfo {
    *  2 into `<agentId>.stderr` so `log` stays the agent-updates stream
    *  (spec bro-e2ec0); absent on remote backends and pre-split entries. */
   stderrLog?: string;
+  /** Exit-harvest learn/retro verdict (spec bro-xkv42.2) — set once per
+   *  run at classification; absent on live agents and runs harvested
+   *  before the check existed. */
+  learnCheck?: AgentLearnCheck;
+  /** What satisfied the check (`ok`) or why it didn't run (`skipped`);
+   *  absent on `miss` — the miss itself is the signal. */
+  learnEvidence?: string;
 }
 
 export interface AgentCapabilities {
@@ -593,6 +613,11 @@ export interface AgentCapabilities {
   attach?: boolean;
   /** spawn() can rebind a dead agent's claim to a new worker. */
   respawn?: boolean;
+  /** spawn() can run a provider-resolved SpawnWorker — backends that own
+   *  their provider session (gascity's city.toml), dispatch remotely
+   *  (copilot), or never spawn (devin) report false; absent means the
+   *  worker contract holds. */
+  workers?: boolean;
   supervisor: 'none' | 'ondemand' | 'required';
 }
 
@@ -709,6 +734,20 @@ export interface AgentRegistryEntry {
   formula_sha?: string;
   session_id?: string;
   pipeline_stage?: string;
+  /** Exit-harvest learn/retro verdict (spec bro-xkv42.2) — written once
+   *  per run at exit classification; commitSpawn clears it on respawn
+   *  like cause/resetAt. */
+  learnCheck?: AgentLearnCheck;
+  /** The evidence that satisfied the check, or the skip reason —
+   *  absent on 'miss'. */
+  learnEvidence?: string;
+  /** The beads store dir the run was pinned to at spawn
+   *  (SpawnSpec.beadsDir) — the exit-harvest learn check reads THIS
+   *  store, not whatever beadsDir(dir) resolves, so a --beads-dir or
+   *  env-pinned spawn is checked where its worker actually wrote
+   *  (spec bro-xkv42.2). Absent on pre-storeDir entries — the check
+   *  falls back to beadsDir(dir). */
+  storeDir?: string;
   [key: string]: unknown;
 }
 
@@ -776,7 +815,13 @@ export function agentEntryBlocked(entry: AgentRegistryEntry, now = Date.now()): 
 /** `<git-common-dir>/bro/agents.json` — shared across linked worktrees,
  *  same anchor as the hooks markers and stack edges. */
 export function agentRegistryPath(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  // bounded like every sync probe — a stalled git (hung mount, dead
+  // credential helper) must not freeze a read surface that walks many
+  // cwds; a timeout reads as "no registry", the bead stays unresolved
+  const r = gitTry(
+    ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    GIT_SYNC_PROBE_TIMEOUT_MS
+  );
   const common = r.code === 0 ? r.out.trim() : '';
   return common === '' ? null : join(common, 'bro', 'agents.json');
 }
@@ -850,14 +895,25 @@ export function acquireAgentRegistryLock(dir: string, opts: { waitMs?: number } 
   });
 }
 
+/** Reentrancy count for `withAgentRegistryLock` — >0 means the caller
+ *  is inside a registry critical section. Callers holding store-probe
+ *  budgets (the learn/retro exit check) read this to defer work that
+ *  would stall every other spawn behind slow `bd` calls. */
+let registryLockDepth = 0;
+export function agentRegistryLockDepth(): number {
+  return registryLockDepth;
+}
+
 /** Run `fn` under the registry lock. Sync-only on purpose — an async
  *  fn would release-and-reattach semantics nobody needs here; the
  *  native spawn section is synchronous top to bottom. */
 export function withAgentRegistryLock<T>(dir: string, fn: () => T): T {
   const release = acquireAgentRegistryLock(dir);
+  registryLockDepth += 1;
   try {
     return fn();
   } finally {
+    registryLockDepth -= 1;
     release();
   }
 }
@@ -876,6 +932,37 @@ export function patchAgentRegistry(
     // the manual clear covers the retained `attempts` too — a superseded
     // death must stay cleared with its entry (spec bro-1x7p), otherwise a
     // shallow top-level stamp leaves the old record walling its provider
+    if (patch.stopped === true && Array.isArray(next.attempts)) {
+      next.attempts = (next.attempts as unknown[]).map(a =>
+        a !== null && typeof a === 'object' ? { ...a, stopped: true } : a
+      );
+    }
+    reg[molStep] = next;
+    writeAgentRegistry(dir, reg);
+    return next;
+  });
+}
+
+/** Conditional read-modify-write — `patch` lands only while `onlyIf`
+ *  still accepts the CURRENT entry, all under the one registry lock.
+ *  This is the patch-shaped CAS twin of `removeAgentRegistryEntries`'s
+ *  `expected`: a caller settling a failed attempt must never rewrite a
+ *  row a parallel respawn replaced between its probe and its write —
+ *  the check and the write are one critical section here. Returns the
+ *  patched entry, or undefined when the predicate refused. */
+export function patchAgentRegistryIf(
+  dir: string,
+  molStep: string,
+  patch: Partial<AgentRegistryEntry>,
+  onlyIf: (cur: AgentRegistryEntry | undefined) => boolean
+): AgentRegistryEntry | undefined {
+  return withAgentRegistryLock(dir, () => {
+    const reg = readAgentRegistry(dir);
+    const cur = reg[molStep];
+    if (!onlyIf(cur)) {
+      return undefined;
+    }
+    const next = { ...(cur ?? { agentId: '', backend: '', spawnedAt: '' }), ...patch };
     if (patch.stopped === true && Array.isArray(next.attempts)) {
       next.attempts = (next.attempts as unknown[]).map(a =>
         a !== null && typeof a === 'object' ? { ...a, stopped: true } : a

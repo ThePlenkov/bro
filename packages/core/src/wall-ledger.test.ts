@@ -58,6 +58,7 @@ describe('host wall ledger', () => {
         {
           account: 'acct',
           cause: 'rate_limited',
+          bound: true,
           until: new Date(base + 15 * 60_000).toISOString(),
           observedAt: new Date(base).toISOString(),
           provider: 'provider',

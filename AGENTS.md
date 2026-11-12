@@ -1,5 +1,13 @@
 # bro — agent's sidekick
 
+<!-- BEGIN bro:sdd -->
+id: BRO-3
+title: bro — agent's sidekick
+area: policy
+status: active
+core: [BRO-1]
+<!-- END bro:sdd -->
+
 `bro` is a CLI carrying agent-workflow mechanics so prompts don't have to:
 review debt on merged PRs, the open-PR review loop, and scoped drill frames
 over beads. In a repo with `bro.config.json` or `.beads/`:
@@ -33,6 +41,16 @@ Developing bro itself: see CONTRIBUTING.md.
 
 ## Conventions
 
+- **Static-analysis-shaped seams** — every SAST finding class gets a
+  structural home before a config waiver: fs calls funnel through a
+  guarded `io` module (paths resolve inside a root or are
+  operator-named), computed object keys go through
+  `Object.entries`/`fromEntries`/`getOwnPropertyDescriptor` (never
+  `obj[key]` on outside data), configured patterns match through
+  dedicated matchers (never `new RegExp` on non-literals). If a linter
+  still misfires, the exclusion lives in `.codacy.yml` /
+  `.markdownlint.json` next to a written justification — pattern-wide,
+  never a per-line suppression.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).

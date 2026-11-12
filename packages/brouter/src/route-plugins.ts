@@ -7,11 +7,13 @@
  */
 import { definePlugin, type CommandPlugin } from '@broject/command';
 import { runHealthCommand } from './health-cmd.ts';
+import { runOutcomeCommand } from './outcome-cmd.ts';
 import { runRouteCommand } from './route-cmd.ts';
 import { runRoutesCommand } from './routes-cmd.ts';
+import { runStatsOutcomesCommand } from './stats-cmd.ts';
 import { runStoreCommand } from './store-cmd.ts';
 
-/** The route surface — store, routes, health, route. */
+/** The route surface — store, routes, health, route, outcome, stats. */
 export function routePlugins(): CommandPlugin[] {
   const store = definePlugin({
     name: 'store',
@@ -37,5 +39,24 @@ export function routePlugins(): CommandPlugin[] {
     run: argv => runRouteCommand(argv),
   });
 
-  return [store, routes, health, route];
+  const outcome = definePlugin({
+    name: 'outcome',
+    summary: "Report a routed decision's terminal verdict — merged|failed|abandoned|parked",
+    run: argv => runOutcomeCommand(argv),
+  });
+
+  const stats = definePlugin({
+    name: 'stats',
+    summary: "The router's numbers — outcomes: P(success | route, features)",
+    run: argv => {
+      const [sub, ...rest] = argv;
+      if (sub === 'outcomes') {
+        return runStatsOutcomesCommand(rest);
+      }
+      console.error(`brouter stats: unknown subject "${sub ?? ''}" — outcomes`);
+      process.exit(2);
+    },
+  });
+
+  return [store, routes, health, route, outcome, stats];
 }

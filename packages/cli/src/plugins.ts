@@ -20,9 +20,6 @@ import {
   hasHelpFlag,
   loadConfig,
   printUsage,
-  busConnector,
-  mailboxConnector,
-  notifyConnector,
   registerConnector,
   meshSection,
   querySection,
@@ -38,32 +35,21 @@ import {
   type DocType,
   type FacadeMap,
 } from '@broject/core';
-import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
+import { ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
-import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt';
-import {
-  DRILL_PLAN_VERSION,
-  drillConnector,
-  drillSection,
-  parseDrillPlan,
-  type DrillPlan,
-} from '@broject/drill';
+import { DEBT_PLAN_VERSION, parseDebtPlan, type DebtPlan } from '@broject/debt';
+import { DRILL_PLAN_VERSION, drillSection, parseDrillPlan, type DrillPlan } from '@broject/drill';
 import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro';
-import { learnConnector, learnSection } from '@broject/learn';
+import { learnSection } from '@broject/learn';
 import { loopSection } from '@broject/loop';
-import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github';
-import { gitlabConnector } from '@broject/gitlab';
-import { linearConnector } from '@broject/linear';
-import { jiraConnector, jiraDcConnector } from '@broject/jira';
 import {
   applyQueryPlan,
-  atlassianConnector,
   parseQueryPlan,
   PLAN_VERSION as QUERY_PLAN_VERSION,
   type QueryPlan,
 } from '@broject/query';
-import { guardConnector, guardSection } from '@broject/guard';
-import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge';
+import { guardSection } from '@broject/guard';
+import { judgeSection } from '@broject/judge';
 import { runAcpCommand } from './commands/acp.ts';
 import { runAcpWorkerCommand } from './commands/acp-worker.ts';
 import { applyActPlan, runActCommand } from './commands/act.ts';
@@ -78,7 +64,6 @@ import { runNotifyCommand } from './commands/notify.ts';
 import { runOtelCommand } from './commands/otel.ts';
 import { otelSection } from '@broject/otel';
 import { rigSection } from './commands/rig-config.ts';
-import { rigConnector } from './commands/rig-pulse.ts';
 import { runRigCommand } from './commands/rig.ts';
 import { runSinksCommand } from './commands/sinks.ts';
 import { runQueryCommand } from './commands/query.ts';
@@ -93,13 +78,14 @@ import { runPluginsCommand } from './commands/plugins.ts';
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDoctorCommand } from './commands/doctor.ts';
 import { driveSection } from './commands/drive-config.ts';
-import { driveConnector } from './commands/drive-pulse.ts';
-import { loopConnector } from './commands/loop-pulse.ts';
 import { runDaemonCommand } from './commands/daemon.ts';
 import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
+import { runClaimCommand } from './commands/claim.ts';
+import { runModeCommand } from './commands/mode.ts';
+import { runSessionsCommand } from './commands/sessions.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
 import { runGoalCommand } from './commands/goal.ts';
 import { runDogfoodCommand, runBenchmarkCommand } from './commands/dogfood.ts';
@@ -116,7 +102,6 @@ import { skillsSection } from './commands/skills-config.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
-import { watchConnector } from './commands/watch-pulse.ts';
 import { watchSection } from './commands/watch-config.ts';
 import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runAgentsCommand } from './commands/agents.ts';
@@ -130,76 +115,20 @@ import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
 import { runRouterCommand } from './commands/router.ts';
-import { runSpecCommand, sddConnector } from './commands/spec.ts';
-import { sessionCapConnector } from './commands/session-cap.ts';
+import { runSpecCommand } from './commands/spec.ts';
 import { runExecCommand } from './commands/exec.ts';
-import { herdrConnector } from './commands/herdr-connector.ts';
 import { runStackCommand } from './commands/stack.ts';
 import { runStampCommand } from './commands/buildstamp.ts';
-import { SPEC_CONNECTORS } from './spec-connectors.ts';
 import { runSweepCommand } from './commands/sweep.ts';
 import { runSyncCommand } from './commands/sync.ts';
 import { runTraceCommand } from './commands/trace.ts';
 import { telemetrySection } from './commands/trace-config.ts';
-import { runWorkCommand, workConnector } from './commands/work.ts';
+import { runWorkCommand } from './commands/work.ts';
 import { runContractCommand } from './commands/contract.ts';
-
-// Built-in connectors register at module load, ahead of external
-// plugins — registry order is the fallback precedence, and an external
-// connector must not shadow a built-in system. Registration order also
-// decides stop-gate block priority: drill > work > act.
-registerConnector(githubConnector);
-registerConnector(gitlabConnector);
-// external merge queues — opt-in only (`connectors.mergeQueue`), they
-// provide nothing but the queue facade so nothing detects them
-registerConnector(mergifyConnector);
-registerConnector(graphiteConnector);
-// queries-facade provider — opt-in only (a step names it or
-// connectors.queries pins it); nothing about a repo detects Atlassian
-registerConnector(atlassianConnector);
-// Linear — tasks + tasksAsync + queries, all name-only pins
-// (connectors.tasks=linear); a repo's remote can't name a Linear team
-registerConnector(linearConnector);
-// Jira — tasks + tasksAsync over the atlassian CLI's REST surface,
-// name-only pins (connectors.tasks=jira); a remote can't name a project
-registerConnector(jiraConnector);
-// Jira Data Center/Server — the same tasks facade on the v2 REST
-// surface (name-keyed users, string bodies, /search), name-only
-registerConnector(jiraDcConnector);
-registerConnector(drillConnector);
-registerConnector(workConnector);
-registerConnector(actConnector);
-// the pulse's rearm nudge — same family as act's dead-watch flags
-registerConnector(watchConnector);
-// the installed merge path's rearm checkpoint — drive.json's owner
-registerConnector(driveConnector);
-registerConnector(loopConnector);
-registerConnector(rigConnector);
-registerConnector(debtConnector);
-registerConnector(sddConnector);
-// the host-wide session cap — refuses a session start at the cap
-registerConnector(sessionCapConnector);
-registerConnector(notifyConnector);
-// pane report-back — env-gated inside the connector; outside herdr
-// every probe is a no-op (spec bro-84zrj)
-registerConnector(herdrConnector);
-registerConnector(learnConnector);
-registerConnector(systemoneConnector);
-registerConnector(llmJudgeConnector);
-// the builtins' home — guard defs contributed here shadow by name
-// behind config defs, so a project's `guard.defs` always wins a rename
-registerConnector(guardConnector);
-// events facade providers — registry order is the fallback precedence,
-// so `mailbox` first: `bro notify` must keep working with no broker and
-// no config. The bus is opt-in via `connectors.events` in bro.config.json.
-registerConnector(mailboxConnector);
-registerConnector(busConnector);
-// specs facade providers — registry order is detection precedence:
-// native first (its matchDir claims the configured sdd.dir), then
-// tool-layout matchers, agent last (explicit pick only, never detects)
-for (const c of SPEC_CONNECTORS) {
-  registerConnector(c);
-}
+// Built-in connector registration lives in connectors.ts — shared with
+// the slim hook entry (dist/hooks.js) so `bro hooks` never needs this
+// registry's import graph. Side-effect import: order is the contract.
+import './connectors.ts';
 
 /** The telemetry plane's usage — the plane had no help of its own, and
  *  `bro telemetry --help` ran the report. */
@@ -242,7 +171,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'act',
     group: 'review',
-    summary: 'Open-PR loop: status|threads|resolve|reply|merge',
+    summary: 'Open-PR loop: status|threads|resolve|reply|merge|dismiss',
     run: runActCommand,
     skill: 'act',
     configKey: 'act',
@@ -259,6 +188,18 @@ export const PLUGINS: BroPlugin[] = [
             2: 'no open PR for the current branch',
           },
           json: 'schemas/cli/act-status.schema.json',
+        },
+        dismiss: {
+          flags: {
+            '--pr <n>': 'the PR whose stale veto reviews to dismiss — default: the current branch',
+            '--dry-run': 'list the stale vetoes without dismissing',
+            '--message <t>': 'the dismissal note the host records',
+          },
+          exits: {
+            0: 'stale vetoes dismissed — or none standing/eligible (live vetoes are never dismissed)',
+            1: 'host cannot enumerate/dismiss reviews, PR not OPEN, or a dismissal failed',
+            2: 'usage — no PR for the current branch',
+          },
         },
       },
     },
@@ -324,7 +265,7 @@ export const PLUGINS: BroPlugin[] = [
         '--json':
           'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
       },
-      json: 'schemas/cli/watchdog.json',
+      json: 'schemas/cli/watchdog.schema.json',
       exits: {
         0: 'brief printed (human or --json)',
         2: 'unknown flag — usage on stderr',
@@ -334,10 +275,31 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'pipeline',
     group: 'pipeline',
-    summary: 'Pipeline customer surface — accept|answer write the verdict store',
+    summary:
+      'Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker',
     run: runPipelineCommand,
     contract: {
       subs: {
+        run: {
+          flags: {
+            '--formula <file>': 'REQUIRED — the pipeline formula (TOML) every run drives',
+            '--engines <module>':
+              'path to a module exporting engines (EngineMap or (dir)=>EngineMap)',
+            '--customer <id>': 'the recorded customer — default: $BRO_CUSTOMER, else the bd actor',
+            '--label <label>': 'the queue label to scan (default pipeline)',
+            '--item <id>': 'explicit bead id (repeatable) — bypasses the label scan',
+            '--limit <n>': 'cap how many candidates this invocation scans',
+            '--max-in-flight <n>':
+              'machine in-flight cap — narrows limits.in_flight (0 = uncapped)',
+            '--dry-run': 'report what WOULD start without invoking runPipeline',
+            '--json': 'machine-readable report',
+          },
+          exits: {
+            0: 'scan completed — per-item outcomes in the report',
+            1: 'customer-unresolved or a run-level failure',
+            2: 'usage or an unloadable formula/engines module',
+          },
+        },
         accept: {
           flags: {
             '--notes <text>': "the customer's notes — required on rejected (the fix scope)",
@@ -364,6 +326,21 @@ export const PLUGINS: BroPlugin[] = [
             2: 'usage',
           },
         },
+        wake: {
+          flags: {
+            '--engines <module>':
+              'engine map module replacing the built-in production map — exports engines (EngineMap or (dir)=>EngineMap)',
+            '--formula <file>':
+              'formula TOML for every run (default: the <runId>.formula.toml sidecar)',
+            '--formula-dir <dir>': 'formula TOML dir — the file whose sha matches formula_sha wins',
+            '--json': 'emit the WakeReport as JSON',
+          },
+          exits: {
+            0: 'pass complete — per-run actions reported (woken|waiting|unresolved|skipped|failed)',
+            1: 'the wake pass itself failed (pipeline plane unreadable)',
+            2: 'usage',
+          },
+        },
       },
     },
   }),
@@ -374,7 +351,7 @@ export const PLUGINS: BroPlugin[] = [
       // no `a|b` alternation in this summary — gen-command-docs'
       // signature() would extract it as subcommands; the arg lists use
       // spaced pipes so the generated page prints the prose only
-      'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]',
+      'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]; hosts [--json]',
     run: runFleetCommand,
     contract: {
       flags: {
@@ -383,10 +360,103 @@ export const PLUGINS: BroPlugin[] = [
         '--live': 'TTY dashboard repaint loop (needs a TTY)',
         '--every N': 'repaint cadence seconds — implies --live',
       },
+      subs: {
+        hosts: {
+          flags: {
+            '--json':
+              '{hosts, projects, generatedAt} — hosts × installs + sessions per project over the session ledger',
+          },
+          json: 'schemas/cli/fleet-hosts.schema.json',
+          exits: {
+            0: 'board printed',
+            1: 'ledger unavailable',
+            2: 'usage',
+          },
+        },
+      },
       json: 'schemas/cli/fleet.schema.json',
       exits: {
         0: 'fleet printed',
         2: 'usage — --live without TTY, --every out of range, --json + --live',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'sessions',
+    group: 'fleet',
+    summary:
+      'Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree [--json]',
+    run: argv => runSessionsCommand(argv),
+    contract: {
+      flags: {
+        '--json': '{sessions, warnings} — epoch-ms times, full sids',
+        '--project': 'only sessions of the current project — the default is machine-wide',
+        '--all': 'every session on the machine — the default',
+        '--host <h>': 'only sessions of this host (claude, codex, devin, …)',
+        '--live': 'only sessions whose derived state is live',
+      },
+      json: 'schemas/cli/sessions.schema.json',
+      exits: {
+        0: 'sessions printed',
+        1: 'ledger unavailable',
+        2: 'usage',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'mode',
+    group: 'fleet',
+    summary:
+      'Per-session behaviour mode — observe | plan | code | review | orchestrate; get, set, list, clear, render snapshots [--json]',
+    run: argv => runModeCommand(argv),
+    contract: {
+      flags: {
+        '--json': 'mode payload as JSON — get: {session, warnings}; list: {modes, warnings}',
+        '--session <sid>': 'target session id — default: session env / hook identity',
+        '--host <h>': 'target host (claude, codex, cursor, devin, …)',
+        '--mode <m>': 'render only this mode (bro mode render)',
+      },
+      subs: {
+        get: {},
+        list: {},
+        clear: {},
+        render: {},
+      },
+      json: 'schemas/cli/mode.schema.json',
+      exits: {
+        0: 'mode printed/set/cleared/rendered — or hook-binding notice',
+        1: 'ledger unavailable',
+        2: 'usage',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'claim',
+    group: 'fleet',
+    summary:
+      'Session resource claims — leases on worktree/branch/task/pr/path/role URIs in the session ledger [--json]',
+    run: argv => runClaimCommand(argv),
+    contract: {
+      flags: {
+        '--json':
+          'claim → {ok,resource,session,conflict}; release → {released,session}; list → {claims,warnings}',
+        '--session <sid>': 'claiming session id — default: session env / hook identity',
+        '--host <h>': 'claiming host (claude, codex, devin, …)',
+        '--ttl <sec>': 'lease seconds — default 24h; 0 = no expiry',
+        '--exclusive': 'refuse every other live holder (role:* default)',
+        '--shared': 'allow co-claims unless the standing claim is exclusive',
+        '--project': 'list only claims of the current project id',
+        '--resource <prefix>': 'list only claims whose URI starts with this prefix',
+      },
+      subs: {
+        release: {},
+        list: {},
+      },
+      json: 'schemas/cli/claim.schema.json',
+      exits: {
+        0: 'claimed/released/listed — a refused claim exits 1 with the standing holder',
+        1: 'claims store unavailable, usage error, or claim refused',
+        2: 'usage',
       },
     },
   }),
@@ -619,9 +689,9 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'learn',
     group: 'self',
-    // lesson store + capture/probe + the connector that injects them;
-    // promote is still pending (spec: bro-f4ot.1-learn.md)
-    summary: 'Self-improvement loop — lessons: add|list|show|forget|capture|probe',
+    // lesson store + capture/probe/promote + the connector that injects
+    // them (spec: bro-f4ot.1-learn.md)
+    summary: 'Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe',
     run: runLearnCommand,
     skill: 'learn',
     configKey: 'learn',
@@ -631,7 +701,7 @@ export const PLUGINS: BroPlugin[] = [
     name: 'goal',
     group: 'work',
     summary:
-      'Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict',
+      'Session-scoped completion goal — status|pause|resume|clear, or <condition> to set; hooks remind + judge-verdict',
     run: runGoalCommand,
     skill: 'goal',
     configKey: 'goal',
@@ -946,6 +1016,7 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)',
     run: runMeshCommand,
+    skill: 'mesh',
     configKey: 'mesh',
     configSchema: meshSection,
   }),
@@ -1207,6 +1278,8 @@ const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
   'events',
   'queries',
   'stacks',
+  'ledger',
+  'claims',
 ]);
 
 const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
@@ -1222,6 +1295,8 @@ const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
   'events',
   'queries',
   'stacks',
+  'ledger',
+  'claims',
   'hooks',
   'guards',
 ];

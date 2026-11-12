@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/mode.schema.json",
+  "title": "bro mode --json",
+  "description": "get → {session, warnings}; list → {modes, warnings}; render → {project, rendered, warnings}",
+  "type": "object",
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": ["session", "warnings"],
+      "properties": {
+        "session": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["host", "sid", "mode", "source"],
+          "properties": {
+            "host": { "type": "string" },
+            "sid": { "type": "string" },
+            "mode": { "type": "string", "enum": ["observe", "plan", "code", "review", "orchestrate"] },
+            "source": { "type": "string", "enum": ["file", "default", "observe"] },
+            "file": { "type": ["string", "null"] }
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    {
+      "required": ["modes", "warnings"],
+      "properties": {
+        "modes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["host", "sid", "mode", "source", "seen"],
+            "properties": {
+              "host": { "type": "string" },
+              "sid": { "type": "string" },
+              "mode": { "type": "string" },
+              "source": { "type": "string", "enum": ["file", "ledger"] },
+              "seen": { "type": "number", "description": "epoch ms" },
+              "file": { "type": "string" }
+            }
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    {
+      "required": ["project", "rendered", "warnings"],
+      "properties": {
+        "project": { "type": ["string", "null"], "description": "null when the project id cannot resolve" },
+        "rendered": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  ]
+}

@@ -7,7 +7,25 @@
  *  `enterHookProject` chdir, which runs before any connector probe gets
  *  to spawn. Null when argv is not bro-shaped (tests import these
  *  modules directly). */
-import { resolve } from 'node:path'
+import { existsSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
-export const SELF_ENTRY: string | null =
-  process.argv[1] === undefined ? null : resolve(process.argv[1])
+const rawEntry = process.argv[1] === undefined ? null : resolve(process.argv[1]);
+
+/** The slim hook entry (`dist/hooks.js`, `src/hooks.ts`) dispatches only
+ *  hook events — a detached respawn through it (`daemon run`, `watch`,
+ *  `trace export`, post-merge workers) would land on runHooksCommand as
+ *  an unknown event and silently do nothing. SELF_ENTRY must therefore
+ *  always name a full-CLI entry: the hooks entry's index sibling is the
+ *  same dispatch `bro <cmd>` takes. The sibling check keeps source/dev
+ *  layouts and foreign `hooks.js` files untouched. */
+function fullCliEntry(entry: string): string {
+  const base = basename(entry);
+  if (base !== 'hooks.js' && base !== 'hooks.ts') {
+    return entry;
+  }
+  const sibling = join(dirname(entry), base === 'hooks.js' ? 'index.js' : 'index.ts');
+  return existsSync(sibling) ? sibling : entry;
+}
+
+export const SELF_ENTRY: string | null = rawEntry === null ? null : fullCliEntry(rawEntry);

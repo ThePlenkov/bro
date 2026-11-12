@@ -58,7 +58,26 @@ import { driveLockPath, runDriveCommand } from './drive.ts';
 import { runLoopCommand } from './loop.ts';
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { SELF_ENTRY } from './self-entry.ts';
-import { readWantMarker } from './want-marker.ts';
+import {
+  driveMarkerPath,
+  loopMarkerPath,
+  readDriveMarker,
+  readLoopMarker,
+  readWantMarker,
+  type DriveMarker,
+  type LoopMarker,
+} from './want-marker.ts';
+// the marker path/read helpers moved to want-marker.ts so the pulse
+// connectors can gate their supervisor-machinery import without this
+// module's registry-reaching graph (specs/bro-36sx7.7.md) — re-exported
+// here so daemon.ts's consumers are unchanged
+export {
+  driveMarkerPath,
+  loopMarkerPath,
+  readDriveMarker,
+  readLoopMarker,
+} from './want-marker.ts';
+export type { DriveMarker, LoopMarker } from './want-marker.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 import { mainWorktree } from './work.ts';
 import { loadBroConfig } from '../plugins.ts';
@@ -641,28 +660,6 @@ function daemonDown(main: string): void {
 
 // --- the install want-marker (bro-y5zon) --------------------------------------
 
-export interface DriveMarker {
-  /** pass cadence the rearmed supervisor runs `--every` at */
-  everySec: number;
-  armedAt: string;
-}
-
-/** `<git-common>/bro/drive.json` — the merge-path want-marker,
- *  `pulse.json`'s analogue: durable intent that survives sessions and
- *  reboots; the connector's checkpoints rearm a dead supervisor from
- *  it. `daemon.json` stays the transient spawn record; `drive.lock`
- *  the liveness hold. */
-export function driveMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir);
-  return common === null ? null : join(common, 'bro', 'drive.json');
-}
-
-/** The want-record — null when absent, malformed, or the repo has no
- *  common dir; readWantMarker owns the torn/cadence verdict. */
-export function readDriveMarker(dir: string): DriveMarker | null {
-  return readWantMarker(driveMarkerPath(dir));
-}
-
 /** The want-marker arm states — armed fresh, re-armed at a new cadence,
  *  or already holding the same cadence. */
 export type ArmState = 'armed' | 'updated' | 'already';
@@ -841,24 +838,6 @@ export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveIns
 // durable want the connector's checkpoints rearm `daemon run --loop`
 // from. The probe differs — the loop supervisor holds `loop.lock`, so
 // its liveness plane is loopProbe, never the drive.lock truth.
-
-export interface LoopMarker {
-  /** pass cadence the rearmed supervisor runs `--every` at */
-  everySec: number;
-  armedAt: string;
-}
-
-/** `<git-common>/bro/loop.json` — `drive.json`'s loop-kind analogue. */
-export function loopMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir);
-  return common === null ? null : join(common, 'bro', 'loop.json');
-}
-
-/** The loop want-record — null when absent, malformed, or the repo has
- *  no common dir; readWantMarker owns the torn/cadence verdict. */
-export function readLoopMarker(dir: string): LoopMarker | null {
-  return readWantMarker(loopMarkerPath(dir));
-}
 
 /** Write the loop want-marker — same tmp+rename contract as `armDrive`. */
 export function armLoop(dir: string, everySec: number): { state: ArmState; marker: LoopMarker } {

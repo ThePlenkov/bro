@@ -7,16 +7,16 @@ the bro store: `serve-turns.jsonl` `conductor.turn` rows (written
 next to `serve.json` under the common git dir), the runner's bead
 claim, the analyst's verdict.
 
-| scenario | client | wire | exercises | hermetic home |
-| --- | --- | --- | --- | --- |
-| `claude-plugin` | claude -p | `/v1/messages` | plugin surface: native commands, hooks, stop-gate, settings.local.json + apiKeyHelper | `serve-conductor.test.ts` |
-| `claude-basics` | claude -p | `/v1/messages` | model pin, streamed deltas, multi-turn retained session | `serve-conductor.test.ts` (retained sessions) |
-| `claude-tools` | claude -p | `/v1/messages` | real client tool loop (Write/Bash) through the wire | `serve-conductor.test.ts` |
-| `claude-errors` | claude -p | `/v1/messages` | killed listener → apiKeyHelper re-ensure → recovery | `serve.ts` ensure path; `bro-ofbw4` lifecycle |
-| `codex-plugin` | codex exec | `/v1/responses` | provider block, env_key token path, AGENTS.md/native surface | `serve-conductor-openai.test.ts` |
-| `codex-basics` | codex exec | `/v1/responses` | provider resolution, model pin, basic task | `serve-conductor-openai.test.ts` |
-| `codex-tools` | codex exec | `/v1/responses` | `function_call`/`function_call_output` item round-trip | `serve-conductor-openai.test.ts` (function_call round-trip) |
-| `codex-reasoning` | codex exec | `/v1/responses` | `model_reasoning_effort` → `reasoning.effort` → composite pin | `serve-conductor-openai.test.ts` (effort fold) |
+| scenario          | client     | wire            | exercises                                                                             | hermetic home                                               |
+| ----------------- | ---------- | --------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `claude-plugin`   | claude -p  | `/v1/messages`  | plugin surface: native commands, hooks, stop-gate, settings.local.json + apiKeyHelper | `serve-conductor.test.ts`                                   |
+| `claude-basics`   | claude -p  | `/v1/messages`  | model pin, streamed deltas, multi-turn retained session                               | `serve-conductor.test.ts` (retained sessions)               |
+| `claude-tools`    | claude -p  | `/v1/messages`  | real client tool loop (Write/Bash) through the wire                                   | `serve-conductor.test.ts`                                   |
+| `claude-errors`   | claude -p  | `/v1/messages`  | killed listener → apiKeyHelper re-ensure → recovery                                   | `serve.ts` ensure path; `bro-ofbw4` lifecycle               |
+| `codex-plugin`    | codex exec | `/v1/responses` | provider block, env_key token path, AGENTS.md/native surface                          | `serve-conductor-openai.test.ts`                            |
+| `codex-basics`    | codex exec | `/v1/responses` | provider resolution, model pin, basic task                                            | `serve-conductor-openai.test.ts`                            |
+| `codex-tools`     | codex exec | `/v1/responses` | `function_call`/`function_call_output` item round-trip                                | `serve-conductor-openai.test.ts` (function_call round-trip) |
+| `codex-reasoning` | codex exec | `/v1/responses` | `model_reasoning_effort` → `reasoning.effort` → composite pin                         | `serve-conductor-openai.test.ts` (effort fold)              |
 
 ## Coverage notes
 
@@ -30,8 +30,12 @@ claim, the analyst's verdict.
   `apiKeyHelper` + `ANTHROPIC_BASE_URL` + `enabledPlugins`; codex
   `model`/`model_provider`/`base_url`/`env_key`/`wire_api`/
   `model_reasoning_effort` + `CODEX_HOME` user-layer trick.
-- **Known gaps** (tracked, not hidden): `ANTHROPIC_SMALL_FAST_MODEL`
-  mapping (`bro-bvipw.1`), host-scope single listener (`bro-dluwn`),
-  dead-listener windows under a live client (`bro-ofbw4`), a real
-  codex binary on this host (environment gap — the codex rows
-  provision but need `codex` installed to run).
+- **Known gaps** (tracked, not hidden): a real codex binary on this
+  host (environment gap — the codex rows provision but need `codex`
+  installed to run). The gaps this index originally tracked have all
+  landed: classifier/`ANTHROPIC_SMALL_FAST_MODEL` calls ride the
+  conductor fast lane upstream or the cheap session lane (`bro-6asnu`,
+  doctor warn `bro-9ww2q`), the host-scope single listener is
+  `bro provider ensure` on :4545 (`bro-dluwn`), and dead-listener
+  windows closed via the keepalive watchdog + ensure self-heal
+  (`bro-ofbw4`).

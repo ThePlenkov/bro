@@ -15,15 +15,16 @@ default store, so standard installs already have it).
 
 ## Commands
 
-| Command                                                                                              | What it does                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bro review act status [PR] [--json]`                                                                | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked                                                                                                                                                                                                                                                                                                                                   |
-| `bro review act threads [PR]`                                                                        | Unresolved review threads, TSV                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands; `--bead` closes the loop-claimed bead once the merge lands (rearm replays it); `--detach` re-spawns the wait as its own process group so the watch outlives the arming session (output on `<git-common>/bro/act-wait-<pr>.log`) |
-| `bro review act rearm [--dry-run] [--json]`                                                          | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`/`--bead`; a settled marker carrying a bead reconciles the claim when the PR merged, unverifiable PRs keep theirs                                                                                                                                                 |
-| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]`          | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land                                                                                                                    |
-| `bro review act resolve --thread ID [--comment T]`                                                   | Resolve a thread (reply first if comment given)                                                                                                                                                                                                                                                                                                                                                                                     |
-| `bro review act reply --thread ID --comment T`                                                       | Reply without resolving (`--file TSV` for batch)                                                                                                                                                                                                                                                                                                                                                                                    |
+| Command                                                                                              | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro review act status [PR] [--json]`                                                                | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked                                                                                                                                                                                                                                                                                                                                                                            |
+| `bro review act threads [PR]`                                                                        | Unresolved review threads, TSV                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands; `--bead` closes the loop-claimed bead once the merge lands (rearm replays it); `--detach` re-spawns the wait as its own process group so the watch outlives the arming session (output on `<git-common>/bro/act-wait-<pr>.log`)                                          |
+| `bro review act rearm [--dry-run] [--json]`                                                          | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`/`--bead`; a settled marker carrying a bead reconciles the claim when the PR merged, unverifiable PRs keep theirs                                                                                                                                                                                          |
+| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]`          | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land                                                                                                                                                             |
+| `bro review act resolve --thread ID [--comment T]`                                                   | Resolve a thread (reply first if comment given)                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `bro review act reply --thread ID --comment T`                                                       | Reply without resolving (`--file TSV` for batch)                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `bro review act dismiss [PR] [--dry-run] [--message T]`                                              | Dismiss **stale** veto reviews — standing `CHANGES_REQUESTED` reviews with ≥1 referenced thread, all resolved+outdated; a live veto (including a body-only one with zero thread refs) is refused by construction (re-review is the reviewer's call). The review **body** prints before mutating — a body-level objection is invisible to the thread rule, so read it before confirming the dismissal. `--dry-run` lists candidates; `--message` overrides the dismissal note |
 
 ## Policy
 
@@ -46,7 +47,16 @@ default store, so standard installs already have it).
   gate unconditionally: a failed job or an error-level annotation is a
   real project finding, not reviewer flake, so `act.ignoreChecks` does
   not shield them and a `neutral` conclusion still gets its annotations
-  inspected.
+  inspected. An ignored-but-failing SAST check still gets its **check
+  output read** (`gh api repos/<r>/check-runs/<id>` → `.output.summary`)
+  before any classification — scanners post verdicts there, never in
+  threads, so "no thread activity" says nothing about whether the tool
+  is down; a named failing condition (duplication %, coverage) is a
+  real finding to fix or debt-bead, not flake. A check you don't
+  **recognize** is a fact to fetch — `gh api check-runs` for the run +
+  `git log --follow` on the workflow file — not a thing to name; an
+  `in_progress` gate-style check is waiting on the gate, which IS the
+  verdict, not a stall.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict); reject → reply with the reason, then resolve; or **defer** —
@@ -60,6 +70,33 @@ default store, so standard installs already have it).
   `"stores": ["jsonl"]` opt-out — the defer didn't happen: fall back to
   fix or reject, do NOT resolve. Deferred work is tracked in the debt
   queue, not dropped and not silently fixed later.
+- **Every finding gets a prevention retro, not just a verdict.** Code is
+  agent-written by default, so before fixing ask: "what code shape would
+  have made this finding class impossible to write?" — then fix to THAT
+  shape, not to silence the site. Dynamic fs paths → one guarded io
+  module all calls funnel through; `new RegExp` on configured values →
+  a dedicated matcher; `obj[key]` writes → entries/`Object.fromEntries`;
+  computed-key reads → `Object.getOwnPropertyDescriptor`. For a true
+  false positive the fix lives at the rule level — a documented
+  exclusion in `.codacy.yml`, a `.markdownlint.json` option — so the
+  same false never reappears in any file, never a one-site suppression.
+  A recurring pattern belongs in AGENTS.md or the relevant skill so the
+  next code is born clean.
+- **Exhaust findings locally before pushing.** A push that flies blind on
+  what remote engines will say is the wave generator — each push
+  re-triggers reviewers whose next annotations were already computable.
+  Before any fix-round push, run the local engine parity sweep over every
+  file in the diff (the transient eslint-plugin-security +
+  no-non-null-assertion setup, plus tsc; see the check-sast bead for the
+  repo command), not just the flagged files. Zero local findings is the
+  bar for "this round is done"; remote annotations landing afterward are
+  either genuinely new or stale-DB reposts, and the sweep is how you tell
+  which.
+  Same sweep, artifact class: before editing any file, grep its basename
+  across `scripts/` and `package.json` for a generator or freshness gate
+  (`check:*`, `gen:*`). Generated outputs — schemas, lockfiles, committed
+  dist — get their change at the source and a regeneration; a hand-edit
+  is a guaranteed red freshness check.
   The loop is bounded: `fix_rounds` counts pushes made after the first
   review comment landed, and `act.maxRounds` (default 3, 0 disables) caps
   them — past the cap the gate names the defer path outright, so
@@ -67,6 +104,25 @@ default store, so standard installs already have it).
   Docs-only PRs (every changed file matches `act.docsPaths`) cap tighter —
   `act.docsMaxRounds` (default 2): doc threads churn per push, so the
   tail belongs in debt, not another round.
+- **A standing `CHANGES_REQUESTED` vetoes the merge even at
+  `open_threads=0`.** GitHub's `reviewDecision` is a third gate axis
+  beside threads and checks — every thread resolved does not clear a
+  reviewer's veto. `bro review act status` names the standing reviews
+  and marks each **stale** (at least one thread it references exists
+  and every one is resolved _and_ outdated — nothing live it could
+  still be talking about) or **live**. A veto with zero referenced
+  threads — a body-only objection — reads **live**: no thread anchor
+  is not proof the ask went stale, and dismissal is destructive-leaning.
+  Thread refs only cover _inline_ objections — the review **body** can
+  carry an independent ask the rule can't see, so `act status` prints a
+  body excerpt under each veto and `act dismiss` re-reads staleness
+  immediately before mutating (a veto that went live mid-command is
+  skipped, never cleared off a stale snapshot). Stale vetoes are
+  cleared by `bro review act dismiss [PR]` — read the printed body
+  first: if it may carry its own objection, that dismissal is your
+  call, not the tool's. Live ones wait for the reviewer's re-review —
+  never dismiss a live veto to unblock a merge (the command refuses by
+  construction, so if it refuses, that IS the answer).
 - **A reopened thread stops the loop — the user confirms.** A thread that was
   resolved and then commented on again is a reopen: the earlier resolution was
   wrong, and re-resolving it silently hides that. The gate names it as a
@@ -168,7 +224,10 @@ default store, so standard installs already have it).
   **'Watcher armed' is never the end state.** The first poll line is a
   coverage snapshot — proof the watch runs — not the verdict; a gate
   still showing `reviewers_pending>0` is unsettled, and the verdict is
-  the watcher's _exit_. A non-zero BLOCKED exit is the next work list,
+  the watcher's _exit_. Arming is not done at spawn: run `bro review act
+  status` and confirm `watch=` names the live watch before reporting —
+  a detached watcher can die between spawn and your reply, and "armed"
+  without the status line is a claim, not a fact. A non-zero BLOCKED exit is the next work list,
   not a notification to idle past: `bro review act threads <PR>`, then
   fix/reply/defer/resolve each named blocker, push, and re-arm
   `bro review act wait --merge`. A BLOCKED event surfacing after the arming

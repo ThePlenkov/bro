@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ArchiveRow } from '../archive/index.ts';
-import { dayLabel, hhmm } from './fmt.ts';
+import { dayLabel, hhmm } from '../wire/fmt.ts';
 import { type Item, MAX_ITEMS, type Op, SessionModel, type ToolItem } from './items.ts';
 
 /** The item's text payload — every non-tool item carries one. */

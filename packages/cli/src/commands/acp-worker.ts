@@ -44,15 +44,15 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
   const command = flag(argv, '--command');
   const model = flag(argv, '--model');
   const autoApprove = argv.includes('--auto-approve');
-  const sessionRm = flag(argv, '--session-rm');
+  const resumeSessionId = flag(argv, '--resume');
   const mcpServers = mcpServersFromFile(argv);
   const pos = positionals(
     argv,
-    new Set(['--command', '--model', '--session-rm', '--mcp-servers-file'])
+    new Set(['--command', '--model', '--resume', '--mcp-servers-file'])
   );
   if (command === undefined || pos.length !== 1) {
     throw new CommandError(
-      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] [--mcp-servers-file <path>] <promptFile>',
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--resume <sessionId>] [--mcp-servers-file <path>] <promptFile>',
       EXIT.usage
     );
   }
@@ -63,7 +63,7 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
     command,
     model,
     autoApprove,
-    sessionRm,
+    resumeSessionId,
     mcpServers,
     promptFile,
     cwd: process.cwd(),

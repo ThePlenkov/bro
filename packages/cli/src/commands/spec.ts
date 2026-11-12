@@ -413,6 +413,15 @@ export const sddConnector: Connector = {
       ];
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): SDD coverage nudges serve the
+  // sessions that write specs and code against them — plan and code;
+  // review/orchestrate/observe stay passive (a spec gate belongs to the
+  // plane that owns the claim).
+  activeIn: {
+    sessionStart: ['plan', 'code'],
+    promptSubmit: ['plan', 'code'],
+    stopGate: ['plan', 'code'],
+  },
 };
 
 // --- commands -----------------------------------------------------------------

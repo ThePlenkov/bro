@@ -12,9 +12,8 @@
 import { and, eq, gt, gte, lte, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-sqlite';
 import type { NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { ensureStorePrivacy } from './privacy.ts';
 import { limits, sessions, usage } from './schema.ts';
 
 /** The typed database — drizzle over Node's built-in SQLite. The raw
@@ -46,10 +45,16 @@ export interface SessionRow {
 }
 
 /** Open (or create) the ledger at `path`. Never throws — the caller
- *  gets the reason instead. */
+ *  gets the reason instead. The privacy contract (spec bro-0ykhg.4)
+ *  runs first: state dir 0700, database and sidecars 0600 — an
+ *  existing store that cannot be tightened fails with the actionable
+ *  reason, it does not open loose. */
 export function openStore(path: string): StoreHandle {
   try {
-    mkdirSync(dirname(path), { recursive: true });
+    const privacy = ensureStorePrivacy(path);
+    if (privacy !== undefined) {
+      return { ok: false, path, reason: privacy };
+    }
     const client = new DatabaseSync(path);
     client.exec('PRAGMA journal_mode = WAL');
     client.exec('PRAGMA foreign_keys = ON');

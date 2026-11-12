@@ -573,7 +573,8 @@ export function parseSlotAcquire(out: string): SlotAcquire {
 /** `merge-slot check` output → current holder or null. Exported for tests. */
 export function parseSlotCheck(out: string): string | null {
   const body = parseJson(out);
-  return body && body.available === false && typeof body.holder === 'string' ? body.holder : null;
+  const holder = body?.holder;
+  return body?.available === false && typeof holder === 'string' ? holder : null;
 }
 
 /** The exec triple the store is built over — cwd routing for
@@ -608,7 +609,7 @@ function dueSnoozes(out: string): string[] {
     if (typeof r?.id !== 'string') {
       continue;
     }
-    const t = typeof r.defer_until === 'string' ? Date.parse(r.defer_until) : NaN;
+    const t = typeof r.defer_until === 'string' ? Date.parse(r.defer_until) : Number.NaN;
     if (Number.isFinite(t) && t <= now) {
       due.push(r.id);
     }
@@ -665,7 +666,9 @@ function publishDoltBridge(b: DoltBridge): string[] {
     health.head === '' ? undefined : { pin: new Map([[DOLT_DATA_REF, health.head]]) }
   );
   if (err !== null) {
-    notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`);
+    // infra — a moved remote or a timed-out publish is a retry, not a
+    // verdict (spec bro-cu3q8)
+    notes.push(`warning: bridge publish ${b.mirror} failed — ${err}; the next sync retries`);
   }
   return notes;
 }
@@ -788,7 +791,7 @@ function makeStore(x: StoreExec): TaskStore {
       for (const b of plan.bridges) {
         const err = bridgeFetch(b);
         if (err !== null) {
-          notes.push(`warning: bridge fetch ${b.mirror} failed — ${err}`);
+          notes.push(`warning: bridge fetch ${b.mirror} failed — ${err}; the next sync retries`);
         }
       }
       const r = x.probe(['sync', ...plan.args], 120_000);
@@ -796,7 +799,8 @@ function makeStore(x: StoreExec): TaskStore {
         if (/ENOENT/.test(r.err) || BD_NO_STORE.test(r.err)) {
           return ''; // no bd, or no routed store — state simply doesn't move
         }
-        throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`);
+        const why = r.err || `bd exited ${r.code}`;
+        throw new Error(`task store sync failed — ${why}`);
       }
       for (const b of plan.bridges) {
         notes.push(...publishDoltBridge(b));

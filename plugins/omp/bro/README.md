@@ -3,7 +3,7 @@
 Agent's sidekick for omp: the live project board on omp's TUI plus the
 same lifecycle mechanics the shell adapters carry, over omp's in-process
 extension API. `bro.ts` is generated from
-`packages/cli/src/adapter/omp.ts` — the shared adapter core folded into
+`packages/agent-plugins/*/src/omp.ts` — the shared adapter core folded into
 one self-contained module (node builtins only) by
 `npm run gen:plugins`; `check:plugins` fails when it drifts.
 

@@ -4,11 +4,6 @@ title: Events — notify, mailbox, bus, sinks
 description: The events facade — a session mailbox by default, a local event broker behind it, webhook sinks for humans.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 `bro comms notify` writes through one `events` facade — mailbox by default,
 or the local broker when `"connectors": { "events": "bus" }` selects it.
 The notify connector's postTool probe drains drops into session

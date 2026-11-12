@@ -202,6 +202,20 @@ function live(lease: Lease | undefined, deps: LocalDependencies, now: number): l
   if (lease === undefined || Date.parse(lease.expiresAt) <= now) {
     return false;
   }
+  return holderReachable(lease, deps);
+}
+
+/** The holder-liveness half of live() — the same host/pid probe,
+ *  without the expiry clause. Expiry exists so a CONTENDER can take
+ *  an absent holder's key; it was never meant to self-destruct the
+ *  recorded holder's own heartbeat. A pass that stalls the event
+ *  loop past TTL (synchronous spawnSync probes freezing the renew
+ *  timer — spec bro-ldvw1) delays the renew, not the holder: when it
+ *  finally fires the token still matches (no successor acquired) and
+ *  the pid is still alive, so the lease extends instead of exiting
+ *  75. A genuinely lost lease — taken by a successor or held by a
+ *  dead pid — still fails the check. */
+function holderReachable(lease: Lease, deps: LocalDependencies): boolean {
   if (lease.holder.host !== deps.host) {
     return true;
   }
@@ -247,7 +261,11 @@ export function localLeaseStore(project: string, options: LocalLeaseStoreOptions
       return withKeyLock(lease.key, path => {
         const now = deps.now();
         const current = readLease(path);
-        if (!tokenMatches(current, lease) || !live(current, deps, now)) {
+        // holder-self check: token match proves no successor acquired
+        // during the gap; holderReachable proves the recorded holder
+        // still lives. Expiry is NOT consulted — an uncontested lapse
+        // is an event-loop stall, not a lost role (spec bro-ldvw1).
+        if (!tokenMatches(current, lease) || !holderReachable(current, deps)) {
           return undefined;
         }
         const renewed = { ...current, expiresAt: new Date(now + ttlMs).toISOString() };

@@ -10,7 +10,7 @@ description: "Parallel-friendly worktrees: enter|leave|list|prune"
 | | |
 | --- | --- |
 | group | `work` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `work` |
 | config | `stack` in bro.config |
 | guide | [commands/stack](/docs/commands/stack) |

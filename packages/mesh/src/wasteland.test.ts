@@ -238,7 +238,7 @@ describe('wasteland e2e (gated)', () => {
       body: 'scratch',
       priority: 2,
     });
-    assert.ok(posted.id, posted.error);
+    assert.ok(posted.id, String(posted.error));
     assert.match(posted.id!, /^w-/);
     assert.equal(claimWanted({ remote: WL_E2E, id: posted.id! }).error, undefined);
     assert.equal(
@@ -250,7 +250,7 @@ describe('wasteland e2e (gated)', () => {
       undefined
     );
     const row = wantedStatus({ remote: WL_E2E, id: posted.id! });
-    assert.ok(row.row, row.error);
+    assert.ok(row.row, String(row.error));
     assert.notEqual(row.row!.status, 'open');
   });
 });

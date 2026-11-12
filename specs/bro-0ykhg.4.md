@@ -113,3 +113,54 @@ predicate evaluator. Zero rows yield 0.5 with `n=0`, never a judge score.
 - Changing `success` changes labels, stats and cache invalidation consistently;
   missing rounds are excluded only when the predicate requires them.
 - stats with zero rows prints the prior and `n=0`, not a fake rate.
+
+## Implementation delta (this PR)
+
+Assumptions re-checked against the tree; where the build diverged from
+the text above, this is the contract that shipped:
+
+- **Context resolution order** (`decisionContextId` in
+  `packages/brouter/src/context.ts`): canonical `projectId(dir)` →
+  configured `brouter.contextId` → `table:<sha256-16 of the canonical
+  route-table path>` → `dir:<sha256-16 of the canonical dir>`. The last
+  fallback covers standalone callers with no table at all. Reads resolve
+  the table path exactly as `brouter route` did — `brouter stats
+  outcomes` accepts the same `--routes` flag and reads the same
+  `brouter.routes` config, so a flag-override decision and its stats
+  share one namespace; `--context` overrides everything.
+- **CLI surface beyond the sketch**: `brouter outcome` also takes
+  `--event`, `--token`, `--path`; `brouter stats outcomes` takes
+  `--context`, `--route`, `--success`, `--days`, `--table-hash`,
+  `--formula-hash`, `--path`, `--json`. A bare CLI submission is pending
+  unless it presents the store's reporter credential (`--token` or
+  `BRO_ROUTER_REPORTER_TOKEN`); the credential lives beside the ledger
+  at mode 0600 inside the 0700 state dir.
+- **Durable outbox**: intents persist to
+  `<git-common>/bro/outcomes/outbox.jsonl` before delivery; `delivered`
+  markers make retries exact. The event id is a content hash, so a
+  retried verdict is the same event. `reconcileOutcomes()` runs at
+  `act wait`/`act merge`/`loop` startup and rides the same pass as the
+  `taskTextRetentionDays` expiry sweep.
+- **Monotonic source revisions**: bro's reporter computes
+  `max(Date.now(), highest recorded revision for the source + 1)` from
+  the store's own `outcome_reports` audit log — `Date.now()` alone
+  collides inside one millisecond and the store's `<=` staleness rule
+  would drop same-ms batch reports.
+- **Who reports what**: `act merge`/`act wait --merge` report `merged`
+  (rounds = `fixRounds + 1`, threads = total review threads — act's
+  round count, so a clean first-round merge reports `rounds=1`, the
+  `merged_first_round` success shape); closed-unmerged PRs report
+  `failed` via the same path. Loop claim settlement reports `failed`
+  and `parked`; fleet terminal exits flow through that same settlement.
+  Merge authority owns `merged`; loop deliberately never reports it.
+- **Non-joinable old rows**: `decisions` is a new table — there are no
+  pre-id journal rows to count; every current row carries a UUID, and
+  `outcome_reports` preserves the audit trail (including rejected
+  reports with reasons) for the explanation surface.
+- **Stats read-model shape**: `outcomeStats(db, {contextId, route?,
+  tableHash?, formulaHash?, features?, featureKeys?, success?, since?,
+  now?})` returns `{p, n, successes, failures, excluded, costUsd,
+  wallSec}`; `labelOutcome()` is the single predicate evaluator
+  (`merged` / `merged_first_round`) shared by stats, recall gating and
+  the .7 `OutcomeStatsSource` adapter. Verified-only rows count;
+  pending rows surface via `pendingOutcomeCount()`.

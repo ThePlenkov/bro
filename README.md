@@ -57,10 +57,10 @@ npx -y @broject/bro --help     # zero install
 npm i -g @broject/bro          # or keep bro around: bro debt status
 ```
 
-npm `latest` is **0.2.5** — this page uses the flat spellings the
-published CLI dispatches (`bro debt status`). The grouped surface
-(`bro review debt status`) lands in **0.3.0**; flat names stay
-permanent aliases, and upcoming commands are marked `0.3.0`.
+npm `latest` is **0.3.0** — the grouped `bro <group> <member>`
+spellings dispatch (`bro review debt status`), and this page keeps the
+flat names (`bro debt status`) that remain available as aliases. Commands
+introduced in 0.3.0 are marked `0.3.0`.
 
 Requires: `node >= 22.18`, `gh` authenticated, `bd`
 ([beads](https://github.com/gastownhall/beads)) — it's a default store, so
@@ -101,17 +101,20 @@ supplies the durable state they lack (claims, specs, the judge, the
 debt ledger). See [specs/bro-omp-plugin.md](specs/bro-omp-plugin.md).
 
 OpenCode, Kilo, and pi are native plugins the CLI installs itself —
-`bro plugins install <client>` writes the adapter module to the client's
-own plugin dir (`bro plugins list` prints the client × scope matrix).
-OpenCode loads JS/TS modules instead of a hook manifest, so `bro` ships
-as a native plugin (`packages/cli/src/opencode.ts`, published
-as the package's `./server` export) that spawns its own CLI. This entry uses
-OpenCode's V1 plugin API and does not run on V2. Two consequences:
+`bro plugins install <client>` writes the adapter to the client's own
+plugin dir (`bro plugins list` prints the client × scope matrix).
+OpenCode loads JS/TS modules instead of a hook manifest, and v2 loads a
+plugin as a _directory_: bro's adapter is the catalog plugin
+`packages/agent-plugins/opencode` — `index.ts` the server entrypoint,
+`tui.tsx` the terminal half, `rpc.ts` the contract both halves share.
+opencode raises the TUI half only for a package that also has a server,
+so the three land together in `plugins/bro/`. Two consequences:
 
-- **Install by package name only.** OpenCode's loader reads `exports["./server"]`
-  from the installed package and does not accept subpath specifiers — `"@broject/bro/opencode"`
-  is not a valid entry. Pin a build with
-  `"plugin": [["@broject/bro", { "command": { "cmd": "/path/to/bro" } }]]`.
+- **Install by directory.** `bro plugins install opencode` materializes
+  the three modules into `~/.config/opencode/plugins/bro/` (or
+  `<repo>/.opencode/plugins/bro/`). The v1-era loose `bro.ts` /
+  `bro-cli.ts` files are swept away by the same command — opencode
+  loads those too, and two bro plugins would fight over the session.
 - **The stop gate re-prompts instead of blocking.** OpenCode has no pre-stop
   hook; `session.idle` arrives after the turn is over. bro feeds the blocker
   back as a synthetic turn **once per session** — a second block is logged, not
@@ -159,12 +162,12 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 
 ### Self-reflection
 
-| Command                                             | What bro does                                                        |
-| --------------------------------------------------- | -------------------------------------------------------------------- |
-| `bro drill down\|up\|current\|tree\|list\|distill`  | Scoped descent frames — result and prevention required on the way up |
-| `bro wtf <complaint>`                               | Capture the complaint verbatim as a bead                             |
-| `bro retrospect record\|status\|schema\|list`       | Turn `wtf`s into retro records and prevention beads                  |
-| `bro learn add\|list\|show\|forget\|capture\|probe` | Store lessons and surface them when their triggers match             |
+| Command                                                      | What bro does                                                        |
+| ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| `bro drill down\|up\|current\|tree\|list\|distill`           | Scoped descent frames — result and prevention required on the way up |
+| `bro wtf <complaint>`                                        | Capture the complaint verbatim as a bead                             |
+| `bro retrospect record\|status\|schema\|list`                | Turn `wtf`s into retro records and prevention beads                  |
+| `bro learn add\|list\|show\|forget\|promote\|capture\|probe` | Store lessons and surface them when their triggers match             |
 
 ### Plumbing
 

@@ -24,6 +24,7 @@ export {
 } from './catalog.ts';
 export { catalogPlugins } from './catalog-plugins.ts';
 export { clientPlugins } from './client-plugins.ts';
+export { decisionContextId, journalDecision, taskTextRetentionDays } from './context.ts';
 export {
   CLAUDE_CODE_BEHAVES_AS,
   type ClaudeCodeRow,
@@ -55,13 +56,14 @@ export {
   readRouterEndpoint,
   routerStatePath,
 } from './gateway.ts';
+export { runOutcomeCommand } from './outcome-cmd.ts';
 export { runHealthCommand } from './health-cmd.ts';
 export { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
 export { type RouterPolicy, routerPlugins } from './plugins.ts';
 export { configuredProviders, type ProviderRow } from './providers.ts';
 export { CLIENTS, clientById, clientIds } from './registry.ts';
 export { runRouteCommand } from './route-cmd.ts';
-export { decideRoute, type TaskDecision } from './route-decide.ts';
+export { decideRoute, type DecisionLinks, type TaskDecision } from './route-decide.ts';
 export { routePlugins } from './route-plugins.ts';
 export { routerUrl } from './router-url.ts';
 export { routeTablePath, runRoutesCommand } from './routes-cmd.ts';
@@ -71,4 +73,5 @@ export {
   type SettingsChange,
   settingsDiff,
 } from './settings-diff.ts';
+export { runStatsOutcomesCommand } from './stats-cmd.ts';
 export { runStoreCommand } from './store-cmd.ts';

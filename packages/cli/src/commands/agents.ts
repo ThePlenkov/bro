@@ -63,6 +63,7 @@ import {
   EXIT,
   gitCommonDir,
   hasHelpFlag,
+  isBatchSpawn,
   localLeaseStore,
   printUsage,
   projectId,
@@ -76,6 +77,7 @@ import {
   stepClassInfo,
   taskStoreAt,
   type AgentConnector,
+  BATCH_MARKER_ENV,
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
@@ -88,8 +90,10 @@ import type { ExitCode } from '@broject/core';
 import type { AcpSeam, FetchFn } from '@broject/providers';
 import { otelHeader, otelSpan } from '@broject/providers';
 import { beadsDir } from '@broject/convoy';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import {
   agentPromptPath,
+  applyFleetMatrix,
   applyFleetRouter,
   eachAgentConnector,
   fleetCapOf,
@@ -101,6 +105,8 @@ import {
   resolveAgentConnector,
   resolveSpawnProvider,
   resolveSpawnRoute,
+  settleAcpSessions,
+  worktreeTelemetryDims,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
@@ -390,11 +396,21 @@ function printStatusTable(
     }
   }
   printLaneSection(lanes);
-  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
+  const cols = [
+    'backend',
+    'supervisor',
+    'agent',
+    'step',
+    'state',
+    'cause',
+    'learn',
+    'pid',
+    'worktree',
+  ];
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor;
     if (agents.length === 0) {
-      return [[conn.name, sup, '—', '—', '—', '—', '—', '—']];
+      return [[conn.name, sup, '—', '—', '—', '—', '—', '—', '—']];
     }
     return agents.map(a => [
       conn.name,
@@ -403,6 +419,9 @@ function printStatusTable(
       a.molStep,
       a.state,
       a.cause === undefined ? '—' : a.cause,
+      // the exit-harvest learn/retro verdict (spec bro-xkv42.2) — 'miss'
+      // is the named tail: exited with no learn/retro evidence
+      a.learnCheck === undefined ? '—' : a.learnCheck,
       a.pid === undefined ? '—' : String(a.pid),
       a.worktree === undefined ? '—' : basename(a.worktree),
     ]);
@@ -454,6 +473,11 @@ function statusDetail(backends: AgentBackendPlane[], target: string, json: boole
   if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`);
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`);
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`);
+  if (a.learnCheck !== undefined) {
+    console.log(
+      `learn     ${a.learnCheck}${a.learnEvidence === undefined ? '' : ` — ${a.learnEvidence}`}`
+    );
+  }
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`);
   if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`);
   if (a.log !== undefined) console.log(`log       ${a.log}`);
@@ -599,13 +623,22 @@ function resolvePrompt(
         `(${err instanceof Error ? err.message : String(err)}); pass --prompt-file`
     );
   }
-  const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
-  if (row === undefined || prompt === `# ${molStep}`) {
+  const base = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
+  // presence, not rendered equality — a bead titled exactly its id
+  // still carries a title; only a row with neither field is promptless
+  const promptless =
+    row === undefined || ((row.title ?? '').trim() === '' && (row.description ?? '').trim() === '');
+  if (promptless) {
     throw new SpawnInputError(
       `bead ${molStep} has no title/description to prompt with — pass --prompt-file`
     );
   }
-  return prompt;
+  // the composed work order carries the shared closeout contract
+  // (spec bro-xkv42.1) — mol/convoy step beads get it through this
+  // wrapper regardless of which formula poured them. The --prompt-file,
+  // stored-prompt, and literal-prompt paths stay the caller's verbatim
+  // text: those are operator work orders, not bro-composed ones.
+  return `${base}\n\n${LEARN_RETRO_CLOSEOUT}`;
 }
 
 /** Bad spawn input (missing worktree/prompt file, exclusive fields) —
@@ -622,6 +655,8 @@ export class SpawnInputError extends Error {
  *  provider/model beats the preset's) → agents.<backend>.provider →
  *  the legacy command template. */
 export interface StepSpawnRequest {
+  /** The spawn's lane — REQUIRED, no default. */
+  lane: 'batch' | 'interactive';
   molStep: string;
   connector?: string;
   worktree?: string;
@@ -657,6 +692,9 @@ export interface StepSpawnRequest {
    *  provenance (spec bro-z8tng). Stamped into the registry and pinned
    *  into the worker's env as BRO_DELEGATED_BY. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -679,6 +717,20 @@ export function spawnStepAgent(
   // '' would slip past `??` below and spawn an agent with no instructions
   if (req.prompt?.trim() === '') {
     throw new SpawnInputError('prompt must not be empty');
+  }
+  // lane is required by the type — this guard is for untyped callers
+  // (deserialized bodies, JS) where "required" is a convention: an
+  // omitted lane must fail loud, not silently classify the spawn
+  const lane = req.lane;
+  if (lane !== 'batch' && lane !== 'interactive') {
+    throw new SpawnInputError('lane must be "batch" or "interactive"');
+  }
+  // BRO_BATCH:'' reads as unset (isBatchSpawn's contract) — the env
+  // merge below scrubs it; only a LIVE marker contradicts interactive
+  if (lane === 'interactive' && isBatchSpawn(req.env)) {
+    throw new SpawnInputError(
+      `lane "interactive" conflicts with caller-set env[${BATCH_MARKER_ENV}]`
+    );
   }
   // --profile expands piecewise BEFORE connector resolution — the
   // preset's `backend` picks the connector only when --connector was
@@ -709,15 +761,22 @@ export function spawnStepAgent(
   // M7 fleet.router: fires only on an UNCLASSED step (no --class, no
   // class: label) with a table declared and the router armed — its one
   // `bd show` carries both the label check and the title/description
-  // the judge sees.
-  const info =
+  // the judge sees. fleet.matrix (bro-v0pvd.1) judges the TASK, not the
+  // lane — an explicit --class does not exempt the bead, so the info
+  // read arms on EITHER router and keeps req.class gating only the
+  // class router's own eligibility.
+  const routerArmed =
     env.fleet?.router !== undefined &&
     env.fleet.router.mode !== 'off' &&
     req.class === undefined &&
     env.fleet.routing !== undefined &&
-    Object.keys(env.fleet.routing).length > 0
-      ? stepClassInfo(beads, req.molStep)
-      : undefined;
+    Object.keys(env.fleet.routing).length > 0;
+  const matrixArmed =
+    env.fleet?.matrix !== undefined &&
+    env.fleet.matrix.provider !== undefined &&
+    env.fleet.matrix.mode !== 'off' &&
+    Object.keys(env.fleet.matrix.models).length > 0;
+  const info = routerArmed || matrixArmed ? stepClassInfo(beads, req.molStep) : undefined;
   const routed = routeStepClass(
     env.fleet,
     env.providers ?? {},
@@ -726,97 +785,132 @@ export function spawnStepAgent(
     req.class,
     info
   );
-  return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then(route => {
-    const provider = req.provider ?? profile?.provider ?? route?.provider;
-    let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
-    if (req.provider !== undefined) {
-      namedBy = 'flag';
-    } else if (profile !== undefined) {
-      namedBy = 'profile';
-    }
-    return resolveSpawnProvider(
-      env,
-      conn.name,
-      {
-        provider,
-        model:
-          req.model ??
-          // a profile's model rides only on its own provider's lane
-          profileModelFor(profile, provider) ??
-          // the routed model pin pairs with the routed provider — an
-          // explicit provider override must not inherit chain[0]'s model
-          (provider !== undefined && provider === route?.provider ? route.model : undefined),
-        autoApprove: req.autoApprove ?? profile?.autoApprove,
-      },
-      namedBy
-    ).then(async pick => {
-      // a flag-named profile's provider is an explicit pick — it
-      // outranks the table like --provider does, so matching the chain
-      // head must not arm the walk (a provider-less profile only
-      // presets fields; routing stays armed for it)
-      const routeSpec =
-        route !== undefined &&
-        req.provider === undefined &&
-        profile?.provider === undefined &&
-        provider === route.provider
-          ? await resolveSpawnRoute(
-              env,
-              conn.name,
-              route,
-              {
-                model: req.model ?? profile?.model,
-                autoApprove: req.autoApprove ?? profile?.autoApprove,
-              },
-              namedBy
-            )
-          : undefined;
-      // a spawned worker is a child trace: the span ctx crosses the
-      // process boundary as TRACEPARENT (and the endpoint itself so the
-      // worker emits without sourcing provider.env) — the worker's own
-      // bro.cmd/acp.* spans nest under this one in Tempo.
-      const span = otelSpan('agent.spawn', {
-        'agent.step': req.molStep ?? '',
-        'agent.backend': conn.name,
-        'agent.provider': pick.provider ?? '',
-        'agent.model': pick.model ?? '',
-      });
-      const tp = otelHeader(span.ctx);
-      const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-      return conn
-        .spawn({
-          molStep: req.molStep,
-          claimRequired: req.claimRequired,
-          repoRoot,
-          beadsDir: beads,
-          prompt,
-          env: {
-            ...req.env,
-            TRACEPARENT: tp,
-            ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
-          },
-          provider: pick.provider,
-          account: pick.account,
-          model: pick.model,
-          class: route?.class,
-          delegatedBy: req.delegatedBy,
-          worker: pick.worker,
-          ...(routeSpec === undefined ? {} : { route: routeSpec }),
-          enter: resolved.enter,
-        })
-        .then(r => {
-          // the registry's stamped provenance is what ran — a chain
-          // walk can move the spawn off the head pick the span opened
-          // with, so end-attrs overwrite them
-          span.end({
-            'agent.id': String(r.id ?? ''),
-            'agent.pid': r.pid ?? 0,
-            'agent.provider': r.provider ?? '',
-            'agent.model': r.model ?? '',
-          });
-          return r;
+  return applyFleetRouter(
+    dir,
+    env,
+    req.molStep,
+    // an explicit --class pin withholds info from the class router —
+    // the matrix's info read must not re-open its eligibility (the pin
+    // is the top precedence tier; loop.ts gates the same pin on
+    // ctx.sel.class directly). applyFleetMatrix still gets the real
+    // info: it judges the task, not the lane.
+    req.class === undefined ? info : undefined,
+    routed,
+    opts
+  )
+    .then(async route => {
+      // the matrix verdict is journaled shadow-side; the spawn's lane
+      // is untouched (enforce refuses inside applyFleetMatrix until the
+      // follow-up bead lands the pick→lane resolution)
+      await applyFleetMatrix(dir, env, req.molStep, info, opts);
+      return route;
+    })
+    .then(route => {
+      const provider = req.provider ?? profile?.provider ?? route?.provider;
+      let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
+      if (req.provider !== undefined) {
+        namedBy = 'flag';
+      } else if (profile !== undefined) {
+        namedBy = 'profile';
+      }
+      return resolveSpawnProvider(
+        env,
+        conn.name,
+        {
+          provider,
+          model:
+            req.model ??
+            // a profile's model rides only on its own provider's lane
+            profileModelFor(profile, provider) ??
+            // the routed model pin pairs with the routed provider — an
+            // explicit provider override must not inherit chain[0]'s model
+            (provider !== undefined && provider === route?.provider ? route.model : undefined),
+          autoApprove: req.autoApprove ?? profile?.autoApprove,
+        },
+        namedBy
+      ).then(async pick => {
+        // a flag-named profile's provider is an explicit pick — it
+        // outranks the table like --provider does, so matching the chain
+        // head must not arm the walk (a provider-less profile only
+        // presets fields; routing stays armed for it)
+        const routeSpec =
+          route !== undefined &&
+          req.provider === undefined &&
+          profile?.provider === undefined &&
+          provider === route.provider
+            ? await resolveSpawnRoute(
+                env,
+                conn.name,
+                route,
+                {
+                  model: req.model ?? profile?.model,
+                  autoApprove: req.autoApprove ?? profile?.autoApprove,
+                },
+                namedBy
+              )
+            : undefined;
+        // a spawned worker is a child trace: the span ctx crosses the
+        // process boundary as TRACEPARENT (and the endpoint itself so the
+        // worker emits without sourcing provider.env) — the worker's own
+        // bro.cmd/acp.* spans nest under this one in Tempo. The worktree
+        // triple rides the span too — the same dims agentEnvPins pins
+        // into the worker's env (spec bro-xgejl.1)
+        const dims = worktreeTelemetryDims(repoRoot);
+        const span = otelSpan('agent.spawn', {
+          'agent.step': req.molStep ?? '',
+          'agent.backend': conn.name,
+          'agent.provider': pick.provider ?? '',
+          'agent.model': pick.model ?? '',
+          'agent.worktree': dims.worktree,
+          ...(dims.branch === undefined ? {} : { 'agent.branch': dims.branch }),
+          ...(dims.repo === undefined ? {} : { 'agent.repo': dims.repo }),
         });
+        const tp = otelHeader(span.ctx);
+        const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+        return conn
+          .spawn({
+            molStep: req.molStep,
+            claimRequired: req.claimRequired,
+            repoRoot,
+            beadsDir: beads,
+            prompt,
+            env: (() => {
+              const merged: Record<string, string> = {
+                ...(req.env ?? {}),
+                TRACEPARENT: tp,
+                ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
+              };
+              if (lane === 'batch') {
+                merged[BATCH_MARKER_ENV] = '1';
+              } else {
+                delete merged[BATCH_MARKER_ENV];
+              }
+              return merged;
+            })(),
+            provider: pick.provider,
+            account: pick.account,
+            model: pick.model,
+            class: route?.class,
+            delegatedBy: req.delegatedBy,
+            worker: pick.worker,
+            resumeSessionId: req.resumeSessionId,
+            ...(routeSpec === undefined ? {} : { route: routeSpec }),
+            enter: resolved.enter,
+          })
+          .then(r => {
+            // the registry's stamped provenance is what ran — a chain
+            // walk can move the spawn off the head pick the span opened
+            // with, so end-attrs overwrite them
+            span.end({
+              'agent.id': String(r.id ?? ''),
+              'agent.pid': r.pid ?? 0,
+              'agent.provider': r.provider ?? '',
+              'agent.model': r.model ?? '',
+            });
+            return r;
+          });
+      });
     });
-  });
 }
 
 /** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */
@@ -1010,6 +1104,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   let info: AgentInfo;
   try {
     info = await spawnStepAgent(dir, env, {
+      lane: 'interactive',
       molStep,
       connector: connectorName,
       worktree: flag(argv, '--worktree'),
@@ -1347,6 +1442,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   let info: AgentInfo;
   try {
     info = await spawnStepAgent(dir, env, {
+      lane: 'interactive',
       molStep,
       connector: flag(argv, '--connector'),
       worktree: flag(argv, '--worktree'),
@@ -1557,6 +1653,13 @@ async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Pr
   }
   const { backends } = await collectAgentBackends(dir, env, connectorName);
   const { reapable, skipped, expected } = selectReapable(backends, cutoff);
+  // a reaped row takes its recorded acp session id with it — run the
+  // provider's sessionRm while the id is still on file, or an adhoc
+  // `agents run` worker's session outlives its only record (the
+  // PR-settle hook in spec bro-5qsnr never fires for phantom steps)
+  if (reapable.length > 0) {
+    settleAcpSessions(dir, env, { molSteps: reapable });
+  }
   const removed = reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected);
   if (json) {
     console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2));

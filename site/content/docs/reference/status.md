@@ -8,7 +8,7 @@ description: "The compact live board — beads + fleet + drill + git [--json|--d
 | | |
 | --- | --- |
 | group | `fleet` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `status` |
 | guide | [commands/status](/docs/commands/status) |
 

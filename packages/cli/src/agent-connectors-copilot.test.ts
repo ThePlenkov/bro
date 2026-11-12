@@ -547,7 +547,12 @@ describe('copilot connector', () => {
     const fx = fixture([]);
     try {
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env);
-      assert.deepEqual(conn.capabilities(), { attach: true, respawn: true, supervisor: 'none' });
+      assert.deepEqual(conn.capabilities(), {
+        attach: true,
+        respawn: true,
+        workers: false,
+        supervisor: 'none',
+      });
     } finally {
       cleanup(fx);
     }

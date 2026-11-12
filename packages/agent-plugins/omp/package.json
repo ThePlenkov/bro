@@ -1,0 +1,36 @@
+{
+  "name": "@broject/omp",
+  "version": "0.3.0",
+  "type": "module",
+  "dependencies": {
+    "@broject/adapter-core": "^0.3.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/omp.d.ts",
+      "default": "./dist/omp.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsdown"
+  },
+  "files": [
+    "dist",
+    "src/omp-assets"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/agent-plugins/omp"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "bro's OMP agent plugin adapter"
+}

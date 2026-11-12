@@ -40,6 +40,7 @@ export const LIFECYCLE_KINDS = [
   'worktree',
   'spawn',
   'agent-exit',
+  'learn-miss',
   'pr-open',
   'gate',
   'verdict',

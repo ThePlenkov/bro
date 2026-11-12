@@ -53,6 +53,7 @@
  * rehydrates once; preCompact clears that mark.
  */
 
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync,
@@ -72,30 +73,53 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
   acquireFileLock,
+  claimsFacade,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
+  hookHostOf,
+  isMode,
+  ledgerFacade,
+  loadConfig,
+  modeFilePath,
   parallelWorkProbe,
+  parseModeCommand,
   postToolLines,
   preToolVerdicts,
   promptContextLines,
+  readModeSnapshot,
   repoOptedIn,
+  sessionMode,
+  sessionProject,
   sessionStartProbe,
+  snapshotModeDir,
   stopGateContributions,
   unrefPendingChildren,
   withFileLock,
+  writeModeFile,
   GUARD_EVENTS,
+  MODE_SNAPSHOT_EVENTS,
   type ConnectorCtx,
   type GateContribution,
   type GuardEvent,
+  type Mode,
+  type ModeSnapshotEvent,
   type ProbeReporter,
   type ProbeResult,
   type ProbeTiming,
 } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
+import {
+  acquireOrchestratorRole,
+  orchestratorRoleHeldBy,
+  releaseOrchestratorRole,
+} from './orchestrator-role.ts';
 import { emitHook } from '@broject/otel';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
-import { loadBroConfig } from '../plugins.ts';
+// .guard config resolves through core's loadConfig with the guard
+// package's own section schema — NOT loadBroConfig from ../plugins.ts,
+// whose import evaluates the whole PLUGINS registry on every hook event
+// (review #9, specs/bro-36sx7.7.md)
 import { sessionCapRefusalForHook } from './session-cap.ts';
 import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
@@ -105,7 +129,9 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
-import { renderHookSpoolStatus, rotateHookSpool } from './hook-spool.ts';
+import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
+import { drainHookSpool } from '@broject/core';
+import { renderModeSnapshots } from './mode-snapshots.ts';
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -117,7 +143,8 @@ import {
 import { deriveToolSuccess } from '../host-matrix.ts';
 
 // Lazy-loaded heavy deps to cut hook startup time
-const lazyRunGuards = async () => (await import('@broject/guard')).runGuards;
+// (@broject/guard is imported inline in guardLines — runGuards and
+// guardSection ride the same module instance)
 const lazyAppendRow = async () => (await import('@broject/judge')).appendRow;
 const lazyJudgeConfig = async () => (await import('@broject/judge')).judgeConfig;
 const lazyJudgeFacade = async () => (await import('@broject/judge')).judgeFacade;
@@ -179,6 +206,23 @@ let permissionAnswerEmitted = false;
  * so permission and pre-tool answers stay on their legacy shapes unless
  * this is set. */
 let codexClient = false;
+
+/** The firing session's resolved mode (specs/bro-izpyk.2.md) — set once
+ *  per hook invocation in runHooksCommand: mode file > `modes.default`
+ *  > `observe`. `undefined` outside the dispatch path (library callers
+ *  like the acp proxy) means unrestricted — every probe runs, today's
+ *  behavior. `observe` is the cheapest resolved value, never absent. */
+let hookMode: Mode | undefined;
+
+/** The firing session's host — hookHostOf's answer, resolved alongside
+ *  hookMode so `bro mode` command binding writes the same file run.sh
+ *  gated on. */
+let hookHost: string | undefined;
+
+/** The session repo's project id, resolved lazily on first snapshot
+ *  need — sessionProject runs git probes, so it must not pay on events
+ *  that never touch snapshots. `null` caches "unresolvable". */
+let hookProjectId: string | null | undefined;
 
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out;
@@ -442,7 +486,10 @@ export function isSelfToolCommand(cmd: string): boolean {
     return false;
   }
   const exec = npxExecutable(cmd.trim().split(/\s+/).slice(1));
-  return exec !== undefined && /^(?:@broject\/)?bro(?:@[\w.:-]+)?$/.test(exec);
+  // ':' is excluded from the version charset — npm protocol aliases
+  // (`bro@npm:other`) resolve to a DIFFERENT package and must fall
+  // through to a prompt, never an auto-approve
+  return exec !== undefined && /^(?:@broject\/)?bro(?:@[\w.-]+)?$/.test(exec);
 }
 
 /** `-p`/`--package` in every spelling npx accepts — the package-set
@@ -606,9 +653,272 @@ function formatAge(ageMs: number): string {
 /** Connector ctx for hook events — sessionId plus this process's
  *  agent-root owner so claim probes treat markers stamped by the same
  *  agent tree under a rotated session id as own work (bro-7022c).
- *  `dir` is the session's repo root — every probe resolves inside it. */
+ *  `dir` is the session's repo root — every probe resolves inside it.
+ *  `mode` is the session's resolved mode — collectors apply each
+ *  connector's `activeIn` declaration against it (specs/bro-izpyk.2.md);
+ *  undefined (library callers) means unrestricted. */
 function hookCtx(dir: string, sessionId: string, toolUseId?: string): ConnectorCtx {
-  return { dir, sessionId, owner: agentOwner(), toolUseId };
+  return { dir, sessionId, owner: agentOwner(), toolUseId, mode: hookMode };
+}
+
+/** `modes.default` from the merged config — undefined when the section
+ *  is absent (the common case: observe stays implicit and no mode file
+ *  is ever materialized). */
+function hookModesDefault(dir: string): Mode | undefined {
+  try {
+    const d = loadConfig(dir).modes?.default;
+    return isMode(d) ? d : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve the firing session's mode once per hook invocation —
+ *  file > `modes.default` > `observe` (core's sessionMode). When the
+ *  file is absent but `modes.default` names a mode, the file is
+ *  materialized (sync write — the cheap Tier-0 check must keep working
+ *  without a config probe on every event) and the ledger projection is
+ *  updated best-effort. Every failure degrades to `observe`: a mode
+ *  bug must never break a host hook. */
+function resolveHookSessionMode(root: string, sessionId: string, raw: unknown): void {
+  hookHost = hookHostOf(process.env, raw);
+  hookMode = undefined;
+  try {
+    const res = sessionMode({
+      env: process.env,
+      host: hookHost,
+      sid: sessionId,
+      defaultMode: hookModesDefault(root),
+    });
+    hookMode = res.mode;
+    if (res.materialize !== undefined && res.file !== null) {
+      try {
+        writeModeFile(res.file, res.materialize, sessionProject(root) ?? '');
+      } catch {
+        // materialization is best-effort — the resolution still holds
+      }
+      void ledgerFacade()
+        .setMode({ host: hookHost, sid: sessionId }, res.materialize)
+        .catch(() => {});
+    }
+  } catch {
+    // resolution itself failed — observe is the spec's fail-open
+    // answer: passive beats activating behavior nobody asked for
+    hookMode = 'observe';
+  }
+}
+
+/** `bro mode <name>` typed into an agent session binds here — the CLI
+ *  cannot always see session env from an agent shell, so the post-tool
+ *  event carries the identity. parseModeCommand accepts only a bare
+ *  `bro mode <mode|off>` invocation (no --session/--host — explicit
+ *  targeting means the CLI already wrote the file). Writes the mode
+ *  file + best-effort ledger projection; the mode applies from the
+ *  NEXT event (this process already resolved its own).
+ *
+ *  `orchestrate` is exclusive per project (bro-izpyk.3): the bind
+ *  acquires `role:orchestrator@<project>` first — a live foreign holder
+ *  leaves the mode file UNWRITTEN and reports the conflict as a context
+ *  line (the hook can't fail the tool call, but it can refuse the
+ *  bind). The role claim and the mode file must agree: the claim is
+ *  released only after a non-orchestrate write LANDS (a failed write
+ *  leaves the old mode standing, so its role stays), and a fresh
+ *  orchestrate acquire is undone when the write cannot land. Returns
+ *  warning lines for the caller's context payload. */
+async function bindModeCommand(cmd: string, sessionId: string, dir: string): Promise<string[]> {
+  if (sessionId === '' || cmd === '') {
+    return [];
+  }
+  const mode = parseModeCommand(cmd);
+  if (mode === null || hookHost === undefined) {
+    return [];
+  }
+  const sessionKey = { host: hookHost, sid: sessionId };
+  // a re-bind of orchestrate renews a role the session may already hold —
+  // snapshot that so a failed write undoes only a FRESH acquire (the
+  // pre-existing claim belongs to the mode file still on disk)
+  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
+  const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
+  if (refusal !== null) {
+    return [refusal];
+  }
+  return finishModeBind(mode, dir, sessionKey, preHeld);
+}
+
+/** Write the bound mode file + ledger projection, then reconcile the
+ *  role claim with what actually landed (see bindModeCommand's
+ *  contract). Always resolves — a bind never fails the tool call. */
+async function finishModeBind(
+  mode: Mode,
+  dir: string,
+  sessionKey: { host: string; sid: string },
+  preHeld: boolean
+): Promise<string[]> {
+  const file = modeFilePath(process.env, sessionKey.host, sessionKey.sid);
+  const wrote = writeBoundModeFile(file, mode, dir);
+  if (!wrote) {
+    // the mode was not applied — undo a FRESH orchestrate acquire, and
+    // release anyway when no mode file exists at all (the session then
+    // resolves its default, never orchestrate, so any role claim is
+    // stale). A pre-existing role stays: the old file may still say
+    // orchestrate; a FAILED write on a non-orchestrate bind keeps it
+    // for the same reason.
+    if ((mode === 'orchestrate' && !preHeld) || (mode !== 'orchestrate' && file === null)) {
+      await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
+    }
+    return [];
+  }
+  if (mode !== 'orchestrate') {
+    await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
+  }
+  void ledgerFacade()
+    .setMode({ host: sessionKey.host, sid: sessionKey.sid }, mode)
+    .catch(() => {});
+  return [];
+}
+
+/** `orchestrate` binds are exclusive per project — acquire the role
+ *  claim before the mode file lands; returns the refusal line, or null
+ *  when the bind may proceed (non-orchestrate modes need no acquire). */
+async function bindOrchestrateRole(
+  mode: Mode,
+  dir: string,
+  sessionKey: { host: string; sid: string }
+): Promise<string | null> {
+  if (mode !== 'orchestrate') {
+    return null;
+  }
+  const agentId = process.env.BRO_AGENT_ID;
+  if (agentId !== undefined && agentId !== '') {
+    return 'bro mode orchestrate refused — BRO_AGENT_ID is set; spawned workers never orchestrate';
+  }
+  // the hook fires inside the target session — its agent pid is the
+  // right liveness proof for the claim
+  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession: true }).catch(() => ({
+    ok: false as const,
+    conflict: null,
+  }));
+  if (role.ok) {
+    return null;
+  }
+  const c = role.conflict;
+  return `bro mode orchestrate refused — the orchestrator role is held by ${
+    c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
+  }; mode unchanged`;
+}
+
+/** The mode-file write half of the bind — false when no state dir
+ *  resolves or the write throws; the ledger is only projected after a
+ *  landed write (hooks keep reading the old file otherwise). */
+function writeBoundModeFile(file: string | null, mode: Mode, dir: string): boolean {
+  if (file === null) {
+    return false;
+  }
+  try {
+    writeModeFile(file, mode, hookProjectIdFor(dir) ?? '');
+    return true;
+  } catch {
+    // binding is best-effort — and a failed write must NOT project the
+    // requested mode into the ledger: hooks keep reading the old file,
+    // so the ledger would claim a mode nothing runs
+    return false;
+  }
+}
+
+/** The session repo's project id for snapshot paths — resolved lazily
+ *  (git probes) and cached per process; null = unresolvable. */
+function hookProjectIdFor(dir: string): string | null {
+  if (hookProjectId === undefined) {
+    try {
+      hookProjectId = sessionProject(dir) ?? null;
+    } catch {
+      hookProjectId = null;
+    }
+  }
+  return hookProjectId;
+}
+
+/** cliEvent → snapshot event file — prompt-submit's cursor-hydrate leg
+ *  reuses the session-start snapshot (same probe set, same content). */
+function snapshotEventFor(cliEvent: string): ModeSnapshotEvent | undefined {
+  if (cliEvent === 'prompt-submit') {
+    return 'session-start';
+  }
+  return (MODE_SNAPSHOT_EVENTS as readonly string[]).includes(cliEvent)
+    ? (cliEvent as ModeSnapshotEvent)
+    : undefined;
+}
+
+/** Throttled detached snapshot render — a mode-active session whose
+ *  snapshot missed or went stale re-renders for next time without
+ *  paying the sweep on THIS event's critical path. Every hook event is
+ *  a fresh process, so the throttle cursor is a `.spawned` file inside
+ *  the mode dir — its mtime bounds respawns to one per
+ *  SNAPSHOT_SPAWN_MIN_MS per (project, mode) across ALL hook processes. */
+const SNAPSHOT_SPAWN_MIN_MS = 60_000;
+
+/** Tier-1 snapshot lines for a rehydrate event (specs/bro-izpyk.2.md):
+ *  a mode-active session reads the pre-rendered sessionStart sweep when
+ *  the stamp is fresh — identical lines, zero probe cost. A miss/stale
+ *  falls through to the live sweep (undefined) and queues a detached
+ *  re-render for next time. The session-scoped remainder (parallel
+ *  nudge, goal, heartbeat) always runs live — it is per-session by
+ *  definition and cannot pre-render. */
+function snapshotContextLines(dir: string, cliEvent: string): string[] | undefined {
+  const snapEvent = hookMode === undefined ? undefined : snapshotEventFor(cliEvent);
+  if (snapEvent === undefined || hookMode === undefined) {
+    return undefined;
+  }
+  const project = hookProjectIdFor(dir);
+  if (project === null) {
+    return undefined;
+  }
+  const snapshot = readModeSnapshot(process.env, project, hookMode, snapEvent);
+  if (snapshot === undefined) {
+    maybeSpawnSnapshotRender(dir, hookMode);
+    return undefined;
+  }
+  return snapshot === '' ? [] : snapshot.split('\n');
+}
+
+function maybeSpawnSnapshotRender(dir: string, mode: Mode): void {
+  const projectId = hookProjectIdFor(dir);
+  if (projectId === null || mode === 'observe') {
+    return;
+  }
+  const entry = process.argv[1];
+  if (entry === undefined || !existsSync(entry)) {
+    return;
+  }
+  const modeDir = snapshotModeDir(process.env, projectId, mode);
+  if (modeDir === null) {
+    return;
+  }
+  const cursor = join(modeDir, '.spawned');
+  const now = Date.now();
+  try {
+    if (now - statSync(cursor).mtimeMs < SNAPSHOT_SPAWN_MIN_MS) {
+      return;
+    }
+  } catch {
+    // no cursor yet — this miss spawns the render
+  }
+  try {
+    mkdirSync(modeDir, { recursive: true });
+    writeFileSync(cursor, `${now}\n`);
+  } catch {
+    // cursor is best-effort — a failed write just re-spawns next miss
+  }
+  try {
+    const child = spawn(
+      process.execPath,
+      [entry, 'snapshot-render', '--dir', dir, '--mode', mode],
+      { detached: true, stdio: 'ignore' }
+    );
+    child.unref();
+  } catch {
+    // a failed spawn just means the next miss re-renders live again
+  }
 }
 
 /** The host client's id for this tool call — the two hook events of
@@ -1165,10 +1475,19 @@ function appendJournal(path: string, line: string, waitMs = 0): void {
  *  commands.jsonl`, a shared repo-wide file (commands aren't
  *  sessions). Called from `process.on('exit')` in the CLI entry:
  *  synchronous, one git spawn + one locked append (~10–20ms),
- *  fail-open — telemetry must never change an exit code. */
+ *  fail-open — telemetry must never change an exit code.
+ *
+ *  `bro hooks` is the exception (review #11, bro-36sx7.9): every
+ *  spelling is already a hook-path process — stdin events write their
+ *  perf row through `flushPerf`, and the pre-gate/operator spellings
+ *  (`perf`, `status`, git-hook events) run off the agent's hook
+ *  budget — so a cmd row here is a second journal write (git spawn +
+ *  locked append) inside the exit handler of a latency-critical
+ *  process. `bro telemetry`, the user-facing alias for `hooks perf`,
+ *  still journals under its own cmd name. */
 export function journalCommand(cmd: string, ms: number, exitCode: number): void {
   try {
-    if (process.env.BRO_TELEMETRY === '0') {
+    if (cmd === 'hooks' || process.env.BRO_TELEMETRY === '0') {
       return;
     }
     const dir = hooksStateDir();
@@ -1460,9 +1779,20 @@ async function guardLines(
   sessionId: string,
   mctx: () => Promise<MatchContext>
 ): Promise<string[]> {
+  // observe is fully passive — user-declared guards are active behavior
+  // and stay off (specs/bro-izpyk.2.md). Library callers (hookMode
+  // undefined) keep the sweep.
+  if (hookMode === 'observe') {
+    return [];
+  }
   try {
-    const cfg = (loadBroConfig(dir) as Record<string, unknown>).guard as GuardConfig;
-    const runGuards = await lazyRunGuards();
+    // .guard is a plugin configKey, not a core section — scoping the
+    // section map resolves it exactly as loadBroConfig's full registry
+    // scan did, without importing plugins.ts (specs/bro-36sx7.7.md)
+    const guardMod = await import('@broject/guard');
+    const cfg = (loadConfig(dir, { guard: guardMod.guardSection }) as Record<string, unknown>)
+      .guard as GuardConfig;
+    const runGuards = guardMod.runGuards;
     const judgeConfigMod = await lazyJudgeConfig().catch(() => null);
     const judgeFacadeMod = await lazyJudgeFacade().catch(() => null);
     const appendRowMod = await lazyAppendRow().catch(() => null);
@@ -1526,11 +1856,25 @@ async function rehydrateLines(
   sessionId: string,
   cliEvent: string
 ): Promise<ProbeResult> {
+  // observe is fully passive (specs/bro-izpyk.2.md): the only context a
+  // passive session still gets is the activeIn-filtered sessionStart
+  // sweep — notify's inbox drain and any connector that declared
+  // observe. No parallel-work nudge, no goal, no heartbeat.
+  if (hookMode === 'observe') {
+    const start = await sessionStartProbe(
+      hookCtx(dir, sessionId),
+      probeReporter(cliEvent, 'sessionStart')
+    );
+    return { lines: start.lines, settled: start.settled };
+  }
+  const snapLines = snapshotContextLines(dir, cliEvent);
   // every leg resolves to its own lines INSIDE the sweep — the goal and
   // heartbeat reads overlap the probe work instead of queueing behind
   // it, and the assembly below keeps the original output order
   const [start, par, goalLines, hbLine] = await Promise.all([
-    sessionStartProbe(hookCtx(dir, sessionId), probeReporter(cliEvent, 'sessionStart')),
+    snapLines !== undefined
+      ? Promise.resolve<ProbeResult>({ lines: snapLines, settled: true })
+      : sessionStartProbe(hookCtx(dir, sessionId), probeReporter(cliEvent, 'sessionStart')),
     parallelLines(dir, sessionId, probeReporter(cliEvent, 'parallelWork')),
     // the session's active goal rehydrates like every other durable
     // state — resume/compaction restores it (spec:
@@ -1706,6 +2050,38 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   context('UserPromptSubmit', text);
 }
 
+/** F3 claims bridge (bro-izpyk.3): a `work` arm also leases
+ *  `worktree:<cwd>` in the session ledger — the marker file stays the
+ *  gate-time truth, the claim is the machine-wide occupancy record
+ *  `bro claim list` reads. Fire-and-forget: the hook never waits on
+ *  sqlite, and a lost write costs one claim row, not a gate. */
+let hookClaims: import('@broject/core').ClaimFacade | undefined;
+
+function claimWorktreeArm(sessionId: string, detail: string): void {
+  try {
+    const host = hookHost ?? hookHostOf(process.env);
+    if (host === '' || host === 'unknown') {
+      return;
+    }
+    hookClaims ??= claimsFacade();
+    const owner = agentOwner();
+    const dir = process.cwd();
+    void hookClaims
+      .claim(
+        `worktree:${dir}`,
+        { host, sid: sessionId },
+        {
+          ...(detail !== '' ? { detail } : {}),
+          ...(owner !== null ? { pid: owner.pid, pidStart: owner.start } : {}),
+          dir,
+        }
+      )
+      .catch(() => {});
+  } catch {
+    // claims are best-effort — arming must never stall a session
+  }
+}
+
 /** Arm the session aspects a command implies, plus the once-per-session
  *  governing-skill citation for mutating bro subcommands (bro-d8s). */
 function armPostTool(cmd: string, sessionId: string): string[] {
@@ -1713,6 +2089,9 @@ function armPostTool(cmd: string, sessionId: string): string[] {
   if (sessionId) {
     for (const aspect of aspects) {
       armSession(sessionId, aspect, armDetail(cmd, aspect));
+    }
+    if (aspects.includes('work')) {
+      claimWorktreeArm(sessionId, armDetail(cmd, 'work'));
     }
   }
   const mutation = classifySkillMutation(cmd);
@@ -1765,6 +2144,29 @@ function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string)
   return lines;
 }
 
+/** The observe post-tool leg — activeIn-filtered probes only; no
+ *  arming, nudges, or guard sweep (specs/bro-izpyk.2.md). `bindLines`
+ *  carries the mode-bind verdicts (a refused orchestrate bind is the
+ *  user's only signal the mode stayed put — dropping it would hide the
+ *  refusal entirely in observe mode). */
+async function emitPostToolObserve(
+  input: HookInput,
+  sessionId: string,
+  bindLines: string[] = []
+): Promise<void> {
+  const dir = process.cwd();
+  const postLines = await postToolLines(
+    hookCtx(dir, sessionId),
+    probeReporter('post-tool', 'postTool')
+  );
+  const all = [...bindLines, ...postLines];
+  if (all.length > 0) {
+    const eventName =
+      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
+    context(eventName, all.join('\n'));
+  }
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const lines: string[] = [];
@@ -1777,6 +2179,23 @@ async function emitPostTool(input: HookInput): Promise<void> {
   maybeSpawnTraceFlush(process.cwd());
   const outcome = input.tool_response?.success;
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+  // `bro mode <name>` binds to this session here — runs in EVERY mode,
+  // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
+  // A proven-failed call binds nothing (the mode was never applied);
+  // hosts that cannot report an outcome still bind.
+  if (outcome !== false) {
+    lines.push(...(await bindModeCommand(cmd, sessionId, process.cwd())));
+  }
+  // observe is fully passive (specs/bro-izpyk.2.md): the trace journal
+  // and OTLP flush above still run (passive telemetry), the
+  // activeIn-filtered postTool probes still deliver (notify's mailbox
+  // drain, learn's lesson match), but no arming, exec nudges,
+  // skill-mutation citation, or guard sweep — those are active
+  // behavior a passive session never pays for.
+  if (hookMode === 'observe') {
+    await emitPostToolObserve(input, sessionId, lines);
+    return;
+  }
   // arming is a "probe live state once" hint the stop gate re-verifies,
   // not a verdict — so it fires on every outcome except a proven
   // failure. A host that cannot observe outcomes (Codex PostToolUse
@@ -1825,6 +2244,11 @@ async function emitStopGate(input: HookInput): Promise<void> {
   // session tail — the last post-tool lines only ship if a flush fires
   // here; a stop's spawn is the same detached, throttled respawn
   maybeSpawnTraceFlush(process.cwd());
+  // observe is fully passive (specs/bro-izpyk.2.md): no goal reminder,
+  // no stop gates, no guard sweep — the trace flush above still runs.
+  if (hookMode === 'observe') {
+    return;
+  }
   // the goal reminder fires on EVERY stop — it is the keep-going nudge,
   // exempt from the once-per-session block budget (context, never
   // `decision: block`; spec: specs/goal/bro-6vcll.md)
@@ -1854,41 +2278,63 @@ async function emitStopGate(input: HookInput): Promise<void> {
   await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP]);
 }
 
-/** One contribution's verdict in priority order: an armed block fires
- *  the session's one-shot for that aspect — a spent marker demotes the
- *  block to a hint the stop-hint dedup keeps from re-waking the host;
- *  an armed-but-clean contribution shows its hint; ambient state stays
- *  passive. */
-function stopGateVerdict(
-  c: GateContribution,
-  armed: Set<string>,
-  sessionId: string
-): { block?: string; hint?: string } {
-  if (!armed.has(c.aspect)) {
-    return { hint: c.passive };
-  }
-  if (c.block) {
-    return takeStopGateBlock(sessionId, c.aspect) ? { block: c.block } : { hint: c.block };
-  }
-  return { hint: c.armedHint ?? c.passive };
-}
-
-/** The contribution walk of the stop gate — first block in aspect
- *  order wins the emit; every non-block verdict's hint rides along so
- *  a block still drops them (they journal as verdict rows regardless). */
-function stopGateOutcome(
+/** The contribution walk of the stop gate — the first ASPECT (in
+ *  GATE_PRIORITY order) holding an armed block wins the emit, and
+ *  every block that aspect produced rides ONE reason: the session
+ *  armed the aspect, not the individual probe, so same-aspect blocks
+ *  concatenate instead of the registry-first shadowing the rest
+ *  (bro-3bgbs — the claims gate's 'task' block used to make the SDD
+ *  spec-missing block unreachable). Groups key on the aspect itself,
+ *  not adjacency — connector-owned aspects share the fallback rank and
+ *  can interleave. The aspect's one-shot is spent once for the joined
+ *  block; a spent marker demotes every block to a hint, and every
+ *  non-block verdict's hint rides along so a block still drops them
+ *  (they journal as verdict rows regardless). */
+export function stopGateOutcome(
   contributions: GateContribution[],
   armed: Set<string>,
   sessionId: string
 ): { block?: string; hints: string[] } {
   const hints: string[] = [];
+  const aspects: string[] = [];
+  const byAspect = new Map<string, GateContribution[]>();
   for (const c of contributions) {
-    const verdict = stopGateVerdict(c, armed, sessionId);
-    if (verdict.block !== undefined) {
-      return { block: verdict.block, hints };
+    let group = byAspect.get(c.aspect);
+    if (group === undefined) {
+      group = [];
+      byAspect.set(c.aspect, group);
+      aspects.push(c.aspect);
     }
-    if (verdict.hint !== undefined) {
-      hints.push(verdict.hint);
+    group.push(c);
+  }
+  for (const aspect of aspects) {
+    const group = byAspect.get(aspect)!;
+    if (!armed.has(aspect)) {
+      for (const c of group) {
+        if (c.passive !== undefined) {
+          hints.push(c.passive);
+        }
+      }
+      continue;
+    }
+    const blockers = group.filter(c => c.block !== undefined);
+    if (blockers.length === 0) {
+      for (const c of group) {
+        const hint = c.armedHint ?? c.passive;
+        if (hint !== undefined) {
+          hints.push(hint);
+        }
+      }
+      continue;
+    }
+    if (takeStopGateBlock(sessionId, aspect)) {
+      return { block: blockers.map(c => c.block!).join('\n'), hints };
+    }
+    for (const c of group) {
+      const hint = c.block ?? c.armedHint ?? c.passive;
+      if (hint !== undefined) {
+        hints.push(hint);
+      }
     }
   }
   return { hints };
@@ -2351,7 +2797,7 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
  *  the broEnabled gate: wiring a repo is how it opts in, and an
  *  installed shim IS the opt-in — gating on .beads/bro.config would
  *  silently deaden a hook the repo installed. */
-function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
+async function runPreGateCommand(event: string | undefined, argv: string[]): Promise<boolean> {
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin
   if (event === 'install' || event === 'uninstall') {
@@ -2383,12 +2829,43 @@ function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
   }
   // `bro hooks status` is the report over the hook spool the launcher's
   // run.sh writes (start/end pairs — a start without an end is a host
-  // kill) — same no-stdin operator placement as perf.
+  // kill) — same no-stdin operator placement as perf. It is also the
+  // ledger worker's lazy cadence (bro-izpyk.1.1): drain pending spool
+  // rows into ledger.db first so the read — and every later facade read —
+  // sees a fresh ledger. Best-effort: a missing node:sqlite or an
+  // unwritable state dir degrades to ok:false, never a failed status.
   if (event === 'status') {
+    await drainHookSpool().catch(() => {});
     console.log(renderHookSpoolStatus(argv));
     return true;
   }
+  // `snapshot-render` is the detached Tier-1 renderer hooks.js spawns
+  // when a mode-active session's snapshot missed or went stale
+  // (specs/bro-izpyk.2.md) — argv-only like the other operator commands:
+  // it must not block reading a payload that was never sent.
+  if (event === 'snapshot-render') {
+    await runSnapshotRender(argv);
+    return true;
+  }
   return false;
+}
+
+/** The detached Tier-1 snapshot renderer — argv-only, best-effort:
+ *  malformed spawn args render nothing, a failed sweep just leaves the
+ *  next miss to the live path (specs/bro-izpyk.2.md). */
+async function runSnapshotRender(argv: string[]): Promise<void> {
+  const dirIdx = argv.indexOf('--dir');
+  const modeIdx = argv.indexOf('--mode');
+  const dir = dirIdx >= 0 ? argv[dirIdx + 1] : undefined;
+  const modeRaw = modeIdx >= 0 ? argv[modeIdx + 1] : undefined;
+  if (dir === undefined || !isMode(modeRaw)) {
+    return; // malformed spawn args — fail open, render nothing
+  }
+  try {
+    await renderModeSnapshots(dir, modeRaw);
+  } catch {
+    // render is best-effort — a failed sweep just leaves the miss
+  }
 }
 
 function detectHookClients(raw: unknown): { cursor: boolean; codex: boolean } {
@@ -2445,18 +2922,32 @@ async function dispatchWithSpan(
   }
 }
 
+/** Bounded spool rotation with a ledger drain first — rotation deletes
+ *  hooks.spool.1, so when the live file is over the bound, pending rows
+ *  drain into ledger.db before the drop (best-effort; only on the rare
+ *  >1MB path so the hot path still pays nothing). */
+async function rotateSpoolBounded(): Promise<void> {
+  if (spoolRotationPending()) {
+    await drainHookSpool().catch(() => {});
+  }
+  rotateHookSpool();
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
   permissionAnswerEmitted = false;
+  hookMode = undefined;
+  hookHost = undefined;
+  hookProjectId = undefined;
   // run.sh spools a start/end pair on every launch — including the
   // early-return paths below (operator commands, the capability probe,
   // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
   // of them, is the only spot that bounds the spool on a tree where the
   // dispatch path never runs.
-  rotateHookSpool();
+  await rotateSpoolBounded();
   const event = argv[0];
-  if (runPreGateCommand(event, argv)) {
+  if (await runPreGateCommand(event, argv)) {
     return;
   }
   // a bare `bro hooks` is a capability probe — launchers test the
@@ -2490,6 +2981,12 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     answerCursorPermission(event, input);
     return;
   }
+  // session mode — file > `modes.default` > `observe`, resolved once
+  // per event before any probe runs (specs/bro-izpyk.2.md). Every
+  // collector below reads it through hookCtx/ctx.mode; `observe`
+  // sessions get the passive path, mode-active sessions the gated
+  // pipeline + Tier-1 snapshots.
+  resolveHookSessionMode(root, typeof input.session_id === 'string' ? input.session_id : '', raw);
   perfBuf = [];
   const t0 = Date.now();
   const deadlineTimer = nodeSetTimeout(() => {

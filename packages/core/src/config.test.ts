@@ -219,6 +219,16 @@ describe('loadConfig serve — the provider windows', () => {
     assert.equal(load({ serve: { acpStallMs: 0 } }).serve.acpStallMs, 0);
     assert.equal(load({ serve: { acpStallMs: -5 } }).serve.acpStallMs, undefined);
   });
+
+  test('the session workspace pin is a path string — blank and non-strings drop', () => {
+    assert.equal(
+      load({ serve: { acpCwd: '/srv/acp-workspace' } }).serve.acpCwd,
+      '/srv/acp-workspace'
+    );
+    assert.equal(load({ serve: { acpCwd: '  /srv/acp  ' } }).serve.acpCwd, '/srv/acp');
+    assert.equal(load({ serve: { acpCwd: '   ' } }).serve.acpCwd, undefined);
+    assert.equal(load({ serve: { acpCwd: 7 } }).serve.acpCwd, undefined);
+  });
 });
 
 describe('loadConfig serve.upstream / serve.apiKeyEnv', () => {
@@ -494,6 +504,53 @@ describe('loadConfig fleet', () => {
   test('a non-object profiles map drops the whole section', () => {
     assert.deepEqual(load({ fleet: { profiles: 'x' } }).fleet.profiles, {});
     assert.deepEqual(load({ fleet: { profiles: [1] } }).fleet.profiles, {});
+  });
+
+  test('fleet.matrix absent → undefined; a full section parses with defaults', () => {
+    assert.equal(load().fleet.matrix, undefined);
+    const cfg = load({
+      fleet: {
+        matrix: {
+          provider: 'orca',
+          models: {
+            cheap: { modes: ['coding'], complexity: ['low'], provider: 'dirac' },
+            max: { profile: 'sweeps' },
+          },
+        },
+      },
+    });
+    assert.equal(cfg.fleet.matrix?.provider, 'orca');
+    assert.equal(cfg.fleet.matrix?.mode, 'shadow');
+    assert.deepEqual(cfg.fleet.matrix?.complexity, ['low', 'medium', 'high']);
+    assert.deepEqual(cfg.fleet.matrix?.modes, ['planning', 'coding', 'review', 'fix']);
+    assert.deepEqual(cfg.fleet.matrix?.models['cheap'], {
+      modes: ['coding'],
+      complexity: ['low'],
+      provider: 'dirac',
+    });
+    assert.deepEqual(cfg.fleet.matrix?.models['max'], { profile: 'sweeps' });
+  });
+
+  test('fleet.matrix rows fail closed on undeclared capability vocab', () => {
+    const cfg = load({
+      fleet: {
+        matrix: {
+          complexity: ['low', 'high'],
+          models: {
+            ok: { complexity: ['low'] },
+            bad: { complexity: ['medium'] }, // 'medium' not in the declared scale
+            badmode: { modes: ['underwater'] },
+          },
+        },
+      },
+    });
+    assert.deepEqual(Object.keys(cfg.fleet.matrix?.models ?? {}), ['ok']);
+  });
+
+  test('a non-object matrix section drops; bad mode falls back to shadow', () => {
+    assert.equal(load({ fleet: { matrix: 'x' } }).fleet.matrix, undefined);
+    const cfg = load({ fleet: { matrix: { mode: 'bogus', models: {} } } });
+    assert.equal(cfg.fleet.matrix?.mode, 'shadow');
   });
 });
 

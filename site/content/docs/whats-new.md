@@ -1,4 +1,5 @@
 ---
+
 title: What's New
 description: Human-readable release notes — what each bro release lets you do, grouped by capability.
 ---
@@ -9,10 +10,7 @@ upgrading actually asks of you. The canonical ledger stays in
 [CHANGELOG.md](https://github.com/ThePlenkov/bro/blob/main/CHANGELOG.md);
 this page is its narrative twin.
 
-## 0.3.0 — the rig wakes up (upcoming)
-
-*Not yet on npm — this section tracks the upcoming release.*
-*Latest published is 0.2.5.*
+## 0.3.0 — the rig wakes up
 
 ### Watch a worker think
 
@@ -46,7 +44,7 @@ The HTTP facade stopped being a pile of hand-written routes:
 - **`GET /ui`** — a dashboard generated from that index: one panel
   per plane, live capability badges, degraded planes dim instead of
   faking empty lists, and an SSE upgrade when the events plane can
-  stream. The index *is* the layout contract.
+  stream. The index _is_ the layout contract.
 - **`GET /api/v1/events/stream`** — server→client SSE over the local
   bus with native `Last-Event-ID` resume; `asyncapi.json` ships the
   generated schema next to it.
@@ -91,7 +89,7 @@ review per reviewer decides, a standing `CHANGES_REQUESTED` vetoes, bot
 approvals never count, and **`act.approvers`** narrows "trusted" to
 named logins so a machine account can't sign off on the agent's own
 output. GitLab approvals map lazily — probed only while the gate is on
-— and an unanswerable probe reads as *not approved*, never a pass. On
+— and an unanswerable probe reads as _not approved_, never a pass. On
 GitLab, current-head binding rides the project's
 reset-approvals-on-push rule; keep `drive.merge: 'never'` plus branch
 protection as the server-side boundary either way.

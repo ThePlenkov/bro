@@ -25,26 +25,38 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { type BrouterConfig, parseBrouter } from './brouter.ts';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
-import { parseBrouter, type BrouterConfig } from './brouter.ts';
+import {
+  cacheKey,
+  type FileProbe,
+  hookCacheDir,
+  isJsonData,
+  probesHold,
+  readCacheFile,
+  statProbe,
+  writeCacheFile,
+} from './hook-cache.ts';
 import {
   API_WIRES,
-  isEnvName,
-  parseProviderEntry,
   type FleetProfile,
+  isEnvName,
   type ProviderEntry,
+  parseProviderEntry,
 } from './providers.ts';
 import {
-  fleetLeases,
-  fleetRouter,
-  fleetRouting,
-  ON_WALL,
-  fleetWalls,
   type FleetLeaseTtls,
   type FleetRouter,
   type FleetWallTtls,
+  fleetLeases,
+  fleetRouter,
+  fleetRouting,
+  fleetWalls,
+  ON_WALL,
   type RoutingTable,
 } from './routing.ts';
+import { fleetMatrix, type FleetMatrix } from './matrix.ts';
+import { isMode, MODES, type Mode } from './ledger.ts';
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const;
 export type StoreBackend = (typeof STORE_BACKENDS)[number];
@@ -100,6 +112,7 @@ export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema
  *  agents.<backend>) stay open. */
 export const js: {
   str: JsonSchema;
+  strOrEmpty: JsonSchema;
   bool: JsonSchema;
   strList: JsonSchema;
   int: (minimum?: number) => JsonSchema;
@@ -115,6 +128,9 @@ export const js: {
   // \S: parsers trim and drop whitespace-only input — a "present"
   // value that normalizes to nothing must validate as the defect it is
   str: { type: 'string', minLength: 1, pattern: String.raw`\S` },
+  // empty is meaningful where the parser discriminates presence:
+  // selfCheck "" reads "the gate names nothing" (act state isSelf)
+  strOrEmpty: { type: 'string', pattern: String.raw`^$|\S` },
   bool: { type: 'boolean' },
   strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: String.raw`\S` } },
   int: (minimum = 0) => ({ type: 'integer', minimum }),
@@ -380,7 +396,7 @@ actSection.jsonSchema = js.obj({
       ],
     },
   },
-  selfCheck: js.str,
+  selfCheck: js.strOrEmpty,
   maxRounds: js.int(),
   docsPaths: js.strList,
   docsMaxRounds: js.int(),
@@ -499,12 +515,35 @@ brouterSection.jsonSchema = js.obj({
     js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
   ),
   routes: js.str,
+  // the routing formula — the md file whose frontmatter is the machine
+  // contract (typed questions, hard filters, score weights) and whose
+  // body is the prose the decision model reads
+  formula: js.str,
   // the decision model — the judge that picks the route. The same shape
-  // the fleet's router keeps: a provider and a mode.
+  // the fleet's router keeps (provider + mode: whether an answer is
+  // TRUSTED) plus the cascade knobs (bro-0ykhg.2): invoke says whether
+  // the judge is ASKED, escalate names the T3 provider, recall tunes T1.
   router: js.obj(
-    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    {
+      provider: js.str,
+      mode: { enum: ['shadow', 'enforce', 'off'] },
+      invoke: { enum: ['always', 'ambiguous', 'never'] },
+      escalate: js.str,
+      recall: js.obj({
+        // the same bounds parseBrouter enforces — the schema says them
+        // up front instead of silently dropping out-of-range values
+        // (bro-0ykhg.2 review)
+        k: js.int(1),
+        minAgreement: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
+        minRows: js.int(1),
+      }),
+    },
     { required: ['provider', 'mode'] }
   ),
+  // the outcome namespace for standalone callers + the task-text
+  // retention window (spec bro-0ykhg.4)
+  contextId: js.str,
+  taskTextRetentionDays: { type: 'integer', minimum: 0 },
 });
 
 /** bro.config.json `connectors` section — facade → connector precedence,
@@ -759,8 +798,9 @@ export type SddMode = (typeof SDD_MODES)[number];
 /** bro.config.json `sdd` section — spec-driven development policy.
  *  off (default): nothing emitted. remind: session-start/prompt context
  *  names claimed beads without a spec. gate: the stop gate also blocks
- *  once while an own claim lacks a spec. `dir` is where `specs/<id>.md`
- *  lives; a `spec:` link in the bead description counts too. */
+ *  once while an own claim lacks a spec. `dir` is where
+ *  `specs/<id>.spec.md` lives; a `spec:` link in the bead description
+ *  counts too. */
 export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     mode?: unknown;
@@ -786,6 +826,24 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
 };
 
 sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
+
+/** bro.config.json `modes` section — the project-wide session-mode
+ *  default (specs/bro-izpyk.2.md). `default` names the mode a session
+ *  resolves when it has NO mode file; absent means `observe` and —
+ *  critically — nothing is materialized, so a project that never opts
+ *  in pays zero per-hook cost. Per-session `bro mode <name>` files
+ *  always win over this default. */
+export const modesSection: ConfigSection<{ default?: Mode }> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { default?: unknown };
+  if (obj.default !== undefined && !isMode(obj.default)) {
+    console.error(
+      `bro.config: modes.default must be one of ${MODES.map(m => `"${m}"`).join('|')} — got ${JSON.stringify(obj.default)}`
+    );
+  }
+  return isMode(obj.default) ? { default: obj.default } : {};
+};
+
+modesSection.jsonSchema = js.obj({ default: { enum: MODES } });
 
 /** The exposed providers — the ROUTES the gateway answers to. Two
  *  spellings: an array of entry names (route ≡ entry, today's form) or a
@@ -1011,6 +1069,15 @@ export const serveSection: ConfigSection<{
   acpMaxAbandoned?: number;
   /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
   acpStallMs?: number;
+  /** The provider wall's cooldown (spec bro-i6811) — how long a lane
+   *  stays closed after the account refused a request. 0 disables the
+   *  cooldown: the lane spawns through walls as before. */
+  acpCooldownMs?: number;
+  /** The session workspace pin (spec bro-sx4hr) — the cwd ACP sessions
+   *  anchor at when the listener has no repo root of its own (the host
+   *  gateway). Repo-scoped serve ignores it: the repo root IS the
+   *  workspace. */
+  acpCwd?: string;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -1024,6 +1091,8 @@ export const serveSection: ConfigSection<{
     acpMaxOpens?: unknown;
     acpMaxAbandoned?: unknown;
     acpStallMs?: unknown;
+    acpCooldownMs?: unknown;
+    acpCwd?: unknown;
   };
   const out: {
     backend?: string;
@@ -1037,6 +1106,8 @@ export const serveSection: ConfigSection<{
     acpMaxOpens?: number;
     acpMaxAbandoned?: number;
     acpStallMs?: number;
+    acpCooldownMs?: number;
+    acpCwd?: string;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1070,6 +1141,17 @@ export const serveSection: ConfigSection<{
   if (typeof obj.acpStallMs === 'number' && Number.isInteger(obj.acpStallMs)) {
     if (obj.acpStallMs >= 0) out.acpStallMs = Math.min(obj.acpStallMs, MAX_TIMER_MS);
   }
+  // the wall cooldown (spec bro-i6811) — a WINDOW, so 0 is a deliberate
+  // "off" and a fractional value is not a window at all (the loader
+  // drops it, the default wins)
+  if (typeof obj.acpCooldownMs === 'number' && Number.isInteger(obj.acpCooldownMs)) {
+    if (obj.acpCooldownMs >= 0) out.acpCooldownMs = Math.min(obj.acpCooldownMs, MAX_TIMER_MS);
+  }
+  // the session workspace pin (spec bro-sx4hr) — a path, so only a
+  // non-empty string counts; anything else drops and the default anchor
+  // wins
+  const acpCwd = trimmedField(obj.acpCwd);
+  if (acpCwd !== undefined) out.acpCwd = acpCwd;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1104,6 +1186,10 @@ serveSection.jsonSchema = js.obj({
   acpMaxAbandoned: js.int(1),
   // the silence bound — 0 disables the watchdog
   acpStallMs: js.int(0),
+  // the wall cooldown (spec bro-i6811) — a window, so 0 disables it
+  acpCooldownMs: js.int(0),
+  // the session workspace pin (spec bro-sx4hr) — a path string
+  acpCwd: js.str,
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1252,6 +1338,7 @@ export const fleetSection: ConfigSection<{
   walls: FleetWallTtls;
   leases: FleetLeaseTtls;
   router?: FleetRouter;
+  matrix?: FleetMatrix;
   providerCaps: Record<string, number>;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
@@ -1261,9 +1348,11 @@ export const fleetSection: ConfigSection<{
     walls?: unknown;
     leases?: unknown;
     router?: unknown;
+    matrix?: unknown;
     providerCaps?: unknown;
   };
   const router = fleetRouter(obj.router);
+  const matrix = fleetMatrix(obj.matrix);
   return {
     maxConcurrent:
       typeof obj.maxConcurrent === 'number' &&
@@ -1277,6 +1366,7 @@ export const fleetSection: ConfigSection<{
     walls: fleetWalls(obj.walls),
     leases: fleetLeases(obj.leases),
     ...(router === undefined ? {} : { router }),
+    ...(matrix === undefined ? {} : { matrix }),
   };
 };
 
@@ -1305,6 +1395,15 @@ fleetSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  matrix: js.obj({
+    provider: js.str,
+    mode: { enum: ['shadow', 'enforce', 'off'] },
+    complexity: js.strList,
+    modes: js.strList,
+    models: js.map(
+      js.obj({ modes: js.strList, complexity: js.strList, profile: js.str, provider: js.str }, {})
+    ),
+  }),
   providerCaps: js.map(js.int()),
   walls: js.obj({
     rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
@@ -1506,6 +1605,7 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   providers: providersSection as ConfigSection<unknown>,
   brouter: brouterSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
+  modes: modesSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
   spawn: spawnSection as ConfigSection<unknown>,
@@ -1616,16 +1716,23 @@ export interface BroConfig {
   /** Spec-driven development policy — spec before code for claimed
    *  beads. `off` (default) emits nothing; `remind` adds session/prompt
    *  context; `gate` also lets the stop gate block once. `dir` holds
-   *  `specs/<id>.md` files; a `spec:` link in the description counts. */
+   *  `specs/<id>.spec.md` files; a `spec:` link in the description
+   *  counts. */
   sdd: { mode: SddMode; dir: string };
+  /** Session-mode project policy (specs/bro-izpyk.2.md) — `default`
+   *  names the mode sessions without a mode file resolve to; absent
+   *  means `observe` and no mode file is ever materialized. */
+  modes: { default?: Mode };
   /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
    *  on every backend's spawn — counts live registry agents across all
    *  backends; 0 means uncapped. Default 3. `profiles` holds the named
    *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1).
    *  `routing` maps a task class to an ordered provider chain (spec
    *  bro-1x7p) — absent/empty = today's static resolution; `router`
-   *  names the optional judge classifier (M7). `providerCaps` sets
-   *  per-provider session caps from the global config layer. */
+   *  names the optional judge classifier (M7). `matrix` declares the
+   *  model capability lanes a judge-scored complexity+mode verdict
+   *  routes over (spec bro-v0pvd.1) — absent = off. `providerCaps`
+   *  sets per-provider session caps from the global config layer. */
   fleet: {
     maxConcurrent: number;
     profiles: Record<string, FleetProfile>;
@@ -1633,6 +1740,7 @@ export interface BroConfig {
     walls: FleetWallTtls;
     leases: FleetLeaseTtls;
     router?: FleetRouter;
+    matrix?: FleetMatrix;
     providerCaps: Record<string, number>;
   };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
@@ -1684,6 +1792,15 @@ export interface BroConfig {
     acpMaxAbandoned?: number;
     /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
     acpStallMs?: number;
+    /** The provider wall's cooldown (spec bro-i6811) — how long a lane
+     *  stays closed after the account refused a request. 0 disables the
+     *  cooldown: the lane spawns through walls as before. */
+    acpCooldownMs?: number;
+    /** The session workspace pin (spec bro-sx4hr) — the cwd ACP
+     *  sessions anchor at when the listener has no repo root of its
+     *  own (the host gateway). Repo-scoped serve ignores it: the repo
+     *  root IS the workspace. */
+    acpCwd?: string;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
@@ -1728,6 +1845,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   providers: {},
   brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
+  modes: {},
   fleet: {
     maxConcurrent: 3,
     profiles: {},
@@ -1987,6 +2105,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   act: 'policy',
   debt: 'policy',
   sdd: 'policy',
+  modes: 'policy',
   guard: 'policy',
   sweep: 'policy',
   stack: 'policy',
@@ -2094,39 +2213,212 @@ export function loadConfigLayers(
   only?: readonly ConfigLayerName[]
 ): ConfigLayersResult {
   const base = resolve(cwd);
+  // the hook-path cache (spec bro-gwh2a): one record per (resolved cwd,
+  // layer) under <git-common>/bro/hooks/cache — null outside a repo or
+  // under BRO_HOOK_CACHE=0, both meaning "scan live" (status quo)
+  const cacheDir = hookCacheDir(base);
   // Linked worktrees share the main checkout's machine-local config —
   // bro.config.local.* is gitignored, so a fresh `git worktree add`
   // otherwise loses act.ignoreChecks and store choices (a bare `act
   // wait` stalls on a flaky reviewer the main checkout knows to ignore).
   // mainWorktreeRoot returns an absolute path, so a relative cwd must be
   // absolute too or the Set dedupe compares 'foo' against '/abs/foo'.
-  const projectDirs = [
-    ...new Set(
-      [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
-    ),
-  ];
+  // Resolved lazily — a cache hit on the repo layers must not pay for a
+  // worktree-root probe the scan never needed.
+  let projectDirs: string[] | null = null;
+  const dirs = (): string[] =>
+    (projectDirs ??= [
+      ...new Set(
+        [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
+      ),
+    ]);
   const layers: ConfigLayerHit[] = [];
   const broken: string[] = [];
   const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer);
-  if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken);
-  if (want('project')) scanConfigLayer('project', projectDirs, layers, broken);
-  if (want('local')) scanConfigLayer('local', projectDirs, layers, broken);
+  for (const layer of CONFIG_LAYERS) {
+    if (!want(layer)) {
+      continue;
+    }
+    const record = readLayerRecord(cacheDir, base, layer);
+    if (record !== undefined) {
+      if (record.hit !== null) {
+        layers.push(record.hit);
+      }
+      broken.push(...record.broken);
+      continue;
+    }
+    // miss — run the real scan with a probe recorder, then persist it.
+    // Layer-local buffers keep `layers`/`broken` ordering identical to
+    // the sequential scan (global → project → local).
+    const layerHits: ConfigLayerHit[] = [];
+    const layerBroken: string[] = [];
+    const probes: FileProbe[] = [];
+    scanConfigLayer(
+      layer,
+      layer === 'global' ? [globalConfigDir()] : dirs(),
+      layerHits,
+      layerBroken,
+      probes
+    );
+    layers.push(...layerHits);
+    broken.push(...layerBroken);
+    writeLayerRecord(cacheDir, base, layer, probes, layerHits[0] ?? null, layerBroken);
+  }
   return { layers, broken };
+}
+
+// --- layer record cache (spec bro-gwh2a) -------------------------------------
+//
+// One JSON record per (resolved cwd, layer): the probe list is the
+// fingerprint — every candidate the scan touched, with existence and
+// mtime/size. A hit replays the cached {hit, broken} without a single
+// file read or warning; a flip anywhere in the probe set rescans. `.ts`
+// files may evaluate dynamically, so a scan that touched an existing
+// `.ts` is recorded with a TTL only when its raw is JSON data — the
+// record still serves N calls, but staleness is bounded.
+
+interface LayerRecord {
+  v: 1;
+  dir: string;
+  layer: ConfigLayerName;
+  /** Write time — TTL anchor for .ts-tainted records (absent = mtime
+   *  fingerprint alone, .json files are pure data). */
+  ts?: number;
+  probes: FileProbe[];
+  hit: ConfigLayerHit | null;
+  broken: string[];
+}
+
+/** `.ts` configs can compute — a tainted record refreshes this often;
+ *  .json-only scans have no expiry (the fingerprint IS the content). */
+const TS_LAYER_RECORD_TTL_MS = 60_000;
+
+function layerRecordFile(cacheDir: string, dirHash: string, layer: ConfigLayerName): string {
+  return join(cacheDir, `config-layer-${layer}-${dirHash}.json`);
+}
+
+/** The record filename's hash input — the global layer's scan root is
+ *  env-derived (XDG_CONFIG_HOME, HOME via homedir), which the file
+ *  probes cannot see: an env flip leaving the old files intact would
+ *  replay the old root's record. Keying on the resolved dir instead —
+ *  a changed env hashes to a different file → miss → rescan, and the
+ *  stale record sweeps out with the rest. Project/local dirs derive
+ *  from `base` (already the record's `dir` pin); recomputing their
+ *  worktree-root twin on every read would cost a git probe a hit must
+ *  not pay. */
+function layerRecordKey(base: string, layer: ConfigLayerName): string {
+  return cacheKey(layer === 'global' ? `${base}@${globalConfigDir()}` : base);
+}
+
+function readLayerRecord(
+  cacheDir: string | null,
+  base: string,
+  layer: ConfigLayerName
+): { hit: ConfigLayerHit | null; broken: string[] } | undefined {
+  if (cacheDir === null) {
+    return undefined;
+  }
+  try {
+    const file = layerRecordFile(cacheDir, layerRecordKey(base, layer), layer);
+    const rec = readCacheFile(file);
+    if (rec === undefined || rec.v !== 1 || rec.dir !== base || rec.layer !== layer) {
+      return undefined;
+    }
+    if (
+      !Array.isArray(rec.probes) ||
+      !Array.isArray(rec.broken) ||
+      !rec.broken.every(b => typeof b === 'string')
+    ) {
+      return undefined;
+    }
+    // TTL only bounds records whose scan touched .ts — everything else
+    // lives purely on the mtime/size fingerprint
+    if (typeof rec.ts === 'number' && Date.now() - rec.ts >= TS_LAYER_RECORD_TTL_MS) {
+      return undefined;
+    }
+    if (!probesHold(rec.probes as FileProbe[])) {
+      return undefined;
+    }
+    const hit = rec.hit as Partial<ConfigLayerHit> | null;
+    // a hand-edited or version-stale record must not feed a malformed
+    // hit to the merge — prove the fields the result contract needs
+    if (
+      hit !== null &&
+      (typeof hit !== 'object' ||
+        Array.isArray(hit) ||
+        hit.layer !== layer ||
+        typeof hit.dir !== 'string' ||
+        typeof hit.file !== 'string' ||
+        typeof hit.raw !== 'object' ||
+        hit.raw === null ||
+        Array.isArray(hit.raw) ||
+        !isJsonData(hit.raw) ||
+        (hit.pluginsRaw !== undefined && !isJsonData(hit.pluginsRaw)))
+    ) {
+      return undefined;
+    }
+    return { hit: hit as ConfigLayerHit | null, broken: rec.broken as string[] };
+  } catch {
+    return undefined; // any cache failure → live scan (fail-open)
+  }
+}
+
+function writeLayerRecord(
+  cacheDir: string | null,
+  base: string,
+  layer: ConfigLayerName,
+  probes: FileProbe[],
+  hit: ConfigLayerHit | null,
+  broken: string[]
+): void {
+  if (cacheDir === null) {
+    return;
+  }
+  // a scan that touched an existing .ts may have evaluated code — the
+  // record is still written (parse once per TTL window) but only when
+  // the parsed shapes serialize losslessly; functions/cycles would
+  // silently corrupt on the way back
+  const tsTainted = probes.some(p => p.exists && p.path.endsWith('.ts'));
+  if (
+    hit !== null &&
+    (!isJsonData(hit.raw) || (hit.pluginsRaw !== undefined && !isJsonData(hit.pluginsRaw)))
+  ) {
+    return;
+  }
+  const record: LayerRecord = {
+    v: 1,
+    dir: base,
+    layer,
+    ...(tsTainted ? { ts: Date.now() } : {}),
+    probes,
+    hit,
+    broken,
+  };
+  writeCacheFile(
+    layerRecordFile(cacheDir, layerRecordKey(base, layer), layer),
+    record,
+    'config-layer-'
+  );
 }
 
 /** One candidate config file — 'missing' lets the next name try,
  *  'broken' retires the dir (a parse failure already warned inside
  *  readConfigFile; a non-object root warns here), 'loaded' settles the
- *  layer. */
+ *  layer. `probes`, when passed, records the stat fingerprint of every
+ *  candidate looked at — the layer record cache's invalidation set
+ *  (spec bro-gwh2a). */
 function probeLayerCandidate(
   layer: ConfigLayerName,
   dir: string,
   name: string,
   layers: ConfigLayerHit[],
-  broken: string[]
+  broken: string[],
+  probes?: FileProbe[]
 ): 'missing' | 'broken' | 'loaded' {
   const path = join(dir, name);
-  if (!existsSync(path)) {
+  const probe = statProbe(path);
+  probes?.push(probe);
+  if (!probe.exists) {
     return 'missing';
   }
   const raw = readConfigFile(name, path);
@@ -2163,10 +2455,11 @@ function scanConfigLayerDir(
   layer: ConfigLayerName,
   dir: string,
   layers: ConfigLayerHit[],
-  broken: string[]
+  broken: string[],
+  probes?: FileProbe[]
 ): boolean {
   for (const name of CONFIG_LAYER_FILES[layer]) {
-    const verdict = probeLayerCandidate(layer, dir, name, layers, broken);
+    const verdict = probeLayerCandidate(layer, dir, name, layers, broken, probes);
     if (verdict !== 'missing') {
       return verdict === 'loaded';
     }
@@ -2178,10 +2471,11 @@ function scanConfigLayer(
   layer: ConfigLayerName,
   dirs: string[],
   layers: ConfigLayerHit[],
-  broken: string[]
+  broken: string[],
+  probes?: FileProbe[]
 ): void {
   for (const dir of dirs) {
-    if (scanConfigLayerDir(layer, dir, layers, broken)) {
+    if (scanConfigLayerDir(layer, dir, layers, broken, probes)) {
       return;
     }
   }

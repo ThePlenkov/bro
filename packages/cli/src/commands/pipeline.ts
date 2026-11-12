@@ -16,31 +16,86 @@
  * would park it the same way). `answer` lands the customer's replies
  * for an intake `questions` park.
  *
+ * `wake` is the run-waker's manual pass (specs/bro-v0pvd.3.md): scan
+ * the journal plane for live resume anchors and `resumePipeline` the
+ * ones whose awaited input may have settled — customer records,
+ * provider walls, fleet capacity, PR settle (probe seam), crash
+ * residue. `bro drive` rides the same pass on its tick; this verb is
+ * the operator/CI entry point. It never admits new work — that is
+ * bro-qjji2.10's boundary.
+ *
  * The target run resolves by scanning the pipeline plane for the run
  * parked at the gate for `<item>`; `--run` pins it explicitly.
  */
-import { readFileSync } from 'node:fs';
-import { bdActor, hasHelpFlag, printUsage } from '@broject/core';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import {
+  bdActor,
+  deriveProviderWalls,
+  hasHelpFlag,
+  printUsage,
+  readAgentRegistry,
+} from '@broject/core';
 import {
   type AwaitingRun,
   appendCustomerRecord,
   awaitingCustomerRuns,
   contentDigest,
   customerChannelPath,
+  type EngineMap,
+  loadPipelineFormula,
+  type PipelineRunView,
+  pipelineDir,
   pipelineKey,
+  type ResolvedRun,
+  type StartReport,
   signCustomerRecord,
+  startRuns,
   verdictDigest,
+  type WakeDeps,
+  type WakeReport,
+  wakePipeline,
 } from '@broject/pipeline';
-import { flag, positionals } from './args.ts';
+import { readyBeads } from '@broject/rig';
+import { fleetCapOf, fleetOccupancyFor, loadAgentEnv } from '../agent-connectors.ts';
+import { engines as productionEngines } from '../pipeline-engines.ts';
+import { flag, flagAll, positionals } from './args.ts';
 
 const USAGE = `usage: bro pipeline <command> [args…]
 
 commands:
+  run [<item>…]             start fresh pipeline runs for queued items —
+                            scans ready beads carrying --label (default
+                            'pipeline'), or the explicit <item>/--item ids
   accept <item> <verdict>   record the customer's accept-gate verdict
                             (accepted|rejected|abandon; --notes required
                             on rejected — it is the fix scope)
   answer <item>             record the customer's answers for an intake
                             questions park
+  wake                      one run-waker pass — resume journaled runs
+                            whose awaited input may have settled
+                            (customer records, walls, capacity, PR
+                            settle seam, crash residue)
+
+run flags:
+  --formula <file>          REQUIRED — the pipeline formula (TOML) every
+                            run stamps and drives
+  --engines <module>        path to a module exporting 'engines' (an
+                            EngineMap or (dir)=>EngineMap) — replaces the
+                            built-in production map wholesale
+  --customer <id>           the recorded customer (accept authority) —
+                            default: $BRO_CUSTOMER, else the bd actor
+  --label <label>           the queue label to scan (default 'pipeline')
+  --item <id>               explicit bead id (repeatable) — bypasses the
+                            label scan, not dedup/admission/occupancy
+  --limit <n>               cap how many candidates this invocation scans
+  --max-in-flight <n>       machine in-flight cap — narrows the formula's
+                            limits.in_flight for every run this invocation
+                            starts (0 = uncapped; absent = no machine cap)
+  --dry-run                 resolve queue/customer/formula/dedup; report
+                            what WOULD start without invoking runPipeline
+  --json                    machine-readable report
 
 flags:
   --notes <text>            the customer's notes (required on rejected)
@@ -51,6 +106,14 @@ flags:
   -m, --message <text>      answer text for 'answer'
   --answers-file <path>     answers from a file (JSON parsed when it
                             parses, else the raw text)
+  --engines <module>        wake: engine map module replacing the
+                            built-in production map (exports 'engines'
+                            — an EngineMap or a (dir)=>EngineMap fn)
+  --formula <file>          wake: formula TOML for every run (default:
+                            the run's <runId>.formula.toml sidecar)
+  --formula-dir <dir>       wake: formula TOML dir — a file whose sha
+                            matches the journaled formula_sha wins
+  --json                    wake: emit the WakeReport as JSON
   --help                    this usage
 `;
 
@@ -352,19 +415,477 @@ function cmdAnswer(argv: string[]): void {
   );
 }
 
-/** `bro pipeline <command>` — the customer channel's write surface. */
-export function runPipelineCommand(argv: string[]): void {
+// --- run — the queue→runPipeline starter (specs/bro-qjji2.10.md) -----------
+
+/** run's flag reads — the value flags it declares plus the boolean
+ *  switches. `--item` is repeatable (flagAll), so it is not in the
+ *  single-value flag set. */
+interface RunFlags {
+  formula?: string;
+  engines?: string;
+  customer?: string;
+  label?: string;
+  limit?: string;
+  maxInFlight?: string;
+  dryRun: boolean;
+  json: boolean;
+}
+
+/** The value-flags `run` consumes a following token for — everything
+ *  `positionals` must skip over when collecting explicit item ids. */
+const RUN_VALUE_FLAGS = new Set([
+  '--formula',
+  '--engines',
+  '--customer',
+  '--label',
+  '--limit',
+  '--max-in-flight',
+  '--item',
+]);
+const RUN_BOOL_FLAGS = new Set(['--dry-run', '--json']);
+
+const runFlagsOf = (argv: string[]): RunFlags => ({
+  formula: flag(argv, '--formula'),
+  engines: flag(argv, '--engines'),
+  customer: flag(argv, '--customer'),
+  label: flag(argv, '--label'),
+  limit: flag(argv, '--limit'),
+  maxInFlight: flag(argv, '--max-in-flight'),
+  dryRun: argv.includes('--dry-run'),
+  json: argv.includes('--json'),
+});
+
+/** The admit-intent set the run and the engine map share — spawn-like
+ *  intents only (the runner's DEFAULT_ADMIT_INTENTS). stageDispatch's
+ *  recheck consults the SAME set, so it is computed once and passed to
+ *  both; a drift between them would silently change park/re-fire
+ *  behavior. */
+const RUN_ADMIT_INTENTS = ['spawn'] as const;
+
+/** Resolve the recorded customer — the accept-gate authority. Precedence:
+ *  --customer > $BRO_CUSTOMER > the bd actor chain. BRO_AGENT_ID is
+ *  deliberately absent: it is the running agent's badge, and letting it
+ *  default the customer would let whatever worker invokes `run` become
+ *  its own acceptance authority. An unresolvable customer is a hard
+ *  fail — a run whose accept gate can never be signed is worse than no
+ *  run. */
+function resolveRunCustomer(dir: string, f: RunFlags): string {
+  const envCustomer = process.env.BRO_CUSTOMER?.trim();
+  const actor = bdActor(dir).trim();
+  const customer =
+    f.customer ??
+    (envCustomer !== undefined && envCustomer !== '' ? envCustomer : undefined) ??
+    (actor !== '' ? actor : undefined);
+  if (customer === undefined) {
+    fail('customer-unresolved — pass --customer, set BRO_CUSTOMER, or configure the bd actor', 1);
+  }
+  return customer;
+}
+
+/** The candidate items: explicit ids (positionals + repeatable --item)
+ *  bypass the label scan; otherwise the ready-queue scan for beads
+ *  carrying --label (default 'pipeline'). Explicit items are NOT
+ *  label-filtered — naming a bead is the operator's opt-in. */
+function runCandidates(ctx: CmdCtx, argv: string[], f: RunFlags): string[] {
+  const explicit = [
+    ...positionals(argv, RUN_VALUE_FLAGS, { boolFlags: RUN_BOOL_FLAGS, strict: true }),
+    ...flagAll(argv, '--item'),
+  ];
+  if (explicit.length > 0) {
+    return explicit;
+  }
+  const label = f.label ?? 'pipeline';
+  return readyBeads(ctx.dir)
+    .filter(b => (b.labels ?? []).includes(label))
+    .map(b => b.id);
+}
+
+/** `--limit` → a non-negative integer cap on candidates scanned; a
+ *  malformed value is a usage error, never a silent drop. */
+function runLimit(f: RunFlags): number | undefined {
+  if (f.limit === undefined) {
+    return undefined;
+  }
+  const n = Number(f.limit);
+  if (!Number.isInteger(n) || n < 0) {
+    fail(`--limit must be a non-negative integer, got ${JSON.stringify(f.limit)}`, 2);
+  }
+  return n;
+}
+
+/** `--max-in-flight` → the machine budget every started run narrows
+ *  `limits.in_flight` with (RunOptions.maxInFlight — 0/absent = no
+ *  machine cap). Same non-negative-integer contract as --limit. */
+function runMaxInFlight(f: RunFlags): number | undefined {
+  if (f.maxInFlight === undefined) {
+    return undefined;
+  }
+  const n = Number(f.maxInFlight);
+  if (!Number.isInteger(n) || n < 0) {
+    fail(`--max-in-flight must be a non-negative integer, got ${JSON.stringify(f.maxInFlight)}`, 2);
+  }
+  return n;
+}
+
+/** Import a user-supplied `--engines` module — `path` resolves against
+ *  `dir` (an absolute path passes through unchanged). Naming the module
+ *  IS the trust boundary: whatever it exports runs with this process's
+ *  credentials, the same as the formula file it drives — the flag is
+ *  operator input, never customer/queue-controlled. Throws the raw
+ *  import error; each caller maps it to its own failure policy. */
+async function importEnginesModule(path: string, dir: string): Promise<Record<string, unknown>> {
+  return (await import(pathToFileURL(resolve(dir, path)).href)) as Record<string, unknown>;
+}
+
+/** Resolve the engine map: `--engines <module>` replaces the WHOLE map
+ *  (the waker's contract — no per-slot merge); absent → the built-in
+ *  production map bound to this dir + the run's formula identity and
+ *  admit-intent set. The module's `engines` export is an EngineMap or a
+ *  `(dir) => EngineMap` factory. */
+async function resolveRunEngines(ctx: CmdCtx, f: RunFlags, formulaSha: string): Promise<EngineMap> {
+  if (f.engines !== undefined) {
+    let mod: Record<string, unknown>;
+    try {
+      mod = await importEnginesModule(f.engines, ctx.dir);
+    } catch (e) {
+      fail(
+        `--engines ${f.engines}: cannot load module — ${e instanceof Error ? e.message : String(e)}`,
+        2
+      );
+    }
+    const bound = mod.engines;
+    if (bound === undefined) {
+      fail(`--engines ${f.engines}: module exports no 'engines'`, 2);
+    }
+    const resolved =
+      typeof bound === 'function'
+        ? await (bound as (d: string) => EngineMap | Promise<EngineMap>)(ctx.dir)
+        : (bound as EngineMap);
+    if (typeof resolved !== 'object' || resolved === null || Array.isArray(resolved)) {
+      fail(`--engines ${f.engines}: 'engines' must be an EngineMap or (dir)=>EngineMap`, 2);
+    }
+    return resolved;
+  }
+  return productionEngines(ctx.dir, {
+    formula: basename(f.formula ?? 'pipeline'),
+    formulaSha,
+    admitIntents: RUN_ADMIT_INTENTS,
+  });
+}
+
+/** Human-readable run report — one line per candidate plus a summary.
+ *  The JSON form is the StartReport verbatim. */
+function printRunReport(report: StartReport): void {
+  const sha = report.formulaSha.slice(0, 12);
+  console.log(
+    `pipeline run — formula ${sha} customer ${report.customer ?? '(none)'}${report.dryRun ? ' (dry-run)' : ''}`
+  );
+  for (const it of report.items) {
+    switch (it.action) {
+      case 'started':
+        console.log(
+          `  ${it.item}: started run ${it.runId} → ${it.outcome}/${it.stage}` +
+            (it.sidecar === true ? ' · formula sidecar' : '') +
+            (it.alert !== undefined ? ` · alert ${it.alert}` : '')
+        );
+        break;
+      case 'already-running':
+        console.log(`  ${it.item}: already-running`);
+        break;
+      case 'would-start':
+        console.log(`  ${it.item}: would-start`);
+        break;
+      case 'failed':
+        console.log(`  ${it.item}: failed — ${it.error ?? 'unknown'}`);
+        break;
+    }
+  }
+  console.log(
+    `summary: ${report.started} started, ` +
+      `${report.items.filter(i => i.action === 'already-running').length} already-running, ` +
+      `${report.items.filter(i => i.action === 'failed').length} failed ` +
+      `(scanned ${report.scanned})`
+  );
+}
+
+/** `bro pipeline run` — scan the queue, resolve the customer, bind the
+ *  engine map, stamp formulaSha, and invoke fresh runPipeline runs. The
+ *  starter owns dedup/admission/sidecar; this command owns queue
+ *  selection, customer resolution, formula loading, and the engine map. */
+async function cmdRun(argv: string[]): Promise<void> {
+  const f = runFlagsOf(argv);
+  const ctx: CmdCtx = { argv, dir: process.cwd() };
+  if (f.formula === undefined) {
+    fail('run needs --formula <file> — the pipeline formula every run drives', 2);
+  }
+  let loaded: ReturnType<typeof loadPipelineFormula>;
+  try {
+    loaded = loadPipelineFormula(f.formula);
+  } catch (e) {
+    fail(`--formula ${f.formula}: ${e instanceof Error ? e.message : String(e)}`, 2);
+  }
+  // the sidecar archives the SAME bytes the sha covers — a second read
+  // could catch a mid-command edit and journal hash A while storing B
+  const formulaBytes = loaded.bytes;
+  const customer = resolveRunCustomer(ctx.dir, f);
+  const items = runCandidates(ctx, argv, f);
+  const limit = runLimit(f);
+  const bounded = limit === undefined ? items : items.slice(0, limit);
+  const maxInFlight = runMaxInFlight(f);
+  const engines = await resolveRunEngines(ctx, f, loaded.sha);
+  const report = await startRuns({
+    dir: ctx.dir,
+    formula: loaded,
+    formulaBytes,
+    customer,
+    engines,
+    items: bounded,
+    dryRun: f.dryRun,
+    runOptions: {
+      admit: () => true,
+      admitIntents: [...RUN_ADMIT_INTENTS],
+      ...(maxInFlight !== undefined ? { maxInFlight } : {}),
+    },
+  });
+  if (f.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    printRunReport(report);
+  }
+}
+
+// --- wake ------------------------------------------------------------------
+
+/** The `--engines` module — `engines` export as an EngineMap or a
+ *  `(dir) => EngineMap` factory; `default` is the fallback name. A
+ *  module without one resolves nothing (every run reports
+ *  `unresolved` — the waker never guesses an engine map). */
+async function loadEnginesModule(path: string, dir: string): Promise<EngineMap | undefined> {
+  let mod: Record<string, unknown>;
+  try {
+    mod = await importEnginesModule(path, dir);
+  } catch (e) {
+    // usage error (2), same as run's --engines path — a module the
+    // operator named but cannot load is bad input, not a plane failure.
+    fail(`cannot load --engines ${path}: ${(e as Error).message}`, 2);
+  }
+  const raw = mod.engines ?? mod.default;
+  const bound = typeof raw === 'function' ? await (raw as (d: string) => unknown)(dir) : raw;
+  return typeof bound === 'object' && bound !== null ? (bound as EngineMap) : undefined;
+}
+
+interface FormulaSource {
+  formulaPath?: string;
+  formulaDir?: string;
+}
+
+/** The run's formula — precedence: explicit --formula, the run's
+ *  `<runId>.formula.toml` sidecar (the .10 creation convention), then
+ *  sha-matched files under --formula-dir (a dir holds many formulas —
+ *  only the one whose sha equals the journaled `formula_sha` can serve
+ *  this run; the waker's drift gate covers the named sources). `file`
+ *  rides along for engine provenance (the fleet worker's formula
+ *  stamp). Undefined = this pass can't serve the run. A corrupt
+ *  candidate is skipped, never fatal to the pass. */
+function formulaFor(
+  view: PipelineRunView,
+  src: FormulaSource,
+  dir: string
+): { loaded: ReturnType<typeof loadPipelineFormula>; file: string } | undefined {
+  const candidates: { file: string; matchSha: boolean }[] = [];
+  if (src.formulaPath !== undefined) {
+    candidates.push({ file: resolve(dir, src.formulaPath), matchSha: false });
+  } else {
+    const d = pipelineDir({ dir });
+    if (d !== null) {
+      const sidecar = join(d, `${view.runId}.formula.toml`);
+      if (existsSync(sidecar)) {
+        candidates.push({ file: sidecar, matchSha: false });
+      }
+    }
+    if (src.formulaDir !== undefined) {
+      const fd = resolve(dir, src.formulaDir);
+      let files: string[] = [];
+      try {
+        files = readdirSync(fd)
+          .filter(f => f.endsWith('.toml'))
+          .sort();
+      } catch {
+        // unreadable --formula-dir — no candidates from it
+      }
+      for (const f of files) {
+        candidates.push({ file: join(fd, f), matchSha: true });
+      }
+    }
+  }
+  for (const c of candidates) {
+    try {
+      const loaded = loadPipelineFormula(c.file);
+      if (c.matchSha && loaded.sha !== view.formulaSha) {
+        continue;
+      }
+      return { loaded, file: c.file };
+    } catch {
+      // unreadable/invalid candidate — try the next source
+    }
+  }
+  return undefined;
+}
+
+interface WakeBindings {
+  enginesPath?: string;
+  formulaPath?: string;
+  formulaDir?: string;
+}
+
+/** The waker's dependency bundle — engine map (--engines overrides the
+ *  built-in production map wholesale, same contract as `run`), formula
+ *  sources, and the prod probes (walls over the agents registry, fleet
+ *  load over occupancy). No `admit` seam is bound: a resumed run
+ *  reaching a spawn intent parks `admission-unavailable`, which is
+ *  bro-qjji2.10's queue→run boundary, fail-closed by design. The
+ *  production map binds per (formula,file) — the fleet worker's
+ *  provenance stamp carries the run's own formula identity, and views
+ *  sharing one formula share one map. */
+async function wakeDeps(dir: string, b: WakeBindings): Promise<WakeDeps> {
+  const override =
+    b.enginesPath === undefined ? undefined : await loadEnginesModule(b.enginesPath, dir);
+  const src: FormulaSource = {
+    ...(b.formulaPath !== undefined ? { formulaPath: b.formulaPath } : {}),
+    ...(b.formulaDir !== undefined ? { formulaDir: b.formulaDir } : {}),
+  };
+  const env = loadAgentEnv(dir);
+  const prodCache = new Map<string, EngineMap>();
+  const enginesFor = (file: string, sha: string): EngineMap => {
+    if (override !== undefined) {
+      return override;
+    }
+    const key = JSON.stringify([file, sha]);
+    let map = prodCache.get(key);
+    if (map === undefined) {
+      map = productionEngines(dir, {
+        formula: basename(file),
+        formulaSha: sha,
+        admitIntents: RUN_ADMIT_INTENTS,
+      });
+      prodCache.set(key, map);
+    }
+    return map;
+  };
+  return {
+    dir,
+    resolve: async (view): Promise<ResolvedRun | undefined> => {
+      // an explicit --engines module that carries no map leaves every
+      // run unresolvable — the waker never guesses an engine map
+      if (b.enginesPath !== undefined && override === undefined) {
+        return undefined;
+      }
+      const hit = formulaFor(view, src, dir);
+      if (hit === undefined) {
+        return undefined;
+      }
+      return {
+        formula: hit.loaded.formula,
+        opts: {
+          engines: enginesFor(hit.file, hit.loaded.sha),
+          dir,
+          formulaSha: hit.loaded.sha,
+        },
+      };
+    },
+    probes: {
+      walls: () => deriveProviderWalls(readAgentRegistry(dir), Date.now(), env.providers),
+      fleetLoad: () => ({ live: fleetOccupancyFor(dir, env), cap: fleetCapOf(env) }),
+    },
+  };
+}
+
+/** `bro pipeline wake` — one waker pass over the journal plane. */
+async function cmdWake(argv: string[]): Promise<void> {
+  const pos = positionals(argv, new Set(['--engines', '--formula', '--formula-dir']), {
+    boolFlags: new Set(['--json']),
+    strict: true,
+  });
+  if (pos.length !== 0) {
+    console.error(
+      'usage: bro pipeline wake [--engines <module>] [--formula <file>] [--formula-dir <dir>] [--json]'
+    );
+    process.exit(2);
+  }
+  const dir = process.cwd();
+  let report: WakeReport;
+  try {
+    report = await wakePipeline(
+      await wakeDeps(dir, {
+        ...(flag(argv, '--engines') !== undefined ? { enginesPath: flag(argv, '--engines') } : {}),
+        ...(flag(argv, '--formula') !== undefined ? { formulaPath: flag(argv, '--formula') } : {}),
+        ...(flag(argv, '--formula-dir') !== undefined
+          ? { formulaDir: flag(argv, '--formula-dir') }
+          : {}),
+      })
+    );
+  } catch (e) {
+    fail(`wake pass failed — ${e instanceof Error ? e.message : String(e)}`, 1);
+  }
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  if (report.dir === null) {
+    console.log('wake: no pipeline plane under this repo — nothing journaled');
+    return;
+  }
+  if (report.locked) {
+    console.log('wake: another pass holds the lock — skipped');
+    return;
+  }
+  for (const f of report.unreadable ?? []) {
+    console.log(`wake: unreadable journal ${f} — skipped this pass`);
+  }
+  for (const r of report.runs) {
+    const detail = r.detail === undefined ? '' : ` — ${r.detail}`;
+    console.log(`${r.runId} ${r.item} @${r.stage}: ${r.action}${detail}`);
+  }
+  const counts = new Map<string, number>();
+  for (const r of report.runs) {
+    counts.set(r.action, (counts.get(r.action) ?? 0) + 1);
+  }
+  const summary = [...counts.entries()].map(([k, n]) => `${n} ${k}`).join(', ');
+  console.log(
+    `wake: ${report.scanned} run(s) scanned — ${summary === '' ? 'no live anchors' : summary}`
+  );
+}
+
+/** The drive tick's wake pass (bro-v0pvd.3) — the same waker with no
+ *  CLI bindings: the production engine map (.10) and the
+ *  `<runId>.formula.toml` sidecar convention resolve runs by default;
+ *  `--engines`/`--formula*` overrides stay CLI-only. Probes (walls,
+ *  fleet load) are ambient and always bound. */
+export async function pipelineWakePass(dir: string): Promise<WakeReport> {
+  return wakePipeline(await wakeDeps(dir, {}));
+}
+
+/** `bro pipeline <command>` — the customer channel's write surface, the
+ *  queue→run starter, and the run-waker pass. `run`/`wake` are the async
+ *  verbs (they await runPipeline/resumePipeline work) — their Promises
+ *  are returned for the dispatcher to await; accept/answer stay
+ *  synchronous so their exit()/output contract is unchanged. */
+export function runPipelineCommand(argv: string[]): void | Promise<void> {
   const [verb, ...rest] = argv;
   if (hasHelpFlag(argv) || verb === undefined) {
     printUsage(USAGE, hasHelpFlag(argv) ? 0 : 2);
   }
   switch (verb) {
+    case 'run':
+      return cmdRun(rest);
     case 'accept':
       cmdAccept(rest);
       return;
     case 'answer':
       cmdAnswer(rest);
       return;
+    case 'wake':
+      return cmdWake(rest);
     default:
       console.error(`pipeline: unknown command ${JSON.stringify(verb)}`);
       printUsage(USAGE, 2);
