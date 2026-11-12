@@ -303,6 +303,14 @@ describe('the key', () => {
     assert.equal(decodeCacheValue('not json'), undefined);
     assert.equal(decodeCacheValue('{"kind":"bogus"}'), undefined);
     assert.equal(decodeCacheValue('{"kind":"pick","pick":42}'), undefined);
+    // typeof null === 'object' — corrupt shapes must read as misses,
+    // never decode into a replay that crashes downstream
+    assert.equal(
+      decodeCacheValue('{"kind":"answers","res":{"answers":null},"t3":false}'),
+      undefined
+    );
+    assert.equal(decodeCacheValue('{"kind":"answers","res":{"answers":[]},"t3":false}'), undefined);
+    assert.equal(decodeCacheValue('{"kind":"answers","res":{"answers":{}},"t3":"yes"}'), undefined);
   });
 });
 

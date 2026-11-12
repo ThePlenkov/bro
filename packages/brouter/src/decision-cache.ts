@@ -382,7 +382,11 @@ export function decodeCacheValue(json: string): CacheValue | undefined {
       value?.kind === 'answers' &&
       typeof value.res === 'object' &&
       value.res !== null &&
+      // typeof null === 'object' — a corrupt entry must not decode into
+      // a hit that crashes the replay on Object.keys(null)
       typeof value.res.answers === 'object' &&
+      value.res.answers !== null &&
+      !Array.isArray(value.res.answers) &&
       typeof value.t3 === 'boolean'
     ) {
       return value;

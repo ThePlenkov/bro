@@ -130,8 +130,10 @@ export async function writeCacheEntry(
 ): Promise<boolean> {
   const client = store.db.$client;
   const createdAt = input.createdAt ?? Date.now();
-  client.exec('BEGIN IMMEDIATE');
   try {
+    // BEGIN inside the try — a contended lock (SQLITE_BUSY) throws here,
+    // and an escape would fail the caller's decision, not just the memo
+    client.exec('BEGIN IMMEDIATE');
     const current = cacheGeneration(store.db, input.keyHash);
     if (current !== input.generation) {
       client.exec('ROLLBACK');
@@ -178,8 +180,9 @@ export async function writeCacheEntry(
  *  false on a store failure — warned, never thrown. */
 export async function invalidateCacheKey(store: StoreFace, keyHash: string): Promise<boolean> {
   const client = store.db.$client;
-  client.exec('BEGIN IMMEDIATE');
   try {
+    // BEGIN inside the try — same lock-contention rule as the write
+    client.exec('BEGIN IMMEDIATE');
     const next = cacheGeneration(store.db, keyHash) + 1;
     client
       .prepare(
