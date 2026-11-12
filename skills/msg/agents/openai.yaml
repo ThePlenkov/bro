@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Msg"
+  short_description: "Message one fleet session — ledger-resolved target, inbox file + events record"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $msg to message a specific agent session."
+policy:
+  allow_implicit_invocation: true

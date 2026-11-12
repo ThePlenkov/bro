@@ -6,12 +6,15 @@
  * shells do not. Recovery used to be a manual runbook (lesson
  * learn-post-reboot-bro-recovery); resume is that runbook as one pass:
  *
- *   sweep → watch → daemon → loop → agents → worktrees
+ *   sweep → watch → daemon → loop → agents → worktrees → sessions
  *
  * What it restores it restores because durable state recorded the
  * intent (a dead watch marker, an armed daemon.json); what has no
  * recorded intent it only reports — `bro flow loop` claims the
- * backlog and is a run-level decision, never auto-spawned. An armed
+ * backlog and is a run-level decision, never auto-spawned, and
+ * interrupted sessions are REPORTED with their resume argv, never
+ * spawned (launching them is the F5 launcher facade, out of scope —
+ * specs/bro-izpyk.4.md §4). An armed
  * loop.json is recorded intent too: its `daemon run --loop` supervisor
  * revives on the same contract as the drive daemon's.
  * Orchestrator-only like `fleet daemon up`: a worker never arms
@@ -20,6 +23,7 @@
 import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import {
+  facade,
   gitCommonDir,
   gitTry,
   janitorDidWork,
@@ -32,11 +36,21 @@ import {
   runJanitor,
   CommandError,
   EXIT,
+  type LedgerFacade,
 } from '@broject/core';
 import { deadWatchPlan } from '@broject/act';
 import { rearmPass } from './act.ts';
 import { loadAgentEnv } from '../agent-connectors.ts';
 import { collectAgentBackends } from './agents.ts';
+import { loadBroConfig } from '../plugins.ts';
+import { sessionResumeArgv } from '../session-planes/resume.ts';
+import {
+  deriveSessionState,
+  displayWorktree,
+  fmtAge,
+  sessionBootTimeMs,
+  shortSid,
+} from './sessions.ts';
 import {
   daemonProbe,
   driveRearm,
@@ -68,6 +82,27 @@ interface AgentsReport {
   degraded: string[];
 }
 
+/** One interrupted session as the resume report renders it — the
+ *  ledger row plus the session plane's resume answer (`null` = the
+ *  host has no resume command bro knows — reported, never guessed;
+ *  specs/bro-izpyk.4.md §4). */
+export interface InterruptedSessionRow {
+  host: string;
+  sid: string;
+  cwd: string | null;
+  /** epoch ms — the ledger's native unit, same as `bro sessions --json` */
+  lastSeen: number;
+  resumeArgv: string[] | null;
+}
+
+export interface SessionsLegReport {
+  /** Most recently seen first, capped at INTERRUPTED_CAP rows. */
+  interrupted: InterruptedSessionRow[];
+  /** Interrupted sessions beyond the cap — absent when all fit. */
+  truncated?: number;
+  warnings: string[];
+}
+
 /** One supervisor kind's resume verdict — a repo can install drive and
  *  loop side by side, and each marker's rearm decides on its own
  *  liveness plane (drive.lock / loop.lock), never the sibling's. */
@@ -90,6 +125,10 @@ interface ResumeReport {
   loop: LoopReport;
   agents: AgentsReport;
   worktrees: Array<{ path: string; branch?: string; dirty: number }>;
+  /** F4 leg — interrupted sessions across the WHOLE machine ledger
+   *  (a restart interrupts every project, not just this repo's),
+   *  report-only: resume argv shown, never spawned. */
+  sessions: SessionsLegReport;
 }
 
 /** `bro/loop.lock` holder liveness — the `bro flow loop` supervisor
@@ -133,7 +172,95 @@ function dirtyWorktrees(main: string): ResumeReport['worktrees'] {
   return out;
 }
 
-async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
+/** The sessions leg's display cap — a reboot can interrupt dozens of
+ *  sessions; the report names the freshest ten and counts the rest. */
+const INTERRUPTED_CAP = 10;
+
+export interface InterruptedSessionsDeps {
+  dir?: string;
+  ledger?: LedgerFacade;
+  now?: number;
+  bootTimeMs?: number;
+}
+
+/** The plane's resumeArgv, fail-safe — a plane that throws must not
+ *  take the whole recovery pass down with it; the row reports
+ *  'unsupported' instead (the honest answer for a broken plane is the
+ *  same as no plane). */
+function safeResumeArgv(host: string, sid: string, cwd: string): string[] | null {
+  try {
+    return sessionResumeArgv(host, sid, cwd);
+  } catch {
+    return null;
+  }
+}
+
+/** Interrupted sessions across the machine ledger — `deriveSessionState`
+ *  per row (stored `live` + lastSeen older than this boot), most
+ *  recently seen first, capped. READ-ONLY: sessions() drains the spool
+ *  like every ledger read, but nothing here spawns, writes mode files,
+ *  or touches a session — the report's resume argv is a hint for
+ *  `bro sessions resume`, never an action (specs/bro-izpyk.4.md §4).
+ *  A ledger that cannot be read is a warning, never a failed pass —
+ *  the supervisor legs must not die on an optional read surface. */
+export async function collectInterruptedSessions(
+  deps: InterruptedSessionsDeps = {}
+): Promise<SessionsLegReport> {
+  const warnings: string[] = [];
+  const dir = deps.dir ?? process.cwd();
+  let ledger = deps.ledger;
+  if (ledger === undefined) {
+    try {
+      const prefer = loadBroConfig(dir).connectors;
+      ledger = facade('ledger', { dir }, prefer === undefined ? {} : { prefer });
+    } catch (err) {
+      return {
+        interrupted: [],
+        warnings: [
+          `session ledger unavailable — ${err instanceof Error ? err.message : String(err)}`,
+        ],
+      };
+    }
+  }
+  let stored;
+  try {
+    stored = await ledger.sessions();
+  } catch (err) {
+    return {
+      interrupted: [],
+      warnings: [`session ledger unreadable — ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
+  const drain = ledger.drainWarning?.();
+  if (drain !== undefined) {
+    warnings.push(`spool drain failed — the session list may be stale (${drain})`);
+  }
+  const now = deps.now ?? Date.now();
+  const boot = deps.bootTimeMs ?? sessionBootTimeMs(now);
+  const interrupted = stored
+    .filter(s => deriveSessionState(s, boot) === 'interrupted')
+    .sort((a, b) => b.lastSeen - a.lastSeen);
+  const shown = interrupted.slice(0, INTERRUPTED_CAP);
+  return {
+    interrupted: shown.map(s => ({
+      host: s.host,
+      sid: s.sid,
+      cwd: s.cwd,
+      lastSeen: s.lastSeen,
+      resumeArgv: safeResumeArgv(s.host, s.sid, s.cwd ?? dir),
+    })),
+    ...(interrupted.length > INTERRUPTED_CAP
+      ? { truncated: interrupted.length - INTERRUPTED_CAP }
+      : {}),
+    warnings,
+  };
+}
+
+async function resumePass(
+  main: string,
+  dry: boolean,
+  sessionsOverride?: SessionsLegReport
+): Promise<ResumeReport> {
   // read the loop supervisor's hold BEFORE the sweep — a dead holder's
   // stale lock is the janitor's to reap, but "supervisor dead" is a
   // better report than "reaped 1 file(s)"
@@ -162,9 +289,10 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
     reapLoopRuns(main);
   }
 
-  // 5 — agents + 6 — worktrees
+  // 5 — agents + 6 — worktrees + 7 — sessions (report-only, F4)
   const agents = await agentsLeg(main);
   const worktrees = dirtyWorktrees(main);
+  const sessions = sessionsOverride ?? (await collectInterruptedSessions());
 
   return {
     dryRun: dry,
@@ -177,6 +305,7 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
     loop: { holder, deadRuns },
     agents,
     worktrees,
+    sessions,
   };
 }
 
@@ -336,6 +465,34 @@ function worktreeLine(ws: ResumeReport['worktrees']): string | null {
   );
 }
 
+/** The F4 sessions block — interrupted rows with their resume argv
+ *  (or 'unsupported' — the same plane lookup `bro sessions resume`
+ *  uses, so the two surfaces never disagree) and the actionable hint.
+ *  Report-only: nothing here spawns a session. Ledger warnings ride
+ *  the same block so an unreadable ledger is visible, not silent.
+ *  Exported for the unit test — reportLines stays private. */
+export function sessionsLines(s: SessionsLegReport): string[] {
+  const lines: string[] = s.warnings.map(w => `resume: sessions — warning: ${w}`);
+  if (s.interrupted.length === 0) {
+    return lines;
+  }
+  const now = Date.now();
+  const total = s.interrupted.length + (s.truncated ?? 0);
+  lines.push(`resume: sessions — ${total} interrupted session(s), last seen before this boot:`);
+  for (const r of s.interrupted) {
+    const cmd = r.resumeArgv === null ? 'unsupported' : r.resumeArgv.join(' ');
+    lines.push(
+      `  ${r.host} ${shortSid(r.sid)} — ${displayWorktree(r.cwd)} — ` +
+        `last seen ${fmtAge(r.lastSeen, now)} ago — ${cmd}`
+    );
+    lines.push(`    resume: bro sessions resume ${r.host}:${r.sid}`);
+  }
+  if (s.truncated !== undefined && s.truncated > 0) {
+    lines.push(`  …and ${s.truncated} more`);
+  }
+  return lines;
+}
+
 function reportLines(rep: ResumeReport): string[] {
   const lines: string[] = [];
   // janitorLine already inflects the verb — "janitor: would reap …" in
@@ -353,6 +510,7 @@ function reportLines(rep: ResumeReport): string[] {
     ),
     agentsLine(rep.agents),
     worktreeLine(rep.worktrees),
+    ...sessionsLines(rep.sessions),
   ];
   for (const l of rest) {
     if (l !== null) {
@@ -371,7 +529,9 @@ export async function runResumeCommand(argv: string[]): Promise<void> {
       'Usage: bro fleet resume [--dry-run] [--json]\n' +
         '  Post-restart recovery: rearm dead watches, revive a recorded-but-dead\n' +
         '  daemon, and audit survivors — dead loop/lock/run records, dead agent\n' +
-        '  registry entries, dirty worktrees. Never restarts `bro flow loop`.\n' +
+        '  registry entries, dirty worktrees, interrupted sessions (report-only:\n' +
+        '  the resume argv is shown, `bro sessions resume` runs it). Never\n' +
+        '  restarts `bro flow loop` or resumes a session itself.\n' +
         '  --dry-run  print the plan without spawning or sweeping\n' +
         '  --json     machine-readable report',
       0

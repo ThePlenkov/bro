@@ -71,6 +71,12 @@ export interface ConnectorCtx {
    *  callers (the acp proxy, tests) that never resolved a mode keep
    *  today's behavior — every probe runs. */
   mode?: Mode;
+  /** The firing session's host — hookHostOf's answer (claude|codex|
+   *  cursor|devin|unknown), resolved alongside `mode` so per-session
+   *  files (the F4 inbox, specs/bro-izpyk.4.md) name the same
+   *  `<host>-<sid>` stem run.sh gated on. `undefined`/`'unknown'` means
+   *  the host could not be proven — consumers must not guess one. */
+  host?: string;
 }
 
 /** Capability → facade type. Optional on Connector; required here once

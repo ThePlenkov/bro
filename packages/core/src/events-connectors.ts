@@ -22,15 +22,10 @@ import {
   mailboxIdentity,
   mailboxText,
   notifyDir,
-} from './notify.ts'
-import type { Connector, ConnectorCtx } from './connectors.ts'
-import {
-  busProbe,
-  busPublish,
-  busSocketPath,
-  busSubscribe,
-} from './bus.ts'
-import { withSinks } from './sinks.ts'
+} from './notify.ts';
+import type { Connector, ConnectorCtx } from './connectors.ts';
+import { busProbe, busPublish, busSocketPath, busSubscribe } from './bus.ts';
+import { withSinks } from './sinks.ts';
 import {
   eventMatches,
   isEventInput,
@@ -42,7 +37,7 @@ import {
   type EventPublishResult,
   type EventsFacade,
   type EventSubscription,
-} from './events.ts'
+} from './events.ts';
 
 /** The mailbox as an `events` provider — publish is a drop, delivery is a
  *  one-shot drain of what this session has not seen. The codec lives in
@@ -52,12 +47,15 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
   const noCursor: EventProbeResult = {
     events: [],
     gapped: false,
-    reason: sessionId === undefined ? 'mailbox delivery needs a session cursor' : 'mailbox is not running',
-  }
+    reason:
+      sessionId === undefined
+        ? 'mailbox delivery needs a session cursor'
+        : 'mailbox is not running',
+  };
 
   const deliver = (filter: EventFilter, handlers: EventHandlers): EventEnvelope[] => {
     if (sessionId === undefined) {
-      return []
+      return [];
     }
     // The filter reaches into the drain: a drop this subscription does
     // not match stays unseen for the session, or a filtered subscribe
@@ -66,24 +64,24 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
     // the drain — env-derived, not declared — so the keep fn strips it
     // or a probe with no declared `to` could never see its own mail.
     const texts = drainMailbox(dir, sessionId, {
-      keep: (text) => {
-        const { to: _addressed, ...unaddressed } = mailboxEvent(text, undefined)
-        return eventMatches(filter, unaddressed)
+      keep: text => {
+        const { to: _addressed, ...unaddressed } = mailboxEvent(text, undefined);
+        return eventMatches(filter, unaddressed);
       },
       for: mailboxIdentity(sessionId),
-    })
-    const out: EventEnvelope[] = []
+    });
+    const out: EventEnvelope[] = [];
     for (const text of texts) {
-      const event = mailboxEvent(text, undefined)
-      out.push(event)
-      handlers.onEvent(event)
+      const event = mailboxEvent(text, undefined);
+      out.push(event);
+      handlers.onEvent(event);
     }
-    return out
-  }
+    return out;
+  };
 
   return {
     async publish(event: EventInput): Promise<EventPublishResult> {
-      const target = notifyDir(dir)
+      const target = notifyDir(dir);
       // No seq: a set of files has no total order, and inventing one is
       // exactly the kind of lie this facade refuses to tell. A failed
       // write is a transport problem — a result, not a rejection.
@@ -91,13 +89,13 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
       // the contract (an empty-string `to` reading as broadcast is the
       // sharp edge) must never reach a consumer as something it is not.
       if (!isEventInput(event)) {
-        return { published: false, reason: 'invalid event input' }
+        return { published: false, reason: 'invalid event input' };
       }
       try {
         // The drop lands first: if it fails, the still-pending same-key
         // drop must survive — superseding before the write would lose
         // the old news without delivering the new.
-        const locator = dropMailbox(target, mailboxText(event), 'note')
+        const locator = dropMailbox(target, mailboxText(event), 'note');
         // `--key` coalesces: pending same-key drops from this source are
         // stale by definition — the writer repeating a key has fresher
         // news, and a chatty fleet must not inflate every drain. A
@@ -110,22 +108,25 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
             event.key,
             { source: event.source, topic: event.topic, to: event.to },
             locator
-          )
+          );
         }
         // bro-9rls.5 dual-write: the mailbox stays the in-session
         // delivery path AND a live broker gets the mirrored envelope —
         // the bus becomes the live stream (/api/v1/events/stream)
         // without either consumer changing when it is down. Fail-open:
-        // a dead broker is routine, never a publish failure.
-        if (event.topic === 'notify') {
-          const socket = busSocketPath(dir)
+        // a dead broker is routine, never a publish failure. 'msg' is
+        // the fleet F4 session-message topic (bro-izpyk.4) — it rides
+        // the same dual-write so bus subscribers see it exactly like a
+        // notify drop.
+        if (event.topic === 'notify' || event.topic === 'msg') {
+          const socket = busSocketPath(dir);
           if (socket !== null) {
-            await busPublish(socket, event).catch(() => {})
+            await busPublish(socket, event).catch(() => {});
           }
         }
-        return { published: true, locator }
+        return { published: true, locator };
       } catch (err) {
-        return { published: false, reason: err instanceof Error ? err.message : String(err) }
+        return { published: false, reason: err instanceof Error ? err.message : String(err) };
       }
     },
 
@@ -138,55 +139,59 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
         // The facade's `since` is a cursor this transport cannot honour;
         // silently ignoring it would let a consumer believe it caught up.
         // No seq either — a transport with no order has none to report.
-        handlers.onGap?.()
+        handlers.onGap?.();
       }
-      deliver(filter, handlers)
+      deliver(filter, handlers);
       // One-shot: the drain already consumed everything this session
       // had, so there is nothing left to stream.
-      return { close: () => {} }
+      return { close: () => {} };
     },
 
     async probe(opts?: { since?: number; limit?: number }): Promise<EventProbeResult> {
       if (sessionId === undefined) {
-        return noCursor
+        return noCursor;
       }
-      const events = deliver({}, { onEvent: () => {} })
+      const events = deliver({}, { onEvent: () => {} });
       // `since` asks for a cursor replay the mailbox cannot honour —
       // deliver what it can, but mark the gap so nobody reads a partial
       // drain as a complete one.
-      const cursorGap = opts?.since !== undefined
-      const limit = opts?.limit
+      const cursorGap = opts?.since !== undefined;
+      const limit = opts?.limit;
       if (limit !== undefined && events.length > limit) {
-        return { events: limit === 0 ? [] : events.slice(-limit), gapped: true }
+        return { events: limit === 0 ? [] : events.slice(-limit), gapped: true };
       }
-      return { events, gapped: cursorGap }
+      return { events, gapped: cursorGap };
     },
-  }
+  };
 }
 
 /** The local bus as an `events` provider — every operation already fails
  *  open, so the facade's contract holds by construction. */
 export function busEvents(dir: string): EventsFacade {
-  const socketPath = busSocketPath(dir)
-  const down: EventPublishResult = { published: false, reason: 'broker down' }
+  const socketPath = busSocketPath(dir);
+  const down: EventPublishResult = { published: false, reason: 'broker down' };
   if (socketPath === null) {
     return {
       publish: async () => down,
       subscribe: async () => {
-        throw new Error('bro bus: not a repository')
+        throw new Error('bro bus: not a repository');
       },
       probe: async () => ({ events: [], gapped: false, reason: 'not a repository' }),
-    }
+    };
   }
   return {
     publish: (event, opts) => busPublish(socketPath, event, opts ?? {}),
-    subscribe: (filter: EventFilter, handlers: EventHandlers, opts?: { since?: number; timeoutMs?: number }) =>
+    subscribe: (
+      filter: EventFilter,
+      handlers: EventHandlers,
+      opts?: { since?: number; timeoutMs?: number }
+    ) =>
       busSubscribe(socketPath, filter, handlers, {
         ...(opts?.since !== undefined ? { since: opts.since } : {}),
         ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       }),
-    probe: (opts) => busProbe(socketPath, opts ?? {}),
-  }
+    probe: opts => busProbe(socketPath, opts ?? {}),
+  };
 }
 
 /** The default `events` connector — a mailbox. Registered first so it
@@ -196,7 +201,7 @@ export function busEvents(dir: string): EventsFacade {
 export const mailboxConnector: Connector = {
   name: 'mailbox',
   events: (ctx: ConnectorCtx) => withSinks(ctx.dir, mailboxEvents(ctx.dir, ctx.sessionId)),
-}
+};
 
 /** The bus as a connector — opt-in, because a bus that is not running is
  *  a routine state and a default would make every event a silent no-op. */
@@ -206,4 +211,4 @@ export const busConnector: Connector = {
   // is named in config or not used at all.
   optIn: true,
   events: (ctx: ConnectorCtx) => withSinks(ctx.dir, busEvents(ctx.dir)),
-}
+};

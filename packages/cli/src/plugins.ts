@@ -60,6 +60,7 @@ import { runCleanupCommand } from './commands/cleanup.ts';
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts';
 import { runLoopCommand } from './commands/loop.ts';
 import { applyNextPlan, runNextCommand } from './commands/next.ts';
+import { runMsgCommand } from './commands/msg.ts';
 import { runNotifyCommand } from './commands/notify.ts';
 import { runOtelCommand } from './commands/otel.ts';
 import { otelSection } from '@broject/otel';
@@ -496,6 +497,25 @@ export const PLUGINS: BroPlugin[] = [
       'Drop an event into the session mailbox — drained into context by the next postTool probe',
     run: runNotifyCommand,
     skill: 'notify',
+  }),
+  definePlugin({
+    name: 'msg',
+    group: 'comms',
+    summary:
+      'Message a fleet session — ledger-resolved <host>:<sid>|sid|agentId|orchestrator; inbox file on proven hosts + events record',
+    run: argv => runMsgCommand(argv),
+    skill: 'msg',
+    contract: {
+      flags: {
+        '--kind <k>': 'note|info|ask|result|block (default note) — a label, never a grant',
+        '--in-reply-to <r>': 'the drop/bead/step this answers',
+        '--key <k>': 'coalesce: a pending same-key drop from this source is superseded',
+      },
+      exits: {
+        0: 'message delivered — one line per delivery channel',
+        2: 'usage — bad target grammar, ambiguous session, or missing text',
+      },
+    },
   }),
   definePlugin({
     // sinks documents itself in the notify skill — the human edge of

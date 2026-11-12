@@ -42,6 +42,7 @@
     "exec",
     "---Comms---",
     "notify",
+    "msg",
     "sinks",
     "bus",
     "---Self---",

@@ -9,6 +9,7 @@
  *   bro task set bro-n5t --status=blocked
  *   bro task close bro-n5t --reason="merged in #95"
  *   bro task rm bro-n5t
+ *   bro task give <session|role> "title"  F4 — create + assign + msg
  *   bro task exec --global -- ready --json   raw bd against the store —
  *                                            escape hatch, not contract
  *
@@ -16,7 +17,7 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process';
-import { CommandError, EXIT, facade, passthroughExitCode } from '@broject/core';
+import { CommandError, EXIT, facade, passthroughExitCode, type LedgerFacade } from '@broject/core';
 import type {
   DocAdapter,
   DocCtx,
@@ -29,6 +30,7 @@ import type {
 } from '@broject/core';
 import { requireGlobalStore } from './store.ts';
 import { loadBroConfig } from '../plugins.ts';
+import { resolveMsgTarget, sendSessionMessage, sessionMsgRows } from '../commands/session-msg.ts';
 
 export type { TaskRow };
 
@@ -129,6 +131,94 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
     close: (ref: string | undefined, flags: DocFlags) => {
       const id = ref ?? die('bro task close needs a ref — `bro task close <id> [--reason=…]`');
       store().close(id, flags['reason']);
+    },
+    // `bro task give <session|role> "title"` — fleet F4 (spec
+    // specs/bro-izpyk.4.md §2): resolve the fleet address FIRST (an
+    // ambiguous target dies before a bead exists), create the task
+    // through the same store `new` uses, mark the assignee, then send
+    // the `bro msg` notification so the recipient's next hook sees it.
+    // Assignment is a marker — claim() would bind the CALLER's actor,
+    // not the target. --global keeps working: the user-level store gets
+    // the bead while the message still targets the session.
+    give: async (ref: string | undefined, flags: DocFlags, positional: string[]) => {
+      const target = ref ?? positional[0];
+      if (target === undefined || target === '') {
+        die('bro task give needs a target — `bro task give <session|role> "title"`');
+      }
+      const title = positional.slice(1).join(' ').trim();
+      if (title === '') {
+        die('bro task give needs a title — `bro task give <session|role> "title"`');
+      }
+      const dir = ctx.root;
+      const prefer = loadBroConfig(dir).connectors;
+      const opts = prefer === undefined ? {} : { prefer };
+      // Resolve before create — a usage error must not leave an
+      // unassigned orphan bead behind. The ledger is machine-wide; a
+      // broken one degrades to mailbox addressing inside the send path,
+      // but here it means the assignee cannot be proven — still give:
+      // the raw target IS the fleet address fallback.
+      let ledger: LedgerFacade | undefined;
+      try {
+        ledger = facade('ledger', { dir }, opts);
+      } catch {
+        ledger = undefined;
+      }
+      const events = facade('events', { dir }, opts);
+      let assignee = target;
+      if (ledger !== undefined) {
+        let resolution;
+        try {
+          const { rows } = await sessionMsgRows(ledger);
+          resolution = resolveMsgTarget(rows, target);
+        } catch {
+          // ledger read failed — the raw target still names a fleet
+          // address; the send path reports its own degradation
+          resolution = undefined;
+        }
+        if (resolution?.error !== undefined) {
+          die(resolution.error);
+        }
+        const sessions = [
+          ...new Map(
+            (resolution?.deliveries ?? [])
+              .map(d => d.session)
+              .filter((s): s is NonNullable<typeof s> => s !== undefined)
+              .map(s => [`${s.host}:${s.sid}`, s] as const)
+          ).values(),
+        ];
+        if (sessions.length === 1) {
+          const sess = sessions[0]!;
+          assignee = sess.spawnedBy ?? `${sess.host}:${sess.sid}`;
+        }
+      }
+      const s = store();
+      const row = s.create(toInput({ title }, flags));
+      s.update(row.id, { assignee });
+      row.assignee = assignee;
+      const res = await sendSessionMessage({
+        dir,
+        target,
+        text: `task ${row.id} assigned: ${title}`,
+        inReplyTo: row.id,
+        key: `task-${row.id}`,
+        env: process.env,
+        ...(ledger !== undefined ? { ledger } : {}),
+        events,
+      });
+      for (const d of res.deliveries) {
+        const via =
+          d.channel === 'mailbox' ? 'mailbox' : d.channel === 'inbox' ? 'inbox' : 'inbox+record';
+        const locator = d.locator ?? d.inboxPath;
+        console.log(`msg → ${d.label} — ${via}${locator !== undefined ? ` (${locator})` : ''}`);
+      }
+      for (const w of res.warnings) {
+        console.error(`warning: ${w}`);
+      }
+      if (res.error !== undefined) {
+        console.error(`warning: message not delivered — ${res.error}`);
+      }
+      console.log(`task ${row.id} assigned to ${assignee}`);
+      return row;
     },
     // raw passthrough — `bro task exec [--global] -- <bd args>`;
     // anything after `--` reaches bd untouched. The escape hatch for

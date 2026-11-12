@@ -72,6 +72,18 @@ export interface SessionPlane {
    *  rows. Same SpawnError('unavailable') contract as countLive — an
    *  unverifiable scan throws, never silently reports "no sessions". */
   listLive?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): DiscoveredSession[];
+  /** The host CLI's own resume argv for a native session id —
+   *  `claude --resume <id>`, `codex resume <id>` (epic spec
+   *  specs/sessions/bro-izpyk.md "Sessions and resume"). `cwd` is the
+   *  session's recorded working directory: a host whose resume grammar
+   *  scopes to where the session ran reads it here; the launcher also
+   *  spawns with it as cwd. Optional and per-host: absent or a null
+   *  return means the host has no resume command bro knows — callers
+   *  report that instead of guessing (bro-izpyk.4). A plane that only
+   *  knows resume (no session counting) still answers here — the
+   *  quota paths never reach it because such a plane claims no cli and
+   *  counts nothing. */
+  resumeArgv?(nativeSessionId: string, cwd: string): string[] | null;
 }
 
 /** One live session a session-plane sees — a worker the registry never

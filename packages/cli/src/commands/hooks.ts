@@ -650,9 +650,20 @@ function formatAge(ageMs: number): string {
  *  `dir` is the session's repo root — every probe resolves inside it.
  *  `mode` is the session's resolved mode — collectors apply each
  *  connector's `activeIn` declaration against it (specs/bro-izpyk.2.md);
- *  undefined (library callers) means unrestricted. */
+ *  undefined (library callers) means unrestricted. `host` is the
+ *  hook-resolved host (hookHostOf's answer, stamped by
+ *  resolveHookSessionMode) — the notify connector's F4 inbox leg reads
+ *  `inbox/<host>-<sid>` only when it names a proven host; undefined
+ *  means no inbox drain, the mailbox `to: <sid>` path still serves. */
 function hookCtx(dir: string, sessionId: string, toolUseId?: string): ConnectorCtx {
-  return { dir, sessionId, owner: agentOwner(), toolUseId, mode: hookMode };
+  return {
+    dir,
+    sessionId,
+    owner: agentOwner(),
+    toolUseId,
+    mode: hookMode,
+    ...(hookHost !== undefined ? { host: hookHost } : {}),
+  };
 }
 
 /** `modes.default` from the merged config — undefined when the section

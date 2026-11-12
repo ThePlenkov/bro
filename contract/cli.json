@@ -51,7 +51,7 @@
     },
     "comms": {
       "summary": "events & session mailbox",
-      "members": ["notify", "sinks", "bus"]
+      "members": ["notify", "msg", "sinks", "bus"]
     },
     "plan": {
       "summary": "versioned plans",
@@ -459,6 +459,28 @@
       "hidden": false,
       "skill": "notify",
       "plan": false,
+      "external": false
+    },
+    "msg": {
+      "name": "msg",
+      "group": "comms",
+      "summary": "Message a fleet session — ledger-resolved <host>:<sid>|sid|agentId|orchestrator; inbox file on proven hosts + events record",
+      "spellings": ["msg", "comms msg"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "msg",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--kind <k>": "note|info|ask|result|block (default note) — a label, never a grant",
+          "--in-reply-to <r>": "the drop/bead/step this answers",
+          "--key <k>": "coalesce: a pending same-key drop from this source is superseded"
+        },
+        "exits": {
+          "0": "message delivered — one line per delivery channel",
+          "2": "usage — bad target grammar, ambiguous session, or missing text"
+        }
+      },
       "external": false
     },
     "sinks": {
