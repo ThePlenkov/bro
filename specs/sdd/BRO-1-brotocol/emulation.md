@@ -207,3 +207,43 @@ of KEY-N protocol docs and ~340 legacy bead specs.
   `@broject/*` source changes through the bundle — a dependency rebuild
   can leave `cli/dist` stale (`--skip-nx-cache` on `@broject/bro:build`
   is the local workaround; CI builds fresh).
+
+## Real replay — agent hooks through opencode (2026-11-12, PR #1031)
+
+`opencode run --model opencode-go/beam-free` against the worktree plugin
+(`.opencode/plugins/bro` → checkout-local `packages/cli/dist`):
+
+- **session-start:** the model quoted the injected line verbatim —
+  `SDD (gate): spec before code — *.spec.md docs on the Brotocol spec
+  protocol (KEY-N ids, template: brotocol/spec@N), policy specs carry
+  bro:sdd identity regions, or a spec: link in the bead …` — the
+  `brose` connector's `policy()`, not native's. Mode came from
+  `bro.config.local.json` `modes.default: code` (gitignored; sdd hooks
+  serve plan/code only — a bare opencode session resolves `observe`
+  and stays silent by design).
+- **Finding (harness):** renaming the global plugin dir to
+  `plugins/bro.disabled` does NOT disable it — opencode loads every
+  `plugins/*/index.*`, so the stale copy kept firing and its PATH
+  `bro` (0.3.0, pre-brose) injected the old policy alongside the new
+  one. Moving it outside `plugins/` entirely is the real off switch.
+- **Finding (packaging, fixed):** the published cli bundles
+  `@broject/spec` (tsdown `noExternal`), so `require.resolve(
+  '@broject/brotocol')` finds nothing at runtime — `bro spec new`
+  would fail `unknown template` outside a checkout. The bundle now
+  emits `packages/brotocol/templates/` as `dist/templates/` assets
+  and the connector probes `<dist>/templates` first.
+- **Finding (detection order, fixed):** with `brose` registered first,
+  a bare repo fell back to it — `spec init` said `native` while the
+  facade served `brose`, and brose's scaffold refuses absent parents
+  where native writes the frontmatter edge. `native.matchDir` now
+  defers on `hasSpecDoc`, `brose` registers after the tool connectors,
+  and `warnIfAmbiguous` treats a layout claim like a remote claim.
+  Verified matrix: bare→native, legacy `*.md`→native, `*.spec.md`→
+  brose, `.specify/`→speckit — with zero ambiguity warnings.
+- **Review-hardening (same PR):** `specScope()` reads `owns:` before
+  `scope:` (drift audit of protocol specs); `specDirAbs` realpaths the
+  deepest existing ancestor so an in-checkout symlink cannot smuggle
+  `sdd.dir` writes outside the root; `hasSpec` requires a non-empty
+  doc (zero-byte `.spec.md` is a stub, matching `hasSpecFile`);
+  `scope()` no longer borrows a same-id legacy file's scope; dir-doc
+  containment uses the platform separator.
