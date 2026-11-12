@@ -284,9 +284,16 @@ export function agentCell(
     return `blocked — ${agent.cause ?? '?'}${reset}`;
   }
   // a clean exit while the step stays claimed is the same respawn
-  // decision as a lost worker — the claim outlived its agent either way
+  // decision as a lost worker — the claim outlived its agent either way.
+  // A learn-miss verdict still surfaces here: this IS the clean-exit,
+  // no-evidence case the harvest flags (spec bro-xkv42.2)
   if ((agent.state === 'lost' || agent.state === 'exited') && step.state === 'in_progress') {
-    return 'lost — respawn?';
+    return agent.learnCheck === 'miss' ? 'lost — respawn? (learn-miss)' : 'lost — respawn?';
+  }
+  // the exit-harvest learn/retro verdict (spec bro-xkv42.2) — a miss is
+  // the named tail: the run exited with no learn/retro evidence
+  if (agent.learnCheck === 'miss') {
+    return `${agent.state} — learn-miss${pid}`;
   }
   return `${agent.state}${pid}`;
 }

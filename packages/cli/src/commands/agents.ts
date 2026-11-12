@@ -395,11 +395,21 @@ function printStatusTable(
     }
   }
   printLaneSection(lanes);
-  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
+  const cols = [
+    'backend',
+    'supervisor',
+    'agent',
+    'step',
+    'state',
+    'cause',
+    'learn',
+    'pid',
+    'worktree',
+  ];
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor;
     if (agents.length === 0) {
-      return [[conn.name, sup, '—', '—', '—', '—', '—', '—']];
+      return [[conn.name, sup, '—', '—', '—', '—', '—', '—', '—']];
     }
     return agents.map(a => [
       conn.name,
@@ -408,6 +418,9 @@ function printStatusTable(
       a.molStep,
       a.state,
       a.cause === undefined ? '—' : a.cause,
+      // the exit-harvest learn/retro verdict (spec bro-xkv42.2) — 'miss'
+      // is the named tail: exited with no learn/retro evidence
+      a.learnCheck === undefined ? '—' : a.learnCheck,
       a.pid === undefined ? '—' : String(a.pid),
       a.worktree === undefined ? '—' : basename(a.worktree),
     ]);
@@ -459,6 +472,11 @@ function statusDetail(backends: AgentBackendPlane[], target: string, json: boole
   if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`);
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`);
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`);
+  if (a.learnCheck !== undefined) {
+    console.log(
+      `learn     ${a.learnCheck}${a.learnEvidence === undefined ? '' : ` — ${a.learnEvidence}`}`
+    );
+  }
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`);
   if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`);
   if (a.log !== undefined) console.log(`log       ${a.log}`);

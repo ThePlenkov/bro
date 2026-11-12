@@ -558,6 +558,15 @@ export function beadsStoreStamp(dir: string): string | null {
   return beads === null ? null : beadsStamp(beads);
 }
 
+/** `beadsStoreStamp` pinned to a SPECIFIC store dir — the exit-harvest
+ *  path reads the store the worker was pinned to (the registry entry's
+ *  storeDir), which can diverge from what beadsDir(dir) resolves under
+ *  a --beads-dir spawn or an asymmetric BEADS_DIR pin (spec
+ *  bro-xkv42.2). */
+export function beadsStoreStampAt(beads: string): string | null {
+  return beadsStamp(beads);
+}
+
 /** Async beadsStoreStamp — the probe-path twin: under the sync name the
  *  `.beads` resolution is a spawnSync inside the async cache helpers
  *  (spec bro-36sx7.2). The manifest reads stay sync fs — the stall is

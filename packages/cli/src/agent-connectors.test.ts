@@ -39,6 +39,7 @@ import {
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
+  readLifecycle,
   type ResolvedClass,
   SESSION_SLOT_TTL_MS,
   SpawnError,
@@ -1306,6 +1307,143 @@ describe('native connector', () => {
     foreign: 'tmux',
     idRe: /^native-[0-9a-f]{8}$/,
     capabilities: { attach: false, respawn: true, supervisor: 'none' },
+  });
+});
+
+/** Exit-harvest learn/retro artifact check (spec bro-xkv42.2): a clean
+ *  exit with no learn/retro evidence persists `learnCheck: 'miss'` on
+ *  the registry entry and earns exactly one `learn-miss` journal row;
+ *  qualifying evidence or an honest skip reads 'ok'/'skipped'. The
+ *  check reads the store the run was pinned to — spec.beadsDir, which
+ *  commitSpawn persists as entry.storeDir — so evidence seeds land on
+ *  the fixture's own f.db, exactly where a real worker's `bd` writes
+ *  would. Native-only: the contract suite runs per backend but only
+ *  native exercises the local-store harvest end to end. */
+describe('exit learn/retro artifact check (bro-xkv42.2)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const learnMisses = (f: Fixture) =>
+    readLifecycle(f.main, { kind: 'learn-miss' }).filter(e => e.bead === 'fx-1');
+  /** Spawn + poll to a terminal state; `afterSpawn` runs in the gap
+   *  before the first status() — the only harvest trigger — so store
+   *  evidence can be planted deterministically post-claim. */
+  const exited = async (
+    f: Fixture,
+    c: AgentConnector,
+    program: string,
+    afterSpawn?: () => void
+  ) => {
+    const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', program));
+    afterSpawn?.();
+    await until(async () => {
+      const st = await c.status(info.id);
+      return st.state !== 'running' && st.state !== 'spawned';
+    });
+    return info;
+  };
+
+  test('clean exit, no evidence → miss persisted + one learn-miss row, deduped on re-harvest', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await exited(f, c, 'process.exit(0)');
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.cause, 'ok');
+      // the spawn pinned the fixture store — the check reads it, not
+      // a dir-resolved guess
+      assert.equal(entry.storeDir, f.beadsDir);
+      assert.equal(entry.learnCheck, 'miss');
+      assert.equal(entry.learnEvidence, undefined);
+      assert.equal(learnMisses(f).length, 1);
+      const row = learnMisses(f)[0]!;
+      assert.equal(row.actor, entry.agentId);
+      assert.equal(row.bead, 'fx-1');
+      // a second harvest sees the carried cause — no re-check, no
+      // second journal row
+      await c.status(info.id);
+      await c.list();
+      assert.equal(learnMisses(f).length, 1);
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.learnCheck, 'miss');
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a learn lesson citing the run bead inside the window → ok, no learn-miss row', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      // kv rides beside rows — planting it pre-spawn can't disturb the
+      // claim (claim only touches the row's status/assignee)
+      writeBeads(f.db, [{ id: 'fx-1', status: 'open' }], {
+        kv: {
+          'learn/learn-x': JSON.stringify({
+            id: 'learn-x',
+            trigger: { on: ['session-start'] },
+            lesson: 'always gate before push',
+            evidence: [{ kind: 'bead', ref: 'fx-1' }],
+            confidence: 'tentative',
+            source: 'manual',
+            createdAt: new Date().toISOString(),
+          }),
+        },
+      });
+      const c = conn(f);
+      await exited(f, c, 'process.exit(0)');
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.learnCheck, 'ok');
+      assert.match(entry.learnEvidence ?? '', /learn-x/);
+      assert.equal(learnMisses(f).length, 0);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a learn:-flagged close_reason on the run bead → ok', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      // the row must stay open through the claim — the flag lands after
+      // spawn, before the first harvest-triggering status() read
+      await exited(f, c, 'process.exit(0)', () => {
+        writeBeads(
+          f.db,
+          [
+            {
+              id: 'fx-1',
+              status: 'closed',
+              close_reason: 'shipped\nlearn: run the gate first',
+              closed_at: new Date().toISOString(),
+            },
+          ],
+          {}
+        );
+      });
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.learnCheck, 'ok');
+      assert.match(entry.learnEvidence ?? '', /close_reason/);
+      assert.equal(learnMisses(f).length, 0);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('rate_limited exit → skipped, never a miss', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      await exited(
+        f,
+        c,
+        "console.log('Reached free model rate limit — try again in 90 minutes'); process.exit(1)"
+      );
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.cause, 'rate_limited');
+      assert.equal(entry.learnCheck, 'skipped');
+      assert.match(entry.learnEvidence ?? '', /rate_limited/);
+      assert.equal(learnMisses(f).length, 0);
+    } finally {
+      cleanup(f);
+    }
   });
 });
 
