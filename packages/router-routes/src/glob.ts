@@ -36,22 +36,36 @@ function segmentMatch(pattern: string, text: string): boolean {
   let ti = 0;
   let starP = -1;
   let starT = 0;
+  // every test is a single comparison — the advance order is the
+  // classic algorithm's: '?' wildcard, literal equality (a '*' in the
+  // TEXT still matches a '*' pattern char literally), then star
   while (ti < t.length) {
     const pc = p.at(pi);
-    if (pc !== undefined && (pc === '?' || pc === t.at(ti))) {
+    const tc = t.at(ti);
+    if (pc === '?') {
       pi += 1;
       ti += 1;
-    } else if (pc === '*') {
+      continue;
+    }
+    if (pc === tc) {
+      pi += 1;
+      ti += 1;
+      continue;
+    }
+    if (pc === '*') {
       starP = pi;
       starT = ti;
       pi += 1;
-    } else if (starP !== -1) {
-      pi = starP + 1;
-      starT += 1;
-      ti = starT;
-    } else {
+      continue;
+    }
+    // literal mismatch — or the pattern ran out (pc undefined fails
+    // every test above); only star backtracking can still match
+    if (starP === -1) {
       return false;
     }
+    pi = starP + 1;
+    starT += 1;
+    ti = starT;
   }
   while (p.at(pi) === '*') {
     pi += 1;

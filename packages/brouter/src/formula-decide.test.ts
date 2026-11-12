@@ -783,7 +783,9 @@ describe('the invoke gate (bro-0ykhg.2)', () => {
     const { decision } = await decideByFormula({
       dir: scratchDir(),
       table: FEATURES_TABLE,
-      task: {},
+      // tier carried → pro fits, free rejects, nothing pends — recall's
+      // decision is the whole ambiguity, so T2 stays shut
+      task: { features: { tier: 'pro' } },
       text: 'a task',
       router: { provider: 'fake', mode: 'enforce' },
       formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
@@ -796,6 +798,55 @@ describe('the invoke gate (bro-0ykhg.2)', () => {
     assert.equal(decision.route?.name, 'any');
     assert.equal(decision.picked, 'recall');
     assert.equal(decision.cascade?.decidedBy, 'recall');
+  });
+
+  test('T1 recall decides but pending formula needs still call T2', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro'), complexity: choice('low') });
+    const rows = [
+      { route: 'any', result: 'merged', rounds: 1, at: 1 },
+      { route: 'any', result: 'merged', rounds: 1, at: 2 },
+      { route: 'any', result: 'merged', rounds: 1, at: 3 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      // no features carried → pro/free pend on 'tier' — recall only
+      // voted among RESOLVED candidates, so the pending needs keep the
+      // judge in the running under ambiguous (bro-0ykhg.2 review)
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      recallRows: rows,
+    });
+    assert.equal(calls.length, 1, 'pending needs are ambiguity — T2 must be asked');
+    assert.equal(decision.cascade?.decidedBy, 'judge');
+    assert.equal(decision.route?.name, 'pro');
+  });
+
+  test('a judge result with no confident answer decides nothing — rules stand', async () => {
+    const { judge } = fakeJudge(
+      { tier: choice('pro'), complexity: choice('low') },
+      { lowConfidence: ['tier', 'complexity'] }
+    );
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+    });
+    // every answer sat in lowConfidence — nothing trusted fed the pick,
+    // so the trace must not claim the judge decided (bro-0ykhg.2 review)
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'rules');
   });
 
   test('T1 recall decides but invoke=always still asks the judge', async () => {
@@ -851,7 +902,7 @@ describe('the invoke gate (bro-0ykhg.2)', () => {
 });
 
 describe('invoke=always yields only to a trusted judge (bro-0ykhg.2 review)', () => {
-  test('shadow mode — decided recall stands, the judge is still asked', async () => {
+  test('shadow mode — decided recall stands', async () => {
     const { judge, calls } = fakeJudge({ tier: choice('pro') });
     const rows = [
       { route: 'any', result: 'merged', rounds: 1, at: 1 },
@@ -861,7 +912,9 @@ describe('invoke=always yields only to a trusted judge (bro-0ykhg.2 review)', ()
     const { decision } = await decideByFormula({
       dir: scratchDir(),
       table: FEATURES_TABLE,
-      task: {},
+      // tier carried → nothing pends, so recall's decision settles the
+      // route even though shadow can never override it
+      task: { features: { tier: 'pro' } },
       text: 'a task',
       router: { provider: 'fake', mode: 'shadow' },
       formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
@@ -875,5 +928,6 @@ describe('invoke=always yields only to a trusted judge (bro-0ykhg.2 review)', ()
     assert.equal(decision.route?.name, 'any');
     assert.equal(decision.picked, 'recall');
     assert.equal(decision.cascade?.decidedBy, 'recall');
+    assert.equal(calls.length, 0, 'a shadow judge cannot override — it is not asked');
   });
 });

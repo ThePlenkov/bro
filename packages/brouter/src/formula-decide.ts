@@ -404,9 +404,13 @@ async function pickByFormula(input: {
 
   // T1 decided and no trusted T2 pick can override it — recall settles
   // the route. invoke=always yields ONLY to an enforce-mode judge that
-  // can actually route; shadow/off/absent judges leave recall standing
+  // can actually route; shadow/off/absent judges leave recall standing.
+  // Pending routes with unresolved needs keep T2 in the running —
+  // recall only voted among resolved candidates (bro-0ykhg.2 review)
+  const pendingNeeds = cascade.pending.some(p => p.needs.length > 0);
+  const t1Settled = cascade.t1Decided !== undefined && !pendingNeeds;
   const t2CanOverride = invoke === 'always' && formulaMode(router) === 'enforce';
-  if (cascade.t1Decided !== undefined && !t2CanOverride) {
+  if (t1Settled && !t2CanOverride) {
     stages.push(stageRecord('T2', [], [], 0, { note: 'skipped — outcome recall already decided' }));
     const decision = resolveRoute(table, task, snapshot, () => cascade.t1Decided, {
       set: { candidates: cascade.candidates, rejected: cascade.rejected },
@@ -584,11 +588,15 @@ async function escalateLowConfidence(input: {
       return null;
     }
     const res = await escJudge.decide(formulaState(text, formula), retry);
-    // merge: confident escalate answers replace low-confidence T2 ones
+    // merge: confident escalate answers replace low-confidence T2 ones —
+    // ONLY keys T2 flagged low-confidence, whether or not T2 emitted an
+    // answer entry for them; a confident T2 answer is never reached
+    // (bro-0ykhg.2 review)
     const mergedAnswers = { ...asked.res.answers };
     const mergedLow = new Set(res.lowConfidence);
+    const lowKeys = new Set(asked.res.lowConfidence);
     for (const [key, answer] of Object.entries(res.answers)) {
-      if (!mergedLow.has(key) && Object.hasOwn(mergedAnswers, key)) {
+      if (!mergedLow.has(key) && lowKeys.has(key)) {
         Object.defineProperty(mergedAnswers, key, {
           value: answer,
           enumerable: true,
@@ -646,9 +654,15 @@ async function decideByQuestions(
   // T1 decided and no trusted T2 pick can override it — recall settles
   // the route; pending routes reject unresolved (no formula answer ever
   // arrived). invoke=always yields ONLY to an enforce-mode judge that
-  // is actually bound — shadow/off/absent judges leave recall standing
+  // is actually bound — shadow/off/absent judges leave recall standing.
+  // Pending routes with unresolved needs are ambiguity the gate already
+  // counted — they keep T2 in the running even when recall decided,
+  // because recall only ever voted among the resolved candidates
+  // (bro-0ykhg.2 review)
+  const pendingNeeds = cascade.pending.some(p => p.needs.length > 0);
+  const t1Settled = cascade.t1Decided !== undefined && !pendingNeeds;
   const t2CanOverride = invoke === 'always' && judge !== undefined && mode === 'enforce';
-  if (cascade.t1Decided !== undefined && !t2CanOverride) {
+  if (t1Settled && !t2CanOverride) {
     decidedBy = 'recall';
     stages.push(stageRecord('T2', [], [], 0, { note: 'skipped — outcome recall already decided' }));
     const set = {
@@ -757,8 +771,14 @@ async function decideByQuestions(
   // evidence orders the survivors when no trusted answer picked, but a
   // judge-decided set keeps the formula's own ordering (fit order for
   // features, score for score). Routes the recall never saw sink to the
-  // tail of the fallback order.
-  const trustedPick = asked !== null && mode === 'enforce';
+  // tail of the fallback order. A judge result with NO confident answer
+  // decided nothing — it is not a trusted pick, T1's ordering still
+  // applies, and the trace must not claim the judge decided
+  // (bro-0ykhg.2 review)
+  const confidentAnswer =
+    asked !== null &&
+    Object.keys(asked.res.answers).some(key => !asked.res.lowConfidence.includes(key));
+  const trustedPick = confidentAnswer && mode === 'enforce';
   const recallRank = new Map(cascade.candidates.map((c, i) => [c.route.name, i]));
   const set = trustedPick
     ? { candidates: filteredSet.candidates, rejected: filteredSet.rejected }
@@ -774,7 +794,7 @@ async function decideByQuestions(
   // who decided — a trusted T2/T3 answer fed the pick; anything else is
   // the rules standing (shadow journals but never routes, a failed
   // judge leaves inputs unresolved, the gate never asked)
-  decidedBy = asked !== null && mode === 'enforce' ? (t3Used ? 'escalate' : 'judge') : 'rules';
+  decidedBy = trustedPick ? (t3Used ? 'escalate' : 'judge') : 'rules';
   const cascadeTrace = { stages, decidedBy };
 
   let decision: RouteDecision;

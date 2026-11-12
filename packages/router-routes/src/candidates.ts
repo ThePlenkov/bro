@@ -235,14 +235,17 @@ function pathConflict(route: Route, task: RouteTask): string | undefined {
  *  Duplicated globs count once, same contract as labels. */
 function pathFit(route: Route, task: RouteTask): { score: number; reasons: string[] } {
   const want = [...new Set(route.match.paths ?? [])];
-  const got = task.paths ?? [];
   const reasons: string[] = [];
   let score = 0;
-  for (const glob of want) {
-    const hit = got.find(path => matchGlob(glob, path));
+  // score the task's PATHS, not the route's globs — the pins are
+  // OR-alternatives, so one task path is one piece of evidence no
+  // matter how many globs it satisfies; redundant overlapping globs
+  // can't inflate the score (bro-0ykhg.2 review)
+  for (const path of task.paths ?? []) {
+    const hit = want.find(glob => matchGlob(glob, path));
     if (hit !== undefined) {
       score += 1;
-      reasons.push(`path~${glob} (${hit})`);
+      reasons.push(`path~${hit} (${path})`);
     }
   }
   return { score, reasons };

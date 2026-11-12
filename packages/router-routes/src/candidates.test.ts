@@ -61,6 +61,30 @@ test('paths — one task path matching one glob is enough', () => {
   assert.ok(names(hit).includes('ui'));
 });
 
+test('paths — overlapping globs cannot double-count one task path', () => {
+  const table = routeTable({
+    kind: 'route',
+    version: 1,
+    routes: {
+      wide: { match: { paths: ['src/**', 'src/*.ts'] }, chain: [{ provider: 'p' }] },
+      narrow: { match: { paths: ['src/*.ts'] }, chain: [{ provider: 'p' }] },
+    },
+  });
+  const set = candidates(table, { paths: ['src/x.ts'] }, {});
+  const wide = set.candidates.find(c => c.route.name === 'wide');
+  const narrow = set.candidates.find(c => c.route.name === 'narrow');
+  // 'src/**' and 'src/*.ts' are OR-alternatives — one task path is one
+  // piece of evidence, so listing redundant globs earns nothing extra
+  // (bro-0ykhg.2 review)
+  assert.equal(wide?.score, 1);
+  assert.equal(wide?.score, narrow?.score);
+  // score follows the task's PATHS — a second matching path adds
+  // evidence even when the globs overlap
+  const two = candidates(table, { paths: ['src/x.ts', 'src/deep/y.ts'] }, {});
+  assert.equal(two.candidates.find(c => c.route.name === 'wide')?.score, 2);
+  assert.equal(two.candidates.find(c => c.route.name === 'narrow')?.score, 1);
+});
+
 test('paths — a task without paths never satisfies the pin', () => {
   const set = candidates(TABLE, { labels: ['ui'] }, {});
   assert.equal(rejected(set, 'ui')?.reason, 'the task carries no paths');
