@@ -116,16 +116,20 @@ describe('local lease store', () => {
 
   test('renew refuses an expired lease whose recorded pid is dead', () => {
     let clock = 1_000;
+    // the holder lives through acquire, then dies inside the stall —
+    // the shape a real holder-death mid-hold takes
+    let pidLive = true;
     const store = localLeaseStore('stall-dead', {
       stateHome: root,
       now: () => clock,
       host: 'local',
-      pidAlive: () => false,
+      pidAlive: () => pidLive,
     });
     const acquired = store.acquire('role/drive', { host: 'local', pid: 1, rig: 'rig' }, 100);
     assert.equal(acquired.ok, true);
     if (!acquired.ok) return;
     clock += 250;
+    pidLive = false;
     assert.equal(store.renew(acquired.lease, 100), undefined);
   });
 
