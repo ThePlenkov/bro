@@ -54,6 +54,8 @@ export interface AskRequest {
   cwd?: string;
   /** the route table the request is routed by — absent = no table */
   routes?: string;
+  /** the routing formula — absent = the table's order plus the model pick */
+  formula?: string;
   /** the explanation's slices — absent = no explanation */
   slices?: ExplainSlice[];
 }
@@ -265,19 +267,22 @@ function fallbackLane(providers: Providers, task: TaskDecision | undefined): Lan
 }
 
 /** The table's verdict for the ask — the task carries no shape, so only
- *  a catch-all route fits it. */
+ *  a catch-all route fits it. The formula, when declared, still asks its
+ *  questions: the answers are what give `match.features` something to
+ *  read. */
 async function tableDecision(
   dir: string,
   table: RouteTable,
   request: AskRequest
 ): Promise<TaskDecision> {
-  const router = loadConfig(dir).brouter?.router;
+  const brouter = loadConfig(dir).brouter;
   return decideRoute({
     dir,
     table,
     task: {},
     text: request.question,
-    router,
+    ...(brouter?.router === undefined ? {} : { router: brouter.router }),
+    ...(request.formula === undefined ? {} : { formula: request.formula }),
   });
 }
 

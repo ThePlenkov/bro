@@ -35,6 +35,10 @@ export interface BrouterConfig {
   models: BrouterModels;
   /** the route table's path — the TOML file the routes live in */
   routes?: string;
+  /** the routing formula's path — the md file whose frontmatter is the
+   *  machine contract (typed questions, hard filters, score weights)
+   *  and whose body is the prose the decision model reads */
+  formula?: string;
   /** the decision model — the judge that picks the route (provider + mode) */
   router?: FleetRouter;
 }
@@ -212,10 +216,12 @@ export function parseBrouter(raw: unknown): BrouterConfig {
     });
   }
   const routes = routeTablePath(bag);
+  const formula = formulaPath(bag);
   const router = decisionModel(bag.router);
   return {
     models,
     ...(routes === undefined ? {} : { routes }),
+    ...(formula === undefined ? {} : { formula }),
     ...(router === undefined ? {} : { router }),
   };
 }
@@ -259,6 +265,22 @@ function routeTablePath(raw: unknown): string | undefined {
   const path = str(value);
   if (path === undefined) {
     console.error('bro.config: brouter.routes must be a path — field dropped');
+  }
+  return path;
+}
+
+/** The routing formula's path — the same contract as the table's. */
+function formulaPath(raw: unknown): string | undefined {
+  if (!isPlainObject(raw)) {
+    return undefined;
+  }
+  const value = raw.formula;
+  if (value === undefined) {
+    return undefined;
+  }
+  const path = str(value);
+  if (path === undefined) {
+    console.error('bro.config: brouter.formula must be a path — field dropped');
   }
   return path;
 }
