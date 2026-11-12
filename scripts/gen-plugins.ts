@@ -253,8 +253,14 @@ function cursorManifest() {
 }
 
 /** ${CURSOR_PLUGIN_ROOT} is a bare token so Cursor expands it before the
- * shell runs. Quoted, so a path with spaces survives. Fallback is bro on
- * PATH. Always exit 0. */
+ * shell runs. Quoted, so a path with spaces survives. The command is the
+ * thin contract every client shares — one root var, one direct run.sh
+ * call, fail-fast: the launcher owns root resolution, the run_bounded
+ * watchdog, the mode fast-paths, and the no-CLI answers, so a
+ * manifest-level `bro hooks` fallback would only bypass all of it
+ * unbounded. permission keeps its no-opinion — Cursor reads empty
+ * stdout as a deny, so a run.sh that cannot exec still answers `ask`.
+ * Always exit 0. */
 function cursorHookCommand(event) {
   // events are code-owned literals today; keep that a checked invariant —
   // the string lands in a shell command, so a future caller passing
@@ -262,9 +268,10 @@ function cursorHookCommand(event) {
   if (!/^[a-z-]+$/.test(event)) {
     throw new Error(`invalid hook event name: ${event}`);
   }
-  const noOpinion =
-    event === 'permission' ? String.raw`else printf '%s\n' '{"permission":"ask"}'; ` : '';
-  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1; then bro hooks ${event} || true; ${noOpinion}fi; exit 0`;
+  if (event === 'permission') {
+    return `"\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" permission || printf '%s\\n' '{"permission":"ask"}'`;
+  }
+  return `"\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true`;
 }
 
 function cursorHook(event, timeout, extra = {}) {
@@ -292,50 +299,29 @@ function cursorHooksJson() {
 }
 
 /** Devin's hook manifest is generated, not hand-written: the event map,
- * matchers, timeouts, and the bounded fallback live here so check:plugins
- * detects any drift instead of linting a JSON file. The command calls
- * `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` directly — the shared launcher owns
- * root resolution AND the watchdog. The fallback (P unset, e.g. an older
- * client that never exported the root var) is a `bro hooks` bounded by a
- * sleep/kill watcher pair — portable where GNU `timeout` is absent
- * (stock macOS), never able to outlive the hook budget. */
+ * matchers, timeouts, and the command shape live here so check:plugins
+ * detects any drift instead of linting a JSON file. Every command is the
+ * thin contract the Claude/Codex manifests already ship — one client
+ * var, one direct `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` call, fail-fast.
+ * The launcher owns plugin-root resolution, the run_bounded watchdog,
+ * the Tier-0 mode fast-paths, and every no-CLI answer; a manifest-level
+ * `bro hooks` fallback would bypass all of it — unbounded where no
+ * watcher wraps it, marginally inside the hook budget where one does —
+ * so there is none. */
 function devinHooksJson() {
-  // fallback anatomy (all three review findings):
-  //  1. `cmd &` under POSIX without job control reads stdin from /dev/null —
-  //     `bro hooks` takes its session payload from fd 0, so the stop gate
-  //     would go blind; fd3 preserves the payload into the async child.
-  //  2. the watcher polls kill -0 once a second and exits on its own the
-  //     tick after bro dies — `wait $w` reaps it with no orphan sleep; fds
-  //     off the hook pipe so a host reading to EOF doesn't eat the budget.
-  //  3. TERM at 8s, `pkill -TERM -P` sweeps bro's direct probe children
-  //     (bd/git) while still attached, KILL at 9s — under the 10s minimum
-  //     hook timeout; pkill absent degrades to the c-only kill.
-  const cmd = event =>
-    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
-    `if [ -x "$P/hooks/run.sh" ]; then "$P/hooks/run.sh" ${event} || true; ` +
-    `elif command -v bro >/dev/null 2>&1; then ` +
-    `( exec 3<&0; bro hooks ${event} <&3 3<&- & c=$!; ` +
-    `( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; ` +
-    `kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
-    `wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; exit 0`;
-  // post-tool is fire-and-forget telemetry — it must never block the
-  // agent's next turn, so neither path may keep the foreground waiting:
-  // stdin is captured to a tempfile first (a detached child cannot read
-  // the parent's pipe once the shell exits), then the hook runs in a
-  // detached subshell. A mktemp or cat failure drops the event: stdin
-  // has already been consumed by cat, so no fallback can replay the
-  // payload. The subshell is redirected off the hook's pipes so a host
-  // reading the hook pipe to EOF is not blocked by the detached work.
+  const cmd = event => `"\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} || true`;
+  // post-tool stays detached (#801): fire-and-forget telemetry must never
+  // block the agent's next turn — stdin is captured to a tempfile first
+  // (a detached child cannot read the parent's pipe once the shell
+  // exits), then run.sh runs in a subshell redirected off the hook's
+  // pipes so a host reading to EOF is not blocked by the detached work.
+  // A mktemp or cat failure drops the event: stdin has already been
+  // consumed by cat, so no fallback can replay the payload.
   const cmdDetached = event =>
-    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
-    `if [ -x "$P/hooks/run.sh" ]; then ` +
     `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
-    `("$P/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
-    `else "$P/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; ` +
-    `elif command -v bro >/dev/null 2>&1; then ` +
-    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
-    `( bro hooks ${event} < "$_f" >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null; rm -f "$_f" ) </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
-    `else ( exec 3<&0; bro hooks ${event} <&3 3<&- >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; fi; exit 0`;
+    `("\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & ` +
+    `else rm -f "$_f"; fi; ` +
+    `else "\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; exit 0`;
   const hook = (event, timeout, matcher = '', command = cmd) => ({
     matcher,
     hooks: [{ type: 'command', command: command(event), timeout }],
