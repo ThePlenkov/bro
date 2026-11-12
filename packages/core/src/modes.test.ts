@@ -227,6 +227,11 @@ describe('parseModeCommand', () => {
     assert.equal(parseModeCommand('bro mode code --session s1'), null);
     assert.equal(parseModeCommand('bro mode code --host claude'), null);
     assert.equal(parseModeCommand('bro mode code --json'), 'code'); // --json is a display flag, still a set
+    // --help prints help and sets nothing — binding it would pin a mode
+    // the CLI never applied
+    assert.equal(parseModeCommand('bro mode code --help'), null);
+    assert.equal(parseModeCommand('bro mode code -h'), null);
+    assert.equal(parseModeCommand('bro mode --help'), null);
     assert.equal(parseModeCommand('bro mode code && rm -rf /'), null);
     assert.equal(parseModeCommand('bro mode code; echo hi'), null);
     assert.equal(parseModeCommand('echo bro mode code'), null);

@@ -318,7 +318,11 @@ function modeCommandTarget(rest: string): string | null {
   // name (a second positional is malformed usage — doubt = no bind)
   const pos: string[] = [];
   for (const t of tokens) {
-    if (t === '--json' || t === '--help' || t === '-h') {
+    // --json is a harmless output modifier; --help/-h are NOT ignored —
+    // the CLI prints help and sets nothing, so binding here would pin a
+    // mode the user never applied. They fall through to the unknown-
+    // flag veto below (doubt = no bind).
+    if (t === '--json') {
       continue;
     }
     if (t.startsWith('-')) {

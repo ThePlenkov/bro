@@ -651,14 +651,19 @@ if [ -n "${HOOK_SPOOL_HOST:-}" ] && [ "$HOOK_SPOOL_HOST" != "unknown" ] \
       # `modes` defers to Node — hooks.js resolves the section,
       # materializes the file, and updates the ledger. HOOK_MODE stays
       # empty = unrestricted = today's behavior until the file exists.
-      _mdirs=$PWD
-      _mgit=$(git -C "$PWD" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+      # The base is the same one Node's hookProjectDir picks for
+      # non-cursor hosts (DEVIN_PROJECT_DIR ?? cwd) — probing $PWD
+      # alone would miss modes.default whenever the host runs the hook
+      # outside the project dir.
+      _mbase=${DEVIN_PROJECT_DIR:-$PWD}
+      _mdirs=$_mbase
+      _mgit=$(git -C "$_mbase" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
       case "$_mgit" in
         /*) _mroot=${_mgit%/*} ;;
-        ?*) _mroot=$PWD/$_mgit; _mroot=${_mroot%/*} ;;
+        ?*) _mroot=$_mbase/$_mgit; _mroot=${_mroot%/*} ;;
         *)  _mroot= ;;
       esac
-      [ -n "$_mroot" ] && [ "$_mroot" != "$PWD" ] && _mdirs="$_mdirs
+      [ -n "$_mroot" ] && [ "$_mroot" != "$_mbase" ] && _mdirs="$_mdirs
 $_mroot"
       _mfound=
       while IFS= read -r _md; do
