@@ -330,6 +330,30 @@ function modeCommandTarget(rest: string): string | null {
   return pos.length === 1 ? pos[0]! : null;
 }
 
+/** `-p`/`--package` in every spelling npx accepts — the package-set
+ *  selector means `bro` in the argv is not necessarily what runs.
+ *  Mirrors the cli's isSelfToolCommand constants (kept local: core
+ *  cannot import the command layer). */
+const MODE_NPX_PACKAGE_RE = /^(?:-p|--package)(?:=|$)/;
+
+/** Flags that take no value and change nothing about what runs —
+ *  the only flags allowed between `npx` and its executable. */
+const MODE_NO_VALUE_NPX_FLAGS = new Set(['-y', '--yes', '--no-install', '-q', '--quiet']);
+
+/** The index of the executable npx will run within `tokens` (the argv
+ *  AFTER `npx`), or -1 — same contract as the cli's npxExecutable: a
+ *  package override vetoes, and the first token that is not a known
+ *  no-value flag must be the executable (a flag in its place can
+ *  rename the run). Tokenized, not regex — the `npx [flags]* bro`
+ *  shape is ReDoS-prone (js/redos). */
+function modeNpxExecIndex(tokens: string[]): number {
+  if (tokens.some(t => MODE_NPX_PACKAGE_RE.test(t))) {
+    return -1;
+  }
+  const i = tokens.findIndex(t => !MODE_NO_VALUE_NPX_FLAGS.has(t));
+  return i >= 0 && !tokens[i]!.startsWith('-') ? i : -1;
+}
+
 /** A shell command that IS a `bro mode <name>` invocation → the mode it
  *  sets ('off' → 'observe'), or null. The post-tool hook binds this to
  *  the calling session — the CLI can't always see session env from an
@@ -338,16 +362,35 @@ export function parseModeCommand(cmd: string): Mode | null {
   if (MODE_CMD_FORBIDDEN.test(cmd)) {
     return null;
   }
-  // `bro mode …` or `npx [flags] [@broject/]bro[@ver] mode …` at command
-  // start — mirrors isSelfToolCommand's two accepted spellings
-  const m =
-    /^\s*(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+mode\b(.*)$/i.exec(
-      cmd
-    );
-  if (m === null) {
+  // `bro mode …` or `npx [no-value flags] [@broject/]bro[@ver] mode …` at
+  // command start — the two spellings isSelfToolCommand accepts, parsed
+  // as tokens so no quantified regex group can backtrack exponentially.
+  const tokens = cmd
+    .trim()
+    .split(/\s+/)
+    .filter(t => t !== '');
+  if (tokens.length === 0) {
     return null;
   }
-  const target = modeCommandTarget(m[1] ?? '');
+  const head = tokens[0]!.toLowerCase();
+  let rest: string[];
+  if (head === 'bro') {
+    rest = tokens.slice(1);
+  } else if (head === 'npx') {
+    const afterNpx = tokens.slice(1);
+    const execIdx = modeNpxExecIndex(afterNpx);
+    const exec = execIdx >= 0 ? afterNpx[execIdx] : undefined;
+    if (exec === undefined || !/^(?:@broject\/)?bro(?:@[\w.:-]+)?$/i.test(exec)) {
+      return null;
+    }
+    rest = afterNpx.slice(execIdx + 1);
+  } else {
+    return null;
+  }
+  if (rest.length === 0 || rest[0]!.toLowerCase() !== 'mode') {
+    return null;
+  }
+  const target = modeCommandTarget(rest.slice(1).join(' '));
   if (target === null) {
     return null;
   }
