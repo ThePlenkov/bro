@@ -7,6 +7,7 @@
  *   bro providers test <name>         smoke-test an ACP provider connection
  */
 import { execFile as execFileCb } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -15,6 +16,7 @@ import {
   hasHelpFlag,
   isQualifiedRouteId,
   loadConfig,
+  loadConfigLayers,
   printUsage,
   resolveModelRoute,
   globalConfigDir,
@@ -54,20 +56,18 @@ function globalConfigJsonPath(): string {
   return join(globalConfigDir(), 'config.json');
 }
 
-// per-process counter — pid+ms alone collide when two writes land in the
-// same millisecond, and 'wx' below turns that collision into an EEXIST
-// that must not delete the other write's tmp
-let tmpCounter = 0;
-
 function writeConfigJsonAtomic(path: string, cfg: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
+  // unguessable tmp name — pid+ms are predictable, and a predictable tmp
+  // path invites a pre-planted symlink or squatter file; 'wx'/O_EXCL
+  // already refuses to follow one, but an unpredictable name removes
+  // the race window entirely
   const tmp = join(
     dirname(path),
-    `.bro.config.json.tmp.${process.pid}.${Date.now()}.${tmpCounter++}`
+    `.bro.config.json.tmp.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
   );
   try {
-    // 'wx' (O_CREAT|O_EXCL) + 0600 — a predictable tmp name must never
-    // follow a pre-existing symlink into an attacker-chosen file
+    // 'wx' (O_CREAT|O_EXCL) + 0600 — never follow a pre-existing symlink
     writeFileSync(
       tmp,
       `${JSON.stringify(cfg, null, 2)}
@@ -76,8 +76,8 @@ function writeConfigJsonAtomic(path: string, cfg: unknown): void {
     );
     renameSync(tmp, path);
   } catch (err) {
-    // an EEXIST means the tmp belongs to someone else — never rm a file
-    // this call did not create
+    // an EEXIST means the tmp name collided with a live write — never
+    // rm a file this call did not create
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
       try {
         rmSync(tmp, { force: true });
@@ -296,37 +296,42 @@ interface ParsedAdd {
   force: boolean;
 }
 
-function parseAddArgs(argv: string[]): ParsedAdd {
-  let preset: string | undefined;
-  let name: string | undefined;
-  let global = false;
-  let force = false;
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a === '--global') {
-      global = true;
-      continue;
-    }
-    if (a === '--force') {
-      force = true;
-      continue;
-    }
-    if (a === '--name') {
-      i++;
-      if (i >= argv.length) die('missing value for --name');
-      name = argv[i]!;
-      continue;
-    }
-    if (a.startsWith('-')) {
-      die(`unknown flag ${a}`);
-    }
-    if (preset === undefined) {
-      preset = a;
-      continue;
-    }
+const ADD_BOOL_FLAGS: Record<string, 'global' | 'force'> = {
+  '--global': 'global',
+  '--force': 'force',
+};
+
+/** Applies one argv token to `parsed`; returns the index of the last
+ *  token consumed (a `--name <value>` pair consumes two). */
+function applyAddArg(parsed: ParsedAdd, argv: string[], i: number): number {
+  const a = argv[i]!;
+  const boolFlag = ADD_BOOL_FLAGS[a];
+  if (boolFlag !== undefined) {
+    parsed[boolFlag] = true;
+    return i;
+  }
+  if (a === '--name') {
+    const value = argv[i + 1];
+    if (value === undefined) die('missing value for --name');
+    parsed.name = value;
+    return i + 1;
+  }
+  if (a.startsWith('-')) {
+    die(`unknown flag ${a}`);
+  }
+  if (parsed.preset !== undefined) {
     die(`unexpected argument ${a}`);
   }
-  return { preset, name, global, force };
+  parsed.preset = a;
+  return i;
+}
+
+function parseAddArgs(argv: string[]): ParsedAdd {
+  const parsed: ParsedAdd = { global: false, force: false };
+  for (let i = 0; i < argv.length; i++) {
+    i = applyAddArg(parsed, argv, i);
+  }
+  return parsed;
 }
 
 /** Shadow check for `bro providers add` — returns the conflicting
@@ -344,6 +349,23 @@ function addConfigShadow(global: boolean, dir: string): string | undefined {
 function getAddConfigPath(global: boolean): string {
   const dir = global ? globalConfigDir() : process.cwd();
   return global ? globalConfigJsonPath() : projectConfigPath(dir);
+}
+
+/** Names the higher-precedence config file whose `providers.<name>`
+ *  entry shadows what `add` just wrote — undefined when nothing does.
+ *  A `--global` write sits below project+local; a project write sits
+ *  below local only. */
+function addShadowedBy(global: boolean, name: string): string | undefined {
+  const { layers } = loadConfigLayers(process.cwd());
+  for (const hit of layers) {
+    const outranks = global ? hit.layer !== 'global' : hit.layer === 'local';
+    if (!outranks) continue;
+    const providers = hit.raw.providers;
+    if (isPlainObject(providers) && Object.hasOwn(providers, name)) {
+      return hit.file;
+    }
+  }
+  return undefined;
 }
 
 async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
@@ -369,7 +391,7 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     const providers = isPlainObject(cfg.providers)
       ? { ...(cfg.providers as Record<string, unknown>) }
       : {};
-    if (Object.prototype.hasOwnProperty.call(providers, providerName) && !parsed.force) {
+    if (Object.hasOwn(providers, providerName) && !parsed.force) {
       die(`providers.${providerName} already exists — use --force to overwrite`);
     }
     const entry: ProviderEntry = { type: 'acp', command: p.command };
@@ -389,6 +411,12 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     }
     writeConfigJsonAtomic(path, cfg);
     console.log(`added providers.${providerName} (${parsed.preset}) → ${path}`);
+    const shadowedBy = addShadowedBy(parsed.global, providerName);
+    if (shadowedBy !== undefined) {
+      console.error(
+        `bro providers: warning: ${shadowedBy} defines providers.${providerName} — it shadows the entry just written to ${path}`
+      );
+    }
   });
 }
 
