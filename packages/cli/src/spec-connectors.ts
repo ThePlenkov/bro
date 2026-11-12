@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { loadConfig, type Connector, type SpecNode, type SpecStore } from '@broject/core';
 import {
   findSpec,
+  hasSpecDoc,
   hasSpecFile,
   indexSpecDir,
   repoRoot,
@@ -49,7 +50,9 @@ export const nativeSpecConnector: Connector = {
       return false;
     }
     const base = specDirAbs(dir, loadConfig(dir).sdd.dir);
-    return base !== null && existsSync(base);
+    // a tree carrying *.spec.md belongs to the brose connector — its
+    // merged view still serves the legacy files beside them
+    return base !== null && existsSync(base) && !hasSpecDoc(base);
   },
   specs(ctx) {
     const { dir: specDir } = loadConfig(ctx.dir).sdd;

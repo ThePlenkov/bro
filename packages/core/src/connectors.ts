@@ -638,18 +638,19 @@ export interface FacadeOpts {
  *  the same for a later registerConnector. */
 const pickMemo = new Map<string, Connector>();
 
-/** Ambiguity warning policy — a non-default provider silently winning
- *  (dir/remote claim) deserves a pin hint, as does a bare fallback when
- *  NO provider declares a matcher. When a matchDir exists but none
- *  claimed, registry-first is the designed default (specs: bare repo →
- *  native), not ambiguity the user should be nagged about. */
+/** Ambiguity warning policy — only the bare eligible[0] fallback
+ *  deserves a pin hint: a remote or project-layout claim is the
+ *  designed winner, and a designed default (registry-first when
+ *  matchers exist but none claimed, e.g. specs: bare repo → native)
+ *  is settled, not a coin flip. Per-facade opt-ins count the same way
+ *  for this kind — they're name-only alternatives here. */
 function warnIfAmbiguous(
   kind: string,
   providers: Connector[],
   pick: Connector,
-  remoteMatched: boolean
+  claimed: boolean
 ): void {
-  if (remoteMatched || providers.length <= 1) {
+  if (claimed || providers.length <= 1) {
     return;
   }
   const designedDefault = pick === providers[0] && providers.some(c => c.matchDir !== undefined);
@@ -722,7 +723,9 @@ function pickConnectorAuto<K extends keyof FacadeMap>(
         : `every "${kind}" provider is opt-in — set connectors.${kind} in bro.config.json`
     );
   }
-  warnIfAmbiguous(kind, providers, pick, remote !== undefined);
+  // a remote or project-layout claim is the designed winner, not an
+  // ambiguity — the warning exists for the bare eligible[0] fallback
+  warnIfAmbiguous(kind, providers, pick, remote !== undefined || dir !== undefined);
   pickMemo.set(key, pick);
   return pick;
 }

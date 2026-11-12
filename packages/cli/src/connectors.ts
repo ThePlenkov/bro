@@ -81,11 +81,11 @@ registerConnector(guardConnector);
 registerConnector(mailboxConnector);
 registerConnector(busConnector);
 // specs facade providers — registry order is detection precedence:
-// `brose` first (it claims trees carrying *.spec.md Brotocol docs and
-// defers to tool layouts), then native (its matchDir claims the
-// configured sdd.dir), tool-layout matchers, agent last (explicit pick
-// only, never detects)
-registerConnector(specConnector);
+// native first so a bare repo keeps the historical default, then the
+// tool-layout matchers; `brose` registers LAST among them — its
+// matchDir claims trees carrying *.spec.md Brotocol docs (native now
+// defers on the same signal), and the no-match fallback stays native.
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c);
 }
+registerConnector(specConnector);
