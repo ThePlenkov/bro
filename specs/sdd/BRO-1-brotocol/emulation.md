@@ -271,3 +271,20 @@ of KEY-N protocol docs and ~340 legacy bead specs.
   unreachable through the emit path. Session-start/promptSubmit
   nudges still carry the signal; the gate-mode stop block needs
   same-aspect concatenation or its own aspect.
+
+## Run 8: prompt submit — dedup nudge (real)
+
+- Setup: transient claimed bead with no `spec:` link, `sdd.mode=gate`,
+  `modes.default=code`, fresh session (no prior nudge stamp).
+- First `bro hooks prompt` (session/prompt payload) → nudge emitted
+  once: `SDD: claimed beads without a spec: <bead> … — write a spec
+  (bro spec new), add a spec: link, or label 'trivial'` — the
+  `brose` connector's remedy text.
+- Repeat submit with the same missing set → silent (dedup stamp
+  holds); the nudge re-arms only when the claimed-without-spec set
+  changes. Probe bead closed afterwards; marker/stamp residue
+  cleaned from the common hooks dir.
+- All three SDD hook surfaces now verified live: sessionStart
+  (Run 6 replay), promptSubmit (this run), stopGate (Run 7 — block
+  carries claims + SDD reasons concatenated after the same-aspect
+  arbitration fix, bro-3bgbs / PR #1035).
