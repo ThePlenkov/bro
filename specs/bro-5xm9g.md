@@ -103,9 +103,11 @@ sessions from `named`/`fingerprint`/`none` in the serve-turns ledger.
 `CATALOG_TTL_MS` (60 s) on the `ProviderLane`. Repeated reads inside the
 window — a client's startup burst, back-to-back live-check invocations
 — collapse to one `session/new`; failures are never cached, so a lane
-that recovers is re-read on the next request. The catalog is live data
-(agent `configOptions`), so the TTL is deliberately short: it kills the
-burst, not the freshness.
+that recovers is re-read on the next request. A read already in flight
+is shared (`catalogInflight` single-flight): a burst that lands before
+the first read completes still pays one `session/new`, not one per
+request. The catalog is live data (agent `configOptions`), so the TTL
+is deliberately short: it kills the burst, not the freshness.
 
 ## Contract
 
@@ -113,7 +115,7 @@ burst, not the freshness.
 | --- | --- | --- |
 | `POST /v1/messages` + `x-bro-probe` | keyless/fingerprint → fresh session per probe | `probe:<lane>` retained session; warm probes `session_reused:true`, `probe:true` |
 | probe on a walled lane | session-open refusal after peer spawn | 429 before `wire.link` — zero session, zero spawn |
-| `GET /v1/models` | `session/new` + child spawn per lane per read | per-lane 60 s success cache |
+| `GET /v1/models` | `session/new` + child spawn per lane per read | per-lane 60 s success cache, single-flight cold reads |
 | every other turn | unchanged | unchanged |
 
 ## Tests
@@ -129,6 +131,8 @@ burst, not the freshness.
 - `keyNs('probe:x') === 'probe'`;
 - `GET /v1/models` twice inside the TTL costs one catalog read
   (`fake.sessions.length === 1` across both);
+- concurrent cold `/v1/models` reads share the in-flight catalog read —
+  `Promise.all` fetches still cost `fake.sessions.length === 1`;
 - the live-check script's client env carries `x-bro-probe`.
 
 ## Out of scope
