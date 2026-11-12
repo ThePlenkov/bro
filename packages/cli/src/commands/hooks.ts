@@ -2150,26 +2150,31 @@ async function emitStopGate(input: HookInput): Promise<void> {
  *  armed the aspect, not the individual probe, so same-aspect blocks
  *  concatenate instead of the registry-first shadowing the rest
  *  (bro-3bgbs — the claims gate's 'task' block used to make the SDD
- *  spec-missing block unreachable). The aspect's one-shot is spent
- *  once for the joined block; a spent marker demotes every block to a
- *  hint, and every non-block verdict's hint rides along so a block
- *  still drops them (they journal as verdict rows regardless). */
+ *  spec-missing block unreachable). Groups key on the aspect itself,
+ *  not adjacency — connector-owned aspects share the fallback rank and
+ *  can interleave. The aspect's one-shot is spent once for the joined
+ *  block; a spent marker demotes every block to a hint, and every
+ *  non-block verdict's hint rides along so a block still drops them
+ *  (they journal as verdict rows regardless). */
 export function stopGateOutcome(
   contributions: GateContribution[],
   armed: Set<string>,
   sessionId: string
 ): { block?: string; hints: string[] } {
   const hints: string[] = [];
-  for (let i = 0; i < contributions.length; ) {
-    // same-aspect contributions sit adjacent after the rank sort —
-    // they are one gate, not competitors
-    let j = i + 1;
-    while (j < contributions.length && contributions[j]!.aspect === contributions[i]!.aspect) {
-      j++;
+  const aspects: string[] = [];
+  const byAspect = new Map<string, GateContribution[]>();
+  for (const c of contributions) {
+    let group = byAspect.get(c.aspect);
+    if (group === undefined) {
+      group = [];
+      byAspect.set(c.aspect, group);
+      aspects.push(c.aspect);
     }
-    const group = contributions.slice(i, j);
-    i = j;
-    const aspect = group[0]!.aspect;
+    group.push(c);
+  }
+  for (const aspect of aspects) {
+    const group = byAspect.get(aspect)!;
     if (!armed.has(aspect)) {
       for (const c of group) {
         if (c.passive !== undefined) {

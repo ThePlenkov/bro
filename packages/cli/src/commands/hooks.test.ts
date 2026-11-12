@@ -444,6 +444,21 @@ describe('stopGateOutcome', () => {
     });
   });
 
+  test('same-aspect blocks merge even when interleaved at the fallback rank', () => {
+    const { root, main } = initRepo('bro-stop-interleave-');
+    inside(main, root, () => {
+      // connector-owned aspects share the fallback rank — 'qa' can sit
+      // non-adjacent to itself across 'qb'; it is still ONE gate
+      const contributions: GateContribution[] = [
+        { aspect: 'qa', block: 'qa reason one' },
+        { aspect: 'qb', armedHint: 'qb ambient' },
+        { aspect: 'qa', block: 'qa reason two' },
+      ];
+      const out = stopGateOutcome(contributions, new Set(['qa']), 'outcome-interleave');
+      assert.equal(out.block, 'qa reason one\nqa reason two');
+    });
+  });
+
   test('unarmed aspects stay passive; armed clean contributions show armedHint', () => {
     const { root, main } = initRepo('bro-stop-passive-');
     inside(main, root, () => {
