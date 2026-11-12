@@ -12,8 +12,8 @@
  * this id".
  *
  * The `brose` connector (Brotocol spec protocol + Brose templates,
- * `@broject/spec`) registers ahead of this list in connectors.ts — it
- * claims trees that carry `*.spec.md` docs. The legacy spec-dir index
+ * `@broject/spec`) registers last in connectors.ts — `native` defers
+ * to it on `*.spec.md` trees via matchDir. The legacy spec-dir index
  * helpers it shares with `native` live in `@broject/spec`.
  */
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
