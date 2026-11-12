@@ -533,16 +533,25 @@ export function labelOutcome(
   return row.rounds === 1 ? 'success' : 'failure';
 }
 
-/** Read verified terminal outcomes inside the window and reduce them
- *  to P(success | route, features). Sync over an already-open db —
- *  the seam .7 binds as OutcomeStatsSource. */
-export async function outcomeStats(
+/** The reduce half's query — the scope conditions (context, verified,
+ *  window, table/formula hashes) already ran at fetch; these are the
+ *  JS-side ones: the route, the feature bucket, the success predicate. */
+export type OutcomeStatsReduce = Pick<
+  OutcomeStatsQuery,
+  'route' | 'features' | 'featureKeys' | 'success'
+>;
+
+/** The stats row fetch — verified terminal outcomes inside the window
+ *  and the declared scope (context, route, table/formula hashes). The
+ *  feature bucket and the labels are NOT applied here: they reduce in
+ *  JS so the .7 adapter can fetch once per decision and score every
+ *  candidate synchronously through reduceOutcomeStats. */
+export async function outcomeStatsRows(
   db: StoreFace['db'],
   query: OutcomeStatsQuery
-): Promise<OutcomeStats> {
+): Promise<StatsRow[]> {
   const now = query.now ?? Date.now();
   const since = query.since ?? now - OUTCOME_WINDOW_MS;
-  const predicate = query.success ?? DEFAULT_SUCCESS_PREDICATE;
   const clauses = [
     eq(outcomes.contextId, query.contextId),
     eq(outcomes.verified, 1),
@@ -552,7 +561,7 @@ export async function outcomeStats(
   if (query.tableHash !== undefined) clauses.push(eq(outcomes.tableHash, query.tableHash));
   if (query.formulaHash !== undefined) clauses.push(eq(outcomes.formulaHash, query.formulaHash));
 
-  const rows = (await db
+  return (await db
     .select({
       decisionId: outcomes.decisionId,
       route: outcomes.route,
@@ -565,7 +574,16 @@ export async function outcomeStats(
     })
     .from(outcomes)
     .where(and(...clauses))) as StatsRow[];
+}
 
+/** The stats reduction — route filter, canonical feature bucket, the
+ *  shared success predicate, the means. Pure and synchronous: the .7
+ *  OutcomeStatsSource adapter runs it per candidate over rows fetched
+ *  once. `route` re-checks in JS so a fetch without it (the adapter's
+ *  per-decision prefetch) still scopes per candidate; a fetch that
+ *  already applied it (outcomeStats) makes the check a no-op. */
+export function reduceOutcomeStats(rows: StatsRow[], query: OutcomeStatsReduce): OutcomeStats {
+  const predicate = query.success ?? DEFAULT_SUCCESS_PREDICATE;
   const keys =
     query.featureKeys !== undefined
       ? query.featureKeys
@@ -584,9 +602,11 @@ export async function outcomeStats(
   let wallN = 0;
 
   for (const row of rows) {
+    if (query.route !== undefined && row.route !== query.route) continue;
     // bucket filter — only when the caller conditioned on features
-    if (wantedBucket !== undefined) {
-      if (featureBucket(row.featuresJson, keys!) !== wantedBucket) continue;
+    // (wantedBucket is defined exactly when keys is)
+    if (wantedBucket !== undefined && keys !== undefined) {
+      if (featureBucket(row.featuresJson, keys) !== wantedBucket) continue;
     }
     const label = labelOutcome(row, predicate);
     if (label === 'success') successes += 1;
@@ -614,6 +634,16 @@ export async function outcomeStats(
     costUsd: costN === 0 ? null : costSum / costN,
     wallSec: wallN === 0 ? null : wallSum / wallN / 1000,
   };
+}
+
+/** Read verified terminal outcomes inside the window and reduce them
+ *  to P(success | route, features) — fetch + reduce, the same answer
+ *  the .7 adapter composes per candidate. */
+export async function outcomeStats(
+  db: StoreFace['db'],
+  query: OutcomeStatsQuery
+): Promise<OutcomeStats> {
+  return reduceOutcomeStats(await outcomeStatsRows(db, query), query);
 }
 
 /** Per-route stats — the `brouter stats outcomes` breakdown: one

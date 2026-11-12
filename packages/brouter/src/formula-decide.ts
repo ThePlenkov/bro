@@ -65,6 +65,13 @@ export interface FormulaTaskDecision {
   snapshot: HealthSnapshot;
   /** false when the ledger could not be read — no wall was applied */
   healthKnown: boolean;
+  /** the effective feature map the formula decided with — the caller's
+   *  `task.features` merged with the trusted answers under `enforce`
+   *  (the task's own map under `shadow`/`off`, and under `pick` where
+   *  no questions exist). This is the map `statsFor` buckets by, so the
+   *  journal stores it as the decision's feature bucket (spec
+   *  bro-0ykhg.7) — absent only on paths that never computed one */
+  features?: Record<string, FeatureValue>;
 }
 
 /** What the formula path needs — the decision path's own inputs plus
@@ -91,7 +98,9 @@ export interface FormulaDecisionInput {
   healthKnown: boolean;
   /** test seam — a ready judge; production binds `decisionJudge` */
   judge?: JudgeFacade;
-  /** test seam — the outcomes read model; .4's store plugs in here */
+  /** test seam — the outcomes read model; decideRoute binds the live
+   *  store's source for `shape: score` (spec bro-0ykhg.7), the Beta(1,1)
+   *  prior stands in when neither is present */
   outcomes?: OutcomeStatsSource;
 }
 
@@ -179,7 +188,7 @@ async function pickByFormula(input: {
     set,
     formula: trace,
   });
-  return { decision, snapshot, healthKnown };
+  return { decision, snapshot, healthKnown, features: task.features ?? {} };
 }
 
 /** The decide() for the question shapes — one call answers every
@@ -344,7 +353,9 @@ async function decideByQuestions(
       );
     }
   }
-  return { decision, snapshot, healthKnown };
+  // the effective features ride the verdict — the journal stores them
+  // as the outcome stats' feature bucket (spec bro-0ykhg.7)
+  return { decision, snapshot, healthKnown, features: effective.features ?? {} };
 }
 
 /** The formula path — parse already happened (the caller owns the loud
@@ -377,7 +388,7 @@ export async function decideByFormula(input: FormulaDecisionInput): Promise<Form
         set,
         formula: trace,
       });
-      return { decision, snapshot, healthKnown };
+      return { decision, snapshot, healthKnown, features: task.features ?? {} };
     }
     return pickByFormula({
       dir,

@@ -26,7 +26,6 @@
  * unavailable store costs the row, never the decision — the id still
  * returns for the pins.
  */
-import { readFileSync } from 'node:fs';
 import type { FleetRouter, HealthSnapshot, JudgeFacade } from '@broject/core';
 import {
   candidates,
@@ -46,8 +45,9 @@ import { newDecisionId } from '@broject/router-store';
 import { journalDecision } from './context.ts';
 import type { DecisionKind } from '@broject/router-store';
 import { decisionJudge } from './decision-model.ts';
-import { decideByFormula } from './formula-decide.ts';
+import { decideByFormula, type FormulaTaskDecision } from './formula-decide.ts';
 import { ledgerHealth } from './ledger.ts';
+import { formulaTextOf, routerOutcomeStats } from './outcome-stats.ts';
 
 /** The verdict for a task — the route, and whether the health was known. */
 export interface TaskDecision {
@@ -83,17 +83,6 @@ function loadFormula(path: string, table: RouteTable): Formula {
   const formula = readFormula(path);
   validateFormulaTable(formula, table, path);
   return formula;
-}
-
-/** The formula file's raw text for the journal — best-effort: the
- *  decision stands even when the snapshot cannot be re-read (the path
- *  still records). */
-function formulaTextOf(path: string): string | undefined {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch {
-    return undefined;
-  }
 }
 
 /** The decision model's pick — the judge over the candidate routes.
@@ -172,24 +161,28 @@ export async function decideRoute(input: {
   links?: DecisionLinks;
 }): Promise<TaskDecision> {
   const { snapshot, known } = await ledgerHealth();
+  // the formula, parsed once — the verdict reads it, the score shape's
+  // stats source hashes it, the journal snapshots it
+  const formula = input.formula === undefined ? undefined : loadFormula(input.formula, input.table);
+  const formulaText = input.formula === undefined ? undefined : formulaTextOf(input.formula);
+  // the score shape's outcome stats — the live read-model over router.db
+  // unless a test seam supplied one; built only for `shape: score`, the
+  // one shape that consumes it (spec bro-0ykhg.7)
+  const outcomes =
+    input.outcomes ??
+    (formula?.shape === 'score'
+      ? await routerOutcomeStats({
+          dir: input.dir,
+          ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
+          table: input.table,
+          ...(formulaText === undefined ? {} : { formulaText }),
+        })
+      : undefined);
   // the verdict — the formula's contract when one is declared, else the
   // table's own order plus the decision model's opinion
-  const verdict =
-    input.formula !== undefined
-      ? await decideByFormula({
-          dir: input.dir,
-          table: input.table,
-          task: input.task,
-          text: input.text,
-          ...(input.router === undefined ? {} : { router: input.router }),
-          formula: loadFormula(input.formula, input.table),
-          formulaPath: input.formula,
-          snapshot,
-          healthKnown: known,
-          ...(input.judge === undefined ? {} : { judge: input.judge }),
-          ...(input.outcomes === undefined ? {} : { outcomes: input.outcomes }),
-        })
-      : await (async () => {
+  const verdict: FormulaTaskDecision =
+    formula === undefined
+      ? await (async (): Promise<FormulaTaskDecision> => {
           const found = candidates(input.table, input.task, snapshot);
           const resolved = found.candidates[0]?.route.name ?? '';
           const named =
@@ -207,9 +200,21 @@ export async function decideRoute(input: {
             snapshot,
             healthKnown: known,
           };
-        })();
+        })()
+      : await decideByFormula({
+          dir: input.dir,
+          table: input.table,
+          task: input.task,
+          text: input.text,
+          ...(input.router === undefined ? {} : { router: input.router }),
+          formula,
+          formulaPath: input.formula,
+          snapshot,
+          healthKnown: known,
+          ...(input.judge === undefined ? {} : { judge: input.judge }),
+          ...(outcomes === undefined ? {} : { outcomes }),
+        });
   const decisionId = newDecisionId();
-  const formulaText = input.formula === undefined ? undefined : formulaTextOf(input.formula);
   const journaled = await journalDecision({
     dir: input.dir,
     kind: input.kind ?? 'route',
@@ -217,16 +222,20 @@ export async function decideRoute(input: {
     ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
     taskText: input.text,
     task: input.task,
-    // the feature bucket — the caller's map when it carries one, else
-    // the task's own declared shape (type/complexity/priority). A
-    // formula's ANSWER-derived features stay out on purpose: they are
-    // volatile model output, replayed through the trace below, not a
-    // stable bucket the stats should group by
-    ...(input.features !== undefined
-      ? { features: input.features }
-      : Object.keys(input.task).length === 0
-        ? {}
-        : { features: input.task as Record<string, string | number | boolean> }),
+    // the feature bucket — a formula decision journals the EFFECTIVE
+    // features it decided and scored with (task.features merged with
+    // the trusted answers): the same map statsFor buckets by, so the
+    // outcome rows this decision later produces join the score shape's
+    // stats (spec bro-0ykhg.7). Formula-less decisions keep the .4
+    // contract: the caller's map when it carries one, else the task's
+    // own declared shape (type/complexity/priority)
+    ...(verdict.features !== undefined
+      ? { features: verdict.features }
+      : input.features !== undefined
+        ? { features: input.features }
+        : Object.keys(input.task).length === 0
+          ? {}
+          : { features: input.task as Record<string, string | number | boolean> }),
     // the surviving candidates — post-filter under a formula
     candidates: verdict.decision.candidates,
     table: input.table,
