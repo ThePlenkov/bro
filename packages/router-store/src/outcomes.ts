@@ -419,6 +419,23 @@ async function syncOutcomeFts(
   }
 }
 
+/** The authority's next monotonic revision for `sourceId` — strictly
+ *  above every revision the source already recorded (the audit log is
+ *  the counter's memory, so a restart never reuses one) and never below
+ *  the wall clock, so revisions minted by unrelated sources still order
+ *  by time. Synchronous: the caller already holds the store open. Two
+ *  reporters racing the same read can still mint the same revision —
+ *  the stale-revision verdict is the detection, the reporter retries
+ *  under a fresh one. */
+export function nextSourceRevision(db: StoreFace['db'], sourceId: string): number {
+  const rows = db.$client
+    .prepare(
+      'select coalesce(max(source_revision), 0) as m from outcome_reports where source_id = ?'
+    )
+    .all(sourceId) as Array<{ m: number }>;
+  return Math.max(Date.now(), Number(rows[0]?.m ?? 0) + 1);
+}
+
 // ---------------------------------------------------------------------------
 // The stats read-model — P(success | route, features)
 // ---------------------------------------------------------------------------

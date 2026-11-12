@@ -29,6 +29,7 @@ import {
   findDecisions,
   linkDecision,
   migrateStore,
+  nextSourceRevision as storeSourceRevision,
   openStore,
   recordOutcome,
   routerStorePath,
@@ -189,9 +190,13 @@ export async function decisionIdsForRun(opts: {
   return [...ids];
 }
 
-/** One delivery attempt — the router acknowledges every non-throw
- *  apply (inserted/updated/pending/retained/duplicate all count: the
- *  report reached the store's audit log). */
+/** One delivery attempt — every non-throw apply counts as delivered:
+ *  inserted/updated/pending/retained/duplicate all mean the report
+ *  reached the store's audit log and the store made its verdict.
+ *  'stale-revision' is the exception — it means a concurrent reporter
+ *  claimed the same revision first, so the outcome row kept the older
+ *  verdict; the intent re-issues under a fresh revision (bounded — a
+ *  revision that keeps losing stays pending for the next reconcile). */
 async function deliverIntent(intent: OutcomeIntent): Promise<boolean> {
   const path = routerStorePath();
   const handle = openStore(path);
@@ -201,27 +206,34 @@ async function deliverIntent(intent: OutcomeIntent): Promise<boolean> {
   try {
     migrateStore(handle.db);
     const token = ensureReporterToken(path);
-    await recordOutcome(
-      handle,
-      {
-        decisionId: intent.decisionId,
-        result: intent.result,
-        ...(intent.rounds === undefined ? {} : { rounds: intent.rounds }),
-        ...(intent.threads === undefined ? {} : { threads: intent.threads }),
-        ...(intent.cost === undefined ? {} : { cost: intent.cost }),
-        ...(intent.tokens === undefined ? {} : { tokens: intent.tokens }),
-        ...(intent.wallMs === undefined ? {} : { wallMs: intent.wallMs }),
-        reporter: intent.reporter,
-        eventId: intent.eventId,
-        sourceId: intent.sourceId,
-        sourceRevision: intent.sourceRevision,
-      },
-      {
-        // bro is the merge authority — the store credential verifies it
-        ...(token === undefined ? {} : { credential: token }),
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const sourceRevision =
+        attempt === 0 ? intent.sourceRevision : storeSourceRevision(handle.db, intent.sourceId);
+      const applied = await recordOutcome(
+        handle,
+        {
+          decisionId: intent.decisionId,
+          result: intent.result,
+          ...(intent.rounds === undefined ? {} : { rounds: intent.rounds }),
+          ...(intent.threads === undefined ? {} : { threads: intent.threads }),
+          ...(intent.cost === undefined ? {} : { cost: intent.cost }),
+          ...(intent.tokens === undefined ? {} : { tokens: intent.tokens }),
+          ...(intent.wallMs === undefined ? {} : { wallMs: intent.wallMs }),
+          reporter: intent.reporter,
+          eventId: intent.eventId,
+          sourceId: intent.sourceId,
+          sourceRevision,
+        },
+        {
+          // bro is the merge authority — the store credential verifies it
+          ...(token === undefined ? {} : { credential: token }),
+        }
+      );
+      if (applied.applied !== 'stale-revision') {
+        return true;
       }
-    );
-    return true;
+    }
+    return false;
   } catch {
     return false;
   } finally {
@@ -260,7 +272,9 @@ export async function linkRunToDecision(
  *  source's highest recorded revision + 1). Date.now() alone collides
  *  inside one millisecond (a loop settling a batch would drop every
  *  report but the first as stale-revision); the store's own audit log
- *  is the counter's memory, so a restart never reuses a revision. */
+ *  is the counter's memory, so a restart never reuses a revision. The
+ *  counter itself lives in router-store — deliverIntent retries under
+ *  it on the handle it already holds. */
 async function nextSourceRevision(sourceId: string): Promise<number> {
   const handle = openStore(routerStorePath());
   if (!handle.ok) {
@@ -268,12 +282,7 @@ async function nextSourceRevision(sourceId: string): Promise<number> {
   }
   try {
     migrateStore(handle.db);
-    const rows = handle.db.$client
-      .prepare(
-        'select coalesce(max(source_revision), 0) as m from outcome_reports where source_id = ?'
-      )
-      .all(sourceId) as Array<{ m: number }>;
-    return Math.max(Date.now(), Number(rows[0]?.m ?? 0) + 1);
+    return storeSourceRevision(handle.db, sourceId);
   } catch {
     return Date.now();
   } finally {
@@ -334,10 +343,29 @@ export async function reportRoutedOutcome(opts: {
       decisionId,
       eventId: eventIdFor({ ...base, decisionId }),
     };
-    appendOutbox(outbox, { type: 'intent', intent });
+    // intent-before-delivery — but a broken outbox must not lose the
+    // verdict: delivery is idempotent by event id, so it proceeds
+    // without the durable copy (loudly) rather than drop the report.
+    // Only an undelivered intent WITH no durable copy is truly lost.
+    let durable = true;
+    try {
+      appendOutbox(outbox, { type: 'intent', intent });
+    } catch (err) {
+      durable = false;
+      console.error(
+        `warning: outcome outbox ${outbox} refused the intent — ` +
+          `${err instanceof Error ? err.message : String(err)}; delivering without the durable copy`
+      );
+    }
     if (await deliverIntent(intent)) {
-      appendOutbox(outbox, { type: 'delivered', eventId: intent.eventId });
       delivered += 1;
+      if (durable) {
+        try {
+          appendOutbox(outbox, { type: 'delivered', eventId: intent.eventId });
+        } catch {
+          /* marker lost — reconcile redelivers as a duplicate-event no-op */
+        }
+      }
     }
   }
   return { intents: decisionIds.length, delivered, decisionIds };
@@ -359,7 +387,11 @@ export async function reconcileOutcomes(
   for (const intent of intents) {
     if (done.has(intent.eventId)) continue;
     if (await deliverIntent(intent)) {
-      appendOutbox(outbox, { type: 'delivered', eventId: intent.eventId });
+      try {
+        appendOutbox(outbox, { type: 'delivered', eventId: intent.eventId });
+      } catch {
+        /* marker lost — the next reconcile redelivers as a no-op */
+      }
       delivered += 1;
     }
   }

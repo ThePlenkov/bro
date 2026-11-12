@@ -29,6 +29,7 @@ export {
   DEFAULT_SUCCESS_PREDICATE,
   expireTaskText,
   labelOutcome,
+  nextSourceRevision,
   outcomeReportLog,
   outcomeStats,
   outcomeStatsByRoute,

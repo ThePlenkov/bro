@@ -12,12 +12,13 @@
  *
  * A bare CLI submission lands as PENDING — stored, never counted —
  * unless it presents the store's reporter credential (`--token` or
- * BROUTER_REPORTER_TOKEN... see below). bro's trusted reporter uses the
- * library seam with its own verification instead.
+ * BRO_ROUTER_REPORTER_TOKEN... see below). bro's trusted reporter uses
+ * the library seam with its own verification instead.
  */
 import { flag, positionals } from '@broject/core';
 import {
   migrateStore,
+  nextSourceRevision,
   openStore,
   OUTCOME_RESULTS,
   recordOutcome,
@@ -117,7 +118,9 @@ export async function runOutcomeCommand(argv: string[]): Promise<void> {
         reporter: 'brouter-cli',
         eventId: flag(argv, '--event') ?? randomUUID(),
         sourceId: 'brouter-cli',
-        sourceRevision: Date.now(),
+        // the store's own monotonic counter — Date.now() alone collides
+        // inside one millisecond and the loser reads as stale-revision
+        sourceRevision: nextSourceRevision(handle.db, 'brouter-cli'),
       },
       {
         ...(token === undefined ? {} : { credential: token }),
