@@ -161,6 +161,11 @@ export async function writeCacheEntry(
         createdAt,
         createdAt + input.ttlMs
       );
+    // house-cleaning in the same transaction — an expired entry is a
+    // miss anyway, and its key_json still carries the task text:
+    // sweeping here bounds that text's stay to the TTL, the same
+    // retention story decisions.task_text keeps (bro-0ykhg.3 review)
+    client.prepare('delete from decision_cache where expires_at <= ?').run(createdAt);
     client.exec('COMMIT');
     tightenStoreFiles(store.path);
     return true;
@@ -191,6 +196,9 @@ export async function invalidateCacheKey(store: StoreFace, keyHash: string): Pro
       )
       .run(keyHash, next);
     client.prepare('delete from decision_cache where key_hash = ?').run(keyHash);
+    // same sweep the write runs — expired rows are misses that still
+    // hold task text; invalidation is already a write transaction
+    client.prepare('delete from decision_cache where expires_at <= ?').run(Date.now());
     client.exec('COMMIT');
     tightenStoreFiles(store.path);
     return true;

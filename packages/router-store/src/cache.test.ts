@@ -125,3 +125,55 @@ test('a rewrite replaces the entry under the same generation', async () => {
   assert.equal(entry?.createdAt, now + 10);
   s.close();
 });
+
+test('expired rows are swept on the next write — text does not outlive its TTL', async () => {
+  const s = await store('sweep');
+  const t0 = 5_000_000;
+  const expiredHash = 'e'.repeat(64);
+  const liveHash = 'l'.repeat(64);
+  // dead at the NEXT write's clock — its key_json still carries task text
+  assert.equal(
+    await writeCacheEntry(s, {
+      ...KEY,
+      keyHash: expiredHash,
+      keyJson: '{"v":1,"task":{"text":"a task that mentioned a token"}}',
+      generation: 0,
+      ttlMs: 1_000,
+      createdAt: t0,
+    }),
+    true
+  );
+  assert.equal(
+    await writeCacheEntry(s, {
+      ...KEY,
+      keyHash: liveHash,
+      generation: 0,
+      ttlMs: 60_000,
+      createdAt: t0 + 2_000,
+    }),
+    true
+  );
+  // the live write's transaction swept the dead row — the text is gone,
+  // not lingering past the TTL (bro-0ykhg.3 review)
+  const rows = s.db.$client.prepare('select key_hash from decision_cache').all() as Array<{
+    key_hash: string;
+  }>;
+  assert.deepEqual(
+    rows.map(r => r.key_hash),
+    [liveHash]
+  );
+  s.close();
+});
+
+test('invalidation sweeps expired rows too', async () => {
+  const s = await store('sweep-invalidate');
+  const t0 = 6_000_000;
+  await writeCacheEntry(s, { ...KEY, generation: 0, ttlMs: 1_000, createdAt: t0 });
+  // invalidating a DIFFERENT key still runs the sweep in its transaction
+  assert.equal(await invalidateCacheKey(s, 'other-key'), true);
+  const row = s.db.$client.prepare('select count(*) as n from decision_cache').get() as {
+    n: number;
+  };
+  assert.equal(row.n, 0);
+  s.close();
+});
