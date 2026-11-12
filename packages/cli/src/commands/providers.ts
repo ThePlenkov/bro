@@ -363,12 +363,6 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     );
   }
   const dir = parsed.global ? globalConfigDir() : process.cwd();
-  const shadow = addConfigShadow(parsed.global, dir);
-  if (shadow !== undefined) {
-    die(
-      `${basename(shadow)} shadows ${basename(shadow, '.ts')}.json — edit providers in ${shadow}`
-    );
-  }
   const path = getAddConfigPath(parsed.global);
   return withFileLock(`${path}.lock`, () => {
     const cfg = readConfigJson(path);
@@ -384,6 +378,15 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     }
     providers[providerName] = entry;
     cfg.providers = providers;
+    // the .ts-shadow check must sit under the lock, immediately before the
+    // write — a bro.config.ts/config.ts created between an outside-lock
+    // check and the rename would shadow the json entry we just reported
+    const shadow = addConfigShadow(parsed.global, dir);
+    if (shadow !== undefined) {
+      die(
+        `${basename(shadow)} shadows ${basename(shadow, '.ts')}.json — edit providers in ${shadow}`
+      );
+    }
     writeConfigJsonAtomic(path, cfg);
     console.log(`added providers.${providerName} (${parsed.preset}) → ${path}`);
   });
