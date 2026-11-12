@@ -39,7 +39,7 @@ import {
   type SessionKey,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
-import { agentOwner } from './proc-owner.ts';
+import { agentOwner } from '@broject/rig';
 
 const USAGE = `usage: bro claim <resource> [--ttl <sec>] [--exclusive|--shared] [--session <sid>] [--host <h>] [--json]
        bro claim release <resource> [--session <sid>] [--host <h>] [--json]

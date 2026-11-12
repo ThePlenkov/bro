@@ -5,3 +5,57 @@ export {
   NEVER_CLAIM_LABELS,
   type ReadyBead,
 } from './ready.ts';
+
+// --- fleet lifecycle: the ownership plane (bro-jamp7 slice 2) -------------
+export {
+  LIVE_MARKER_MS,
+  agentOwner,
+  agentProcessesIn,
+  detailMatches,
+  hooksDirOf,
+  liveWorkDetails,
+  liveWorkEntries,
+  markerLive,
+  markerOwner,
+  ownerTag,
+  processesRootedIn,
+  registryEntryHoldsClaim,
+  registryEntryState,
+  type ProcHit,
+  type WorkEntry,
+} from './proc-owner.ts';
+export {
+  claimLockPath,
+  isLinkedGitDir,
+  worktreeClaim,
+  worktreeClaimInfo,
+  worktreeGitDir,
+  worktreeIdleMs,
+  type WorktreeClaimInfo,
+} from './worktree-claim.ts';
+export {
+  acquireOccupancyLocks,
+  branchSlug,
+  freshOccupancy,
+  greenOccupancy,
+  occupied,
+  occupancyProofs,
+  registryAgents,
+  retireOrphanedWorktree,
+  supervisedBy,
+  supervisorFresh,
+  type FreshOccupancy,
+  type OccProof,
+  type OccupancyCtx,
+} from './occupancy.ts';
+export { ensureFixerWorktree } from './fixer-worktree.ts';
+export {
+  FIXER_LABEL,
+  ensureFixerBead,
+  fixerAttemptSpent,
+  fixerBeadFor,
+  fixerPrFromRef,
+  fixerRef,
+  recordFixerAttempt,
+} from './fixer.ts';
+export { REAP_STATES, selectReapable } from './reap.ts';

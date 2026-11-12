@@ -1313,7 +1313,7 @@ export function worktreeTelemetryDims(dir: string): WorktreeTelemetryDims {
 
 /** The real pin values a backend injects over/around caller env —
  *  BEADS_DIR/BRO_BEAD_ID bind the shared store + claim; BRO_AGENT_ID is
- *  the environ badge proc-owner reads to tell a bro-spawned worker from
+ *  the environ badge @broject/rig's proc-owner reads to tell a bro-spawned worker from
  *  an ambient process; BRO_PROMPT_FILE points at the rendered prompt
  *  artifact prepareSpawn writes. BRO_AGENT/BRO_SESSION_ID/BRO_MOL_ID
  *  are the commit-provenance trailers (bro-fzot): the agent cli name

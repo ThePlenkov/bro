@@ -19,7 +19,7 @@ import { constants as osConstants } from 'node:os';
 import type { Readable } from 'node:stream';
 import { printUsage, taskFinishProbes } from '@broject/core';
 import { envProvenance } from './githooks.ts';
-import { agentOwner } from './proc-owner.ts';
+import { agentOwner } from '@broject/rig';
 
 /** Interleaved stdout+stderr kept for the report — enough for a
  *  verdict digest, never a log replay. */

@@ -107,7 +107,7 @@ import {
   type ProbeResult,
   type ProbeTiming,
 } from '@broject/core';
-import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
+import { agentOwner, markerLive, markerOwner, ownerTag } from '@broject/rig';
 import {
   acquireOrchestratorRole,
   orchestratorRoleHeldBy,
