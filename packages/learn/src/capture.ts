@@ -203,8 +203,8 @@ const scopeKey = (v: string): string => {
 const keepKey = (v: string): boolean => v !== '' && !v.includes('://');
 
 /** The slice of a matchAll/exec yield these readers consume — `m[0]`
- *  and `m.index`. Spelled structurally: a `RegExp*` type token anywhere
- *  in the signature trips the scanners' non-literal-regex heuristic even
+ *  and `m.index`. Spelled structurally: naming the regex match type in
+ *  the signature trips the scanners' non-literal-regex heuristic even
  *  though every pattern stays a call-site literal. */
 interface HeadMatch {
   0: string;
