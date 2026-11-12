@@ -2144,41 +2144,63 @@ async function emitStopGate(input: HookInput): Promise<void> {
   await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP]);
 }
 
-/** One contribution's verdict in priority order: an armed block fires
- *  the session's one-shot for that aspect — a spent marker demotes the
- *  block to a hint the stop-hint dedup keeps from re-waking the host;
- *  an armed-but-clean contribution shows its hint; ambient state stays
- *  passive. */
-function stopGateVerdict(
-  c: GateContribution,
-  armed: Set<string>,
-  sessionId: string
-): { block?: string; hint?: string } {
-  if (!armed.has(c.aspect)) {
-    return { hint: c.passive };
-  }
-  if (c.block) {
-    return takeStopGateBlock(sessionId, c.aspect) ? { block: c.block } : { hint: c.block };
-  }
-  return { hint: c.armedHint ?? c.passive };
-}
-
-/** The contribution walk of the stop gate — first block in aspect
- *  order wins the emit; every non-block verdict's hint rides along so
- *  a block still drops them (they journal as verdict rows regardless). */
-function stopGateOutcome(
+/** The contribution walk of the stop gate — the first ASPECT (in
+ *  GATE_PRIORITY order) holding an armed block wins the emit, and
+ *  every block that aspect produced rides ONE reason: the session
+ *  armed the aspect, not the individual probe, so same-aspect blocks
+ *  concatenate instead of the registry-first shadowing the rest
+ *  (bro-3bgbs — the claims gate's 'task' block used to make the SDD
+ *  spec-missing block unreachable). Groups key on the aspect itself,
+ *  not adjacency — connector-owned aspects share the fallback rank and
+ *  can interleave. The aspect's one-shot is spent once for the joined
+ *  block; a spent marker demotes every block to a hint, and every
+ *  non-block verdict's hint rides along so a block still drops them
+ *  (they journal as verdict rows regardless). */
+export function stopGateOutcome(
   contributions: GateContribution[],
   armed: Set<string>,
   sessionId: string
 ): { block?: string; hints: string[] } {
   const hints: string[] = [];
+  const aspects: string[] = [];
+  const byAspect = new Map<string, GateContribution[]>();
   for (const c of contributions) {
-    const verdict = stopGateVerdict(c, armed, sessionId);
-    if (verdict.block !== undefined) {
-      return { block: verdict.block, hints };
+    let group = byAspect.get(c.aspect);
+    if (group === undefined) {
+      group = [];
+      byAspect.set(c.aspect, group);
+      aspects.push(c.aspect);
     }
-    if (verdict.hint !== undefined) {
-      hints.push(verdict.hint);
+    group.push(c);
+  }
+  for (const aspect of aspects) {
+    const group = byAspect.get(aspect)!;
+    if (!armed.has(aspect)) {
+      for (const c of group) {
+        if (c.passive !== undefined) {
+          hints.push(c.passive);
+        }
+      }
+      continue;
+    }
+    const blockers = group.filter(c => c.block !== undefined);
+    if (blockers.length === 0) {
+      for (const c of group) {
+        const hint = c.armedHint ?? c.passive;
+        if (hint !== undefined) {
+          hints.push(hint);
+        }
+      }
+      continue;
+    }
+    if (takeStopGateBlock(sessionId, aspect)) {
+      return { block: blockers.map(c => c.block!).join('\n'), hints };
+    }
+    for (const c of group) {
+      const hint = c.block ?? c.armedHint ?? c.passive;
+      if (hint !== undefined) {
+        hints.push(hint);
+      }
     }
   }
   return { hints };
