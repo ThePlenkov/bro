@@ -635,6 +635,11 @@ function answerToFeature(
   if (answer.type !== 'score' || !Number.isFinite(answer.score)) {
     return undefined;
   }
+  // the wire contract bounds a score answer to the levels' index range —
+  // 0 = first, N-1 = last; outside it the answer is no answer at all
+  if (answer.score < 0 || answer.score > q.levels.length - 1) {
+    return undefined;
+  }
   return { value: answer.score };
 }
 
@@ -872,7 +877,8 @@ function checkMatchValues(
 }
 
 /** The values one filter's `unless` lists — same typing contract as a
- *  match, except a score question takes finite numbers. */
+ *  match, except a score question takes finite numbers inside the
+ *  levels' index range (0..N-1 — the wire contract for score answers). */
 function checkFilterValues(
   at: TablePath,
   qid: string,
@@ -883,8 +889,17 @@ function checkFilterValues(
   for (const [i, value] of values.entries()) {
     const atValue = at.index(i);
     if (q.type === 'score') {
-      if (typeof value !== 'number') {
-        problems.add(atValue, `question "${qid}" is a score — the value must be a number`);
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        problems.add(atValue, `question "${qid}" is a score — the value must be a finite number`);
+        continue;
+      }
+      // a score answer lives in the levels' index range — a filter value
+      // outside it can never match, so it is dead config, not a rule
+      if (value < 0 || value > q.levels.length - 1) {
+        problems.add(
+          atValue,
+          `question "${qid}" is a score — the value must sit in 0..${q.levels.length - 1}`
+        );
       }
       continue;
     }

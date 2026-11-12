@@ -221,3 +221,16 @@ export function candidates(
   found.sort((a, b) => b.score - a.score);
   return { candidates: found, rejected };
 }
+
+/** The set reordered into the table's DECLARATION order — the order the
+ *  routes appear in the file. Fit order is candidates()' ranking; "table
+ *  order" in the score contract (score.ts — tie-breaks and the skip
+ *  fallback) is declaration order, and the two must not be conflated. */
+export function inTableOrder(set: CandidateSet, table: RouteTable): CandidateSet {
+  const at = new Map(table.routes.map((r, i) => [r.name, i]));
+  const rank = (name: string): number => at.get(name) ?? Number.MAX_SAFE_INTEGER;
+  return {
+    candidates: [...set.candidates].sort((a, b) => rank(a.route.name) - rank(b.route.name)),
+    rejected: set.rejected,
+  };
+}

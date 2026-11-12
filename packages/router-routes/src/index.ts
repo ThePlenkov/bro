@@ -15,6 +15,7 @@
  */
 export {
   candidates,
+  inTableOrder,
   survivingChain,
   type CandidateSet,
   type RejectedRoute,

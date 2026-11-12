@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import type { DecideResult } from '@broject/core';
-import { candidates } from './candidates.ts';
+import { candidates, inTableOrder } from './candidates.ts';
 import {
   applyFormulaFilters,
   FormulaError,
@@ -339,6 +339,30 @@ describe('validateFormulaTable', () => {
       assert.ok(err.problems.some(p => p.includes('not one of')));
     }
   });
+
+  test('a score filter value outside the levels range is a named problem', () => {
+    // effort has 3 levels — a score answer lives in 0..2; 5 can never
+    // match, so the filter would be dead config, not a rule
+    const f = formulaOf({
+      ...VALID_FEATURES,
+      filters: [{ route: 'free-lane', unless: { effort: [5] } }],
+    });
+    try {
+      validateFormulaTable(f, TABLE, 'test');
+      assert.fail('expected a FormulaError');
+    } catch (err) {
+      assert.ok(err instanceof FormulaError);
+      assert.ok(err.problems.some(p => p.includes('0..2')));
+    }
+  });
+
+  test('a score filter value inside the levels range validates', () => {
+    const f = formulaOf({
+      ...VALID_FEATURES,
+      filters: [{ route: 'free-lane', unless: { effort: [1.5, 2] } }],
+    });
+    validateFormulaTable(f, TABLE, 'test');
+  });
 });
 
 describe('formulaQuestions + formulaAnswersToFeatures', () => {
@@ -443,6 +467,20 @@ describe('formulaQuestions + formulaAnswersToFeatures', () => {
     };
     const { features } = formulaAnswersToFeatures(formula, res);
     assert.equal(features.complexity, undefined);
+  });
+
+  test('a score outside the levels range is unusable', () => {
+    // effort has 3 levels — the wire contract bounds the answer to 0..2
+    const res: DecideResult = {
+      ...decide,
+      answers: {
+        ...decide.answers,
+        effort: { type: 'score', score: 7, probabilities: {}, confidence: 0.9, decidedBy: 'test' },
+      },
+    };
+    const { features, answers } = formulaAnswersToFeatures(formula, res);
+    assert.equal(features.effort, undefined);
+    assert.equal(answers.find(a => a.id === 'effort')?.value, '(unusable answer)');
   });
 
   test('mergeTaskFeatures conflicts fail loud, agreements pass', () => {
@@ -624,6 +662,51 @@ describe('scoreCandidates', () => {
     assert.match(result.skipped ?? '', /gamma/);
   });
 
+  test('a non-finite measure skips scoring like an unknown one', () => {
+    // NaN cost would poison the arithmetic — it is no measure at all
+    const source: OutcomeStatsSource = {
+      statsFor: route =>
+        route.name === 'gamma'
+          ? { p: 0.5, n: 0, costUsd: Number.NaN, wallSec: 60 }
+          : { p: 0.9, n: 4, costUsd: 0.1, wallSec: 60 },
+    };
+    const result = scoreCandidates(
+      found.candidates,
+      formula,
+      TASK.features ?? {},
+      source,
+      SCORE_TABLE
+    );
+    assert.equal(result.winner, undefined);
+    assert.match(result.skipped ?? '', /not finite/);
+  });
+
+  test('a zero weight never reads the measure — non-finite stays unread', () => {
+    const noCost = formulaOf({
+      kind: 'formula',
+      version: 1,
+      shape: 'score',
+      questions: formula.questions,
+      score: { lambda: 0, mu: 0 },
+    });
+    const source: OutcomeStatsSource = {
+      statsFor: route => ({
+        p: route.name === 'alpha' ? 0.9 : 0.4,
+        n: 3,
+        costUsd: Number.NaN, // lambda = 0 — never multiplied
+        wallSec: Number.POSITIVE_INFINITY, // mu = 0 — never multiplied
+      }),
+    };
+    const result = scoreCandidates(
+      found.candidates,
+      noCost,
+      TASK.features ?? {},
+      source,
+      SCORE_TABLE
+    );
+    assert.equal(result.winner, 'alpha');
+  });
+
   test('ties keep table order, not candidate-fit order', () => {
     // the catch-all sits FIRST in the table but last in fit order —
     // equal formula scores must still land on it
@@ -692,6 +775,28 @@ describe('features match in candidates + resolve', () => {
     assert.equal(decision.route?.name, 'paid-lane');
     assert.equal(decision.picked, 'static');
     assert.equal(decision.formula, trace);
+  });
+
+  test('inTableOrder restores declaration order among the survivors', () => {
+    // the catch-all is declared first but fits worst — fit order ranks it
+    // last; "table order" is the order the routes appear in the file
+    const table = routeTable({
+      kind: 'route',
+      version: 1,
+      routes: {
+        fallback: { chain: ['p4'] },
+        pinned: { match: { features: { tier: 'pro' } }, chain: ['p1'] },
+      },
+    });
+    const set = candidates(table, { features: { tier: 'pro' } }, {});
+    assert.deepEqual(
+      set.candidates.map(c => c.route.name),
+      ['pinned', 'fallback'] // fit order — the pinned route first
+    );
+    assert.deepEqual(
+      inTableOrder(set, table).candidates.map(c => c.route.name),
+      ['fallback', 'pinned'] // declaration order — the catch-all first
+    );
   });
 
   test('a formula pick reports picked=formula with its own reason', () => {

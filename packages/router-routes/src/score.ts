@@ -73,15 +73,24 @@ function weights(formula: Formula): { lambda: number; mu: number } {
 }
 
 /** The first unknown measure under a positive weight — the skip
- *  reason, or undefined when every needed measure is known. */
+ *  reason, or undefined when every needed measure is known. A measure
+ *  that is present but not finite (NaN, ±Infinity) is no measure at
+ *  all: it would poison the arithmetic, so it skips the set the same
+ *  way an absent one does. */
 function unknownMeasure(
   name: string,
   route: string,
   value: number | undefined,
   weight: number
 ): string | undefined {
-  if (weight > 0 && value === undefined) {
+  if (weight <= 0) {
+    return undefined;
+  }
+  if (value === undefined) {
     return `${name} for route "${route}" is unknown and its weight is positive — scoring skipped`;
+  }
+  if (!Number.isFinite(value)) {
+    return `${name} for route "${route}" is not finite — scoring skipped`;
   }
   return undefined;
 }
