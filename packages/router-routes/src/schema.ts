@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'smol-toml';
 import { ON_WALL } from '@broject/core';
 import type { ChainEntry, OnWall } from '@broject/core';
-import type { Route, RouteMatch, RouteTable } from './types.ts';
+import type { FeatureMatch, FeatureValue, Route, RouteMatch, RouteTable } from './types.ts';
 
 /** The envelope's kind — the router's tables say what they are. */
 export const ROUTE_KIND = 'route';
@@ -170,6 +170,72 @@ function matchField(
   return text;
 }
 
+/** One feature match value — a scalar, or a non-empty list of scalars.
+ *  The formula cross-check owns the typing against the declared
+ *  questions; the table only guarantees the shape. */
+function featureValue(raw: unknown): FeatureValue | undefined {
+  if (typeof raw === 'string' || typeof raw === 'boolean') {
+    return raw;
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw;
+  }
+  return undefined;
+}
+
+/** The `match.features` table — question name → value(s) the task must
+ *  carry. Keys are the formula's question ids, so they stay dynamic;
+ *  every VALUE must be a scalar or a non-empty list of scalars. */
+function matchFeatures(
+  raw: unknown,
+  at: TablePath,
+  problems: RouteProblems
+): Record<string, FeatureMatch> | undefined {
+  const atFeatures = at.child('features');
+  if (!isRecord(raw)) {
+    problems.add(atFeatures, 'must be a table');
+    return undefined;
+  }
+  const out: Record<string, FeatureMatch> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const atKey = atFeatures.child(key);
+    const single = featureValue(value);
+    if (single !== undefined) {
+      Object.defineProperty(out, key, {
+        value: single,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+      continue;
+    }
+    if (!Array.isArray(value) || value.length === 0) {
+      problems.add(atKey, 'must be a scalar or a non-empty list of scalars');
+      continue;
+    }
+    const list: FeatureValue[] = [];
+    let bad = false;
+    for (const [i, entry] of value.entries()) {
+      const scalar = featureValue(entry);
+      if (scalar === undefined) {
+        problems.add(atKey.index(i), 'must be a string, number, or boolean');
+        bad = true;
+        break;
+      }
+      list.push(scalar);
+    }
+    if (!bad) {
+      Object.defineProperty(out, key, {
+        value: list,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return out;
+}
+
 /** The match — the task's shape. An absent field matches any value. */
 function match(raw: unknown, at: TablePath, problems: RouteProblems): RouteMatch {
   if (raw === undefined) {
@@ -182,9 +248,18 @@ function match(raw: unknown, at: TablePath, problems: RouteProblems): RouteMatch
   const atMatch = at.child('match');
   const out: RouteMatch = {};
   for (const [key, value] of Object.entries(raw)) {
+    if (key === 'features') {
+      const features = matchFeatures(value, atMatch, problems);
+      if (features !== undefined) {
+        out.features = features;
+      }
+      continue;
+    }
     const text = matchField(key, value, atMatch, problems);
     if (text !== undefined) {
-      out[key as keyof RouteMatch] = text;
+      // matchField only answers the scalar keys — 'features' took the
+      // other branch — so the write lands on a string field
+      out[key as 'type' | 'complexity' | 'priority'] = text;
     }
   }
   return out;

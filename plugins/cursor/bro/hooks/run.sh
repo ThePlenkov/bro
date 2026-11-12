@@ -300,23 +300,244 @@ agent_root_pid() {
   echo "$_top"
 }
 
+# silence on Cursor's beforeShellExecution is a deny — when no binary
+# answered (the watchdog expired the run, or nothing could run), the
+# launcher itself emits the no-opinion. Defined beside the spool block
+# because the capture-expiry path calls it before the dispatch section.
+cursor_permission_ask() {
+  [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ] || return 0
+  printf '%s\n' '{"permission":"ask"}'
+}
+
+# --- hook spool (v2) ---------------------------------------------------------
+#
+# Tier-0 telemetry: every launch appends a start row and exactly one end
+# row to $XDG_STATE_HOME/bro/hooks.spool (BRO_HOOK_SPOOL pins the path,
+# literal 0 disables). v2 carries the enrichment the machine-wide ledger
+# (specs/bro-izpyk.1.1.md) needs — native session id, pid/ppid, adapter
+# version, plugin root, launcher — as TSV with cwd LAST so embedded tabs
+# survive (readers re-join the tail). Mid-row fields are sanitized of
+# tab/newline at compute time; everything here is fail-open — a spool
+# problem must never break the hook it guards.
+#
+# The functions live ABOVE the fast-path case on purpose: post-tool and
+# prompt-submit can exit before Node runs, and their fastpath start/end
+# pair is exactly the observe-mode signal the ledger exists to see.
+
+HOOK_SPOOL_STARTED=0
+HOOK_SPOOL_IDENTITY=0
+
+hook_spool_prepare() {
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  if [ -n "${BRO_HOOK_SPOOL:-}" ]; then
+    HOOK_SPOOL=$BRO_HOOK_SPOOL
+  elif [ -n "${XDG_STATE_HOME:-}" ]; then
+    HOOK_SPOOL=$XDG_STATE_HOME/bro/hooks.spool
+  elif [ -n "${HOME:-}" ]; then
+    HOOK_SPOOL=$HOME/.local/state/bro/hooks.spool
+  else
+    # No XDG_STATE_HOME/HOME and no explicit pin — Node resolves the OS
+    # home via the passwd db, which the shell cannot (same doubt-defers
+    # rule as the mailbox probe above); a guessed root-level path only
+    # fails mkdir or lands where the reader never looks. Empty
+    # HOOK_SPOOL tells the writers to skip the row.
+    HOOK_SPOOL=
+    return 0
+  fi
+  case "$HOOK_SPOOL" in
+    */*) HOOK_SPOOL_DIR=${HOOK_SPOOL%/*}; [ -n "$HOOK_SPOOL_DIR" ] || HOOK_SPOOL_DIR=/ ;;
+    *) HOOK_SPOOL_DIR=. ;;
+  esac
+  if [ ! -d "$HOOK_SPOOL_DIR" ]; then
+    mkdir -p "$HOOK_SPOOL_DIR" 2>/dev/null || :
+  fi
+}
+
+# Mid-row TSV fields must not carry tab/newline — octal escapes because
+# \t is not portable tr syntax everywhere; one tr per field, run ONCE
+# per launch inside hook_spool_identity (values are cached, so start
+# and end rows share the sanitized copies). A missing tr (stripped PATH)
+# falls back to the raw value — a possibly-dirty field beats an empty
+# one that would make the whole row unparseable.
+_spool_field() {
+  _o=$(printf '%s' "$1" | tr -d '\011\012\015' 2>/dev/null || printf '%s' "$1")
+  printf '%s' "$_o"
+}
+
+# plugin manifest version — the portable root plugin.json first, then the
+# per-adapter manifests; first "version" string wins. Empty when nothing
+# resolves (a foreign plugin root, a source checkout without manifests).
+hook_spool_adapter() {
+  for _f in \
+    "$SCRIPT_ROOT/plugin.json" \
+    "$SCRIPT_ROOT/.claude-plugin/plugin.json" \
+    "$SCRIPT_ROOT/.codex-plugin/plugin.json" \
+    "$SCRIPT_ROOT/.cursor-plugin/plugin.json" \
+    "$SCRIPT_ROOT/.devin-plugin/plugin.json"; do
+    [ -f "$_f" ] || continue
+    _v=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_f" 2>/dev/null | head -n 1)
+    [ -n "$_v" ] && { _spool_field "$_v"; return 0; }
+  done
+  return 0
+}
+
+# first session_id/conversation_id string in the payload — the same
+# identity hooks.ts normalizes to input.session_id. Empty when the event
+# carried none (or stdin was never captured).
+hook_spool_sid() {
+  [ -n "${PAYLOAD:-}" ] || return 0
+  _sid=$(printf %s "$PAYLOAD" \
+    | grep -oE '"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"[^"]*"' 2>/dev/null \
+    | head -n 1 \
+    | sed 's/.*"\([^"]*\)"$/\1/')
+  [ -n "$_sid" ] && _spool_field "$_sid"
+  return 0
+}
+
+# computed once per launch — every field is env/script/payload state that
+# cannot change between the start and end rows of one invocation.
+hook_spool_identity() {
+  [ "$HOOK_SPOOL_IDENTITY" = 1 ] && return 0
+  HOOK_SPOOL_IDENTITY=1
+  HOOK_SPOOL_ID=$$-$BRO_HOOK_T0
+
+  # host — env markers first (the *_PLUGIN_ROOT vars each client exports,
+  # then *_PROJECT_DIR corroboration), then bare PLUGIN_ROOT which the
+  # repo's codex paths already treat as the codex plugin root, then a
+  # payload fingerprint only when env detection found nothing.
+  HOOK_SPOOL_HOST=unknown
+  if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=cursor
+  elif [ -n "${DEVIN_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=devin
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=claude
+  elif [ -n "${CURSOR_PROJECT_DIR:-}" ]; then
+    HOOK_SPOOL_HOST=cursor
+  elif [ -n "${DEVIN_PROJECT_DIR:-}" ]; then
+    HOOK_SPOOL_HOST=devin
+  elif [ -n "${PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=codex
+  else
+    case "$PAYLOAD" in
+      *'"cursor_version"'*|*'"workspace_roots"'*) HOOK_SPOOL_HOST=cursor ;;
+      *'"turn_id"'*) HOOK_SPOOL_HOST=codex ;;
+      *) ;;
+    esac
+  fi
+
+  # launcher — env only, no forks; 'agent' is the bro-spawned badge
+  if [ -n "${BRO_AGENT_ID:-}" ]; then
+    HOOK_SPOOL_LAUNCHER=agent
+  elif [ "${HERDR_ENV:-}" = 1 ] || [ -n "${HERDR_PANE_ID:-}" ]; then
+    HOOK_SPOOL_LAUNCHER=herdr
+  elif [ -n "${TMUX:-}" ]; then
+    HOOK_SPOOL_LAUNCHER=tmux
+  elif [ -n "${ZELLIJ:-}" ]; then
+    HOOK_SPOOL_LAUNCHER=zellij
+  elif [ -n "${STY:-}" ]; then
+    HOOK_SPOOL_LAUNCHER=screen
+  elif [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
+    HOOK_SPOOL_LAUNCHER=ssh
+  else
+    HOOK_SPOOL_LAUNCHER=interactive
+  fi
+
+  HOOK_SPOOL_SID=$(hook_spool_sid)
+  HOOK_SPOOL_AGENT=
+  [ -n "${BRO_AGENT_ID:-}" ] && HOOK_SPOOL_AGENT=$(_spool_field "$BRO_AGENT_ID")
+  HOOK_SPOOL_ADAPTER=$(hook_spool_adapter)
+  HOOK_SPOOL_PROOT=$(_spool_field "$SCRIPT_ROOT")
+  HOOK_SPOOL_EVENT=$(_spool_field "$EVENT")
+}
+
+hook_spool_start() {
+  # idempotent — the dispatch paths call this again as a guard, and the
+  # early call below already wrote the row for every event
+  [ "$HOOK_SPOOL_STARTED" = 1 ] && return 0
+  HOOK_SPOOL_STARTED=1
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  hook_spool_prepare
+  [ -n "${HOOK_SPOOL:-}" ] || return 0
+  hook_spool_identity
+  printf 'v2\t%s\tstart\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$BRO_HOOK_T0" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$HOOK_SPOOL_SID" \
+    "$HOOK_SPOOL_EVENT" "$$" "$PPID" "$HOOK_SPOOL_AGENT" "$HOOK_SPOOL_ADAPTER" \
+    "$HOOK_SPOOL_PROOT" "$HOOK_SPOOL_LAUNCHER" "${PWD:-}" \
+    >> "$HOOK_SPOOL" 2>/dev/null || :
+  return 0
+}
+
+hook_spool_end() {
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  hook_spool_prepare
+  [ -n "${HOOK_SPOOL:-}" ] || return 0
+  hook_spool_identity
+  _hook_spool_ts=$(date +%s 2>/dev/null) || _hook_spool_ts=$BRO_HOOK_T0
+  printf 'v2\t%s\tend\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$_hook_spool_ts" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$HOOK_SPOOL_SID" \
+    "$HOOK_SPOOL_EVENT" "$$" "$PPID" "$HOOK_SPOOL_AGENT" "$HOOK_SPOOL_ADAPTER" \
+    "$HOOK_SPOOL_PROOT" "$HOOK_SPOOL_LAUNCHER" "$1" "$2" "${PWD:-}" \
+    >> "$HOOK_SPOOL" 2>/dev/null || :
+  return 0
+}
+
+# Universal stdin capture — the v2 sid and the fast-path checks both need
+# the payload, so stdin is captured once when the spool is on (or the
+# event is a fast-path candidate, which needs it regardless of spooling).
+# Node still reads identical bytes through CAPTURED/PAYLOAD_FILE. The
+# capture rides run_bounded so a never-EOF stdin dies at the same
+# watchdog budget the node run would have had — an expired capture means
+# the payload never completed: record the launch as a watchdog kill and
+# get out of the host's way.
+_spool_capture=0
+[ "${BRO_HOOK_SPOOL:-}" != 0 ] && _spool_capture=1
+case "$EVENT" in
+  post-tool|prompt-submit) _spool_capture=1 ;;
+esac
+if [ "$_spool_capture" = 1 ] && [ ! -t 0 ]; then
+  PAYLOAD_FILE=$(mktemp "${TMPDIR:-/tmp}/bro-hook.XXXXXX" 2>/dev/null) || PAYLOAD_FILE=
+  if [ -n "$PAYLOAD_FILE" ]; then
+    _cap_rc=0
+    run_bounded cat > "$PAYLOAD_FILE" || _cap_rc=$?
+    if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+      hook_spool_start
+      hook_spool_end "$_cap_rc" watchdog
+      cursor_permission_ask
+      exit 0
+    fi
+    # a short read (cat rc != 0 without expiry) means the payload never
+    # completed — the pre-spool contract exits before any candidate can
+    # run on bytes it cannot faithfully forward. The launch is still
+    # journaled: start + one nonzero end (the worker maps it to the
+    # canonical `error`), then out of the host's way.
+    if [ "$_cap_rc" != 0 ] || ! PAYLOAD=$(cat "$PAYLOAD_FILE" 2>/dev/null); then
+      [ "$_cap_rc" = 0 ] && _cap_rc=1
+      hook_spool_start
+      hook_spool_end "$_cap_rc" nonzero
+      cursor_permission_ask
+      exit 0
+    fi
+    CAPTURED=1
+    RUN_BOUNDED_EXPIRED=0
+  fi
+fi
+
+# the start row lands for EVERY event that reaches this point — including
+# the fast-path exits below and every operator/binary path after. Events
+# that exited earlier (BRO_HOOKS=0, a project-owned devin hook) were
+# never bro launches and write nothing.
+hook_spool_start
+
 case "$EVENT" in
 post-tool|prompt-submit)
   # same base the hook resolves for non-cursor hosts
   BASE=${DEVIN_PROJECT_DIR:-$PWD}
   NEED_NODE=
-  PAYLOAD_FILE=$(mktemp "${TMPDIR:-/tmp}/bro-hook.XXXXXX" 2>/dev/null) || PAYLOAD_FILE=
-  if [ -n "$PAYLOAD_FILE" ]; then
-    if ! cat > "$PAYLOAD_FILE"; then
-      exit 0
-    fi
-    if ! PAYLOAD=$(cat "$PAYLOAD_FILE"); then
-      exit 0
-    fi
-    CAPTURED=1
-  else
-    NEED_NODE=1
-  fi
+  # the payload was captured above — CAPTURED=0 means stdin was a tty,
+  # the spool+mktemp both failed, or this event never needed one: no
+  # payload to inspect, so the checks cannot prove a no-op → defer
+  [ "$CAPTURED" = 1 ] || NEED_NODE=1
 
   # foreign-schema payload — cursor/codex need schema translation, the
   # hydrate leg, and CURSOR_PROJECT_DIR/workspace_roots resolution;
@@ -344,7 +565,13 @@ post-tool|prompt-submit)
       [ "$_p" = "$_d" ] && break
       _d=$_p
     done
-    [ "$_opted" = 0 ] && exit 0
+    if [ "$_opted" = 0 ]; then
+      # resolved to a shell no-op on a repo with no bro opt-in — pair
+      # the start row like the fastpath exit below so the launch does
+      # not read as a host kill in the spool
+      hook_spool_end 0 fastpath
+      exit 0
+    fi
   fi
 
   # session-id candidates — every value offered, sanitized the same
@@ -646,7 +873,13 @@ EOF
     NEED_NODE=1
   fi
 
-  [ -z "$NEED_NODE" ] && exit 0
+  if [ -z "$NEED_NODE" ]; then
+    # resolved to a shell no-op — still a firing: pair the start row so
+    # observe-mode volume reaches the ledger instead of looking like a
+    # host kill
+    hook_spool_end 0 fastpath
+    exit 0
+  fi
   ;;
 *) ;;
 esac
@@ -709,80 +942,13 @@ bro_hooks_js() {
   printf '%s\n' "$_h"
 }
 
-# silence on Cursor's beforeShellExecution is a deny — when no binary
-# answered (the watchdog expired the run, or nothing could run), the
-# launcher itself emits the no-opinion
-cursor_permission_ask() {
-  [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ] || return 0
-  printf '%s\n' '{"permission":"ask"}'
-}
-
-HOOK_SPOOL_STARTED=0
-
-hook_spool_prepare() {
-  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
-  if [ -n "${BRO_HOOK_SPOOL:-}" ]; then
-    HOOK_SPOOL=$BRO_HOOK_SPOOL
-  elif [ -n "${XDG_STATE_HOME:-}" ]; then
-    HOOK_SPOOL=$XDG_STATE_HOME/bro/hooks.spool
-  elif [ -n "${HOME:-}" ]; then
-    HOOK_SPOOL=$HOME/.local/state/bro/hooks.spool
-  else
-    # No XDG_STATE_HOME/HOME and no explicit pin — Node resolves the OS
-    # home via the passwd db, which the shell cannot (same doubt-defers
-    # rule as the mailbox probe above); a guessed root-level path only
-    # fails mkdir or lands where the reader never looks. Empty
-    # HOOK_SPOOL tells the writers to skip the row.
-    HOOK_SPOOL=
-    return 0
-  fi
-  case "$HOOK_SPOOL" in
-    */*) HOOK_SPOOL_DIR=${HOOK_SPOOL%/*}; [ -n "$HOOK_SPOOL_DIR" ] || HOOK_SPOOL_DIR=/ ;;
-    *) HOOK_SPOOL_DIR=. ;;
-  esac
-  if [ ! -d "$HOOK_SPOOL_DIR" ]; then
-    mkdir -p "$HOOK_SPOOL_DIR" 2>/dev/null || :
-  fi
-}
-
-hook_spool_identity() {
-  HOOK_SPOOL_HOST=unknown
-  if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
-    HOOK_SPOOL_HOST=cursor
-  elif [ -n "${DEVIN_PLUGIN_ROOT:-}" ]; then
-    HOOK_SPOOL_HOST=devin
-  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-    HOOK_SPOOL_HOST=claude
-  fi
-  HOOK_SPOOL_ID=$$-$BRO_HOOK_T0
-}
-
-hook_spool_start() {
-  HOOK_SPOOL_STARTED=1
-  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
-  hook_spool_prepare
-  [ -n "${HOOK_SPOOL:-}" ] || return 0
-  hook_spool_identity
-  printf 'v1\t%s\tstart\t%s\t%s\t%s\t%s\n' \
-    "$BRO_HOOK_T0" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "${PWD:-}" \
-    >> "$HOOK_SPOOL" 2>/dev/null || :
-  return 0
-}
-
-hook_spool_end() {
-  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
-  hook_spool_prepare
-  [ -n "${HOOK_SPOOL:-}" ] || return 0
-  hook_spool_identity
-  _hook_spool_ts=$(date +%s 2>/dev/null) || _hook_spool_ts=$BRO_HOOK_T0
-  printf 'v1\t%s\tend\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$_hook_spool_ts" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "$1" "$2" "${PWD:-}" \
-    >> "$HOOK_SPOOL" 2>/dev/null || :
-  return 0
-}
-
+# _cli_ran marks that a binary branch actually executed — the start row
+# now lands for every event before dispatch, so HOOK_SPOOL_STARTED can
+# no longer stand in for "something ran" in the no-binary else below
+_cli_ran=
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   _rc=0
+  _cli_ran=1
   hook_spool_start
   # prefer the slim hooks entry — same dispatch minus the PLUGINS
   # registry cold-load; a dist built before it existed falls back to
@@ -820,10 +986,16 @@ if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; 
   fi
 fi
 # same pin when dist or node is missing — the PATH fallback must not
-# hide it either
-[ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ] && exit 1
+# hide it either. Reaching here means the dist branch never ran (its
+# own NO_FALLBACK exits all write an end row), so nothing executed —
+# pair the early start as no-cli rather than leaving a synthetic kill.
+if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
+  hook_spool_end 0 no-cli
+  exit 1
+fi
 if command -v bro >/dev/null 2>&1; then
   _rc=0
+  _cli_ran=1
   [ "$HOOK_SPOOL_STARTED" = 1 ] || hook_spool_start
   # the resolved bro bin's own dist/hooks.js is the same slim entry the
   # repo-dist branch prefers — published installs reach it here, where
@@ -848,8 +1020,8 @@ if command -v bro >/dev/null 2>&1; then
     hook_spool_end "$_rc" nonzero
   fi
 else
-  if [ "$HOOK_SPOOL_STARTED" = 1 ]; then
-    hook_spool_end "$_rc" nonzero
+  if [ -n "$_cli_ran" ]; then
+    hook_spool_end "${_rc:-1}" nonzero
   else
     hook_spool_end 0 no-cli
   fi

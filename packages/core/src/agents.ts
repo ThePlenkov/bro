@@ -45,6 +45,16 @@ export type AgentCause = (typeof AGENT_CAUSES)[number];
 export const isAgentCause = (v: unknown): v is AgentCause =>
   typeof v === 'string' && (AGENT_CAUSES as readonly string[]).includes(v);
 
+/** Exit-harvest learn/retro verdict (spec bro-xkv42.2): `ok` =
+ *  qualifying evidence found, `miss` = proven absent, `skipped` = the
+ *  check could not run honestly (budget wall, remote lane, unreadable
+ *  store) — never a miss on unproven absence. */
+export const AGENT_LEARN_CHECKS = ['ok', 'miss', 'skipped'] as const;
+export type AgentLearnCheck = (typeof AGENT_LEARN_CHECKS)[number];
+
+export const isAgentLearnCheck = (v: unknown): v is AgentLearnCheck =>
+  typeof v === 'string' && (AGENT_LEARN_CHECKS as readonly string[]).includes(v);
+
 export interface ExitClassification {
   cause: AgentCause;
   /** Provider-reported reset, ISO — parsed from the same log tail. */
@@ -588,6 +598,13 @@ export interface AgentInfo {
    *  2 into `<agentId>.stderr` so `log` stays the agent-updates stream
    *  (spec bro-e2ec0); absent on remote backends and pre-split entries. */
   stderrLog?: string;
+  /** Exit-harvest learn/retro verdict (spec bro-xkv42.2) — set once per
+   *  run at classification; absent on live agents and runs harvested
+   *  before the check existed. */
+  learnCheck?: AgentLearnCheck;
+  /** What satisfied the check (`ok`) or why it didn't run (`skipped`);
+   *  absent on `miss` — the miss itself is the signal. */
+  learnEvidence?: string;
 }
 
 export interface AgentCapabilities {
@@ -717,6 +734,20 @@ export interface AgentRegistryEntry {
   formula_sha?: string;
   session_id?: string;
   pipeline_stage?: string;
+  /** Exit-harvest learn/retro verdict (spec bro-xkv42.2) — written once
+   *  per run at exit classification; commitSpawn clears it on respawn
+   *  like cause/resetAt. */
+  learnCheck?: AgentLearnCheck;
+  /** The evidence that satisfied the check, or the skip reason —
+   *  absent on 'miss'. */
+  learnEvidence?: string;
+  /** The beads store dir the run was pinned to at spawn
+   *  (SpawnSpec.beadsDir) — the exit-harvest learn check reads THIS
+   *  store, not whatever beadsDir(dir) resolves, so a --beads-dir or
+   *  env-pinned spawn is checked where its worker actually wrote
+   *  (spec bro-xkv42.2). Absent on pre-storeDir entries — the check
+   *  falls back to beadsDir(dir). */
+  storeDir?: string;
   [key: string]: unknown;
 }
 
@@ -858,14 +889,25 @@ export function acquireAgentRegistryLock(dir: string, opts: { waitMs?: number } 
   });
 }
 
+/** Reentrancy count for `withAgentRegistryLock` — >0 means the caller
+ *  is inside a registry critical section. Callers holding store-probe
+ *  budgets (the learn/retro exit check) read this to defer work that
+ *  would stall every other spawn behind slow `bd` calls. */
+let registryLockDepth = 0;
+export function agentRegistryLockDepth(): number {
+  return registryLockDepth;
+}
+
 /** Run `fn` under the registry lock. Sync-only on purpose — an async
  *  fn would release-and-reattach semantics nobody needs here; the
  *  native spawn section is synchronous top to bottom. */
 export function withAgentRegistryLock<T>(dir: string, fn: () => T): T {
   const release = acquireAgentRegistryLock(dir);
+  registryLockDepth += 1;
   try {
     return fn();
   } finally {
+    registryLockDepth -= 1;
     release();
   }
 }

@@ -116,6 +116,7 @@ import {
   procStat,
   projectId,
   readAgentRegistry,
+  readLifecycle,
   type ResolvedClass,
   type ReviewFacade,
   releaseSessionSlot,
@@ -4213,6 +4214,48 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
   }
 }
 
+/** Workers this run saw exit with no learn/retro evidence (spec
+ *  bro-xkv42.2) — the durable `learn-miss` journal rows unioned with
+ *  the registry verdict: a respawn resets the entry's learnCheck, but
+ *  its journal row survives, so the audit can't lose an earlier miss.
+ *  Only steps the loop itself worked are this audit's tail; a foreign
+ *  lane's miss surfaces on `bro agents status` instead. */
+function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
+  const tails = new Map<string, string>();
+  const add = (key: string, line: string): void => {
+    if (!tails.has(key)) {
+      tails.set(key, line);
+    }
+  };
+  try {
+    for (const ev of readLifecycle(root, { kind: 'learn-miss' })) {
+      if (ev.bead === undefined || !seen.has(ev.bead)) {
+        continue;
+      }
+      const agent = typeof ev.detail?.agent === 'string' ? ev.detail.agent : ev.actor;
+      const cause = typeof ev.detail?.cause === 'string' ? ev.detail.cause : undefined;
+      const suffix = cause === undefined ? '' : ` (${cause})`;
+      add(`${agent}|${ev.bead}`, `${agent} ${ev.bead}${suffix}`);
+    }
+  } catch {
+    // journal unreadable — the registry scan below still reports
+  }
+  try {
+    for (const [step, e] of Object.entries(readAgentRegistry(root))) {
+      if (!seen.has(step) || e.learnCheck !== 'miss') {
+        continue;
+      }
+      const cause = e.cause === undefined ? '' : ` (${e.cause})`;
+      add(`${e.agentId}|${step}`, `${e.agentId} ${step}${cause}`);
+    }
+  } catch {
+    if (tails.size === 0) {
+      return ['warning: learn-miss audit failed — registry unreadable'];
+    }
+  }
+  return [...tails.values()];
+}
+
 /** The close-out litter sweep — reap the provably-done leftovers before
  *  the audit names what survived. A sweep failure is a warning line,
  *  never a crash. */
@@ -4339,6 +4382,7 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ['branches', branches],
       ['claimed beads', claimed.own],
       ['in_progress elsewhere', claimed.other],
+      ['learn misses', learnMissTails(ctx.root, seen)],
       ['audit errors', errors],
       ['cleanup errors', ctx.tails],
     ]);

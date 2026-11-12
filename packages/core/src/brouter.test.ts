@@ -52,6 +52,13 @@ describe('parseBrouter', () => {
     assert.ok(lines.some(l => /brouter\.routes must be a path/.test(l)));
   });
 
+  test('the formula path is a trimmed string, or nothing', () => {
+    assert.equal(parseBrouter({ formula: ' formula.md ' }).formula, 'formula.md');
+    assert.equal(parseBrouter({}).formula, undefined);
+    const lines = err(() => parseBrouter({ formula: '  ' }));
+    assert.ok(lines.some(l => /brouter\.formula must be a path/.test(l)));
+  });
+
   test('the decision model is a provider and a mode — the three modes are all legal', () => {
     const cfg = parseBrouter({ router: { provider: 'orca', mode: 'shadow' } });
     assert.deepEqual(cfg.router, { provider: 'orca', mode: 'shadow' });

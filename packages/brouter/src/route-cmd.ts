@@ -27,7 +27,7 @@ import type { RouteTask } from '@broject/router-routes';
 import { chainModelFacts, costFacts, healthFacts, routeFacts } from './explain.ts';
 import { windowCounters } from './ledger.ts';
 import { decideRoute } from './route-decide.ts';
-import { reportUnserved, routeTablePath } from './routes-cmd.ts';
+import { formulaPath, reportUnserved, routeTablePath } from './routes-cmd.ts';
 
 /** The verdict's own shape — the resolver's decision. */
 type RouteDecisionView = Awaited<ReturnType<typeof decideRoute>>['decision'];
@@ -67,6 +67,20 @@ function render(
   const chain = decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ');
   console.log(`chain: ${chain || '(empty)'}`);
   console.log(`picked: ${decision.picked} — ${decision.reason}`);
+  const formula = decision.formula;
+  if (formula !== undefined) {
+    const answers =
+      formula.answers.length === 0 ? 'no answers' : `${formula.answers.length} answer(s)`;
+    const fired =
+      formula.filtered.length === 0 ? '' : `, ${formula.filtered.length} filter(s) fired`;
+    console.log(`formula: ${formula.shape} — ${answers}${fired}`);
+    for (const firedFilter of formula.filtered) {
+      console.log(`  filtered: ${firedFilter.route} — ${firedFilter.reason}`);
+    }
+    if (formula.note !== undefined) {
+      console.log(`  note: ${formula.note}`);
+    }
+  }
   if (!known) {
     console.log('health: unknown — the ledger is unavailable, no wall was applied');
   }
@@ -129,7 +143,10 @@ async function planCostFacts(input: {
 /** The route surface — `brouter route "<task>"`. */
 export async function runRouteCommand(argv: string[]): Promise<void> {
   const dir = process.cwd();
-  const task = positionals(argv, new Set(['--routes', '--type', '--complexity', '--priority']))
+  const task = positionals(
+    argv,
+    new Set(['--routes', '--type', '--complexity', '--priority', '--formula'])
+  )
     .join(' ')
     .trim();
   const path = routeTablePath(dir, argv);
@@ -145,6 +162,7 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   reportUnserved(unservedChains(table, config?.models ?? {}));
   const shape = taskShape(argv);
   const router = config?.router;
+  const formula = formulaPath(dir, argv);
   const { decision, snapshot, healthKnown, decisionId, contextId, journaled } = await decideRoute({
     dir,
     table,
@@ -153,6 +171,7 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
     text: task,
     kind: 'route',
     ...(router === undefined ? {} : { router }),
+    ...(formula === undefined ? {} : { formula }),
   });
   const slices = explainSlicesOrExit(argv);
   if (slices !== undefined) {
