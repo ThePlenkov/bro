@@ -1,11 +1,11 @@
 # bro-izpyk.2 — fleet F2: session modes, `bro mode`, connector `activeIn`, Tier-1 snapshots
 
 Child of bro-izpyk (epic contract `specs/sessions/bro-izpyk.md` on branch
-`devin/1792972271-fleet-spec`, PR https://github.com/ThePlenkov/bro/pull/700).
+`devin/1792972271-fleet-spec`, PR <https://github.com/ThePlenkov/bro/pull/700>).
 F1 landed the ledger, spool, `bro sessions`/`bro fleet hosts` and doctor rows
-(PRs https://github.com/ThePlenkov/bro/pull/1006,
-https://github.com/ThePlenkov/bro/pull/1017,
-https://github.com/ThePlenkov/bro/pull/1019). This bead adds the mode plane:
+(PRs <https://github.com/ThePlenkov/bro/pull/1006>,
+<https://github.com/ThePlenkov/bro/pull/1017>,
+<https://github.com/ThePlenkov/bro/pull/1019>). This bead adds the mode plane:
 `observe` is the default, `plan|code|review|orchestrate` opt a session into
 bro's active behavior, and every hook pays the cheap path unless a mode says
 otherwise.
@@ -48,7 +48,7 @@ line 2 as the project id for humans/debugging (readers ignore it).
 
 ## `bro mode`
 
-```
+```text
 bro mode [--session <sid>] [--host <h>] [--json]        # effective mode + source
 bro mode <observe|plan|code|review|orchestrate|off> [--session <sid>] [--host <h>]
 bro mode list [--json]
@@ -134,7 +134,7 @@ collector. Per event:
   drains still deliver inbox). Non-observe → Tier-1 snapshot short-circuit
   (below) then live probes.
 - `prompt-submit`/`post-tool`: `observe` → only `activeIn`-filtered probes
-  + trace journal/flush + `bro mode` command binding; no arming, nudges,
+  - trace journal/flush + `bro mode` command binding; no arming, nudges,
   skill-mutation classify, or guard sweep. Non-observe → full pipeline.
 - `pre-tool`: verdicts filtered by `activeIn`; `observe` adds nothing —
   `session-cap` stays live in every mode.

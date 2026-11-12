@@ -375,6 +375,23 @@ function sessionsLedger(dir: string, deps: SessionsDeps): LedgerFacade {
   return facade('ledger', { dir }, prefer === undefined ? {} : { prefer });
 }
 
+/** Live mode files are the hook-time truth — overlay them onto the
+ *  ledger projection so `bro sessions` never shows a stale mode
+ *  (specs/bro-izpyk.2.md). Keyed by the sanitized stem both sides
+ *  share; tests inject the map directly. */
+function sessionModeOverlay(
+  injected?: ReadonlyMap<string, Mode>
+): (host: string, sid: string) => Mode | undefined {
+  const modeFiles =
+    injected ??
+    new Map(
+      listModeFiles()
+        .filter(f => f.mode !== undefined)
+        .map(f => [sessionFileStem(f.host, f.sid), f.mode as Mode] as const)
+    );
+  return (host, sid) => modeFiles.get(sessionFileStem(host, sid));
+}
+
 export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}): Promise<void> {
   if (hasHelpFlag(argv)) {
     printUsage(USAGE, EXIT.ok);
@@ -397,18 +414,7 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
     }
   }
   const ledger = sessionsLedger(dir, deps);
-  // live mode files are the hook-time truth — overlay them onto the
-  // ledger projection so `bro sessions` never shows a stale mode
-  // (specs/bro-izpyk.2.md). Keyed by the sanitized stem both sides share.
-  const modeFiles =
-    deps.modeFiles ??
-    new Map(
-      listModeFiles()
-        .filter(f => f.mode !== undefined)
-        .map(f => [sessionFileStem(f.host, f.sid), f.mode as Mode] as const)
-    );
-  const modeFor = (host: string, sid: string): Mode | undefined =>
-    modeFiles.get(sessionFileStem(host, sid));
+  const modeFor = sessionModeOverlay(deps.modeFiles);
   let views: SessionViews;
   try {
     views = await collectSessionViews(ledger, {

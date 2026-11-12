@@ -759,15 +759,40 @@ function snapshotEventFor(cliEvent: string): ModeSnapshotEvent | undefined {
 const SNAPSHOT_SPAWN_MIN_MS = 60_000;
 const snapshotSpawnSeen = new Map<string, number>();
 
+/** Tier-1 snapshot lines for a rehydrate event (specs/bro-izpyk.2.md):
+ *  a mode-active session reads the pre-rendered sessionStart sweep when
+ *  the stamp is fresh — identical lines, zero probe cost. A miss/stale
+ *  falls through to the live sweep (undefined) and queues a detached
+ *  re-render for next time. The session-scoped remainder (parallel
+ *  nudge, goal, heartbeat) always runs live — it is per-session by
+ *  definition and cannot pre-render. */
+function snapshotContextLines(dir: string, cliEvent: string): string[] | undefined {
+  const snapEvent = hookMode === undefined ? undefined : snapshotEventFor(cliEvent);
+  if (snapEvent === undefined || hookMode === undefined) {
+    return undefined;
+  }
+  const project = hookProjectIdFor(dir);
+  if (project === null) {
+    return undefined;
+  }
+  const snapshot = readModeSnapshot(process.env, project, hookMode, snapEvent);
+  if (snapshot === undefined) {
+    maybeSpawnSnapshotRender(dir, hookMode);
+    return undefined;
+  }
+  return snapshot === '' ? [] : snapshot.split('\n');
+}
+
 function maybeSpawnSnapshotRender(dir: string, mode: Mode): void {
-  if (hookProjectIdFor(dir) === null || mode === 'observe') {
+  const projectId = hookProjectIdFor(dir);
+  if (projectId === null || mode === 'observe') {
     return;
   }
   const entry = process.argv[1];
   if (entry === undefined || !existsSync(entry)) {
     return;
   }
-  const key = `${hookProjectId}|${mode}`;
+  const key = `${projectId}|${mode}`;
   const now = Date.now();
   const last = snapshotSpawnSeen.get(key);
   if (last !== undefined && now - last < SNAPSHOT_SPAWN_MIN_MS) {
@@ -1732,23 +1757,7 @@ async function rehydrateLines(
     );
     return { lines: start.lines, settled: start.settled };
   }
-  // Tier-1 snapshot (specs/bro-izpyk.2.md): a mode-active session reads
-  // the pre-rendered sessionStart sweep when the stamp is fresh —
-  // identical lines, zero probe cost. A miss/stale falls through to the
-  // live sweep and queues a detached re-render for next time. The
-  // session-scoped remainder (parallel nudge, goal, heartbeat) always
-  // runs live — it is per-session by definition and cannot pre-render.
-  const snapEvent = hookMode === undefined ? undefined : snapshotEventFor(cliEvent);
-  const snapProject = snapEvent === undefined ? null : hookProjectIdFor(dir);
-  const snapshot =
-    snapEvent !== undefined && snapProject !== null && hookMode !== undefined
-      ? readModeSnapshot(process.env, snapProject, hookMode, snapEvent)
-      : undefined;
-  if (snapshot === undefined && snapEvent !== undefined && hookMode !== undefined) {
-    maybeSpawnSnapshotRender(dir, hookMode);
-  }
-  const snapLines =
-    snapshot === undefined ? undefined : snapshot === '' ? [] : snapshot.split('\n');
+  const snapLines = snapshotContextLines(dir, cliEvent);
   // every leg resolves to its own lines INSIDE the sweep — the goal and
   // heartbeat reads overlap the probe work instead of queueing behind
   // it, and the assembly below keeps the original output order
@@ -1990,6 +1999,21 @@ function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string)
   return lines;
 }
 
+/** The observe post-tool leg — activeIn-filtered probes only; no
+ *  arming, nudges, or guard sweep (specs/bro-izpyk.2.md). */
+async function emitPostToolObserve(input: HookInput, sessionId: string): Promise<void> {
+  const dir = process.cwd();
+  const postLines = await postToolLines(
+    hookCtx(dir, sessionId),
+    probeReporter('post-tool', 'postTool')
+  );
+  if (postLines.length > 0) {
+    const eventName =
+      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
+    context(eventName, postLines.join('\n'));
+  }
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const lines: string[] = [];
@@ -2012,16 +2036,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // skill-mutation citation, or guard sweep — those are active
   // behavior a passive session never pays for.
   if (hookMode === 'observe') {
-    const dir = process.cwd();
-    const postLines = await postToolLines(
-      hookCtx(dir, sessionId),
-      probeReporter('post-tool', 'postTool')
-    );
-    if (postLines.length > 0) {
-      const eventName =
-        typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
-      context(eventName, postLines.join('\n'));
-    }
+    await emitPostToolObserve(input, sessionId);
     return;
   }
   // arming is a "probe live state once" hint the stop gate re-verifies,
@@ -2650,21 +2665,28 @@ async function runPreGateCommand(event: string | undefined, argv: string[]): Pro
   // (specs/bro-izpyk.2.md) — argv-only like the other operator commands:
   // it must not block reading a payload that was never sent.
   if (event === 'snapshot-render') {
-    const dirIdx = argv.indexOf('--dir');
-    const modeIdx = argv.indexOf('--mode');
-    const dir = dirIdx >= 0 ? argv[dirIdx + 1] : undefined;
-    const modeRaw = modeIdx >= 0 ? argv[modeIdx + 1] : undefined;
-    if (dir === undefined || !isMode(modeRaw)) {
-      return true; // malformed spawn args — fail open, render nothing
-    }
-    try {
-      await renderModeSnapshots(dir, modeRaw);
-    } catch {
-      // render is best-effort — a failed sweep just leaves the miss
-    }
+    await runSnapshotRender(argv);
     return true;
   }
   return false;
+}
+
+/** The detached Tier-1 snapshot renderer — argv-only, best-effort:
+ *  malformed spawn args render nothing, a failed sweep just leaves the
+ *  next miss to the live path (specs/bro-izpyk.2.md). */
+async function runSnapshotRender(argv: string[]): Promise<void> {
+  const dirIdx = argv.indexOf('--dir');
+  const modeIdx = argv.indexOf('--mode');
+  const dir = dirIdx >= 0 ? argv[dirIdx + 1] : undefined;
+  const modeRaw = modeIdx >= 0 ? argv[modeIdx + 1] : undefined;
+  if (dir === undefined || !isMode(modeRaw)) {
+    return; // malformed spawn args — fail open, render nothing
+  }
+  try {
+    await renderModeSnapshots(dir, modeRaw);
+  } catch {
+    // render is best-effort — a failed sweep just leaves the miss
+  }
 }
 
 function detectHookClients(raw: unknown): { cursor: boolean; codex: boolean } {

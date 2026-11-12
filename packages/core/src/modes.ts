@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { isMode, MODES, type Mode } from './ledger.ts';
 
 // --- state dir -----------------------------------------------------------------
@@ -100,7 +100,7 @@ export function readModeFile(path: string): Mode | undefined {
  *  a torn file. Line 2 carries the project id for humans/debugging;
  *  readers ignore everything past line 1. */
 export function writeModeFile(path: string, mode: Mode, project?: string): void {
-  mkdirSync(join(path, '..'), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true });
   const body = project === undefined || project === '' ? `${mode}\n` : `${mode}\n${project}\n`;
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, body);
@@ -511,7 +511,7 @@ export function writeModeSnapshot(
     return false;
   }
   try {
-    mkdirSync(join(path, '..'), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true });
     const tmp = `${path}.${process.pid}.tmp`;
     writeFileSync(tmp, text);
     renameSync(tmp, path);
@@ -527,7 +527,7 @@ export function touchSnapshotStamp(env: NodeJS.ProcessEnv, project: string, mode
     return;
   }
   try {
-    mkdirSync(join(stamp, '..'), { recursive: true });
+    mkdirSync(dirname(stamp), { recursive: true });
     writeFileSync(stamp, `${Date.now()}\n`);
   } catch {
     // stamp is best-effort — a missing stamp just reads stale

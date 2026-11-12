@@ -36,9 +36,15 @@ export interface RenderSnapshotsResult {
   /** Probe lines rendered — also the per-event file content basis. */
   lines: number;
   events: ModeSnapshotEvent[];
-  /** False when the project id could not resolve (no git, no realpath). */
+  /** False when the project id could not resolve (no git, no realpath)
+   *  or the sweep did not settle — an unsettled render writes nothing
+   *  so a previous good snapshot keeps answering. */
   ok: boolean;
 }
+
+/** The sweep seam — tests inject a fake; production is the connector
+ *  sessionStart probe set. */
+export type SnapshotSweep = (ctx: ConnectorCtx) => Promise<ProbeResult>;
 
 /** Run the sessionStart sweep once for (dir, mode) and write every
  *  snapshot event file + the freshness stamp. Best-effort per write —
@@ -46,19 +52,42 @@ export interface RenderSnapshotsResult {
 export async function renderModeSnapshots(
   dir: string,
   mode: Mode,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  sweep: SnapshotSweep = sessionStartProbe
 ): Promise<RenderSnapshotsResult | null> {
   const project = sessionProject(dir);
   if (project === undefined) {
     return null;
   }
   const ctx: ConnectorCtx = { dir, sessionId: '', mode };
+  // The renderer is nobody: it is spawned detached from whichever
+  // session happened to miss, and an inherited BRO_AGENT_ID — or none,
+  // which answers to 'orchestrator' — would let the notify drain
+  // consume addressed drops into a snapshot every session of that
+  // mode then reads (single-consumer drops are deleted on delivery).
+  // Pin an identity that owns nothing for the sweep; broadcast drops
+  // still render — they stay pending for real sessions regardless.
+  const prevAgentId = process.env.BRO_AGENT_ID;
+  process.env.BRO_AGENT_ID = `snapshot-render-${process.pid}`;
   let probe: ProbeResult;
   try {
-    probe = await sessionStartProbe(ctx);
+    probe = await sweep(ctx);
   } catch {
     // a thrown sweep still stamps nothing — next consumer re-renders
     return { project, mode, lines: 0, events: [], ok: false };
+  } finally {
+    if (prevAgentId === undefined) {
+      delete process.env.BRO_AGENT_ID;
+    } else {
+      process.env.BRO_AGENT_ID = prevAgentId;
+    }
+  }
+  if (!probe.settled) {
+    // a partial sweep (timed-out/thrown probes) must not stamp fresh —
+    // that would serve incomplete lines for the whole TTL and suppress
+    // the retry. Write nothing: any previous good snapshot keeps
+    // answering, and the next miss re-renders on the throttle.
+    return { project, mode, lines: probe.lines.length, events: [], ok: false };
   }
   const text = probe.lines.join('\n');
   const events: ModeSnapshotEvent[] = [];
