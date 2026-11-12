@@ -95,3 +95,11 @@ binding dedups so hydration injects once.
 - 2026-11-12 — v2 rewrite: bro tool contract (write-capable),
   shared-transform dedup, notify-only stop honesty, nativeOnly
   recursion guard.
+- 2026-11-12 — v3: `bro.ts` now ships as a `bundleAdapter` bundle
+  over `adapter-core` (`@kilocode/plugin` external). The two-tier
+  local-dist/PATH ladder is replaced by the shared ladder — sibling,
+  checkout, PATH, and now the npx fallback (`@broject/bro@<pin>` then
+  latest) the old doc claimed but the code never had. Hook parsing
+  takes the first control line like every adapter (was last-line);
+  the dead `BRO_HOOK_INPUT` env is gone; tool runs share
+  `RUN_TIMEOUT_MS`.

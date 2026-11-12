@@ -13,6 +13,9 @@
     "typecheck": "tsc --noEmit",
     "build": "tsdown"
   },
+  "dependencies": {
+    "@broject/adapter-core": "^0.3.0"
+  },
   "devDependencies": {
     "@kilocode/plugin": "^7.8.3"
   },

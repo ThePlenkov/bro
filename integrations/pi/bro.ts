@@ -12,6 +12,15 @@ const HOOK_TIMEOUT_MS = 15e3;
 const REHYDRATION_TIMEOUT_MS = 45e3;
 /** Cap on a hook's stdout — a runaway child must not eat the heap. */
 const MAX_OUTPUT = 1 << 20;
+/** A hung CLI must not wedge an adapter: `/bro`, `bro_status` and the
+*  bro tool are interactive reads, and a wedged dolt lock can stall
+*  them forever. The kill takes the detached process group down. */
+const RUN_TIMEOUT_MS = 6e4;
+/** How long a failed CLI resolution stays cached before a retry —
+*  PATH, a local install or npx can appear mid-session, but
+*  re-probing the npx rung on every keystroke would be worse than
+*  the outage. */
+const RESOLVE_RETRY_MS = 6e4;
 /**
 * `node` on PATH, not process.execPath — a host may ship as a compiled
 * binary whose execPath IS that binary, so running it with our own
@@ -100,38 +109,46 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	return await resolvePinnedCommand(opts.command) ?? await resolveLocalCommand() ?? await resolvePathCommand() ?? await resolveNpxCommand(opts.npxPin);
-}
-async function resolvePinnedCommand(command) {
-	if (command === void 0 || command === "") return null;
-	const [cmd, ...args] = command.split(/\s+/).filter((part) => part !== "");
-	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
-		cmd,
-		args
-	} : null;
-}
-async function resolveLocalCommand() {
+	const pinned = opts.command;
+	if (typeof pinned === "string" && pinned.trim() !== "") {
+		const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
+		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
+			cmd,
+			args
+		};
+	} else if (pinned !== void 0 && typeof pinned === "object" && pinned !== null) {
+		const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
+		const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
+		if (cmd !== "" && await exitsZero(cmd, [...args, "hooks"])) return {
+			cmd,
+			args
+		};
+	}
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
 		cmd: jsRuntime(),
 		args: [entry]
 	};
-	return null;
-}
-async function resolvePathCommand() {
-	return await exitsZero("bro", ["hooks"]) ? {
+	if (await exitsZero("bro", ["hooks"])) return {
 		cmd: "bro",
 		args: []
-	} : null;
-}
-async function resolveNpxCommand(npxPin) {
-	return npxPin !== void 0 && await exitsZero("npx", ["--version"]) ? {
-		cmd: "npx",
-		args: [
+	};
+	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
+	if (specs.length > 0 && await exitsZero("npx", ["--version"])) {
+		for (const spec of specs) if (await exitsZero("npx", [
 			"-y",
 			"--prefer-offline",
-			npxPin
-		]
-	} : null;
+			spec,
+			"hooks"
+		])) return {
+			cmd: "npx",
+			args: [
+				"-y",
+				"--prefer-offline",
+				spec
+			]
+		};
+	}
+	return null;
 }
 /**
 * The env an in-process adapter stamps on its `bro hooks` spawn so the
@@ -152,49 +169,24 @@ function hookEmitEnv(kind, opts = {}) {
 	if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
 	return env;
 }
-/** The one-line cause a diagnostic surfaces for a failed hook call. */
-function hookFailureText(failure) {
-	switch (failure.kind) {
-		case "no-cli": return "no bro CLI resolved";
-		case "input": return "the hook payload could not be serialized";
-		case "spawn": return "the hook process failed to spawn";
-		case "timeout": return `the hook timed out after ${failure.timeoutMs}ms`;
-		case "exit": return `the hook exited ${failure.code ?? "with no exit code"}`;
-		case "output": return "the hook answered with no control object";
-	}
-}
 /**
-* callHook with the failure class attached. The stop gate needs to tell
-* "bro had nothing to say" apart from "bro could not answer": both are
-* fail-open, but the second must not pass invisibly. A clean exit with
-* empty stdout is silence (failure null) — only real outage kinds set it.
+* Run one `bro hooks <event>` with the payload on stdin; resolve null on
+* every failure mode — spawn error, timeout, nonzero exit, garbage out.
+* `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
 */
-async function callHookDetailed(options) {
-	let input;
-	try {
-		input = JSON.stringify(options.payload);
-	} catch {
-		return {
-			control: null,
-			failure: { kind: "input" }
-		};
-	}
-	if (input === void 0) return {
-		control: null,
-		failure: { kind: "input" }
-	};
+async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
-		child = spawn(options.command.cmd, [
-			...options.command.args,
+		child = spawn(command.cmd, [
+			...command.args,
 			"hooks",
-			options.event
+			event
 		], {
-			cwd: options.cwd,
-			env: options.extraEnv === void 0 ? void 0 : {
+			cwd,
+			env: extraEnv === void 0 ? void 0 : {
 				...process.env,
-				...options.extraEnv
+				...extraEnv
 			},
 			stdio: [
 				"pipe",
@@ -205,25 +197,16 @@ async function callHookDetailed(options) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		return {
-			control: null,
-			failure: { kind: "spawn" }
-		};
+		return null;
 	}
 	let settled = false;
-	const settle = (result) => {
+	const settle = (value) => {
 		if (!settled) {
 			settled = true;
-			resolve(result);
+			resolve(value);
 		}
 	};
-	const timer = killAfter(child, options.timeoutMs, () => settle({
-		control: null,
-		failure: {
-			kind: "timeout",
-			timeoutMs: options.timeoutMs
-		}
-	}));
+	const timer = killAfter(child, timeoutMs, () => settle(null));
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -232,38 +215,14 @@ async function callHookDetailed(options) {
 	});
 	child.on("error", () => {
 		clearTimeout(timer);
-		settle({
-			control: null,
-			failure: { kind: "spawn" }
-		});
+		settle(null);
 	});
 	child.on("close", (code) => {
 		clearTimeout(timer);
-		if (code !== 0) {
-			settle({
-				control: null,
-				failure: {
-					kind: "exit",
-					code
-				}
-			});
-			return;
-		}
-		const control = parseControl(out);
-		if (control === null && out.trim() !== "") {
-			settle({
-				control: null,
-				failure: { kind: "output" }
-			});
-			return;
-		}
-		settle({
-			control,
-			failure: null
-		});
+		settle(code === 0 ? parseControl(out) : null);
 	});
 	child.stdin?.on("error", () => {});
-	child.stdin?.end(input);
+	child.stdin?.end(JSON.stringify(payload));
 	return promise;
 }
 /**
@@ -276,13 +235,10 @@ function parseControl(out) {
 		if (text === "") continue;
 		try {
 			const parsed = JSON.parse(text);
-			if (isControlObject(parsed)) return parsed;
+			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
 		} catch {}
 	}
 	return null;
-}
-function isControlObject(value) {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 /**
 * The context half of a control object: bro's "here is what you should
@@ -364,55 +320,9 @@ async function statusJson(command, cwd) {
 	return promise;
 }
 const ELLIPSIS = "…";
-/** Terminal column width of one code point — wcwidth-lite. Ranges are
-*  table-driven: ZERO for combining marks/joiners, WIDE for wide,
-*  fullwidth and emoji blocks (two columns), one otherwise. */
-const ZERO_WIDTH = [
-	[768, 879],
-	[8203, 8205],
-	[65024, 65039]
-];
-const WIDE = [
-	[4352, 4447],
-	[11904, 12350],
-	[12353, 13311],
-	[13312, 19903],
-	[19968, 40959],
-	[40960, 42191],
-	[44032, 55203],
-	[63744, 64255],
-	[65072, 65135],
-	[65280, 65376],
-	[65504, 65510],
-	[126976, 129791],
-	[131072, 196605],
-	[196608, 262141]
-];
-const inRanges = (cp, ranges) => ranges.some(([lo, hi]) => cp >= lo && cp <= hi);
-function charWidth(cp) {
-	if (inRanges(cp, ZERO_WIDTH)) return 0;
-	return inRanges(cp, WIDE) ? 2 : 1;
-}
-/** Display width in terminal columns — not string length. */
-function displayWidth(text) {
-	let w = 0;
-	for (const ch of text) w += charWidth(ch.codePointAt(0) ?? 0);
-	return w;
-}
-/** Clip to a display width in terminal columns, marking the cut. The
-*  iteration is by code point — a surrogate pair never splits. */
+/** Clip to a width, marking the cut. */
 function clip(text, width) {
-	if (displayWidth(text) <= width) return text;
-	const budget = Math.max(0, width - 1);
-	let w = 0;
-	let out = "";
-	for (const ch of text) {
-		const cw = charWidth(ch.codePointAt(0) ?? 0);
-		if (w + cw > budget) break;
-		w += cw;
-		out += ch;
-	}
-	return `${out}${ELLIPSIS}`;
+	return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
 }
 /**
 * The widget board — one compact summary line, then the top in-progress
@@ -423,46 +333,52 @@ function boardLines(s) {
 	const beads = s.beads?.inProgress ?? [];
 	const running = (s.fleet?.agents ?? []).filter((a) => a.state === "running");
 	const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : "";
-	const optional = [[s.drill?.frame, `drill ${s.drill?.frame?.id ?? ""}`], [(s.dirty ?? 0) > 0, `dirty ${s.dirty ?? 0}`]];
 	const parts = [
 		`◐ ${beads.length} bead${beads.length === 1 ? "" : "s"}`,
 		`fleet ${running.length}${cap}`,
-		`ready ${s.beads?.readyTotal ?? 0}`,
-		...optional.filter(([present]) => present).map(([, text]) => text)
+		`ready ${s.beads?.readyTotal ?? 0}`
 	];
-	const beadLine = (b) => `  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${b.link ? `  ${b.link}` : ""}`;
-	const agentLine = (a) => `  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${a.step ? `  ${a.step}` : ""}`;
-	return [
-		`bro · ${parts.join(" · ")}`,
-		...beads.slice(0, 3).map(beadLine),
-		...running.slice(0, 2).map(agentLine)
-	];
+	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
+	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
+	const lines = [`bro · ${parts.join(" · ")}`];
+	for (const b of beads.slice(0, 3)) {
+		const link = b.link ? `  ${b.link}` : "";
+		lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${link}`);
+	}
+	for (const a of running.slice(0, 2)) {
+		const step = a.step ? `  ${a.step}` : "";
+		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
+	}
+	return lines;
 }
 /** The footer crumb — the one-glance form of the same board. */
 function statusCrumb(s) {
 	return `bro ◐${s.beads?.inProgress?.length ?? 0} ⬢${(s.fleet?.agents ?? []).filter((a) => a.state === "running").length}`;
+}
+/**
+* The lazy, retrying CLI resolver every adapter shares: resolution
+* costs spawn probes, so it runs on first use and a *failed* answer
+* expires after RESOLVE_RETRY_MS instead of poisoning the instance —
+* PATH, a local install or npx can appear mid-session.
+*/
+function createCommandResolver(opts = {}) {
+	let resolved;
+	let failedAt;
+	return () => {
+		if (resolved !== void 0 && (failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS)) return resolved;
+		failedAt = void 0;
+		resolved = resolveCommand(opts).then((cmd) => {
+			if (cmd === null) failedAt = Date.now();
+			return cmd;
+		});
+		return resolved;
+	};
 }
 
 //#endregion
 //#region packages/agent-plugins/adapter-core/src/host.ts
 /** The board's widget key — one slot, owned by bro. */
 const BOARD_KEY = "bro";
-/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
-*  board refresh are interactive reads, and a wedged dolt lock can
-*  stall them forever. The kill takes the detached process group
-*  down, so a dolt child dies with its parent. */
-const RUN_TIMEOUT_MS = 6e4;
-/** How long a failed CLI resolution stays cached before a retry —
-*  PATH, a local install or npx can appear mid-session, but
-*  re-probing the npx rung on every keystroke would be worse than
-*  the outage. */
-const RESOLVE_RETRY_MS = 6e4;
-/** How often a dead stop probe may warn. The gate is fail-open by
-*  contract — a missing CLI or a broken hook must be LOUD once (the
-*  operator cannot otherwise tell "nothing armed" from "the gate never
-*  ran"), then quiet: a persistently-broken install cannot spam a
-*  notification at every stop event. */
-const GATE_DIAG_INTERVAL_MS = 15 * 6e4;
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -487,8 +403,7 @@ function sharedBinding(host) {
 	return {
 		events: {
 			...LINEAGE_EVENTS,
-			stop: host.stop,
-			userInput: host.userInput
+			stop: host.stop
 		},
 		on: host.on,
 		sessionId(ctx) {
@@ -512,8 +427,7 @@ function sharedBinding(host) {
 		stopAborted: host.stopAborted,
 		promptOf(event) {
 			const turn = event;
-			if (typeof turn.prompt === "string") return turn.prompt;
-			return typeof turn.text === "string" ? turn.text : "";
+			return typeof turn.prompt === "string" ? turn.prompt : "";
 		},
 		inject(text) {
 			return { message: {
@@ -535,31 +449,12 @@ function sharedBinding(host) {
 		hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin })
 	};
 }
-function mergeHydrationText(priorCarry, text) {
-	if (priorCarry === "") return text;
-	return text === "" ? priorCarry : `${priorCarry}\n\n${text}`;
-}
-function canReuseCommand(failedAt) {
-	return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
-}
-function canConsumeHydration(pending, sessionId, hydrated) {
-	return pending !== void 0 && pending.sessionId === sessionId && hydrated !== sessionId;
-}
-function trackHydration(options) {
-	const { raw, started, isCurrent, onFailure, clear } = options;
-	raw.then((control) => {
-		if (control === null && isCurrent()) onFailure();
-	}).catch(() => {});
-	started.then((text) => {
-		if (isCurrent() && text === "") clear();
-	}).catch(() => {});
-}
 /**
 * Wire bro into a host. `api` is the host's own extension API — the
 * driver passes it through so the client can register commands and
 * tools without a second channel.
 */
-function createBroDriver(host, api, deps = {}) {
+function createBroDriver(host, api) {
 	let board = null;
 	/** Monotonic token — a refresh that finishes after a newer one
 	*  started must not overwrite the newer snapshot. */
@@ -588,49 +483,16 @@ function createBroDriver(host, api, deps = {}) {
 	*  let through, and a NEW session starts with a fresh gate (the
 	*  flag dies with its session instead of leaking into the next). */
 	let gatedSession;
-	/** Prompt-submit probes run when the host receives input, not when the
-	* agent starts. Keep their answers until that input's turn begins. */
-	const promptNudges = /* @__PURE__ */ new Map();
-	/** Resolve the CLI once. Probing costs a spawn even where bro is
-	*  inert, so it stays lazy. A *failed* resolution is not permanent:
-	*  PATH, a local install or npx can appear mid-session, so a null
-	*  answer expires after RESOLVE_RETRY_MS instead of poisoning the
-	*  whole extension instance. */
-	let resolved;
-	let resolvedFailedAt;
-	const resolve = deps.resolve ?? resolveCommand;
-	const command = () => {
-		if (resolved !== void 0 && canReuseCommand(resolvedFailedAt)) return resolved;
-		resolvedFailedAt = void 0;
-		resolved = resolve({ npxPin: host.npxPin }).then((cmd) => {
-			if (cmd === null) resolvedFailedAt = Date.now();
-			return cmd;
-		});
-		return resolved;
-	};
-	/** Probe one bro hook — the verdict plus the failure class when the
-	*  probe could not run. A bro-disabled dir is healthy silence (both
-	*  fields null), never a failure: the repo simply didn't opt in. */
-	const probeResult = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
-		if (!broEnabled(cwd)) return {
-			control: null,
-			failure: null
-		};
-		const cmd = await command();
-		return cmd === null ? {
-			control: null,
-			failure: { kind: "no-cli" }
-		} : callHookDetailed({
-			command: cmd,
-			event,
-			payload,
-			cwd,
-			timeoutMs,
-			extraEnv: host.hookEnv
-		});
-	};
+	/** Resolve the CLI once — the shared lazy+retrying resolver. Probing
+	*  costs a spawn even where bro is inert, so it stays lazy; a failed
+	*  resolution expires instead of poisoning the extension instance. */
+	const command = createCommandResolver({ npxPin: host.npxPin });
 	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
-	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => (await probeResult(event, payload, cwd, timeoutMs)).control;
+	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
+		if (!broEnabled(cwd)) return null;
+		const cmd = await command();
+		return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+	};
 	const paint = (ctx) => {
 		if (!host.canPaint(ctx)) return;
 		if (board === null) {
@@ -667,28 +529,22 @@ function createBroDriver(host, api, deps = {}) {
 	const hydrate = (ctx, event) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const priorCarry = event === "post-compaction" && carry?.sessionId === sessionId ? carry.text : "";
+		const priorCarry = carry?.sessionId === sessionId ? carry.text : "";
 		carry = void 0;
 		const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
-		const started = raw.then(contextOf).then((text) => mergeHydrationText(priorCarry, text));
+		const started = raw.then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
 		hydration = {
 			sessionId,
 			promise: started
 		};
-		if (event === "session-start" || hydrated === sessionId) hydrated = void 0;
-		if (event === "session-start") hydrationRetried = void 0;
+		if (hydrated === sessionId) hydrated = void 0;
 		hydrationFailed = void 0;
-		trackHydration({
-			raw,
-			started,
-			isCurrent: () => hydration?.promise === started,
-			onFailure: () => {
-				hydrationFailed = sessionId;
-			},
-			clear: () => {
-				hydration = void 0;
-			}
-		});
+		raw.then((control) => {
+			if (control === null && hydration?.promise === started) hydrationFailed = sessionId;
+		}).catch(() => {});
+		started.then((text) => {
+			if (hydration?.promise === started && text === "") hydration = void 0;
+		}).catch(() => {});
 	};
 	/** The session's context text, consumed from the cached probe. An
 	*  empty answer is not the session's verdict: the claim is released
@@ -696,8 +552,7 @@ function createBroDriver(host, api, deps = {}) {
 	*  picks the answer up, this turn never waits on it). */
 	const consumeHydration = async (sessionId, cwd) => {
 		const pending = hydration;
-		if (pending === void 0) return "";
-		if (!canConsumeHydration(pending, sessionId, hydrated)) return "";
+		if (pending === void 0 || pending.sessionId !== sessionId || hydrated === sessionId) return "";
 		hydrated = sessionId;
 		const text = (await pending.promise).trim();
 		if (text !== "") return text;
@@ -746,29 +601,17 @@ function createBroDriver(host, api, deps = {}) {
 	bind(host.events.beforeAgentStart, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		let nudge = promptNudges.get(sessionId);
-		promptNudges.delete(sessionId);
-		if (nudge === void 0 && host.events.userInput === void 0) nudge = probe("prompt-submit", {
+		const nudge = probe("prompt-submit", {
 			session_id: sessionId,
 			prompt: host.promptOf(event)
 		}, cwd).then(contextOf);
 		const parts = [];
 		const hydrationText = await consumeHydration(sessionId, cwd);
 		if (hydrationText !== "") parts.push(hydrationText);
-		const nudgeText = nudge === void 0 ? "" : (await nudge).trim();
+		const nudgeText = (await nudge).trim();
 		if (nudgeText !== "") parts.push(nudgeText);
 		if (parts.length === 0) return;
 		return host.inject(parts.join("\n\n"));
-	});
-	bind(host.events.userInput, (event, ctx) => {
-		const prompt = host.promptOf(event);
-		if (prompt === "") return;
-		const sessionId = host.sessionId(ctx);
-		const cwd = host.cwd(ctx);
-		promptNudges.set(sessionId, probe("prompt-submit", {
-			session_id: sessionId,
-			prompt
-		}, cwd).then(contextOf));
 	});
 	bind(host.events.toolResult, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
@@ -782,23 +625,12 @@ function createBroDriver(host, api, deps = {}) {
 		if (text === "") return;
 		return host.appendToolResult(event, text);
 	});
-	/** The last gate diagnostic stamp — one warn per interval per driver
-	*  instance. In-process on purpose: the diagnostic's own contract is
-	*  "never break the gate", and in-memory state is the only store that
-	*  cannot itself fail (a marker file could). A driver reload simply
-	*  re-arms the window. */
-	let gateDiagAt = 0;
-	const gateDiag = (ctx, failure) => {
-		const now = Date.now();
-		if (now - gateDiagAt < GATE_DIAG_INTERVAL_MS) return;
-		gateDiagAt = now;
-		try {
-			host.notify(ctx, `bro stop gate did not run — ${hookFailureText(failure)}; the stop is unguarded`, "warning");
-		} catch {}
-	};
-	/** The healthy probe's verdict: a block refuses the stop; anything
-	*  else lets it land — surfacing bro's hint when it left one. */
-	const stopVerdict = (ctx, sessionId, control) => {
+	const stopGate = async (event, ctx, sessionId) => {
+		if (host.stopAborted?.(event) === true) return;
+		const control = await probe("stop", {
+			session_id: sessionId,
+			stop_hook_active: gatedSession === sessionId || host.stopAlreadyRefused(event)
+		}, host.cwd(ctx));
 		if (control?.decision !== "block") {
 			const hint = contextOf(control);
 			if (hint !== "") host.notify(ctx, hint, "info");
@@ -808,18 +640,6 @@ function createBroDriver(host, api, deps = {}) {
 		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
 		refreshBoard(ctx).catch(() => {});
 		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
-	};
-	const stopGate = async (event, ctx, sessionId) => {
-		if (host.stopAborted?.(event) === true) return;
-		const { control, failure } = await probeResult("stop", {
-			session_id: sessionId,
-			stop_hook_active: gatedSession === sessionId || host.stopAlreadyRefused(event)
-		}, host.cwd(ctx));
-		if (failure !== null) {
-			gateDiag(ctx, failure);
-			return;
-		}
-		return stopVerdict(ctx, sessionId, control);
 	};
 	/** In-flight stop probes by session id — two concurrent stops must
 	*  not both run the probe and both block: the second awaits the
@@ -880,8 +700,7 @@ function createBroDriver(host, api, deps = {}) {
 			properties: {},
 			additionalProperties: false
 		},
-		async execute(...toolArgs) {
-			const ctx = toolArgs[4];
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
 				content: [{
@@ -933,15 +752,6 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		});
 		return promise;
 	}
-	return wireBroProcess({
-		child,
-		promise,
-		resolve,
-		timeoutMs
-	});
-}
-function wireBroProcess(options) {
-	const { child, promise, resolve, timeoutMs } = options;
 	let out = "";
 	let err = "";
 	let settled = false;
@@ -952,7 +762,10 @@ function wireBroProcess(options) {
 		resolve(result);
 	};
 	const timer = setTimeout(() => {
-		killChild(child);
+		try {
+			if (child.pid !== void 0 && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+			else child.kill("SIGKILL");
+		} catch {}
 		settle({
 			code: 1,
 			stdout: out,
@@ -962,10 +775,10 @@ function wireBroProcess(options) {
 	child.stdout?.setEncoding("utf8");
 	child.stderr?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
-		out = appendOutput(out, chunk);
+		if (out.length < 1 << 20) out += chunk;
 	});
 	child.stderr?.on("data", (chunk) => {
-		err = appendOutput(err, chunk);
+		if (err.length < 1 << 20) err += chunk;
 	});
 	child.on("error", () => settle({
 		code: 127,
@@ -978,18 +791,6 @@ function wireBroProcess(options) {
 		stderr: err
 	}));
 	return promise;
-}
-function appendOutput(current, chunk) {
-	return current.length < 1 << 20 ? current + chunk : current;
-}
-function killChild(child) {
-	try {
-		if (child.pid !== void 0 && process.platform !== "win32") {
-			process.kill(-child.pid, "SIGKILL");
-			return;
-		}
-		child.kill("SIGKILL");
-	} catch {}
 }
 
 //#endregion
@@ -1008,7 +809,6 @@ function binding(pi) {
 			kind: "pi",
 			npxPin: NPX_PIN,
 			stop: "agent_before_settle",
-			userInput: "input",
 			on(event, handler) {
 				pi.on(event, handler);
 			},
@@ -1091,7 +891,7 @@ function broExtension(pi) {
 /**
 * Adapter ownership sentinel — `bro plugins install|uninstall` refuses a
 * foreign file holding this slot; the marker survives generation into
-* integrations/pi/bro.ts.
+* plugins/pi/bro/bro.ts.
 */
 const adapter = {
 	id: "bro",
