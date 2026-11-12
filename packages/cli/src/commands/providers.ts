@@ -1,45 +1,39 @@
 /** `bro providers` — the provider registry's read surface.
  *
- *   bro providers models [name…]
- *   bro providers route [--all] <model>
- *
- * The catalog surface: every provider's model list rendered as
- * `<provider>/<model>` — the uniform `provider/model` vocabulary the
- * hosts' pickers (claude's `/bro:models`, a fleet --model flag, a
- * judge pin) all share. Source per kind:
- *
- *   api — the `models` allowlist (config-declared, offline)
- *   acp — session/new's model config option, enumerated over ACP
- *   cli — the entry's `models` shell template (one id per line)
- *
- * A pinned default `model` always renders, even when no catalog
- * surface exists — `bro providers models` never prints an empty
- * provider silently.
- *
- * `route` is the inverse query (spec: specs/bro-n1p0s.md) — the
- * brouter registry: a MODEL id in, the serving `provider/model` route
- * out. Qualified `p/m` ids and `brouter.models` declarations resolve
- * statically; anything else resolves against the same live catalog
- * `models` enumerates.
+ *   bro providers models [name…]      list every provider's models as <provider>/<model>
+ *   bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
+ *   bro providers add <preset> [--name <name>] [--global] [--force]
+ *                                     add a preset ACP provider entry
+ *   bro providers test <name>         smoke-test an ACP provider connection
  */
 import { execFile as execFileCb } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import {
   brouterStaticCatalog,
   hasHelpFlag,
   isQualifiedRouteId,
   loadConfig,
+  loadConfigLayers,
   printUsage,
   resolveModelRoute,
+  globalConfigDir,
+  withFileLock,
   CommandError,
   EXIT,
 } from '@broject/core';
 import type { BrouterConfig, ModelRoute, ProviderEntry } from '@broject/core';
 import type { AcpSeam } from '@broject/providers';
+import { parseProviderEntry } from '@broject/core';
 
 const USAGE = `usage:
   bro providers models [name…]      list every provider's models as <provider>/<model>
   bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
+  bro providers add <preset> [--name <name>] [--global] [--force]
+                                    add a preset ACP provider entry
+  bro providers test <name>         smoke-test an ACP provider connection
 `;
 const die = (msg: string): never => {
   throw new CommandError(`bro providers: ${msg}`, EXIT.error);
@@ -47,16 +41,84 @@ const die = (msg: string): never => {
 
 const execFile = promisify(execFileCb);
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+function hasBroConfigTs(dir: string): boolean {
+  return existsSync(join(dir, 'bro.config.ts'));
+}
+
+function projectConfigPath(dir: string): string {
+  return join(dir, 'bro.config.json');
+}
+
+function globalConfigJsonPath(): string {
+  return join(globalConfigDir(), 'config.json');
+}
+
+function writeConfigJsonAtomic(path: string, cfg: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  // unguessable tmp name — pid+ms are predictable, and a predictable tmp
+  // path invites a pre-planted symlink or squatter file; 'wx'/O_EXCL
+  // already refuses to follow one, but an unpredictable name removes
+  // the race window entirely
+  const tmp = join(
+    dirname(path),
+    `.bro.config.json.tmp.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
+  );
+  try {
+    // 'wx' (O_CREAT|O_EXCL) + 0600 — never follow a pre-existing symlink
+    writeFileSync(
+      tmp,
+      `${JSON.stringify(cfg, null, 2)}
+`,
+      { flag: 'wx', mode: 0o600 }
+    );
+    renameSync(tmp, path);
+  } catch (err) {
+    // an EEXIST means the tmp name collided with a live write — never
+    // rm a file this call did not create
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    throw err;
+  }
+}
+
+function readConfigJson(path: string): Record<string, unknown> {
+  if (!existsSync(path)) {
+    return {};
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isPlainObject(raw)) {
+      die(`${path}: root must be an object`);
+    }
+    return raw;
+  } catch (err) {
+    return die(`failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+const PRESETS: Record<string, { command: string }> = {
+  kilo: { command: 'kilo --acp' },
+  'claude-code': { command: 'claude --acp' },
+  codex: { command: 'codex --acp' },
+  'gemini-cli': { command: 'gemini --acp' },
+  goose: { command: 'goose acp' },
+  opencode: { command: 'opencode acp' },
+  devin: { command: 'devin --acp' },
+};
+
 interface Opts {
-  /** Test seam — injected in-process acp peer (AcpSeam.peer). */
   acp?: AcpSeam;
-  /** Test seam — replaces the models-template exec. */
   exec?: (command: string) => string | Promise<string>;
-  /** Test seam — the registry; default loads cwd config. */
   providers?: Record<string, ProviderEntry>;
-  /** Test seam — the brouter registry; default loads cwd config. */
   brouter?: BrouterConfig;
-  /** Test seam — stdout capture; default console.log. */
   out?: (line: string) => void;
   /** The catalog read's budget — absolute ms. Absent keeps the 30s the
    *  acp catalog has always had; a caller that OWNS a budget (the serve
@@ -66,19 +128,11 @@ interface Opts {
   deadline?: number;
 }
 
-/** A catalog row — `id` is `<name>/<model-id>`; `name` is the
- *  provider's own display label when it advertises one (acp options
- *  carry a human name; api/cli catalogs are id-only). The conductor's
- *  `/v1/models` maps `name` onto display_name. */
 export interface CatalogModel {
   id: string;
   name?: string;
 }
 
-/** The catalog as `<name>/<model-id>` rows — the same list
- *  `bro providers models` renders, exported for the serve conductor's
- *  `/v1/models` surface (spec bro-wxfls: the catalog may be a
- *  different entry than the messages backend). */
 export async function catalogModels(
   name: string,
   entry: ProviderEntry,
@@ -92,7 +146,6 @@ export async function catalogModels(
   return providerModels(name, entry, opts);
 }
 
-/** One provider's catalog rows — `id` is `<name>/<model-id>` each. */
 async function providerModels(
   name: string,
   entry: ProviderEntry,
@@ -104,7 +157,6 @@ async function providerModels(
   });
   switch (entry.type) {
     case 'api':
-      // the allowlist IS the catalog — a model not declared can't run
       return Object.keys(entry.models).map(id => render(id));
     case 'cli': {
       const ids: string[] = [];
@@ -144,10 +196,6 @@ async function providerModels(
   }
 }
 
-/** The live catalog as a provider → served-ids index — the same rows
- *  `models` renders, prefix stripped back to raw model ids. A failed
- *  provider warns and indexes nothing — a catalog that can't enumerate
- *  is a smaller index, never the route's error. */
 async function liveCatalog(
   providers: Record<string, ProviderEntry>,
   opts: Opts
@@ -160,8 +208,6 @@ async function liveCatalog(
           r.id.slice(name.length + 1)
         );
       } catch (err) {
-        // statically-known ids still route — a probe failure shrinks the
-        // live index, it never drops an api allowlist or a pinned model
         catalog[name] = brouterStaticCatalog({ [name]: entry })[name] ?? [];
         console.error(
           `bro providers: ${name} — catalog failed: ${err instanceof Error ? err.message : String(err)}`
@@ -172,12 +218,6 @@ async function liveCatalog(
   return catalog;
 }
 
-/** `route` — qualified ids and declared routes are authoritative:
- *  they resolve without paying a live probe. Bare ids resolve against
- *  the live catalog (which subsumes the static index — pins append on
- *  every kind, api allowlists ARE the api catalog, and a failed probe
- *  falls back to the static ids) so `--all` still reports every
- *  candidate the live catalog would serve (spec: specs/bro-n1p0s.md). */
 async function runRouteCommand(
   names: string[],
   providers: Record<string, ProviderEntry>,
@@ -187,6 +227,7 @@ async function runRouteCommand(
   const rest = names.filter(n => n !== '--all');
   if (rest.length !== 1) {
     printUsage(USAGE, 2);
+    return;
   }
   const asked = rest[0]!;
   const brouter = opts.brouter ?? loadConfig(process.cwd()).brouter ?? { models: {} };
@@ -211,14 +252,13 @@ async function runRouteCommand(
   }
 }
 
-/** `models` — the catalog surface: named providers or all of them,
- *  a failing provider warns and the exit code reports it. */
-async function runModelsCommand(
-  names: string[],
-  providers: Record<string, ProviderEntry>,
-  opts: Opts,
-  out: (line: string) => void
-): Promise<void> {
+async function cmdModels(argv: string[], opts: Opts): Promise<void> {
+  const names = argv;
+  if (hasHelpFlag(names)) {
+    printUsage(USAGE, 2);
+    return;
+  }
+  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
   const wanted =
     names.length > 0
       ? names.map(n => {
@@ -231,10 +271,12 @@ async function runModelsCommand(
           return [n, entry] as const;
         })
       : (Object.entries(providers) as [string, ProviderEntry][]);
+  const out = opts.out ?? ((line: string) => console.log(line));
   let failed = 0;
   for (const [name, entry] of wanted) {
     try {
-      for (const row of await providerModels(name, entry, opts)) {
+      const models = await providerModels(name, entry, opts);
+      for (const row of models) {
         out(row.id);
       }
     } catch (err) {
@@ -247,20 +289,190 @@ async function runModelsCommand(
   }
 }
 
+interface ParsedAdd {
+  preset?: string;
+  name?: string;
+  global: boolean;
+  force: boolean;
+}
+
+const ADD_BOOL_FLAGS: Record<string, 'global' | 'force'> = {
+  '--global': 'global',
+  '--force': 'force',
+};
+
+/** Applies one argv token to `parsed`; returns the index of the last
+ *  token consumed (a `--name <value>` pair consumes two). */
+function applyAddArg(parsed: ParsedAdd, argv: string[], i: number): number {
+  const a = argv[i]!;
+  const boolFlag = ADD_BOOL_FLAGS[a];
+  if (boolFlag !== undefined) {
+    parsed[boolFlag] = true;
+    return i;
+  }
+  if (a === '--name') {
+    const value = argv[i + 1];
+    if (value === undefined) die('missing value for --name');
+    parsed.name = value;
+    return i + 1;
+  }
+  if (a.startsWith('-')) {
+    die(`unknown flag ${a}`);
+  }
+  if (parsed.preset !== undefined) {
+    die(`unexpected argument ${a}`);
+  }
+  parsed.preset = a;
+  return i;
+}
+
+function parseAddArgs(argv: string[]): ParsedAdd {
+  const parsed: ParsedAdd = { global: false, force: false };
+  for (let i = 0; i < argv.length; i++) {
+    i = applyAddArg(parsed, argv, i);
+  }
+  return parsed;
+}
+
+/** Shadow check for `bro providers add` — returns the conflicting
+ *  .ts path when a TypeScript config would shadow the .json write. */
+function addConfigShadow(global: boolean, dir: string): string | undefined {
+  if (!global && hasBroConfigTs(dir)) {
+    return join(dir, 'bro.config.ts');
+  }
+  if (global && existsSync(join(dir, 'config.ts'))) {
+    return join(dir, 'config.ts');
+  }
+  return undefined;
+}
+
+function getAddConfigPath(global: boolean): string {
+  const dir = global ? globalConfigDir() : process.cwd();
+  return global ? globalConfigJsonPath() : projectConfigPath(dir);
+}
+
+/** Names the higher-precedence config file whose `providers.<name>`
+ *  entry shadows what `add` just wrote — undefined when nothing does.
+ *  A `--global` write sits below project+local; a project write sits
+ *  below local only. */
+function addShadowedBy(global: boolean, name: string): string | undefined {
+  const { layers } = loadConfigLayers(process.cwd());
+  for (const hit of layers) {
+    const outranks = global ? hit.layer !== 'global' : hit.layer === 'local';
+    if (!outranks) continue;
+    const providers = hit.raw.providers;
+    if (isPlainObject(providers) && Object.hasOwn(providers, name)) {
+      return hit.file;
+    }
+  }
+  return undefined;
+}
+
+async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
+  const parsed = parseAddArgs(argv);
+  if (parsed.preset === undefined) {
+    die('usage: bro providers add <preset> [--name <name>] [--global] [--force]');
+  }
+  const presetName = parsed.preset!;
+  const p = PRESETS[presetName];
+  if (p === undefined) {
+    die(`unknown preset ${presetName} — available: ${Object.keys(PRESETS).join(', ')}`);
+  }
+  const providerName = parsed.name ?? presetName;
+  if (!/^(?!__proto__$|constructor$|prototype$)[A-Za-z0-9][\w.-]*$/.test(providerName)) {
+    die(
+      `unsafe provider name ${JSON.stringify(providerName)} — use [A-Za-z0-9._-], not __proto__/constructor/prototype`
+    );
+  }
+  const dir = parsed.global ? globalConfigDir() : process.cwd();
+  const path = getAddConfigPath(parsed.global);
+  return withFileLock(`${path}.lock`, () => {
+    const cfg = readConfigJson(path);
+    const providers = isPlainObject(cfg.providers)
+      ? { ...(cfg.providers as Record<string, unknown>) }
+      : {};
+    if (Object.hasOwn(providers, providerName) && !parsed.force) {
+      die(`providers.${providerName} already exists — use --force to overwrite`);
+    }
+    const entry: ProviderEntry = { type: 'acp', command: p.command };
+    if (parseProviderEntry(providerName, entry) === null) {
+      die('generated entry failed validation');
+    }
+    providers[providerName] = entry;
+    cfg.providers = providers;
+    // the .ts-shadow check must sit under the lock, immediately before the
+    // write — a bro.config.ts/config.ts created between an outside-lock
+    // check and the rename would shadow the json entry we just reported
+    const shadow = addConfigShadow(parsed.global, dir);
+    if (shadow !== undefined) {
+      die(
+        `${basename(shadow)} shadows ${basename(shadow, '.ts')}.json — edit providers in ${shadow}`
+      );
+    }
+    writeConfigJsonAtomic(path, cfg);
+    console.log(`added providers.${providerName} (${parsed.preset}) → ${path}`);
+    const shadowedBy = addShadowedBy(parsed.global, providerName);
+    if (shadowedBy !== undefined) {
+      console.error(
+        `bro providers: warning: ${shadowedBy} defines providers.${providerName} — it shadows the entry just written to ${path}`
+      );
+    }
+  });
+}
+
+async function cmdTest(argv: string[], opts: Opts): Promise<void> {
+  if (argv.length === 0 || hasHelpFlag(argv)) {
+    die('usage: bro providers test <name>');
+  }
+  const name = argv[0]!;
+  if (argv.length > 1) {
+    die(`unexpected argument ${argv[1]}`);
+  }
+  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
+  const entry = providers[name];
+  if (entry === undefined) {
+    die(
+      `providers.${name} is not configured — configured: ${Object.keys(providers).join(', ') || 'none'}`
+    );
+  }
+  if (entry.type !== 'acp') {
+    die(`providers.${name} must be type 'acp' to test`);
+  }
+  try {
+    const { acpModels } = await import('@broject/providers');
+    await acpModels(name, entry as any, { acp: opts.acp });
+    console.log(`ok: providers.${name} (acp)`);
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
+  }
+}
+
 export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
-  const [verb, ...names] = argv;
-  if (verb === undefined || hasHelpFlag(argv)) {
+  const [verb, ...rest] = argv;
+  if (verb === undefined) {
     printUsage(USAGE, 0);
+    return;
+  }
+  if (hasHelpFlag(argv)) {
+    printUsage(USAGE, 0);
+  }
+  if (verb === 'add') {
+    await cmdAdd(rest, opts);
+    return;
+  }
+  if (verb === 'test') {
+    await cmdTest(rest, opts);
+    return;
   }
   const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
   const out = opts.out ?? ((line: string) => console.log(line));
   if (verb === 'route') {
-    await runRouteCommand(names, providers, opts, out);
+    await runRouteCommand(rest, providers, opts, out);
     return;
   }
   if (verb === 'models') {
-    await runModelsCommand(names, providers, opts, out);
+    await cmdModels(rest, opts);
     return;
   }
-  printUsage(USAGE, 2);
+  die(`unknown subcommand ${verb}`);
 }
