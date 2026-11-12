@@ -134,3 +134,12 @@ exclude_paths:
   # a bounded scalar, not outside data — reading chars by cursor is the
   # file's whole job, like the fs seam above.
   - 'packages/brose/src/frontmatter.ts'
+
+  # The worktree-claim plane IS path construction: every fs op lands on
+  # the worktree's own gitdir artifacts — <wt>/.git (file or dir),
+  # <gitdir>/bro/work, <gitdir>/bro/claim.lock, <gitdir>/{index,logs/HEAD,
+  # HEAD} — paths bro BUILDS from the tree under inspection, never request
+  # data. The non-literal-path rule reads a computed path as uncontrolled
+  # data; the code is a VERBATIM move from commands/work.ts (bro-jamp7) —
+  # the same false positive as plane.ts above, not new code.
+  - 'packages/rig/src/worktree-claim.ts'

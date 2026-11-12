@@ -115,7 +115,7 @@ classified into the ownership and cleanup verdicts every surface
 needs. The write transitions (spawn commit, stop, claim stamps) stay
 in the connectors/commands — spawn/IO adapters, per the slice rule.
 
-### Moves
+### Moves — slice 2
 
 | symbol(s) | from | to |
 | --------- | ---- | -- |
@@ -142,7 +142,7 @@ in the connectors/commands — spawn/IO adapters, per the slice rule.
   a second copy as a regex in `sweepSettledFixers`; rig owns the
   format now, the sweep parses through it.
 
-### Dependencies
+### Dependencies — slice 2
 
 `rig → {core, drill, act}` — still acyclic (`act → {core, debt}`).
 `@broject/act` enters for the occupancy supervisor plane: `ListedWatch`,
