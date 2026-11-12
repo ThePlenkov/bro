@@ -1,11 +1,11 @@
 ---
 title: "bro pipeline"
-description: "Pipeline customer surface — run|accept|answer"
+description: "Pipeline customer surface — accept|answer write the verdict store"
 ---
 
-**`bro pipeline`** — Pipeline customer surface — run|accept|answer
+**`bro pipeline`** — Pipeline customer surface — accept|answer write the verdict store
 
-`bro pipeline run|accept|answer`
+`bro pipeline accept|answer`
 
 | | |
 | --- | --- |
