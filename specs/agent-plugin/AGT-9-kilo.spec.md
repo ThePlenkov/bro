@@ -1,7 +1,7 @@
 ---
 template: brotocol/spec@2
 id: AGT-9
-title: kilo — plugin bus, shared transform event, notify-only stop
+title: Kilo — plugin bus, write-capable bro tool, notify-only stop, context transform
 status: draft
 area: agents
 parent: AGT-1
@@ -12,109 +12,86 @@ aliases:
   - kilo
 ---
 
-# AGT-9 — kilo: plugin bus, shared transform event, notify-only stop
+# AGT-9 — Kilo: plugin bus, write-capable bro tool, notify-only stop, context transform
 
 ## Problem
 
-kilo (`@kilocode/plugin`) has the thinnest lifecycle surface of any
-wired host: no dedicated session-start event, no compaction events,
-no pre/post-tool events — one `experimental.chat.system.transform`
-carries both session-start and prompt-submit context, `permission.ask`
-carries the approve, and `session.idle` is the only stop-adjacent
-signal, which kilo **cannot halt**. The spec pins the minimal honest
-mapping and the notify-only stop declaration — kilo is the contract's
-lowest-capability wired host and the reference for "partial coverage
-is still coverage".
+Kilo (`@kilocode/plugin`) sits on the plugin bus but at the
+**floor tier**: no widget, no command surface, no skill registry —
+the only host where the model gets a *write-capable* bro tool
+(`sub` + `args` → any subcommand) while the stop gate degrades to
+`session.idle → notify`. The spec pins the bus contract, the
+tool-vs-command asymmetry, and the honest enforcement gap.
 
 ## Design
 
-### Surface: `plugin`, async, single generated module
+### Surface: `plugin`, async, generated `bro.ts`
 
-`plugins/kilo/bro/bro.ts` is generated from
-`packages/agent-plugins/kilo/src/kilo.ts` (adapter-core folded by
-bundle-adapter). The module imports `@kilocode/plugin` — kilo
-provisions `package.json` + `node_modules` in any config dir carrying
-a `plugin/` folder. Install: `bro plugins install kilo` → global
-`~/.config/kilo/bro/bro.ts` + `kilo.json` `plugin[]` entry, or local
-`.kilo/plugin/bro.ts` (auto-loaded). Every hook call fail-open.
+`plugins/kilo/bro/bro.ts` from `packages/agent-plugins/kilo/src/kilo.ts`
+— `@kilocode/plugin` API, raw `.ts` load. Install:
+`bro plugins install kilo [--global|--local]` → kilo plugin dir.
 
 ### Event mapping (HOOK_MATRIX `kilo` row)
 
-| bro event | kilo native | effects |
+| bro event | Kilo native | effects |
 | --------- | ----------- | ------- |
-| session-start | `experimental.chat.system.transform` | context |
-| prompt-submit | `experimental.chat.system.transform` | context — **same native event serves both** |
+| session-start + prompt-submit | `experimental.chat.system.transform` | context — **one shared transform**, dedup inside binding |
 | permission | `permission.ask` | approve |
-| stop | `event` → `session.idle` | notify — `stopRefusal: 'none'` |
-| post-compaction | — | declared gap: no compaction event exists |
-| pre-compact | — | declared gap |
-| pre-tool | — | declared gap |
-| post-tool | — | declared gap: no tool-result event exists |
+| stop | `event` → `session.idle` | **notify only** — `stopRefusal: 'none'` |
+| pre-compact / post-compaction | — | gap |
+| pre-tool | — | gap |
+| post-tool | — | gap |
 
-`nativeOnly`: `session.created`, `session.deleted`, `tool.bro` —
-kilo lifecycle events bro observes for bookkeeping.
+`nativeOnly`: `session.created`, `session.deleted`, `tool.bro`.
 
-### The shared-transform consequence
+### What the plugin adds — the inventory
 
-Because one native event feeds both session-start and prompt-submit,
-the adapter must deduplicate internally: the transform fires per
-prompt, so "session start" semantics (hydrate once, cache the
-snapshot) live in the adapter's cache, not in the host's event
-stream. This is the contract's **event-coalescing** case — when a
-host merges lifecycle moments, the binding owns the separation. Any
-future host with coarse events inherits the same rule: the driver
-sees distinct bro events; the binding de-multiplexes native ones.
+| asset | mechanism |
+| ----- | --------- |
+| `bro` tool | **write-capable** — `{sub, args[]}` → `bro <sub> <args…>`; the model invokes any subcommand (act, debt, drill, convoy, work, stack, next, loop, plan, plugins…). The ONE host where bro is model-callable beyond reads |
+| `/bro` command | **none** — kilo has no command slot wired |
+| `bro_*` read tools | **none** — the single `bro` tool replaces the read-namespace pattern |
+| skills | no host registry wired — skills reach the model via `~/.agents/skills/` (`bro skills sync`) only |
+| UX | `session.idle` → warn-log notify; no widget, no toast, no keymap |
+| self-tool guard | `nativeOnly` patterns keep `tool.bro`/`session.*` out of bro's own probes (no self-trigger loops) |
 
-### Notify-only stop — the floor of the contract
+### The stop-gate honesty
 
-`session.idle` cannot be refused: when bro's stop gate returns
-`decision:block`, kilo surfaces it as a warn-level log line and
-nothing more (`stopRefusal: 'none'`, effects `['notify']`). The spec
-states this plainly — kilo users get the gate's *signal* (log +
-the session-start/prompt nudges that carry the same policy) but not
-its *enforcement*. Enforcement parity is per-host declared, never
-implied; a kilo session that ignores the log is behaving exactly as
-specified.
+`session.idle` fires *after* settle — bro can only notify
+(`stopRefusal: 'none'`). The gate's armed aspects still compute
+and drain the mailbox, but nothing halts Kilo's stop. Declared
+gap, not hidden: kilo is the contract's notify-tier floor, and
+the spec says enforcement there is advisory-by-construction.
 
-### Native functions leveraged
+### Native correlation
 
-- **`experimental.chat.system.transform`** — kilo's system-prompt
-  transform is the context channel; bro injects hydration/nudges
-  through it (the host's own "add context" slot).
-- **`permission.ask`** — the self-tool approve lands on kilo's real
-  permission hook; scoped opt-in per boundaries.
-- **`tool.bro`** — kilo's tool-registration surface hosts a `bro`
-  tool (nativeOnly cell) for model-callable status reads.
-- **Plugin auto-load** — `.kilo/plugin/` needs no registration;
-  global installs register in `kilo.json` — two install scopes,
-  both through `bro plugins install`.
+Kilo's native tools/commands stay native; `bro` is one namespaced
+tool, never a host-verb override. The shared `system.transform`
+carries both session-start and prompt-submit context — the
+binding dedups so hydration injects once.
 
 ## Requirements
 
-- **R1** — The shared-transform dedup stays in the binding: session
-  hydration caches once per session, prompt nudges fire per prompt —
-  never let the coalesced event double-inject.
-- **R2** — Stop stays `notify`-only — do not synthesize a reprompt
-  kilo cannot deliver; `stopRefusal: 'none'` is the declared floor.
-- **R3** — `plugins/kilo/bro/bro.ts` stays generated; `check:plugins`
-  clean; the `@kilocode/plugin` import resolves only inside kilo's
-  plugin environment (never a hard dependency of the module).
-- **R4** — `permission.ask` approve stays scoped to `bro`/`bd`
-  self-tools.
-- **R5** — Declared gaps (compaction, tool events) stay declared —
-  if kilo ships the events upstream, this spec gains cells, not
-  silent wirings.
+- **R1** — `bro` tool stays write-capable with `{sub, args}` —
+  read-pinning belongs to opencode's `bro_*` namespace, not kilo.
+- **R2** — `system.transform` dedup preserved — hydration once per
+  session, nudge per prompt.
+- **R3** — Stop stays notify-only; never claim block on kilo.
+- **R4** — `nativeOnly` patterns keep bro's own events out of
+  probes (no recursion).
+- **R5** — `plugins/kilo/bro/bro.ts` stays generated.
+- **R6** — No `/bro`/widget/skill-registry claimed — assets are
+  tool + context + permission + notify.
 
 ## Verify
 
-- `host-matrix.test.ts` kilo row green — the sparsest row, all gaps
-  explicit.
-- Adapter unit tests + `check:plugins` clean.
-- Live: kilo session shows transform-injected context on start and
-  prompts, `bro`/`bd` approve on permission.ask, gate findings as
-  warn logs on idle (no reprompt expected or faked).
+- `host-matrix.test.ts` kilo row; adapter tests; `check:plugins`.
+- Live: `bro` tool callable with subcommand args, transform
+  injection visible, idle notify fires, no stop block attempted.
 
 ## Changelog
 
-- 2026-11-12 — Initial draft under AGT-1: plugin surface, shared
-  transform event dedup, notify-only stop floor, declared gaps.
+- 2026-11-12 — v1 draft.
+- 2026-11-12 — v2 rewrite: bro tool contract (write-capable),
+  shared-transform dedup, notify-only stop honesty, nativeOnly
+  recursion guard.

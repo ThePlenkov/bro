@@ -14,6 +14,7 @@ owns:
   - plugins/
   - scripts/gen-plugins.ts
   - packages/cli/src/commands/plugins.ts
+  - packages/cli/src/commands/hooks.ts
 aliases:
   - agent-plugin
   - x-agent
@@ -24,178 +25,154 @@ aliases:
 ## Problem
 
 bro reaches agent hosts through nine different plugin shapes — hook
-manifests for Claude/Codex/Devin/Cursor, generated manifests for
-Cursor, in-process extensions for pi/omp, catalog plugin directories
-for opencode/kilo, and a herdr plugin that is not an agent host at
-all. The agent-facing logic — what bro *does* inside a session — is
-real but implicit: it lives scattered across `hooks/run.sh`,
-`host-matrix.ts`, `packages/agent-plugins/adapter-core`,
-`scripts/gen-plugins.ts`, nine `plugins/` dirs, 49 skills, and a
-handful of marketplace manifests. No spec states what "bro inside
-agent X" means independent of X.
-
-The contract exists de facto — `HOOK_MATRIX` declares every host's
-event cells, `host-matrix.test.ts` enforces them cell-by-cell, and
-`integrations.md` renders the same table — but it is a test fixture
-and a docs table, not a declared contract. Three consequences:
-
-- **Archaeology for the next host.** Adding agent X today means
-  reading plugins/, adapter-core, gen-plugins, the hook runner, and
-  docs to re-derive what the contract even is. The knowledge is in
-  code shape, not in a spec.
-- **Drift surface.** The matrix, the test, the docs table, and the
-  shipped manifests are four renderings of one contract. Only the
-  test pins them together; nothing names the contract they serve.
-- **No boundary statement.** Which parts of session behavior are
-  bro's agent logic (rehydration, nudges, gates, skills, claims) and
-  which belong to the host (permission plane, native modes, UI) is
-  folklore spread across READMEs — each adapter re-answers it.
+manifests (Claude/Codex/Devin/Cursor), generated manifests (Cursor),
+in-process extensions (pi/omp), catalog plugin directories
+(opencode/kilo), and a herdr plugin that is not an agent host. The
+agent-facing surface — what bro *adds* to a session — is real but
+scattered: `hooks/run.sh`, `host-matrix.ts`, `adapter-core`,
+`gen-plugins.ts`, nine `plugins/` dirs, 49 skills, marketplace
+manifests. No spec states what "bro inside agent X" means, what the
+plugin *adds* (commands, tools, skills, UX), or how it correlates
+with the host's native commands. The contract exists de facto —
+`HOOK_MATRIX` + `host-matrix.test.ts` + `integrations.md` — but as a
+test fixture, not a declared spec.
 
 ## Design
 
-### The contract has four planes
+### The four planes (unchanged framing, now with the surface inventory)
 
-**1. Lifecycle plane — the hook protocol.** Eight bro events form
-the shared vocabulary: `session-start`, `post-compaction`,
-`pre-compact`, `prompt-submit`, `pre-tool`, `post-tool`, `stop`,
-`permission`. Every host maps its native events onto them; every
-answer travels the `bro hooks <event>` protocol (stdin payload in,
-JSON control out). `HOOK_MATRIX` is the machine form of this plane:
-per host, per event — native names, tool matchers, effects
-(`context | observe | block | reprompt | rewrite | approve |
-notify`), outcome source, stop-refusal mode, sync/async background.
+**1. Lifecycle plane — `bro hooks <event>`.** Eight events, one
+protocol (stdin payload → JSON control out). Per-hook logic, stated
+once for every host:
 
-**2. State plane — the repo is the session.** Claims, markers
-(`.work`/`.task`/`.act`/`.drill` in the git common dir), mailbox
-drops, the spec tree, guard and lesson caches — all durable state
-lives on disk in the repository, never inside the host. This is why
-one logic serves every X: the state plane is host-blind by
-construction. A host contributes only *when* to ask; bro owns *what*
-is true.
+| event | what bro does | host-visible effect |
+| ----- | ------------- | ------------------- |
+| `session-start` / `post-compaction` / `pre-compact` | rehydrate: beads ready, drill frame, PR gate, debt, merge slot, work nudges, matched lessons, SDD policy | context injection (never enforced) |
+| `prompt-submit` | drill-frame reminder; review host parses its own PR URLs → act snapshot; SDD nudge on own claims; matched lessons | context injection |
+| `pre-tool` | guard plane: connector verdicts — first `block` vetoes the call, `tool_input` overrides merge | block/rewrite where host allows |
+| `post-tool` | exec nudges (`gh pr create` → act gate + trace stamp; merge → debt sweep; first mutating bro subcommand → cites governing skill); **arms the stop gate** via per-session `.git` markers (act/drill/work/task aspects); drains session mailbox; connector postTool probes | context/observe; arming is invisible state |
+| `stop` | connector GateContributions — each system reports unfinished work; blocks only aspects this session armed; one-shot per aspect | block / reprompt / notify per host cell |
+| `permission` | auto-approve `bro`/`bd`/`npx @broject/bro` self-tools — scoped opt-in, never the host's security plane | approve / mandatory-answer (Cursor) / absent |
 
-**3. Surface plane — what the host can show.** Board/status
-rendering, model-callable tools, slash commands, skill registries,
-toasts and widgets. Capability-tiered by surface kind: manifest
-hosts are sync and context-only; extension/plugin hosts are async
-and may paint UI, register tools, and hold native refusal slots.
-The tier is declared per host in the matrix — never assumed.
+Plus non-event ops: `install`/`uninstall` write git-hook shims
+(`prepare-commit-msg` provenance trailers, `reference-transaction`
+shared-branch ref guard, `post-merge` dep-graph refresh) — repo
+hooks, host-independent.
 
-**4. Delivery plane — four surfaces, one protocol.** `manifest`
-(host-native hooks.json piping stdin to `hooks/run.sh`),
-`generated` (same shape, emitted by `gen-plugins.ts`),
-`extension` (in-process TS module on the pi/omp API), `plugin`
-(catalog module on the opencode/kilo bus). All four terminate in the
-same `bro hooks` dispatch; the surface decides transport and timing,
-never semantics.
+**2. State plane — the repo is the session.** Claims, `.work`/`.task`/
+`.act`/`.drill` markers in the git common dir, mailbox drops, spec
+tree, guard/lesson caches — durable state lives on disk, host-blind
+by construction. The stop gate's arming markers are written by
+`post-tool` and read by `stop` — both sides of the gate are bro
+state, the host only carries the event.
 
-### What a host X must supply
+**3. Surface plane — what the plugin ADDS.** Four asset classes,
+delivered per host capability:
 
-A host satisfies the contract by exactly three commitments:
+- **`/bro` command** — the unified dispatcher. Bare `/bro` refreshes
+  the board widget (extension/plugin hosts); `/bro <args>` runs
+  `bro <args>` and drops output into the transcript. On manifest
+  hosts there is no command surface — bro reaches the model through
+  hook context + skills instead.
+- **`bro_*` model tools** — read-verbs pinned to fixed argv so the
+  model gets reads, never arbitrary bro: `bro_status` (board JSON),
+  `bro_convoy_status`, `bro_act_status`, `bro_fleet`, `bro_next`,
+  `bro_drill_status`, `bro_review_threads`, `bro_worktree_status`
+  (opencode); `bro_status` (pi/omp); kilo's `bro` tool is the one
+  *write-capable* variant (`sub` + `args` → any bro subcommand).
+- **Skills** — the portable 49-skill tree (`skills/*/SKILL.md`,
+  Agent Skills format). Delivery per host: plugin `skills/` dir
+  (manifest hosts), host skill registry (opencode),
+  `~/.agents/skills/` via `bro skills sync` (directory installs).
+  Skills are how the model *invokes* bro workflows (`/act`,
+  `/drill`, `/loop`… as skill names, not host commands).
+- **UX surfaces** — board widgets (pi/omp `setWidget`, opencode
+  TUI sidebar+panel), toasts/sound (opencode `attention` event,
+  pi/omp `notify`), keymap commands (`bro.status`/`bro.board`),
+  warn logs (kilo), follow-up messages (Cursor `loop_limit`,
+  manifest context lines). Cosmetic by contract — never enforcement.
 
-1. **Cells** — its `HOOK_MATRIX` entry: which native events wire to
-   which bro events, with honest `—` gaps where the host lacks a
-   surface or bro deliberately leaves one unwired. A declared gap is
-   contract; a silent absence is a bug.
-2. **Transport** — the surface artifact that carries payloads to
-   `bro hooks` (manifest file, generated module, extension, or
-   plugin package) plus its install path (marketplace manifest or
-   `bro plugins install` client entry).
-3. **Opt-in** — participation stays opt-in: `bro.config.json` /
-   `.beads/` presence gates context and gates; a missing CLI or a
-   timeout resolves to "no opinion", never an error. The one
-   exception is the host's own permission answer shape (Cursor
-   denies an empty `beforeShellExecution` reply — the adapter must
-   still answer).
+**4. Delivery plane — four surfaces.** `manifest` (host hooks.json →
+run.sh), `generated` (gen-plugins.ts output), `extension` (in-process
+TS on pi/omp API), `plugin` (catalog module on opencode/kilo bus).
+All terminate in `bro hooks`; surface decides transport/timing, never
+semantics. `HOOK_MATRIX` is the machine form — per host, per event:
+native names, matchers, effects, outcome source, stop refusal,
+sync/async.
 
-Everything else — what the hooks *mean*, what state they read, what
-the gates decide — is bro's, identical for every X.
+### Native correlation — extend, never shadow
 
-### Boundaries (canonized, already enforced)
+The plugin's first law: **bro supplies what the host lacks; the
+host's own commands/modes keep their semantics.** The correlation
+matrix per host names native features bro rides:
 
-- **Advisory ≠ enforcement.** Nudges, context injection, re-prompts
-  and toasts are UX. Enforcement exists only where the host's own
-  `block`/`rewrite`/`approve` slot applies it.
-- **bro policy ≠ host permissions.** Stop-gate and merge policy own
-  repo state; the host permission plane stays the user's security
-  surface. bro answers permission events, never widens them.
-- **Opt-in approval is scoped.** `approve` covers `bro`/`bd`
-  self-tools only — a workspace opting into bro calling itself, not
-  a statement about any other tool.
-- **Fail-open, bounded.** Every probe is deadline-bound; the stop
-  gate is the single blocking surface and it is one-shot per armed
-  aspect per session.
-- **Sync vs async is declared.** Manifest hosts block the event on
-  `run.sh` (bounded by hook timeout); extension/plugin handlers
-  resolve while adapter work continues — the matrix records which.
+- omp Plan/Goal/Vibe/Prewalk/Advisor → `modes.ts` injects claims,
+  specs, judge, debt — omp keeps the mode UX.
+- Codex `/goal` `/plan` `/agent` `/fork` → `INSTRUCTIONS.md`
+  ownership table routes durable-plane work to bro, session work
+  stays Codex.
+- opencode native commands/tools → bro adds `bro_*` namespace +
+  `/bro`/`/act`, never redefines host verbs.
+- Where a host has NO native equivalent (most do not), bro's skills
+  are the interface — the model invokes `act`, `drill`, `loop` by
+  skill name.
 
-### The new-host path
+A host-native feature that overlaps a bro concept gets a **bridge**
+(state injection), never a competing implementation — two "review
+the approach first" buttons is the failure mode `bro-omp-plugin.md`
+already named.
 
-X may be anything — a new CLI, an editor, a multiplexer, a phone.
-The checklist this spec fixes:
+### What a host X must supply (contract checklist)
 
-1. Classify the surface: does X have lifecycle hooks? A plugin/extension
-   API? Only a shell? Pick the nearest `HookSurface`; a host with no
-   hook surface still receives skills + CLI (the degenerate contract —
-   everything advisory, nothing gated).
-2. Wire events bottom-up: `stop` and `session-start` first (the gate
-   and the rehydration carry the most value), then `prompt-submit`,
-   `post-tool`, the rest as surfaces allow.
-3. Declare cells in `HOOK_MATRIX` + bump `HOOK_MATRIX_VERSION`;
-   `host-matrix.test.ts` names every unwired cell.
-4. Choose the binding: manifest hosts need only hooks.json +
-   run.sh reachability; extension/plugin hosts supply a
-   `BroHostBinding` (events, sessionId, cwd, paint/notify,
-   refuseStop/stopAlreadyRefused, inject, appendToolResult) and get
-   the shared driver lifecycle for free.
-5. Install path: marketplace manifest for store-distributed hosts,
-   `bro plugins install <x>` CLIENTS entry for module-distribution
-   hosts.
-6. Dogfood: `hooks.e2e` payload shapes + a live session on X.
+1. **Cells** — `HOOK_MATRIX` entry: native events → bro events,
+   honest `—` gaps (declared gap = contract; silent absence = bug).
+2. **Transport** — surface artifact to `bro hooks` + install path.
+3. **Opt-in** — `bro.config.json`/`.beads/` gates everything;
+   fail-open everywhere except the host's own permission-answer
+   shape (Cursor's empty-reply-is-deny).
+4. **Surface assets** — at minimum skills delivery; commands/tools/
+   UX only where the host has the slots (declared per child spec).
 
-### Relation to existing specs
+### Boundaries (canonized)
 
-`specs/bro-omp-plugin.md` designed the core+binding+driver split
-this contract generalizes; `specs/sdd/` owns the spec engine; the
-per-host children (AGT-2…AGT-10) own each host's native mapping.
-This spec owns the *contract* — the four planes, the vocabulary,
-the boundaries, the checklist.
+- Advisory ≠ enforcement — only host `block`/`rewrite`/`approve`
+  slots enforce; reprompt/notify/context are UX.
+- bro policy ≠ host permissions — bro answers permission events for
+  self-tools only; the host's approval plane stays the user's.
+- Fail-open, bounded — every probe deadline-bound; stop gate is the
+  single blocking surface, one-shot per armed aspect.
+- Sync vs async declared per host in the matrix.
 
 ## Requirements
 
-- **R1** — The four planes, the eight-event vocabulary, the effect
-  vocabulary, and the five boundaries above are the declared
-  contract; `HOOK_MATRIX` remains their machine form and
-  `host-matrix.test.ts` their enforcement.
-- **R2** — Every shipped agent host has a child spec
-  (AGT-2…AGT-10) mapping its native surface onto contract cells,
-  naming what is leveraged natively vs adapted, and listing gaps.
-- **R3** — The new-host checklist is sufficient to wire a previously
-  unknown X without reading adapter sources: surface → events →
-  cells → binding → install → dogfood.
-- **R4** — Contract evolution is spec-governed: a cell change bumps
-  `HOOK_MATRIX_VERSION` and lands with a Changelog entry here or in
-  the affected child spec; the docs table in `integrations.md`
-  renders the matrix, never paraphrases it.
-- **R5** — Honest gaps are contract: every `—` cell names why (host
-  lacks the surface / bro deliberately unwired); silent absence is
-  a defect, not a gap.
-- **R6** — Degenerate contract: a host with no hook surface still
-  gets the portable package (skills + CLI) — advisory-only,
-  explicitly declared, never implied.
+- **R1** — The four planes, eight events + per-hook logic, four
+  asset classes, five boundaries are the declared contract;
+  `HOOK_MATRIX` remains machine form, `host-matrix.test.ts` its
+  enforcement.
+- **R2** — Every shipped host has a child spec (AGT-2…AGT-10)
+  inventorying: hook cells, `/bro`+command surface, `bro_*` tools,
+  skills delivery, UX surfaces, native-command correlation, gaps.
+- **R3** — New-host checklist covers assets too: which of
+  command/tools/UX the host can carry, declared not assumed.
+- **R4** — Evolution is spec-governed: cell/asset changes bump
+  `HOOK_MATRIX_VERSION` + Changelog; `integrations.md` renders the
+  matrix, never paraphrases.
+- **R5** — Honest gaps are contract; silent absence is a defect.
+- **R6** — Degenerate contract: no hook surface → skills + CLI
+  only, advisory, explicitly declared.
 
 ## Verify
 
-- `bro spec tree` shows AGT-1 as root of the agent-plugin family.
-- `host-matrix.test.ts` + `hooks.e2e.test.ts` green — the contract's
-  machine form and its payload shapes.
-- `site/content/docs/integrations.md` matrix == `HOOK_MATRIX`
-  rendering (already generated/verified by the doc check).
-- Each child spec's Verify section names its host's live evidence.
-- Adding a hypothetical host is exercised at least once as a dry run
-  (checklist completeness) before the contract is called stable.
+- `bro spec tree` shows AGT-1 root of the family.
+- `host-matrix.test.ts` + `hooks.e2e.test.ts` green.
+- `integrations.md` matrix == `HOOK_MATRIX`.
+- Per-child Verify names live evidence (commands/tools/UX exercised).
+- New-host dry run against the checklist before contract is stable.
 
 ## Changelog
 
-- 2026-11-12 — Initial draft: four planes, eight-event vocabulary,
-  boundaries, new-host checklist. Codifies what HOOK_MATRIX +
-  adapter-core + run.sh already enforce de facto.
+- 2026-11-12 — v1 draft: four planes, event vocabulary, boundaries.
+- 2026-11-12 — v2 rewrite after review: added the surface inventory —
+  per-hook logic table, `/bro` dispatcher contract, `bro_*` tool
+  taxonomy, skills delivery matrix, UX tiers, native-correlation
+  rule. Specs are engineering docs, not architecture prose.
