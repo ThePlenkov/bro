@@ -138,17 +138,3 @@ exclude_paths:
   # file's whole job, like the fs seam above.
   - 'packages/brose/src/frontmatter.ts'
 
-# Codacy's ESLint engine crashes repo-wide: eslint-plugin-security-node's
-# detect-unhandled-async-errors reads bodyArg.handler.type on TryStatement
-# nodes whose handler is null (try/finally without catch — valid modern
-# TS). One crash exits the container non-zero, so NO eslint results are
-# committed and every eslint issue stays frozen at its last-good commit.
-# These three files hold async try/finally blocks; excluding them lets the
-# engine finish. Durable fix (repo eslint config / upstream patch) tracked
-# separately — any new try/finally in an async fn re-trips this.
-engines:
-  eslint-8:
-    exclude_paths:
-      - 'packages/cli/src/commands/delegate-wait.ts'
-      - 'packages/cli/src/commands/drill.ts'
-      - 'packages/cli/src/commands/watch.ts'
