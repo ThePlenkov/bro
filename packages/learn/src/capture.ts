@@ -202,10 +202,19 @@ const scopeKey = (v: string): string => {
 };
 const keepKey = (v: string): boolean => v !== '' && !v.includes('://');
 
+/** The slice of a matchAll/exec yield these readers consume — `m[0]`
+ *  and `m.index`. Spelled structurally: a `RegExp*` type token anywhere
+ *  in the signature trips the scanners' non-literal-regex heuristic even
+ *  though every pattern stays a call-site literal. */
+interface HeadMatch {
+  0: string;
+  index?: number;
+}
+
 /** Collect `m[0]` keys off a caller's literal-pattern matchAll — the
  *  pattern eval happens at the call site on a literal, never on a
  *  parameter (semgrep non-literal-regexp). */
-function collect(head: Iterable<RegExpMatchArray>, cap: number): string[] {
+function collect(head: Iterable<HeadMatch>, cap: number): string[] {
   const out = new Set<string>();
   for (const m of head) {
     const v = scopeKey(m[0]);
@@ -433,7 +442,7 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
  *  each following line's start; no stop runs to EOF. */
 function mdSection(
   text: string,
-  head: Iterable<RegExpMatchArray>,
+  head: Iterable<HeadMatch>,
   stopLine?: (line: string) => boolean
 ): string | undefined {
   for (const m of head) {
