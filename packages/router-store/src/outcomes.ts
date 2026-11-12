@@ -385,6 +385,12 @@ async function upsertOutcome(
         cost: values.cost,
         tokens: values.tokens,
         wallMs: values.wallMs,
+        // the text-bearing columns move with the report too — leaving
+        // them out let the stored row, the FTS index (synced from
+        // values.taskText) and the returned row disagree whenever
+        // persistText differed between writes to the same decision
+        taskText: values.taskText,
+        featuresJson: values.featuresJson,
         reporter: values.reporter,
         eventId: values.eventId,
         sourceId: values.sourceId,

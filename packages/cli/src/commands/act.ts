@@ -285,8 +285,13 @@ async function cmdWait(argv: string[]): Promise<void> {
   const rev = reviewHost(undefined, loadBroConfig().connectors);
   const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read');
   // a watcher's startup drains the outcome outbox — intents a crashed
-  // merge/report pass left undelivered retry here (spec bro-0ykhg.4)
-  await reconcileOutcomes(process.cwd());
+  // merge/report pass left undelivered retry here (spec bro-0ykhg.4);
+  // housekeeping, never a gate on the wait itself
+  try {
+    await reconcileOutcomes(process.cwd());
+  } catch {
+    /* reconciliation is best-effort — the next pass retries */
+  }
   const act = loadBroConfig().act;
   const interval = Number(flag(argv, '--interval') ?? '60');
   const timeout = Number(flag(argv, '--timeout') ?? '45');
@@ -1108,8 +1113,13 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
   }
   const t = resolvePr(rev, argv, 'strict');
   // direct merges drain the outcome outbox too — a merge intent a
-  // crashed wait left behind retries here (spec bro-0ykhg.4)
-  await reconcileOutcomes(process.cwd());
+  // crashed wait left behind retries here (spec bro-0ykhg.4);
+  // housekeeping, never a gate on the merge itself
+  try {
+    await reconcileOutcomes(process.cwd());
+  } catch {
+    /* reconciliation is best-effort — the next pass retries */
+  }
 
   const method = mergeMethod(argv);
   if (!method) {

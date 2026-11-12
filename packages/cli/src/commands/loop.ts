@@ -420,6 +420,9 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_WORKTREE',
     'BRO_BRANCH',
     'BRO_REPO',
+    // the routing decision id is per-spawn provenance — a parent
+    // worker's id must not label this child's outcome join
+    'BRO_ROUTER_DECISION',
     BATCH_MARKER_ENV,
   ]) {
     delete env[k];
@@ -5102,13 +5105,18 @@ async function settleOutcome(
   // are merge-lifecycle results the act path owns — reporting them
   // here would double the merge authority's verdict.
   if (out.result === 'failed' || out.result === 'parked') {
-    await reportRoutedOutcome({
-      dir: ctx.root,
-      beadId: ids[0],
-      result: out.result,
-      reporter: 'bro:loop',
-      sourceId: 'bro:loop',
-    });
+    try {
+      await reportRoutedOutcome({
+        dir: ctx.root,
+        beadId: ids[0],
+        result: out.result,
+        reporter: 'bro:loop',
+        sourceId: 'bro:loop',
+      });
+    } catch {
+      /* the outbox is durable — a failed pass retries on reconcile,
+         and the park journal below still runs */
+    }
   }
   if (out.result === 'parked') {
     for (const id of ids) {

@@ -20,9 +20,9 @@
  * imports act; the credential is the whole seam.
  */
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { gitCommonDir } from '@broject/core';
+import { appendPrivateFileSync, gitCommonDir, mkdirPrivateSync } from '@broject/core';
 import {
   ensureReporterToken,
   expireTaskText,
@@ -67,9 +67,34 @@ export function outcomeOutboxPath(dir: string): string | undefined {
   return common === null ? undefined : join(common, 'bro', 'outcomes', 'outbox.jsonl');
 }
 
+/** True when the outbox's last byte isn't a newline — a crash mid-append
+ *  leaves a torn tail line, and the next row must start on its own line
+ *  or readOutbox parse-fails the merged line and loses BOTH intents. */
+function outboxNeedsNewline(path: string): boolean {
+  try {
+    const size = statSync(path).size;
+    if (size === 0) {
+      return false;
+    }
+    const fd = openSync(path, 'r');
+    try {
+      const last = Buffer.alloc(1);
+      readSync(fd, last, 0, 1, size - 1);
+      return last[0] !== 0x0a; // '\n'
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
 function appendOutbox(path: string, row: OutboxRow): void {
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  // owner-only like the agents registry — the intents name decisions,
+  // beads and verdicts (the same privacy plane the spec draws)
+  mkdirPrivateSync(dirname(path));
+  const prefix = outboxNeedsNewline(path) ? '\n' : '';
+  appendPrivateFileSync(path, `${prefix}${JSON.stringify(row)}\n`);
 }
 
 function readOutbox(path: string): { intents: OutcomeIntent[]; delivered: Set<string> } {
@@ -148,9 +173,13 @@ export async function decisionIdsForRun(opts: {
       ...(opts.pr === undefined ? {} : { pr: String(opts.pr) }),
       ...(opts.workerId === undefined ? {} : { worker: opts.workerId }),
     });
-    // newest first — the latest decision for a re-run bead is the live one
-    for (const d of found.sort((a, b) => b.createdAt - a.createdAt)) {
-      ids.add(d.decisionId);
+    // newest first — a re-run bead journals one decision per attempt
+    // and only the LATEST is this verdict's; reporting it to an
+    // earlier attempt's decision would overwrite that attempt's own
+    // outcome with a verdict that is not its
+    const live = found.sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (live !== undefined) {
+      ids.add(live.decisionId);
     }
   } catch {
     /* journal unreadable — the pin still stands */

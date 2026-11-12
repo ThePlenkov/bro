@@ -47,13 +47,22 @@ function taskShape(argv: string[]): RouteTask {
   };
 }
 
+/** The decision-id line every surface prints — `brouter outcome` joins
+ *  on it, so an unjournaled id says so up front (its report fails
+ *  unknown at the store) instead of looking usable. */
+function decisionLine(meta: { decisionId: string; journaled: boolean }): string {
+  return meta.journaled
+    ? `decision: ${meta.decisionId}`
+    : `decision: ${meta.decisionId} (not journaled — an outcome report will fail unknown)`;
+}
+
 /** The decision, rendered. */
 function render(
   decision: RouteDecisionView,
   known: boolean,
   meta: { decisionId: string; contextId: string; journaled: boolean }
 ): void {
-  console.log(`decision: ${meta.decisionId}`);
+  console.log(decisionLine(meta));
   console.log(`route: ${decision.route?.name ?? '(none)'}`);
   const chain = decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ');
   console.log(`chain: ${chain || '(empty)'}`);
@@ -152,6 +161,9 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
       console.log(JSON.stringify({ ...explanation, decisionId, contextId }, null, 2));
       return;
     }
+    // the plain explanation names the decision too — same join key the
+    // verdict render prints, so --explain never hides it
+    console.log(decisionLine({ decisionId, journaled }));
     console.log(renderExplanation(explanation, slices));
     return;
   }

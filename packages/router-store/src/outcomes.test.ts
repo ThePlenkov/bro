@@ -215,6 +215,31 @@ test('a verified merge supersedes fleet failure; unrelated signals cannot undo i
   assert.equal(later.outcome?.result, 'merged');
 });
 
+test('an outcome update keeps task text, features and the FTS index in step', async () => {
+  const s = await store('upsert-text');
+  const id = await journal(s, { taskText: 'flaky websocket reconnect test' });
+  await recordOutcome(s, report(id, { eventId: 'v1', sourceRevision: 1, rounds: 1 }), verified);
+  // a newer revision from the same source asked not to persist text —
+  // the stored row, the FTS index and the returned row must agree
+  const res = await recordOutcome(
+    s,
+    report(id, { eventId: 'v2', sourceRevision: 2, result: 'failed', rounds: 2 }),
+    { ...verified, persistText: false }
+  );
+  assert.equal(res.applied, 'updated');
+  assert.equal(res.outcome?.taskText, null);
+  assert.equal(res.outcome?.featuresJson, null);
+  const row = s.db.$client
+    .prepare('select task_text, features_json from outcomes where decision_id = ?')
+    .get(id) as { task_text: string | null; features_json: string | null };
+  assert.equal(row.task_text, null);
+  assert.equal(row.features_json, null);
+  assert.equal(
+    (await recallDecisions(s.db, { contextId: 'repo:test', text: 'websocket' })).length,
+    0
+  );
+});
+
 test('conflicting verified terminal reports from unrelated sources are retained', async () => {
   const s = await store('conflict');
   const id = await journal(s);
