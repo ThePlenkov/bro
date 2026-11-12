@@ -141,10 +141,14 @@ function foldInstalls(map: Map<string, HostAcc>, installs: InstallRow[]): void {
     a.firstSeen = Math.min(a.firstSeen, i.firstSeen);
     a.lastSeen = Math.max(a.lastSeen, i.lastSeen);
     // the freshest install row owns the adapter version — a stale root's
-    // older version must not overwrite what fired last
+    // older version must not overwrite what fired last, and a freshest
+    // row that reports NO version clears it rather than borrowing the
+    // stale root's (the board attributes the newest install's truth)
     if (i.lastSeen >= a.adapterSeen) {
       a.adapterSeen = i.lastSeen;
-      if (i.adapterVersion !== null) {
+      if (i.adapterVersion === null) {
+        delete a.adapter;
+      } else {
         a.adapter = i.adapterVersion;
       }
     }
@@ -215,11 +219,13 @@ interface ProjectAcc {
 
 /** Sessions grouped by ledger project id; a null project falls back to
  *  grouping by its own cwd (unknown project, known location), and a
- *  session with neither lands in one `—` bucket. */
+ *  session with neither lands in one `—` bucket. The no-project key is
+ *  NUL-prefixed — a ledger project id can never contain NUL, so the
+ *  sentinel can never collide with a real `"none"` project. */
 function foldProjects(sessions: SessionRow[], boot: number): Map<string, ProjectAcc> {
   const byProject = new Map<string, ProjectAcc>();
   for (const s of sessions) {
-    const key = s.project ?? (s.cwd !== null && s.cwd !== '' ? `cwd:${s.cwd}` : 'none');
+    const key = s.project ?? (s.cwd !== null && s.cwd !== '' ? `cwd:${s.cwd}` : '\0none');
     let p = byProject.get(key);
     if (p === undefined) {
       p = {
@@ -255,7 +261,7 @@ function projectRow(key: string, p: ProjectAcc): FleetProjectRow {
         : '—';
   return {
     project: p.project,
-    label: key === 'none' ? '—' : label,
+    label: key === '\0none' ? '—' : label,
     sessions: p.sessions,
     liveSessions: p.liveSessions,
     hosts: [...p.hosts].sort(),
@@ -275,6 +281,11 @@ export async function collectFleetHosts(
     ledger.sessions(),
     ledger.stats(),
   ]);
+  // a failed opportunistic drain still answers — but the board may be
+  // stale, and the read surface says so rather than implying freshness
+  const drain = ledger.drainWarning?.();
+  const warnings =
+    drain === undefined ? [] : [`spool drain failed — the board may be stale (${drain})`];
   const acc = new Map<string, HostAcc>();
   foldInstalls(acc, installs);
   foldSessions(acc, sessions, boot);
@@ -285,7 +296,7 @@ export async function collectFleetHosts(
   const projects = [...foldProjects(sessions, boot).entries()]
     .map(([key, p]) => projectRow(key, p))
     .sort((a, b) => b.sessions - a.sessions || a.label.localeCompare(b.label));
-  return { hosts, projects, generatedAt: now, warnings: [] };
+  return { hosts, projects, generatedAt: now, warnings };
 }
 
 function fmtCount(n: number): string {

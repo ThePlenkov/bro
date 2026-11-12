@@ -90,7 +90,9 @@ export function sessionsArgs(argv: string[]): SessionsArgs {
 /** Boot time in epoch ms — `os.uptime()` is seconds since boot, so this
  *  needs no /proc parsing and works on every platform Node runs on. */
 export function sessionBootTimeMs(now: number = Date.now(), upSeconds: number = uptime()): number {
-  return now - upSeconds * 1000;
+  // floor to integer epoch ms — ledger timestamps are integral and a
+  // fractional boot bound would compare against them inconsistently
+  return now - Math.floor(upSeconds * 1000);
 }
 
 /** The epic spec's read-time rule: a session whose last event predates
@@ -247,6 +249,12 @@ export async function collectSessionViews(
     ...(opts.project !== undefined ? { project: opts.project } : {}),
     ...(opts.host !== undefined ? { host: opts.host } : {}),
   });
+  // a failed opportunistic drain still answers — but the listing may be
+  // stale, and the read surface says so rather than implying freshness
+  const drain = ledger.drainWarning?.();
+  if (drain !== undefined) {
+    warnings.push(`spool drain failed — the listing may be stale (${drain})`);
+  }
   const rows: SessionViewRow[] = [];
   for (const s of stored) {
     const state = deriveSessionState(s, boot);

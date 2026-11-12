@@ -99,6 +99,22 @@ describe('bro sessions', () => {
   test('sessionBootTimeMs derives boot from uptime', () => {
     const now = 1_000_000_000;
     assert.equal(sessionBootTimeMs(now, 120), now - 120_000);
+    // fractional uptime still yields an integer epoch-ms bound
+    assert.equal(sessionBootTimeMs(now, 120.4), now - 120_400);
+  });
+
+  test('a failed spool drain surfaces as a staleness warning', async () => {
+    const ledger: LedgerFacade = {
+      append: async () => {},
+      sessions: async () => [srow({ host: 'claude', sid: 's1' })],
+      installs: async () => [],
+      stats: async () => [],
+      setMode: async () => {},
+      drainWarning: () => 'disk is gone',
+    };
+    const views = await collectSessionViews(ledger, { now: T0, bootTimeMs: BOOT });
+    assert.equal(views.rows.length, 1);
+    assert.ok(views.warnings.some(w => w.includes('may be stale')));
   });
 
   test('table carries host/sid/state/mode/agent/bead/worktree/branch/started/seen', async () => {

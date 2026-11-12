@@ -201,6 +201,46 @@ describe('collectFleetHosts', () => {
     assert.equal(none.sessions, 1);
   });
 
+  test('a real "none" project never merges into the no-project bucket', async () => {
+    const ledger = stubLedger({
+      sessions: [
+        sess({ host: 'claude', sid: 'a', project: 'none', cwd: null, lastSeen: T0 - 1000 }),
+        sess({ host: 'pi', sid: 'b', project: null, cwd: null, lastSeen: T0 - 2000 }),
+      ],
+    });
+    const p = await collectFleetHosts(ledger, { now: T0, bootTimeMs: BOOT });
+    assert.equal(p.projects.length, 2);
+    const named = p.projects.find(x => x.project === 'none')!;
+    assert.equal(named.sessions, 1);
+    assert.equal(named.label, 'none');
+    const bucket = p.projects.find(x => x.label === '—')!;
+    assert.equal(bucket.sessions, 1);
+    assert.equal(bucket.project, null);
+  });
+
+  test('the freshest install row with no version clears the adapter', async () => {
+    const ledger = stubLedger({
+      installs: [
+        install({ host: 'claude', lastSeen: T0 - 10 * DAY, adapterVersion: '0.3.0' }),
+        install({
+          host: 'claude',
+          pluginRoot: '/plugins/claude-new',
+          lastSeen: T0 - HOUR,
+          adapterVersion: null,
+        }),
+      ],
+    });
+    const p = await collectFleetHosts(ledger, { now: T0, bootTimeMs: BOOT });
+    assert.equal(p.hosts.length, 1);
+    assert.equal(p.hosts[0]!.adapter, undefined);
+  });
+
+  test('a failed spool drain surfaces as a staleness warning', async () => {
+    const ledger: LedgerFacade = { ...stubLedger({}), drainWarning: () => 'disk is gone' };
+    const p = await collectFleetHosts(ledger, { now: T0, bootTimeMs: BOOT });
+    assert.ok(p.warnings.some(w => w.includes('may be stale')));
+  });
+
   test('empty ledger renders honest empty lines', async () => {
     const p = await collectFleetHosts(stubLedger({}), { now: T0, bootTimeMs: BOOT });
     const lines = fleetHostsLines(p, T0);

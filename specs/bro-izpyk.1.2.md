@@ -1,8 +1,8 @@
 # bro-izpyk.1.2 — fleet F1b: `bro sessions` + `bro fleet hosts` read surfaces over the session ledger
 
 Child of bro-izpyk.1 (epic contract `specs/sessions/bro-izpyk.md` on branch
-`devin/1792972271-fleet-spec`; landed write path specs/bro-izpyk.1.1.md, PR
-#1006). **Read surfaces only** — the ledger write path (spool v2, ingest,
+`devin/1792972271-fleet-spec`; landed write path specs/bro-izpyk.1.1.md via
+PR #1006). **Read surfaces only** — the ledger write path (spool v2, ingest,
 killed synthesis, stats rollup) is F1a's and untouched here. `bro sessions
 resume`, `bro msg`, claims and the doctor rows are sibling beads
 (bro-izpyk.4 / .3 / .1.3) and out of scope.
@@ -39,7 +39,7 @@ sqlite by hand. The epic spec's Visibility section names the two reads:
 
 ### 1. `bro sessions` — `packages/cli/src/commands/sessions.ts`
 
-```
+```text
 bro sessions [--project|--all] [--host <h>] [--live] [--json]
 ```
 
