@@ -1,7 +1,7 @@
 ---
 template: brotocol/spec@2
 id: AGT-3
-title: Codex — manifest surface, PostCompact, PermissionRequest, unobservable outcome
+title: Codex — manifest surface, all eight events, INSTRUCTIONS.md ownership map
 status: draft
 area: agents
 parent: AGT-1
@@ -11,28 +11,25 @@ aliases:
   - codex
 ---
 
-# AGT-3 — Codex: manifest surface, PostCompact, PermissionRequest, unobservable outcome
+# AGT-3 — Codex: manifest surface, all eight events, INSTRUCTIONS.md ownership map
 
 ## Problem
 
-Codex is the only manifest host that wires **all eight** bro events —
-including `PostCompact` and `PermissionRequest`, two surfaces Claude
-declares as gaps. It also has the weakest post-tool signal of any
-host: `PostToolUse` fires on non-zero exits too, so the tool outcome
-is genuinely unobservable and the arm is a re-verified hint. The
-spec pins the mapping and the honest-degradation rule.
+Codex is the only manifest host wiring **all eight** bro events —
+`PostCompact` and `PermissionRequest` included, surfaces Claude
+declares as gaps. Its post-tool outcome is the weakest (`PostToolUse`
+fires on non-zero exits — genuinely unobservable). It also ships
+`INSTRUCTIONS.md`, the only host with a written native↔bro ownership
+table — the correlation contract made explicit. The spec pins the
+mapping, the degradation rule, and the ownership doc as contract.
 
 ## Design
 
 ### Surface: `manifest`, sync, marketplace plugin
 
-`plugins/codex/bro/` carries `hooks/hooks.json` + `hooks/run.sh` +
-`INSTRUCTIONS.md`. The hooks map is hand-maintained (not generated —
-Codex's schema is stable enough that gen-plugins does not own it);
-`INSTRUCTIONS.md` is the host-specific policy doc: *"Codex commands
-own the session. Bro owns the durable plane."* — the ownership table
-(`/goal`, `/plan`, subagents vs `bro agents`, worktrees vs `/fork`)
-is part of this spec's contract surface.
+`plugins/codex/bro/` = `hooks/hooks.json` + `hooks/run.sh` +
+`INSTRUCTIONS.md` (hand-maintained — Codex's schema is stable).
+Marketplace: `.agents/plugins/marketplace.json`.
 
 ### Event mapping (HOOK_MATRIX `codex` row)
 
@@ -43,58 +40,67 @@ is part of this spec's contract surface.
 | post-compaction | `PostCompact` | context |
 | prompt-submit | `UserPromptSubmit` | context |
 | pre-tool | `PreToolUse` (`Bash`) | block, rewrite |
-| post-tool | `PostToolUse` (`Bash`) | context, observe — outcome `unobservable` |
+| post-tool | `PostToolUse` (`Bash`) | context, observe — `unobservable` |
 | permission | `PermissionRequest` (`Bash`) | approve |
-| stop | `Stop` | block, context — `stopRefusal: 'block'` |
+| stop | `Stop` | block, context |
 
-### Native functions leveraged
+### What the plugin adds — the honest inventory
 
-- **`AGENTS.md`** — Codex's native instruction file *is* bro's
-  policy-spec path; no shim needed.
-- **SessionStart matcher** — `startup|resume|clear|compact` means
-  rehydration fires on resume and post-compact automatically; the
-  `PostCompact` cell exists because Codex tells us compaction
-  happened rather than making us infer it.
-- **`PermissionRequest`** — the self-tool approve (`bro`/`bd`/`npx
-  @broject/bro`) lands on Codex's real permission plane; scoped
-  opt-in per the boundaries.
-- **Unobservable outcome** — the contract's honesty rule in action:
-  `outcome: 'unobservable'` tells the journal to record no `ok`, and
-  the arm predicate re-verifies instead of trusting the event.
-  Codex is the reference case for "host fires the hook but cannot
-  say how the tool ended."
+| asset | Codex gets | mechanism |
+| ----- | ----------- | --------- |
+| `/bro` command | **none** | n/a |
+| `bro_*` tools | **none** | n/a |
+| skills | all 49 | repo-root plugin (`plugin.json` + `skills/`) via Codex plugin system |
+| UX | hook context lines + `INSTRUCTIONS.md` routing | rehydration/nudges; the ownership table tells the model when Codex commands vs bro apply |
+| permission | `PermissionRequest` approve | `bro`/`bd`/`npx @broject/bro` self-tools |
 
-### Install
+### Native correlation — `INSTRUCTIONS.md` is the contract
 
-`codex plugin marketplace add ThePlenkov/bro` → install `bro`.
-Marketplace manifest: `.agents/plugins/marketplace.json` (repo
-root, gen-plugins-validated).
+| When | Codex owns | Bro owns |
+| ---- | ---------- | -------- |
+| target surviving turns | `/goal` | repo seed, hosts without `/goal` |
+| design before code | `/plan` | — |
+| parallel work in-chat | subagent → `/agent` | beads workers that outlive the chat: `bro agents` |
+| background shell | `/ps`, `/stop` | — |
+| another approach | `/fork`, `/side` | git worktree |
+| the open PR | — | `bro act` (`/review` is the working tree) |
+
+The rule generalized: **session-scoped UX stays native; durable
+plane (beads, specs, PR gates, fleet) is bro's.** Codex is the
+reference implementation of the correlation table every child spec
+must fill.
+
+### Unobservable outcome — the honesty reference
+
+`PostToolUse` fires on non-zero exits too → `outcome:
+'unobservable'`: post-tool arms on the hint, the journal records no
+`ok`, nothing synthesizes success the host didn't report.
 
 ## Requirements
 
 - **R1** — All eight cells stay wired — Codex is the coverage
-  reference host; losing `PostCompact` or `PermissionRequest` is a
-  contract regression, not a simplification.
-- **R2** — `outcome: 'unobservable'` semantics preserved: post-tool
-  arms on the hint, the journal records no `ok`, never synthesize a
-  success the host did not report.
-- **R3** — `INSTRUCTIONS.md` stays the Codex↔bro ownership map —
-  host-native commands (`/goal`, `/plan`, subagents) are never
-  re-implemented by bro policy.
-- **R4** — SessionStart matcher keeps covering `resume`/`clear`/
-  `compact` — a session that survives compaction must rehydrate.
-- **R5** — Stop `decision:block` one-shot per armed aspect.
+  reference; dropping `PostCompact`/`PermissionRequest` is a
+  contract regression.
+- **R2** — `unobservable` semantics preserved: arm on hint, no `ok`
+  in journal, never fake success.
+- **R3** — `INSTRUCTIONS.md` stays the ownership map — native
+  commands (`/goal`, `/plan`, `/agent`, `/fork`) never re-implemented.
+- **R4** — SessionStart matcher keeps `resume|clear|compact` —
+  post-compaction sessions rehydrate.
+- **R5** — Stop block one-shot per armed aspect.
+- **R6** — No `/bro`/tools claimed — assets stay context+skills+
+  permission.
 
 ## Verify
 
-- `host-matrix.test.ts` codex row green — eight cells, no gaps.
-- `hooks.e2e.test.ts` Codex payload shapes incl. `turn_id`
-  fingerprinting (`shellHostOf` must keep reading Codex payloads as
-  codex, not claude).
-- Live: Codex session shows rehydration on start/resume, self-tool
-  approve on `bro`/`bd` shell calls, single stop-gate block.
+- `host-matrix.test.ts` codex row — eight cells, zero gaps.
+- `hooks.e2e.test.ts` Codex payloads incl. `turn_id` fingerprint
+  (`shellHostOf` must not read Codex as Claude).
+- Live: rehydration on start/resume, self-tool approve, single
+  stop-gate block; `/goal`-style native flows untouched.
 
 ## Changelog
 
-- 2026-11-12 — Initial draft under AGT-1: full eight-event coverage,
-  unobservable post-tool outcome, INSTRUCTIONS.md ownership map.
+- 2026-11-12 — v1 draft.
+- 2026-11-12 — v2 rewrite: assets inventory, INSTRUCTIONS.md
+  ownership table promoted to contract, unobservable-outcome rule.
