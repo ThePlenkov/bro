@@ -15,7 +15,7 @@
  * Legacy `<id>.md`-only trees keep resolving to `native` — migration
  * is opt-in by adopting the marker, never a silent cutover.
  */
-import { type Dirent, existsSync, readdirSync, readFileSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,7 @@ import {
   update,
 } from '@broject/brotocol';
 import { findSpec, hasSpecFile, indexSpecDir, repoRoot, specDirAbs, specScope } from './legacy.ts';
+import { ioExists, ioRead, ioReadDir } from './io.ts';
 
 /** Any `*.spec.md` under dir, early exit — the format-presence signal
  *  matchDir claims on. Bounded by the tree itself; spec dirs are small.
@@ -43,10 +44,13 @@ import { findSpec, hasSpecFile, indexSpecDir, repoRoot, specDirAbs, specScope } 
 export function hasSpecDoc(dir: string): boolean {
   const stack = [dir];
   while (stack.length > 0) {
-    const d = stack.pop()!;
+    const d = stack.pop();
+    if (d === undefined) {
+      continue;
+    }
     let entries: Dirent[];
     try {
-      entries = readdirSync(d, { withFileTypes: true });
+      entries = ioReadDir(d);
     } catch {
       continue;
     }
@@ -85,7 +89,7 @@ function brotocolTemplates(): string[] {
     // package not resolvable from here — specTemplateDir may still work
   }
   dirs.push(specTemplateDir);
-  return [...new Set(dirs.filter(d => existsSync(d)))];
+  return [...new Set(dirs.filter(d => ioExists(d)))];
 }
 
 /** `owns:` (KEY-N specs) wins over `scope:` (legacy pathspecs); both
@@ -129,7 +133,7 @@ function specStoreOver(
   } => {
     const byPath = new Map<string, SpecNode>();
     const dirDocs: { id: string; dir: string }[] = [];
-    if (!existsSync(specRoot)) {
+    if (!ioExists(specRoot)) {
       return { byPath, dirDocs };
     }
     for (const d of scan(protocol)) {
@@ -158,7 +162,7 @@ function specStoreOver(
         // parity with hasSpecFile: a zero-byte .spec.md is a scaffold
         // stub, not coverage — scan still derives its id from the name
         try {
-          if (readFileSync(d.path, 'utf8').trim() !== '') {
+          if (ioRead(d.path).trim() !== '') {
             return true;
           }
         } catch {
@@ -201,7 +205,7 @@ function specStoreOver(
     policy: () =>
       "spec before code — *.spec.md docs on the Brotocol spec protocol (KEY-N ids, template: brotocol/spec@N), policy specs carry bro:sdd identity regions, or a spec: link in the bead (exempt: chore / molecule / 'trivial' / 'debt')",
     tree() {
-      if (!existsSync(specRoot)) {
+      if (!ioExists(specRoot)) {
         return [];
       }
       const byPath = new Map<string, SpecNode>();
@@ -266,11 +270,11 @@ export const specConnector: Connector = {
   matchDir(dir) {
     try {
       const root = repoRoot(dir);
-      if (existsSync(join(root, '.specify')) || existsSync(join(root, 'openspec'))) {
+      if (ioExists(join(root, '.specify')) || ioExists(join(root, 'openspec'))) {
         return false;
       }
       const specDir = specDirAbs(dir, loadConfig(dir).sdd.dir);
-      return specDir !== null && existsSync(specDir) && hasSpecDoc(specDir);
+      return specDir !== null && ioExists(specDir) && hasSpecDoc(specDir);
     } catch {
       return false;
     }
