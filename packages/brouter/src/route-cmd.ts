@@ -22,8 +22,8 @@ import {
   withSlice,
 } from '@broject/core';
 import type { Explanation } from '@broject/core';
-import { unservedChains } from '@broject/router-routes';
-import type { RouteTask } from '@broject/router-routes';
+import { unservedChains, isRepoRelativePath } from '@broject/router-routes';
+import type { FeatureValue, RouteTask } from '@broject/router-routes';
 import { chainModelFacts, costFacts, healthFacts, routeFacts } from './explain.ts';
 import { windowCounters } from './ledger.ts';
 import { decideRoute } from './route-decide.ts';
@@ -35,15 +35,84 @@ type RouteDecisionView = Awaited<ReturnType<typeof decideRoute>>['decision'];
 /** The health's shape — the snapshot the verdict read. */
 type HealthSnapshotView = Awaited<ReturnType<typeof decideRoute>>['snapshot'];
 
-/** The task's shape — the flags beside the text. */
+/** A comma-separated flag's list — empty entries drop, the rest trim. */
+function listFlag(argv: string[], name: string): string[] | undefined {
+  const raw = flag(argv, name);
+  if (raw === undefined) {
+    return undefined;
+  }
+  const out = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s !== '');
+  return out.length === 0 ? undefined : out;
+}
+
+/** Invalid task input fails loud — a silently dropped field would turn a
+ *  restriction into a no-op (the same rule the plan schemas keep). */
+function badInput(msg: string): never {
+  console.error(`brouter route: ${msg}`);
+  process.exit(1);
+}
+
+/** The `--features` JSON — a flat object of scalar values; anything
+ *  else is a usage error, never a silent drop. */
+function featuresFlag(argv: string[]): Record<string, FeatureValue> | undefined {
+  const raw = flag(argv, '--features');
+  if (raw === undefined) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    badInput('--features must be a JSON object — {"key": "value"}');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    badInput('--features must be a JSON object — {"key": "value"}');
+  }
+  const out: Record<string, FeatureValue> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const ok = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+    if (!ok) {
+      badInput(`--features.${key} must be a string, number, or boolean`);
+    }
+    Object.defineProperty(out, key, {
+      value: value as FeatureValue,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
+
+/** The task's shape — the flags beside the text. The cascade's carried
+ *  fields (bro-0ykhg.2): labels, repo-relative paths, the repo id, and
+ *  the typed features map. */
 function taskShape(argv: string[]): RouteTask {
   const type = flag(argv, '--type');
   const complexity = flag(argv, '--complexity');
   const priority = flag(argv, '--priority');
+  const labels = listFlag(argv, '--labels');
+  const paths = listFlag(argv, '--paths');
+  const repo = flag(argv, '--repo');
+  const features = featuresFlag(argv);
+  if (paths !== undefined) {
+    for (const p of paths) {
+      if (!isRepoRelativePath(p)) {
+        badInput(`--paths entry "${p}" must be repo-relative (no leading /, no ..)`);
+      }
+    }
+  }
   return {
     ...(type === undefined ? {} : { type }),
     ...(complexity === undefined ? {} : { complexity }),
     ...(priority === undefined ? {} : { priority }),
+    ...(labels === undefined ? {} : { labels }),
+    ...(paths === undefined ? {} : { paths }),
+    ...(repo === undefined ? {} : { repo }),
+    ...(features === undefined ? {} : { features }),
   };
 }
 
@@ -67,6 +136,21 @@ function render(
   const chain = decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ');
   console.log(`chain: ${chain || '(empty)'}`);
   console.log(`picked: ${decision.picked} — ${decision.reason}`);
+  // the cascade's verdict — which rung decided, and each stage's
+  // before/after (bro-0ykhg.2)
+  const cascade = decision.cascade;
+  if (cascade !== undefined) {
+    console.log(`decided by: ${cascade.decidedBy ?? 'rules'}`);
+    for (const s of cascade.stages) {
+      const moved =
+        s.before.length === s.after.length && s.before.every((n, i) => n === s.after[i])
+          ? ''
+          : ` — ${s.before.length}→${s.after.length}`;
+      console.log(
+        `  ${s.stage}: ${s.before.length} in, ${s.after.length} out${moved} (${s.latencyMs}ms)${s.decided !== undefined ? ` decided ${s.decided}` : ''}${s.note !== undefined ? ` — ${s.note}` : ''}`
+      );
+    }
+  }
   const formula = decision.formula;
   if (formula !== undefined) {
     const answers =
@@ -145,7 +229,17 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   const dir = process.cwd();
   const task = positionals(
     argv,
-    new Set(['--routes', '--type', '--complexity', '--priority', '--formula'])
+    new Set([
+      '--routes',
+      '--type',
+      '--complexity',
+      '--priority',
+      '--formula',
+      '--labels',
+      '--paths',
+      '--repo',
+      '--features',
+    ])
   )
     .join(' ')
     .trim();

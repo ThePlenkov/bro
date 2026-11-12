@@ -25,14 +25,13 @@
  * prior over verified terminal rows inside the window — zero rows
  * report the prior 0.5 and n=0, never a judge score.
  */
+
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, eq, gte, sql } from 'drizzle-orm';
-import type { StoreFace } from './decisions.ts';
+import type { DecisionRow, StoreFace } from './decisions.ts';
 import { canonicalJson, getDecision } from './decisions.ts';
-import type { DecisionRow } from './decisions.ts';
-import { outcomes, outcomeReports } from './schema.ts';
 import { readReporterToken, redactSecrets, tightenStoreFiles } from './privacy.ts';
-import { timingSafeEqual } from 'node:crypto';
-import { randomUUID } from 'node:crypto';
+import { outcomeReports, outcomes } from './schema.ts';
 
 /** The terminal results an outcome may carry — all of them terminal. */
 export const OUTCOME_RESULTS = ['merged', 'failed', 'abandoned', 'parked'] as const;
@@ -774,6 +773,102 @@ export async function recallDecisions(
       )
       .all(query.text, query.contextId, query.limit ?? 20) as Array<{ decision_id: string }>;
     return rows.map(r => r.decision_id);
+  } catch {
+    return [];
+  }
+}
+
+/** One recalled outcome row — the vote T1 counts (spec bro-0ykhg.2).
+ *  `route` is the route the decision landed on (NULL when none fit —
+ *  such rows never vote), `result` the reported outcome, `rounds` the
+ *  merge-round measure, `at` the outcome's timestamp. */
+export interface RecallOutcomeRow {
+  route: string | null;
+  result: string;
+  rounds: number | null;
+  at: number;
+}
+
+/** Task prose → a safe FTS5 MATCH expression. The text is bound as a
+ *  parameter (never interpolated), but FTS5 still parses it as QUERY
+ *  SYNTAX — punctuation like `(#123)`, quotes, or `OR`/`NOT`/`NEAR`
+ *  tokens would corrupt the match or error out. Reduce to word tokens
+ *  joined by OR: BM25 then ranks rows covering the most terms, which
+ *  is exactly the similarity recall wants (bro-0ykhg.2 review). */
+function ftsQueryText(text: string): string {
+  const terms = text.match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const term of terms) {
+    const lower = term.toLowerCase();
+    if (seen.has(lower) || out.length >= 8) {
+      continue;
+    }
+    seen.add(lower);
+    out.push(term);
+  }
+  // each term quoted — a task literally containing "or"/"not" must stay
+  // a SEARCH TERM, never parse back into query syntax
+  return out.map(term => `"${term}"`).join(' OR ');
+}
+
+/** The T1-recall read — BM25-ranked outcome rows inside the decision's
+ *  own scope: the active context, the table hash, the formula hash
+ *  (NULL matches NULL — a formula-less decision recalls only
+ *  formula-less outcomes), verified rows only. Failures come back too:
+ *  the caller counts them separately, they never vote positively.
+ *  Same-named routes in different contexts can never share votes —
+ *  context_id is part of the WHERE, not a post-filter. Empty or
+ *  broken recall returns [] — the cascade passes through. */
+export async function recallOutcomeRows(
+  db: StoreFace['db'],
+  query: {
+    contextId: string;
+    text: string;
+    tableHash: string;
+    formulaHash: string | null;
+    /** the current contender route names — when given, the SQL filters
+     *  to them BEFORE the limit, so better-ranked rows for dead routes
+     *  can never crowd eligible outcomes out of the window
+     *  (bro-0ykhg.2 review) */
+    routes?: readonly string[];
+    limit?: number;
+  }
+): Promise<RecallOutcomeRow[]> {
+  const fts = ftsQueryText(query.text);
+  if (fts === '') return [];
+  const routes = query.routes ?? [];
+  // the contender names ride as ONE json_each parameter — the SQL text
+  // never interpolates data, so there is no injection surface at all
+  const routeFilter = routes.length === 0 ? '' : ' and o.route in (select value from json_each(?))';
+  const args: Array<string | number | null> = [
+    fts,
+    query.contextId,
+    query.tableHash,
+    query.formulaHash,
+  ];
+  if (routes.length > 0) {
+    args.push(JSON.stringify(routes));
+  }
+  args.push(query.limit ?? 20);
+  try {
+    const rows = db.$client
+      .prepare(
+        `select o.route, o.result, o.rounds, o.at
+         from outcomes_fts f
+         join outcomes o on o.decision_id = f.decision_id
+         where outcomes_fts match ? and o.context_id = ? and o.verified = 1
+           and o.table_hash = ? and o.formula_hash is ?${routeFilter}
+         order by bm25(outcomes_fts)
+         limit ?`
+      )
+      .all(...args) as Array<{
+      route: string | null;
+      result: string;
+      rounds: number | null;
+      at: number;
+    }>;
+    return rows;
   } catch {
     return [];
   }

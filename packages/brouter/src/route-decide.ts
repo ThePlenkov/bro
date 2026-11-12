@@ -26,7 +26,7 @@
  * unavailable store costs the row, never the decision — the id still
  * returns for the pins.
  */
-import type { FleetRouter, HealthSnapshot, JudgeFacade } from '@broject/core';
+import type { BrouterRouter, FleetRouter, HealthSnapshot, JudgeFacade } from '@broject/core';
 import { readFileSync } from 'node:fs';
 import {
   candidates,
@@ -36,6 +36,8 @@ import {
   validateFormulaTable,
 } from '@broject/router-routes';
 import type {
+  CascadeDecider,
+  CascadeStage,
   Formula,
   OutcomeStatsSource,
   RouteCandidate,
@@ -43,13 +45,15 @@ import type {
   RouteTable,
   RouteTask,
 } from '@broject/router-routes';
-import { newDecisionId } from '@broject/router-store';
+import { newDecisionId, DEFAULT_SUCCESS_PREDICATE } from '@broject/router-store';
 import { journalDecision } from './context.ts';
 import type { DecisionKind } from '@broject/router-store';
 import { decisionJudge } from './decision-model.ts';
 import { decideByFormula, type FormulaTaskDecision } from './formula-decide.ts';
 import { ledgerHealth } from './ledger.ts';
 import { routerOutcomeStats } from './outcome-stats.ts';
+import { runT1, shouldInvokeT2, stageRecord, type InvokeMode } from './cascade.ts';
+import { recallTuning } from './recall.ts';
 
 /** The verdict for a task — the route, and whether the health was known. */
 export interface TaskDecision {
@@ -111,8 +115,10 @@ async function modelPick(opts: {
   task: string;
   /** the statically resolved route — journaled beside the model's opinion */
   resolved: string;
+  /** the T3 escalate judge — asked only on a low-confidence pick */
+  escalate?: import('@broject/core').JudgeFacade;
 }): Promise<string | undefined> {
-  const { dir, router, found, task, resolved } = opts;
+  const { dir, router, found, task, resolved, escalate } = opts;
   const { routePick } = await import('@broject/judge');
   const judge = await decisionJudge(dir, router);
   const options = found.map(c => ({
@@ -128,6 +134,7 @@ async function modelPick(opts: {
       subject: task.slice(0, 80),
       resolved,
       mode: router.mode,
+      ...(escalate === undefined ? {} : { escalate }),
     });
   } catch (err) {
     console.error(
@@ -157,8 +164,9 @@ export async function decideRoute(input: {
   /** the feature map the outcome stats bucket by — the task's declared
    *  features when it carries them */
   features?: Record<string, string | number | boolean>;
-  /** the decision model — absent means the table's own order decides */
-  router?: FleetRouter;
+  /** the decision model — absent means the table's own order decides;
+   *  the cascade's invoke/escalate/recall knobs ride it (bro-0ykhg.2) */
+  router?: BrouterRouter;
   /** the formula's path — `--formula` wins over `brouter.formula` at the
    *  surface; absent means the table's order plus the model pick, exactly
    *  the behavior before formulas existed */
@@ -199,22 +207,120 @@ export async function decideRoute(input: {
     formula === undefined
       ? await (async (): Promise<FormulaTaskDecision> => {
           const found = candidates(input.table, input.task, snapshot);
-          const resolved = found.candidates[0]?.route.name ?? '';
-          const named =
-            input.router === undefined || found.candidates.length === 0
-              ? undefined
-              : await modelPick({
-                  dir: input.dir,
-                  router: input.router,
-                  found: found.candidates,
-                  task: input.text,
-                  resolved,
-                });
-          return {
-            decision: resolveRoute(input.table, input.task, snapshot, () => named),
-            snapshot,
-            healthKnown: known,
-          };
+          const invoke: InvokeMode = input.router?.invoke ?? 'ambiguous';
+          const stages: CascadeStage[] = [];
+          // T0 — rules + health over the carried fields
+          const t0Start = Date.now();
+          const names = found.candidates.map(c => c.route.name);
+          stages.push(
+            stageRecord('T0', names, names, Date.now() - t0Start, {
+              note: `${names.length} candidate(s) survived rules + health`,
+            })
+          );
+          // T1 — outcome recall over the candidates (bro-0ykhg.2)
+          const t1 = await runT1({
+            dir: input.dir,
+            table: input.table,
+            text: input.text,
+            contenders: names,
+            tuning: recallTuning(input.router?.recall),
+            predicate: DEFAULT_SUCCESS_PREDICATE,
+            ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
+          });
+          stages.push(t1.stage);
+          // reorder the candidates by recall standing
+          const rank = new Map(t1.order.map((n, i) => [n, i]));
+          const reordered = [...found.candidates].sort(
+            (a, b) =>
+              (rank.get(a.route.name) ?? Number.MAX_SAFE_INTEGER) -
+              (rank.get(b.route.name) ?? Number.MAX_SAFE_INTEGER)
+          );
+          const set = { candidates: reordered, rejected: found.rejected };
+          // T1 decided and no trusted T2 pick can override it — recall
+          // settles it. invoke=always yields ONLY to an enforce-mode
+          // router: shadow journals but never routes, off never asks,
+          // and an absent router has no judge at all (bro-0ykhg.2)
+          const t2CanOverride = invoke === 'always' && input.router?.mode === 'enforce';
+          if (t1.decided !== undefined && !t2CanOverride) {
+            stages.push(
+              stageRecord('T2', [], [], 0, { note: 'skipped — outcome recall already decided' })
+            );
+            const decision = resolveRoute(input.table, input.task, snapshot, () => t1.decided, {
+              set,
+              picked: 'recall',
+              cascade: { stages, decidedBy: 'recall' },
+              reason: `outcome recall picked ${t1.decided}`,
+            });
+            return { decision, snapshot, healthKnown: known };
+          }
+          // the invoke gate — 'never' never asks, 'ambiguous' asks only
+          // on ambiguity, 'always' asks every task; mode=off never asks
+          const gate = shouldInvokeT2({
+            invoke,
+            candidates: reordered.length,
+            pending: 0,
+            pendingNeeds: false,
+          });
+          const mayAsk =
+            gate.ask &&
+            input.router !== undefined &&
+            input.router.mode !== 'off' &&
+            reordered.length > 0;
+          let named: string | undefined;
+          let decidedBy: CascadeDecider = 'rules';
+          if (mayAsk) {
+            // T3 — the escalate judge rides routePick on low-confidence
+            const escalate =
+              input.router!.escalate === undefined
+                ? undefined
+                : await decisionJudge(input.dir, {
+                    provider: input.router!.escalate,
+                    mode: input.router!.mode,
+                  }).catch(() => undefined);
+            const t2Start = Date.now();
+            named = await modelPick({
+              dir: input.dir,
+              router: input.router!,
+              found: reordered,
+              task: input.text,
+              resolved: reordered[0]?.route.name ?? '',
+              ...(escalate === undefined ? {} : { escalate }),
+            });
+            stages.push(
+              stageRecord(
+                'T2',
+                reordered.map(c => c.route.name),
+                // the pick narrows the set to the named route — an
+                // unanswered judge leaves every contender standing
+                named !== undefined ? [named] : reordered.map(c => c.route.name),
+                Date.now() - t2Start,
+                {
+                  note:
+                    named === undefined
+                      ? 'the judge named no confident candidate'
+                      : `the judge picked ${named}`,
+                }
+              )
+            );
+            decidedBy = input.router!.mode === 'enforce' && named !== undefined ? 'judge' : 'rules';
+          } else {
+            stages.push(
+              stageRecord('T2', [], [], 0, {
+                note:
+                  gate.reason +
+                  (input.router === undefined
+                    ? ' — no decision model configured'
+                    : input.router.mode === 'off'
+                      ? ' — the decision model is off'
+                      : ''),
+              })
+            );
+          }
+          const decision = resolveRoute(input.table, input.task, snapshot, () => named, {
+            set,
+            cascade: { stages, decidedBy },
+          });
+          return { decision, snapshot, healthKnown: known };
         })()
       : await decideByFormula({
           dir: input.dir,
@@ -228,6 +334,13 @@ export async function decideRoute(input: {
           healthKnown: known,
           ...(input.judge === undefined ? {} : { judge: input.judge }),
           ...(outcomes === undefined ? {} : { outcomes }),
+          // the cascade's knobs + the recall scope's formula bytes —
+          // the SAME text the journal snapshots (bro-0ykhg.2)
+          ...(input.router?.invoke === undefined ? {} : { invoke: input.router.invoke }),
+          ...(input.router?.recall === undefined ? {} : { recall: input.router.recall }),
+          ...(input.router?.escalate === undefined ? {} : { escalate: input.router.escalate }),
+          ...(formulaText === undefined ? {} : { formulaText }),
+          ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
         });
   const decisionId = newDecisionId();
   const journaled = await journalDecision({
@@ -260,9 +373,20 @@ export async function decideRoute(input: {
           formulaPath: input.formula,
           ...(formulaText === undefined ? {} : { formulaText }),
         }),
-    // the formula's trace — answers, fired filters, score rows — rides
-    // the stage-answers slot for replay
-    ...(verdict.decision.formula === undefined ? {} : { stages: verdict.decision.formula }),
+    // the formula's trace — answers, fired filters, score rows — plus
+    // the cascade's stage record ride the stage-answers slot for replay
+    ...(verdict.decision.formula === undefined && verdict.decision.cascade === undefined
+      ? {}
+      : {
+          stages: {
+            ...(verdict.decision.formula === undefined
+              ? {}
+              : { formula: verdict.decision.formula }),
+            ...(verdict.decision.cascade === undefined
+              ? {}
+              : { cascade: verdict.decision.cascade }),
+          },
+        }),
     ...(input.router === undefined
       ? {}
       : { judge: { provider: input.router.provider, mode: input.router.mode } }),

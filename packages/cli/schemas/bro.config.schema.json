@@ -205,6 +205,37 @@
                 "enforce",
                 "off"
               ]
+            },
+            "invoke": {
+              "enum": [
+                "always",
+                "ambiguous",
+                "never"
+              ]
+            },
+            "escalate": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "recall": {
+              "type": "object",
+              "properties": {
+                "k": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "minAgreement": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 1
+                },
+                "minRows": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false,

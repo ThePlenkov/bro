@@ -12,9 +12,10 @@
  * signature says nothing about where it is.
  */
 import { readFileSync } from 'node:fs';
-import { parse } from 'smol-toml';
-import { ON_WALL } from '@broject/core';
 import type { ChainEntry, OnWall } from '@broject/core';
+import { ON_WALL } from '@broject/core';
+import { parse } from 'smol-toml';
+import { isRepoRelativePath } from './glob.ts';
 import type { FeatureMatch, FeatureValue, Route, RouteMatch, RouteTable } from './types.ts';
 
 /** The envelope's kind — the router's tables say what they are. */
@@ -29,8 +30,10 @@ const ROUTE_KEYS = new Set(['match', 'chain', 'onWall', 'prompt', 'description']
 /** The keys the envelope may carry. */
 const TABLE_KEYS = new Set(['kind', 'version', 'routes']);
 
-/** The match fields — the task's shape, as the operator spells it. */
-const MATCH_KEYS = new Set(['type', 'complexity', 'priority']);
+/** The match fields — the task's shape, as the operator spells it.
+ *  `labels`/`paths` take lists of strings; `repo` takes one string;
+ *  `features` takes the question→value table; the rest are scalars. */
+const MATCH_KEYS = new Set(['type', 'complexity', 'priority', 'labels', 'paths', 'repo']);
 
 /** Where a value sits in the table — the path every problem names. */
 export class TablePath {
@@ -236,6 +239,34 @@ function matchFeatures(
   return out;
 }
 
+/** A list-of-strings match field — `labels` and `paths`. Every entry
+ *  must be a non-empty string; an empty list pins nothing, which the
+ *  table treats as an error (write no key instead). */
+function matchStringList(
+  key: string,
+  value: unknown,
+  at: TablePath,
+  problems: RouteProblems
+): string[] | undefined {
+  const atKey = at.child(key);
+  if (!Array.isArray(value) || value.length === 0) {
+    problems.add(atKey, 'must be a non-empty list of strings');
+    return undefined;
+  }
+  const out: string[] = [];
+  let bad = false;
+  for (const [i, entry] of value.entries()) {
+    const text = typeof entry === 'string' ? entry.trim() : '';
+    if (text === '') {
+      problems.add(atKey.index(i), 'must be a non-empty string');
+      bad = true;
+      break;
+    }
+    out.push(text);
+  }
+  return bad ? undefined : out;
+}
+
 /** The match — the task's shape. An absent field matches any value. */
 function match(raw: unknown, at: TablePath, problems: RouteProblems): RouteMatch {
   if (raw === undefined) {
@@ -255,11 +286,41 @@ function match(raw: unknown, at: TablePath, problems: RouteProblems): RouteMatch
       }
       continue;
     }
+    if (key === 'labels' || key === 'paths') {
+      const list = matchStringList(key, value, atMatch, problems);
+      if (list !== undefined) {
+        // path globs must stay repo-relative — a leading '/' would be
+        // normalized away by the matcher and silently match anyway
+        // (bro-0ykhg.2 review); labels carry no such constraint. The
+        // writes name their fields — a computed key reads as an
+        // injection sink to the security scanners
+        if (key === 'paths') {
+          for (const [i, glob] of list.entries()) {
+            if (!isRepoRelativePath(glob)) {
+              problems.add(atMatch.child('paths').index(i), 'must be a repo-relative glob');
+            }
+          }
+          out.paths = list;
+        } else {
+          out.labels = list;
+        }
+      }
+      continue;
+    }
     const text = matchField(key, value, atMatch, problems);
     if (text !== undefined) {
       // matchField only answers the scalar keys — 'features' took the
-      // other branch — so the write lands on a string field
-      out[key as 'type' | 'complexity' | 'priority'] = text;
+      // other branch — so the write lands on a string field; the
+      // fields are named outright, never indexed by the raw key
+      if (key === 'type') {
+        out.type = text;
+      } else if (key === 'complexity') {
+        out.complexity = text;
+      } else if (key === 'priority') {
+        out.priority = text;
+      } else if (key === 'repo') {
+        out.repo = text;
+      }
     }
   }
   return out;

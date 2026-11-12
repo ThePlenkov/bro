@@ -756,6 +756,7 @@ export function applyFormulaFilters(
     }
     const unresolved: string[] = [];
     let matches = true;
+    let disproved = false;
     const clauses: string[] = [];
     for (const [qid, values] of Object.entries(filter.unless)) {
       const got = taskFeature(task, qid);
@@ -766,9 +767,13 @@ export function applyFormulaFilters(
       clauses.push(`${qid}=${answerText(got)}`);
       if (!values.includes(got)) {
         matches = false;
+        disproved = true;
       }
     }
-    if (unresolved.length > 0) {
+    // an unanswered key only pends the route while every RESOLVED clause
+    // still matches — one disproved clause means the filter can never
+    // fire, so the missing answer is moot (bro-0ykhg.2)
+    if (unresolved.length > 0 && !disproved) {
       const reason = `hard filter — ${unresolved.join(', ')} unanswered, the route cannot dispatch`;
       removed.set(filter.route, reason);
       fired.push({ route: filter.route, reason });
@@ -792,6 +797,49 @@ export function applyFormulaFilters(
     }
   }
   return { set: { candidates: kept, rejected }, fired };
+}
+
+/** What a route's hard filters still need — the cascade's T0 reads
+ *  this to mark a route pending (bro-0ykhg.2). `needs` names the
+ *  question ids whose answers could still change the verdict;
+ *  `fired` means a filter already matches every resolved clause, so
+ *  the route is out regardless of what the judge says. An unanswered
+ *  key only counts as a need while every resolved clause still
+ *  matches — one disproved clause makes the filter unfireable. */
+export function filterPending(
+  formula: Formula,
+  routeName: string,
+  task: RouteTask
+): { needs: string[]; fired: boolean } {
+  const needs = new Set<string>();
+  for (const filter of formula.filters) {
+    if (filter.route !== routeName) {
+      continue;
+    }
+    const unresolved: string[] = [];
+    let disproved = false;
+    for (const [qid, values] of Object.entries(filter.unless)) {
+      const got = taskFeature(task, qid);
+      if (got === undefined) {
+        unresolved.push(qid);
+        continue;
+      }
+      if (!values.includes(got)) {
+        disproved = true;
+        break;
+      }
+    }
+    if (disproved) {
+      continue;
+    }
+    if (unresolved.length === 0) {
+      return { needs: [...needs], fired: true };
+    }
+    for (const qid of unresolved) {
+      needs.add(qid);
+    }
+  }
+  return { needs: [...needs], fired: false };
 }
 
 /** The cross-check — every question the table's `match.features` and

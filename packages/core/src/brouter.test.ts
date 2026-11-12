@@ -76,6 +76,47 @@ describe('parseBrouter', () => {
     assert.equal(parseBrouter({ router: { provider: 'orca', mode: 'yes' } }).router, undefined);
   });
 
+  test('the cascade knobs — invoke, escalate, recall parse or drop loudly', () => {
+    const cfg = parseBrouter({
+      router: {
+        provider: 'orca',
+        mode: 'enforce',
+        invoke: 'never',
+        escalate: 'gpt-5',
+        recall: { k: 8, minAgreement: 0.7, minRows: 4 },
+      },
+    });
+    assert.deepEqual(cfg.router, {
+      provider: 'orca',
+      mode: 'enforce',
+      invoke: 'never',
+      escalate: 'gpt-5',
+      recall: { k: 8, minAgreement: 0.7, minRows: 4 },
+    });
+    // a bad invoke drops the field, the router section survives
+    const lines = err(() =>
+      parseBrouter({ router: { provider: 'orca', mode: 'enforce', invoke: 'sometimes' } })
+    );
+    assert.ok(lines.some(l => /brouter\.router\.invoke must be always\|ambiguous\|never/.test(l)));
+    assert.equal(
+      parseBrouter({ router: { provider: 'orca', mode: 'enforce', invoke: 'sometimes' } }).router
+        ?.invoke,
+      undefined
+    );
+    // a non-object recall drops; bad tuning values drop per-field
+    assert.equal(
+      parseBrouter({ router: { provider: 'orca', mode: 'enforce', recall: 'lots' } }).router
+        ?.recall,
+      undefined
+    );
+    assert.deepEqual(
+      parseBrouter({
+        router: { provider: 'orca', mode: 'enforce', recall: { k: -1, minRows: 2 } },
+      }).router?.recall,
+      { minRows: 2 }
+    );
+  });
+
   test('shorthand, object, and ordered-list routes normalize', () => {
     const cfg = parseBrouter({
       models: {

@@ -45,6 +45,10 @@ export interface RoutePickOpts {
    *  the pick doesn't win (shadow, enforce with no confident pick). */
   resolved: string;
   mode: 'shadow' | 'enforce' | 'off';
+  /** the T3 escalate judge (bro-0ykhg.2) — asked ONLY when the first
+   *  judge's answer sits in lowConfidence; its confident answers merge
+   *  back before the pick is read. Absent = no escalation. */
+  escalate?: JudgeFacade;
 }
 
 /** The chooser's one question — a `choice` whose options are exactly the
@@ -150,7 +154,38 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
     return undefined;
   }
   const questions = routePickQuestions(opts.options);
-  const res = await opts.judge.decide(opts.state, questions);
+  let res = await opts.judge.decide(opts.state, questions);
+  // T3 — the escalate judge re-answers ONLY the keys the first judge
+  // left low-confidence; a confident first answer never reaches it, and
+  // an escalate failure leaves the first result standing (fail-open)
+  if (opts.escalate !== undefined && res.lowConfidence.length > 0) {
+    try {
+      const esc = await opts.escalate.decide(opts.state, questions);
+      const low = new Set(res.lowConfidence);
+      const escLow = new Set(esc.lowConfidence);
+      const mergedAnswers = { ...res.answers };
+      for (const [key, answer] of Object.entries(esc.answers)) {
+        if (!escLow.has(key) && low.has(key) && Object.hasOwn(mergedAnswers, key)) {
+          Object.defineProperty(mergedAnswers, key, {
+            value: answer,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+        }
+      }
+      res = {
+        ...res,
+        answers: mergedAnswers,
+        lowConfidence: res.lowConfidence.filter(
+          k => escLow.has(k) || !Object.hasOwn(esc.answers, k)
+        ),
+        model: esc.model ?? res.model,
+      };
+    } catch {
+      /* the escalate judge failed — the first answer stands */
+    }
+  }
   const pick = candidatePick(opts.options, confidentChoice(res));
   const outcome = outcomeFor(opts.mode, pick, opts.resolved);
   appendRow(opts.dir, verdictOf(opts, questions, res, outcome));

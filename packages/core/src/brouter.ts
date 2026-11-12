@@ -29,6 +29,36 @@ export interface BrouterRoute {
  *  list; list order is preference order, [0] the primary pick. */
 export type BrouterModels = Record<string, BrouterRoute[]>;
 
+/** How often the judge is ASKED (spec bro-0ykhg.2) — `mode` says whether
+ *  a T2/T3 answer is trusted; `invoke` says whether it is asked at all:
+ *  `always` asks on every task (today's behavior), `ambiguous` (the
+ *  default) asks only when the surviving candidates need it, `never`
+ *  keeps the cascade to T0 rules + T1 recall. */
+export type RouterInvoke = 'always' | 'ambiguous' | 'never';
+
+/** T1 outcome-recall tuning — how many similar verified outcomes vote,
+ *  and how strongly they must agree before recall decides a route. */
+export interface RouterRecall {
+  /** how many top-scoring similar outcome rows vote (default 5) */
+  k?: number;
+  /** the fraction of voting rows that must name the winner (default 0.6) */
+  minAgreement?: number;
+  /** the minimum number of rows that must vote before recall may
+   *  decide (default 3) */
+  minRows?: number;
+}
+
+/** The brouter decision model — the fleet router's provider+mode plus
+ *  the cascade's invoke/escalate/recall knobs (bro-0ykhg.2). */
+export interface BrouterRouter extends FleetRouter {
+  invoke?: RouterInvoke;
+  /** the T3 provider — a second judge asked only when T2's answer sits
+   *  in lowConfidence; absent = table order stands */
+  escalate?: string;
+  /** T1 outcome-recall tuning — absent fields take the defaults */
+  recall?: RouterRecall;
+}
+
 /** The `brouter` config section — the model's registry plus the path of
  *  the route table that maps a task to a (provider, model) chain. */
 export interface BrouterConfig {
@@ -39,8 +69,9 @@ export interface BrouterConfig {
    *  machine contract (typed questions, hard filters, score weights)
    *  and whose body is the prose the decision model reads */
   formula?: string;
-  /** the decision model — the judge that picks the route (provider + mode) */
-  router?: FleetRouter;
+  /** the decision model — the judge that picks the route, plus the
+   *  cascade's invoke/escalate/recall knobs (bro-0ykhg.2) */
+  router?: BrouterRouter;
   /** the outcome namespace for standalone callers — the canonical repo
    *  id wins when the dir sits in a git project; this names the
    *  namespace when it does not (spec bro-0ykhg.4) */
@@ -242,15 +273,45 @@ export function parseBrouter(raw: unknown): BrouterConfig {
 /** The decision modes the table accepts. */
 const ROUTER_MODES = new Set(['shadow', 'enforce', 'off']);
 
+/** The invoke modes the cascade accepts (bro-0ykhg.2). */
+const ROUTER_INVOKES = new Set(['always', 'ambiguous', 'never']);
+
 /** The mode — one of the three the table accepts. */
 function isRouterMode(mode: unknown): mode is FleetRouter['mode'] {
   return typeof mode === 'string' && ROUTER_MODES.has(mode);
 }
 
-/** The decision model — the judge provider and the mode. Absent means the
- *  table's own order decides; 'shadow' journals the model's opinion and
- *  picks nothing; 'enforce' lets a confident pick win. */
-function decisionModel(raw: unknown): FleetRouter | undefined {
+/** A positive finite tuning number — absent and bad both drop. */
+function tuningNumber(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** The T1 recall tuning — {k, minAgreement, minRows}, each optional. */
+function recallTuning(raw: unknown): RouterRecall | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: brouter.router.recall must be an object — field dropped');
+    return undefined;
+  }
+  const o = raw as Record<string, unknown>;
+  const out: RouterRecall = {};
+  const k = tuningNumber(o.k);
+  const minAgreement = tuningNumber(o.minAgreement);
+  const minRows = tuningNumber(o.minRows);
+  if (k !== undefined) out.k = k;
+  if (minAgreement !== undefined) out.minAgreement = minAgreement;
+  if (minRows !== undefined) out.minRows = minRows;
+  return out;
+}
+
+/** The decision model — the judge provider and the mode, plus the
+ *  cascade's invoke/escalate/recall knobs (bro-0ykhg.2). Absent means
+ *  the table's own order decides; 'shadow' journals the model's opinion
+ *  and picks nothing; 'enforce' lets a confident pick win; `invoke`
+ *  says how often the judge is ASKED at all. */
+function decisionModel(raw: unknown): BrouterRouter | undefined {
   if (raw === undefined) {
     return undefined;
   }
@@ -263,7 +324,26 @@ function decisionModel(raw: unknown): FleetRouter | undefined {
     );
     return undefined;
   }
-  return { provider, mode };
+  const out: BrouterRouter = { provider, mode };
+  const invoke = o.invoke;
+  if (invoke !== undefined) {
+    if (typeof invoke === 'string' && ROUTER_INVOKES.has(invoke)) {
+      out.invoke = invoke as RouterInvoke;
+    } else {
+      console.error(
+        'bro.config: brouter.router.invoke must be always|ambiguous|never — field dropped'
+      );
+    }
+  }
+  const escalate = str(o.escalate);
+  if (escalate !== undefined) {
+    out.escalate = escalate;
+  }
+  const recall = recallTuning(o.recall);
+  if (recall !== undefined) {
+    out.recall = recall;
+  }
+  return out;
 }
 
 /** The route table's path — a non-empty string, or nothing. */

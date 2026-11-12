@@ -72,13 +72,23 @@ async function routingHealth(): Promise<HealthSnapshot> {
 }
 
 /** The task's shape — the bead's class and priority, in the table's
- *  vocabulary. A bead without a label simply has no type. */
-function taskShape(opts: { class?: string; label?: string; priority?: number }) {
+ *  vocabulary, plus the cascade's carried fields (bro-0ykhg.2): the
+ *  bead's labels and the repo's canonical id. A bead without a label
+ *  simply has no type; absent labels/repo satisfy no pins. */
+function taskShape(opts: {
+  class?: string;
+  label?: string;
+  priority?: number;
+  labels?: string[];
+  repo?: string;
+}) {
   const type = opts.class ?? opts.label;
   const priority = opts.priority === undefined ? undefined : `P${opts.priority}`;
   return {
     ...(type === undefined ? {} : { type }),
     ...(priority === undefined ? {} : { priority }),
+    ...(opts.labels === undefined || opts.labels.length === 0 ? {} : { labels: opts.labels }),
+    ...(opts.repo === undefined ? {} : { repo: opts.repo }),
   };
 }
 
@@ -116,6 +126,10 @@ export async function routeTableLane(opts: {
   class?: string;
   label?: string;
   priority?: number;
+  /** the bead's labels — `match.labels` reads them (bro-0ykhg.2) */
+  labels?: string[];
+  /** the canonical repo id — `match.repo` reads it (bro-0ykhg.2) */
+  repo?: string;
   /** what the operator declared the router serves — the served universe */
   served?: ServedDeclaration;
   /** the working dir — the journal and the context id anchor here */
