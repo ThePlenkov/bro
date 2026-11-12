@@ -24,8 +24,8 @@ import {
   type RecallTuning,
   recallDecision,
   recallOutcomeRowsScoped,
-  recallVotingWindow,
   recallVotes,
+  recallVotingWindow,
 } from './recall.ts';
 
 /** The invoke modes — `brouter.router.invoke`, 'ambiguous' the default. */
