@@ -56,6 +56,15 @@ function claimsFor(dir: string): ClaimFacade {
   return facade('claims', { dir }, prefer === undefined ? {} : { prefer });
 }
 
+/** Rows on the EXACT orchestrator role URI — `claims.list` prefix-
+ *  matches, so `role:orchestrator@-backup` would otherwise read as a
+ *  claim on `role:orchestrator@` and block (or impersonate) the role. */
+async function roleClaims(dir: string, project: string) {
+  const uri = orchestratorRoleUri(project);
+  const rows = await claimsFor(dir).list({ resource: uri });
+  return rows.filter(r => r.resource === uri);
+}
+
 /** May this session act as the project orchestrator? See the module
  *  comment for the verdict table. `session` null → env-only legacy
  *  answer (true when BRO_AGENT_ID is unset). */
@@ -76,28 +85,46 @@ export async function orchestratorRoleAllows(
     return true; // no project identity — nothing to be exclusive over
   }
   try {
-    const claims = claimsFor(dir);
-    const rows = await claims.list({ resource: orchestratorRoleUri(project) });
+    const rows = await roleClaims(dir, project);
     return !rows.some(r => !(r.host === session.host && r.sid === session.sid));
   } catch {
     return true; // ledger down → legacy behavior, never a hard gate
   }
 }
 
+/** Does `session` currently hold the role claim? Tells a fresh acquire
+ *  from a renewal — a failed mode write undoes only the fresh claim;
+ *  a pre-existing role belongs to the mode file still on disk. */
+export async function orchestratorRoleHeldBy(dir: string, session: RoleSession): Promise<boolean> {
+  const project = sessionProject(dir);
+  if (project === undefined) {
+    return false;
+  }
+  try {
+    const rows = await roleClaims(dir, project);
+    return rows.some(r => r.host === session.host && r.sid === session.sid);
+  } catch {
+    return false; // ledger down → treat as not-held; the acquire still gates
+  }
+}
+
 /** Acquire `role:orchestrator@<project>` for `session` — the
- *  `bro mode orchestrate` write path. The holder pid is this process's
- *  agent root so a dead orchestrator frees the role on the next claim
- *  probe instead of waiting out the TTL. */
+ *  `bro mode orchestrate` write path. `ownSession` marks the target as
+ *  the calling process's own session: only then is this process's agent
+ *  pid attached, so a dead orchestrator frees the role on the next
+ *  claim probe. An explicitly targeted session (--session/--host) gets
+ *  a pid-less claim — attaching the caller's pid would let the caller's
+ *  death sweep a claim the target session still needs. */
 export async function acquireOrchestratorRole(
   dir: string,
   session: SessionKey,
-  opts: { ttlMs?: number } = {}
+  opts: { ttlMs?: number; ownSession?: boolean } = {}
 ): Promise<ClaimResult> {
   const project = sessionProject(dir);
   if (project === undefined) {
     return { ok: false, conflict: null };
   }
-  const owner = agentOwner();
+  const owner = opts.ownSession === true ? agentOwner() : null;
   return claimsFor(dir).claim(orchestratorRoleUri(project), session, {
     exclusive: true,
     ...(opts.ttlMs !== undefined ? { ttlMs: opts.ttlMs } : {}),

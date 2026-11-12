@@ -108,7 +108,11 @@ import {
   type ProbeTiming,
 } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
-import { acquireOrchestratorRole, releaseOrchestratorRole } from './orchestrator-role.ts';
+import {
+  acquireOrchestratorRole,
+  orchestratorRoleHeldBy,
+  releaseOrchestratorRole,
+} from './orchestrator-role.ts';
 import { emitHook } from '@broject/otel';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
@@ -730,11 +734,15 @@ async function bindModeCommand(cmd: string, sessionId: string, dir: string): Pro
     return [];
   }
   const sessionKey = { host: hookHost, sid: sessionId };
+  // a re-bind of orchestrate renews a role the session may already hold —
+  // snapshot that so a failed write undoes only a FRESH acquire (the
+  // pre-existing claim belongs to the mode file still on disk)
+  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
   const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
   if (refusal !== null) {
     return [refusal];
   }
-  return finishModeBind(mode, dir, sessionKey);
+  return finishModeBind(mode, dir, sessionKey, preHeld);
 }
 
 /** Write the bound mode file + ledger projection, then reconcile the
@@ -743,17 +751,19 @@ async function bindModeCommand(cmd: string, sessionId: string, dir: string): Pro
 async function finishModeBind(
   mode: Mode,
   dir: string,
-  sessionKey: { host: string; sid: string }
+  sessionKey: { host: string; sid: string },
+  preHeld: boolean
 ): Promise<string[]> {
   const file = modeFilePath(process.env, sessionKey.host, sessionKey.sid);
   const wrote = writeBoundModeFile(file, mode, dir);
   if (!wrote) {
-    // the mode was not applied — undo a fresh orchestrate acquire, and
+    // the mode was not applied — undo a FRESH orchestrate acquire, and
     // release anyway when no mode file exists at all (the session then
     // resolves its default, never orchestrate, so any role claim is
-    // stale). A FAILED write on a non-orchestrate bind keeps the role:
-    // the old file may still say orchestrate.
-    if (mode === 'orchestrate' || file === null) {
+    // stale). A pre-existing role stays: the old file may still say
+    // orchestrate; a FAILED write on a non-orchestrate bind keeps it
+    // for the same reason.
+    if ((mode === 'orchestrate' && !preHeld) || (mode !== 'orchestrate' && file === null)) {
       await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
     }
     return [];
@@ -782,7 +792,9 @@ async function bindOrchestrateRole(
   if (agentId !== undefined && agentId !== '') {
     return 'bro mode orchestrate refused — BRO_AGENT_ID is set; spawned workers never orchestrate';
   }
-  const role = await acquireOrchestratorRole(dir, sessionKey).catch(() => ({
+  // the hook fires inside the target session — its agent pid is the
+  // right liveness proof for the claim
+  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession: true }).catch(() => ({
     ok: false as const,
     conflict: null,
   }));
@@ -2133,17 +2145,25 @@ function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string)
 }
 
 /** The observe post-tool leg — activeIn-filtered probes only; no
- *  arming, nudges, or guard sweep (specs/bro-izpyk.2.md). */
-async function emitPostToolObserve(input: HookInput, sessionId: string): Promise<void> {
+ *  arming, nudges, or guard sweep (specs/bro-izpyk.2.md). `bindLines`
+ *  carries the mode-bind verdicts (a refused orchestrate bind is the
+ *  user's only signal the mode stayed put — dropping it would hide the
+ *  refusal entirely in observe mode). */
+async function emitPostToolObserve(
+  input: HookInput,
+  sessionId: string,
+  bindLines: string[] = []
+): Promise<void> {
   const dir = process.cwd();
   const postLines = await postToolLines(
     hookCtx(dir, sessionId),
     probeReporter('post-tool', 'postTool')
   );
-  if (postLines.length > 0) {
+  const all = [...bindLines, ...postLines];
+  if (all.length > 0) {
     const eventName =
       typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
-    context(eventName, postLines.join('\n'));
+    context(eventName, all.join('\n'));
   }
 }
 
@@ -2173,7 +2193,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // skill-mutation citation, or guard sweep — those are active
   // behavior a passive session never pays for.
   if (hookMode === 'observe') {
-    await emitPostToolObserve(input, sessionId);
+    await emitPostToolObserve(input, sessionId, lines);
     return;
   }
   // arming is a "probe live state once" hint the stop gate re-verifies,

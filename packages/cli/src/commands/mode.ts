@@ -52,7 +52,11 @@ import {
   type SessionRow,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
-import { acquireOrchestratorRole, releaseOrchestratorRole } from './orchestrator-role.ts';
+import {
+  acquireOrchestratorRole,
+  orchestratorRoleHeldBy,
+  releaseOrchestratorRole,
+} from './orchestrator-role.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { renderModeSnapshots, SNAPSHOT_MODES } from './mode-snapshots.ts';
 
@@ -262,7 +266,8 @@ async function ensureOrchestratorClaim(
   mode: Mode,
   dir: string,
   sessionKey: SessionKey,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  ownSession: boolean
 ): Promise<boolean> {
   if (mode !== 'orchestrate') {
     return false;
@@ -275,7 +280,7 @@ async function ensureOrchestratorClaim(
       EXIT.usage
     );
   }
-  const role = await acquireOrchestratorRole(dir, sessionKey);
+  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession });
   if (!role.ok) {
     const c = role.conflict;
     throw new CommandError(
@@ -303,14 +308,24 @@ async function runSet(
   const project = sessionProject(dir);
   const warnings: string[] = [];
   const sessionKey = { host: sess.host, sid: sess.sid };
-  const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env);
+  // implicit session resolution means the target IS this process — an
+  // explicit --session/--host may name another session, whose claim
+  // must not carry this process's pid
+  const ownSession = args.session === undefined && args.host === undefined;
+  // re-applying orchestrate renews a role the session may already hold —
+  // snapshot that so a failed write undoes only a FRESH acquire (the
+  // pre-existing claim belongs to the mode file still on disk)
+  const preHeld =
+    args.mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
+  const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env, ownSession);
   try {
     writeModeFile(file, args.mode, project);
   } catch (err) {
-    // the mode was not applied — undo the role acquire so the claim
+    // the mode was not applied — undo a fresh role acquire so the claim
     // and the mode file never disagree; a stranded claim would block
-    // the next orchestrator for up to the TTL
-    if (roleAcquired) {
+    // the next orchestrator for up to the TTL. A renewed pre-existing
+    // role stays: the old file may still say orchestrate.
+    if (roleAcquired && !preHeld) {
       await releaseOrchestratorRole(dir, sessionKey);
     }
     throw err;
@@ -359,6 +374,17 @@ async function runClear(
 ): Promise<void> {
   const file = modeFilePath(env, sess.host, sess.sid);
   const warnings: string[] = [];
+  const sessionKey = { host: sess.host, sid: sess.sid };
+  const ownSession = args.session === undefined && args.host === undefined;
+  // modes.default decides the post-clear mode — when it is orchestrate
+  // this clear IS an orchestrate activation in disguise: same worker
+  // veto + exclusive role gate as `bro mode orchestrate`, taken BEFORE
+  // the file goes so a foreign holder refuses the clear and the mode
+  // file (and the mode it names) stays put
+  const willOrchestrate = modesDefault(dir) === 'orchestrate';
+  const gated = willOrchestrate
+    ? await ensureOrchestratorClaim('orchestrate', dir, sessionKey, env, ownSession)
+    : false;
   if (file !== null && !removeModeFile(file)) {
     warnings.push(`could not remove mode file ${file} — the old mode still applies`);
   }
@@ -371,12 +397,17 @@ async function runClear(
     defaultMode: modesDefault(dir),
   });
   await ledgerSetMode(ledger, sess.host, sess.sid, res.mode, warnings);
-  // the role claim follows the effective mode — orchestrate acquires,
-  // anything else releases (best-effort both ways; the claim's own
-  // TTL/pid liveness is the backstop)
-  const sessionKey = { host: sess.host, sid: sess.sid };
+  // the role claim follows the effective mode — orchestrate keeps (or
+  // best-effort acquires) it, anything else releases (best-effort both
+  // ways; the claim's own TTL/pid liveness is the backstop). A failed
+  // remove leaves the old file standing, so res.mode — not
+  // willOrchestrate — is the truth the role reconciles against.
   if (res.mode === 'orchestrate') {
-    await acquireOrchestratorRole(dir, sessionKey).catch(() => ({ ok: false }));
+    if (!gated) {
+      await acquireOrchestratorRole(dir, sessionKey, { ownSession }).catch(() => ({
+        ok: false,
+      }));
+    }
   } else {
     await releaseOrchestratorRole(dir, sessionKey);
   }

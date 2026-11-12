@@ -193,19 +193,27 @@ function blocksClaim(row: ClaimDbRow, session: SessionKey, exclusive: boolean): 
   return exclusive || row.exclusive;
 }
 
-/** `task:*` delegation needs a project dir — opts.dir wins (CLI
- *  callers pass their cwd), else the session row's ledger cwd. */
+/** `task:*` delegation needs a project dir — the session row's ledger
+ *  cwd is authoritative; opts.dir is the fallback for sessions with no
+ *  ledger row (spec specs/bro-izpyk.3.md declares it the fallback). */
 async function taskDirFor(
   s: LedgerStore,
   session: SessionKey,
   o: { dir?: string }
 ): Promise<string | undefined> {
+  // the session's ledger cwd is the authority — a claim belongs to the
+  // session's project even when the CLI ran from another directory;
+  // opts.dir is the fallback for sessions with no ledger row (spec
+  // specs/bro-izpyk.3.md declares it the fallback, not an override)
+  const rows = await s.sessions({ host: session.host, sid: session.sid });
+  const cwd = rows.at(0)?.cwd;
+  if (cwd !== undefined && cwd !== null && cwd.trim() !== '') {
+    return cwd;
+  }
   if (o.dir !== undefined && o.dir.trim() !== '') {
     return o.dir;
   }
-  const rows = await s.sessions({ host: session.host, sid: session.sid });
-  const cwd = rows.at(0)?.cwd;
-  return cwd === undefined || cwd === null || cwd.trim() === '' ? undefined : cwd;
+  return undefined;
 }
 
 /** claimsFacade — lazy sqlite handle like ledgerFacade: the store
@@ -222,14 +230,27 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
 
   let opening: Promise<LedgerStore> | undefined;
   const store = async (): Promise<LedgerStore> => {
-    opening ??= (async () => {
+    if (opening !== undefined) {
+      return opening;
+    }
+    const p = (async () => {
       const h = await openLedgerStore(dbPath);
       if (!h.ok) {
         throw new Error(`claims store unavailable at ${h.path}: ${h.reason}`);
       }
       return h.store;
     })();
-    return opening;
+    opening = p;
+    try {
+      return await p;
+    } catch (err) {
+      // a transient open failure must not poison the facade for the
+      // process — clear the cached rejection so the next call retries
+      if (opening === p) {
+        opening = undefined;
+      }
+      throw err;
+    }
   };
   /** Same opportunistic drain the ledger facade runs — a failed drain
    *  costs freshness, never the call. */
@@ -297,8 +318,10 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     const assignee = (row.assignee ?? '').trim();
     // actor '' is "unverifiable, never a match" (TaskStore.actor) —
     // empty==empty must not read as already-ours: it would return ok
-    // without ever calling ts.claim, reporting a hold that never was
-    if (actor !== '' && assignee === actor) {
+    // without ever calling ts.claim, reporting a hold that never was.
+    // A CLOSED task keeping our assignee is not a live hold either —
+    // fall through so the refusal reports the real state.
+    if (actor !== '' && assignee === actor && !isClosedStatus(row.status)) {
       return { ok: true };
     }
     if (assignee !== '') {
@@ -334,11 +357,10 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     if (actor === '' || !taskReleasable(ts, id, actor)) {
       return;
     }
-    try {
-      ts.reopen(id);
-    } catch {
-      // best-effort release — the next `bro claim list`/`bd` read tells the truth
-    }
+    // a failed reopen is a real failure — swallowing it would print
+    // `released` while the assignee stays set; let it propagate so the
+    // CLI reports the error and the caller can retry
+    ts.reopen(id);
   };
 
   return {

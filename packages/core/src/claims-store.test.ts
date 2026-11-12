@@ -91,6 +91,7 @@ function taskClaimsFixture(actor = 'me') {
     ['bro-2', { id: 'bro-2', status: 'in_progress', assignee: 'other-agent' } as TaskRow],
     ['bro-3', { id: 'bro-3', status: 'in_progress', assignee: 'me' } as TaskRow],
     ['bro-4', { id: 'bro-4', status: 'in_progress', assignee: 'me' } as TaskRow],
+    ['bro-5', { id: 'bro-5', status: 'closed', assignee: 'me' } as TaskRow],
   ]);
   const claimed: string[] = [];
   const reopened: string[] = [];
@@ -118,8 +119,9 @@ function taskClaimsFixture(actor = 'me') {
     actor: () => actor,
   } as unknown as TaskStore;
   const dbPath = join(root, `claims-task-${taskFixtureN}.db`);
-  const c = facade({ dbPath, tasksForDir: () => ts });
-  return { c, dbPath, beads, claimed, reopened };
+  const dirs: string[] = [];
+  const c = facade({ dbPath, tasksForDir: d => (dirs.push(d), ts) });
+  return { c, dbPath, beads, claimed, reopened, ts, dirs };
 }
 
 test('task:* claim delegates to the tasks store — bd claim stays truth', async () => {
@@ -189,6 +191,51 @@ test('task:* release honors opts.dir without a session cwd', async () => {
   assert.deepEqual(f.reopened, ['bro-3']);
 });
 
+test('task:* prefers the session cwd over opts.dir', async () => {
+  const f = taskClaimsFixture();
+  const h = await openLedgerStore(f.dbPath);
+  assert.equal(h.ok, true);
+  if (!h.ok) return;
+  try {
+    await h.store.append([
+      {
+        kind: 'session',
+        host: A.host,
+        sid: A.sid,
+        cwd: '/session-repo',
+        mode: 'code',
+        state: 'live',
+        lastSeen: Date.now(),
+      },
+    ]);
+    // the CLI always passes its cwd — the session's ledger cwd is the
+    // authority, so a claim from another directory still lands in the
+    // session's project
+    await f.c.claim('task:bro-1', A, { dir: '/cli-dir' });
+    assert.deepEqual(f.dirs, ['/session-repo']);
+  } finally {
+    h.store.close();
+  }
+});
+
+test('task:* claim on a closed task does not report a fresh hold', async () => {
+  const f = taskClaimsFixture();
+  // bro-5 stays assigned to us but is closed — ok:true would claim a
+  // hold that does not exist
+  const res = await f.c.claim('task:bro-5', A, { dir: '/repo' });
+  assert.equal(res.ok, false);
+  assert.equal(f.claimed.includes('bro-5'), false);
+});
+
+test('task:* release propagates a failed reopen', async () => {
+  const f = taskClaimsFixture();
+  f.ts.reopen = () => {
+    throw new Error('bd store down');
+  };
+  // a swallowed reopen would print `released` while the assignee stays
+  await assert.rejects(() => f.c.release('task:bro-3', A, { dir: '/repo' }), /bd store down/);
+});
+
 test('claims list filters by session and resource prefix', async () => {
   const c = facade();
   await c.claim('worktree:/w1', A);
@@ -206,6 +253,18 @@ test('resource prefix matching treats LIKE metachars literally', async () => {
   await c.claim('path:src/myXfile', B);
   // unescaped, the `_` in my_file would wildcard-match myXfile
   const rows = await c.list({ resource: 'path:src/my_file' });
+  assert.deepEqual(
+    rows.map(r => r.sid),
+    ['sess-a']
+  );
+});
+
+test('resource prefix matching is case-sensitive', async () => {
+  const c = facade();
+  await c.claim('path:src/Foo.ts', A);
+  await c.claim('path:src/foo.ts', B);
+  // LIKE would fold ASCII case and return both; claim identity is exact
+  const rows = await c.list({ resource: 'path:src/Foo' });
   assert.deepEqual(
     rows.map(r => r.sid),
     ['sess-a']

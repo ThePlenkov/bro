@@ -567,7 +567,7 @@ function renewClaimsHeartbeat(
   return (
     db
       .prepare(
-        `UPDATE claims SET lease_until = ? + ttl_ms
+        `UPDATE claims SET lease_until = MAX(COALESCE(lease_until, 0), ? + ttl_ms)
          WHERE host = ? AND sid = ? AND ttl_ms IS NOT NULL`
       )
       .run(nowMs, host, sid).changes ?? 0
@@ -772,10 +772,11 @@ function buildClaimsOps(db: SqliteDatabase): ClaimsStoreOps {
         params.push(q.sid);
       }
       if (q.resourcePrefix !== undefined) {
-        // LIKE metachars in the prefix are literal — resource URIs
-        // legitimately carry `_`/`%` (path:src/my_file, pr:100%)
-        where.push("resource LIKE ? ESCAPE '\\'");
-        params.push(`${q.resourcePrefix.replace(/[\\%_]/g, '\\$&')}%`);
+        // literal case-sensitive prefix — substr equality needs no
+        // wildcard escaping and, unlike LIKE, does not fold ASCII case
+        // (claim identity is exact: `path:src/Foo` ≠ `path:src/foo`)
+        where.push('substr(resource, 1, ?) = ?');
+        params.push(q.resourcePrefix.length, q.resourcePrefix);
       }
       const sql = `SELECT ${CLAIM_COLS} FROM claims${
         where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''

@@ -203,7 +203,13 @@ function expandBareResource(a: string, dir: string): string {
         EXIT.usage
       );
     default:
-      return a;
+      // a bare word that is no shorthand and carries no `scheme:` is a
+      // misspelling (`bro claim brnch`), never a resource URI — claims
+      // are explicit, so garbage in must not mint a garbage lease
+      throw new CommandError(
+        `error: unknown resource "${a}" — shorthand: worktree|branch|pr|path|role|task, or a <scheme>:<rest> URI\n${USAGE}`,
+        EXIT.usage
+      );
   }
 }
 
@@ -432,7 +438,12 @@ async function runClaimAcquire(
   resource: string,
   dir: string
 ): Promise<void> {
-  const owner = agentOwner();
+  // the caller's pid proves liveness only for the caller's OWN session —
+  // `--session/--host` targeting another session gets a pid-less claim
+  // (TTL + that session's heartbeat carry it) rather than a lease the
+  // caller's death would wrongly sweep
+  const selfTarget = args.session === undefined && args.host === undefined;
+  const owner = selfTarget ? agentOwner() : null;
   let result: ClaimResult;
   try {
     result = await claims.claim(resource, key, {

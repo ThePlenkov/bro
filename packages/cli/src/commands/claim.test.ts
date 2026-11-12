@@ -61,6 +61,9 @@ test('expandResourceWords maps shorthands and passes URIs through', () => {
   // never a literal resource URI containing spaces
   assert.throws(() => expandResourceWords(['worktree', '/some/path'], dir));
   assert.throws(() => expandResourceWords(['bogus', 'two', 'words'], dir));
+  // a bare word that is no shorthand and carries no `scheme:` is a
+  // misspelling — `bro claim brnch` must not mint a `brnch` lease
+  assert.throws(() => expandResourceWords(['brnch'], dir));
 });
 
 test('runClaimCommand claims and releases through the facade', async () => {
