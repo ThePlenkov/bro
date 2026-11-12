@@ -4,7 +4,15 @@
  *  live Dolt store. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { initRepo, inside, installFakeBd, readBeads, runCli, writeBeads, type CliResult } from './testrepo.ts';
+import {
+  initRepo,
+  inside,
+  installFakeBd,
+  readBeads,
+  runCli,
+  writeBeads,
+  type CliResult,
+} from './testrepo.ts';
 
 function learnFixture(
   rows: Array<Record<string, unknown>> = [],

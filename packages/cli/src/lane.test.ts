@@ -385,10 +385,15 @@ describe('the lane status', () => {
 describe('the work budget pause (bro-tdndq)', () => {
   /** Spend the kind's ledger directly — the reconcile only reads it. */
   const spend = (kind: string, now: number, workerMin: number): void => {
-    laneBudgetAdmit(kind, laneBudgetKey('seed', 'x-1'), { minutes: 1, windowMinutes: 240 }, {
-      now: now - workerMin * 60_000,
-      scope: 'seed',
-    });
+    laneBudgetAdmit(
+      kind,
+      laneBudgetKey('seed', 'x-1'),
+      { minutes: 1, windowMinutes: 240 },
+      {
+        now: now - workerMin * 60_000,
+        scope: 'seed',
+      }
+    );
     // the admit opened a segment — it accrues open until the caller's
     // registry says the worker is dead; foreign scope keeps it alive
   };

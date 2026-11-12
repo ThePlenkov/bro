@@ -4,11 +4,6 @@ title: Exit codes
 description: The shared exit-code taxonomy every bro command follows — and the stream rule that pairs with it.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 ## The stream rule
 
 **The exit code picks the stream.**

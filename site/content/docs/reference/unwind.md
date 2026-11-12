@@ -8,7 +8,7 @@ description: "Alias for `drill up`"
 | | |
 | --- | --- |
 | group | `work` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 
 Alias for [`bro drill`](/docs/reference/drill) — see that page.
 

@@ -630,7 +630,7 @@ export const PLUGINS: BroPlugin[] = [
     name: 'goal',
     group: 'work',
     summary:
-      'Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict',
+      'Session-scoped completion goal — status|pause|resume|clear, or <condition> to set; hooks remind + judge-verdict',
     run: runGoalCommand,
     skill: 'goal',
     configKey: 'goal',

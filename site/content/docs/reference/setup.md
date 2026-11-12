@@ -8,6 +8,6 @@ description: "Wire bro into the current repo"
 | | |
 | --- | --- |
 | group | `utility` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | guide | [commands/utility](/docs/commands/utility) |
 

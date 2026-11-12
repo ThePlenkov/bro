@@ -4,11 +4,6 @@ title: Integrations
 description: facades, connectors, agent clients, and hooks — what bro plugs into.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 bro keeps vendor details behind facades. Commands ask for tasks, reviews,
 agents, or specs; the configured connector supplies the backend.
 

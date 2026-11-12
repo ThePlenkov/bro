@@ -10,7 +10,7 @@ description: "Inter-rig work federation: me|peers|pull|inbox|request|claim|done|
 | | |
 | --- | --- |
 | group | `mesh` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` — new in `0.4.0`: accept, reject |
 | skill | `mesh` |
 | config | `mesh` in bro.config |
 | guide | [commands/mesh](/docs/commands/mesh) |

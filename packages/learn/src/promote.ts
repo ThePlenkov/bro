@@ -32,8 +32,7 @@ export interface PromoteResult {
 }
 
 /** Title-safe one-line shorten — same 72-char convention retro uses. */
-const shorten = (text: string): string =>
-  text.length > 72 ? `${text.slice(0, 71)}…` : text;
+const shorten = (text: string): string => (text.length > 72 ? `${text.slice(0, 71)}…` : text);
 
 /** The bead body — everything the rule edit needs without re-reading
  *  the store: the rule, when it fires, where it was learned, and the

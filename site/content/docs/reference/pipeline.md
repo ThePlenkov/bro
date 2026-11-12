@@ -10,5 +10,5 @@ description: "Pipeline surface — run|accept|answer|wake: queue→run starter, 
 | | |
 | --- | --- |
 | group | `pipeline` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` — new in `0.4.0`: run, wake |
 

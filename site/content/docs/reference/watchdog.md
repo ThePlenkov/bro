@@ -8,6 +8,6 @@ description: "Infinite read-only pipeline watchdog — launch brief + tick-0 bas
 | | |
 | --- | --- |
 | group | `flow` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 | skill | `watchdog` |
 

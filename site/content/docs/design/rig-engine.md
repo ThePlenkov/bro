@@ -4,11 +4,6 @@ title: The rig engine
 description: One lifecycle state machine per work item — loop, drive and convoy are policies over it, not daemons of their own.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 bro used to run three supervisors that each owned a fragment of the
 same lifecycle: **loop** claimed and spawned work, **drive** supervised
 open PRs, **convoy** drained molecule DAGs. Every seam between them

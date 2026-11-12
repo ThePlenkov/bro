@@ -8,5 +8,5 @@ description: "Agent sessions on this machine — the session-ledger view: host, 
 | | |
 | --- | --- |
 | group | `fleet` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | unreleased — lands in `0.4.0` |
 

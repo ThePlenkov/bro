@@ -57,10 +57,10 @@ npx -y @broject/bro --help     # zero install
 npm i -g @broject/bro          # or keep bro around: bro debt status
 ```
 
-npm `latest` is **0.2.5** — this page uses the flat spellings the
-published CLI dispatches (`bro debt status`). The grouped surface
-(`bro review debt status`) lands in **0.3.0**; flat names stay
-permanent aliases, and upcoming commands are marked `0.3.0`.
+npm `latest` is **0.3.0** — the grouped `bro <group> <member>`
+spellings dispatch (`bro review debt status`), and this page keeps the
+flat names (`bro debt status`) that remain available as aliases. Commands
+introduced in 0.3.0 are marked `0.3.0`.
 
 Requires: `node >= 22.18`, `gh` authenticated, `bd`
 ([beads](https://github.com/gastownhall/beads)) — it's a default store, so

@@ -8,7 +8,7 @@ description: "Declarative prompt guards — list resolved declarations [--json]"
 | | |
 | --- | --- |
 | group | `self` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | config | `guard` in bro.config |
 | guide | [commands/guard](/docs/commands/guard) |
 

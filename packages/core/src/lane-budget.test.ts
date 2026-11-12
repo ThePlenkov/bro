@@ -47,9 +47,7 @@ describe('the lane work budget (bro-tdndq)', () => {
       // three workers admitted 40 minutes ago, still running: 120
       // worker-minutes open — the 30-minute budget is long spent
       for (const id of ['a-1', 'a-2', 'a-3']) {
-        assert.ok(
-          laneBudgetAdmit('devin', laneBudgetKey('repo', id), cfg, { now: 0, dir }).ok
-        );
+        assert.ok(laneBudgetAdmit('devin', laneBudgetKey('repo', id), cfg, { now: 0, dir }).ok);
       }
       const r = laneBudgetAdmit('devin', laneBudgetKey('repo', 'a-4'), cfg, {
         now: 40 * MIN,

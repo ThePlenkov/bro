@@ -413,9 +413,7 @@ const EMPTY_KEYS: ReadonlySet<string> = new Set();
 /** sessionKind → live agentIds — the registry's cheap liveness verdict
  *  the ledger prunes against (spec bro-tdndq). Same rule as the spawn
  *  path's liveSessionKeysByKind: stopped or exit-harvested is dead. */
-function liveKeysByKind(
-  registry: Record<string, AgentRegistryEntry>
-): Map<string, Set<string>> {
+function liveKeysByKind(registry: Record<string, AgentRegistryEntry>): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   for (const e of Object.values(registry)) {
     if (typeof e.sessionKind !== 'string' || e.stopped === true || e.exitStatus !== undefined) {

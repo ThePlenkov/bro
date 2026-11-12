@@ -4,11 +4,6 @@ title: Utility commands
 description: setup, diagnostics, checks, plans, sync, cleanup, and stores.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 | Command                                                                    | What it does                                                                                                                                                                                                                                                                                                                                                                    |
 | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bro setup [--beads] [--skills] [--pack [NAME]]`                           | Wire bro into the repo and optionally initialize beads, skill wrappers, and a capability pack; also installs the commit-provenance, ref-guard, and post-merge git hooks                                                                                                                                                                                                         |

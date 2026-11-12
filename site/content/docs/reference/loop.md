@@ -8,7 +8,7 @@ description: "Autonomous backlog runner — claim → agent → gate → close �
 | | |
 | --- | --- |
 | group | `flow` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `loop` |
 | config | `loop` in bro.config |
 | guide | [commands/loop](/docs/commands/loop) |

@@ -273,8 +273,7 @@ export function sessionQuotaConfig(
   if (workBudgetMinutes !== undefined) {
     quota.workBudgetMinutes = workBudgetMinutes;
     // the window is a modifier of the budget lane — default when absent
-    quota.workBudgetWindowMinutes =
-      laneCount(budgetWindow) ?? DEFAULT_WORK_BUDGET_WINDOW_MINUTES;
+    quota.workBudgetWindowMinutes = laneCount(budgetWindow) ?? DEFAULT_WORK_BUDGET_WINDOW_MINUTES;
   }
   return quota;
 }
