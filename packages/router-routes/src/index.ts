@@ -24,7 +24,12 @@ export {
   type RouteTask,
 } from './candidates.ts';
 export { matchGlob, isRepoRelativePath } from './glob.ts';
-export { resolveRoute, type ResolveExtras, type RouteDecision } from './resolve.ts';
+export {
+  resolveRoute,
+  type ResolveExtras,
+  type RouteCacheInfo,
+  type RouteDecision,
+} from './resolve.ts';
 export {
   type CascadeDecider,
   type CascadeStage,

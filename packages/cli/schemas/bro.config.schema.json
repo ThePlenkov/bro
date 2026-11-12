@@ -236,6 +236,17 @@
                 }
               },
               "additionalProperties": false
+            },
+            "cache": {
+              "enum": [
+                "off",
+                "exact",
+                "recall"
+              ]
+            },
+            "cacheTtlHours": {
+              "type": "number",
+              "exclusiveMinimum": 0
             }
           },
           "additionalProperties": false,

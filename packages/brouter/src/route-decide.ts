@@ -40,6 +40,7 @@ import type {
   CascadeStage,
   Formula,
   OutcomeStatsSource,
+  RouteCacheInfo,
   RouteCandidate,
   RouteDecision,
   RouteTable,
@@ -48,6 +49,13 @@ import type {
 import { newDecisionId, DEFAULT_SUCCESS_PREDICATE } from '@broject/router-store';
 import { journalDecision } from './context.ts';
 import type { DecisionKind } from '@broject/router-store';
+import {
+  cacheConfig,
+  cacheInfo,
+  formatCacheAge,
+  planCacheConsult,
+  storeCacheValue,
+} from './decision-cache.ts';
 import { decisionJudge } from './decision-model.ts';
 import { decideByFormula, type FormulaTaskDecision } from './formula-decide.ts';
 import { ledgerHealth } from './ledger.ts';
@@ -176,6 +184,9 @@ export async function decideRoute(input: {
   /** test seam — the outcomes read model for the score shape; .4's store
    *  plugs in here, the Beta(1,1) prior stands in until it lands */
   outcomes?: OutcomeStatsSource;
+  /** bypass the decision cache for this decision (bro-0ykhg.3) —
+   *  `--no-cache`; the entries stay, only the consult is skipped */
+  noCache?: boolean;
   /** who is asking — 'route' (default), 'ask', or 'spawn' */
   kind?: DecisionKind;
   /** the run links already known — bead/worker/run/PR */
@@ -201,6 +212,11 @@ export async function decideRoute(input: {
           ...(formulaText === undefined ? {} : { formulaText }),
         })
       : undefined);
+  // the decision cache (bro-0ykhg.3) — resolved once here so both the
+  // formula and the no-formula paths consult the same way; 'off' (the
+  // default) and --no-cache resolve to undefined: no key, no lookup,
+  // no write, no journal field
+  const cacheCfg = cacheConfig(input.router, input.noCache);
   // the verdict — the formula's contract when one is declared, else the
   // table's own order plus the decision model's opinion
   const verdict: FormulaTaskDecision =
@@ -266,9 +282,55 @@ export async function decideRoute(input: {
             input.router !== undefined &&
             input.router.mode !== 'off' &&
             reordered.length > 0;
+          // the decision cache (bro-0ykhg.3) — consulted only when the
+          // judge would actually be asked; 'exact' keys on the
+          // normalized text + carried fields, 'recall' on the T1
+          // cluster. The generation is captured BEFORE T2 so an
+          // invalidation landing mid-flight rejects the write.
+          const consultStart = Date.now();
+          const plan =
+            mayAsk && cacheCfg !== undefined
+              ? await planCacheConsult({
+                  dir: input.dir,
+                  table: input.table,
+                  text: input.text,
+                  task: input.task,
+                  router: input.router,
+                  escalate: input.router?.escalate,
+                  ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
+                  shape: 'none',
+                  mode: cacheCfg.mode,
+                  ...(t1.cluster === undefined ? {} : { cluster: t1.cluster }),
+                })
+              : undefined;
+          const consultMs = Date.now() - consultStart;
+          const planHit = plan?.hit;
+          const hit =
+            planHit !== undefined && planHit.value.kind === 'pick'
+              ? { pick: planHit.value.pick, ageMs: planHit.ageMs }
+              : undefined;
           let named: string | undefined;
           let decidedBy: CascadeDecider = 'rules';
-          if (mayAsk) {
+          let cache: RouteCacheInfo | undefined;
+          if (hit !== undefined) {
+            // replay — the judge's pick stands in for a fresh ask;
+            // candidates, health and the chain all re-ran above and
+            // resolve below exactly as on a miss
+            named = hit.pick ?? undefined;
+            cache = cacheInfo(plan, true);
+            stages.push(
+              stageRecord(
+                'T2',
+                reordered.map(c => c.route.name),
+                named !== undefined ? [named] : reordered.map(c => c.route.name),
+                consultMs,
+                {
+                  note: `cache hit — the judge's pick replayed (${formatCacheAge(hit.ageMs)} old)`,
+                }
+              )
+            );
+            decidedBy = input.router!.mode === 'enforce' && named !== undefined ? 'judge' : 'rules';
+          } else if (mayAsk) {
             // T3 — the escalate judge rides routePick on low-confidence
             const escalate =
               input.router!.escalate === undefined
@@ -302,6 +364,20 @@ export async function decideRoute(input: {
                 }
               )
             );
+            // memoize the stage answer — the pick name IS the T2
+            // output here; the CAS write rejects it if an
+            // invalidation landed while the judge was thinking. `plan`
+            // is undefined when no key could be built (unresolvable
+            // judge config, 'recall' with no cluster) — nothing to write
+            if (plan !== undefined) {
+              await storeCacheValue(
+                plan.key,
+                plan.consult,
+                { kind: 'pick', pick: named ?? null },
+                cacheCfg!.ttlMs
+              );
+              cache = cacheInfo(plan, false);
+            }
             decidedBy = input.router!.mode === 'enforce' && named !== undefined ? 'judge' : 'rules';
           } else {
             stages.push(
@@ -319,6 +395,7 @@ export async function decideRoute(input: {
           const decision = resolveRoute(input.table, input.task, snapshot, () => named, {
             set,
             cascade: { stages, decidedBy },
+            ...(cache === undefined ? {} : { cache }),
           });
           return { decision, snapshot, healthKnown: known };
         })()
@@ -341,6 +418,9 @@ export async function decideRoute(input: {
           ...(input.router?.escalate === undefined ? {} : { escalate: input.router.escalate }),
           ...(formulaText === undefined ? {} : { formulaText }),
           ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
+          // the decision cache (bro-0ykhg.3) — resolved once above;
+          // absent = off, the formula path never consults
+          ...(cacheCfg === undefined ? {} : { cache: cacheCfg }),
         });
   const decisionId = newDecisionId();
   const journaled = await journalDecision({
@@ -393,7 +473,18 @@ export async function decideRoute(input: {
     route: verdict.decision.route?.name,
     provider: verdict.decision.chain[0]?.provider,
     model: verdict.decision.chain[0]?.model,
-    picked: verdict.decision.picked,
+    // a cache hit is its own provenance — 'cache', never the stage
+    // answer it replayed (bro-0ykhg.3); the key + generation journal
+    // for hits and fresh writes alike, and the success predicate is
+    // what a later verified outcome is judged by for invalidation
+    picked: verdict.decision.cache?.hit === true ? 'cache' : verdict.decision.picked,
+    ...(verdict.decision.cache === undefined
+      ? {}
+      : {
+          cacheKey: verdict.decision.cache.key,
+          cacheGeneration: verdict.decision.cache.generation,
+        }),
+    successPredicate: formula?.success ?? DEFAULT_SUCCESS_PREDICATE,
     ...(input.links ?? {}),
   });
   return {

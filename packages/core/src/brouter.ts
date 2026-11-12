@@ -48,8 +48,15 @@ export interface RouterRecall {
   minRows?: number;
 }
 
+/** The decision-cache mode (spec bro-0ykhg.3) — `off` is the default
+ *  and never writes a row; `exact` memoizes on the normalized task
+ *  text + carried fields; `recall` memoizes on the scoped T1 recall
+ *  cluster, so similar tasks share one answer. */
+export type RouterCacheMode = 'off' | 'exact' | 'recall';
+
 /** The brouter decision model — the fleet router's provider+mode plus
- *  the cascade's invoke/escalate/recall knobs (bro-0ykhg.2). */
+ *  the cascade's invoke/escalate/recall knobs (bro-0ykhg.2) and the
+ *  opt-in decision cache (bro-0ykhg.3). */
 export interface BrouterRouter extends FleetRouter {
   invoke?: RouterInvoke;
   /** the T3 provider — a second judge asked only when T2's answer sits
@@ -57,6 +64,10 @@ export interface BrouterRouter extends FleetRouter {
   escalate?: string;
   /** T1 outcome-recall tuning — absent fields take the defaults */
   recall?: RouterRecall;
+  /** the decision cache — absent = 'off' (the default, never required) */
+  cache?: RouterCacheMode;
+  /** hours a cache entry answers before the TTL expires (default 24) */
+  cacheTtlHours?: number;
 }
 
 /** The `brouter` config section — the model's registry plus the path of
@@ -276,6 +287,9 @@ const ROUTER_MODES = new Set(['shadow', 'enforce', 'off']);
 /** The invoke modes the cascade accepts (bro-0ykhg.2). */
 const ROUTER_INVOKES = new Set(['always', 'ambiguous', 'never']);
 
+/** The decision-cache modes the router accepts (bro-0ykhg.3). */
+const ROUTER_CACHES = new Set(['off', 'exact', 'recall']);
+
 /** The mode — one of the three the table accepts. */
 function isRouterMode(mode: unknown): mode is FleetRouter['mode'] {
   return typeof mode === 'string' && ROUTER_MODES.has(mode);
@@ -365,6 +379,24 @@ function decisionModel(raw: unknown): BrouterRouter | undefined {
   const recall = recallTuning(o.recall);
   if (recall !== undefined) {
     out.recall = recall;
+  }
+  const cache = o.cache;
+  if (cache !== undefined) {
+    if (typeof cache === 'string' && ROUTER_CACHES.has(cache)) {
+      out.cache = cache as RouterCacheMode;
+    } else {
+      console.error('bro.config: brouter.router.cache must be off|exact|recall — field dropped');
+    }
+  }
+  const ttl = o.cacheTtlHours;
+  if (ttl !== undefined) {
+    if (typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0) {
+      out.cacheTtlHours = ttl;
+    } else {
+      console.error(
+        'bro.config: brouter.router.cacheTtlHours must be a positive number — field dropped'
+      );
+    }
   }
   return out;
 }

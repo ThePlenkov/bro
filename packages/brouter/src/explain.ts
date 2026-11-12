@@ -13,6 +13,7 @@
 import { healthKey, unknownFact } from '@broject/core';
 import type { ExplainFact, HealthSnapshot } from '@broject/core';
 import type { FormulaTrace, RouteDecision } from '@broject/router-routes';
+import { formatCacheAge } from './decision-cache.ts';
 
 /** The chain's entry, rendered — the honest id. */
 function chainId(entry: { provider: string; model?: string }): string {
@@ -72,6 +73,38 @@ function cascadeFacts(decision: RouteDecision): ExplainFact[] {
     });
   }
   return facts;
+}
+
+/** The decision cache's fact (spec bro-0ykhg.3) — hit or miss, the key
+ *  it consulted, and what a hit did and did not skip. A hit replays
+ *  the stage ANSWERS: the filters, the health and the chain all re-ran,
+ *  so the route on the page is this task's route, not a stored one. */
+function cacheFacts(decision: RouteDecision): ExplainFact[] {
+  const cache = decision.cache;
+  if (cache === undefined) {
+    return [];
+  }
+  const key = `${cache.key.slice(0, 12)}…`;
+  if (cache.hit) {
+    return [
+      {
+        label: 'cache',
+        value: `hit (age ${formatCacheAge(cache.ageMs ?? 0)}, key ${key})`,
+        because:
+          'the memoized stage answers replayed — the judge was not asked; ' +
+          'the filters, the health and the chain re-ran on them',
+        source: 'the decision cache',
+      },
+    ];
+  }
+  return [
+    {
+      label: 'cache',
+      value: `miss (key ${key}, generation ${cache.generation})`,
+      because: 'no live entry answered — the judge was asked and its answers were memoized',
+      source: 'the decision cache',
+    },
+  ];
 }
 
 /** The verdict's own facts — the route and the chain it names. */
@@ -215,6 +248,7 @@ export function routeFacts(decision: RouteDecision): ExplainFact[] {
   return [
     ...verdictFacts(decision),
     ...cascadeFacts(decision),
+    ...cacheFacts(decision),
     ...chainFacts(decision),
     ...(trace === undefined ? [] : formulaHeadFacts(trace)),
     ...(trace === undefined ? [] : formulaInputFacts(trace)),

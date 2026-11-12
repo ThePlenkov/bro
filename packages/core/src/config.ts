@@ -537,6 +537,10 @@ brouterSection.jsonSchema = js.obj({
         minAgreement: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
         minRows: js.int(1),
       }),
+      // the opt-in decision cache (bro-0ykhg.3) — 'off' is the default;
+      // cacheTtlHours bounds an entry's answer window (default 24)
+      cache: { enum: ['off', 'exact', 'recall'] },
+      cacheTtlHours: { type: 'number', exclusiveMinimum: 0 },
     },
     { required: ['provider', 'mode'] }
   ),

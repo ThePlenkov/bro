@@ -101,6 +101,18 @@ export const decisions = sqliteTable('decisions', {
   worker: text('worker'),
   runId: text('run_id'),
   pr: text('pr'),
+  /** the decision cache key this decision consulted (spec bro-0ykhg.3)
+   *  — the sha256 the decision_cache row is keyed by; NULL when the
+   *  cache was off or no key could be built. Declared LAST: migration
+   *  0003 ALTERs them on, and ALTER appends — the drift test compares
+   *  column order against PRAGMA table_info */
+  cacheKey: text('cache_key'),
+  /** the key's generation at decision time — the write's compare-and-
+   *  set value and the journal's provenance for both hits and writes */
+  cacheGeneration: integer('cache_generation'),
+  /** the success predicate the formula declared — the label a verified
+   *  outcome is judged by for cache invalidation */
+  successPredicate: text('success_predicate'),
 });
 
 /** The outcomes — how a routed decision actually went (spec bro-0ykhg.4).
@@ -171,6 +183,37 @@ export const outcomeReports = sqliteTable('outcome_reports', {
   at: integer('at').notNull(),
 });
 
+/** The decision cache — the memoized T2 stage answers (spec
+ *  bro-0ykhg.3). One row per cache key: the canonical key JSON for
+ *  debugging, the stage-answer value, the generation it was written
+ *  under, and the TTL expiry. A hit replays the answers — the route
+ *  itself is never stored; filters, health and the chain re-run. */
+export const decisionCache = sqliteTable('decision_cache', {
+  /** sha256 over the canonical key JSON — the lookup identity */
+  keyHash: text('key_hash').primaryKey(),
+  /** the canonical key JSON — contextId, hashes, shape, task/cluster */
+  keyJson: text('key_json').notNull(),
+  /** the project namespace the key was minted under */
+  contextId: text('context_id').notNull(),
+  /** the stage answers as JSON — never the final route */
+  valueJson: text('value_json').notNull(),
+  /** the per-key generation this entry was written under */
+  generation: integer('generation').notNull(),
+  /** epoch ms the entry was written */
+  createdAt: integer('created_at').notNull(),
+  /** epoch ms the entry stops answering — the TTL */
+  expiresAt: integer('expires_at').notNull(),
+});
+
+/** The per-key generation counter — persistent even when no entry
+ *  exists, so an in-flight miss cannot resurrect an answer invalidated
+ *  mid-flight (spec bro-0ykhg.3). Invalidation bumps it; a cache write
+ *  lands only while the generation is unchanged. */
+export const decisionCacheGen = sqliteTable('decision_cache_gen', {
+  keyHash: text('key_hash').primaryKey(),
+  generation: integer('generation').notNull(),
+});
+
 /** The bookkeeping table — which migrations ran, and when. */
 export const migrations = sqliteTable('migrations', {
   id: text('id').primaryKey(),
@@ -185,5 +228,7 @@ export const schema = {
   decisions,
   outcomes,
   outcomeReports,
+  decisionCache,
+  decisionCacheGen,
   migrations,
 };

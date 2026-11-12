@@ -22,7 +22,7 @@ export interface RouterPolicy {
 }
 
 /** The flags the router's commands read — the boolean ones. */
-export const BOOL_FLAGS = new Set(['--write', '--wire', '--json', '--explain']);
+export const BOOL_FLAGS = new Set(['--write', '--wire', '--json', '--explain', '--no-cache']);
 
 /** The flags the router's commands read — the valued ones. */
 export const VALUE_FLAGS = new Set([

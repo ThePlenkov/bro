@@ -56,11 +56,21 @@ import type {
   OutcomeStatsSource,
   PendingRoute,
   RouteCandidate,
+  RouteCacheInfo,
   RouteDecision,
   RouteTable,
   RouteTask,
 } from '@broject/router-routes';
 import type { RecallOutcomeRow, SuccessPredicate } from '@broject/router-store';
+import {
+  cacheInfo,
+  formatCacheAge,
+  planCacheConsult,
+  storeCacheValue,
+  type CacheConfig,
+  type CachePlan,
+  type CacheValue,
+} from './decision-cache.ts';
 import { decisionJudge } from './decision-model.ts';
 import { runT1, shouldInvokeT2, stageRecord, type InvokeMode } from './cascade.ts';
 import { recallTuning } from './recall.ts';
@@ -131,6 +141,9 @@ export interface FormulaDecisionInput {
   successPredicate?: SuccessPredicate;
   /** test seam — pre-fetched recall rows; production reads the store */
   recallRows?: RecallOutcomeRow[];
+  /** the decision cache (bro-0ykhg.3) — resolved mode + TTL; absent =
+   *  off, the cache never runs */
+  cache?: CacheConfig;
 }
 
 /** The judge the formula asks — the seam's own when a test hands one,
@@ -266,6 +279,9 @@ async function cascadePrefix(input: {
   rejected: { route: RouteCandidate['route']; reason: string }[];
   stages: CascadeStage[];
   t1Decided?: string;
+  /** the scoped recall cluster — the 'recall'-mode cache key's task
+   *  component (bro-0ykhg.3); absent when T1 saw no eligible rows */
+  t1Cluster?: string;
   askT2: boolean;
   gateReason: string;
 }> {
@@ -324,9 +340,219 @@ async function cascadePrefix(input: {
     rejected: t0.set.rejected,
     stages,
     ...(t1.decided === undefined ? {} : { t1Decided: t1.decided }),
+    ...(t1.cluster === undefined ? {} : { t1Cluster: t1.cluster }),
     askT2: gate.ask,
     gateReason: gate.reason,
   };
+}
+
+/** The cache consult for a formula decision (bro-0ykhg.3) — the key's
+ *  task component is the normalized text + carried fields under
+ *  'exact', the scoped T1 recall cluster under 'recall'. Undefined
+ *  when the cache cannot run: the config is off, the judge
+ *  configuration will not hash, or 'recall' saw no eligible cluster —
+ *  all ordinary misses, never errors. */
+async function cacheConsultFor(input: {
+  dir: string;
+  tablePath?: string;
+  table: RouteTable;
+  task: RouteTask;
+  text: string;
+  router?: FleetRouter;
+  escalate?: string;
+  formulaText?: string;
+  shape: Formula['shape'];
+  cache: CacheConfig;
+  t1Cluster?: string;
+}): Promise<CachePlan | undefined> {
+  return planCacheConsult({
+    dir: input.dir,
+    table: input.table,
+    text: input.text,
+    task: input.task,
+    router: input.router,
+    ...(input.escalate === undefined ? {} : { escalate: input.escalate }),
+    ...(input.formulaText === undefined ? {} : { formulaText: input.formulaText }),
+    ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
+    shape: input.shape,
+    mode: input.cache.mode,
+    ...(input.t1Cluster === undefined ? {} : { cluster: input.t1Cluster }),
+  });
+}
+
+/** Store the stage answers under the consulted plan — the write's
+ *  generation check runs inside router-store's transaction, so an
+ *  invalidation that landed mid-T2 rejects this write. */
+async function cacheWrite(
+  plan: CachePlan | undefined,
+  value: CacheValue,
+  ttlMs: number
+): Promise<void> {
+  if (plan === undefined) {
+    return;
+  }
+  await storeCacheValue(plan.key, plan.consult, value, ttlMs);
+}
+
+/** The T2/T3 ask for the questions shapes — a fresh judge call (with
+ *  the gated T3 escalation), a decision-cache replay, or the gate's
+ *  refusal record. Returns what the shared post-eval consumes: the
+ *  answers (null when the judge never answered), whether T3 spoke,
+ *  and the cache provenance the resolve extras carry.
+ *
+ *  The judge is asked only when the gate says so, one is configured,
+ *  and the mode allows it — 'off' never calls decide(), shadow calls
+ *  it to journal the opinion. When it is not asked the shared
+ *  post-eval still runs: pending routes reject unresolved, filters
+ *  fire on resolved inputs, and the score shape still ranks by
+ *  outcome stats — invoke gates the JUDGE call, never the code's own
+ *  contract.
+ *
+ *  The decision cache (bro-0ykhg.3) wraps the ask: consulted only
+ *  when the judge would actually be asked, BEFORE it — the key is
+ *  built from the task's shape and the formula/table/judge hashes,
+ *  never from inferred answers — and the generation is captured here
+ *  so an invalidation landing mid-T2 rejects the write. A hit
+ *  replays the stage answers; every filter, health check and chain
+ *  resolution after this still re-runs exactly as on a miss. */
+async function askOrReplayFormula(args: {
+  decision: FormulaDecisionInput;
+  judge: JudgeFacade | undefined;
+  formula: Formula;
+  mode: 'off' | 'shadow' | 'enforce';
+  cascade: Awaited<ReturnType<typeof cascadePrefix>>;
+  stages: CascadeStage[];
+}): Promise<{
+  asked: Awaited<ReturnType<typeof askQuestions>>;
+  t3Used: boolean;
+  cache: RouteCacheInfo | undefined;
+}> {
+  const { decision, judge, formula, mode, cascade, stages } = args;
+  const { dir, table, task, text, router } = decision;
+  const mayAsk = cascade.askT2 && judge !== undefined && mode !== 'off';
+  const consultStart = Date.now();
+  const plan =
+    mayAsk && decision.cache !== undefined
+      ? await cacheConsultFor({
+          dir,
+          table,
+          task,
+          text,
+          router,
+          escalate: decision.escalate,
+          ...(decision.tablePath === undefined ? {} : { tablePath: decision.tablePath }),
+          ...(decision.formulaText === undefined ? {} : { formulaText: decision.formulaText }),
+          shape: formula.shape,
+          cache: decision.cache,
+          ...(cascade.t1Cluster === undefined ? {} : { t1Cluster: cascade.t1Cluster }),
+        })
+      : undefined;
+  const consultMs = Date.now() - consultStart;
+  const planHit = plan?.hit;
+  const hit =
+    planHit !== undefined && planHit.value.kind === 'answers'
+      ? { res: planHit.value.res, t3: planHit.value.t3, ageMs: planHit.ageMs }
+      : undefined;
+  let asked: Awaited<ReturnType<typeof askQuestions>> = null;
+  let t3Used = false;
+  let cache: RouteCacheInfo | undefined;
+  if (hit !== undefined) {
+    // replay — the cached DecideResult stands in for a fresh ask;
+    // the questions rebuild deterministically from the same formula,
+    // and every filter, health check and chain resolution below
+    // re-runs exactly as on a miss
+    const { features, answers } = formulaAnswersToFeatures(formula, hit.res);
+    asked = { res: hit.res, questions: formulaQuestions(formula), features, answers };
+    t3Used = hit.t3;
+    cache = cacheInfo(plan, true);
+    stages.push(
+      stageRecord(
+        t3Used ? 'T3' : 'T2',
+        cascade.candidates.map(c => c.route.name),
+        [],
+        consultMs,
+        {
+          note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
+        }
+      )
+    );
+  } else if (mayAsk) {
+    const t2Start = Date.now();
+    asked = await askQuestions({ router, judge: judge!, formula, text });
+
+    // T3 — the escalate provider answers ONLY the keys T2 left in
+    // lowConfidence; a confident T2 never reaches it, and an absent
+    // escalate leaves the table order standing
+    if (asked !== null && asked.res.lowConfidence.length > 0 && decision.escalate !== undefined) {
+      const escalated = await escalateLowConfidence({
+        dir,
+        router,
+        provider: decision.escalate,
+        judge: judge!,
+        formula,
+        text,
+        asked,
+      });
+      if (escalated !== null) {
+        asked = escalated;
+        t3Used = true;
+      }
+    }
+    stages.push(
+      stageRecord(
+        t3Used ? 'T3' : 'T2',
+        cascade.candidates.map(c => c.route.name),
+        [],
+        Date.now() - t2Start,
+        {
+          note: t3Used
+            ? 'T2 low-confidence — the escalate provider re-answered'
+            : asked === null
+              ? 'the judge did not answer — inputs stay unresolved'
+              : 'the judge answered the formula questions',
+        }
+      )
+    );
+    // memoize the stage answers — a judge that did not answer leaves
+    // nothing worth replaying (transient failures are never cached);
+    // the CAS write rejects it if an invalidation landed mid-T2
+    if (asked !== null && decision.cache !== undefined) {
+      await cacheWrite(plan, { kind: 'answers', res: asked.res, t3: t3Used }, decision.cache.ttlMs);
+      cache = cacheInfo(plan, false);
+    }
+  } else {
+    stages.push(
+      stageRecord('T2', [], [], 0, {
+        note:
+          cascade.gateReason +
+          (judge === undefined
+            ? ' — no decision model configured'
+            : mode === 'off'
+              ? ' — the decision model is off'
+              : ''),
+      })
+    );
+  }
+  return { asked, t3Used, cache };
+}
+
+/** Why the formula's inputs stayed unresolved — no model configured,
+ *  the model off, the gate never asked, or the model did not answer. */
+function unansweredNote(
+  router: FleetRouter | undefined,
+  mode: 'off' | 'shadow' | 'enforce',
+  cascade: Awaited<ReturnType<typeof cascadePrefix>>
+): string {
+  if (router === undefined) {
+    return "no decision model configured — the formula's inputs stay unresolved";
+  }
+  if (mode === 'off') {
+    return "the decision model is off — the formula's inputs stay unresolved";
+  }
+  if (!cascade.askT2) {
+    return `${cascade.gateReason} — the formula's inputs stay unresolved`;
+  }
+  return "the decision model did not answer — the formula's inputs stay unresolved";
 }
 
 /** The T3 judge for the pick paths — the escalate provider bound the
@@ -366,6 +592,8 @@ async function pickByFormula(input: {
   formulaText?: string;
   successPredicate?: SuccessPredicate;
   recallRows?: RecallOutcomeRow[];
+  /** the decision cache (bro-0ykhg.3) — absent = off */
+  cache?: CacheConfig;
 }): Promise<FormulaTaskDecision> {
   const {
     dir,
@@ -443,54 +671,109 @@ async function pickByFormula(input: {
     return { decision, snapshot, healthKnown, features: task.features ?? {} };
   }
 
-  const t2Start = Date.now();
-  const resolved = set.candidates[0]?.route.name ?? '';
-  const options = set.candidates.map(c => ({
-    name: c.route.name,
-    description: c.route.description ?? `chain: ${c.route.chain.map(e => e.provider).join(' → ')}`,
-  }));
-  // T3 — the escalate judge rides routePick; it answers only when T2's
-  // pick sits in lowConfidence (bro-0ykhg.2)
-  const escalate = await escalateJudgeFor(dir, router, input.escalate);
+  // the decision cache (bro-0ykhg.3) — consulted only when the judge
+  // would actually be asked; the generation is captured BEFORE T2 so
+  // an invalidation landing mid-flight rejects the write
+  const consultStart = Date.now();
+  const plan =
+    input.cache === undefined
+      ? undefined
+      : await cacheConsultFor({
+          dir,
+          table,
+          task,
+          text,
+          router,
+          escalate: input.escalate,
+          ...(tablePath === undefined ? {} : { tablePath }),
+          ...(input.formulaText === undefined ? {} : { formulaText: input.formulaText }),
+          shape: 'pick',
+          cache: input.cache,
+          ...(cascade.t1Cluster === undefined ? {} : { t1Cluster: cascade.t1Cluster }),
+        });
+  const consultMs = Date.now() - consultStart;
+  const planHit = plan?.hit;
+  const hit =
+    planHit !== undefined && planHit.value.kind === 'pick'
+      ? { pick: planHit.value.pick, ageMs: planHit.ageMs }
+      : undefined;
   let named: string | undefined;
-  if (set.candidates.length > 0) {
-    try {
-      named = await routePick({
-        dir,
-        judge,
-        options,
-        state: formulaState(text, formula),
-        subject: text.slice(0, 80),
-        resolved,
-        mode: formulaMode(router),
-        ...(escalate === undefined ? {} : { escalate }),
-      });
-    } catch (err) {
-      console.error(
-        `warning: ${router === undefined ? 'the decision model' : `brouter.router.provider "${router.provider}"`} — ` +
-          `${err instanceof Error ? err.message : String(err)}; the table's own order stands`
-      );
+  let cache: RouteCacheInfo | undefined;
+  if (hit !== undefined) {
+    // replay — the judge's pick stands in for a fresh ask; the
+    // candidates, filters, health and chain all re-run below exactly
+    // as on a miss, so a wall that appeared since the write still wins
+    named = hit.pick ?? undefined;
+    cache = cacheInfo(plan, true);
+    stages.push(
+      stageRecord(
+        'T2',
+        cascade.candidates.map(c => c.route.name),
+        named !== undefined ? [named] : cascade.candidates.map(c => c.route.name),
+        consultMs,
+        {
+          note: `cache hit — the judge's pick replayed (${formatCacheAge(hit.ageMs)} old)`,
+        }
+      )
+    );
+  } else {
+    const t2Start = Date.now();
+    const resolved = set.candidates[0]?.route.name ?? '';
+    const options = set.candidates.map(c => ({
+      name: c.route.name,
+      description:
+        c.route.description ?? `chain: ${c.route.chain.map(e => e.provider).join(' → ')}`,
+    }));
+    // T3 — the escalate judge rides routePick; it answers only when T2's
+    // pick sits in lowConfidence (bro-0ykhg.2)
+    const escalate = await escalateJudgeFor(dir, router, input.escalate);
+    if (set.candidates.length > 0) {
+      try {
+        named = await routePick({
+          dir,
+          judge,
+          options,
+          state: formulaState(text, formula),
+          subject: text.slice(0, 80),
+          resolved,
+          mode: formulaMode(router),
+          ...(escalate === undefined ? {} : { escalate }),
+        });
+      } catch (err) {
+        console.error(
+          `warning: ${router === undefined ? 'the decision model' : `brouter.router.provider "${router.provider}"`} — ` +
+            `${err instanceof Error ? err.message : String(err)}; the table's own order stands`
+        );
+      }
+    }
+    stages.push(
+      stageRecord(
+        'T2',
+        cascade.candidates.map(c => c.route.name),
+        set.candidates.map(c => c.route.name),
+        Date.now() - t2Start,
+        {
+          note:
+            named === undefined
+              ? 'the judge named no confident candidate'
+              : `the judge picked ${named}`,
+        }
+      )
+    );
+    // memoize the stage answer — a pick formula's T2 output IS the
+    // pick name; the CAS write rejects it if an invalidation landed
+    // while the judge was thinking
+    if (input.cache !== undefined) {
+      await cacheWrite(plan, { kind: 'pick', pick: named ?? null }, input.cache.ttlMs);
+      cache = cacheInfo(plan, false);
     }
   }
-  stages.push(
-    stageRecord(
-      'T2',
-      cascade.candidates.map(c => c.route.name),
-      set.candidates.map(c => c.route.name),
-      Date.now() - t2Start,
-      {
-        note:
-          named === undefined
-            ? 'the judge named no confident candidate'
-            : `the judge picked ${named}`,
-      }
-    )
-  );
   const trusted = formulaMode(router) === 'enforce' && named !== undefined;
   const decision = resolveRoute(table, task, snapshot, () => named, {
     set,
     formula: trace,
     cascade: { stages, decidedBy: trusted ? 'judge' : 'rules' },
+    ...(cache === undefined ? {} : { cache }),
   });
   return { decision, snapshot, healthKnown, features: task.features ?? {} };
 }
@@ -679,65 +962,17 @@ async function decideByQuestions(
     return { decision, snapshot, healthKnown, features: task.features ?? {} };
   }
 
-  // the judge is asked only when the gate says so, one is configured,
-  // and the mode allows it — 'off' never calls decide(), shadow calls
-  // it to journal the opinion. When it is not asked the shared post-eval
-  // below still runs: pending routes reject unresolved, filters fire on
-  // resolved inputs, and the score shape still ranks by outcome stats —
-  // invoke gates the JUDGE call, never the code's own contract.
-  const mayAsk = cascade.askT2 && judge !== undefined && mode !== 'off';
-  let asked: Awaited<ReturnType<typeof askQuestions>> = null;
-  let t3Used = false;
-  if (mayAsk) {
-    const t2Start = Date.now();
-    asked = await askQuestions({ router, judge: judge!, formula, text });
-
-    // T3 — the escalate provider answers ONLY the keys T2 left in
-    // lowConfidence; a confident T2 never reaches it, and an absent
-    // escalate leaves the table order standing
-    if (asked !== null && asked.res.lowConfidence.length > 0 && input.escalate !== undefined) {
-      const escalated = await escalateLowConfidence({
-        dir,
-        router,
-        provider: input.escalate,
-        judge: judge!,
-        formula,
-        text,
-        asked,
-      });
-      if (escalated !== null) {
-        asked = escalated;
-        t3Used = true;
-      }
-    }
-    stages.push(
-      stageRecord(
-        t3Used ? 'T3' : 'T2',
-        cascade.candidates.map(c => c.route.name),
-        [],
-        Date.now() - t2Start,
-        {
-          note: t3Used
-            ? 'T2 low-confidence — the escalate provider re-answered'
-            : asked === null
-              ? 'the judge did not answer — inputs stay unresolved'
-              : 'the judge answered the formula questions',
-        }
-      )
-    );
-  } else {
-    stages.push(
-      stageRecord('T2', [], [], 0, {
-        note:
-          cascade.gateReason +
-          (judge === undefined
-            ? ' — no decision model configured'
-            : mode === 'off'
-              ? ' — the decision model is off'
-              : ''),
-      })
-    );
-  }
+  // the judge ask — fresh T2 (+ the gated T3), a decision-cache
+  // replay, or the gate's refusal; the shared post-eval below
+  // consumes the answers whichever way they arrived (bro-0ykhg.3)
+  const { asked, t3Used, cache } = await askOrReplayFormula({
+    decision: input,
+    judge,
+    formula,
+    mode,
+    cascade,
+    stages,
+  });
 
   let effective = task;
   if (asked !== null) {
@@ -752,16 +987,7 @@ async function decideByQuestions(
   } else {
     // the judge was never asked or did not answer — say which, the way
     // the pre-cascade trace always did
-    addNote(
-      trace,
-      router === undefined
-        ? "no decision model configured — the formula's inputs stay unresolved"
-        : mode === 'off'
-          ? "the decision model is off — the formula's inputs stay unresolved"
-          : !cascade.askT2
-            ? `${cascade.gateReason} — the formula's inputs stay unresolved`
-            : "the decision model did not answer — the formula's inputs stay unresolved"
-    );
+    addNote(trace, unansweredNote(router, mode, cascade));
   }
 
   const set0 = candidates(table, effective, snapshot);
@@ -803,6 +1029,7 @@ async function decideByQuestions(
       set,
       formula: trace,
       cascade: cascadeTrace,
+      ...(cache === undefined ? {} : { cache }),
     });
   } else {
     const scoring = scoreCandidates(
@@ -823,12 +1050,14 @@ async function decideByQuestions(
         formula: trace,
         cascade: cascadeTrace,
         reason: `the table's own order — ${scoring.skipped}`,
+        ...(cache === undefined ? {} : { cache }),
       });
     } else if (scoring.winner === undefined) {
       decision = resolveRoute(table, effective, snapshot, undefined, {
         set,
         formula: trace,
         cascade: cascadeTrace,
+        ...(cache === undefined ? {} : { cache }),
       });
     } else {
       const winner = scoring.winner;
@@ -838,6 +1067,7 @@ async function decideByQuestions(
         formula: trace,
         cascade: cascadeTrace,
         reason: `the formula scored ${winner} highest`,
+        ...(cache === undefined ? {} : { cache }),
       });
     }
   }
@@ -857,8 +1087,11 @@ async function decideByQuestions(
   // the verdict journals AFTER the decision — the outcome is the route
   // that actually served, not the static guess routePick journals with.
   // The journal is observability, never a gate: a write failure warns
-  // and the decision stands, the same fail-open the pick path keeps
-  if (asked !== null) {
+  // and the decision stands, the same fail-open the pick path keeps.
+  // A cache HIT skips it: the replayed answers were already journaled
+  // when the judge first answered — re-journaling would duplicate the
+  // verdict row under a stale latency (bro-0ykhg.3)
+  if (asked !== null && cache?.hit !== true) {
     try {
       await journalFormula({
         dir,
@@ -964,6 +1197,7 @@ export async function decideByFormula(input: FormulaDecisionInput): Promise<Form
       ...(input.successPredicate === undefined ? {} : { successPredicate: input.successPredicate }),
       ...(input.recallRows === undefined ? {} : { recallRows: input.recallRows }),
       ...(input.tablePath === undefined ? {} : { tablePath: input.tablePath }),
+      ...(input.cache === undefined ? {} : { cache: input.cache }),
     });
   }
   return decideByQuestions(input, judge, trace);
