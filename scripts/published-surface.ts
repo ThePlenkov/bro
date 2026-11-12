@@ -12,7 +12,7 @@
  * non-git scratch dir at snapshot-generation time.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,15 +109,22 @@ export class NpmSpec {
   install(): Install {
     const dir = mkdtempSync(join(tmpdir(), 'bro-published-'));
     const prefix = join(dir, 'prefix');
-    execFileSync(NPM, ['install', '-g', '--prefix', prefix, this.value], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const bin = join(prefix, 'bin', 'bro');
-    if (!existsSync(bin)) {
-      throw new Error(`${this.value}: no bin/bro under ${prefix}`);
+    try {
+      execFileSync(NPM, ['install', '-g', '--prefix', prefix, this.value], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const bin = join(prefix, 'bin', 'bro');
+      if (!existsSync(bin)) {
+        throw new Error(`${this.value}: no bin/bro under ${prefix}`);
+      }
+      return new Install({ bin, dir });
+    } catch (err) {
+      // the fixture is ~100M of npm payload — a failed probe must not
+      // leak it (the Install exit hook does not exist yet, spec bro-d9znu)
+      rmSync(dir, { recursive: true, force: true });
+      throw err;
     }
-    return new Install({ bin, dir });
   }
 
   /** Resolve, pin, install, and probe `bro --help` — the shared
@@ -148,6 +155,25 @@ export interface InstallPaths {
   dir: string;
 }
 
+/** Fixture dirs awaiting removal — one process-level exit hook drains
+ *  the set. `process.exit()` (the scripts' failure paths) runs exit
+ *  hooks but no `finally`, so the hook is the only cleanup that covers
+ *  every exit (spec bro-d9znu). */
+const pendingFixtureDirs = new Set<string>();
+let fixtureExitHookArmed = false;
+
+function armFixtureExitHook(): void {
+  if (fixtureExitHookArmed) {
+    return;
+  }
+  fixtureExitHookArmed = true;
+  process.on('exit', () => {
+    for (const dir of pendingFixtureDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 /** The `--prefix` install fixture — the bin plus a non-git scratch
  *  cwd: several published commands run on `--help`, and a repo cwd
  *  would hand them a store. */
@@ -160,6 +186,16 @@ export class Install {
     this.bin = paths.bin;
     this.dir = paths.dir;
     this.scratch = mkdtempSync(join(this.dir, 'scratch-'));
+    pendingFixtureDirs.add(this.dir);
+    armFixtureExitHook();
+  }
+
+  /** Remove the fixture now — idempotent; the exit hook's later rm is
+   *  a no-op on the gone dir. The set entry drops only after a
+   *  successful rm so a partial failure still gets the exit-hook retry. */
+  dispose(): void {
+    rmSync(this.dir, { recursive: true, force: true });
+    pendingFixtureDirs.delete(this.dir);
   }
 
   /** Run the installed bin, capturing both streams — spawnSync never
