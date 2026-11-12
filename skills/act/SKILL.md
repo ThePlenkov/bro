@@ -24,7 +24,7 @@ default store, so standard installs already have it).
 | `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]`          | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land                                                                                                                    |
 | `bro review act resolve --thread ID [--comment T]`                                                   | Resolve a thread (reply first if comment given)                                                                                                                                                                                                                                                                                                                                                                                     |
 | `bro review act reply --thread ID --comment T`                                                       | Reply without resolving (`--file TSV` for batch)                                                                                                                                                                                                                                                                                                                                                                                    |
-| `bro review act dismiss [PR] [--dry-run] [--message T]`                                              | Dismiss **stale** veto reviews — standing `CHANGES_REQUESTED` reviews whose referenced threads are all resolved+outdated; a live veto is refused by construction (re-review is the reviewer's call). `--dry-run` lists candidates; `--message` overrides the dismissal note                                                                                                                                                         |
+| `bro review act dismiss [PR] [--dry-run] [--message T]`                                              | Dismiss **stale** veto reviews — standing `CHANGES_REQUESTED` reviews with ≥1 referenced thread, all resolved+outdated; a live veto (including a body-only one with zero thread refs) is refused by construction (re-review is the reviewer's call). `--dry-run` lists candidates; `--message` overrides the dismissal note                                                                                                         |
 
 ## Policy
 
@@ -108,12 +108,15 @@ default store, so standard installs already have it).
   `open_threads=0`.** GitHub's `reviewDecision` is a third gate axis
   beside threads and checks — every thread resolved does not clear a
   reviewer's veto. `bro review act status` names the standing reviews
-  and marks each **stale** (every thread it references is resolved
-  _and_ outdated — nothing live it could still be talking about) or
-  **live**. Stale vetoes are cleared by `bro review act dismiss [PR]`;
-  live ones wait for the reviewer's re-review — never dismiss a live
-  veto to unblock a merge (the command refuses by construction, so if
-  it refuses, that IS the answer).
+  and marks each **stale** (at least one thread it references exists
+  and every one is resolved _and_ outdated — nothing live it could
+  still be talking about) or **live**. A veto with zero referenced
+  threads — a body-only objection — reads **live**: no thread anchor
+  is not proof the ask went stale, and dismissal is destructive-leaning.
+  Stale vetoes are cleared by `bro review act dismiss [PR]`; live ones
+  wait for the reviewer's re-review — never dismiss a live veto to
+  unblock a merge (the command refuses by construction, so if it
+  refuses, that IS the answer).
 - **A reopened thread stops the loop — the user confirms.** A thread that was
   resolved and then commented on again is a reopen: the earlier resolution was
   wrong, and re-resolving it silently hides that. The gate names it as a

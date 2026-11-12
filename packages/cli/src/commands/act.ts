@@ -256,10 +256,15 @@ function printStatus(state: PrActState, gate: ExitGate): void {
   for (const v of state.vetoReviews ?? []) {
     console.log(
       v.stale
-        ? `  veto: ${v.author} review ${v.id} — stale ` +
-            `(${v.threads === 0 ? 'no referenced threads' : `${v.threads} thread(s) resolved+outdated`}) ` +
+        ? // stale implies ≥1 referenced thread — zero refs reads live
+          `  veto: ${v.author} review ${v.id} — stale ` +
+            `(${v.threads} thread(s) resolved+outdated) ` +
             `— \`bro act dismiss ${state.pr}\` clears it`
-        : `  veto: ${v.author} review ${v.id} — live (${v.threads} thread(s) open) — wait for re-review`
+        : `  veto: ${v.author} review ${v.id} — live (${
+            v.threads === 0
+              ? 'no referenced threads — body-only veto'
+              : `${v.threads} referenced thread(s) not all settled`
+          }) — wait for re-review`
     );
   }
   const live = listWatches(process.cwd()).filter(l => l.alive && l.watch.pr === state.pr);
@@ -1834,9 +1839,9 @@ async function cmdDismiss(argv: string[]): Promise<void> {
   // decision input, same rule as the merge gate (bro-0tcrl)
   const vetoes = await rev.vetoReviews(t);
   const stale = vetoes.filter(v => v.stale);
+  // stale ⇒ ≥1 referenced thread — the count is always real here
   const describe = (v: (typeof stale)[number]): string =>
-    `${v.author}'s review ${v.id} — ` +
-    (v.threads === 0 ? 'no referenced threads' : `${v.threads} thread(s) resolved+outdated`);
+    `${v.author}'s review ${v.id} — ${v.threads} thread(s) resolved+outdated`;
   if (argv.includes('--dry-run')) {
     if (stale.length === 0) {
       console.log(

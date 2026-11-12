@@ -791,8 +791,9 @@ async function humanApprovedAsync(t: PrTarget, opts?: ApprovalProbeOpts): Promis
 //
 // reviewDecision=CHANGES_REQUESTED is a host veto the thread axis can't
 // see — the gate blocks on it, and this probe answers WHICH review(s)
-// stand and whether each is stale (every referenced thread resolved +
-// outdated → dismissible via dismissPullRequestReview).
+// stand and whether each is stale (≥1 referenced thread, ALL resolved +
+// outdated → dismissible via dismissPullRequestReview; zero refs reads
+// LIVE — a body-only veto's objection may have no thread anchor).
 
 /** The standing CHANGES_REQUESTED reviews — the latest decision review
  *  per reviewer folded exactly like headApprovalVerdict (later
@@ -827,13 +828,17 @@ export function standingVetoes(nodes: readonly PrReviewNode[]): PrReviewNode[] {
 
 /** One reviewThreads page for the veto probe — slimmer than
  *  ThreadPage: only the resolved/outdated flags and each comment's
- *  review attribution are read. */
+ *  review attribution are read. `id` is the thread's node id — the
+ *  handle for the comments-rest pagination a >100-comment thread
+ *  needs. */
 interface VetoThreadPage {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
   nodes: Array<{
+    id?: string;
     isResolved: boolean;
     isOutdated: boolean;
     comments: {
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
       nodes: Array<{ pullRequestReview?: { id?: string } | null }>;
     };
   }>;
@@ -847,9 +852,11 @@ function vetoThreadsQuery(afterClause: string): string {
           reviewThreads(first: $n${afterClause}) {
             pageInfo { hasNextPage endCursor }
             nodes {
+              id
               isResolved
               isOutdated
               comments(first: 100) {
+                pageInfo { hasNextPage endCursor }
                 nodes { pullRequestReview { id } }
               }
             }
@@ -857,6 +864,54 @@ function vetoThreadsQuery(afterClause: string): string {
         }
       }
     }`;
+}
+
+/** The comments-rest read for one thread whose first:100 page reported
+ *  hasNextPage — addressed by node id so only the overflowing thread
+ *  pays the extra pages. */
+function vetoThreadCommentsQuery(afterClause: string): string {
+  return `
+    query($id: ID!, $n: Int!) {
+      node(id: $id) {
+        ... on PullRequestReviewThread {
+          comments(first: $n${afterClause}) {
+            pageInfo { hasNextPage endCursor }
+            nodes { pullRequestReview { id } }
+          }
+        }
+      }
+    }`;
+}
+
+interface VetoCommentsPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: Array<{ pullRequestReview?: { id?: string } | null }>;
+}
+
+function parseVetoCommentsPage(raw: string, threadId: string): VetoCommentsPage {
+  const parsed = JSON.parse(raw) as {
+    data?: { node?: { comments?: VetoCommentsPage } | null };
+    errors?: unknown;
+  };
+  if (parsed.errors) {
+    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`);
+  }
+  const comments = parsed.data?.node?.comments;
+  if (comments === undefined || comments === null) {
+    throw new Error(
+      `review thread ${threadId}: comments page unreadable — veto staleness unanswerable`
+    );
+  }
+  if (
+    comments.pageInfo === undefined ||
+    typeof comments.pageInfo.hasNextPage !== 'boolean' ||
+    comments.nodes === undefined
+  ) {
+    throw new Error(
+      `review thread ${threadId}: comments page incomplete — veto staleness unanswerable`
+    );
+  }
+  return comments;
 }
 
 function parseVetoThreadPage(raw: string, pr: number): VetoThreadPage {
@@ -885,9 +940,52 @@ function parseVetoThreadPage(raw: string, pr: number): VetoThreadPage {
   return threads;
 }
 
+/** The review ids on the comments pages AFTER the first — a thread
+ *  with >100 comments would otherwise hide the veto's only attributed
+ *  comment and read as unreferenced (codeant-ai on PR #1020). Same
+ *  advance-or-throw cursor rule as every other connection here. */
+async function vetoThreadCommentsRest(
+  threadId: string,
+  firstCursor: string,
+  into: Set<string>
+): Promise<void> {
+  let cursor = firstCursor;
+  for (;;) {
+    const afterClause = gqlAfter(cursor);
+    const raw = await ghAsync([
+      'api',
+      'graphql',
+      '-f',
+      `query=${vetoThreadCommentsQuery(afterClause)}`,
+      '-f',
+      `id=${threadId}`,
+      '-F',
+      'n=100',
+    ]);
+    const page = parseVetoCommentsPage(raw, threadId);
+    for (const c of page.nodes) {
+      const id = c.pullRequestReview?.id;
+      if (id !== undefined) {
+        into.add(id);
+      }
+    }
+    if (page.pageInfo.hasNextPage !== true) {
+      return;
+    }
+    const next = page.pageInfo.endCursor;
+    if (!next || next === cursor) {
+      throw new Error(`review thread ${threadId}: comments pagination did not advance`);
+    }
+    cursor = next;
+  }
+}
+
 /** Every review thread with the set of review ids its comments were
  *  submitted under — the veto→thread attribution. Comments that aren't
- *  part of a submitted review answer null and attribute to nothing. */
+ *  part of a submitted review answer null and attribute to nothing.
+ *  A thread whose comments connection overflows first:100 is followed
+ *  to its last page — attribution is never read off a truncated
+ *  window (a missed ref would mark a live veto stale). */
 async function vetoThreads(
   t: PrTarget
 ): Promise<Array<{ resolved: boolean; outdated: boolean; reviewIds: Set<string> }>> {
@@ -912,12 +1010,36 @@ async function vetoThreads(
     ]);
     const page = parseVetoThreadPage(raw, t.pr);
     for (const n of page.nodes) {
+      // the comments connection carries its own pagination — a node
+      // missing it can't prove its attribution window is complete
+      const comments = n.comments;
+      const cp = comments?.pageInfo;
+      if (
+        comments === undefined ||
+        comments.nodes === undefined ||
+        cp === undefined ||
+        typeof cp.hasNextPage !== 'boolean'
+      ) {
+        throw new Error(
+          `pull request #${t.pr}: review thread comments page incomplete — veto staleness unanswerable`
+        );
+      }
       const reviewIds = new Set<string>();
-      for (const c of n.comments.nodes) {
+      for (const c of comments.nodes) {
         const id = c.pullRequestReview?.id;
         if (id !== undefined) {
           reviewIds.add(id);
         }
+      }
+      // the comments connection itself can overflow first:100 — follow
+      // it before trusting the attribution set
+      if (cp.hasNextPage === true) {
+        if (n.id === undefined || cp.endCursor === null || cp.endCursor === undefined) {
+          throw new Error(
+            `pull request #${t.pr}: truncated comments page without a cursor — veto staleness unanswerable`
+          );
+        }
+        await vetoThreadCommentsRest(n.id, cp.endCursor, reviewIds);
       }
       out.push({ resolved: n.isResolved, outdated: n.isOutdated, reviewIds });
     }
@@ -982,9 +1104,13 @@ async function vetoReviews(t: PrTarget): Promise<VetoReview[]> {
       submittedAt: v.submittedAt ?? '',
       commitSha: v.commit?.oid ?? '',
       threads: refs.length,
-      // vacuous truth at 0 — a body-only veto left no thread evidence,
-      // which is exactly the stale case the #931 evidence review was
-      stale: refs.every(th => th.resolved && th.outdated),
+      // staleness needs POSITIVE evidence — ≥1 referenced thread, all
+      // resolved+outdated. Zero refs is NOT stale: a body-only veto's
+      // objection can live in the review body with no thread anchor,
+      // and absence of evidence is never evidence of staleness
+      // (codeant-ai on PR #1020 — dismissal is destructive-leaning,
+      // so every uncertainty resolves toward LIVE).
+      stale: refs.length > 0 && refs.every(th => th.resolved && th.outdated),
     };
   });
 }

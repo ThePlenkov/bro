@@ -91,9 +91,11 @@ export interface ApprovalProbeOpts {
 /** A standing CHANGES_REQUESTED review — the host veto behind
  *  `reviewDecision=CHANGES_REQUESTED` (bro-n1foa). `id` is the host's
  *  opaque review node id — the dismissal handle. `stale` marks the
- *  dismissible case: every thread the review's comments reference is
- *  resolved AND outdated (a body-only veto references zero threads and
- *  is stale by the same rule — its asks left no thread evidence). */
+ *  dismissible case: at least one thread the review's comments reference
+ *  exists and EVERY one is resolved AND outdated. Zero referenced
+ *  threads is NOT stale — a body-only veto's objection can live in the
+ *  review body with no thread anchor, and staleness needs positive
+ *  evidence, never absence of it (dismissal is destructive-leaning). */
 export interface VetoReview {
   /** The host's review node id — pass to `dismissReview` verbatim. */
   id: string;
@@ -106,11 +108,13 @@ export interface VetoReview {
    *  can't bind it. */
   commitSha: string;
   /** Threads the review's comments reference — 0 means the veto
-   *  carries no thread evidence (a body-only objection). */
+   *  carries no thread evidence (a body-only objection), which reads
+   *  LIVE: no thread anchor is not proof the ask went stale. */
   threads: number;
-  /** Every referenced thread resolved AND outdated — the stale-review
-   *  rule. Resolved-but-current does not count: a "won't fix" resolve
-   *  on live code is not evidence the veto's ask went stale. */
+  /** ≥1 referenced thread AND every one resolved AND outdated — the
+   *  stale-review rule. Resolved-but-current does not count: a "won't
+   *  fix" resolve on live code is not evidence the veto's ask went
+   *  stale. */
   stale: boolean;
 }
 

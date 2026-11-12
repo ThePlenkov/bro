@@ -47,20 +47,27 @@ but nothing could say WHICH review was stale or clear it.
   `pullRequestReview.id` is the veto's node id. A review's own
   `comments` connection can't answer this — review comments carry no
   thread back-reference — so the probe pages `reviewThreads` with
-  `comments{pullRequestReview{id}}` attribution. A body-only veto
-  references zero threads and is therefore stale (vacuous truth — the
-  #931 evidence review had no comments at all; its findings arrived
-  as separate COMMENTED reviews whose threads all resolved).
-- **Stale** = every referenced thread `isResolved && isOutdated`.
-  Resolved-but-not-outdated does NOT count — a "won't fix" resolve on
-  current code is not evidence the veto's ask went stale. `threads`
-  rides the record so the report can say "0 referenced threads"
-  honestly instead of implying thread evidence existed.
-- **Fail closed**: a truncated reviews or threads page throws — the
-  state fetch degrades `vetoReviews` to undefined (the gate still
-  blocks on `reviewDecision`; only the enumeration is lost), and
-  `act dismiss` errors rather than dismissing on a partial read.
-  An unenumerable veto is never "nothing to dismiss".
+  `comments{pullRequestReview{id}}` attribution, following each
+  thread's `comments` connection past its first:100 page (a veto's
+  only attributed comment can sit beyond the cap — attribution is
+  never read off a truncated window). A body-only veto references
+  zero threads.
+- **Stale** = ≥1 referenced thread AND every referenced thread
+  `isResolved && isOutdated`. Resolved-but-not-outdated does NOT
+  count — a "won't fix" resolve on current code is not evidence the
+  veto's ask went stale. **Zero referenced threads is NOT stale** —
+  a body-only veto's objection can live in the review body with no
+  thread anchor, and staleness needs positive evidence, never
+  absence of it (dismissal is destructive-leaning; every uncertainty
+  resolves toward LIVE — codeant-ai on PR #1020). `threads` rides
+  the record so the report can say "0 referenced threads —
+  body-only veto" honestly instead of implying thread evidence
+  existed.
+- **Fail closed**: a truncated reviews, threads, or comments page
+  throws — the state fetch degrades `vetoReviews` to undefined (the
+  gate still blocks on `reviewDecision`; only the enumeration is
+  lost), and `act dismiss` errors rather than dismissing on a
+  partial read. An unenumerable veto is never "nothing to dismiss".
 
 ## Invariants
 
@@ -82,6 +89,12 @@ but nothing could say WHICH review was stale or clear it.
 - A veto with any unresolved or not-outdated referenced thread →
   `stale === false`; the blocker says "wait for re-review" and
   `act dismiss` refuses it.
+- A veto with ZERO referenced threads (body-only objection) →
+  `stale === false` — no thread anchor is not proof the ask went
+  stale; `act dismiss` refuses it.
+- A veto whose only attributed comment sits past a thread's
+  comments:first:100 page → still attributed → `stale` computed on
+  the full comment set, never the truncated window.
 - Latest-per-reviewer fold: an older CR superseded by the same
   reviewer's APPROVED (or DISMISSED) is not a standing veto.
 - `dismissReview` sends `dismissPullRequestReview` with the review

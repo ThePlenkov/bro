@@ -54,6 +54,10 @@ case "$1 $2" in
           *'after: "'*) echo "\${FAKE_GH_REVIEWS_P2:-{\\}}";;
           *) echo "\${FAKE_GH_REVIEWS_P1:-{\\}}";;
         esac ;;
+      *'node(id: $id)'*) case "$@" in
+          *'after: "ccur2"'*) echo "\${FAKE_GH_VETO_COMMENTS_P2:-{\\}}";;
+          *) echo "\${FAKE_GH_VETO_COMMENTS:-{\\}}";;
+        esac ;;
       *"pullRequestReview { id }"*) case "$@" in
           *'after: "'*) echo "\${FAKE_GH_VETO_THREADS_P2:-{\\}}";;
           *) echo "\${FAKE_GH_VETO_THREADS:-{\\}}";;
@@ -1364,9 +1368,13 @@ describe('githubReview vetoReviews', { skip: WIN32 }, () => {
 
   const tpage = (
     nodes: Array<{
+      id?: string;
       resolved: boolean;
       outdated: boolean;
       reviewIds: string[];
+      /** set → comments.pageInfo.hasNextPage with this endCursor —
+       *  the >100-comments overflow the rest-pagination covers */
+      commentsNext?: string;
     }>,
     next: string | null = null
   ) =>
@@ -1376,14 +1384,32 @@ describe('githubReview vetoReviews', { skip: WIN32 }, () => {
           pullRequest: {
             reviewThreads: {
               pageInfo: { hasNextPage: next !== null, endCursor: next },
-              nodes: nodes.map(n => ({
+              nodes: nodes.map((n, i) => ({
+                id: n.id ?? `THR_${i}`,
                 isResolved: n.resolved,
                 isOutdated: n.outdated,
                 comments: {
+                  pageInfo: {
+                    hasNextPage: n.commentsNext !== undefined,
+                    endCursor: n.commentsNext ?? null,
+                  },
                   nodes: n.reviewIds.map(id => ({ pullRequestReview: { id } })),
                 },
               })),
             },
+          },
+        },
+      },
+    });
+
+  /** One comments-rest page for the node(id:) follow-up read. */
+  const cpage = (reviewIds: string[], next: string | null = null) =>
+    JSON.stringify({
+      data: {
+        node: {
+          comments: {
+            pageInfo: { hasNextPage: next !== null, endCursor: next },
+            nodes: reviewIds.map(id => ({ pullRequestReview: { id } })),
           },
         },
       },
@@ -1444,7 +1470,11 @@ describe('githubReview vetoReviews', { skip: WIN32 }, () => {
     );
   });
 
-  test('a body-only veto references zero threads — stale by vacuous truth', async () => {
+  test('a body-only veto references zero threads — LIVE, never stale', async () => {
+    // zero thread refs is absence of evidence, not evidence of
+    // staleness — the objection can live in the review body with no
+    // thread anchor, and dismissal is destructive-leaning so every
+    // uncertainty resolves toward live (codeant-ai on PR #1020)
     const p1 = vpage(
       HEAD_SHA,
       [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
@@ -1456,9 +1486,141 @@ describe('githubReview vetoReviews', { skip: WIN32 }, () => {
         const got = await githubReview().vetoReviews!(target);
         assert.equal(got.length, 1);
         assert.equal(got[0]!.threads, 0);
-        assert.equal(got[0]!.stale, true);
+        assert.equal(got[0]!.stale, false);
       },
       { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: threads }
+    );
+  });
+
+  test('a veto attributed only past comments:first:100 still counts', async () => {
+    // the veto's only thread comment sits beyond the first comments
+    // page — without the node(id:) rest read the ref is invisible and
+    // a live veto could read stale (codeant-ai on PR #1020)
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    const threads = tpage([
+      {
+        resolved: true,
+        outdated: true,
+        reviewIds: ['PRR_other'],
+        commentsNext: 'ccur1',
+      },
+    ]);
+    const rest = cpage(['PRR_1']);
+    await withFakeGhAsync(
+      async log => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.equal(got.length, 1);
+        assert.equal(got[0]!.threads, 1);
+        assert.equal(got[0]!.stale, true);
+        // the rest read fired against the thread's node id
+        const calls = readFileSync(log, 'utf8');
+        assert.match(calls, /node\(id: \$id\)/);
+        assert.match(calls, /id=THR_0/);
+        assert.match(calls, /after: "ccur1"/);
+      },
+      {
+        FAKE_GH_REVIEWS_P1: p1,
+        FAKE_GH_VETO_THREADS: threads,
+        FAKE_GH_VETO_COMMENTS: rest,
+      }
+    );
+  });
+
+  test('comments rest pagination follows multiple pages', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    const threads = tpage([
+      { resolved: false, outdated: false, reviewIds: ['PRR_other'], commentsNext: 'ccur1' },
+    ]);
+    // rest page 1 still has more; page 2 carries the veto's comment —
+    // the thread is unresolved so the veto must read LIVE either way,
+    // but the attribution has to reach it to prove the walk completed
+    const rest1 = cpage(['PRR_other'], 'ccur2');
+    const rest2 = cpage(['PRR_1']);
+    await withFakeGhAsync(
+      async () => {
+        const got = await githubReview().vetoReviews!(target);
+        assert.equal(got[0]!.threads, 1);
+        assert.equal(got[0]!.stale, false);
+      },
+      {
+        FAKE_GH_REVIEWS_P1: p1,
+        FAKE_GH_VETO_THREADS: threads,
+        FAKE_GH_VETO_COMMENTS: rest1,
+        FAKE_GH_VETO_COMMENTS_P2: rest2,
+      }
+    );
+  });
+
+  test('a comments rest page that cannot advance throws — attribution unanswerable', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    const threads = tpage([
+      { resolved: true, outdated: true, reviewIds: [], commentsNext: 'ccur1' },
+    ]);
+    // hasNextPage with the SAME cursor it was fetched after — a stuck
+    // host, never a last page
+    const stuck = cpage([], 'ccur1');
+    await withFakeGhAsync(
+      async () => {
+        await assert.rejects(
+          githubReview().vetoReviews!(target) as Promise<unknown>,
+          /comments pagination did not advance/
+        );
+      },
+      {
+        FAKE_GH_REVIEWS_P1: p1,
+        FAKE_GH_VETO_THREADS: threads,
+        FAKE_GH_VETO_COMMENTS: stuck,
+      }
+    );
+  });
+
+  test('a truncated comments page without pageInfo throws — unanswerable', async () => {
+    const p1 = vpage(
+      HEAD_SHA,
+      [vnode('PRR_1', 'alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      null
+    );
+    // comments.pageInfo missing entirely — can't prove the first:100
+    // window was the whole connection
+    const broken = JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [
+                {
+                  id: 'THR_0',
+                  isResolved: true,
+                  isOutdated: true,
+                  comments: { nodes: [] },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+    await withFakeGhAsync(
+      async () => {
+        await assert.rejects(
+          githubReview().vetoReviews!(target) as Promise<unknown>,
+          /comments page incomplete/
+        );
+      },
+      { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: broken }
     );
   });
 
