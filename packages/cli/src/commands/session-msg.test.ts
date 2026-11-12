@@ -431,25 +431,27 @@ describe('runSessionsResume', () => {
   const resumeFixture = () => stateFixture('bro-resume-');
 
   /** Seed one claude session, then assert runSessionsResume rejects
-   *  with a CommandError matching `pattern`. */
+   *  with a CommandError matching `spec.pattern`. */
   async function expectResumeError(
     f: ReturnType<typeof resumeFixture>,
-    sid: string,
-    args: string[],
-    pattern: RegExp,
-    deps: Partial<Parameters<typeof runSessionsResume>[1]> = {}
+    spec: {
+      sid: string;
+      args: string[];
+      pattern: RegExp;
+      deps?: Partial<Parameters<typeof runSessionsResume>[1]>;
+    }
   ): Promise<void> {
-    await f.ledger.append([sess({ host: 'claude', sid })]);
+    await f.ledger.append([sess({ host: 'claude', sid: spec.sid })]);
     await assert.rejects(
-      runSessionsResume(args, {
+      runSessionsResume(spec.args, {
         dir: f.dir,
         ledger: f.ledger,
         now: NOW,
         bootTimeMs: BOOT,
         out: () => {},
-        ...deps,
+        ...spec.deps,
       }),
-      (err: unknown) => err instanceof CommandError && pattern.test(String(err))
+      (err: unknown) => err instanceof CommandError && spec.pattern.test(String(err))
     );
   }
 
@@ -549,8 +551,11 @@ describe('runSessionsResume', () => {
   test('--pick on non-TTY is a usage error', async () => {
     const f = resumeFixture();
     try {
-      await expectResumeError(f, 'p-1', ['--pick'], /--pick needs an interactive terminal/, {
-        stdinTTY: false,
+      await expectResumeError(f, {
+        sid: 'p-1',
+        args: ['--pick'],
+        pattern: /--pick needs an interactive terminal/,
+        deps: { stdinTTY: false },
       });
     } finally {
       f.cleanup();
@@ -560,8 +565,11 @@ describe('runSessionsResume', () => {
   test('resume child nonzero exit is an error', async () => {
     const f = resumeFixture();
     try {
-      await expectResumeError(f, 'fail-1', ['fail-1'], /resume exited 3/, {
-        spawn: async () => 3,
+      await expectResumeError(f, {
+        sid: 'fail-1',
+        args: ['fail-1'],
+        pattern: /resume exited 3/,
+        deps: { spawn: async () => 3 },
       });
     } finally {
       f.cleanup();

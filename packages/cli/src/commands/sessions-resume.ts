@@ -150,6 +150,55 @@ function spawnResume(argv: string[], cwd: string): Promise<number> {
   });
 }
 
+/** The <id> leg — the shared fleet grammar narrowed to exactly one
+ *  session. Ambiguity and zero-match are usage errors, never guesses. */
+function resumeById(rows: MsgSessionRow[], id: string): MsgSessionRow {
+  const resolution = resolveMsgTarget(rows, id);
+  if (resolution.error !== undefined) {
+    throw new CommandError(`error: ${resolution.error}`, EXIT.usage);
+  }
+  const matched = resolution.deliveries
+    .map(d => d.session)
+    .filter((s): s is MsgSessionRow => s !== undefined);
+  const distinct = new Map(matched.map(s => [`${s.host}:${s.sid}`, s]));
+  if (distinct.size === 0) {
+    throw new CommandError(
+      `error: no ledger session matches "${id}" — the session may not be wired yet`,
+      EXIT.usage
+    );
+  }
+  if (distinct.size > 1) {
+    const list = [...distinct.keys()].join(', ');
+    throw new CommandError(
+      `error: "${id}" resolves to ${distinct.size} sessions (${list}) — name one with <host>:<sid>`,
+      EXIT.usage
+    );
+  }
+  return [...distinct.values()][0];
+}
+
+/** The --pick leg — TTY gate, then the picker. A cancelled picker and
+ *  an injected pick answering out of range are the same outcome: no
+ *  session to resume. */
+async function resumeByPick(
+  rows: MsgSessionRow[],
+  deps: SessionsResumeDeps,
+  out: (line: string) => void
+): Promise<MsgSessionRow | null> {
+  const tty = deps.stdinTTY ?? process.stdin.isTTY === true;
+  if (!tty) {
+    throw new CommandError('error: --pick needs an interactive terminal', EXIT.usage);
+  }
+  const pick = deps.pick ?? pickSession;
+  const idx = await pick(rows);
+  const picked = idx === null ? undefined : rows[idx];
+  if (picked === undefined) {
+    out('resume: cancelled');
+    return null;
+  }
+  return picked;
+}
+
 /** Which session the invocation names — --last (rows arrive
  *  lastSeen-desc), --pick (TTY picker), or the shared fleet grammar.
  *  Every path yields exactly one row or throws a usage error; null
@@ -166,47 +215,50 @@ async function resumeTarget(
     return rows[0];
   }
   if (args.pick) {
-    const tty = deps.stdinTTY ?? process.stdin.isTTY === true;
-    if (!tty) {
-      throw new CommandError('error: --pick needs an interactive terminal', EXIT.usage);
-    }
-    const pick = deps.pick ?? pickSession;
-    const idx = await pick(rows);
-    if (idx === null) {
-      out('resume: cancelled');
-      return null;
-    }
-    const picked = rows[idx];
-    if (picked === undefined) {
-      // an injected pick is not bounds-checked — treat an out-of-range
-      // answer as a cancel, never a crash on session.cwd below
-      out('resume: cancelled');
-      return null;
-    }
-    return picked;
+    return resumeByPick(rows, deps, out);
   }
-  const resolution = resolveMsgTarget(rows, args.id!);
-  if (resolution.error !== undefined) {
-    throw new CommandError(`error: ${resolution.error}`, EXIT.usage);
-  }
-  const matched = resolution.deliveries
-    .map(d => d.session)
-    .filter((s): s is MsgSessionRow => s !== undefined);
-  const distinct = new Map(matched.map(s => [`${s.host}:${s.sid}`, s]));
-  if (distinct.size === 0) {
-    throw new CommandError(
-      `error: no ledger session matches "${args.id}" — the session may not be wired yet`,
-      EXIT.usage
+  return resumeById(rows, args.id!);
+}
+
+/** Everything resumeTarget's caller already resolved — kept as one
+ *  bag so launch helpers stay under the argument-count threshold. */
+interface ResumeCtx {
+  deps: SessionsResumeDeps;
+  dir: string;
+  out: (line: string) => void;
+}
+
+/** Render and launch the resume — --print short-circuits before any
+ *  spawn; an unsupported host reports instead of guessing. */
+async function launchResume(
+  session: MsgSessionRow,
+  args: { print: boolean },
+  ctx: ResumeCtx
+): Promise<void> {
+  const cwd = session.cwd ?? ctx.dir;
+  const resumeArgv = sessionResumeArgv(session.host, session.sid, cwd);
+  const stateNote = ` [${session.state}]`;
+  if (resumeArgv === null) {
+    // report, never guess — the spec's unsupported-host contract
+    ctx.out(
+      `resume: host '${session.host}' has no resume command — ` +
+        `${session.host}:${shortSid(session.sid)}${stateNote} (${cwd})`
     );
+    return;
   }
-  if (distinct.size > 1) {
-    const list = [...distinct.keys()].join(', ');
-    throw new CommandError(
-      `error: "${args.id}" resolves to ${distinct.size} sessions (${list}) — name one with <host>:<sid>`,
-      EXIT.usage
+  const cmdline = resumeArgv.join(' ');
+  if (args.print) {
+    ctx.out(
+      `resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}  (cwd: ${cwd})`
     );
+    return;
   }
-  return [...distinct.values()][0];
+  ctx.out(`resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}`);
+  const spawnFn = ctx.deps.spawn ?? spawnResume;
+  const code = await spawnFn(resumeArgv, cwd);
+  if (code !== 0) {
+    throw new CommandError(`error: resume exited ${code}`, EXIT.error);
+  }
 }
 
 export async function runSessionsResume(
@@ -231,27 +283,5 @@ export async function runSessionsResume(
   if (session === null) {
     return;
   }
-
-  const cwd = session.cwd ?? dir;
-  const resumeArgv = sessionResumeArgv(session.host, session.sid, cwd);
-  const stateNote = ` [${session.state}]`;
-  if (resumeArgv === null) {
-    // report, never guess — the spec's unsupported-host contract
-    out(
-      `resume: host '${session.host}' has no resume command — ` +
-        `${session.host}:${shortSid(session.sid)}${stateNote} (${cwd})`
-    );
-    return;
-  }
-  const cmdline = resumeArgv.join(' ');
-  if (args.print === true) {
-    out(`resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}  (cwd: ${cwd})`);
-    return;
-  }
-  out(`resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}`);
-  const spawnFn = deps.spawn ?? spawnResume;
-  const code = await spawnFn(resumeArgv, cwd);
-  if (code !== 0) {
-    throw new CommandError(`error: resume exited ${code}`, EXIT.error);
-  }
+  await launchResume(session, args, { deps, dir, out });
 }

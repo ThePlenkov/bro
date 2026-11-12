@@ -65,9 +65,9 @@ function msgUsageError(): never {
 interface MsgArgs {
   target: string;
   text: string;
-  kind?: string;
-  inReplyTo?: string;
-  key?: string;
+  kind: string | undefined;
+  inReplyTo: string | undefined;
+  key: string | undefined;
 }
 
 /** argv → the send's inputs. strict: msg knows every --flag it takes —
@@ -90,13 +90,14 @@ function msgArgs(argv: string[]): MsgArgs {
   if (text === '') {
     msgUsageError();
   }
-  return {
-    target: target!,
-    text,
-    ...(kind !== undefined ? { kind } : {}),
-    ...(inReplyTo !== undefined ? { inReplyTo } : {}),
-    ...(key !== undefined ? { key } : {}),
-  };
+  return { target: target!, text, kind, inReplyTo, key };
+}
+
+/** The connectors.* precedence pins `facade()` honors — {} when the
+ *  project configures none. */
+function connectorOpts(dir: string): { prefer?: Record<string, string> } {
+  const prefer = loadConfig(dir).connectors;
+  return prefer === undefined ? {} : { prefer };
 }
 
 /** The ledger facade for this send — injected in tests, resolved
@@ -109,10 +110,8 @@ function msgLedger(dir: string, deps: MsgDeps): LedgerFacade | undefined {
   if (deps.ledger !== undefined) {
     return deps.ledger;
   }
-  const prefer = loadConfig(dir).connectors;
-  const opts = prefer === undefined ? {} : { prefer };
   try {
-    return facade('ledger', { dir }, opts);
+    return facade('ledger', { dir }, connectorOpts(dir));
   } catch (err) {
     console.error(
       `warning: session ledger unavailable — resolving by mailbox address only (${
@@ -145,17 +144,11 @@ export async function runMsgCommand(argv: string[], deps: MsgDeps = {}): Promise
   const dir = deps.dir ?? process.cwd();
   const env = deps.env ?? process.env;
   const ledger = msgLedger(dir, deps);
-  const prefer = loadConfig(dir).connectors;
-  const opts = prefer === undefined ? {} : { prefer };
-  const events = deps.events ?? facade('events', { dir }, opts);
+  const events = deps.events ?? facade('events', { dir }, connectorOpts(dir));
   const res = await sendSessionMessage({
     dir,
-    target: args.target,
-    text: args.text,
     env,
-    ...(args.kind !== undefined ? { kind: args.kind } : {}),
-    ...(args.inReplyTo !== undefined ? { inReplyTo: args.inReplyTo } : {}),
-    ...(args.key !== undefined ? { key: args.key } : {}),
+    ...args,
     ...(ledger !== undefined ? { ledger } : {}),
     events,
   });
