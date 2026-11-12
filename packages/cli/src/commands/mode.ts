@@ -48,9 +48,15 @@ import {
   writeModeFile,
   type LedgerFacade,
   type Mode,
+  type SessionKey,
   type SessionRow,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
+import {
+  acquireOrchestratorRole,
+  orchestratorRoleHeldBy,
+  releaseOrchestratorRole,
+} from './orchestrator-role.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { renderModeSnapshots, SNAPSHOT_MODES } from './mode-snapshots.ts';
 
@@ -249,6 +255,44 @@ async function runGet(
   }
 }
 
+/** orchestrate is exclusive per project (specs/sessions/bro-izpyk.md):
+ *  the mode write is gated on the role:orchestrator@<project> claim —
+ *  a live foreign holder refuses the set, a dead/unclaimed role is
+ *  taken. Spawned workers (BRO_AGENT_ID) never orchestrate — the same
+ *  veto isOrchestratorSession encodes for the supervisor guards.
+ *  Returns true when this call took the claim — the caller releases
+ *  it if the mode write fails so claim and file never disagree. */
+async function ensureOrchestratorClaim(
+  mode: Mode,
+  dir: string,
+  sessionKey: SessionKey,
+  env: NodeJS.ProcessEnv,
+  ownSession: boolean
+): Promise<boolean> {
+  if (mode !== 'orchestrate') {
+    return false;
+  }
+  const agentId = env.BRO_AGENT_ID;
+  if (agentId !== undefined && agentId !== '') {
+    throw new CommandError(
+      'error: BRO_AGENT_ID is set — spawned workers never orchestrate; ' +
+        'the orchestrator session owns supervisor duties',
+      EXIT.usage
+    );
+  }
+  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession });
+  if (!role.ok) {
+    const c = role.conflict;
+    throw new CommandError(
+      `error: orchestrator role already held by ${
+        c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
+      } — that session runs supervisor duties for this project`,
+      EXIT.error
+    );
+  }
+  return true;
+}
+
 async function runSet(
   args: ModeArgs & { mode: Mode },
   sess: ResolvedSession,
@@ -262,9 +306,36 @@ async function runSet(
     throw new CommandError('error: no state dir resolves — cannot write a mode file', EXIT.error);
   }
   const project = sessionProject(dir);
-  writeModeFile(file, args.mode, project);
   const warnings: string[] = [];
+  const sessionKey = { host: sess.host, sid: sess.sid };
+  // implicit session resolution means the target IS this process — an
+  // explicit --session/--host may name another session, whose claim
+  // must not carry this process's pid
+  const ownSession = args.session === undefined && args.host === undefined;
+  // re-applying orchestrate renews a role the session may already hold —
+  // snapshot that so a failed write undoes only a FRESH acquire (the
+  // pre-existing claim belongs to the mode file still on disk)
+  const preHeld =
+    args.mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
+  const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env, ownSession);
+  try {
+    writeModeFile(file, args.mode, project);
+  } catch (err) {
+    // the mode was not applied — undo a fresh role acquire so the claim
+    // and the mode file never disagree; a stranded claim would block
+    // the next orchestrator for up to the TTL. A renewed pre-existing
+    // role stays: the old file may still say orchestrate.
+    if (roleAcquired && !preHeld) {
+      await releaseOrchestratorRole(dir, sessionKey);
+    }
+    throw err;
+  }
   await ledgerSetMode(ledger, sess.host, sess.sid, args.mode, warnings);
+  // leaving orchestrate (or never holding it) releases the role claim —
+  // best-effort; a stuck row dies with its TTL/pid anyway
+  if (args.mode !== 'orchestrate') {
+    await releaseOrchestratorRole(dir, sessionKey);
+  }
   // Tier-1 snapshots render for the mode just set — the next
   // session-start/post-compaction reads them instead of the live sweep.
   // Best-effort: a probe failure leaves the live path answering.
@@ -303,6 +374,17 @@ async function runClear(
 ): Promise<void> {
   const file = modeFilePath(env, sess.host, sess.sid);
   const warnings: string[] = [];
+  const sessionKey = { host: sess.host, sid: sess.sid };
+  const ownSession = args.session === undefined && args.host === undefined;
+  // modes.default decides the post-clear mode — when it is orchestrate
+  // this clear IS an orchestrate activation in disguise: same worker
+  // veto + exclusive role gate as `bro mode orchestrate`, taken BEFORE
+  // the file goes so a foreign holder refuses the clear and the mode
+  // file (and the mode it names) stays put
+  const willOrchestrate = modesDefault(dir) === 'orchestrate';
+  const gated = willOrchestrate
+    ? await ensureOrchestratorClaim('orchestrate', dir, sessionKey, env, ownSession)
+    : false;
   if (file !== null && !removeModeFile(file)) {
     warnings.push(`could not remove mode file ${file} — the old mode still applies`);
   }
@@ -315,6 +397,20 @@ async function runClear(
     defaultMode: modesDefault(dir),
   });
   await ledgerSetMode(ledger, sess.host, sess.sid, res.mode, warnings);
+  // the role claim follows the effective mode — orchestrate keeps (or
+  // best-effort acquires) it, anything else releases (best-effort both
+  // ways; the claim's own TTL/pid liveness is the backstop). A failed
+  // remove leaves the old file standing, so res.mode — not
+  // willOrchestrate — is the truth the role reconciles against.
+  if (res.mode === 'orchestrate') {
+    if (!gated) {
+      await acquireOrchestratorRole(dir, sessionKey, { ownSession }).catch(() => ({
+        ok: false,
+      }));
+    }
+  } else {
+    await releaseOrchestratorRole(dir, sessionKey);
+  }
   if (args.json) {
     console.log(
       JSON.stringify(

@@ -30,6 +30,7 @@ import { cacheKey, hookCacheDir, isJsonData, readCacheFile, writeCacheFile } fro
 import { markerOwner } from './proc.ts';
 import type { EventsFacade } from './events.ts';
 import type { ClaimFacade } from './claims.ts';
+import { claimsFacade } from './claims-store.ts';
 import type { LedgerFacade, Mode } from './ledger.ts';
 import { ledgerFacade } from './ledger-store.ts';
 import type { QueryFacade } from './queries.ts';
@@ -104,8 +105,8 @@ export interface FacadeMap {
    *  $XDG_STATE_HOME/bro/, drained lazily from the hook spool. */
   ledger: LedgerFacade;
   /** Session leases on resource URIs — contract landed in F1a, first
-   *  provider in bro-izpyk.3. Until then `facade('claims')` throws the
-   *  honest "no connector provides" — absence is never faked. */
+   *  provider in bro-izpyk.3: the ledger connector's sqlite `claims`
+   *  table (claims-store.ts), `task:*` delegated to the tasks facade. */
   claims: ClaimFacade;
 }
 
@@ -568,9 +569,13 @@ const gitConnector: Connector = {
  *  LedgerFacade has no close — a per-resolution facade would leak one
  *  WAL connection per call in a long-lived process. */
 let ledgerSingleton: LedgerFacade | undefined;
+/** The claims plane shares the ledger's sqlite home — same memoization
+ *  rule: one WAL connection per process, never per resolution. */
+let claimsSingleton: ClaimFacade | undefined;
 const ledgerConnector: Connector = {
   name: 'ledger',
   ledger: () => (ledgerSingleton ??= ledgerFacade()),
+  claims: () => (claimsSingleton ??= claimsFacade()),
 };
 
 // --- registry ------------------------------------------------------------------

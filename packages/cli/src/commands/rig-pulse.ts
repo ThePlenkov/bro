@@ -41,6 +41,7 @@ import {
   spawnedAlive,
   type PulseSpawn,
 } from './watch-pulse.ts';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
 import { rigSection, type RigConfig } from './rig-config.ts';
 import { SELF_ENTRY } from './self-entry.ts';
 
@@ -281,10 +282,10 @@ export const rigConnector: Connector = {
   name: 'rig',
   hooks: () => ({
     sessionStart(ctx) {
-      return rigPulseCheckpoint(ctx.dir, 'session start');
+      return rigPulseCheckpoint(ctx.dir, 'session start', ctx.sessionId);
     },
     postTool(ctx) {
-      return rigPulseCheckpoint(ctx.dir, 'tool call');
+      return rigPulseCheckpoint(ctx.dir, 'tool call', ctx.sessionId);
     },
   }),
   // mode gating (specs/bro-izpyk.2.md): rig supervision is a code+
@@ -299,10 +300,19 @@ export const rigConnector: Connector = {
 /** One checkpoint for every lifecycle event: decide, spawn, record,
  *  report. A failure anywhere stays silent — a probe must never break
  *  the hook event it rode in on. */
-function rigPulseCheckpoint(dir: string, where: string): string[] {
+async function rigPulseCheckpoint(
+  dir: string,
+  where: string,
+  sessionId?: string
+): Promise<string[]> {
   try {
     const r = rigPulseRearm(dir, rigCfg(dir).pulseSec);
     if (r.kind !== 'rearm') {
+      return [];
+    }
+    // role gate (bro-izpyk.3) — only when a rearm is due, same ordering
+    // argument as watch-pulse's checkpoint
+    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
       return [];
     }
     const pid = spawnRigPulse(dir, r.repo, r.everySec, r.forSec);

@@ -73,6 +73,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
   acquireFileLock,
+  claimsFacade,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   hookHostOf,
@@ -107,6 +108,11 @@ import {
   type ProbeTiming,
 } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
+import {
+  acquireOrchestratorRole,
+  orchestratorRoleHeldBy,
+  releaseOrchestratorRole,
+} from './orchestrator-role.ts';
 import { emitHook } from '@broject/otel';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
@@ -708,30 +714,115 @@ function resolveHookSessionMode(root: string, sessionId: string, raw: unknown): 
  *  `bro mode <mode|off>` invocation (no --session/--host — explicit
  *  targeting means the CLI already wrote the file). Writes the mode
  *  file + best-effort ledger projection; the mode applies from the
- *  NEXT event (this process already resolved its own). */
-function bindModeCommand(cmd: string, sessionId: string, dir: string): void {
+ *  NEXT event (this process already resolved its own).
+ *
+ *  `orchestrate` is exclusive per project (bro-izpyk.3): the bind
+ *  acquires `role:orchestrator@<project>` first — a live foreign holder
+ *  leaves the mode file UNWRITTEN and reports the conflict as a context
+ *  line (the hook can't fail the tool call, but it can refuse the
+ *  bind). The role claim and the mode file must agree: the claim is
+ *  released only after a non-orchestrate write LANDS (a failed write
+ *  leaves the old mode standing, so its role stays), and a fresh
+ *  orchestrate acquire is undone when the write cannot land. Returns
+ *  warning lines for the caller's context payload. */
+async function bindModeCommand(cmd: string, sessionId: string, dir: string): Promise<string[]> {
   if (sessionId === '' || cmd === '') {
-    return;
+    return [];
   }
   const mode = parseModeCommand(cmd);
   if (mode === null || hookHost === undefined) {
-    return;
+    return [];
   }
-  const file = modeFilePath(process.env, hookHost, sessionId);
+  const sessionKey = { host: hookHost, sid: sessionId };
+  // a re-bind of orchestrate renews a role the session may already hold —
+  // snapshot that so a failed write undoes only a FRESH acquire (the
+  // pre-existing claim belongs to the mode file still on disk)
+  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
+  const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
+  if (refusal !== null) {
+    return [refusal];
+  }
+  return finishModeBind(mode, dir, sessionKey, preHeld);
+}
+
+/** Write the bound mode file + ledger projection, then reconcile the
+ *  role claim with what actually landed (see bindModeCommand's
+ *  contract). Always resolves — a bind never fails the tool call. */
+async function finishModeBind(
+  mode: Mode,
+  dir: string,
+  sessionKey: { host: string; sid: string },
+  preHeld: boolean
+): Promise<string[]> {
+  const file = modeFilePath(process.env, sessionKey.host, sessionKey.sid);
+  const wrote = writeBoundModeFile(file, mode, dir);
+  if (!wrote) {
+    // the mode was not applied — undo a FRESH orchestrate acquire, and
+    // release anyway when no mode file exists at all (the session then
+    // resolves its default, never orchestrate, so any role claim is
+    // stale). A pre-existing role stays: the old file may still say
+    // orchestrate; a FAILED write on a non-orchestrate bind keeps it
+    // for the same reason.
+    if ((mode === 'orchestrate' && !preHeld) || (mode !== 'orchestrate' && file === null)) {
+      await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
+    }
+    return [];
+  }
+  if (mode !== 'orchestrate') {
+    await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
+  }
+  void ledgerFacade()
+    .setMode({ host: sessionKey.host, sid: sessionKey.sid }, mode)
+    .catch(() => {});
+  return [];
+}
+
+/** `orchestrate` binds are exclusive per project — acquire the role
+ *  claim before the mode file lands; returns the refusal line, or null
+ *  when the bind may proceed (non-orchestrate modes need no acquire). */
+async function bindOrchestrateRole(
+  mode: Mode,
+  dir: string,
+  sessionKey: { host: string; sid: string }
+): Promise<string | null> {
+  if (mode !== 'orchestrate') {
+    return null;
+  }
+  const agentId = process.env.BRO_AGENT_ID;
+  if (agentId !== undefined && agentId !== '') {
+    return 'bro mode orchestrate refused — BRO_AGENT_ID is set; spawned workers never orchestrate';
+  }
+  // the hook fires inside the target session — its agent pid is the
+  // right liveness proof for the claim
+  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession: true }).catch(() => ({
+    ok: false as const,
+    conflict: null,
+  }));
+  if (role.ok) {
+    return null;
+  }
+  const c = role.conflict;
+  return `bro mode orchestrate refused — the orchestrator role is held by ${
+    c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
+  }; mode unchanged`;
+}
+
+/** The mode-file write half of the bind — false when no state dir
+ *  resolves or the write throws; the ledger is only projected after a
+ *  landed write (hooks keep reading the old file otherwise). */
+function writeBoundModeFile(file: string | null, mode: Mode, dir: string): boolean {
   if (file === null) {
-    return;
+    return false;
   }
   try {
     writeModeFile(file, mode, hookProjectIdFor(dir) ?? '');
+    return true;
   } catch {
     // binding is best-effort — and a failed write must NOT project the
     // requested mode into the ledger: hooks keep reading the old file,
     // so the ledger would claim a mode nothing runs
-    return;
+    return false;
   }
-  void ledgerFacade()
-    .setMode({ host: hookHost, sid: sessionId }, mode)
-    .catch(() => {});
 }
 
 /** The session repo's project id for snapshot paths — resolved lazily
@@ -1959,6 +2050,38 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   context('UserPromptSubmit', text);
 }
 
+/** F3 claims bridge (bro-izpyk.3): a `work` arm also leases
+ *  `worktree:<cwd>` in the session ledger — the marker file stays the
+ *  gate-time truth, the claim is the machine-wide occupancy record
+ *  `bro claim list` reads. Fire-and-forget: the hook never waits on
+ *  sqlite, and a lost write costs one claim row, not a gate. */
+let hookClaims: import('@broject/core').ClaimFacade | undefined;
+
+function claimWorktreeArm(sessionId: string, detail: string): void {
+  try {
+    const host = hookHost ?? hookHostOf(process.env);
+    if (host === '' || host === 'unknown') {
+      return;
+    }
+    hookClaims ??= claimsFacade();
+    const owner = agentOwner();
+    const dir = process.cwd();
+    void hookClaims
+      .claim(
+        `worktree:${dir}`,
+        { host, sid: sessionId },
+        {
+          ...(detail !== '' ? { detail } : {}),
+          ...(owner !== null ? { pid: owner.pid, pidStart: owner.start } : {}),
+          dir,
+        }
+      )
+      .catch(() => {});
+  } catch {
+    // claims are best-effort — arming must never stall a session
+  }
+}
+
 /** Arm the session aspects a command implies, plus the once-per-session
  *  governing-skill citation for mutating bro subcommands (bro-d8s). */
 function armPostTool(cmd: string, sessionId: string): string[] {
@@ -1966,6 +2089,9 @@ function armPostTool(cmd: string, sessionId: string): string[] {
   if (sessionId) {
     for (const aspect of aspects) {
       armSession(sessionId, aspect, armDetail(cmd, aspect));
+    }
+    if (aspects.includes('work')) {
+      claimWorktreeArm(sessionId, armDetail(cmd, 'work'));
     }
   }
   const mutation = classifySkillMutation(cmd);
@@ -2019,17 +2145,25 @@ function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string)
 }
 
 /** The observe post-tool leg — activeIn-filtered probes only; no
- *  arming, nudges, or guard sweep (specs/bro-izpyk.2.md). */
-async function emitPostToolObserve(input: HookInput, sessionId: string): Promise<void> {
+ *  arming, nudges, or guard sweep (specs/bro-izpyk.2.md). `bindLines`
+ *  carries the mode-bind verdicts (a refused orchestrate bind is the
+ *  user's only signal the mode stayed put — dropping it would hide the
+ *  refusal entirely in observe mode). */
+async function emitPostToolObserve(
+  input: HookInput,
+  sessionId: string,
+  bindLines: string[] = []
+): Promise<void> {
   const dir = process.cwd();
   const postLines = await postToolLines(
     hookCtx(dir, sessionId),
     probeReporter('post-tool', 'postTool')
   );
-  if (postLines.length > 0) {
+  const all = [...bindLines, ...postLines];
+  if (all.length > 0) {
     const eventName =
       typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
-    context(eventName, postLines.join('\n'));
+    context(eventName, all.join('\n'));
   }
 }
 
@@ -2050,7 +2184,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // A proven-failed call binds nothing (the mode was never applied);
   // hosts that cannot report an outcome still bind.
   if (outcome !== false) {
-    bindModeCommand(cmd, sessionId, process.cwd());
+    lines.push(...(await bindModeCommand(cmd, sessionId, process.cwd())));
   }
   // observe is fully passive (specs/bro-izpyk.2.md): the trace journal
   // and OTLP flush above still run (passive telemetry), the
@@ -2059,7 +2193,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // skill-mutation citation, or guard sweep — those are active
   // behavior a passive session never pays for.
   if (hookMode === 'observe') {
-    await emitPostToolObserve(input, sessionId);
+    await emitPostToolObserve(input, sessionId, lines);
     return;
   }
   // arming is a "probe live state once" hint the stop gate re-verifies,

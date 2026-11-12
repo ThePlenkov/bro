@@ -22,6 +22,7 @@
 import { GIT_SYNC_PROBE_TIMEOUT_MS, type Connector, type ConnectorCtx } from '@broject/core';
 import { readDriveMarker } from './want-marker.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
 
 /** One checkpoint for every lifecycle event: decide, bring up, report.
  *  `supervisorUp` re-decides under `daemon.up.lock`, so a racing
@@ -31,7 +32,11 @@ import { isOrchestratorSession } from './watch-pulse.ts';
  *  could be uninstalled while the spawn queued — 'disarmed' instead of
  *  a supervisor nobody asked for. A failure anywhere stays silent: a
  *  probe must never break the hook event it rode in on. */
-async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
+async function supervisorCheckpoint(
+  dir: string,
+  where: string,
+  sessionId?: string
+): Promise<string[]> {
   try {
     // orchestrator gate first — workers never rearm, and env-checking
     // before the marker read keeps their checkpoint at zero git cost
@@ -57,6 +62,11 @@ async function supervisorCheckpoint(dir: string, where: string): Promise<string[
     if (r.kind !== 'rearm') {
       return [];
     }
+    // role gate (bro-izpyk.3) — the exclusive orchestrator claim decides
+    // who may resurrect the supervisor; unclaimed stays fail-open
+    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+      return [];
+    }
     const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true });
     return up.kind === 'spawned'
       ? [
@@ -73,10 +83,10 @@ export const driveConnector: Connector = {
   name: 'drive',
   hooks: () => ({
     sessionStart(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'session start');
+      return supervisorCheckpoint(ctx.dir, 'session start', ctx.sessionId);
     },
     postTool(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'tool call');
+      return supervisorCheckpoint(ctx.dir, 'tool call', ctx.sessionId);
     },
   }),
   // mode gating (specs/bro-izpyk.2.md): supervisor rearm is a code+
