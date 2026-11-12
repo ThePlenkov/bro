@@ -14,7 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runSpecCommand, sddConnector, specState } from './spec.ts';
-import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts';
+import { hasSpecFile } from '@broject/spec';
+import { SPEC_CONNECTORS } from '../spec-connectors.ts';
 import {
   loadConfig,
   procStat,

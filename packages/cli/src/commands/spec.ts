@@ -68,7 +68,7 @@ import {
   type TaskStoreAsync,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
-import { specDirAbs, validBeadId } from '../spec-connectors.ts';
+import { hasSpecDoc, specDirAbs, validBeadId } from '@broject/spec';
 import { driftEnv, driftRow, specLinkPath, SPEC_LINK } from '../spec-drift.ts';
 import { flag, positionals } from './args.ts';
 
@@ -708,10 +708,14 @@ function detectSpecTool(dir: string): string {
   if (existsSync(join(dir, 'openspec'))) {
     return 'openspec';
   }
+  const specDir = specDirAbs(dir, loadConfig(dir).sdd.dir);
+  if (specDir !== null && existsSync(specDir) && hasSpecDoc(specDir)) {
+    return 'brose';
+  }
   return 'native';
 }
 
-const SPEC_TOOLS = ['native', 'speckit', 'openspec', 'agent'];
+const SPEC_TOOLS = ['native', 'brose', 'speckit', 'openspec', 'agent'];
 
 function cmdInit(dir: string, tool: string | undefined): void {
   const detected = tool ?? detectSpecTool(dir);

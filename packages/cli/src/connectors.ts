@@ -27,6 +27,7 @@ import { sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
 import { herdrConnector } from './commands/herdr-connector.ts';
 import { SPEC_CONNECTORS } from './spec-connectors.ts';
+import { specConnector } from '@broject/spec';
 import { workConnector } from './commands/work.ts';
 
 // Built-in connectors register at module load, ahead of external
@@ -80,8 +81,11 @@ registerConnector(guardConnector);
 registerConnector(mailboxConnector);
 registerConnector(busConnector);
 // specs facade providers — registry order is detection precedence:
-// native first (its matchDir claims the configured sdd.dir), then
-// tool-layout matchers, agent last (explicit pick only, never detects)
+// `brose` first (it claims trees carrying *.spec.md Brotocol docs and
+// defers to tool layouts), then native (its matchDir claims the
+// configured sdd.dir), tool-layout matchers, agent last (explicit pick
+// only, never detects)
+registerConnector(specConnector);
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c);
 }
