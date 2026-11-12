@@ -41,7 +41,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "if _f=$(mktemp 2>/dev/null) && [ -n \"$_f\" ]; then if cat > \"$_f\"; then (\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\"; rm -f \"$_f\") </dev/null >/dev/null 2>&1 & else rm -f \"$_f\"; fi; else \"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" post-tool >/dev/null 2>&1 || true; fi; exit 0",
+          "command": "if _f=$(mktemp 2>/dev/null) && [ -n \"$_f\" ]; then if cat > \"$_f\"; then (\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\"; rm -f \"$_f\") </dev/null >/dev/null 2>&1 & else rm -f \"$_f\"; fi; fi; exit 0",
           "timeout": 10
         }
       ]

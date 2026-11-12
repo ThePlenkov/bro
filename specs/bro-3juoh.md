@@ -44,7 +44,11 @@ Per-event deviations that are part of the contract, not the bug:
   fire-and-forget: stdin is captured to a tempfile, then run.sh runs in a
   subshell detached off the hook pipes (`</dev/null >/dev/null 2>&1 &`).
   That stays — it is host-latency policy, not fallback duplication. Only
-  the `bro hooks` elif is dropped; the run.sh branch is unchanged.
+  the `bro hooks` elif is dropped; the run.sh branch is unchanged. A
+  mktemp failure drops the event outright — no tempfile means nothing to
+  detach on, and a synchronous run.sh would block the agent for the
+  launcher's remaining watchdog budget instead of dropping telemetry
+  (codeant on PR #1025).
 - **Cursor permission.** Cursor treats empty `beforeShellExecution`
   stdout as a *deny*, so the no-opinion must be printed when run.sh cannot
   exec: `… || printf '%s\n' '{"permission":"ask"}'`. Every other event

@@ -315,13 +315,15 @@ function devinHooksJson() {
   // (a detached child cannot read the parent's pipe once the shell
   // exits), then run.sh runs in a subshell redirected off the hook's
   // pipes so a host reading to EOF is not blocked by the detached work.
-  // A mktemp or cat failure drops the event: stdin has already been
-  // consumed by cat, so no fallback can replay the payload.
+  // A mktemp failure drops the event: with no tempfile there is nothing
+  // to detach on, and a synchronous run.sh would block the agent for the
+  // launcher's remaining watchdog budget — the exact stall this contract
+  // exists to prevent (codeant on PR #1025). A cat failure drops it too:
+  // stdin was already consumed, so no fallback can replay the payload.
   const cmdDetached = event =>
     `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
     `("\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & ` +
-    `else rm -f "$_f"; fi; ` +
-    `else "\${DEVIN_PLUGIN_ROOT}/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; exit 0`;
+    `else rm -f "$_f"; fi; fi; exit 0`;
   const hook = (event, timeout, matcher = '', command = cmd) => ({
     matcher,
     hooks: [{ type: 'command', command: command(event), timeout }],
