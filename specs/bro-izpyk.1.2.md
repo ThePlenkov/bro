@@ -75,7 +75,7 @@ today, and `sessions.pid` is the ephemeral run.sh pid — useless for
 liveness — so the only provable derivation is the epic spec's own rule:
 *a session whose last event predates this boot cannot be live.*
 
-```
+```text
 deriveSessionState(row, bootTimeMs):
   row.state === 'live' && row.lastSeen < bootTimeMs → 'interrupted'
   otherwise → row.state
