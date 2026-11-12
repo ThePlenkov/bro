@@ -23,7 +23,7 @@ export function selectReapable(
 ): {
   reapable: string[];
   skipped: string[];
-  expected: Map<string, { agentId?: string; spawnedAt?: string; pid?: number }>;
+  expected: Map<string, { agentId: string; spawnedAt?: string; pid?: number }>;
 } {
   const reapable: string[] = [];
   const skipped: string[] = [];
