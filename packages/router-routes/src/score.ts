@@ -13,7 +13,9 @@
  * stays undefined. If ANY surviving candidate has an unknown measure
  * under a POSITIVE weight, scoring is skipped for the whole set and the
  * table's order stands — with the reason on the trace. A zero weight
- * needs no measure.
+ * needs no measure. A computed score that overflows to ±Infinity (a
+ * huge-but-finite weight times a known measure) skips the same way —
+ * poisoned arithmetic never ranks.
  */
 import type { RouteCandidate } from './candidates.ts';
 import type { Formula, FormulaScoreTrace } from './formula.ts';
@@ -142,11 +144,28 @@ export function scoreCandidates(
     }
   }
 
+  // the computed score must be finite too — a huge-but-finite weight
+  // can overflow λ·cost or μ·latency to ±Infinity and silently tie
+  // the whole set at the bound. That is the same poison as a
+  // non-finite measure: the set skips, table order stands, and the
+  // reason names the route.
+  const scored = rows.map(({ candidate, stats, row }) => ({
+    candidate,
+    row,
+    score: scoreOf(stats, w),
+  }));
+  const bad = scored.find(s => !Number.isFinite(s.score));
+  if (bad !== undefined) {
+    return {
+      scores: rows.map(r => r.row),
+      skipped: `score for route "${bad.candidate.route.name}" is not finite — scoring skipped`,
+    };
+  }
+
   let winner: string | undefined;
   let best = Number.NEGATIVE_INFINITY;
   let bestOrder = Number.POSITIVE_INFINITY;
-  for (const { candidate, stats, row } of rows) {
-    const score = scoreOf(stats, w);
+  for (const { candidate, row, score } of scored) {
     row.score = score;
     const at = order.get(candidate.route.name) ?? Number.MAX_SAFE_INTEGER;
     if (score > best || (score === best && at < bestOrder)) {

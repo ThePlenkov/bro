@@ -7,6 +7,7 @@ import type { DecideResult } from '@broject/core';
 import { candidates, inTableOrder } from './candidates.ts';
 import {
   applyFormulaFilters,
+  type Formula,
   FormulaError,
   formulaAnswersToFeatures,
   formulaDoc,
@@ -15,11 +16,10 @@ import {
   parseFormulaText,
   readFormula,
   validateFormulaTable,
-  type Formula,
 } from './formula.ts';
 import { resolveRoute } from './resolve.ts';
 import { routeTable } from './schema.ts';
-import { priorOnlyOutcomes, scoreCandidates, type OutcomeStatsSource } from './score.ts';
+import { type OutcomeStatsSource, priorOnlyOutcomes, scoreCandidates } from './score.ts';
 import type { RouteTable } from './types.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'router-routes-formula-'));
@@ -679,6 +679,39 @@ describe('scoreCandidates', () => {
     );
     assert.equal(result.winner, undefined);
     assert.match(result.skipped ?? '', /not finite/);
+  });
+
+  test('a computed score that overflows skips the whole set too', () => {
+    // λ = 1e308 is finite and non-negative — validation accepts it —
+    // but λ·cost overflows to Infinity, so gamma's score is -Infinity.
+    // Without the finiteness check every route would tie at the bound
+    // and the first declared would win silently, no skip recorded.
+    const huge = formulaOf({
+      kind: 'formula',
+      version: 1,
+      shape: 'score',
+      questions: formula.questions,
+      score: { lambda: 1e308, mu: 0 },
+    });
+    const source: OutcomeStatsSource = {
+      statsFor: route => ({
+        p: 0.9,
+        n: 4,
+        costUsd: route.name === 'gamma' ? 10 : 0.1,
+        wallSec: 60,
+      }),
+    };
+    const result = scoreCandidates(
+      found.candidates,
+      huge,
+      TASK.features ?? {},
+      source,
+      SCORE_TABLE
+    );
+    assert.equal(result.winner, undefined);
+    assert.match(result.skipped ?? '', /not finite/);
+    assert.match(result.skipped ?? '', /gamma/);
+    assert.ok(result.scores.every(s => s.score === undefined));
   });
 
   test('a zero weight never reads the measure — non-finite stays unread', () => {
