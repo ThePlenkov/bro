@@ -173,3 +173,37 @@ The emulated commands now exist. Replays against real binaries:
 - Open question logged to spec: whether `emulation.md` (a part
   subfile) should be indexed as a child spec by today's walker —
   post-y1jtm it's a *part*, not a spec.
+
+## Real replay — `@broject/spec` connector (2026-11-12, PR #1031)
+
+The plugin layer landed: `specConnector` (name `brose`) registers ahead
+of `native` and serves this repo's own `specs/` tree — a live hybrid
+of KEY-N protocol docs and ~340 legacy bead specs.
+
+- **tree:** `bro spec tree` (worktree cli) renders `sdd` → `BRO-1` →
+  `BRO-2` from frontmatter `id:`s — the path-derived legacy ids
+  (`BRO-1-brotocol`) are gone — while every `bro-*.md` bead spec still
+  resolves through the merged legacy index. `emulation.md` parts show
+  as legacy child specs re-parented by the orphan fixup, matching
+  native's view. No dangling-parent diagnostics.
+- **check:** `bro spec check bro-bntld.2|.3|.5` → `link` (unchanged —
+  the `spec:` link path never touched the connector).
+- **drift:** `bro spec drift` → 248 stale rows; `scope()` reads
+  `owns:`/`scope:` frontmatter on protocol docs and `specScope()` on
+  legacy files.
+- **new:** `bro spec new bro-zztest` wrote `specs/bro-zztest.spec.md`
+  rendered from `brotocol/spec@1` (`template:`/`id:`/`status:`
+  frontmatter, Problem/Design/Requirements/Verify sections) — the
+  first spec scaffolded by the engine, not `scaffoldBody`.
+- **init:** scratch repo with a `.spec.md` doc → `spec init` detects
+  `brose` and writes `connectors.specs: "brose"`; legacy-only and
+  tool-layout repos detect `native`/`speckit`/`openspec` as before.
+- **Finding (closed in-plugin):** `specTemplateDir` derives from
+  brotocol's `import.meta.url` — inside the bundled cli that URL lands
+  in cli's dist, so `create` saw `unknown template`. The connector
+  resolves `@broject/brotocol` through `createRequire` and prepends
+  the real `templates/` dir; `specTemplateDir` stays as fallback.
+- **Finding (tooling):** nx's per-project cache does not see
+  `@broject/*` source changes through the bundle — a dependency rebuild
+  can leave `cli/dist` stale (`--skip-nx-cache` on `@broject/bro:build`
+  is the local workaround; CI builds fresh).
