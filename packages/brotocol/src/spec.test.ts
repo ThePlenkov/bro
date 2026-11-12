@@ -41,7 +41,7 @@ describe('spec template', () => {
     const registry = createRegistry({ dirs: [specTemplateDir], cwd: '/nonexistent' });
     assert.equal(registry.resolve('spec@1')?.name, 'spec');
     assert.equal(registry.resolve('brotocol/spec@1')?.name, 'brotocol/spec');
-    assert.equal(registry.resolve('brotocol/spec')?.version, 1);
+    assert.equal(registry.resolve('brotocol/spec')?.version, 2);
   });
 
   it('create → validate round-trips against the shipped template', () => {
@@ -49,12 +49,12 @@ describe('spec template', () => {
     after(() => rm(root));
     const p = specProtocol({ dir: root });
     const doc = create(p, {
-      template: 'brotocol/spec@1',
+      template: 'brotocol/spec@2',
       id: 'BRO-7',
       values: { title: 'Round trip', status: 'draft', area: 'test' },
     });
     const text = readFileSync(doc.path, 'utf8');
-    assert.ok(text.includes('template: brotocol/spec@1'));
+    assert.ok(text.includes('template: brotocol/spec@2'));
     assert.ok(text.includes('# BRO-7 — Round trip'));
     assert.deepEqual(validate(doc.path, { dirs: [specTemplateDir], cwd: '/nonexistent' }), []);
     assert.equal(get(p, 'BRO-7')?.frontmatter.status, 'draft');

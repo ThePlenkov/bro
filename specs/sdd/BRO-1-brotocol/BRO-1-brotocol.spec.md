@@ -1,5 +1,5 @@
 ---
-template: brotocol/spec@1
+template: brotocol/spec@2
 id: BRO-1
 title: Brotocol — bro's native spec engine
 status: draft
@@ -194,7 +194,7 @@ A `.spec.md` is a brose document declaring its template:
 
 ```yaml
 ---
-template: brotocol/spec@1
+template: brotocol/spec@2
 id: BRO-1
 title: …
 status: draft
@@ -394,3 +394,9 @@ conventions; the decoupling stands either way.
   `brotocol` as the specs engine; a repo with
   `plugins: ["@broject/openspec"]` resolves openspec;
   `bro spec check|tree|drift` output identical to pre-move.
+
+## Changelog
+
+- 2026-11-12 — Migrated `template:` to `brotocol/spec@2` and adopted
+  the mandatory Changelog section (AGT-1's spec-format ruling);
+  content unchanged.

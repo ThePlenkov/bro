@@ -38,7 +38,7 @@ import { registerConnector } from '@broject/core';
 registerConnector(specConnector); // before the native connector
 ```
 
-`scaffold(id, { parent, title })` renders `brotocol/spec@1` through
+`scaffold(id, { parent, title })` renders `brotocol/spec@2` through
 brose `create` — a dir-doc parent nests the child positionally, a
 flat parent writes the `parent:` frontmatter edge, and a legacy-only
 parent gets the same edge written after creation.
