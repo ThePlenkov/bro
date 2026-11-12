@@ -43,14 +43,35 @@ jobs:
       - name: Check config schema is fresh
         run: npm run check:config-schema
 
-      - name: Typecheck
-        run: npm run typecheck
+      # one task graph — typecheck tasks interleave with test tasks
+      # across projects instead of serializing per target
+      - name: Typecheck + Test
+        run: |
+          npx nx run-many -t typecheck test --exclude='skills-*,plugins-*-skills-*'
+          npm run test:scripts
 
-      - name: Test
-        run: npm test
+  # the 4.8m e2e suite is the tail of the critical path — it needs only
+  # cli's dep-tree builds (dependsOn pulls them; Nx Cloud serves the rest)
+  test-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "lts/*"
+          check-latest: true
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      # build prerequisite of the npm run build script — generates the
+      # plugin manifests the cli dep-tree build consumes
+      - name: Generate plugin manifests
+        run: node scripts/gen-plugins.ts
 
       - name: Test E2E
-        run: npm run test:e2e
+        run: npx nx run-many -t test:e2e --exclude='skills-*,plugins-*-skills-*'
 
       - name: Hook latency baseline
         # earlier steps may fail after the build — run anyway when the
