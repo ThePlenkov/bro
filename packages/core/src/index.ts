@@ -511,6 +511,7 @@ export {
   rateDeathBackoff,
   readAgentRegistry,
   removeAgentRegistryEntries,
+  agentRegistryLockDepth,
   rebindStep,
   RESET_MARK_MARGIN_MS,
   SpawnError,

@@ -95,6 +95,7 @@ import {
   readAgentRegistry,
   readLedgerWalls,
   recordWall,
+  agentRegistryLockDepth,
   type ResolvedClass,
   type RoutingTable,
   rebindStep,
@@ -3284,15 +3285,25 @@ function ensureExitCause(
   // the same classify block the carried-cause early return dedupes.
   // The verdict persists on the entry; a proven-absent run also earns
   // the learn-miss journal row. Never throws — a store problem reads
-  // 'skipped', not a crash in the death harvest.
-  const learn = checkRunLearnEvidence({
-    dir,
-    home,
-    molStep,
-    entry,
-    cause: c.cause,
-    exitAt: exitAt ?? Date.now(),
-  });
+  // 'skipped', not a crash in the death harvest. The probes are `bd`
+  // subprocesses (up to ~15s each): they must never run inside the
+  // registry lock — a slow store would hold every other spawn hostage.
+  // A death first classified under the lock reads 'skipped' (unproven),
+  // never 'miss'.
+  const learn =
+    agentRegistryLockDepth() > 0
+      ? {
+          verdict: 'skipped' as const,
+          evidence: 'classified inside the registry lock — store probes deferred',
+        }
+      : checkRunLearnEvidence({
+          dir,
+          home,
+          molStep,
+          entry,
+          cause: c.cause,
+          exitAt: exitAt ?? Date.now(),
+        });
   entry.learnCheck = learn.verdict;
   entry.learnEvidence = learn.evidence;
   if (learn.verdict === 'miss') {

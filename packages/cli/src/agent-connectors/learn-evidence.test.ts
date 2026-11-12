@@ -390,6 +390,32 @@ describe('checkRunLearnEvidence', () => {
     }
   });
 
+  test('dep targets past the walk bound read skipped, never miss', () => {
+    // 8 sibling steps + the root = 9 targets > MAX_DEP_TARGETS — the
+    // truncated walk can't disprove a retro linked to an omitted
+    // target, so the verdict is 'skipped', not 'miss'
+    const steps = Array.from({ length: 8 }, (_, i) => ({
+      id: `fx-s${i + 1}`,
+      status: 'closed',
+      closed_at: iso(NOW - 30_000),
+    }));
+    const f = fx([{ id: 'fx-mol-1', status: 'closed', issue_type: 'molecule' }], {
+      mols: {
+        'fx-mol-1': {
+          root: { id: 'fx-mol-1', status: 'closed' },
+          issues: [{ id: 'fx-mol-1', status: 'closed' }, ...steps],
+        },
+      },
+    });
+    try {
+      const r = check(f, { molStep: 'fx-mol-1' });
+      assert.equal(r.verdict, 'skipped');
+      assert.match(r.evidence ?? '', /dep targets truncated/);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('rate_limited / quota / auth exits skip before any store read → skipped', () => {
     const f = fx();
     try {

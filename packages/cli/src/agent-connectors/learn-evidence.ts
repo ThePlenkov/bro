@@ -257,11 +257,6 @@ interface DepWalk {
 const isRetroRow = (row: TaskRow, created: number, inWindow: (t: number) => boolean): boolean =>
   RETRO_LABELS.some(l => hasLabel(row, l)) && (Number.isNaN(created) || inWindow(created));
 
-/** wtf rows expand only off the run's own frontier (hop 0) and only
- *  up to the bound — the one documented intermediary. */
-const wtfExpandable = (row: TaskRow, hop: number, wtfNext: string[]): boolean =>
-  hop === 0 && hasLabel(row, WTF_LABEL) && wtfNext.length < MAX_WTF_EXPANSIONS;
-
 /** One frontier target's discovered-up neighbors: the retro hit, or
  *  the wtf rows queued for the next hop's expansion. A failed read
  *  records `degraded` and yields nothing — partial coverage never
@@ -288,8 +283,14 @@ function depNeighbors(
     if (isRetroRow(row, created, walk.inWindow)) {
       return { id: row.id, via: `discovered-from ${target}` };
     }
-    if (wtfExpandable(row, hop, walk.wtfNext)) {
-      walk.wtfNext.push(row.id);
+    // wtf rows expand only off the run's own frontier (hop 0), bounded —
+    // a dropped expansion is degraded coverage, never silent
+    if (hop === 0 && hasLabel(row, WTF_LABEL)) {
+      if (walk.wtfNext.length < MAX_WTF_EXPANSIONS) {
+        walk.wtfNext.push(row.id);
+      } else {
+        walk.degraded.push(`wtf expansion bound ${MAX_WTF_EXPANSIONS} — ${row.id} not walked`);
+      }
     }
   }
   return undefined;
@@ -325,6 +326,11 @@ function depWalkHit(
   inWindow: (t: number) => boolean,
   degraded: string[]
 ): { id: string; via: string } | undefined {
+  if (targets.length > MAX_DEP_TARGETS) {
+    // truncated coverage is degraded, never a clean 'miss' — a qualifying
+    // retro linked only to an omitted target can't be disproven
+    degraded.push(`dep targets truncated at ${MAX_DEP_TARGETS} of ${targets.length}`);
+  }
   let frontier = targets.slice(0, MAX_DEP_TARGETS);
   const walk: DepWalk = { seen: new Set(frontier), wtfNext: [], degraded, inWindow };
   for (let hop = 0; hop < 2 && frontier.length > 0; hop++) {

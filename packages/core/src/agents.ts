@@ -889,14 +889,25 @@ export function acquireAgentRegistryLock(dir: string, opts: { waitMs?: number } 
   });
 }
 
+/** Reentrancy count for `withAgentRegistryLock` — >0 means the caller
+ *  is inside a registry critical section. Callers holding store-probe
+ *  budgets (the learn/retro exit check) read this to defer work that
+ *  would stall every other spawn behind slow `bd` calls. */
+let registryLockDepth = 0;
+export function agentRegistryLockDepth(): number {
+  return registryLockDepth;
+}
+
 /** Run `fn` under the registry lock. Sync-only on purpose — an async
  *  fn would release-and-reattach semantics nobody needs here; the
  *  native spawn section is synchronous top to bottom. */
 export function withAgentRegistryLock<T>(dir: string, fn: () => T): T {
   const release = acquireAgentRegistryLock(dir);
+  registryLockDepth += 1;
   try {
     return fn();
   } finally {
+    registryLockDepth -= 1;
     release();
   }
 }
