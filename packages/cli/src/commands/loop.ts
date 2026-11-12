@@ -168,6 +168,7 @@ import {
 import { isStackName } from '@broject/stack';
 import {
   type AgentConnectorEnv,
+  applyFleetMatrix,
   applyFleetRouter,
   EMPTY_KEYS,
   fleetProfileOf,
@@ -755,6 +756,7 @@ function beadClassInfo(
     description: bead.description,
   };
   const router = ctx.env.fleet?.router;
+  const matrix = ctx.env.fleet?.matrix;
   const routerMayFire =
     routerEnabled &&
     router !== undefined &&
@@ -762,7 +764,20 @@ function beadClassInfo(
     ctx.sel.class === undefined &&
     info.label === undefined &&
     ctx.beadsDir !== undefined;
-  return routerMayFire ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) } : info;
+  // the matrix router (bro-v0pvd.1) judges every bead's task text — no
+  // class/label exemptions — and wants the description the ready row
+  // may not carry, so it earns the same extra `bd show` the class
+  // router does (still gated on routerEnabled: dry runs never pay it)
+  const matrixMayFire =
+    routerEnabled &&
+    matrix !== undefined &&
+    matrix.provider !== undefined &&
+    matrix.mode !== 'off' &&
+    Object.keys(matrix.models).length > 0 &&
+    ctx.beadsDir !== undefined;
+  return routerMayFire || matrixMayFire
+    ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) }
+    : info;
 }
 
 /** One claimed bead's spawn lane — fleet.routing resolves its class
@@ -886,6 +901,12 @@ async function resolveBeadLane(
     opts.router === false || ctx.sel.class !== undefined
       ? routed
       : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed);
+  // the matrix router (bro-v0pvd.1) judges the TASK's complexity+mode —
+  // orthogonal to the class pin, so --class does not suppress it; only
+  // the dry-run escape (router:false) does, same as the class router
+  if (opts.router !== false) {
+    await applyFleetMatrix(ctx.root, ctx.env, bead.id, info);
+  }
   return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route);
 }
 

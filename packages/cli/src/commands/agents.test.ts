@@ -1617,6 +1617,234 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
   });
 });
 
+describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
+  /** The judge provider + spawn lanes; matrix rows bind profile/provider. */
+  const ORCA_TYPED = {
+    type: 'api',
+    baseUrl: 'https://orca.test',
+    apiKeyEnv: 'ORCA_TEST_KEY',
+    models: { 'jev-1.0': 'systemone' },
+  };
+
+  const withMatrix = (fx: Fixture, mode: string): void => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({
+        agents: { native: { command: 'node {promptFile}', provider: 'alt' } },
+        providers: {
+          // the STATIC lane — nothing in the matrix binds it, so any
+          // pick leaking into the spawn shows up as provider/model drift
+          alt: { type: 'cli', command: 'node {promptFile}' },
+          // matrix-only bindings — 'cheap' pins local, 'max' pins the
+          // sweeps profile (local + sweep-1); shadow must reach neither
+          local: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'local-1' },
+          orca: ORCA_TYPED,
+        },
+        fleet: {
+          profiles: { sweeps: { provider: 'local', model: 'sweep-1' } },
+          matrix: {
+            provider: 'orca',
+            mode,
+            models: {
+              cheap: { modes: ['coding'], complexity: ['low'], provider: 'local' },
+              max: {
+                modes: ['planning', 'coding'],
+                complexity: ['low', 'medium', 'high'],
+                profile: 'sweeps',
+              },
+            },
+          },
+        },
+      })
+    );
+  };
+
+  /** A systemone-wire typed reply answering BOTH matrix questions. */
+  const matrixReply = (level: number, mode: string, confidence = 0.9) => ({
+    status: 200,
+    body: {
+      model: 'jev-1.0',
+      answers: {
+        complexity: {
+          type: 'score',
+          score: level,
+          probabilities: { [String(level)]: confidence },
+          confidence,
+        },
+        mode: {
+          type: 'choice',
+          choice: mode,
+          probabilities: { [mode]: confidence },
+          confidence,
+        },
+      },
+    },
+  });
+
+  const spawn = (
+    fx: Fixture,
+    req: Partial<Parameters<typeof spawnStepAgent>[2]> = {},
+    opts: Parameters<typeof spawnStepAgent>[3] = {}
+  ) =>
+    spawnStepAgent(
+      fx.main,
+      loadAgentEnv(fx.main),
+      {
+        lane: 'interactive',
+        molStep: 'fx-1',
+        worktree: fx.main,
+        beadsDir: fx.beads,
+        promptFile: fx.promptFile(LONG_RUN),
+        ...req,
+      },
+      opts
+    );
+
+  const withKey = async (fn: () => Promise<void>): Promise<void> => {
+    const prev = process.env.ORCA_TEST_KEY;
+    process.env.ORCA_TEST_KEY = 'test-key';
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) {
+        delete process.env.ORCA_TEST_KEY;
+      } else {
+        process.env.ORCA_TEST_KEY = prev;
+      }
+    }
+  };
+
+  const matrixRows = (fx: Fixture): Verdict[] =>
+    readJournal(fx.main).filter((r): r is Verdict => 'questions' in r && r.kind === 'route-matrix');
+
+  test('shadow journals complexity+mode distributions and the pick — the spawn stands', async () => {
+    const fx = fixture([
+      { id: 'fx-1', status: 'open', title: 'sweep the ledger', description: 'tidy' },
+    ]);
+    try {
+      withMatrix(fx, 'shadow');
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+        await spawn(fx, {}, { fetch });
+        assert.equal(calls.length, 1); // ONE decide() carried both questions
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        // shadow picks nothing — the lane is exactly the static one:
+        // 'alt' (agents.native.provider), never cheap's 'local' or
+        // max's sweeps profile (local + sweep-1)
+        assert.equal(entry.provider, 'alt');
+        assert.equal(entry.model, undefined);
+        const rows = matrixRows(fx);
+        assert.equal(rows.length, 1);
+        const v = rows[0]!;
+        assert.equal(v.subject.threadId, 'fx-1');
+        assert.equal(v.outcome, 'cheap'); // low+coding → first eligible row
+        assert.equal(v.answers['complexity']!.type, 'score');
+        assert.equal(v.answers['mode']!.type, 'choice');
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('the hard filter holds end-to-end — high complexity never picks the low row', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'rewrite the consensus layer' }]);
+    try {
+      withMatrix(fx, 'shadow');
+      await withKey(async () => {
+        const { fetch } = fakeFetch(matrixReply(2, 'coding'));
+        await spawn(fx, {}, { fetch });
+        const v = matrixRows(fx)[0]!;
+        assert.equal(v.outcome, 'max'); // cheap's complexity:['low'] filtered it
+        const cx = v.answers['complexity']!;
+        assert.equal(cx.type, 'score');
+        if (cx.type === 'score') {
+          assert.equal(cx.score, 2);
+        }
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('a no-fit verdict journals visibly while the spawn proceeds', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'review the rollout plan' }]);
+    try {
+      withMatrix(fx, 'shadow');
+      await withKey(async () => {
+        // 'review' mode: neither row declares it → no-fit
+        const { fetch } = fakeFetch(matrixReply(1, 'review'));
+        await spawn(fx, {}, { fetch });
+        const v = matrixRows(fx)[0]!;
+        assert.equal(v.outcome, 'no-fit');
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        assert.equal(entry.provider, 'alt'); // static lane, unchanged
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('enforce is refused loudly — shadow-only until the follow-up bead', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'x' }]);
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+        await assert.rejects(
+          () => spawn(fx, {}, { fetch }),
+          /fleet\.matrix\.mode "enforce" is not implemented/
+        );
+        assert.equal(calls.length, 0); // refused before any judge call
+        assert.equal(matrixRows(fx).length, 0);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('matrix off / empty models / missing provider → zero judge calls', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'x' }]);
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node {promptFile}' } },
+          providers: { orca: ORCA_TYPED },
+          fleet: {
+            matrix: { provider: 'orca', mode: 'off', models: { a: {} } },
+          },
+        })
+      );
+      const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+      await spawn(fx, {}, { fetch });
+      assert.equal(calls.length, 0);
+      await agents(['down', 'fx-1']);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('JudgeUnavailable is "no verdict" — warn and the spawn stands', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'x' }]);
+    try {
+      withMatrix(fx, 'shadow');
+      await withKey(async () => {
+        const { fetch } = fakeFetch({ status: 500, body: {} });
+        const r = await capture(() => spawn(fx, {}, { fetch }));
+        assert.match(r.err.join('\n'), /fleet\.matrix\.provider "orca".*spawn proceeds unrouted/);
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        assert.equal(entry.provider, 'alt');
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+});
+
 describe('bro agents down <target>', () => {
   test('down updates the local entry without clearing a host ledger wall', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);

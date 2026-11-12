@@ -55,6 +55,7 @@ import {
   ON_WALL,
   type RoutingTable,
 } from './routing.ts';
+import { fleetMatrix, type FleetMatrix } from './matrix.ts';
 import { isMode, MODES, type Mode } from './ledger.ts';
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const;
@@ -1337,6 +1338,7 @@ export const fleetSection: ConfigSection<{
   walls: FleetWallTtls;
   leases: FleetLeaseTtls;
   router?: FleetRouter;
+  matrix?: FleetMatrix;
   providerCaps: Record<string, number>;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
@@ -1346,9 +1348,11 @@ export const fleetSection: ConfigSection<{
     walls?: unknown;
     leases?: unknown;
     router?: unknown;
+    matrix?: unknown;
     providerCaps?: unknown;
   };
   const router = fleetRouter(obj.router);
+  const matrix = fleetMatrix(obj.matrix);
   return {
     maxConcurrent:
       typeof obj.maxConcurrent === 'number' &&
@@ -1362,6 +1366,7 @@ export const fleetSection: ConfigSection<{
     walls: fleetWalls(obj.walls),
     leases: fleetLeases(obj.leases),
     ...(router === undefined ? {} : { router }),
+    ...(matrix === undefined ? {} : { matrix }),
   };
 };
 
@@ -1390,6 +1395,15 @@ fleetSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  matrix: js.obj({
+    provider: js.str,
+    mode: { enum: ['shadow', 'enforce', 'off'] },
+    complexity: js.strList,
+    modes: js.strList,
+    models: js.map(
+      js.obj({ modes: js.strList, complexity: js.strList, profile: js.str, provider: js.str }, {})
+    ),
+  }),
   providerCaps: js.map(js.int()),
   walls: js.obj({
     rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
@@ -1715,8 +1729,10 @@ export interface BroConfig {
    *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1).
    *  `routing` maps a task class to an ordered provider chain (spec
    *  bro-1x7p) — absent/empty = today's static resolution; `router`
-   *  names the optional judge classifier (M7). `providerCaps` sets
-   *  per-provider session caps from the global config layer. */
+   *  names the optional judge classifier (M7). `matrix` declares the
+   *  model capability lanes a judge-scored complexity+mode verdict
+   *  routes over (spec bro-v0pvd.1) — absent = off. `providerCaps`
+   *  sets per-provider session caps from the global config layer. */
   fleet: {
     maxConcurrent: number;
     profiles: Record<string, FleetProfile>;
@@ -1724,6 +1740,7 @@ export interface BroConfig {
     walls: FleetWallTtls;
     leases: FleetLeaseTtls;
     router?: FleetRouter;
+    matrix?: FleetMatrix;
     providerCaps: Record<string, number>;
   };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's

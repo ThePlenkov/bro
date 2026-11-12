@@ -93,6 +93,7 @@ import { beadsDir } from '@broject/convoy';
 import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import {
   agentPromptPath,
+  applyFleetMatrix,
   applyFleetRouter,
   eachAgentConnector,
   fleetCapOf,
@@ -760,15 +761,22 @@ export function spawnStepAgent(
   // M7 fleet.router: fires only on an UNCLASSED step (no --class, no
   // class: label) with a table declared and the router armed — its one
   // `bd show` carries both the label check and the title/description
-  // the judge sees.
-  const info =
+  // the judge sees. fleet.matrix (bro-v0pvd.1) judges the TASK, not the
+  // lane — an explicit --class does not exempt the bead, so the info
+  // read arms on EITHER router and keeps req.class gating only the
+  // class router's own eligibility.
+  const routerArmed =
     env.fleet?.router !== undefined &&
     env.fleet.router.mode !== 'off' &&
     req.class === undefined &&
     env.fleet.routing !== undefined &&
-    Object.keys(env.fleet.routing).length > 0
-      ? stepClassInfo(beads, req.molStep)
-      : undefined;
+    Object.keys(env.fleet.routing).length > 0;
+  const matrixArmed =
+    env.fleet?.matrix !== undefined &&
+    env.fleet.matrix.provider !== undefined &&
+    env.fleet.matrix.mode !== 'off' &&
+    Object.keys(env.fleet.matrix.models).length > 0;
+  const info = routerArmed || matrixArmed ? stepClassInfo(beads, req.molStep) : undefined;
   const routed = routeStepClass(
     env.fleet,
     env.providers ?? {},
@@ -777,112 +785,120 @@ export function spawnStepAgent(
     req.class,
     info
   );
-  return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then(route => {
-    const provider = req.provider ?? profile?.provider ?? route?.provider;
-    let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
-    if (req.provider !== undefined) {
-      namedBy = 'flag';
-    } else if (profile !== undefined) {
-      namedBy = 'profile';
-    }
-    return resolveSpawnProvider(
-      env,
-      conn.name,
-      {
-        provider,
-        model:
-          req.model ??
-          // a profile's model rides only on its own provider's lane
-          profileModelFor(profile, provider) ??
-          // the routed model pin pairs with the routed provider — an
-          // explicit provider override must not inherit chain[0]'s model
-          (provider !== undefined && provider === route?.provider ? route.model : undefined),
-        autoApprove: req.autoApprove ?? profile?.autoApprove,
-      },
-      namedBy
-    ).then(async pick => {
-      // a flag-named profile's provider is an explicit pick — it
-      // outranks the table like --provider does, so matching the chain
-      // head must not arm the walk (a provider-less profile only
-      // presets fields; routing stays armed for it)
-      const routeSpec =
-        route !== undefined &&
-        req.provider === undefined &&
-        profile?.provider === undefined &&
-        provider === route.provider
-          ? await resolveSpawnRoute(
-              env,
-              conn.name,
-              route,
-              {
-                model: req.model ?? profile?.model,
-                autoApprove: req.autoApprove ?? profile?.autoApprove,
-              },
-              namedBy
-            )
-          : undefined;
-      // a spawned worker is a child trace: the span ctx crosses the
-      // process boundary as TRACEPARENT (and the endpoint itself so the
-      // worker emits without sourcing provider.env) — the worker's own
-      // bro.cmd/acp.* spans nest under this one in Tempo. The worktree
-      // triple rides the span too — the same dims agentEnvPins pins
-      // into the worker's env (spec bro-xgejl.1)
-      const dims = worktreeTelemetryDims(repoRoot);
-      const span = otelSpan('agent.spawn', {
-        'agent.step': req.molStep ?? '',
-        'agent.backend': conn.name,
-        'agent.provider': pick.provider ?? '',
-        'agent.model': pick.model ?? '',
-        'agent.worktree': dims.worktree,
-        ...(dims.branch === undefined ? {} : { 'agent.branch': dims.branch }),
-        ...(dims.repo === undefined ? {} : { 'agent.repo': dims.repo }),
-      });
-      const tp = otelHeader(span.ctx);
-      const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-      return conn
-        .spawn({
-          molStep: req.molStep,
-          claimRequired: req.claimRequired,
-          repoRoot,
-          beadsDir: beads,
-          prompt,
-          env: (() => {
-            const merged: Record<string, string> = {
-              ...(req.env ?? {}),
-              TRACEPARENT: tp,
-              ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
-            };
-            if (lane === 'batch') {
-              merged[BATCH_MARKER_ENV] = '1';
-            } else {
-              delete merged[BATCH_MARKER_ENV];
-            }
-            return merged;
-          })(),
-          provider: pick.provider,
-          account: pick.account,
-          model: pick.model,
-          class: route?.class,
-          delegatedBy: req.delegatedBy,
-          worker: pick.worker,
-          resumeSessionId: req.resumeSessionId,
-          ...(routeSpec === undefined ? {} : { route: routeSpec }),
-          enter: resolved.enter,
-        })
-        .then(r => {
-          // the registry's stamped provenance is what ran — a chain
-          // walk can move the spawn off the head pick the span opened
-          // with, so end-attrs overwrite them
-          span.end({
-            'agent.id': String(r.id ?? ''),
-            'agent.pid': r.pid ?? 0,
-            'agent.provider': r.provider ?? '',
-            'agent.model': r.model ?? '',
-          });
-          return r;
+  return applyFleetRouter(dir, env, req.molStep, info, routed, opts)
+    .then(async route => {
+      // the matrix verdict is journaled shadow-side; the spawn's lane
+      // is untouched (enforce refuses inside applyFleetMatrix until the
+      // follow-up bead lands the pick→lane resolution)
+      await applyFleetMatrix(dir, env, req.molStep, info, opts);
+      return route;
+    })
+    .then(route => {
+      const provider = req.provider ?? profile?.provider ?? route?.provider;
+      let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
+      if (req.provider !== undefined) {
+        namedBy = 'flag';
+      } else if (profile !== undefined) {
+        namedBy = 'profile';
+      }
+      return resolveSpawnProvider(
+        env,
+        conn.name,
+        {
+          provider,
+          model:
+            req.model ??
+            // a profile's model rides only on its own provider's lane
+            profileModelFor(profile, provider) ??
+            // the routed model pin pairs with the routed provider — an
+            // explicit provider override must not inherit chain[0]'s model
+            (provider !== undefined && provider === route?.provider ? route.model : undefined),
+          autoApprove: req.autoApprove ?? profile?.autoApprove,
+        },
+        namedBy
+      ).then(async pick => {
+        // a flag-named profile's provider is an explicit pick — it
+        // outranks the table like --provider does, so matching the chain
+        // head must not arm the walk (a provider-less profile only
+        // presets fields; routing stays armed for it)
+        const routeSpec =
+          route !== undefined &&
+          req.provider === undefined &&
+          profile?.provider === undefined &&
+          provider === route.provider
+            ? await resolveSpawnRoute(
+                env,
+                conn.name,
+                route,
+                {
+                  model: req.model ?? profile?.model,
+                  autoApprove: req.autoApprove ?? profile?.autoApprove,
+                },
+                namedBy
+              )
+            : undefined;
+        // a spawned worker is a child trace: the span ctx crosses the
+        // process boundary as TRACEPARENT (and the endpoint itself so the
+        // worker emits without sourcing provider.env) — the worker's own
+        // bro.cmd/acp.* spans nest under this one in Tempo. The worktree
+        // triple rides the span too — the same dims agentEnvPins pins
+        // into the worker's env (spec bro-xgejl.1)
+        const dims = worktreeTelemetryDims(repoRoot);
+        const span = otelSpan('agent.spawn', {
+          'agent.step': req.molStep ?? '',
+          'agent.backend': conn.name,
+          'agent.provider': pick.provider ?? '',
+          'agent.model': pick.model ?? '',
+          'agent.worktree': dims.worktree,
+          ...(dims.branch === undefined ? {} : { 'agent.branch': dims.branch }),
+          ...(dims.repo === undefined ? {} : { 'agent.repo': dims.repo }),
         });
+        const tp = otelHeader(span.ctx);
+        const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+        return conn
+          .spawn({
+            molStep: req.molStep,
+            claimRequired: req.claimRequired,
+            repoRoot,
+            beadsDir: beads,
+            prompt,
+            env: (() => {
+              const merged: Record<string, string> = {
+                ...(req.env ?? {}),
+                TRACEPARENT: tp,
+                ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
+              };
+              if (lane === 'batch') {
+                merged[BATCH_MARKER_ENV] = '1';
+              } else {
+                delete merged[BATCH_MARKER_ENV];
+              }
+              return merged;
+            })(),
+            provider: pick.provider,
+            account: pick.account,
+            model: pick.model,
+            class: route?.class,
+            delegatedBy: req.delegatedBy,
+            worker: pick.worker,
+            resumeSessionId: req.resumeSessionId,
+            ...(routeSpec === undefined ? {} : { route: routeSpec }),
+            enter: resolved.enter,
+          })
+          .then(r => {
+            // the registry's stamped provenance is what ran — a chain
+            // walk can move the spawn off the head pick the span opened
+            // with, so end-attrs overwrite them
+            span.end({
+              'agent.id': String(r.id ?? ''),
+              'agent.pid': r.pid ?? 0,
+              'agent.provider': r.provider ?? '',
+              'agent.model': r.model ?? '',
+            });
+            return r;
+          });
+      });
     });
-  });
 }
 
 /** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */

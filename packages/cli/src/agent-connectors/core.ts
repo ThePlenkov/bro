@@ -55,6 +55,7 @@ import {
   entryRunId,
   externalPlanes,
   type FleetLeaseTtls,
+  type FleetMatrix,
   type FleetProfile,
   type FleetRouter,
   type FleetWallTtls,
@@ -274,6 +275,7 @@ export interface AgentConnectorEnv {
     walls?: FleetWallTtls;
     leases?: FleetLeaseTtls;
     router?: FleetRouter;
+    matrix?: FleetMatrix;
   };
   /** The named provider registry — spawn resolution reads entries by
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
@@ -372,6 +374,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       walls?: FleetWallTtls;
       leases?: FleetLeaseTtls;
       router?: FleetRouter;
+      matrix?: FleetMatrix;
     };
     providers?: Record<string, ProviderEntry>;
     spawn?: { externalBlock: boolean; externalIdleSec: number };
@@ -809,6 +812,83 @@ function requireTypedRouterGrade(provider: string, entry: ProviderEntry): void {
         `mode 'enforce' requires a typed judgment (a systemone-wire api model or a jev-family acp pin)`,
       'config'
     );
+  }
+}
+
+/** The fleet matrix's spawn seam (spec bro-v0pvd.1) — fires on EVERY
+ *  spawn when `fleet.matrix` is armed: provider named, mode not 'off',
+ *  at least one model row, and `info` carrying task text (title or
+ *  description — nothing to judge otherwise). ONE decide() asks
+ *  complexity+mode; `matrixVerdict` picks deterministically; the
+ *  verdict journals under 'route-matrix'. v1 is shadow-only: the pick
+ *  is journaled, the spawn proceeds on its static lane untouched.
+ *  'enforce' is refused loudly — enforcement is the follow-up bead and
+ *  a config claiming it while only journaling would lie. JudgeUnavailable
+ *  is "no verdict" — warn and stand, fail-open like every judge call. */
+export async function applyFleetMatrix(
+  dir: string,
+  env: AgentConnectorEnv,
+  molStep: string,
+  info: { title?: string; description?: string } | undefined,
+  opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
+): Promise<void> {
+  const matrix = env.fleet?.matrix;
+  if (
+    matrix === undefined ||
+    matrix.provider === undefined ||
+    matrix.mode === 'off' ||
+    Object.keys(matrix.models).length === 0 ||
+    info === undefined ||
+    ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
+  ) {
+    return;
+  }
+  if (matrix.mode === 'enforce') {
+    throw new SpawnError(
+      `fleet.matrix.mode "enforce" is not implemented — the matrix router is shadow-only (spec bro-v0pvd.1); set "shadow" or "off"`,
+      'config'
+    );
+  }
+  const providers = env.providers ?? {};
+  let entry: ProviderEntry;
+  try {
+    entry = requireProviderSurface(providers, matrix.provider, 'call');
+  } catch (err) {
+    if (err instanceof UnknownProviderError || err instanceof ProviderSurfaceError) {
+      throw new SpawnError(`fleet.matrix.provider — ${err.message}`, 'config');
+    }
+    throw err;
+  }
+  // same lazy-import trick as applyFleetRouter — the judge stack is
+  // heavy (the acp binding pulls the SDK); only an armed matrix pays it
+  const { chainedJudge, judgeConfig, providerJudge, routeMatrix } = await import('@broject/judge');
+  const jcfg = judgeConfig(dir).judge;
+  const judge = chainedJudge(
+    providerJudge(matrix.provider, entry, jcfg, {
+      fetch: opts.fetch,
+      acp: opts.acp,
+      keyField: `providers.${matrix.provider}.apiKeyEnv`,
+    }),
+    undefined,
+    { confidence: jcfg.confidence, timeoutMs: jcfg.timeoutMs }
+  );
+  try {
+    await routeMatrix({
+      dir,
+      judge,
+      state: { molStep, title: info.title ?? '', description: info.description ?? '' },
+      subject: molStep,
+      matrix,
+      mode: matrix.mode,
+    });
+  } catch (err) {
+    if (err instanceof JudgeUnavailable) {
+      console.error(
+        `warning: fleet.matrix.provider "${matrix.provider}" — ${err.message}; spawn proceeds unrouted`
+      );
+      return;
+    }
+    throw err;
   }
 }
 

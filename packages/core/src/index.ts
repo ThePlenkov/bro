@@ -174,6 +174,13 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export {
+  DEFAULT_MATRIX_COMPLEXITY,
+  DEFAULT_MATRIX_MODES,
+  fleetMatrix,
+  matrixVerdict,
+} from './matrix.ts';
+export type { FleetMatrix, FleetMatrixModel, MatrixVerdict } from './matrix.ts';
 export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
 export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
 export {

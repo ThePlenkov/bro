@@ -65,6 +65,17 @@ current provider. `fallthrough` moves forward to the first un-walled
 provider without wrapping; `park` keeps the step blocked on its current
 provider.
 
+**Model matrix** — `fleet.matrix` (spec `specs/bro-v0pvd.1.md`) is the
+shadow-only capability router: before each spawn ONE judge `decide()`
+scores the task's complexity (ordered scale, default low→medium→high)
+and picks its mode (default planning/coding/review/fix); deterministic
+code then filters `fleet.matrix.models` rows by declared `modes` +
+`complexity` ceilings and journals the pick as a `route-matrix` verdict
+in the judge journal — `no-fit` when nothing can take the task. The
+lane never changes: shadow journals what it WOULD have spawned, the
+static resolution above stays authoritative, and `mode: "enforce"` is
+refused loudly until the follow-up bead lands pick→lane resolution.
+
 **Route table** — declare `brouter.routes` and the loop asks the ROUTER's
 own table instead: the bead's class label is the task's `type`, its
 priority the task's band, and the table's `chain` names the models (the
