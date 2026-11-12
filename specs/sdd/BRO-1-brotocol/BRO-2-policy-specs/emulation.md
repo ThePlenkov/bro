@@ -22,6 +22,12 @@ Stage: **mixed** — engine ops run real (`brose`, `brotocol`, current
   for `@broject/brose`.
 - Golden case: `brose new --template X` output always validates
   against X without extra `--set`.
+- **Resolved (bro-bntld.4, [#1033](https://github.com/ThePlenkov/bro/pull/1033))**:
+  root cause was the shipped templates declaring `template:` as a
+  `required` field — engine provenance masquerading as author data.
+  Dropped from `fields:` in `brotocol/spec@1` and `spec@1`; `create()`
+  still pins `name@version` last. Re-verified: `brose new` without
+  `--set template=` creates a doc that validates clean.
 
 ## Run 2: validate — `brose validate` (real)
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { after, describe, it } from 'node:test';
-import { createRegistry, validate } from '@broject/brose';
+import { create as broseCreate, createRegistry, validate } from '@broject/brose';
 import { create } from './create.ts';
 import { get } from './scan.ts';
 import {
@@ -59,6 +59,18 @@ describe('spec template', () => {
     assert.deepEqual(validate(doc.path, { dirs: [specTemplateDir], cwd: '/nonexistent' }), []);
     assert.equal(get(p, 'BRO-7')?.frontmatter.status, 'draft');
     assert.equal(dir('BRO-7.spec.md'), doc.path);
+  });
+
+  it('shipped template does not require a template: value — the engine pins it', () => {
+    // bro-bntld.4: `template:` is engine-emitted provenance, not author
+    // data — raw `brose new`/`create` must not demand a redundant --set.
+    const registry = createRegistry({ dirs: [specTemplateDir], cwd: '/nonexistent' });
+    const text = broseCreate(
+      'brotocol/spec@1',
+      { id: 'T-1', title: 'T', status: 'draft' },
+      { registry }
+    );
+    assert.ok(text.includes('template: brotocol/spec@1'));
   });
 });
 
