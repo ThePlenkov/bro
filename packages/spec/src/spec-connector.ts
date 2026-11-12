@@ -17,7 +17,7 @@
  */
 import { type Dirent, existsSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import {
   type Connector,
   type ConnectorCtx,
@@ -207,7 +207,7 @@ function specStoreOver(
           continue;
         }
         const owner = dirDocs
-          .filter(d => abs.startsWith(d.dir + '/'))
+          .filter(d => abs.startsWith(d.dir + sep))
           .sort((a, b) => b.dir.length - a.dir.length)[0];
         if (owner !== undefined) {
           n.parent = owner.id;
@@ -219,10 +219,11 @@ function specStoreOver(
     scope: id => {
       const d = get(protocol, id);
       if (d !== undefined) {
+        // a protocol doc that declares no owns/scope owns nothing — do
+        // NOT fall through to a same-id legacy file's scope: that would
+        // audit a different document's claimed surface
         const declared = fmPaths(d.frontmatter.owns) ?? fmPaths(d.frontmatter.scope);
-        if (declared !== null) {
-          return declared;
-        }
+        return declared;
       }
       const node = findSpec(root, specDir, id);
       if (node === undefined) {

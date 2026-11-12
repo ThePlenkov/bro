@@ -68,7 +68,7 @@ import {
   type TaskStoreAsync,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
-import { hasSpecDoc, specDirAbs, validBeadId } from '@broject/spec';
+import { hasSpecDoc, repoRoot, specDirAbs, validBeadId } from '@broject/spec';
 import { driftEnv, driftRow, specLinkPath, SPEC_LINK } from '../spec-drift.ts';
 import { flag, positionals } from './args.ts';
 
@@ -702,10 +702,13 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
 /** Project-layout detection for `spec init` — the order is the claim
  *  precedence the connectors use. */
 function detectSpecTool(dir: string): string {
-  if (existsSync(join(dir, '.specify'))) {
+  // tool layouts live at the checkout root — a subdirectory invocation
+  // must not miss them and mislabel the repo 'brose'/'native'
+  const root = repoRoot(dir);
+  if (existsSync(join(root, '.specify'))) {
     return 'speckit';
   }
-  if (existsSync(join(dir, 'openspec'))) {
+  if (existsSync(join(root, 'openspec'))) {
     return 'openspec';
   }
   const specDir = specDirAbs(dir, loadConfig(dir).sdd.dir);

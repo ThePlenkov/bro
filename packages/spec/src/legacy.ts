@@ -16,7 +16,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { basename, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, type SpecNode } from '@broject/core';
 
 /** Repo root for ctx.dir — worktree-aware: a spec committed on the
@@ -55,7 +55,32 @@ export function specDirAbs(dir: string, specDir: string): string | null {
     const real = realpathSync(abs);
     return real === root || real.startsWith(root + sep) ? abs : null;
   } catch {
-    return abs; // not yet created — the lexical check already held
+    // abs does not exist yet — but an existing ANCESTOR could be a
+    // symlink out of the checkout, and the lexical check can't see it.
+    // Resolve the deepest ancestor that does exist and re-check the
+    // would-be path against the root before allowing the write.
+    let realRoot = root;
+    try {
+      realRoot = realpathSync(root);
+    } catch {
+      /* root always exists — the fallback keeps the lexical compare */
+    }
+    let probe = abs;
+    const missing: string[] = [];
+    for (;;) {
+      const parent = dirname(probe);
+      if (parent === probe) {
+        return abs; // no existing ancestor — the lexical check already held
+      }
+      try {
+        const real = realpathSync(parent);
+        const candidate = join(real, basename(probe), ...missing);
+        return candidate === realRoot || candidate.startsWith(realRoot + sep) ? abs : null;
+      } catch {
+        missing.unshift(basename(probe));
+        probe = parent;
+      }
+    }
   }
 }
 
@@ -425,11 +450,26 @@ export function specScope(path: string): string[] {
       return [];
     }
     const lines = fm[1]!.split('\n');
-    const i = lines.findIndex(l => /^scope:\s*/.test(l));
-    if (i === -1) {
-      return [];
+    // `owns:` is the brotocol field, `scope:` the legacy one — the
+    // connector's id-keyed scope() prefers owns the same way; an empty
+    // owns falls through to scope rather than declaring nothing
+    for (const key of ['owns', 'scope']) {
+      const i = lines.findIndex(l => {
+        const m = /^([A-Za-z_-]+):/.exec(l);
+        return m?.[1] === key;
+      });
+      if (i === -1) {
+        continue;
+      }
+      const items = scopeItems(
+        yamlScalar(lines[i]!.replace(/^[A-Za-z_-]+:\s*/, '')),
+        lines.slice(i + 1)
+      );
+      if (items.length > 0) {
+        return items;
+      }
     }
-    return scopeItems(yamlScalar(lines[i]!.replace(/^scope:\s*/, '')), lines.slice(i + 1));
+    return [];
   } catch {
     return [];
   }
