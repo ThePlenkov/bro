@@ -92,6 +92,23 @@ async function resumeRows(
   return res;
 }
 
+/** One-based picker answer → zero-based index, or null on junk. Each
+ *  rejection is its own check — a compound condition reads as one
+ *  dense branch and hides which rule refused. */
+function pickIndex(answer: string, count: number): number | null {
+  const n = Number(answer.trim());
+  if (!Number.isInteger(n)) {
+    return null;
+  }
+  if (n < 1) {
+    return null;
+  }
+  if (n > count) {
+    return null;
+  }
+  return n - 1;
+}
+
 /** The --pick flow — numbered list, one line back. Injectable for
  *  tests; production reads process.stdin through readline. */
 async function pickSession(rows: MsgSessionRow[]): Promise<number | null> {
@@ -107,11 +124,7 @@ async function pickSession(rows: MsgSessionRow[]): Promise<number | null> {
     const answer = await new Promise<string>(resolve => {
       rl.question('resume> ', resolve);
     });
-    const n = Number(answer.trim());
-    if (!Number.isInteger(n) || n < 1 || n > rows.length) {
-      return null;
-    }
-    return n - 1;
+    return pickIndex(answer, rows.length);
   } finally {
     rl.close();
   }
@@ -137,6 +150,65 @@ function spawnResume(argv: string[], cwd: string): Promise<number> {
   });
 }
 
+/** Which session the invocation names — --last (rows arrive
+ *  lastSeen-desc), --pick (TTY picker), or the shared fleet grammar.
+ *  Every path yields exactly one row or throws a usage error; null
+ *  means the user cancelled the picker. */
+async function resumeTarget(
+  args: { last: boolean; pick: boolean; id?: string },
+  rows: MsgSessionRow[],
+  deps: SessionsResumeDeps,
+  out: (line: string) => void
+): Promise<MsgSessionRow | null> {
+  if (args.last) {
+    // rows arrive lastSeen-desc from the store — the first is "last"
+    // (the caller already refused an empty list)
+    return rows[0];
+  }
+  if (args.pick) {
+    const tty = deps.stdinTTY ?? process.stdin.isTTY === true;
+    if (!tty) {
+      throw new CommandError('error: --pick needs an interactive terminal', EXIT.usage);
+    }
+    const pick = deps.pick ?? pickSession;
+    const idx = await pick(rows);
+    if (idx === null) {
+      out('resume: cancelled');
+      return null;
+    }
+    const picked = rows[idx];
+    if (picked === undefined) {
+      // an injected pick is not bounds-checked — treat an out-of-range
+      // answer as a cancel, never a crash on session.cwd below
+      out('resume: cancelled');
+      return null;
+    }
+    return picked;
+  }
+  const resolution = resolveMsgTarget(rows, args.id!);
+  if (resolution.error !== undefined) {
+    throw new CommandError(`error: ${resolution.error}`, EXIT.usage);
+  }
+  const matched = resolution.deliveries
+    .map(d => d.session)
+    .filter((s): s is MsgSessionRow => s !== undefined);
+  const distinct = new Map(matched.map(s => [`${s.host}:${s.sid}`, s]));
+  if (distinct.size === 0) {
+    throw new CommandError(
+      `error: no ledger session matches "${args.id}" — the session may not be wired yet`,
+      EXIT.usage
+    );
+  }
+  if (distinct.size > 1) {
+    const list = [...distinct.keys()].join(', ');
+    throw new CommandError(
+      `error: "${args.id}" resolves to ${distinct.size} sessions (${list}) — name one with <host>:<sid>`,
+      EXIT.usage
+    );
+  }
+  return [...distinct.values()][0];
+}
+
 export async function runSessionsResume(
   argv: string[],
   deps: SessionsResumeDeps = {}
@@ -155,45 +227,9 @@ export async function runSessionsResume(
     throw new CommandError('error: no sessions in the ledger', EXIT.error);
   }
 
-  let session: MsgSessionRow | undefined;
-  if (args.last === true) {
-    // rows arrive lastSeen-desc from the store — the first is "last"
-    session = rows[0];
-  } else if (args.pick === true) {
-    const tty = deps.stdinTTY ?? process.stdin.isTTY === true;
-    if (!tty) {
-      throw new CommandError('error: --pick needs an interactive terminal', EXIT.usage);
-    }
-    const pick = deps.pick ?? pickSession;
-    const idx = await pick(rows);
-    if (idx === null) {
-      console.log('resume: cancelled');
-      return;
-    }
-    session = rows[idx];
-  } else {
-    const resolution = resolveMsgTarget(rows, args.id!);
-    if (resolution.error !== undefined) {
-      throw new CommandError(`error: ${resolution.error}`, EXIT.usage);
-    }
-    const matched = resolution.deliveries
-      .map(d => d.session)
-      .filter((s): s is MsgSessionRow => s !== undefined);
-    const distinct = new Map(matched.map(s => [`${s.host}:${s.sid}`, s]));
-    if (distinct.size === 0) {
-      throw new CommandError(
-        `error: no ledger session matches "${args.id}" — the session may not be wired yet`,
-        EXIT.usage
-      );
-    }
-    if (distinct.size > 1) {
-      const list = [...distinct.keys()].join(', ');
-      throw new CommandError(
-        `error: "${args.id}" resolves to ${distinct.size} sessions (${list}) — name one with <host>:<sid>`,
-        EXIT.usage
-      );
-    }
-    session = [...distinct.values()][0];
+  const session = await resumeTarget(args, rows, deps, out);
+  if (session === null) {
+    return;
   }
 
   const cwd = session.cwd ?? dir;

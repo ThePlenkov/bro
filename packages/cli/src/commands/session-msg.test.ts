@@ -21,15 +21,25 @@ const T0 = Date.parse('2026-11-20T12:00:00.000Z');
 const BOOT = T0 - 60 * 60 * 1000;
 const NOW = T0;
 
-function ledgerFixture(): { dir: string; ledger: LedgerFacade; cleanup(): void } {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-msg-'));
+/** A temp state dir + ledger facade + sanitized env — the fixture
+ *  every describe shares (prefix only namespaces the tmpdir). */
+function stateFixture(prefix: string): {
+  dir: string;
+  ledger: LedgerFacade;
+  env: NodeJS.ProcessEnv;
+  cleanup(): void;
+} {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
   const env = { BRO_HOOK_SPOOL: '0', XDG_STATE_HOME: dir } as NodeJS.ProcessEnv;
   return {
     dir,
+    env,
     ledger: ledgerFacade({ dbPath: join(dir, 'ledger.db'), env }),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
 }
+
+const ledgerFixture = () => stateFixture('bro-msg-');
 
 function sess(
   partial: Partial<LedgerSessionRow> & { host: string; sid: string }
@@ -418,20 +428,29 @@ describe('sessionResumeArgv', () => {
 });
 
 describe('runSessionsResume', () => {
-  function resumeFixture(): {
-    dir: string;
-    ledger: LedgerFacade;
-    env: NodeJS.ProcessEnv;
-    cleanup(): void;
-  } {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-resume-'));
-    const env = { BRO_HOOK_SPOOL: '0', XDG_STATE_HOME: dir } as NodeJS.ProcessEnv;
-    return {
-      dir,
-      ledger: ledgerFacade({ dbPath: join(dir, 'ledger.db'), env }),
-      env,
-      cleanup: () => rmSync(dir, { recursive: true, force: true }),
-    };
+  const resumeFixture = () => stateFixture('bro-resume-');
+
+  /** Seed one claude session, then assert runSessionsResume rejects
+   *  with a CommandError matching `pattern`. */
+  async function expectResumeError(
+    f: ReturnType<typeof resumeFixture>,
+    sid: string,
+    args: string[],
+    pattern: RegExp,
+    deps: Partial<Parameters<typeof runSessionsResume>[1]> = {}
+  ): Promise<void> {
+    await f.ledger.append([sess({ host: 'claude', sid })]);
+    await assert.rejects(
+      runSessionsResume(args, {
+        dir: f.dir,
+        ledger: f.ledger,
+        now: NOW,
+        bootTimeMs: BOOT,
+        out: () => {},
+        ...deps,
+      }),
+      (err: unknown) => err instanceof CommandError && pattern.test(String(err))
+    );
   }
 
   test('--print renders the argv without spawning', async () => {
@@ -530,18 +549,9 @@ describe('runSessionsResume', () => {
   test('--pick on non-TTY is a usage error', async () => {
     const f = resumeFixture();
     try {
-      await f.ledger.append([sess({ host: 'claude', sid: 'p-1' })]);
-      await assert.rejects(
-        runSessionsResume(['--pick'], {
-          dir: f.dir,
-          ledger: f.ledger,
-          now: NOW,
-          bootTimeMs: BOOT,
-          stdinTTY: false,
-        }),
-        (err: unknown) =>
-          err instanceof CommandError && /--pick needs an interactive terminal/.test(String(err))
-      );
+      await expectResumeError(f, 'p-1', ['--pick'], /--pick needs an interactive terminal/, {
+        stdinTTY: false,
+      });
     } finally {
       f.cleanup();
     }
@@ -550,18 +560,9 @@ describe('runSessionsResume', () => {
   test('resume child nonzero exit is an error', async () => {
     const f = resumeFixture();
     try {
-      await f.ledger.append([sess({ host: 'claude', sid: 'fail-1' })]);
-      await assert.rejects(
-        runSessionsResume(['fail-1'], {
-          dir: f.dir,
-          ledger: f.ledger,
-          now: NOW,
-          bootTimeMs: BOOT,
-          out: () => {},
-          spawn: async () => 3,
-        }),
-        (err: unknown) => err instanceof CommandError && /resume exited 3/.test(String(err))
-      );
+      await expectResumeError(f, 'fail-1', ['fail-1'], /resume exited 3/, {
+        spawn: async () => 3,
+      });
     } finally {
       f.cleanup();
     }

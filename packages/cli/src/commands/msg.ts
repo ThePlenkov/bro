@@ -29,7 +29,7 @@ import {
   type LedgerFacade,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
-import { sendSessionMessage } from './session-msg.ts';
+import { sendSessionMessage, type SendSessionMessageResult } from './session-msg.ts';
 
 const KINDS = new Set(['note', 'info', 'ask', 'result', 'block']);
 const VALUE_FLAGS = new Set(['--kind', '--in-reply-to', '--key']);
@@ -55,13 +55,26 @@ Delivery: ledger-resolved sessions on claude|codex|cursor|devin get the
 per-session inbox file (Tier-0 delivery on their next hook); everything
 else publishes through the events facade's mailbox address.`;
 
-export async function runMsgCommand(argv: string[], deps: MsgDeps = {}): Promise<void> {
-  if (hasHelpFlag(argv)) {
-    printUsage(USAGE, EXIT.ok);
-  }
-  // strict: msg knows every --flag it takes — anything else is a
-  // typo'd option, never message text silently dropped. `--` ends flag
-  // parsing so a text containing an option-looking word survives.
+const MSG_USAGE_LINE =
+  'usage: bro msg [--kind <k>] [--in-reply-to <r>] [--key <k>] [--] <session|role> <text>';
+
+function msgUsageError(): never {
+  throw new CommandError(MSG_USAGE_LINE, EXIT.usage);
+}
+
+interface MsgArgs {
+  target: string;
+  text: string;
+  kind?: string;
+  inReplyTo?: string;
+  key?: string;
+}
+
+/** argv → the send's inputs. strict: msg knows every --flag it takes —
+ *  anything else is a typo'd option, never message text silently
+ *  dropped. `--` ends flag parsing so a text containing an
+ *  option-looking word survives. */
+function msgArgs(argv: string[]): MsgArgs {
   const pos = positionals(argv, VALUE_FLAGS, { strict: true });
   const kind = flag(argv, '--kind');
   const inReplyTo = flag(argv, '--in-reply-to');
@@ -70,56 +83,49 @@ export async function runMsgCommand(argv: string[], deps: MsgDeps = {}): Promise
     throw new CommandError(`error: --kind must be one of: ${[...KINDS].join(', ')}`, EXIT.usage);
   }
   if (pos.length < 2) {
-    throw new CommandError(
-      'usage: bro msg [--kind <k>] [--in-reply-to <r>] [--key <k>] [--] <session|role> <text>',
-      EXIT.usage
-    );
+    msgUsageError();
   }
   const [target, ...words] = pos;
   const text = words.join(' ').trim();
   if (text === '') {
-    throw new CommandError(
-      'usage: bro msg [--kind <k>] [--in-reply-to <r>] [--key <k>] [--] <session|role> <text>',
-      EXIT.usage
-    );
+    msgUsageError();
   }
-  const dir = deps.dir ?? process.cwd();
-  const env = deps.env ?? process.env;
-  const prefer = loadConfig(dir).connectors;
-  const opts = prefer === undefined ? {} : { prefer };
-  // The ledger is machine-wide but its facade can still fail (a broken
-  // sqlite, a pinned connector that is down) — degrade to mailbox
-  // addressing with a warning rather than fail the message outright:
-  // `to: <sid>` reaches sessions the ledger cannot see anyway.
-  let ledger = deps.ledger;
-  if (ledger === undefined) {
-    try {
-      ledger = facade('ledger', { dir }, opts);
-    } catch (err) {
-      console.error(
-        `warning: session ledger unavailable — resolving by mailbox address only (${
-          err instanceof Error ? err.message : String(err)
-        })`
-      );
-    }
-  }
-  const events = deps.events ?? facade('events', { dir }, opts);
-  const res = await sendSessionMessage({
-    dir,
+  return {
     target: target!,
     text,
-    env,
     ...(kind !== undefined ? { kind } : {}),
     ...(inReplyTo !== undefined ? { inReplyTo } : {}),
     ...(key !== undefined ? { key } : {}),
-    ...(ledger !== undefined ? { ledger } : {}),
-    events,
-  });
-  if (res.error !== undefined || res.deliveries.length === 0) {
-    // only reachable through an ambiguous target — the error carries
-    // the candidate list
-    throw new CommandError(`error: ${res.error ?? 'no delivery'}`, EXIT.usage);
+  };
+}
+
+/** The ledger facade for this send — injected in tests, resolved
+ *  through `facade()` in production so a `connectors.ledger` pin is
+ *  honored. The ledger is machine-wide but its facade can still fail
+ *  (a broken sqlite, a pinned connector that is down) — degrade to
+ *  mailbox addressing with a warning rather than fail the message
+ *  outright: `to: <sid>` reaches sessions the ledger cannot see anyway. */
+function msgLedger(dir: string, deps: MsgDeps): LedgerFacade | undefined {
+  if (deps.ledger !== undefined) {
+    return deps.ledger;
   }
+  const prefer = loadConfig(dir).connectors;
+  const opts = prefer === undefined ? {} : { prefer };
+  try {
+    return facade('ledger', { dir }, opts);
+  } catch (err) {
+    console.error(
+      `warning: session ledger unavailable — resolving by mailbox address only (${
+        err instanceof Error ? err.message : String(err)
+      })`
+    );
+    return undefined;
+  }
+}
+
+/** The per-delivery report — channel plus the locator (events record
+ *  or inbox path) when one exists. */
+function printDeliveries(res: SendSessionMessageResult): void {
   for (const d of res.deliveries) {
     const via =
       d.channel === 'mailbox' ? 'mailbox' : d.channel === 'inbox' ? 'inbox' : 'inbox+record';
@@ -129,4 +135,34 @@ export async function runMsgCommand(argv: string[], deps: MsgDeps = {}): Promise
   for (const w of res.warnings) {
     console.error(`warning: ${w}`);
   }
+}
+
+export async function runMsgCommand(argv: string[], deps: MsgDeps = {}): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    printUsage(USAGE, EXIT.ok);
+  }
+  const args = msgArgs(argv);
+  const dir = deps.dir ?? process.cwd();
+  const env = deps.env ?? process.env;
+  const ledger = msgLedger(dir, deps);
+  const prefer = loadConfig(dir).connectors;
+  const opts = prefer === undefined ? {} : { prefer };
+  const events = deps.events ?? facade('events', { dir }, opts);
+  const res = await sendSessionMessage({
+    dir,
+    target: args.target,
+    text: args.text,
+    env,
+    ...(args.kind !== undefined ? { kind: args.kind } : {}),
+    ...(args.inReplyTo !== undefined ? { inReplyTo: args.inReplyTo } : {}),
+    ...(args.key !== undefined ? { key: args.key } : {}),
+    ...(ledger !== undefined ? { ledger } : {}),
+    events,
+  });
+  if (res.error !== undefined || res.deliveries.length === 0) {
+    // only reachable through an ambiguous target — the error carries
+    // the candidate list
+    throw new CommandError(`error: ${res.error ?? 'no delivery'}`, EXIT.usage);
+  }
+  printDeliveries(res);
 }

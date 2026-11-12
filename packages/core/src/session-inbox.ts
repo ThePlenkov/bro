@@ -19,7 +19,15 @@
  * `ended` sessions for exactly this reason).
  */
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { broStateDir, inboxPath } from './modes.ts';
 
@@ -49,7 +57,9 @@ export function sessionInboxDir(env: NodeJS.ProcessEnv = process.env): string | 
  *  claim by rename so a torn tail line can only come from a crashed
  *  writer, and it degrades to a verbatim passthrough entry). Returns
  *  the file path, or null when the (host, sid) pair cannot name one —
- *  an empty host or sid has no inbox. */
+ *  an empty host or sid has no inbox — or when the write itself fails
+ *  (ENOSPC/EACCES/…): delivery degrades to the events-record channel,
+ *  the same fail-open rule the notify path lives by. */
 export function appendSessionInbox(
   env: NodeJS.ProcessEnv,
   host: string,
@@ -63,9 +73,41 @@ export function appendSessionInbox(
   if (path === null) {
     return null;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(entry)}\n`);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${JSON.stringify(entry)}\n`);
+  } catch {
+    return null;
+  }
   return path;
+}
+
+/** JSON.parse that only answers plain objects — primitives, arrays
+ *  and garbage all return undefined so the caller degrades to a
+ *  verbatim passthrough entry. */
+function parseJsonEntry(trimmed: string): Partial<SessionInboxEntry> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed !== null && typeof parsed === 'object') {
+      return parsed as Partial<SessionInboxEntry>;
+    }
+  } catch {
+    // not JSON — passthrough
+  }
+  return undefined;
+}
+
+/** The optional string fields an entry may carry — copied only when
+ *  present and non-empty, so a `""` never masquerades as metadata. */
+const INBOX_META_KEYS = ['from', 'kind', 'cause'] as const;
+
+function copyInboxMeta(parsed: Partial<SessionInboxEntry>, entry: SessionInboxEntry): void {
+  for (const k of INBOX_META_KEYS) {
+    const v = parsed[k];
+    if (typeof v === 'string' && v !== '') {
+      entry[k] = v;
+    }
+  }
 }
 
 /** Parse one JSONL line into an entry. A line that is not a JSON
@@ -77,28 +119,16 @@ function parseInboxLine(line: string): SessionInboxEntry {
   if (trimmed === '') {
     return { ts: 0, text: '' };
   }
-  try {
-    const parsed = JSON.parse(trimmed) as Partial<SessionInboxEntry> | null;
-    if (parsed !== null && typeof parsed === 'object' && typeof parsed.text === 'string') {
-      const entry: SessionInboxEntry = {
-        ts: typeof parsed.ts === 'number' ? parsed.ts : 0,
-        text: parsed.text,
-      };
-      if (typeof parsed.from === 'string' && parsed.from !== '') {
-        entry.from = parsed.from;
-      }
-      if (typeof parsed.kind === 'string' && parsed.kind !== '') {
-        entry.kind = parsed.kind;
-      }
-      if (typeof parsed.cause === 'string' && parsed.cause !== '') {
-        entry.cause = parsed.cause;
-      }
-      return entry;
-    }
-  } catch {
-    // not JSON — fall through to passthrough
+  const parsed = parseJsonEntry(trimmed);
+  if (parsed === undefined || typeof parsed.text !== 'string') {
+    return { ts: 0, text: trimmed };
   }
-  return { ts: 0, text: trimmed };
+  const entry: SessionInboxEntry = {
+    ts: typeof parsed.ts === 'number' ? parsed.ts : 0,
+    text: parsed.text,
+  };
+  copyInboxMeta(parsed, entry);
+  return entry;
 }
 
 /** Claim and read the inbox — rename the file aside FIRST so a
@@ -126,14 +156,27 @@ export function drainSessionInbox(
     // raced another drain or the file vanished — nothing to deliver
     return null;
   }
-  let raw: string;
+  let raw: string | null;
   try {
     raw = readFileSync(claim, 'utf8');
   } catch {
-    raw = '';
-  } finally {
-    rmSync(claim, { force: true });
+    raw = null;
   }
+  if (raw === null) {
+    // The claim owns every undelivered byte — never unlink it unread.
+    // Restore it to the inbox path so the next drain retries; a
+    // hard-link is the atomic no-clobber form (EEXIST when a racing
+    // append already recreated the path — then the claim stays put,
+    // bytes preserved, rather than destroying either copy).
+    try {
+      linkSync(claim, path);
+      rmSync(claim, { force: true });
+    } catch {
+      // restore raced or failed — the .drain-* claim still holds them
+    }
+    return null;
+  }
+  rmSync(claim, { force: true });
   const entries = raw
     .split('\n')
     .filter(line => line.trim() !== '')

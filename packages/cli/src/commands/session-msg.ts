@@ -34,6 +34,7 @@
  */
 import {
   appendSessionInbox,
+  type EventInput,
   type EventsFacade,
   type LedgerFacade,
   type SessionInboxEntry,
@@ -156,95 +157,111 @@ function deliveryFor(r: MsgSessionRow): TargetDelivery {
   };
 }
 
-/** Match `target` against the session rows. Pure — the send path owns
- *  facades and env. Ambiguity is an error candidate list, never a
- *  guess; zero matches degrade to a mailbox-address delivery. */
-export function resolveMsgTarget(rows: MsgSessionRow[], target: string): TargetResolution {
+/** One delivery per session key — the same (host, sid) can surface
+ *  through two grammars at once (a sid that is also an agentId) and
+ *  must not double-deliver. */
+function deliverMatched(matched: MsgSessionRow[]): TargetDelivery[] {
+  const seen = new Set<string>();
+  const out: TargetDelivery[] = [];
+  for (const r of matched) {
+    const k = key(r);
+    if (seen.has(k)) {
+      continue;
+    }
+    seen.add(k);
+    out.push(deliveryFor(r));
+  }
+  return out;
+}
+
+/** `<host>:<sid>` — the session key. Exact only: a prefix of a key is
+ *  not a key. */
+function resolveSessionKey(rows: MsgSessionRow[], host: string, sid: string): TargetResolution {
   const warnings: string[] = [];
-  const t = target.trim();
-
-  const deliver = (matched: MsgSessionRow[]): TargetDelivery[] => {
-    const seen = new Set<string>();
-    const out: TargetDelivery[] = [];
-    for (const r of matched) {
-      const k = key(r);
-      if (seen.has(k)) {
-        continue;
-      }
-      seen.add(k);
-      out.push(deliveryFor(r));
-    }
-    return out;
-  };
-
-  // <host>:<sid> — the session key. Exact only: a prefix of a key is
-  // not a key.
-  const colon = t.indexOf(':');
-  if (colon > 0) {
-    const host = t.slice(0, colon);
-    const sid = t.slice(colon + 1);
-    const matched = rows.filter(r => r.host === host && r.sid === sid);
-    if (matched.length === 0) {
-      // The ledger may simply not know this session yet (plugin hosts
-      // never spool). The sid still names a mailbox address — degrade
-      // honestly rather than erroring on a reachable session.
-      warnings.push(
-        `no ledger session matches ${host}:${sid} — publishing to mailbox address ${sid}`
-      );
-      return {
-        deliveries: [{ to: sid, inbox: false, label: `${host}:${sid} → ${sid}` }],
-        warnings,
-      };
-    }
-    return { deliveries: deliver(matched), warnings };
+  const matched = rows.filter(r => r.host === host && r.sid === sid);
+  if (matched.length === 0) {
+    // The ledger may simply not know this session yet (plugin hosts
+    // never spool). The sid still names a mailbox address — degrade
+    // honestly rather than erroring on a reachable session.
+    warnings.push(
+      `no ledger session matches ${host}:${sid} — publishing to mailbox address ${sid}`
+    );
+    return {
+      deliveries: [{ to: sid, inbox: false, label: `${host}:${sid} → ${sid}` }],
+      warnings,
+    };
   }
+  return { deliveries: deliverMatched(matched), warnings };
+}
 
-  if (t === 'orchestrator') {
-    const matched = rows.filter(r => r.spawnedBy === null || r.spawnedBy === '');
-    if (matched.length === 0) {
-      // no wired orchestrator — the mailbox role address still works
-      // for sessions the ledger has not seen
-      return {
-        deliveries: [{ to: 'orchestrator', inbox: false, label: 'orchestrator' }],
-        warnings,
-      };
-    }
-    return { deliveries: deliver(matched), warnings };
+/** `orchestrator` — the role: ledger rows with no spawnedBy. With no
+ *  wired orchestrator the mailbox role address still works for
+ *  sessions the ledger has not seen. */
+function resolveOrchestrator(rows: MsgSessionRow[]): TargetResolution {
+  const matched = rows.filter(r => r.spawnedBy === null || r.spawnedBy === '');
+  if (matched.length === 0) {
+    return {
+      deliveries: [{ to: 'orchestrator', inbox: false, label: 'orchestrator' }],
+      warnings: [],
+    };
   }
+  return { deliveries: deliverMatched(matched), warnings: [] };
+}
 
-  // Bare token — sid (exact, then unique-prefix) ∪ agentId. Both
-  // grammars are live; the union is the honest answer, and zero
-  // matches means "mailbox address" (an agentId the ledger has not
-  // seen, or a plugin-host sid).
+/** The bare-token grammar — sid (exact, then unique-prefix) ∪ agentId.
+ *  Both spellings are live; the union is the honest answer, and zero
+ *  matches means "mailbox address" (an agentId the ledger has not
+ *  seen, or a plugin-host sid). */
+function resolveBareToken(rows: MsgSessionRow[], t: string): TargetResolution {
   const exactSid = rows.filter(r => r.sid === t);
   const agentRows = rows.filter(r => r.spawnedBy === t);
-  let matched = [...exactSid, ...agentRows];
-  if (matched.length === 0 && t.length >= MIN_SID_PREFIX) {
-    const prefix = rows.filter(r => r.sid.startsWith(t));
-    // prefix ambiguity is measured on distinct SIDS, not rows — the
-    // same sid on two hosts is one session identity, not two answers
-    const sids = new Set(prefix.map(r => r.sid));
-    if (sids.size === 1) {
-      matched = prefix;
-    } else if (sids.size > 1) {
-      const candidates = [...sids].sort().map(s => {
-        const r = prefix.find(p => p.sid === s)!;
-        return `${r.host}:${s}`;
-      });
+  let sidRows = exactSid;
+  // the prefix leg is consulted only when neither grammar claimed the
+  // token — an exact sid or agentId hit never falls through to it
+  const unclaimed = sidRows.length === 0 && agentRows.length === 0;
+  if (unclaimed && t.length >= MIN_SID_PREFIX) {
+    sidRows = rows.filter(r => r.sid.startsWith(t));
+  }
+  // A sid names exactly ONE session — the ledger keys rows by
+  // (host, sid), so the same sid string on two hosts is two answers,
+  // and a prefix spanning two sids is ambiguous. Only the agentId
+  // grammar fans out to many sessions on purpose.
+  if (agentRows.length === 0) {
+    const sidKeys = new Set(sidRows.map(key));
+    if (sidKeys.size > 1) {
+      const candidates = [...sidKeys].sort();
       return {
         deliveries: [],
-        warnings,
+        warnings: [],
         error: `ambiguous session "${t}" — matches ${candidates.join(', ')}; use <host>:<sid>`,
       };
     }
   }
+  const matched = [...sidRows, ...agentRows];
   if (matched.length === 0) {
     return {
       deliveries: [{ to: t, inbox: false, label: t }],
-      warnings,
+      warnings: [],
     };
   }
-  return { deliveries: deliver(matched), warnings };
+  return { deliveries: deliverMatched(matched), warnings: [] };
+}
+
+/** Match `target` against the session rows. Pure — the send path owns
+ *  facades and env. Ambiguity is an error candidate list, never a
+ *  guess; zero matches degrade to a mailbox-address delivery. */
+export function resolveMsgTarget(rows: MsgSessionRow[], target: string): TargetResolution {
+  const t = target.trim();
+  // <host>:<sid> — the session key. Exact only: a prefix of a key is
+  // not a key.
+  const colon = t.indexOf(':');
+  if (colon > 0) {
+    return resolveSessionKey(rows, t.slice(0, colon), t.slice(colon + 1));
+  }
+  if (t === 'orchestrator') {
+    return resolveOrchestrator(rows);
+  }
+  return resolveBareToken(rows, t);
 }
 
 export interface SendSessionMessageOpts {
@@ -285,6 +302,127 @@ export interface SendSessionMessageResult {
   error?: string;
 }
 
+/** Who sent it — the agentId badge first, then the session id, else
+ *  unattributed (the entry/publish simply carry no `from`/`source`). */
+function messageSource(env: NodeJS.ProcessEnv): string | undefined {
+  const agentId = env.BRO_AGENT_ID;
+  if (agentId !== undefined && agentId !== '') {
+    return agentId;
+  }
+  const sessionId = env.BRO_SESSION_ID;
+  if (sessionId !== undefined && sessionId !== '') {
+    return sessionId;
+  }
+  return undefined;
+}
+
+/** The per-delivery facts every leg shares. */
+interface SendShared {
+  env: NodeJS.ProcessEnv;
+  kind: string;
+  now: number;
+  source?: string;
+}
+
+/** The inbox leg — append the session's drop file when the delivery
+ *  channel calls for it. Returns the written path (null when the
+ *  channel is mailbox-only or the write failed — the latter also
+ *  yields a warning, the same fail-open rule as the publish leg). */
+function appendDeliveryInbox(
+  d: TargetDelivery,
+  opts: SendSessionMessageOpts,
+  shared: SendShared
+): { path: string | null; warnings: string[] } {
+  if (d.session === undefined || !d.inbox) {
+    return { path: null, warnings: [] };
+  }
+  const entry: SessionInboxEntry = {
+    ts: shared.now,
+    ...(shared.source !== undefined ? { from: shared.source } : {}),
+    kind: shared.kind,
+    ...(opts.inReplyTo !== undefined ? { cause: opts.inReplyTo } : {}),
+    text: opts.text,
+  };
+  const path = appendSessionInbox(shared.env, d.session.host, d.session.sid, entry);
+  if (path !== null) {
+    return { path, warnings: [] };
+  }
+  return { path: null, warnings: [`inbox unavailable for ${d.label} — events record only`] };
+}
+
+/** The `msg` event one delivery publishes — optional fields only ride
+ *  when set, so the record never carries empty-string metadata. */
+function msgEventInput(
+  d: TargetDelivery,
+  opts: SendSessionMessageOpts,
+  shared: SendShared
+): EventInput {
+  return {
+    topic: 'msg',
+    kind: shared.kind,
+    payload: opts.text,
+    to: d.to,
+    ...(opts.inReplyTo !== undefined ? { cause: opts.inReplyTo } : {}),
+    ...(opts.key !== undefined ? { key: opts.key } : {}),
+    ...(shared.source !== undefined ? { source: shared.source } : {}),
+  };
+}
+
+/** The events leg — one publish per delivery through the facade. A
+ *  transport failure is a reason on the delivery plus a warning,
+ *  never a throw (the caller is often a detached worker). */
+async function publishDeliveryRecord(
+  d: TargetDelivery,
+  sent: SentDelivery,
+  opts: SendSessionMessageOpts,
+  shared: SendShared
+): Promise<string[]> {
+  if (opts.events === undefined) {
+    return [];
+  }
+  const res = await opts.events.publish(msgEventInput(d, opts, shared));
+  sent.published = res.published;
+  if (res.locator !== undefined) {
+    sent.locator = res.locator;
+  }
+  if (sent.channel === 'inbox' && res.published) {
+    sent.channel = 'inbox+record';
+  }
+  if (!res.published) {
+    sent.reason = res.reason;
+    return [`events publish failed for ${d.label} — ${res.reason ?? 'unknown reason'}`];
+  }
+  return [];
+}
+
+/** One resolved delivery end-to-end: inbox append when the channel
+ *  calls for it, then the events publish — each leg fail-open into
+ *  the shared warnings list. */
+async function sendOneDelivery(
+  d: TargetDelivery,
+  opts: SendSessionMessageOpts,
+  shared: SendShared,
+  warnings: string[]
+): Promise<SentDelivery> {
+  const sent: SentDelivery = {
+    to: d.to,
+    label: d.label,
+    channel: 'mailbox',
+    published: false,
+  };
+  const inbox = appendDeliveryInbox(d, opts, shared);
+  if (inbox.path !== null) {
+    sent.inboxPath = inbox.path;
+    sent.channel = 'inbox';
+  }
+  warnings.push(...inbox.warnings);
+  warnings.push(...(await publishDeliveryRecord(d, sent, opts, shared)));
+  if (d.note !== undefined) {
+    warnings.push(`${d.label}: ${d.note}`);
+  }
+  return sent;
+}
+
 /** The writer side of `bro msg`: resolve the target against the
  *  ledger, append inbox entries for inbox-channel sessions, and publish
  *  one event per delivery through the events facade. Every leg is
@@ -298,6 +436,7 @@ export async function sendSessionMessage(
   const warnings: string[] = [];
   const kind = opts.kind ?? 'note';
   const now = opts.now ?? Date.now();
+  const shared: SendShared = { env, kind, now, source: messageSource(env) };
 
   let rows: MsgSessionRow[] = [];
   if (opts.ledger !== undefined) {
@@ -320,65 +459,9 @@ export async function sendSessionMessage(
   const resolution = resolveMsgTarget(rows, opts.target);
   warnings.push(...resolution.warnings);
 
-  const agentId = env.BRO_AGENT_ID;
-  const sessionId = env.BRO_SESSION_ID;
-  const source =
-    agentId !== undefined && agentId !== ''
-      ? agentId
-      : sessionId !== undefined && sessionId !== ''
-        ? sessionId
-        : undefined;
-
   const deliveries: SentDelivery[] = [];
   for (const d of resolution.deliveries) {
-    const sent: SentDelivery = {
-      to: d.to,
-      label: d.label,
-      channel: 'mailbox',
-      published: false,
-    };
-    if (d.session !== undefined && d.inbox) {
-      const entry: SessionInboxEntry = {
-        ts: now,
-        ...(source !== undefined ? { from: source } : {}),
-        kind,
-        ...(opts.inReplyTo !== undefined ? { cause: opts.inReplyTo } : {}),
-        text: opts.text,
-      };
-      const inboxPath = appendSessionInbox(env, d.session.host, d.session.sid, entry);
-      if (inboxPath !== null) {
-        sent.inboxPath = inboxPath;
-        sent.channel = 'inbox';
-      } else {
-        warnings.push(`inbox unavailable for ${d.label} — events record only`);
-      }
-    }
-    if (opts.events !== undefined) {
-      const res = await opts.events.publish({
-        topic: 'msg',
-        kind,
-        payload: opts.text,
-        to: d.to,
-        ...(opts.inReplyTo !== undefined ? { cause: opts.inReplyTo } : {}),
-        ...(opts.key !== undefined ? { key: opts.key } : {}),
-        ...(source !== undefined ? { source } : {}),
-      });
-      sent.published = res.published;
-      if (res.locator !== undefined) {
-        sent.locator = res.locator;
-      }
-      if (sent.channel === 'inbox' && res.published) {
-        sent.channel = 'inbox+record';
-      }
-      if (!res.published) {
-        sent.reason = res.reason;
-        warnings.push(`events publish failed for ${d.label} — ${res.reason ?? 'unknown reason'}`);
-      }
-    }
-    if (d.note !== undefined) {
-      warnings.push(`${d.label}: ${d.note}`);
-    }
-    deliveries.push(sent);
+    deliveries.push(await sendOneDelivery(d, opts, shared, warnings));
   }
   return {
     deliveries,

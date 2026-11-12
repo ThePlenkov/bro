@@ -39,6 +39,24 @@ import {
   type EventSubscription,
 } from './events.ts';
 
+/** bro-9rls.5 dual-write: the mailbox stays the in-session delivery
+ *  path AND a live broker gets the mirrored envelope — the bus becomes
+ *  the live stream (/api/v1/events/stream) without either consumer
+ *  changing when it is down. Fail-open: a dead broker is routine,
+ *  never a publish failure. 'msg' is the fleet F4 session-message
+ *  topic (bro-izpyk.4) — it rides the same dual-write so bus
+ *  subscribers see it exactly like a notify drop. */
+async function mirrorToBus(dir: string, event: EventInput): Promise<void> {
+  if (event.topic !== 'notify' && event.topic !== 'msg') {
+    return;
+  }
+  const socket = busSocketPath(dir);
+  if (socket === null) {
+    return;
+  }
+  await busPublish(socket, event).catch(() => {});
+}
+
 /** The mailbox as an `events` provider — publish is a drop, delivery is a
  *  one-shot drain of what this session has not seen. The codec lives in
  *  notify.ts — the drain path parses envelopes for addressing, so the
@@ -110,20 +128,7 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
             locator
           );
         }
-        // bro-9rls.5 dual-write: the mailbox stays the in-session
-        // delivery path AND a live broker gets the mirrored envelope —
-        // the bus becomes the live stream (/api/v1/events/stream)
-        // without either consumer changing when it is down. Fail-open:
-        // a dead broker is routine, never a publish failure. 'msg' is
-        // the fleet F4 session-message topic (bro-izpyk.4) — it rides
-        // the same dual-write so bus subscribers see it exactly like a
-        // notify drop.
-        if (event.topic === 'notify' || event.topic === 'msg') {
-          const socket = busSocketPath(dir);
-          if (socket !== null) {
-            await busPublish(socket, event).catch(() => {});
-          }
-        }
+        await mirrorToBus(dir, event);
         return { published: true, locator };
       } catch (err) {
         return { published: false, reason: err instanceof Error ? err.message : String(err) };

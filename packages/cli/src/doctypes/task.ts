@@ -141,7 +141,9 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
     // not the target. --global keeps working: the user-level store gets
     // the bead while the message still targets the session.
     give: async (ref: string | undefined, flags: DocFlags, positional: string[]) => {
-      const target = ref ?? positional[0];
+      // trim once here — resolution trims internally, but the assignee
+      // fallback stores the raw target, and the two must agree
+      const target = (ref ?? positional[0])?.trim();
       if (target === undefined || target === '') {
         die('bro task give needs a target — `bro task give <session|role> "title"`');
       }
@@ -188,13 +190,31 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
         ];
         if (sessions.length === 1) {
           const sess = sessions[0]!;
-          assignee = sess.spawnedBy ?? `${sess.host}:${sess.sid}`;
+          // '' is the ledger's other "no spawner" spelling (orchestrator
+          // rows match on null OR '') — ?? would keep it and write an
+          // empty assignee, which bd reads as "clear the field"
+          assignee = sess.spawnedBy || `${sess.host}:${sess.sid}`;
         }
       }
       const s = store();
       const row = s.create(toInput({ title }, flags));
-      s.update(row.id, { assignee });
-      row.assignee = assignee;
+      // Assignment is a marker — but not every tasks backend can store
+      // it (gitlab's update rejects `assignee`). A refused write must
+      // not strand the just-created bead behind a thrown command:
+      // warn and keep the delivery — the message still reaches the
+      // session, and the bead exists either way.
+      let assigned = false;
+      try {
+        s.update(row.id, { assignee });
+        row.assignee = assignee;
+        assigned = true;
+      } catch (err) {
+        console.error(
+          `warning: ${row.id} created but assignee not recorded — ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
       const res = await sendSessionMessage({
         dir,
         target,
@@ -217,7 +237,11 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
       if (res.error !== undefined) {
         console.error(`warning: message not delivered — ${res.error}`);
       }
-      console.log(`task ${row.id} assigned to ${assignee}`);
+      console.log(
+        assigned
+          ? `task ${row.id} assigned to ${assignee}`
+          : `task ${row.id} created — assignee ${assignee} not recorded on the store`
+      );
       return row;
     },
     // raw passthrough — `bro task exec [--global] -- <bd args>`;
