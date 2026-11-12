@@ -478,8 +478,16 @@ export type {
   SessionState,
   StatsQuery,
 } from './ledger.ts';
+export { claimsFacade } from './claims-store.ts';
+export type { ClaimsFacadeOptions } from './claims-store.ts';
+export {
+  CLAIM_DEFAULT_TTL_MS,
+  ORCHESTRATOR_ROLE_NAME,
+  orchestratorRoleUri,
+} from './claims.ts';
 export type {
   ClaimFacade,
+  ClaimOptions,
   ClaimQuery,
   ClaimResult,
   ClaimRow,

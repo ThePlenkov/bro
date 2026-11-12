@@ -51,6 +51,7 @@ import {
   type SessionRow,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
+import { acquireOrchestratorRole, releaseOrchestratorRole } from './orchestrator-role.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { renderModeSnapshots, SNAPSHOT_MODES } from './mode-snapshots.ts';
 
@@ -262,9 +263,40 @@ async function runSet(
     throw new CommandError('error: no state dir resolves — cannot write a mode file', EXIT.error);
   }
   const project = sessionProject(dir);
-  writeModeFile(file, args.mode, project);
   const warnings: string[] = [];
+  const sessionKey = { host: sess.host, sid: sess.sid };
+  // orchestrate is exclusive per project (specs/sessions/bro-izpyk.md):
+  // the mode write is gated on the role:orchestrator@<project> claim —
+  // a live foreign holder refuses the set, a dead/unclaimed role is
+  // taken. Spawned workers (BRO_AGENT_ID) never orchestrate — the same
+  // veto isOrchestratorSession encodes for the supervisor guards.
+  if (args.mode === 'orchestrate') {
+    const agentId = env.BRO_AGENT_ID;
+    if (agentId !== undefined && agentId !== '') {
+      throw new CommandError(
+        'error: BRO_AGENT_ID is set — spawned workers never orchestrate; ' +
+          'the orchestrator session owns supervisor duties',
+        EXIT.usage
+      );
+    }
+    const role = await acquireOrchestratorRole(dir, sessionKey);
+    if (!role.ok) {
+      const c = role.conflict;
+      throw new CommandError(
+        `error: orchestrator role already held by ${
+          c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`
+        } — that session runs supervisor duties for this project`,
+        EXIT.error
+      );
+    }
+  }
+  writeModeFile(file, args.mode, project);
   await ledgerSetMode(ledger, sess.host, sess.sid, args.mode, warnings);
+  // leaving orchestrate (or never holding it) releases the role claim —
+  // best-effort; a stuck row dies with its TTL/pid anyway
+  if (args.mode !== 'orchestrate') {
+    await releaseOrchestratorRole(dir, sessionKey);
+  }
   // Tier-1 snapshots render for the mode just set — the next
   // session-start/post-compaction reads them instead of the live sweep.
   // Best-effort: a probe failure leaves the live path answering.
@@ -315,6 +347,15 @@ async function runClear(
     defaultMode: modesDefault(dir),
   });
   await ledgerSetMode(ledger, sess.host, sess.sid, res.mode, warnings);
+  // the role claim follows the effective mode — orchestrate acquires,
+  // anything else releases (best-effort both ways; the claim's own
+  // TTL/pid liveness is the backstop)
+  const sessionKey = { host: sess.host, sid: sess.sid };
+  if (res.mode === 'orchestrate') {
+    await acquireOrchestratorRole(dir, sessionKey).catch(() => ({ ok: false }));
+  } else {
+    await releaseOrchestratorRole(dir, sessionKey);
+  }
   if (args.json) {
     console.log(
       JSON.stringify(

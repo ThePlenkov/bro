@@ -53,9 +53,13 @@ Claims are **leases on resource URIs** — `worktree:<path>`, `branch:<name>`,
    skipped.
 8. **Arming/occupancy migration (partial, honest)** — `armSession`'s
    post-tool path dual-writes ledger claims beside the marker files:
-   `work` arms → `worktree:<cwd>` (detail = armed detail), `task` arms →
-   `task:<bead>` (already the bd claim's job — the facade call is
-   idempotent verification). Markers remain the gate-time truth in F3
+   `work` arms → `worktree:<cwd>` (detail = armed detail). `task` arms
+   write NO ledger row: the command that armed them *was* a bd claim —
+   the tasks store is already the source of truth, and a facade
+   round-trip would spawn synchronous `bd` probes (actor resolution,
+   `bd show`) inside every task-arming hook event. The `task:*`
+   delegation path serves explicit `bro claim task <id>` calls instead.
+   Markers remain the gate-time truth in F3
    (per-session aspect arms are a different concern than resource
    leases); `agents.json` occupancy stays for spawned-agent liveness.
    Claim TTLs (default 24h) plus hook-event heartbeat renewal give the

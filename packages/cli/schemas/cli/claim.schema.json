@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/claim.schema.json",
+  "title": "bro claim --json",
+  "description": "claim → {ok, resource, session, conflict}; release → {released, session}; list → {claims, warnings}",
+  "type": "object",
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": ["ok", "resource", "session"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "resource": { "type": "string" },
+        "session": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["host", "sid"],
+          "properties": {
+            "host": { "type": "string" },
+            "sid": { "type": "string" }
+          }
+        },
+        "conflict": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "properties": {
+            "resource": { "type": "string" },
+            "host": { "type": "string" },
+            "sid": { "type": "string" },
+            "project": { "type": ["string", "null"] },
+            "exclusive": { "type": "boolean" },
+            "leaseUntil": { "type": ["number", "null"], "description": "epoch ms" },
+            "claimedAt": { "type": "number", "description": "epoch ms" }
+          }
+        }
+      }
+    },
+    {
+      "required": ["released", "session"],
+      "properties": {
+        "released": { "type": "string" },
+        "session": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["host", "sid"],
+          "properties": {
+            "host": { "type": "string" },
+            "sid": { "type": "string" }
+          }
+        }
+      }
+    },
+    {
+      "required": ["claims", "warnings"],
+      "properties": {
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["resource", "host", "sid", "project", "exclusive", "leaseUntil", "claimedAt"],
+            "properties": {
+              "resource": { "type": "string" },
+              "host": { "type": "string" },
+              "sid": { "type": "string" },
+              "project": { "type": ["string", "null"] },
+              "exclusive": { "type": "boolean" },
+              "leaseUntil": { "type": ["number", "null"], "description": "epoch ms" },
+              "claimedAt": { "type": "number", "description": "epoch ms" },
+              "pid": { "type": ["number", "null"] },
+              "pidStart": { "type": ["string", "null"] },
+              "ttlMs": { "type": ["number", "null"] },
+              "detail": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  ]
+}

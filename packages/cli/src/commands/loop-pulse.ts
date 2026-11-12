@@ -6,8 +6,13 @@
 import { GIT_SYNC_PROBE_TIMEOUT_MS, type Connector, type ConnectorCtx } from '@broject/core';
 import { readLoopMarker } from './want-marker.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
 
-async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
+async function supervisorCheckpoint(
+  dir: string,
+  where: string,
+  sessionId?: string
+): Promise<string[]> {
   try {
     // orchestrator gate first — same ordering argument as drive-pulse:
     // workers return before any git probe, exactly as loopRearm's own
@@ -29,6 +34,10 @@ async function supervisorCheckpoint(dir: string, where: string): Promise<string[
     if (r.kind !== 'rearm') {
       return [];
     }
+    // role gate (bro-izpyk.3) — same contract as drive-pulse
+    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+      return [];
+    }
     const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true, loop: true });
     return up.kind === 'spawned'
       ? [
@@ -45,10 +54,10 @@ export const loopConnector: Connector = {
   name: 'loop',
   hooks: () => ({
     sessionStart(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'session start');
+      return supervisorCheckpoint(ctx.dir, 'session start', ctx.sessionId);
     },
     postTool(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'tool call');
+      return supervisorCheckpoint(ctx.dir, 'tool call', ctx.sessionId);
     },
   }),
   // mode gating (specs/bro-izpyk.2.md): supervisor rearm is a code+

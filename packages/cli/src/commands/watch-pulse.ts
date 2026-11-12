@@ -29,6 +29,7 @@ import {
 import { SELF_ENTRY } from './self-entry.ts';
 import { readWantMarker } from './want-marker.ts';
 import { watchSection, type WatchConfig } from './watch-config.ts';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
 
 export interface PulseMarker {
   /** tick cadence the armed pulse runs `--every` at */
@@ -280,7 +281,7 @@ export const watchConnector: Connector = {
     // session start is the first checkpoint — same rearm path as
     // postTool: armed + dead → spawn the bounded window, don't ask
     sessionStart(ctx) {
-      return pulseCheckpoint(ctx.dir, 'session start');
+      return pulseCheckpoint(ctx.dir, 'session start', ctx.sessionId);
     },
     // every tool call is a checkpoint: an armed marker with a dead
     // pulse gets a fresh bounded window spawned right here — the
@@ -288,7 +289,7 @@ export const watchConnector: Connector = {
     // self-perpetuating while the orchestrator works. A standby child
     // or a live pulse is quiet (bro-killn)
     postTool(ctx) {
-      return pulseCheckpoint(ctx.dir, 'tool call');
+      return pulseCheckpoint(ctx.dir, 'tool call', ctx.sessionId);
     },
   }),
   // mode gating (specs/bro-izpyk.2.md): supervisor rearm belongs to the
@@ -302,11 +303,16 @@ export const watchConnector: Connector = {
 
 /** One checkpoint for every lifecycle event: decide, spawn, record,
  *  report. A failure anywhere stays silent — a probe must never break
- *  the hook event it rode in on. */
-function pulseCheckpoint(dir: string, where: string): string[] {
+ *  the hook event it rode in on. The role gate (bro-izpyk.3) runs only
+ *  when a rearm is actually due — the claims read is the expensive leg,
+ *  so quiet checkpoints never pay it. */
+async function pulseCheckpoint(dir: string, where: string, sessionId?: string): Promise<string[]> {
   try {
     const r = pulseRearm(dir, pulseCfg(dir).pulseSec);
     if (r.kind !== 'rearm') {
+      return [];
+    }
+    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
       return [];
     }
     const pid = spawnPulse(dir, r.everySec, r.forSec);

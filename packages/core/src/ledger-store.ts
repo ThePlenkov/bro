@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS claims(
   exclusive INTEGER NOT NULL DEFAULT 0,
   lease_until INTEGER,
   claimed_at INTEGER NOT NULL,
+  pid INTEGER,
+  pid_start TEXT,
+  ttl_ms INTEGER,
+  detail TEXT,
   PRIMARY KEY(resource, host, sid)
 );
 CREATE TABLE IF NOT EXISTS hook_stats_daily(
@@ -190,7 +194,58 @@ export interface IngestResult {
 
 /** What the store exposes — the LedgerFacade contract plus the worker's
  *  ingest/drain surface (not part of the facade: read commands never
- *  see it). */
+ *  see it). `claims` is the F3 claims-plane primitive set — the
+ *  ClaimFacade provider (`claims-store.ts`) wraps it with liveness and
+ *  task:* delegation; liveness stays OUT of the store so the SQL layer
+ *  never learns pid/session semantics. */
+export interface ClaimsStoreOps {
+  /** Insert or renew one claim row. Same (resource, host, sid) keeps
+   *  its first `claimed_at`; every other field takes the new value. */
+  upsert(row: {
+    resource: string;
+    host: string;
+    sid: string;
+    project: string | null;
+    exclusive: boolean;
+    leaseUntil: number | null;
+    ttlMs: number | null;
+    pid: number | null;
+    pidStart: string | null;
+    detail: string | null;
+    nowMs: number;
+  }): void;
+  /** Drop one (resource, host, sid) row — release + stale sweep. */
+  remove(resource: string, host: string, sid: string): void;
+  /** Raw claim rows for the liveness pass — no dead-row filtering here;
+   *  the facade decides what "live" means (pid proof, session state). */
+  rows(q: { project?: string; host?: string; sid?: string; resourcePrefix?: string }): ClaimDbRow[];
+  /** Every claim row on one resource — the conflict probe. */
+  resourceRows(resource: string): ClaimDbRow[];
+  /** Heartbeat: push each ttl-bearing claim of (host, sid) out to
+   *  `nowMs + ttl_ms`. Returns rows touched. */
+  renewSession(host: string, sid: string, nowMs: number): number;
+  /** Atomic section for check-then-write — claim()'s conflict probe
+   *  and upsert must not interleave with a racing claimant. Optional:
+   *  single-writer callers may omit it (the facade falls back to
+   *  unserialized ops). */
+  withLock?<T>(fn: () => T): T;
+}
+
+/** One claims-table row as stored — epoch-ms stamps, sqlite ints. */
+export interface ClaimDbRow {
+  resource: string;
+  host: string;
+  sid: string;
+  project: string | null;
+  exclusive: boolean;
+  leaseUntil: number | null;
+  claimedAt: number;
+  pid: number | null;
+  pidStart: string | null;
+  ttlMs: number | null;
+  detail: string | null;
+}
+
 export interface LedgerStore extends LedgerFacade {
   ingest(batches: FileBatch[], ctx: IngestContext): IngestResult;
   loadCursor(): Record<string, number>;
@@ -198,6 +253,7 @@ export interface LedgerStore extends LedgerFacade {
    *  file after a drain so readers on other connections see a compact
    *  db. Best-effort: a busy checkpoint just defers to the next drain. */
   checkpoint(): void;
+  claims: ClaimsStoreOps;
   close(): void;
 }
 
@@ -520,6 +576,14 @@ function ingestSessionRow(
     lastSeen: tsMs,
     spawnedBy: rec.agent,
   });
+  // claims heartbeat (bro-izpyk.3): any hook event from the holder
+  // renews its leases — push every ttl-bearing claim of this session
+  // out to event-time + its own ttl. No-expiry claims (ttl_ms NULL)
+  // are untouched; dead rows are the sweeper's problem, not ours.
+  db.prepare(
+    `UPDATE claims SET lease_until = ? + ttl_ms
+     WHERE host = ? AND sid = ? AND ttl_ms IS NOT NULL`
+  ).run(tsMs, rec.host, rec.sid);
   st.counts.sessions += 1;
 }
 
@@ -592,6 +656,140 @@ function runMaintenance(
   ).run(String(ctx.nowMs));
 }
 
+/** claims columns added after the F1a schema froze — ALTER TABLE for
+ *  databases created before bro-izpyk.3; fresh databases get them from
+ *  SCHEMA and this is a no-op. */
+const CLAIMS_ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['pid', 'INTEGER'],
+  ['pid_start', 'TEXT'],
+  ['ttl_ms', 'INTEGER'],
+  ['detail', 'TEXT'],
+];
+
+function migrateClaimsColumns(db: SqliteDatabase): void {
+  const cols = db.prepare(`PRAGMA table_info(claims)`).all() as Array<{ name: string }>;
+  const have = new Set(cols.map(c => c.name));
+  for (const [name, type] of CLAIMS_ADDED_COLUMNS) {
+    if (!have.has(name)) {
+      db.exec(`ALTER TABLE claims ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+function claimDbRow(r: Record<string, unknown>): ClaimDbRow {
+  return {
+    resource: String(r.resource),
+    host: String(r.host),
+    sid: String(r.sid),
+    project: (r.project as string | null) ?? null,
+    exclusive: Number(r.exclusive) !== 0,
+    leaseUntil: (r.lease_until as number | null) ?? null,
+    claimedAt: Number(r.claimed_at),
+    pid: (r.pid as number | null) ?? null,
+    pidStart: (r.pid_start as string | null) ?? null,
+    ttlMs: (r.ttl_ms as number | null) ?? null,
+    detail: (r.detail as string | null) ?? null,
+  };
+}
+
+const CLAIM_COLS = `resource, host, sid, project, exclusive, lease_until, claimed_at,
+  pid, pid_start, ttl_ms, detail`;
+
+function buildClaimsOps(db: SqliteDatabase): ClaimsStoreOps {
+  return {
+    upsert(row) {
+      db.prepare(
+        `INSERT INTO claims(resource, host, sid, project, exclusive, lease_until, claimed_at,
+           pid, pid_start, ttl_ms, detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(resource, host, sid) DO UPDATE SET
+           project = excluded.project,
+           exclusive = excluded.exclusive,
+           lease_until = excluded.lease_until,
+           pid = excluded.pid,
+           pid_start = excluded.pid_start,
+           ttl_ms = excluded.ttl_ms,
+           detail = excluded.detail`
+      ).run(
+        row.resource,
+        row.host,
+        row.sid,
+        row.project,
+        row.exclusive ? 1 : 0,
+        row.leaseUntil,
+        row.nowMs,
+        row.pid,
+        row.pidStart,
+        row.ttlMs,
+        row.detail
+      );
+    },
+    remove(resource, host, sid) {
+      db.prepare(`DELETE FROM claims WHERE resource = ? AND host = ? AND sid = ?`).run(
+        resource,
+        host,
+        sid
+      );
+    },
+    rows(q) {
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (q.project !== undefined) {
+        where.push('project = ?');
+        params.push(q.project);
+      }
+      if (q.host !== undefined) {
+        where.push('host = ?');
+        params.push(q.host);
+      }
+      if (q.sid !== undefined) {
+        where.push('sid = ?');
+        params.push(q.sid);
+      }
+      if (q.resourcePrefix !== undefined) {
+        where.push('resource LIKE ?');
+        params.push(`${q.resourcePrefix}%`);
+      }
+      const sql = `SELECT ${CLAIM_COLS} FROM claims${
+        where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''
+      }`;
+      return (db.prepare(sql).all(...params) as Array<Record<string, unknown>>).map(claimDbRow);
+    },
+    resourceRows(resource) {
+      return (
+        db.prepare(`SELECT ${CLAIM_COLS} FROM claims WHERE resource = ?`).all(resource) as Array<
+          Record<string, unknown>
+        >
+      ).map(claimDbRow);
+    },
+    renewSession(host, sid, nowMs) {
+      return (
+        db
+          .prepare(
+            `UPDATE claims SET lease_until = ? + ttl_ms
+             WHERE host = ? AND sid = ? AND ttl_ms IS NOT NULL`
+          )
+          .run(nowMs, host, sid).changes ?? 0
+      );
+    },
+    withLock(fn) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const out = fn();
+        db.exec('COMMIT');
+        return out;
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          // already rolled back
+        }
+        throw err;
+      }
+    },
+  };
+}
+
 function buildStore(db: SqliteDatabase): LedgerStore {
   const loadCursor = (): Record<string, number> => {
     const row = db.prepare(`SELECT value FROM meta WHERE key = 'spool_cursor'`).get() as
@@ -662,6 +860,7 @@ function buildStore(db: SqliteDatabase): LedgerStore {
   return {
     ingest,
     loadCursor,
+    claims: buildClaimsOps(db),
     checkpoint: () => {
       try {
         db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
@@ -892,6 +1091,7 @@ export async function openLedgerStore(path: string): Promise<LedgerStoreResult> 
     client.exec('PRAGMA journal_mode = WAL');
     client.exec('PRAGMA busy_timeout = 3000');
     client.exec(SCHEMA);
+    migrateClaimsColumns(client);
     return { ok: true, store: buildStore(client), close: () => client.close() };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

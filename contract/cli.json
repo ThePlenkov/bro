@@ -15,6 +15,7 @@
         "fleet",
         "sessions",
         "mode",
+        "claim",
         "delegate",
         "agents",
         "status",
@@ -364,6 +365,38 @@
         "exits": {
           "0": "mode printed/set/cleared/rendered — or hook-binding notice",
           "1": "ledger unavailable",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
+    "claim": {
+      "name": "claim",
+      "group": "fleet",
+      "summary": "Session resource claims — leases on worktree/branch/task/pr/path/role URIs in the session ledger [--json]",
+      "spellings": ["claim", "fleet claim"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "claim → {ok,resource,session,conflict}; release → {released,session}; list → {claims,warnings}",
+          "--session <sid>": "claiming session id — default: session env / hook identity",
+          "--host <h>": "claiming host (claude, codex, devin, …)",
+          "--ttl <sec>": "lease seconds — default 24h; 0 = no expiry",
+          "--exclusive": "refuse every other live holder (role:* default)",
+          "--shared": "allow co-claims unless the standing claim is exclusive",
+          "--project": "list only claims of the current project id",
+          "--resource <prefix>": "list only claims whose URI starts with this prefix"
+        },
+        "subs": {
+          "release": {},
+          "list": {}
+        },
+        "json": "schemas/cli/claim.schema.json",
+        "exits": {
+          "0": "claimed/released/listed — a refused claim exits 1 with the standing holder",
+          "1": "claims store unavailable, usage error, or claim refused",
           "2": "usage"
         }
       },

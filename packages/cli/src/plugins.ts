@@ -83,6 +83,7 @@ import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
+import { runClaimCommand } from './commands/claim.ts';
 import { runModeCommand } from './commands/mode.ts';
 import { runSessionsCommand } from './commands/sessions.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
@@ -413,6 +414,36 @@ export const PLUGINS: BroPlugin[] = [
       exits: {
         0: 'mode printed/set/cleared/rendered — or hook-binding notice',
         1: 'ledger unavailable',
+        2: 'usage',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'claim',
+    group: 'fleet',
+    summary:
+      'Session resource claims — leases on worktree/branch/task/pr/path/role URIs in the session ledger [--json]',
+    run: argv => runClaimCommand(argv),
+    contract: {
+      flags: {
+        '--json':
+          'claim → {ok,resource,session,conflict}; release → {released,session}; list → {claims,warnings}',
+        '--session <sid>': 'claiming session id — default: session env / hook identity',
+        '--host <h>': 'claiming host (claude, codex, devin, …)',
+        '--ttl <sec>': 'lease seconds — default 24h; 0 = no expiry',
+        '--exclusive': 'refuse every other live holder (role:* default)',
+        '--shared': 'allow co-claims unless the standing claim is exclusive',
+        '--project': 'list only claims of the current project id',
+        '--resource <prefix>': 'list only claims whose URI starts with this prefix',
+      },
+      subs: {
+        release: {},
+        list: {},
+      },
+      json: 'schemas/cli/claim.schema.json',
+      exits: {
+        0: 'claimed/released/listed — a refused claim exits 1 with the standing holder',
+        1: 'claims store unavailable, usage error, or claim refused',
         2: 'usage',
       },
     },
