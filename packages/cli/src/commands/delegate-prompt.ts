@@ -3,6 +3,7 @@
  *  bounded regular file only: a prompt file is one turn's payload,
  *  never an unbounded stream or a device. (spec bro-z8tng) */
 import { readFileSync, statSync, type Stats } from 'node:fs';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import { SpawnInputError } from './agents.ts';
 import { MAX_PROMPT_FILE_BYTES, type DelegateRequest } from './delegate.ts';
 
@@ -46,4 +47,13 @@ export function delegatePrompt(req: DelegateRequest): string {
   const text =
     req.prompt ?? (req.promptFile === undefined ? undefined : promptFileText(req.promptFile));
   return requirePrompt(text);
+}
+
+/** The --detach work order — the caller's ask plus the worker closeout
+ *  contract every spawn lane carries (spec bro-xkv42.1, epic bro-xkv42).
+ *  --wait stays conversational: a pooled turn has no registry entry, no
+ *  exit record, and no --result channel — nothing a learn/retro
+ *  artifact could attach to. */
+export function delegateWorkPrompt(req: DelegateRequest): string {
+  return `${delegatePrompt(req)}\n\n${LEARN_RETRO_CLOSEOUT}`;
 }

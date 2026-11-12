@@ -71,4 +71,30 @@ describe('the pane impl seam', () => {
     assert.equal(v?.led.state, 'idle');
     assert.match(v?.mode ?? '', /^since /);
   });
+
+  test('the permission clock starts at the ask — later rows do not move it', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.feed({
+      kind: 'permission',
+      title: 'write /x',
+      verdict: 'denied',
+      ts: '2026-01-01T00:00:30Z',
+    });
+    impl.beginLive();
+    const asked = impl.verdict?.mode;
+    assert.match(asked ?? '', /^permission · since /);
+    // an update row keeps requires_action open (the ask is still
+    // unanswered) but is not a new ask — the stamp must not move
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:05:00Z',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'still blocked' },
+      } as never,
+    });
+    assert.equal(impl.verdict?.led.state, 'blocked');
+    assert.equal(impl.verdict?.mode, asked);
+  });
 });

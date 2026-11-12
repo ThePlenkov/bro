@@ -2,6 +2,16 @@
  *  by every frontend that paints an LED off the journal. */
 import type { PaneLed } from './led.ts';
 import type { ArchiveRow } from './rows.ts';
+import { fmtWhen } from '../wire/fmt.ts';
+
+/** Terminal postures carry the status-entry stamp — "since" is the
+ *  question a finished/blocked row must answer. A stamp that parses
+ *  to nothing (malformed ts) degrades to the bare mode, never a
+ *  trailing `· since ` with no time. */
+const since = (base: string, ts: string | undefined): string => {
+  const when = ts === undefined ? '' : fmtWhen(ts);
+  return when === '' ? base : `${base} · since ${when}`;
+};
 
 /** The archive's own LED for one row — last row wins: a turn start or
  *  update is working, a clean stop is idle, an error/denied-ask is
@@ -17,14 +27,14 @@ export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | un
       if (row.phase === 'start') return { led: { state: 'working' }, mode: 'turn' };
       if (row.phase === 'stop') {
         return row.error !== undefined && row.error !== ''
-          ? { led: { state: 'blocked' }, mode: 'turn error' }
-          : { led: { state: 'idle' }, mode: 'turn complete' };
+          ? { led: { state: 'blocked' }, mode: since('turn error', row.ts) }
+          : { led: { state: 'idle' }, mode: since('turn complete', row.ts) };
       }
       return undefined;
     case 'permission':
       return {
         led: { state: 'blocked' },
-        mode: `permission — ${row.verdict ?? 'denied'}`,
+        mode: since(`permission — ${row.verdict ?? 'denied'}`, row.ts),
       };
     default:
       return undefined;

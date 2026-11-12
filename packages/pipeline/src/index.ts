@@ -91,8 +91,25 @@ export {
   SATURATION_ALERT,
   STAGE_INTENTS,
 } from './runner.ts';
+export type {
+  StartAction,
+  StartItemReport,
+  StartReport,
+  StartRunDeps,
+  StartRunOptions,
+} from './starter.ts';
+export { liveRunItems, startRuns, writeFormulaSidecar } from './starter.ts';
 export type { AcceptDeps, AcceptPayload, EvidenceBundle } from './stages/accept.ts';
 export { acceptStage, evidenceBundle, REJECTED_VERDICT } from './stages/accept.ts';
+export type {
+  ActGateDeps,
+  ActGateObservation,
+  ActGatePayload,
+  ActGatePrRef,
+  ActGateRead,
+  ActGateVerdict,
+} from './stages/act-gate.ts';
+export { ACT_GATE_VERDICTS, actGateStage } from './stages/act-gate.ts';
 export type {
   CaptureDeps,
   CaptureMode,
@@ -183,6 +200,14 @@ export type {
   VerifyVerdict,
 } from './stages/verify.ts';
 export { ROW_VERDICTS, VERIFY_VERDICTS, verifyStage } from './stages/verify.ts';
+export type {
+  FleetDeps,
+  FleetDiff,
+  FleetPayload,
+  FleetSpawnRequest,
+  WorkVerdict,
+} from './stages/work.ts';
+export { WORK_VERDICTS, workStage } from './stages/work.ts';
 export type {
   ArtifactTrace,
   TraceDeps,

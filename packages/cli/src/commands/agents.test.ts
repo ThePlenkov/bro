@@ -742,7 +742,11 @@ describe('bro agents run — --for claim dedup', () => {
       assert.equal(r.code, 0, r.err.join('\n'));
       const entry = readAgentRegistry(fx.main)['fx-1']!;
       const stored = agentPromptPath(fx.main, String(entry.agentId))!;
-      assert.equal(readFileSync(stored, 'utf8'), '# my title\n\nmy desc');
+      const text = readFileSync(stored, 'utf8');
+      // the composed work order: bead text first, then the shared
+      // learn+retro closeout block (spec bro-xkv42.1)
+      assert.ok(text.startsWith('# my title\n\nmy desc'), 'bead text leads the order');
+      assert.ok(text.includes('learn + retro'), 'closeout contract appended');
       await agents(['down', 'fx-1']);
     } finally {
       fx.restore();
@@ -1733,7 +1737,12 @@ describe('bro agents down <target>', () => {
     }
   });
 
-  test('a dead wrapper with a live descendant is still-running, not stopped', async () => {
+  // descendant enumeration rides /proc (and setsid semantics have no
+  // macOS spelling) — the survival probe is a linux-only contract
+  // until the darwin legs prove it out (bro-0204b)
+  test('a dead wrapper with a live descendant is still-running, not stopped', {
+    skip: process.platform !== 'linux',
+  }, async () => {
     // the wrapper dies on SIGTERM while its descendant had TERM
     // ignored before exec — a group probe, not the wrapper pid, is what
     // stands between this unit and a `stopped` marker (bro-l8c4f.3)
@@ -1751,7 +1760,11 @@ describe('bro agents down <target>', () => {
     }
   });
 
-  test('a setsid-escaped descendant dies with the unit — the tree spans every group it leads', async () => {
+  // setsid itself does not exist off-Linux — same linux-only contract
+  // as the dead-wrapper scenario above (bro-0204b)
+  test('a setsid-escaped descendant dies with the unit — the tree spans every group it leads', {
+    skip: process.platform !== 'linux',
+  }, async () => {
     // setsid moves the child into its own session AND process group —
     // kill(-wrapperPgid) cannot reach it, but it is still a tree member,
     // so the pre-signal snapshot's pgid set signals it directly

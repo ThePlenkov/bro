@@ -111,6 +111,16 @@ export const PARK_ALERTS = {
   /** the customer's answer record failed shape validation — drained
    *  and consumed so the same bad row can't re-alert every wake */
   answerMalformed: 'answer-malformed',
+  /** the merge gate's pipeline ctx carried no usable PR identity
+   *  (absent or malformed `pr`/`draft_pr`) — the gate cannot probe
+   *  what it cannot name; a corrected context on a later wake can
+   *  still settle (same fail-closed contract as accept's missing
+   *  run.customer) */
+  prIdentityMissing: 'pr-identity-missing',
+  /** the act-state probe found no PR at the journaled ref — the gate
+   *  cannot settle on a PR that isn't there; the world must repair
+   *  (wrong ref, recreated PR) before a wake helps */
+  prUnreadable: 'pr-unreadable',
 } as const;
 export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
 

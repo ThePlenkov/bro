@@ -198,7 +198,7 @@
         "flags": {
           "--json": "the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`"
         },
-        "json": "schemas/cli/watchdog.json",
+        "json": "schemas/cli/watchdog.schema.json",
         "exits": {
           "0": "brief printed (human or --json)",
           "2": "unknown flag — usage on stderr"
@@ -209,13 +209,31 @@
     "pipeline": {
       "name": "pipeline",
       "group": "pipeline",
-      "summary": "Pipeline customer surface — accept|answer write the verdict store",
+      "summary": "Pipeline customer surface — run|accept|answer",
       "spellings": ["pipeline"],
       "aliases": [],
       "hidden": false,
       "plan": false,
       "contract": {
         "subs": {
+          "run": {
+            "flags": {
+              "--formula <file>": "REQUIRED — the pipeline formula (TOML) every run drives",
+              "--engines <module>": "path to a module exporting engines (EngineMap or (dir)=>EngineMap)",
+              "--customer <id>": "the recorded customer — default: $BRO_CUSTOMER, else the bd actor",
+              "--label <label>": "the queue label to scan (default pipeline)",
+              "--item <id>": "explicit bead id (repeatable) — bypasses the label scan",
+              "--limit <n>": "cap how many candidates this invocation scans",
+              "--max-in-flight <n>": "machine in-flight cap — narrows limits.in_flight (0 = uncapped)",
+              "--dry-run": "report what WOULD start without invoking runPipeline",
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "scan completed — per-item outcomes in the report",
+              "1": "customer-unresolved or a run-level failure",
+              "2": "usage or an unloadable formula/engines module"
+            }
+          },
           "accept": {
             "flags": {
               "--notes <text>": "the customer's notes — required on rejected (the fix scope)",
@@ -553,7 +571,7 @@
     "learn": {
       "name": "learn",
       "group": "self",
-      "summary": "Self-improvement loop — lessons: add|list|show|forget|capture|probe",
+      "summary": "Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe",
       "spellings": ["learn", "self learn"],
       "aliases": [],
       "hidden": false,

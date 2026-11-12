@@ -4,41 +4,57 @@
   "targetDefaults": {
     "typecheck": {
       "dependsOn": ["^build"],
-      "cache": false
-    },
-    "test": {
-      "dependsOn": ["^build", "build"],
       "cache": true,
       "inputs": [
         "default",
-        "envGates",
-        "{workspaceRoot}/plugin.json",
-        "{workspaceRoot}/skills/**/*",
-        "{workspaceRoot}/.claude-plugin/**/*",
-        "{workspaceRoot}/.codex-plugin/**/*"
+        {
+          "externalDependencies": ["typescript"]
+        }
       ]
+    },
+    "test": {
+      "dependsOn": ["^build", "build"],
+      "cache": true
     },
     "test:e2e": {
       "dependsOn": ["^build", "build"],
       "cache": true,
-      "inputs": [
-        "default",
-        "envGates",
-        "{workspaceRoot}/plugin.json",
-        "{workspaceRoot}/skills/**/*",
-        "{workspaceRoot}/.claude-plugin/**/*",
-        "{workspaceRoot}/.codex-plugin/**/*"
-      ]
+      "inputs": ["default", "envGates"]
     }
   },
   "namedInputs": {
+    "pluginSurface": [
+      "{workspaceRoot}/plugin.json",
+      "{workspaceRoot}/plugins/**/*",
+      "{workspaceRoot}/packages/agent-plugins/**/*",
+      "{workspaceRoot}/.claude-plugin/**/*",
+      "{workspaceRoot}/.codex-plugin/**/*",
+      "{workspaceRoot}/.agents/**/*",
+      "{workspaceRoot}/skills/**/*",
+      "{workspaceRoot}/formulas/**/*",
+      "{workspaceRoot}/hooks/**/*",
+      "{workspaceRoot}/hooks.json",
+      "{workspaceRoot}/dogfood/**/*"
+    ],
     "envGates": [
-      { "env": "BRO_MESH_E2E_REPO" },
-      { "env": "BRO_MESH_WL_E2E" },
-      { "env": "CODACY_API_TOKEN" },
-      { "env": "CODACY_PROJECT_TOKEN" },
-      { "env": "CODESCENE_TOKEN" },
-      { "env": "SONAR_TOKEN" }
+      {
+        "env": "BRO_MESH_E2E_REPO"
+      },
+      {
+        "env": "BRO_MESH_WL_E2E"
+      },
+      {
+        "env": "CODACY_API_TOKEN"
+      },
+      {
+        "env": "CODACY_PROJECT_TOKEN"
+      },
+      {
+        "env": "CODESCENE_TOKEN"
+      },
+      {
+        "env": "SONAR_TOKEN"
+      }
     ]
   },
   "release": {
@@ -74,5 +90,8 @@
       "options": {}
     }
   ],
-  "nxCloudId": "6ac40919e891443e6ed11ebf"
+  "nxCloudId": "6ac40919e891443e6ed11ebf",
+  "affected": {
+    "legacy": true
+  }
 }

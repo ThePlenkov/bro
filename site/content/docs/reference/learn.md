@@ -1,11 +1,11 @@
 ---
 title: "bro learn"
-description: "Self-improvement loop — lessons: add|list|show|forget|capture|probe"
+description: "Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe"
 ---
 
-**`bro learn`** — Self-improvement loop — lessons: add|list|show|forget|capture|probe
+**`bro learn`** — Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe
 
-`bro learn add|list|show|forget|capture|probe`
+`bro learn add|list|show|forget|promote|capture|probe`
 
 | | |
 | --- | --- |

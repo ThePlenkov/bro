@@ -16,6 +16,7 @@ tools, or failed-tool evidence decide when it surfaces.
 | `bro self learn list [--json] [--source X] [--confidence X]`                                    | List lessons, optionally filtered                                                             |
 | `bro self learn show <id>`                                                                      | Print one lesson as JSON                                                                      |
 | `bro self learn forget <id>`                                                                    | Remove a lesson                                                                               |
+| `bro self learn promote <id>`                                                                   | Graduate a lesson to a rule-edit bead — carries the rule, trigger, and evidence               |
 | `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run] [--json]` | Distill finished artifacts into lessons                                                       |
 | `bro self learn probe <question>`                                                               | Ask the store first; a hit prints ranked lessons and a miss records the gap                   |
 
@@ -23,6 +24,12 @@ tools, or failed-tool evidence decide when it surfaces.
 `--lesson`, `--on`, `--match-terms`, `--match-commands`,
 `--match-paths`, `--match-tools`, `--match-errors`, `--budget`, and
 optional `--evidence`.
+
+`bro self learn promote <id>` graduates a lesson into a rule-edit bead:
+the bead carries the rule, its trigger, and its evidence, and the edit
+lands through the normal spec/PR path (skills/ or rules files). The
+lesson records `promotedTo` and keeps firing until the rule lands —
+promote never edits the rules files itself.
 Manual evidence uses `K:R`: the supported kinds are `bead`, `pr`, `session`,
 `command`, and `text`.
 

@@ -4,7 +4,15 @@
  *  live Dolt store. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { initRepo, inside, installFakeBd, runCli, writeBeads, type CliResult } from './testrepo.ts';
+import {
+  initRepo,
+  inside,
+  installFakeBd,
+  readBeads,
+  runCli,
+  writeBeads,
+  type CliResult,
+} from './testrepo.ts';
 
 function learnFixture(
   rows: Array<Record<string, unknown>> = [],
@@ -283,6 +291,48 @@ describe('bro learn', () => {
         lesson: string;
       }>;
       assert.equal(lessons[0]!.lesson, 'bro act merge refuses on a red gate');
+    });
+  });
+
+  test('promote opens a rule-edit bead and marks the lesson promotedTo', () => {
+    const f = learnFixture();
+    inside(f.main, f.root, () => {
+      const add = f.run(ADD);
+      assert.equal(add.code, 0, add.stderr);
+      const id = add.stdout.trim();
+
+      const p = f.run(['promote', id]);
+      assert.equal(p.code, 0, p.stderr);
+      const beadId = p.stdout.trim();
+      assert.match(beadId, /^fx-/);
+
+      // the bead carries the rule + trigger + evidence for the spec/PR path
+      const rows = readBeads(f.db);
+      const bead = rows.find(r => r.id === beadId)!;
+      assert.deepEqual(bead.labels, ['learn']);
+      assert.match(String(bead.title), new RegExp(`learn promote ${id}`));
+      const desc = String(bead.description);
+      assert.match(desc, /after gh pr merge run bro debt collect/);
+      assert.match(desc, /on: post-tool/);
+      assert.match(desc, /bead: bro-abc/);
+      assert.match(desc, new RegExp(`lesson: ${id}`));
+
+      // the lesson records promotedTo — show proves the mark landed
+      const lesson = JSON.parse(f.run(['show', id]).stdout) as Record<string, unknown>;
+      assert.equal(lesson.promotedTo, beadId);
+      assert.ok(lesson.updatedAt !== undefined);
+
+      // idempotent — same bead id, stderr notes the skip, no second row
+      const again = f.run(['promote', id]);
+      assert.equal(again.code, 0, again.stderr);
+      assert.equal(again.stdout.trim(), beadId);
+      assert.match(again.stderr, /already promoted/);
+      assert.equal(readBeads(f.db).length, 1);
+
+      // a missing lesson is a not-found, not a usage error
+      const miss = f.run(['promote', 'learn-nope']);
+      assert.equal(miss.code, 1);
+      assert.match(miss.stderr, /no lesson learn-nope/);
     });
   });
 });

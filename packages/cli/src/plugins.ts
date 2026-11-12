@@ -250,7 +250,7 @@ export const PLUGINS: BroPlugin[] = [
         '--json':
           'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
       },
-      json: 'schemas/cli/watchdog.json',
+      json: 'schemas/cli/watchdog.schema.json',
       exits: {
         0: 'brief printed (human or --json)',
         2: 'unknown flag — usage on stderr',
@@ -260,10 +260,30 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'pipeline',
     group: 'pipeline',
-    summary: 'Pipeline customer surface — accept|answer write the verdict store',
+    summary: 'Pipeline customer surface — run|accept|answer',
     run: runPipelineCommand,
     contract: {
       subs: {
+        run: {
+          flags: {
+            '--formula <file>': 'REQUIRED — the pipeline formula (TOML) every run drives',
+            '--engines <module>':
+              'path to a module exporting engines (EngineMap or (dir)=>EngineMap)',
+            '--customer <id>': 'the recorded customer — default: $BRO_CUSTOMER, else the bd actor',
+            '--label <label>': 'the queue label to scan (default pipeline)',
+            '--item <id>': 'explicit bead id (repeatable) — bypasses the label scan',
+            '--limit <n>': 'cap how many candidates this invocation scans',
+            '--max-in-flight <n>':
+              'machine in-flight cap — narrows limits.in_flight (0 = uncapped)',
+            '--dry-run': 'report what WOULD start without invoking runPipeline',
+            '--json': 'machine-readable report',
+          },
+          exits: {
+            0: 'scan completed — per-item outcomes in the report',
+            1: 'customer-unresolved or a run-level failure',
+            2: 'usage or an unloadable formula/engines module',
+          },
+        },
         accept: {
           flags: {
             '--notes <text>': "the customer's notes — required on rejected (the fix scope)",
@@ -545,9 +565,9 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'learn',
     group: 'self',
-    // lesson store + capture/probe + the connector that injects them;
-    // promote is still pending (spec: bro-f4ot.1-learn.md)
-    summary: 'Self-improvement loop — lessons: add|list|show|forget|capture|probe',
+    // lesson store + capture/probe/promote + the connector that injects
+    // them (spec: bro-f4ot.1-learn.md)
+    summary: 'Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe',
     run: runLearnCommand,
     skill: 'learn',
     configKey: 'learn',
