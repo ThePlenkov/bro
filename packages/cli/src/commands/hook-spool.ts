@@ -1,6 +1,10 @@
 import { existsSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import {
+  parseSpoolLine,
+  resolveHookSpoolPath as coreResolveHookSpoolPath,
+  type SpoolOutcome,
+  type SpoolRow,
+} from '@broject/core';
 
 const MAX_SPOOL_BYTES = 1024 * 1024;
 const DEFAULT_WATCHDOG_SECONDS = 8;
@@ -13,7 +17,23 @@ const DURATION_UNIT_MS = new Map<string, number>([
   ['d', 86_400_000],
 ]);
 
-type HookOutcome = 'ok' | 'nonzero' | 'watchdog' | 'no-cli';
+/** Aggregation buckets — the v1 columns plus `fastpath` (the shell
+ *  fast-path exit's own signal) and `killed` (a paired end that reported
+ *  the kill; unpaired starts past the watchdog still count on the
+ *  top-level `killed` field). Canonical ledger outcomes the writer never
+ *  emits are tolerated and aliased: `timeout`→watchdog, `error`→nonzero. */
+type HookOutcome = 'ok' | 'nonzero' | 'watchdog' | 'no-cli' | 'fastpath' | 'killed';
+
+const OUTCOME_BUCKETS: Record<SpoolOutcome, HookOutcome> = {
+  ok: 'ok',
+  nonzero: 'nonzero',
+  watchdog: 'watchdog',
+  timeout: 'watchdog',
+  'no-cli': 'no-cli',
+  fastpath: 'fastpath',
+  killed: 'killed',
+  error: 'nonzero',
+};
 
 interface StartRecord {
   kind: 'start';
@@ -55,7 +75,15 @@ export interface HookSpoolRow {
   count: number;
   p50: number | null;
   p95: number | null;
-  outcomes: { ok: number; nonzero: number; watchdog: number; 'no-cli': number };
+  outcomes: {
+    ok: number;
+    nonzero: number;
+    watchdog: number;
+    'no-cli': number;
+    fastpath: number;
+    killed: number;
+  };
+  /** Starts with no end past the watchdog — host kills. */
   killed: number;
 }
 
@@ -76,11 +104,6 @@ interface KilledStartContext extends HookSpoolReadContext {
   endedIds: Set<string>;
 }
 
-interface TimedFields {
-  ts: number;
-  fields: string[];
-}
-
 interface PercentileInput {
   values: number[];
   fraction: number;
@@ -91,13 +114,26 @@ interface StatusArgsInput {
   nowMs: number;
 }
 
+/** The spool's home — core's canonical resolver (`$BRO_HOOK_SPOOL` pins
+ *  it, literal `0` disables, else `$XDG_STATE_HOME/bro/hooks.spool`). */
 export function resolveHookSpoolPath(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.BRO_HOOK_SPOOL === '0') {
-    return null;
+  return coreResolveHookSpoolPath(env);
+}
+
+/** True when the live spool is over the rotation bound — the caller
+ *  drains pending rows before `rotateHookSpool` drops `.1`, so an
+ *  over-limit rotation can't silently discard backlog the ledger never
+ *  saw. Same stat the rotator itself does; best-effort false on error. */
+export function spoolRotationPending(env: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    const path = resolveHookSpoolPath(env);
+    if (path === null) {
+      return false;
+    }
+    return statSync(path).size > MAX_SPOOL_BYTES;
+  } catch {
+    return false;
   }
-  const home = env.HOME || homedir();
-  const stateHome = env.XDG_STATE_HOME || join(home, '.local', 'state');
-  return resolve(env.BRO_HOOK_SPOOL || join(stateHome, 'bro', 'hooks.spool'));
 }
 
 export function rotateHookSpool(env: NodeJS.ProcessEnv = process.env): void {
@@ -118,80 +154,30 @@ export function rotateHookSpool(env: NodeJS.ProcessEnv = process.env): void {
   }
 }
 
-function isOutcome(value: string | undefined): value is HookOutcome {
-  switch (value) {
-    case 'ok':
-    case 'nonzero':
-    case 'watchdog':
-    case 'no-cli':
-      return true;
-    default:
-      return false;
+/** One parsed spool row → the reader's record shape. The core parser is
+ *  version-tolerant (v1 + v2); end rows without rc/outcome can't pair a
+ *  duration and are dropped, same as the old strict parser. */
+function toRecord(row: SpoolRow): HookRecord | undefined {
+  if (row.phase === 'start') {
+    return { kind: 'start', ts: row.ts, id: row.id, host: row.host, event: row.event };
   }
-}
-
-interface RecordIdentity extends HookIdentity {
-  id: string;
-}
-
-function parseIdentity(fields: string[]): RecordIdentity | undefined {
-  const id = fields.at(3);
-  const host = fields.at(4);
-  const event = fields.at(5);
-  if (!id || !host) {
+  if (row.rc === undefined || row.outcome === undefined) {
     return undefined;
   }
-  if (event === undefined) {
-    return undefined;
-  }
-  return { id, host, event };
-}
-
-function parseStart({ ts, fields }: TimedFields): StartRecord | undefined {
-  const identity = parseIdentity(fields);
-  if (identity === undefined) {
-    return undefined;
-  }
-  return { kind: 'start', ts, ...identity };
-}
-
-function parseEnd({ ts, fields }: TimedFields): EndRecord | undefined {
-  const identity = parseIdentity(fields);
-  if (identity === undefined) {
-    return undefined;
-  }
-  const rcText = fields.at(6);
-  if (rcText === undefined || !/^\d+$/.test(rcText)) {
-    return undefined;
-  }
-  const outcome = fields.at(7);
-  if (!isOutcome(outcome)) {
-    return undefined;
-  }
-  return { kind: 'end', ts, ...identity, rc: Number(rcText), outcome };
+  return {
+    kind: 'end',
+    ts: row.ts,
+    id: row.id,
+    host: row.host,
+    event: row.event,
+    rc: row.rc,
+    outcome: OUTCOME_BUCKETS[row.outcome],
+  };
 }
 
 function parseRecord(line: string): HookRecord | undefined {
-  const fields = line.split('\t');
-  if (fields.at(0) !== 'v1') {
-    return undefined;
-  }
-  const tsText = fields.at(1);
-  if (tsText === undefined || !/^\d+$/.test(tsText)) {
-    return undefined;
-  }
-  const ts = Number(tsText);
-  if (!Number.isSafeInteger(ts)) {
-    return undefined;
-  }
-  const kind = fields.at(2);
-  if (kind === 'start') {
-    return parseStart({ ts, fields });
-  }
-  if (kind === 'end') {
-    return parseEnd({ ts, fields });
-  }
-  return undefined;
+  const row = parseSpoolLine(line);
+  return row === undefined ? undefined : toRecord(row);
 }
 
 function readRecords(path: string): HookRecord[] {
@@ -202,8 +188,7 @@ function readRecords(path: string): HookRecord[] {
     return readFileSync(path, 'utf8')
       .split('\n')
       .flatMap(line => {
-        const row = line.endsWith('\r') ? line.slice(0, -1) : line;
-        const record = row === '' ? undefined : parseRecord(row);
+        const record = parseRecord(line);
         return record === undefined ? [] : [record];
       });
   } catch {
@@ -258,6 +243,8 @@ function toRow(aggregate: HookSpoolAggregate): HookSpoolRow {
       nonzero: aggregate.outcomes.get('nonzero') ?? 0,
       watchdog: aggregate.outcomes.get('watchdog') ?? 0,
       'no-cli': aggregate.outcomes.get('no-cli') ?? 0,
+      fastpath: aggregate.outcomes.get('fastpath') ?? 0,
+      killed: aggregate.outcomes.get('killed') ?? 0,
     },
     killed: aggregate.killed,
   };
@@ -442,7 +429,7 @@ export function renderHookSpoolStatus(
     return JSON.stringify(rows, null, 2);
   }
   return [
-    'host\tevent\tcount\tp50(s)\tp95(s)\tok\tnonzero\twatchdog\tno-cli\tkilled',
+    'host\tevent\tcount\tp50(s)\tp95(s)\tok\tnonzero\twatchdog\tno-cli\tfastpath\tkilled',
     ...rows.map(row =>
       [
         row.host,
@@ -454,7 +441,10 @@ export function renderHookSpoolStatus(
         row.outcomes.nonzero,
         row.outcomes.watchdog,
         row.outcomes['no-cli'],
-        row.killed,
+        row.outcomes.fastpath,
+        // paired ends that reported a kill + unpaired starts past the
+        // watchdog — both are "the run died" for a status glance
+        row.outcomes.killed + row.killed,
       ].join('\t')
     ),
   ].join('\n');

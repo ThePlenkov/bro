@@ -193,19 +193,21 @@ function assertSpoolCase(scenario: SpoolScenario, shell: string, spool: string):
     .trim()
     .split('\n')
     .map(line => line.split('\t'));
-  const startRecord = records.find(record => record.at(2) === 'start');
-  const endRecord = records.find(record => record.at(2) === 'end');
-  assert.equal(records.length, scenario.outcome === 'no-cli' ? 1 : 2);
-  const hostRecord = startRecord ?? endRecord;
-  assert.equal(hostRecord?.at(4), scenario.client === 'none' ? 'unknown' : scenario.client);
-  assert.equal(endRecord?.at(7), scenario.outcome);
-  if (scenario.outcome === 'no-cli') {
-    assert.equal(startRecord, undefined);
-  } else {
-    assert.equal(startRecord?.at(3), endRecord?.at(3), `${shell} ${scenario.name} id`);
-  }
+  // v2 rows: every launch pairs a start with exactly one end — including
+  // no-cli (nothing ran, but the firing still happened) and fastpath
+  const startRecord = records.find(record => record.at(0) === 'v2' && record.at(2) === 'start');
+  const endRecord = records.find(record => record.at(0) === 'v2' && record.at(2) === 'end');
+  assert.equal(records.length, 2, `${shell} ${scenario.name} row count`);
+  // the fixtures always set PLUGIN_ROOT — bare PLUGIN_ROOT reads as the
+  // codex plugin root under the widened host detection
+  const expectedHost = scenario.client === 'none' ? 'codex' : scenario.client;
+  assert.equal(startRecord?.at(4), expectedHost, `${shell} ${scenario.name} host`);
+  assert.equal(endRecord?.at(4), expectedHost, `${shell} ${scenario.name} end host`);
+  // v2 end: … launcher(12) rc(13) outcome(14) cwd(15…)
+  assert.equal(endRecord?.at(14), scenario.outcome, `${shell} ${scenario.name} outcome`);
+  assert.equal(startRecord?.at(3), endRecord?.at(3), `${shell} ${scenario.name} id`);
   if (scenario.rc !== null) {
-    assert.equal(endRecord?.at(6), scenario.rc, `${shell} ${scenario.name} rc`);
+    assert.equal(endRecord?.at(13), scenario.rc, `${shell} ${scenario.name} rc`);
   }
 }
 
@@ -1093,13 +1095,18 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       const result = runCli(['hooks', 'status', '--since', '24h', '--json'], {
         cwd: f.main,
         input: 'not JSON',
-        env: { BRO_HOOK_SPOOL: spool },
+        // the status read also drains the spool into ledger.db — pin the
+        // state home so the test ledger stays inside the fixture
+        env: { BRO_HOOK_SPOOL: spool, XDG_STATE_HOME: join(f.root, 'xdg-state') },
       });
       assert.equal(result.code, 0, result.stderr);
       assert.equal(JSON.parse(result.stdout).at(0)?.event, 'post-tool');
       const empty = runCli(['hooks', 'status'], {
         cwd: f.main,
-        env: { BRO_HOOK_SPOOL: join(f.root, 'missing.spool') },
+        env: {
+          BRO_HOOK_SPOOL: join(f.root, 'missing.spool'),
+          XDG_STATE_HOME: join(f.root, 'xdg-state'),
+        },
       });
       assert.equal(empty.code, 0, empty.stderr);
       assert.equal(empty.stdout, 'no hook runs recorded\n');
