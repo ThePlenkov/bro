@@ -83,6 +83,7 @@ import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
+import { runSessionsCommand } from './commands/sessions.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
 import { runGoalCommand } from './commands/goal.ts';
 import { runDogfoodCommand, runBenchmarkCommand } from './commands/dogfood.ts';
@@ -336,7 +337,7 @@ export const PLUGINS: BroPlugin[] = [
       // no `a|b` alternation in this summary — gen-command-docs'
       // signature() would extract it as subcommands; the arg lists use
       // spaced pipes so the generated page prints the prose only
-      'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]',
+      'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]; hosts [--json]',
     run: runFleetCommand,
     contract: {
       flags: {
@@ -345,10 +346,46 @@ export const PLUGINS: BroPlugin[] = [
         '--live': 'TTY dashboard repaint loop (needs a TTY)',
         '--every N': 'repaint cadence seconds — implies --live',
       },
+      subs: {
+        hosts: {
+          flags: {
+            '--json':
+              '{hosts, projects, generatedAt} — hosts × installs + sessions per project over the session ledger',
+          },
+          json: 'schemas/cli/fleet-hosts.schema.json',
+          exits: {
+            0: 'board printed',
+            1: 'ledger unavailable',
+            2: 'usage',
+          },
+        },
+      },
       json: 'schemas/cli/fleet.schema.json',
       exits: {
         0: 'fleet printed',
         2: 'usage — --live without TTY, --every out of range, --json + --live',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'sessions',
+    group: 'fleet',
+    summary:
+      'Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree [--json]',
+    run: argv => runSessionsCommand(argv),
+    contract: {
+      flags: {
+        '--json': '{sessions, warnings} — epoch-ms times, full sids',
+        '--project': 'only sessions of the current project — the default is machine-wide',
+        '--all': 'every session on the machine — the default',
+        '--host <h>': 'only sessions of this host (claude, codex, devin, …)',
+        '--live': 'only sessions whose derived state is live',
+      },
+      json: 'schemas/cli/sessions.schema.json',
+      exits: {
+        0: 'sessions printed',
+        1: 'ledger unavailable',
+        2: 'usage',
       },
     },
   }),
