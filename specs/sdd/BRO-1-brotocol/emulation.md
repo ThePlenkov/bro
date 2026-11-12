@@ -173,3 +173,118 @@ The emulated commands now exist. Replays against real binaries:
 - Open question logged to spec: whether `emulation.md` (a part
   subfile) should be indexed as a child spec by today's walker —
   post-y1jtm it's a *part*, not a spec.
+
+## Real replay — `@broject/spec` connector (2026-11-12, PR #1031)
+
+The plugin layer landed: `specConnector` (name `brose`) registers ahead
+of `native` and serves this repo's own `specs/` tree — a live hybrid
+of KEY-N protocol docs and ~340 legacy bead specs.
+
+- **tree:** `bro spec tree` (worktree cli) renders `sdd` → `BRO-1` →
+  `BRO-2` from frontmatter `id:`s — the path-derived legacy ids
+  (`BRO-1-brotocol`) are gone — while every `bro-*.md` bead spec still
+  resolves through the merged legacy index. `emulation.md` parts show
+  as legacy child specs re-parented by the orphan fixup, matching
+  native's view. No dangling-parent diagnostics.
+- **check:** `bro spec check bro-bntld.2|.3|.5` → `link` (unchanged —
+  the `spec:` link path never touched the connector).
+- **drift:** `bro spec drift` → 248 stale rows; `scope()` reads
+  `owns:`/`scope:` frontmatter on protocol docs and `specScope()` on
+  legacy files.
+- **new:** `bro spec new bro-zztest` wrote `specs/bro-zztest.spec.md`
+  rendered from `brotocol/spec@1` (`template:`/`id:`/`status:`
+  frontmatter, Problem/Design/Requirements/Verify sections) — the
+  first spec scaffolded by the engine, not `scaffoldBody`.
+- **init:** scratch repo with a `.spec.md` doc → `spec init` detects
+  `brose` and writes `connectors.specs: "brose"`; legacy-only and
+  tool-layout repos detect `native`/`speckit`/`openspec` as before.
+- **Finding (closed in-plugin):** `specTemplateDir` derives from
+  brotocol's `import.meta.url` — inside the bundled cli that URL lands
+  in cli's dist, so `create` saw `unknown template`. The connector
+  resolves `@broject/brotocol` through `createRequire` and prepends
+  the real `templates/` dir; `specTemplateDir` stays as fallback.
+- **Finding (tooling):** nx's per-project cache does not see
+  `@broject/*` source changes through the bundle — a dependency rebuild
+  can leave `cli/dist` stale (`--skip-nx-cache` on `@broject/bro:build`
+  is the local workaround; CI builds fresh).
+
+## Real replay — agent hooks through opencode (2026-11-12, PR #1031)
+
+`opencode run --model opencode-go/beam-free` against the worktree plugin
+(`.opencode/plugins/bro` → checkout-local `packages/cli/dist`):
+
+- **session-start:** the model quoted the injected line verbatim —
+  `SDD (gate): spec before code — *.spec.md docs on the Brotocol spec
+  protocol (KEY-N ids, template: brotocol/spec@N), policy specs carry
+  bro:sdd identity regions, or a spec: link in the bead …` — the
+  `brose` connector's `policy()`, not native's. Mode came from
+  `bro.config.local.json` `modes.default: code` (gitignored; sdd hooks
+  serve plan/code only — a bare opencode session resolves `observe`
+  and stays silent by design).
+- **Finding (harness):** renaming the global plugin dir to
+  `plugins/bro.disabled` does NOT disable it — opencode loads every
+  `plugins/*/index.*`, so the stale copy kept firing and its PATH
+  `bro` (0.3.0, pre-brose) injected the old policy alongside the new
+  one. Moving it outside `plugins/` entirely is the real off switch.
+- **Finding (packaging, fixed):** the published cli bundles
+  `@broject/spec` (tsdown `noExternal`), so `require.resolve(
+  '@broject/brotocol')` finds nothing at runtime — `bro spec new`
+  would fail `unknown template` outside a checkout. The bundle now
+  emits `packages/brotocol/templates/` as `dist/templates/` assets
+  and the connector probes `<dist>/templates` first.
+- **Finding (detection order, fixed):** with `brose` registered first,
+  a bare repo fell back to it — `spec init` said `native` while the
+  facade served `brose`, and brose's scaffold refuses absent parents
+  where native writes the frontmatter edge. `native.matchDir` now
+  defers on `hasSpecDoc`, `brose` registers after the tool connectors,
+  and `warnIfAmbiguous` treats a layout claim like a remote claim.
+  Verified matrix: bare→native, legacy `*.md`→native, `*.spec.md`→
+  brose, `.specify/`→speckit — with zero ambiguity warnings.
+- **Review-hardening (same PR):** `specScope()` reads `owns:` before
+  `scope:` (drift audit of protocol specs); `specDirAbs` realpaths the
+  deepest existing ancestor so an in-checkout symlink cannot smuggle
+  `sdd.dir` writes outside the root; `hasSpec` requires a non-empty
+  doc (zero-byte `.spec.md` is a stub, matching `hasSpecFile`);
+  `scope()` no longer borrows a same-id legacy file's scope; dir-doc
+  containment uses the platform separator.
+
+## Run 7: stop gate — `bro hooks stop` with armed claim (real)
+
+- Setup: transient bead `bro-3k283` (in_progress, no spec — `spec
+  check` → MISSING), `BRO_BEAD_ID` env pin, `.task` marker
+  `sddgate-probe-1.task` in the common hooks dir, `sdd.mode=gate`,
+  `modes.default=code`.
+- `bro hooks stop` → `{"decision":"block","reason":"bro: claimed
+  beads open: bro-3k283 … — close (bd close <id>) or release the
+  claim before stopping"}` — the gate FIRED, but with the tasks
+  connector's reason, not SDD's.
+- Direct probe of `sddConnector.hooks().stopGate(ctx)` (real beads
+  store + marker + brose resolution) → correct contribution:
+  `{aspect:'task', block:'bro: SDD — claimed beads without a spec:
+  bro-3k283 … — write a spec for "bro-3k283" (`bro spec new
+  bro-3k283`), add a spec: link, or label 'trivial'}`.
+- **Finding (arbitration, → bro-3bgbs):** `stopGateOutcome` returns
+  on the first armed block in aspect order; the tasks connector's
+  own-claims block shares aspect `task` and identical preconditions,
+  so it always wins and `takeStopGateBlock` (keyed by aspect) demotes
+  the SDD block to a hint on every stop — the spec-first reason is
+  unreachable through the emit path. Session-start/promptSubmit
+  nudges still carry the signal; the gate-mode stop block needs
+  same-aspect concatenation or its own aspect.
+
+## Run 8: prompt submit — dedup nudge (real)
+
+- Setup: transient claimed bead with no `spec:` link, `sdd.mode=gate`,
+  `modes.default=code`, fresh session (no prior nudge stamp).
+- First `bro hooks prompt` (session/prompt payload) → nudge emitted
+  once: `SDD: claimed beads without a spec: <bead> … — write a spec
+  (bro spec new), add a spec: link, or label 'trivial'` — the
+  `brose` connector's remedy text.
+- Repeat submit with the same missing set → silent (dedup stamp
+  holds); the nudge re-arms only when the claimed-without-spec set
+  changes. Probe bead closed afterwards; marker/stamp residue
+  cleaned from the common hooks dir.
+- All three SDD hook surfaces now verified live: sessionStart
+  (Run 6 replay), promptSubmit (this run), stopGate (Run 7 — block
+  carries claims + SDD reasons concatenated after the same-aspect
+  arbitration fix, bro-3bgbs / PR #1035).

@@ -13,8 +13,8 @@
  *    3. neither resolves → `no-scope`.
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import {
   gitDriftRef,
   gitIsAncestor,
@@ -25,13 +25,13 @@ import {
   type GitStamp,
   type SpecNode,
   type SpecStore,
-} from '@broject/core'
-import { specScope } from './spec-connectors.ts'
+} from '@broject/core';
+import { specScope } from '@broject/spec';
 
 export type ScopeResult =
   | { state: 'scoped'; via: 'frontmatter' | 'commits'; pathspecs: string[] }
   | { state: 'no-scope' }
-  | { state: 'unverifiable'; reason: string }
+  | { state: 'unverifiable'; reason: string };
 
 /** Deterministic pick among same-id tree() nodes — the same rule the
  *  connector's hasSpec applies, re-derivable from SpecNode alone:
@@ -42,22 +42,22 @@ export type ScopeResult =
 export function pickSpecPath(dir: string, nodes: SpecNode[], id: string): string | undefined {
   const nonEmpty = (path: string): boolean => {
     try {
-      return readFileSync(join(dir, path), 'utf8').trim() !== ''
+      return readFileSync(join(dir, path), 'utf8').trim() !== '';
     } catch {
-      return false
+      return false;
     }
-  }
+  };
   const dirSpec = (n: SpecNode): boolean =>
-    n.path !== undefined && basename(dirname(n.path)) === n.id
+    n.path !== undefined && basename(dirname(n.path)) === n.id;
   return nodes
-    .filter((n) => n.id === id && n.path !== undefined)
+    .filter(n => n.id === id && n.path !== undefined)
     .slice()
     .sort(
       (a, b) =>
         Number(nonEmpty(b.path!)) - Number(nonEmpty(a.path!)) ||
         Number(dirSpec(b)) - Number(dirSpec(a)) ||
         a.path!.localeCompare(b.path!)
-    )[0]?.path
+    )[0]?.path;
 }
 
 /** Spec paths come from the filesystem (tree nodes use `join`, a `spec:`
@@ -65,7 +65,7 @@ export function pickSpecPath(dir: string, nodes: SpecNode[], id: string): string
  *  paths and pathspecs are `/`-form. Normalize before a spec path
  *  becomes a pathspec or gets compared to one. Windows-only: on POSIX a
  *  `\` is a legal filename character, not a separator. */
-const gitPath = (p: string): string => (sep === '\\' ? p.replaceAll('\\', '/') : p)
+const gitPath = (p: string): string => (sep === '\\' ? p.replaceAll('\\', '/') : p);
 
 /** A scope entry that can't name a repo path — an absolute path or a
  *  `..` segment — makes the row unverifiable ("bad scope path"),
@@ -76,7 +76,7 @@ function badScopeEntry(entry: string): boolean {
     isAbsolute(entry) ||
     /^[A-Za-z]:[\\/]/.test(entry) ||
     entry.split(/[\\/]/).includes('..')
-  )
+  );
 }
 
 /** A subtract-only pathspec — `:(exclude…)`, `:(!…)`, `:!…`, `:^…`.
@@ -84,14 +84,14 @@ function badScopeEntry(entry: string): boolean {
  *  widening, which the spec forbids. */
 function negativePathspec(entry: string): boolean {
   if (entry.startsWith(':!') || entry.startsWith(':^')) {
-    return true
+    return true;
   }
-  const m = /^:\(([^)]*)\)/.exec(entry)
+  const m = /^:\(([^)]*)\)/.exec(entry);
   if (m === null) {
-    return false
+    return false;
   }
-  const sigil = m[1]!.split(',').map((s) => s.trim())
-  return sigil.includes('exclude') || sigil.some((s) => s.startsWith('!'))
+  const sigil = m[1]!.split(',').map(s => s.trim());
+  return sigil.includes('exclude') || sigil.some(s => s.startsWith('!'));
 }
 
 /** Resolve bead `id` to its repo path set on `ref` — the drift
@@ -101,113 +101,142 @@ function negativePathspec(entry: string): boolean {
  *  come from it, commits from git. `auditedSpecPath` is the path the
  *  caller actually audits (a `spec:` link can win over the tree pick)
  *  — it is the file the exclusion masks. */
-export function resolveScope(dir: string, ref: string, id: string, spec: SpecStore, auditedSpecPath?: string): ScopeResult {
-  const specPath = auditedSpecPath ?? pickSpecPath(dir, spec.tree(), id)
+export function resolveScope(
+  dir: string,
+  ref: string,
+  id: string,
+  spec: SpecStore,
+  auditedSpecPath?: string
+): ScopeResult {
+  const specPath = auditedSpecPath ?? pickSpecPath(dir, spec.tree(), id);
   // the spec path is a filesystem path, not a user pathspec — literal
   // keeps a `specs/[id].md` name from globbing; gitPath keeps a
   // `specs\b1.md` name matching on Windows
-  const specGitPath = specPath === undefined ? undefined : gitPath(specPath)
-  const exclude = specGitPath === undefined ? [] : [`:(exclude,literal)${specGitPath}`]
+  const specGitPath = specPath === undefined ? undefined : gitPath(specPath);
+  const exclude = specGitPath === undefined ? [] : [`:(exclude,literal)${specGitPath}`];
   // the audited file's own declared scope — the connector's id-keyed
   // scope() can resolve a different same-id file than the one being
   // audited (a spec: link wins the audit), which would compare the
   // link's stamp against another spec's scope
   const explicit =
-    specPath !== undefined ? specScope(join(dir, specPath)) : (spec.scope?.(id) ?? [])
+    specPath !== undefined ? specScope(join(dir, specPath)) : (spec.scope?.(id) ?? []);
   return explicit.length > 0
     ? explicitScope(dir, ref, explicit, exclude, specGitPath)
-    : commitScope(dir, ref, id, specGitPath, exclude)
+    : commitScope(dir, ref, id, specGitPath, exclude);
 }
 
 /** Frontmatter scope — validated, never widened: bad entries and
  *  exclusion-only sets are unverifiable, and the match probe counts
  *  paths *after* the spec's own exclusion so `scope: <its own file>`
  *  can't pass as "covers something". */
-function explicitScope(dir: string, ref: string, entries: string[], exclude: string[], specPath?: string): ScopeResult {
-  const bad = entries.find(badScopeEntry)
+function explicitScope(
+  dir: string,
+  ref: string,
+  entries: string[],
+  exclude: string[],
+  specPath?: string
+): ScopeResult {
+  const bad = entries.find(badScopeEntry);
   if (bad !== undefined) {
-    return { state: 'unverifiable', reason: `bad scope path: ${bad}` }
+    return { state: 'unverifiable', reason: `bad scope path: ${bad}` };
   }
   if (entries.every(negativePathspec)) {
-    return { state: 'unverifiable', reason: 'bad scope path: exclusion-only scope' }
+    return { state: 'unverifiable', reason: 'bad scope path: exclusion-only scope' };
   }
   // count effective paths post-exclusion: a scope naming only the
   // spec's own file audits nothing — `scope: specs/b1.md` must not
   // report scoped on the file the self-exclusion erases
   if (
     specPath !== undefined &&
-    entries.every((e) => negativePathspec(e) || gitPath(e) === specPath)
+    entries.every(e => negativePathspec(e) || gitPath(e) === specPath)
   ) {
-    return { state: 'unverifiable', reason: 'scope names only the spec file' }
+    return { state: 'unverifiable', reason: 'scope names only the spec file' };
   }
   // an explicit scope matching zero committed paths is a typo the
   // audit must not bless — history, not just the tree, so a scoped
   // path deleted later still resolves
-  const r = gitTry(['-C', dir, 'log', '-1', '--format=%H', '--end-of-options', ref, '--', ...entries, ...exclude])
+  const r = gitTry([
+    '-C',
+    dir,
+    'log',
+    '-1',
+    '--format=%H',
+    '--end-of-options',
+    ref,
+    '--',
+    ...entries,
+    ...exclude,
+  ]);
   if (r.code !== 0) {
-    return { state: 'unverifiable', reason: `git log failed: ${r.err}` }
+    return { state: 'unverifiable', reason: `git log failed: ${r.err}` };
   }
   if (r.out.trim() === '') {
-    return { state: 'unverifiable', reason: 'scope matches nothing' }
+    return { state: 'unverifiable', reason: 'scope matches nothing' };
   }
-  return { state: 'scoped', via: 'frontmatter', pathspecs: [...entries, ...exclude] }
+  return { state: 'scoped', via: 'frontmatter', pathspecs: [...entries, ...exclude] };
 }
 
 /** `git log` path records are a per-(dir,ref) fact — the commit-scope
  *  fallback's history scan is the run's most expensive call, so it is
  *  shared across audited beads instead of repeating per row. */
-const logRecordsCache = new Map<string, ReturnType<typeof gitLogPathRecords>>()
+const logRecordsCache = new Map<string, ReturnType<typeof gitLogPathRecords>>();
 
 function logPathRecords(dir: string, ref: string): ReturnType<typeof gitLogPathRecords> {
-  const key = `${dir}\0${ref}`
-  let r = logRecordsCache.get(key)
+  const key = `${dir}\0${ref}`;
+  let r = logRecordsCache.get(key);
   if (r === undefined) {
-    r = gitLogPathRecords(dir, ref)
-    logRecordsCache.set(key, r)
+    r = gitLogPathRecords(dir, ref);
+    logRecordsCache.set(key, r);
   }
-  return r
+  return r;
 }
 
 /** Commit-refs fallback — the union of paths touched by commits whose
  *  subject carries `(<id>)`. A bead whose commits only ever touched its
  *  own spec file leaves nothing to audit → no-scope. */
-function commitScope(dir: string, ref: string, id: string, specPath: string | undefined, exclude: string[]): ScopeResult {
-  const records = logPathRecords(dir, ref)
+function commitScope(
+  dir: string,
+  ref: string,
+  id: string,
+  specPath: string | undefined,
+  exclude: string[]
+): ScopeResult {
+  const records = logPathRecords(dir, ref);
   if (records === null) {
-    return { state: 'unverifiable', reason: 'git log failed' }
+    return { state: 'unverifiable', reason: 'git log failed' };
   }
   // `(<id>)` as a literal needle: the parens are part of the match, so
   // `(b10)` or a bare `b1` cannot satisfy bead `b1`
-  const marker = `(${id})`
-  const own = specPath === undefined ? undefined : `:(literal)${specPath}`
-  const paths = new Set<string>()
+  const marker = `(${id})`;
+  const own = specPath === undefined ? undefined : `:(literal)${specPath}`;
+  const paths = new Set<string>();
   for (const rec of records) {
     if (!rec.subject.includes(marker)) {
-      continue
+      continue;
     }
     for (const p of rec.paths) {
       // touched paths are exact file names, not user-written globs —
       // a literal `src/[id].ts` must not widen into a pathspec
-      const lit = `:(literal)${p}`
+      const lit = `:(literal)${p}`;
       if (lit !== own) {
-        paths.add(lit)
+        paths.add(lit);
       }
     }
   }
   if (paths.size === 0) {
-    return { state: 'no-scope' }
+    return { state: 'no-scope' };
   }
-  return { state: 'scoped', via: 'commits', pathspecs: [...paths, ...exclude] }
+  return { state: 'scoped', via: 'commits', pathspecs: [...paths, ...exclude] };
 }
 
 // --- staleness — the drift audit row ------------------------------------------
 
-export type DriftState = 'STALE' | 'fresh' | 'no-scope' | 'unverifiable'
+export type DriftState = 'STALE' | 'fresh' | 'no-scope' | 'unverifiable';
 
 export interface DriftRow {
-  id: string
-  state: DriftState
-  detail: string
+  id: string;
+  state: DriftState;
+  detail: string;
 }
 
 /** Repo-level facts every drift row shares — resolved once per run, not
@@ -215,22 +244,26 @@ export interface DriftRow {
  *  null = unborn/empty history), `shallow` the honesty gate the spec
  *  checks before any timestamp comparison (null = git failure). */
 export interface DriftEnv {
-  ref: string | null
-  shallow: boolean | null
+  ref: string | null;
+  shallow: boolean | null;
 }
 
 export function driftEnv(dir: string, ref?: string): DriftEnv {
-  return { ref: ref ?? gitDriftRef(dir), shallow: gitIsShallow(dir) }
+  return { ref: ref ?? gitDriftRef(dir), shallow: gitIsShallow(dir) };
 }
 
-const unverifiable = (id: string, detail: string): DriftRow => ({ id, state: 'unverifiable', detail })
+const unverifiable = (id: string, detail: string): DriftRow => ({
+  id,
+  state: 'unverifiable',
+  detail,
+});
 
 /** The `spec:` declaration marker in free text — presence is a
  *  different question from resolution (specLinkPath): a declared link
  *  that resolves to no local file is `unverifiable` on its own, never
  *  tree-picked over. `bro spec drift` and the spec-drift probe share it
  *  so both audit the same contract. */
-export const SPEC_LINK = /\bspec:\s*\S+/i
+export const SPEC_LINK = /\bspec:\s*\S+/i;
 
 /** The bead's `spec:` link target when it names a repo-relative file
  *  that exists in the checkout — a local spec the drift audit can date.
@@ -240,8 +273,8 @@ export const SPEC_LINK = /\bspec:\s*\S+/i
  *  (the tree pick substitutes only when nothing was declared). Trailing
  *  delimiters are stripped — the target often sits inside parentheses. */
 export function specLinkPath(dir: string, desc: string | undefined): string | undefined {
-  const t = /\bspec:\s*(\S+)/i.exec(desc ?? '')?.[1]?.replace(/[)\].,;:'"]+$/, '')
-  return t === undefined ? undefined : localSpecPath(dir, t)
+  const t = /\bspec:\s*(\S+)/i.exec(desc ?? '')?.[1]?.replace(/[)\].,;:'"]+$/, '');
+  return t === undefined ? undefined : localSpecPath(dir, t);
 }
 
 /** `target` validated as a repo-relative spec file — the same rules a
@@ -257,11 +290,11 @@ export function localSpecPath(dir: string, target: string): string | undefined {
     !lstatSync(join(dir, target)).isFile() ||
     escapesRepo(dir, target)
   ) {
-    return undefined
+    return undefined;
   }
   // `spec: ./…` must normalize to the tracked path — git pathspecs
   // never match a leading `./`
-  return target.replace(/^(?:\.[/\\])+/, '')
+  return target.replace(/^(?:\.[/\\])+/, '');
 }
 
 /** `lstatSync` vets only the final component — `linked/spec.md` with
@@ -271,10 +304,10 @@ export function localSpecPath(dir: string, target: string): string | undefined {
  *  reject; an unresolvable path fails closed as an escape. */
 function escapesRepo(dir: string, target: string): boolean {
   try {
-    const rel = relative(realpathSync(dir), realpathSync(join(dir, target)))
-    return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)
+    const rel = relative(realpathSync(dir), realpathSync(join(dir, target)));
+    return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
   } catch {
-    return true
+    return true;
   }
 }
 
@@ -284,43 +317,49 @@ function escapesRepo(dir: string, target: string): boolean {
  *  can't be dated), then the scope side. `linkPath` is the bead's own
  *  `spec:` declaration resolved to a repo path — explicit wins over the
  *  tree pick. */
-export function driftRow(dir: string, id: string, spec: SpecStore, env: DriftEnv, linkPath?: string): DriftRow {
+export function driftRow(
+  dir: string,
+  id: string,
+  spec: SpecStore,
+  env: DriftEnv,
+  linkPath?: string
+): DriftRow {
   if (env.ref === null) {
-    return unverifiable(id, 'unborn or empty history — no drift ref')
+    return unverifiable(id, 'unborn or empty history — no drift ref');
   }
   if (env.shallow !== false) {
-    return unverifiable(id, env.shallow === true ? 'shallow history' : 'git failure')
+    return unverifiable(id, env.shallow === true ? 'shallow history' : 'git failure');
   }
-  const specPath = linkPath ?? pickSpecPath(dir, spec.tree(), id)
+  const specPath = linkPath ?? pickSpecPath(dir, spec.tree(), id);
   if (specPath === undefined) {
     // covers the `spec:` external link — there is no local file to date
-    return unverifiable(id, 'no local spec file to date')
+    return unverifiable(id, 'no local spec file to date');
   }
-  const specStamp = gitLogStamp(dir, env.ref, [`:(literal)${gitPath(specPath)}`], { follow: true })
+  const specStamp = gitLogStamp(dir, env.ref, [`:(literal)${gitPath(specPath)}`], { follow: true });
   if (specStamp.state === 'error') {
-    return unverifiable(id, specStamp.err)
+    return unverifiable(id, specStamp.err);
   }
   if (specStamp.state === 'none') {
     // uncommitted, or committed on a branch that hasn't landed on the ref
-    return unverifiable(id, `no spec commit on ${env.ref}`)
+    return unverifiable(id, `no spec commit on ${env.ref}`);
   }
-  const scope = resolveScope(dir, env.ref, id, spec, specPath)
+  const scope = resolveScope(dir, env.ref, id, spec, specPath);
   if (scope.state === 'no-scope') {
-    return { id, state: 'no-scope', detail: 'no frontmatter scope, no bead-id commits' }
+    return { id, state: 'no-scope', detail: 'no frontmatter scope, no bead-id commits' };
   }
   if (scope.state === 'unverifiable') {
-    return unverifiable(id, scope.reason)
+    return unverifiable(id, scope.reason);
   }
-  const scopeStamp = gitLogStamp(dir, env.ref, scope.pathspecs)
+  const scopeStamp = gitLogStamp(dir, env.ref, scope.pathspecs);
   if (scopeStamp.state === 'error') {
-    return unverifiable(id, scopeStamp.err)
+    return unverifiable(id, scopeStamp.err);
   }
   if (scopeStamp.state === 'none') {
     // resolveScope already proved the scope matches landed commits —
     // none here is a race or a git quirk, never fresh data
-    return unverifiable(id, 'scope matched nothing')
+    return unverifiable(id, 'scope matched nothing');
   }
-  return compare(id, specStamp.stamp, scopeStamp.stamp, dir)
+  return compare(id, specStamp.stamp, scopeStamp.stamp, dir);
 }
 
 /** The staleness predicate: same commit is fresh (spec and code landed
@@ -328,16 +367,16 @@ export function driftRow(dir: string, id: string, spec: SpecStore, env: DriftEnv
  *  equal one-second committer timestamps on different SHAs resolve by
  *  ancestry — the scope commit predating the spec commit is fresh. */
 function compare(id: string, spec: GitStamp, scope: GitStamp, dir: string): DriftRow {
-  const detail = `spec@${spec.sha.slice(0, 8)} ${spec.iso} · scope@${scope.sha.slice(0, 8)} ${scope.iso}`
+  const detail = `spec@${spec.sha.slice(0, 8)} ${spec.iso} · scope@${scope.sha.slice(0, 8)} ${scope.iso}`;
   if (spec.sha === scope.sha || scope.ts < spec.ts) {
-    return { id, state: 'fresh', detail }
+    return { id, state: 'fresh', detail };
   }
   if (scope.ts > spec.ts) {
-    return { id, state: 'STALE', detail }
+    return { id, state: 'STALE', detail };
   }
-  const anc = gitIsAncestor(dir, scope.sha, spec.sha)
+  const anc = gitIsAncestor(dir, scope.sha, spec.sha);
   if (anc === null) {
-    return unverifiable(id, 'ancestry check failed')
+    return unverifiable(id, 'ancestry check failed');
   }
-  return { id, state: anc ? 'fresh' : 'STALE', detail }
+  return { id, state: anc ? 'fresh' : 'STALE', detail };
 }

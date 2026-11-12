@@ -4,7 +4,7 @@
     "autoMerge": true
   },
   "act": {
-    "ignoreChecks": ["kilo", "github-advanced-security", "sonarcloud", "codescene"],
+    "ignoreChecks": ["kilo", "github-advanced-security", "sonarcloud", "codescene", "codacy"],
     "docsPaths": ["*.md", "*.mdx", "*.rst", "docs/", "specs/", "site/content/"]
   },
   "debt": {

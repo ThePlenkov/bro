@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsdown';
 import { collectEmbedded } from './src/embedded.ts';
@@ -33,6 +33,30 @@ export default defineConfig({
           fileName: 'generated/skills-data.json',
           source: JSON.stringify(collectEmbedded(root)),
         });
+      },
+    },
+    {
+      // brotocol's spec templates ride the tarball as dist assets —
+      // @broject/spec is bundled (noExternal), so the published cli has
+      // no node_modules/@broject/brotocol to resolve templates from;
+      // spec-connector probes <dist>/templates first
+      name: 'bro-brotocol-templates',
+      generateBundle() {
+        const templates = `${root}/packages/brotocol/templates`;
+        if (!existsSync(templates)) {
+          return;
+        }
+        for (const e of readdirSync(templates, { withFileTypes: true })) {
+          if (!e.isFile()) {
+            continue;
+          }
+          const source = `${templates}/${e.name}`;
+          this.emitFile({
+            type: 'asset',
+            fileName: `templates/${e.name}`,
+            source: readFileSync(source),
+          });
+        }
       },
     },
     {

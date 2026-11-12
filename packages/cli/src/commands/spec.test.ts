@@ -14,7 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runSpecCommand, sddConnector, specState } from './spec.ts';
-import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts';
+import { hasSpecFile } from '@broject/spec';
+import { SPEC_CONNECTORS } from '../spec-connectors.ts';
 import {
   loadConfig,
   procStat,
@@ -1145,6 +1146,30 @@ describe('bro spec init', () => {
       assert.equal(cfg.connectors.specs, 'speckit');
       assert.equal(cfg.sdd.mode, 'remind');
       assert.ok(!existsSync(join(dir, 'specs', 'project.md')));
+    });
+  });
+
+  test('explicit --tool native pins connectors.specs in a *.spec.md tree', async () => {
+    // absence now means auto-detect — and auto would hand a *.spec.md
+    // tree to brose, silently overriding the user's explicit choice
+    await withRepo({ config: {} }, async dir => {
+      mkdirSync(join(dir, 'specs'));
+      writeFileSync(
+        join(dir, 'specs', 'BRO-1-x.spec.md'),
+        '---\nid: BRO-1\ntemplate: brotocol/spec@1\nstatus: draft\n---\n# x\n'
+      );
+      rmSync(join(dir, 'bro.config.json'));
+      const cwd = process.cwd();
+      process.chdir(dir);
+      try {
+        const { runSpecCommand } = await import('./spec.ts');
+        runSpecCommand(['init', '--tool', 'native']);
+      } finally {
+        process.chdir(cwd);
+      }
+      const cfg = JSON.parse(readFileSync(join(dir, 'bro.config.json'), 'utf8'));
+      assert.equal(cfg.connectors.specs, 'native');
+      assert.equal(cfg.sdd.mode, 'remind');
     });
   });
 });
