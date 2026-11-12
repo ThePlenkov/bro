@@ -834,6 +834,10 @@ async function routeTableLaneFor(
     dir: ctx.root,
     beadId: bead.id,
     text: `${bead.id}: ${bead.title}`,
+    // the cascade's carried fields (bro-0ykhg.2) — the bead's labels and
+    // the repo's canonical id; absent fields satisfy no match pins
+    ...(bead.labels === undefined || bead.labels.length === 0 ? {} : { labels: bead.labels }),
+    repo: projectId(ctx.root),
   });
   if (routed === undefined) {
     return undefined;

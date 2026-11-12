@@ -3,22 +3,25 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { migrateStore } from './migrations.ts';
 import {
+  contentHash,
+  type DecisionInput,
   findDecisions,
   getDecision,
   linkDecision,
   newDecisionId,
   recordDecision,
-  type DecisionInput,
+  textHash,
 } from './decisions.ts';
+import { migrateStore } from './migrations.ts';
 import {
   expireTaskText,
+  type OutcomeReport,
   outcomeStats,
   pendingOutcomeCount,
   recallDecisions,
+  recallOutcomeRows,
   recordOutcome,
-  type OutcomeReport,
 } from './outcomes.ts';
 import { openStore, type StoreHandle } from './store.ts';
 
@@ -326,6 +329,227 @@ test('recallDecisions finds retained task text through FTS (verified only)', asy
   await recordOutcome(s, report(id, { eventId: 'v1', rounds: 1 }), verified);
   const hits = await recallDecisions(s.db, { contextId: 'repo:test', text: 'websocket reconnect' });
   assert.deepEqual(hits, [id]);
+});
+
+test('recallOutcomeRows returns only verified rows inside the decision scope', async () => {
+  const s = await store('recallrows');
+  const table = { kind: 'route', routes: { pro: { chain: [{ provider: 'a' }] } } };
+  const formulaText = '---\nkind: formula\nshape: features\n---\nthe rubric\n';
+  const tableHash = contentHash(table);
+  const formulaHash = textHash(formulaText);
+  const text = 'fix the websocket reconnect bug';
+  // in scope — same context, table hash, formula hash
+  const inScope = await journal(s, { taskText: text, table, formulaText, route: 'pro' });
+  // out of scope on every axis — different table, different context,
+  // and one still pending verification
+  const otherTable = await journal(s, {
+    taskText: text,
+    table: { kind: 'route', routes: {} },
+    formulaText,
+    route: 'pro',
+  });
+  const otherCtx = await journal(s, {
+    taskText: text,
+    contextId: 'repo:other',
+    table,
+    formulaText,
+    route: 'pro',
+  });
+  const pending = await journal(s, { taskText: text, table, formulaText, route: 'pro' });
+  await recordOutcome(s, report(inScope, { rounds: 1 }), verified);
+  await recordOutcome(s, report(otherTable, { rounds: 1 }), verified);
+  await recordOutcome(s, report(otherCtx, { rounds: 1 }), verified);
+  await recordOutcome(s, report(pending, { rounds: 1 })); // never verified
+
+  const rows = await recallOutcomeRows(s.db, {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash,
+  });
+  assert.equal(rows.length, 1, 'only the verified in-scope row recalls');
+  assert.equal(rows[0]?.route, 'pro');
+  assert.equal(rows[0]?.result, 'merged');
+  assert.equal(rows[0]?.rounds, 1);
+
+  // a formula-less scope recalls only formula-less rows — NULL is NULL
+  const noFormula = await recallOutcomeRows(s.db, {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash: null,
+  });
+  assert.equal(noFormula.length, 0);
+
+  // empty recall text fails open to []
+  assert.deepEqual(
+    await recallOutcomeRows(s.db, {
+      contextId: 'repo:test',
+      text: '   ',
+      tableHash,
+      formulaHash,
+    }),
+    []
+  );
+});
+
+test('recallOutcomeRows filters contenders inside the SQL window', async () => {
+  const s = await store('recallroutes');
+  const table = { kind: 'route', routes: { pro: { chain: [{ provider: 'a' }] } } };
+  const tableHash = contentHash(table);
+  const text = 'fix the websocket reconnect bug';
+  // two verified in-scope rows — one per route name
+  const pro = await journal(s, { taskText: text, table, route: 'pro' });
+  const dead = await journal(s, { taskText: text, table, route: 'dead' });
+  await recordOutcome(s, report(pro, { rounds: 1 }), verified);
+  await recordOutcome(s, report(dead, { rounds: 1 }), verified);
+
+  const all = await recallOutcomeRows(s.db, {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash: null,
+  });
+  assert.equal(all.length, 2, 'unfiltered recall sees both routes');
+
+  // the contender filter runs BEFORE the limit — a dead route's rows
+  // can never occupy the window (bro-0ykhg.2 review)
+  const scoped = await recallOutcomeRows(s.db, {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash: null,
+    routes: ['pro'],
+    limit: 1,
+  });
+  assert.equal(scoped.length, 1);
+  assert.equal(scoped[0]?.route, 'pro');
+
+  // an empty contender list means no filter — same as omitting it
+  const unfiltered = await recallOutcomeRows(s.db, {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash: null,
+    routes: [],
+  });
+  assert.equal(unfiltered.length, 2);
+});
+
+test("recallOutcomeRows excludes the predicate's unlabelled shape before the limit", async () => {
+  const s = await store('recallvotable');
+  const table = { kind: 'route', routes: { pro: { chain: [{ provider: 'a' }] } } };
+  const tableHash = contentHash(table);
+  const text = 'fix the websocket reconnect bug';
+  // three merged-without-rounds rows — unlabelled under the default
+  // merged_first_round predicate, votable successes under 'merged'
+  for (let i = 0; i < 3; i += 1) {
+    const id = await journal(s, { taskText: `${text} variant ${i}`, table });
+    await recordOutcome(s, report(id, { rounds: undefined }), verified);
+  }
+  const labelled = await journal(s, { taskText: text, table });
+  await recordOutcome(s, report(labelled, { rounds: 1 }), verified);
+
+  const base = {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash: null,
+    limit: 2,
+  };
+  // under merged_first_round the unlabelled rows never reach the
+  // window — the limit fills with votable evidence instead, so three
+  // dead rows cannot crowd one labelled success out (bro-0ykhg.2 review)
+  const first = await recallOutcomeRows(s.db, {
+    ...base,
+    predicate: 'merged_first_round',
+  });
+  assert.equal(first.length, 1, 'only the labelled row is votable');
+  assert.equal(first[0]?.rounds, 1);
+
+  // the default predicate is the same — omitting it changes nothing
+  const implicit = await recallOutcomeRows(s.db, base);
+  assert.equal(implicit.length, 1);
+
+  // under 'merged' the same rows ARE successes — nothing is excluded
+  const any = await recallOutcomeRows(s.db, { ...base, predicate: 'merged' });
+  assert.equal(any.length, 2, 'the limit now holds merged rows');
+  assert.ok(any.every(r => r.result === 'merged'));
+});
+
+test('recallOutcomeRows breaks bm25 ties deterministically — recency, then id', async () => {
+  const s = await store('recalldet');
+  const table = {
+    kind: 'route',
+    routes: {
+      a: { chain: [{ provider: 'a' }] },
+      b: { chain: [{ provider: 'b' }] },
+      c: { chain: [{ provider: 'c' }] },
+    },
+  };
+  const tableHash = contentHash(table);
+  // identical task text → identical FTS documents → identical bm25
+  const text = 'identical task text — every row scores the same';
+  const a = await journal(s, { taskText: text, table, route: 'a' });
+  const b = await journal(s, { taskText: text, table, route: 'b' });
+  const c = await journal(s, { taskText: text, table, route: 'c' });
+  for (const id of [a, b, c]) {
+    await recordOutcome(s, report(id, { rounds: 1 }), verified);
+  }
+  // pin `at` out of insertion order — b newest; a and c tie on `at`, so
+  // the decision-id tiebreak decides between them (bro-0ykhg.2 review)
+  const stamp = (id: string, at: number): void => {
+    s.db.$client.prepare('update outcomes set at = ? where decision_id = ?').run(at, id);
+  };
+  stamp(a, 1000);
+  stamp(b, 3000);
+  stamp(c, 1000);
+  const routeOf = new Map([
+    [a, 'a'],
+    [b, 'b'],
+    [c, 'c'],
+  ]);
+  const tied = [a, c].sort();
+  const expected = [b, ...tied].map(id => routeOf.get(id));
+
+  const query = {
+    contextId: 'repo:test',
+    text: 'identical task text',
+    tableHash,
+    formulaHash: null,
+  };
+  const rows = await recallOutcomeRows(s.db, query);
+  assert.deepEqual(
+    rows.map(r => r.route),
+    expected,
+    'bm25 ties resolve by at desc, then decision_id asc'
+  );
+  // and the order is stable across repeated reads — the LIMIT window
+  // can never pick a different subset for the same request
+  const again = await recallOutcomeRows(s.db, query);
+  assert.deepEqual(
+    again.map(r => r.route),
+    expected
+  );
+});
+
+test('recallOutcomeRows sanitizes prose — FTS syntax never reaches MATCH', async () => {
+  const s = await store('recallfts');
+  const table = { kind: 'route', routes: { pro: { chain: [{ provider: 'a' }] } } };
+  const tableHash = contentHash(table);
+  const text = 'fix login (#123) — "or" NOT near';
+  const id = await journal(s, { taskText: text, table, route: 'pro' });
+  await recordOutcome(s, report(id, { rounds: 1 }), verified);
+  // punctuation + operator words must not corrupt or empty the query —
+  // the word tokens still recall the row
+  const rows = await recallOutcomeRows(s.db, {
+    contextId: 'repo:test',
+    text: 'login (#123) or near fix',
+    tableHash,
+    formulaHash: null,
+  });
+  assert.ok(rows.length >= 1, 'sanitized terms still match the retained text');
+  assert.equal(rows[0]?.route, 'pro');
 });
 
 test('expireTaskText strips text + FTS while numeric aggregates survive', async () => {

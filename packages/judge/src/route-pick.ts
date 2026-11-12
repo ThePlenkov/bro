@@ -45,6 +45,10 @@ export interface RoutePickOpts {
    *  the pick doesn't win (shadow, enforce with no confident pick). */
   resolved: string;
   mode: 'shadow' | 'enforce' | 'off';
+  /** the T3 escalate judge (bro-0ykhg.2) — asked ONLY when the first
+   *  judge's answer sits in lowConfidence; its confident answers merge
+   *  back before the pick is read. Absent = no escalation. */
+  escalate?: JudgeFacade;
 }
 
 /** The chooser's one question — a `choice` whose options are exactly the
@@ -150,7 +154,72 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
     return undefined;
   }
   const questions = routePickQuestions(opts.options);
-  const res = await opts.judge.decide(opts.state, questions);
+  let res = await opts.judge.decide(opts.state, questions);
+  // T3 — the escalate judge re-answers ONLY the keys the first judge
+  // left low-confidence; a confident first answer never reaches it, and
+  // an escalate failure leaves the first result standing (fail-open)
+  if (opts.escalate !== undefined && res.lowConfidence.length > 0) {
+    try {
+      const esc = await opts.escalate.decide(opts.state, questions);
+      const low = new Set(res.lowConfidence);
+      const escLow = new Set(esc.lowConfidence);
+      const mergedAnswers = { ...res.answers };
+      let mergedAny = false;
+      for (const [key, answer] of Object.entries(esc.answers)) {
+        // the key must have been low-confidence in T2 and confident in
+        // T3 — whether or not T2 emitted an answer entry for it: a
+        // low-confidence flag with no answer still accepts the
+        // escalate verdict, and the lowConfidence filter below clears
+        // the flag only when this merge actually landed one
+        // (bro-0ykhg.2 review)
+        if (!escLow.has(key) && low.has(key)) {
+          Object.defineProperty(mergedAnswers, key, {
+            value: answer,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+          mergedAny = true;
+        }
+      }
+      // the journal bills BOTH calls — T3's tokens and wall-clock are
+      // real spend the verdict must carry (bro-0ykhg.2 review). The
+      // model names the judge whose answer actually landed: an
+      // escalate call that merged nothing keeps the primary's name
+      const escCost = esc.usage?.costUsd;
+      const baseCost = res.usage?.costUsd;
+      const escTokens = esc.usage?.inputTokens;
+      const baseTokens = res.usage?.inputTokens;
+      const costUsd =
+        baseCost === undefined && escCost === undefined
+          ? undefined
+          : (baseCost ?? 0) + (escCost ?? 0);
+      const inputTokens =
+        baseTokens === undefined && escTokens === undefined
+          ? undefined
+          : (baseTokens ?? 0) + (escTokens ?? 0);
+      res = {
+        ...res,
+        answers: mergedAnswers,
+        lowConfidence: res.lowConfidence.filter(
+          k => escLow.has(k) || !Object.hasOwn(esc.answers, k)
+        ),
+        model: mergedAny ? (esc.model ?? res.model) : res.model,
+        latencyMs: res.latencyMs + esc.latencyMs,
+        ...(costUsd === undefined && inputTokens === undefined && res.usage === undefined
+          ? {}
+          : {
+              usage: {
+                ...res.usage,
+                ...(inputTokens === undefined ? {} : { inputTokens }),
+                ...(costUsd === undefined ? {} : { costUsd }),
+              },
+            }),
+      };
+    } catch {
+      /* the escalate judge failed — the first answer stands */
+    }
+  }
   const pick = candidatePick(opts.options, confidentChoice(res));
   const outcome = outcomeFor(opts.mode, pick, opts.resolved);
   appendRow(opts.dir, verdictOf(opts, questions, res, outcome));

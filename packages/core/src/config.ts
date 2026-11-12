@@ -25,34 +25,34 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { type BrouterConfig, parseBrouter } from './brouter.ts';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
 import {
   cacheKey,
+  type FileProbe,
   hookCacheDir,
   isJsonData,
   probesHold,
   readCacheFile,
   statProbe,
   writeCacheFile,
-  type FileProbe,
 } from './hook-cache.ts';
-import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
-  isEnvName,
-  parseProviderEntry,
   type FleetProfile,
+  isEnvName,
   type ProviderEntry,
+  parseProviderEntry,
 } from './providers.ts';
 import {
-  fleetLeases,
-  fleetRouter,
-  fleetRouting,
-  ON_WALL,
-  fleetWalls,
   type FleetLeaseTtls,
   type FleetRouter,
   type FleetWallTtls,
+  fleetLeases,
+  fleetRouter,
+  fleetRouting,
+  fleetWalls,
+  ON_WALL,
   type RoutingTable,
 } from './routing.ts';
 import { isMode, MODES, type Mode } from './ledger.ts';
@@ -519,9 +519,24 @@ brouterSection.jsonSchema = js.obj({
   // body is the prose the decision model reads
   formula: js.str,
   // the decision model — the judge that picks the route. The same shape
-  // the fleet's router keeps: a provider and a mode.
+  // the fleet's router keeps (provider + mode: whether an answer is
+  // TRUSTED) plus the cascade knobs (bro-0ykhg.2): invoke says whether
+  // the judge is ASKED, escalate names the T3 provider, recall tunes T1.
   router: js.obj(
-    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    {
+      provider: js.str,
+      mode: { enum: ['shadow', 'enforce', 'off'] },
+      invoke: { enum: ['always', 'ambiguous', 'never'] },
+      escalate: js.str,
+      recall: js.obj({
+        // the same bounds parseBrouter enforces — the schema says them
+        // up front instead of silently dropping out-of-range values
+        // (bro-0ykhg.2 review)
+        k: js.int(1),
+        minAgreement: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
+        minRows: js.int(1),
+      }),
+    },
     { required: ['provider', 'mode'] }
   ),
   // the outcome namespace for standalone callers + the task-text

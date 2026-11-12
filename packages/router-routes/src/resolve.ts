@@ -16,6 +16,7 @@ import {
   type RouteTask,
 } from './candidates.ts';
 import type { FormulaTrace } from './formula.ts';
+import type { CascadeTrace } from './stages.ts';
 import type { Route, RouteTable } from './types.ts';
 
 /** The verdict — the route, its chain, and the why. */
@@ -32,10 +33,14 @@ export interface RouteDecision {
   rejected: CandidateSet['rejected'];
   /** why this route — in words */
   reason: string;
-  /** who chose — the table's own order, the decision model, or the formula */
-  picked: 'static' | 'model' | 'formula';
+  /** who chose — the table's own order, the decision model, the formula,
+   *  or outcome recall */
+  picked: 'static' | 'model' | 'formula' | 'recall';
   /** what the formula did — answers, filters, scores — when one ran */
   formula?: FormulaTrace;
+  /** the cascade's stage record — every rung's before/after, latency,
+   *  and who decided (bro-0ykhg.2) */
+  cascade?: CascadeTrace;
 }
 
 /** What a caller may hand the resolver beyond the table, task and
@@ -44,12 +49,15 @@ export interface RouteDecision {
 export interface ResolveExtras {
   /** candidates already computed and filtered — the formula path's set */
   set?: CandidateSet;
-  /** who the pick speaks for — 'model' (default) or 'formula' */
-  picked?: 'model' | 'formula';
+  /** who the pick speaks for — 'model' (default), 'formula', or
+   *  'recall' when outcome history named the winner */
+  picked?: 'model' | 'formula' | 'recall';
   /** why the pick won — overrides the default wording */
   reason?: string;
   /** the formula's trace — answers, fired filters, score rows */
   formula?: FormulaTrace;
+  /** the cascade's stage record — rides onto the decision */
+  cascade?: CascadeTrace;
 }
 
 /** Why the winner won — the static order, the chooser, or a refusal. */
@@ -57,15 +65,19 @@ function reasonFor(
   winner: RouteCandidate,
   named: string | undefined,
   chosen: RouteCandidate | undefined,
-  picked: 'model' | 'formula'
+  picked: 'model' | 'formula' | 'recall'
 ): string {
   if (named !== undefined && chosen === undefined) {
     return `the decision model named "${named}", which is not a candidate — ${winner.route.name} stands`;
   }
   if (chosen !== undefined) {
-    return picked === 'formula'
-      ? `the formula picked ${winner.route.name}`
-      : `the decision model picked ${winner.route.name}`;
+    if (picked === 'formula') {
+      return `the formula picked ${winner.route.name}`;
+    }
+    if (picked === 'recall') {
+      return `outcome recall picked ${winner.route.name}`;
+    }
+    return `the decision model picked ${winner.route.name}`;
   }
   const why = winner.reasons.length === 0 ? 'the fallback route' : winner.reasons.join(', ');
   return `the table's own order — ${winner.route.name} (${why})`;
@@ -91,6 +103,7 @@ export function resolveRoute(
       reason: `no route fits — ${why}`,
       picked: 'static',
       ...(extras?.formula === undefined ? {} : { formula: extras.formula }),
+      ...(extras?.cascade === undefined ? {} : { cascade: extras.cascade }),
     };
   }
   // a missing hook and a hook that named nothing are DIFFERENT states:
@@ -111,8 +124,14 @@ export function resolveRoute(
       named !== undefined && chosen === undefined
         ? reasonFor(winner, named, chosen, 'model')
         : (extras?.reason ??
-          reasonFor(winner, named, chosen, picked === 'formula' ? 'formula' : 'model')),
+          reasonFor(
+            winner,
+            named,
+            chosen,
+            picked === 'formula' || picked === 'recall' ? picked : 'model'
+          )),
     picked,
     ...(extras?.formula === undefined ? {} : { formula: extras.formula }),
+    ...(extras?.cascade === undefined ? {} : { cascade: extras.cascade }),
   };
 }

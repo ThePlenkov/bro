@@ -702,3 +702,260 @@ describe('the explanation', () => {
     assert.equal(route?.source, 'the formula');
   });
 });
+
+describe('the invoke gate (bro-0ykhg.2)', () => {
+  /** A table where nothing pends — one catch-all, so T0 leaves exactly
+   *  one candidate and zero pending routes. */
+  const QUIET_TABLE: RouteTable = {
+    kind: 'route',
+    version: 1,
+    routes: [{ name: 'any', match: {}, chain: [{ provider: 'c' }] }],
+  };
+
+  test('invoke=never — the judge is never called, rules stand', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      invoke: 'never',
+    });
+    assert.equal(calls.length, 0);
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'rules');
+    assert.match(decision.cascade?.stages.find(s => s.stage === 'T2')?.note ?? '', /invoke=never/);
+  });
+
+  test('invoke=ambiguous — one clean candidate skips the judge', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: QUIET_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, QUIET_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      invoke: 'ambiguous',
+    });
+    assert.equal(calls.length, 0, 'a single survivor must not pay for a judge call');
+    assert.equal(decision.route?.name, 'any');
+    assert.match(
+      decision.cascade?.stages.find(s => s.stage === 'T2')?.note ?? '',
+      /one candidate survived/
+    );
+  });
+
+  test('invoke=always — the judge is asked even on one candidate', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: QUIET_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, QUIET_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      invoke: 'always',
+    });
+    assert.equal(calls.length, 1, 'invoke=always preserves judge-on-every-task');
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'judge');
+  });
+
+  test('T1 recall decides — the judge is skipped under ambiguous', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const rows = [
+      { route: 'any', result: 'merged', rounds: 1, at: 1 },
+      { route: 'any', result: 'merged', rounds: 1, at: 2 },
+      { route: 'any', result: 'merged', rounds: 1, at: 3 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      // tier carried → pro fits, free rejects, nothing pends — recall's
+      // decision is the whole ambiguity, so T2 stays shut
+      task: { features: { tier: 'pro' } },
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      recallRows: rows,
+    });
+    assert.equal(calls.length, 0, 'recall already decided — T2 stays shut');
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.picked, 'recall');
+    assert.equal(decision.cascade?.decidedBy, 'recall');
+  });
+
+  test('T1 recall decides but pending formula needs still call T2', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro'), complexity: choice('low') });
+    const rows = [
+      { route: 'any', result: 'merged', rounds: 1, at: 1 },
+      { route: 'any', result: 'merged', rounds: 1, at: 2 },
+      { route: 'any', result: 'merged', rounds: 1, at: 3 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      // no features carried → pro/free pend on 'tier' — recall only
+      // voted among RESOLVED candidates, so the pending needs keep the
+      // judge in the running under ambiguous (bro-0ykhg.2 review)
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      recallRows: rows,
+    });
+    assert.equal(calls.length, 1, 'pending needs are ambiguity — T2 must be asked');
+    assert.equal(decision.cascade?.decidedBy, 'judge');
+    assert.equal(decision.route?.name, 'pro');
+  });
+
+  test('unlabelled recall rows cannot crowd labelled votes out of the window', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const rows = [
+      // five unlabelled rows outrank the labelled ones — merged with
+      // unknown rounds is no vote under merged_first_round, so they
+      // must not occupy the top-k window either (bro-0ykhg.2 review)
+      ...[1, 2, 3, 4, 5].map(i => ({ route: 'any', result: 'merged', rounds: null, at: i })),
+      { route: 'any', result: 'merged', rounds: 1, at: 6 },
+      { route: 'any', result: 'merged', rounds: 1, at: 7 },
+      { route: 'any', result: 'merged', rounds: 1, at: 8 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: { features: { tier: 'pro' } },
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      recallRows: rows,
+    });
+    assert.equal(calls.length, 0, 'the three labelled rows still decide — T2 stays shut');
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'recall');
+  });
+
+  test('a judge result with no confident answer decides nothing — rules stand', async () => {
+    const { judge } = fakeJudge(
+      { tier: choice('pro'), complexity: choice('low') },
+      { lowConfidence: ['tier', 'complexity'] }
+    );
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+    });
+    // every answer sat in lowConfidence — nothing trusted fed the pick,
+    // so the trace must not claim the judge decided (bro-0ykhg.2 review)
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'rules');
+  });
+
+  test('T1 recall decides but invoke=always still asks the judge', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const rows = [
+      { route: 'any', result: 'merged', rounds: 1, at: 1 },
+      { route: 'any', result: 'merged', rounds: 1, at: 2 },
+      { route: 'any', result: 'merged', rounds: 1, at: 3 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      invoke: 'always',
+      recallRows: rows,
+    });
+    assert.equal(calls.length, 1);
+    // the judge's answers route — recall's pick yields to invoke=always
+    assert.equal(decision.route?.name, 'pro');
+    assert.equal(decision.cascade?.decidedBy, 'judge');
+  });
+
+  test('an unresolvable escalate provider fails open — T2 answers stand', async () => {
+    const { judge, calls } = fakeJudge(
+      { tier: choice('pro'), complexity: choice('low') },
+      { lowConfidence: ['tier'] }
+    );
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: {},
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      escalate: 'no-such-provider',
+    });
+    assert.equal(calls.length, 1, 'only T2 was asked — T3 never bound');
+    // the low-confidence 'tier' never applied — pro/free stay pending,
+    // 'any' stands; T2's confident complexity answer still fed the pick,
+    // so the judge is who decided
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'judge');
+  });
+});
+
+describe('invoke=always yields only to a trusted judge (bro-0ykhg.2 review)', () => {
+  test('shadow mode — decided recall stands', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const rows = [
+      { route: 'any', result: 'merged', rounds: 1, at: 1 },
+      { route: 'any', result: 'merged', rounds: 1, at: 2 },
+      { route: 'any', result: 'merged', rounds: 1, at: 3 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      // tier carried → nothing pends, so recall's decision settles the
+      // route even though shadow can never override it
+      task: { features: { tier: 'pro' } },
+      text: 'a task',
+      router: { provider: 'fake', mode: 'shadow' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      invoke: 'always',
+      recallRows: rows,
+    });
+    // shadow journals but never routes — T1's decided recall stands
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.picked, 'recall');
+    assert.equal(decision.cascade?.decidedBy, 'recall');
+    assert.equal(calls.length, 0, 'a shadow judge cannot override — it is not asked');
+  });
+});

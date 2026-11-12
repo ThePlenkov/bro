@@ -27,6 +27,16 @@ export interface RouteMatch {
   complexity?: string;
   /** the priority band ("P0", "P1", "P2") */
   priority?: string;
+  /** the labels the task must carry — EVERY listed label must be present
+   *  (a route pinning ["a", "b"] serves only tasks carrying both); a
+   *  task without labels never satisfies the pin */
+  labels?: string[];
+  /** repo-relative path globs — the route fits when at least one of the
+   *  task's paths matches at least one declared glob ("touches this
+   *  area"); a task without paths never satisfies the pin */
+  paths?: string[];
+  /** the canonical repository id the task must belong to — exact match */
+  repo?: string;
   /** the formula features the task must carry — keys name the formula's
    *  declared questions; values match literally (scalar = exact, list =
    *  membership). Only `choice` and `bool` questions may drive these —

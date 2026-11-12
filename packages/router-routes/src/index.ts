@@ -18,11 +18,19 @@ export {
   inTableOrder,
   survivingChain,
   type CandidateSet,
+  type PendingRoute,
   type RejectedRoute,
   type RouteCandidate,
   type RouteTask,
 } from './candidates.ts';
+export { matchGlob, isRepoRelativePath } from './glob.ts';
 export { resolveRoute, type ResolveExtras, type RouteDecision } from './resolve.ts';
+export {
+  type CascadeDecider,
+  type CascadeStage,
+  type CascadeStageName,
+  type CascadeTrace,
+} from './stages.ts';
 export {
   unservedChains,
   type ServedDeclaration,
@@ -30,6 +38,7 @@ export {
 } from './served.ts';
 export {
   applyFormulaFilters,
+  filterPending,
   FORMULA_KIND,
   FORMULA_VERSION,
   FormulaError,

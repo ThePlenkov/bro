@@ -349,3 +349,52 @@ test('routes validate cross-checks the formula against the table', t => {
   assert.equal(bad.code, 1);
   assert.match(bad.stderr, /names no question the formula declares/);
 });
+
+test('the route surface reads labels, paths, repo, and features (bro-0ykhg.2)', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const table = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.ui]',
+      'match = { labels = ["ui"], paths = ["web/**"] }',
+      'chain = [{ provider = "devin-acp", model = "swe-2-max" }]',
+      '',
+      '[routes.repo]',
+      'match = { repo = "ThePlenkov/bro" }',
+      'chain = [{ provider = "kilo-free" }]',
+      '',
+      '[routes.fallback]',
+      'chain = [{ provider = "omp" }]',
+      '',
+    ].join('\n')
+  );
+  // labels + a matching path land the ui route
+  const ui = run([
+    'route',
+    'ship',
+    'it',
+    '--routes',
+    table,
+    '--labels',
+    'ui,bug',
+    '--paths',
+    'web/app.tsx',
+  ]);
+  assert.equal(ui.code, 0);
+  assert.match(ui.stdout, /^route: ui$/m);
+  // the repo id alone lands the repo-pinned route
+  const repo = run(['route', 'ship', 'it', '--routes', table, '--repo', 'ThePlenkov/bro']);
+  assert.match(repo.stdout, /^route: repo$/m);
+  // a label without its path pin falls to the catch-all
+  const bare = run(['route', 'ship', 'it', '--routes', table, '--labels', 'ui']);
+  assert.match(bare.stdout, /^route: fallback$/m);
+  // a non-repo-relative path fails loud
+  const badPath = run(['route', 'ship', 'it', '--routes', table, '--paths', '../escape.ts']);
+  assert.equal(badPath.code, 1);
+  assert.match(badPath.stderr, /repo-relative/);
+  // malformed feature JSON fails loud
+  const badFeatures = run(['route', 'ship', 'it', '--routes', table, '--features', '{bad']);
+  assert.equal(badFeatures.code, 1);
+});

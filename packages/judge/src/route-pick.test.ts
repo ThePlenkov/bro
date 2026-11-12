@@ -169,4 +169,119 @@ describe('routePick', () => {
       );
       assert.equal(readJournal(dir).length, 0);
     }));
+
+  test('escalate merges a confident answer onto a low-confidence key T2 never answered', () =>
+    withRepo(async dir => {
+      // T2 flags `route` low-confidence but emits NO answer entry — the
+      // escalate judge's confident pick must still land, or enforce
+      // falls back to the resolved route for no reason
+      // (bro-0ykhg.2 review)
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({ answers: {}, lowConfidence: ['route'] }),
+        escalate: judgeReturning(pick('design')),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, 'design');
+      assert.equal(lastVerdict(dir).outcome, 'design');
+    }));
+
+  test('escalate still overrides a low-confidence answer it disagrees with', () =>
+    withRepo(async dir => {
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({ ...pick('edit'), lowConfidence: ['route'] }),
+        escalate: judgeReturning(pick('design')),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, 'design');
+    }));
+
+  test('a low-confidence escalate answer merges nothing — the resolved route stands', () =>
+    withRepo(async dir => {
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({ answers: {}, lowConfidence: ['route'] }),
+        escalate: judgeReturning({ ...pick('design'), lowConfidence: ['route'] }),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, undefined);
+      assert.equal(lastVerdict(dir).outcome, 'edit');
+    }));
+
+  test('a merged escalate answer bills both calls and names the escalate model', () =>
+    withRepo(async dir => {
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({
+          ...pick('edit'),
+          lowConfidence: ['route'],
+          model: 't2-model',
+          latencyMs: 10,
+          usage: { costUsd: 0.5, inputTokens: 100 },
+        }),
+        escalate: judgeReturning({
+          ...pick('design'),
+          model: 't3-model',
+          latencyMs: 20,
+          usage: { costUsd: 0.25, inputTokens: 50 },
+        }),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, 'design');
+      const v = lastVerdict(dir);
+      assert.equal(v.model, 't3-model');
+      assert.equal(v.latencyMs, 30);
+      assert.equal(v.costUsd, 0.75);
+    }));
+
+  test('an escalate call that merges nothing keeps the primary model — but still bills', () =>
+    withRepo(async dir => {
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({
+          answers: {},
+          lowConfidence: ['route'],
+          model: 't2-model',
+          latencyMs: 10,
+          usage: { costUsd: 0.5 },
+        }),
+        escalate: judgeReturning({
+          ...pick('design'),
+          lowConfidence: ['route'],
+          model: 't3-model',
+          latencyMs: 20,
+          usage: { costUsd: 0.25 },
+        }),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, undefined);
+      const v = lastVerdict(dir);
+      // T3's own answer stayed low-confidence — nothing it said routed,
+      // so the journal attributes the verdict to T2 while still paying
+      // for both calls (bro-0ykhg.2 review)
+      assert.equal(v.model, 't2-model');
+      assert.equal(v.latencyMs, 30);
+      assert.equal(v.costUsd, 0.75);
+    }));
 });

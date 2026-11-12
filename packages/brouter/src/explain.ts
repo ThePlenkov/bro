@@ -27,7 +27,51 @@ function pickedSource(picked: RouteDecision['picked']): string {
   if (picked === 'formula') {
     return 'the formula';
   }
+  if (picked === 'recall') {
+    return 'outcome recall';
+  }
   return 'the table';
+}
+
+/** The cascade's facts — who decided and what each stage kept (spec
+ *  bro-0ykhg.2). Every rung reports its before/after and its cost, so
+ *  the explanation shows exactly where candidates were won or lost. */
+function cascadeFacts(decision: RouteDecision): ExplainFact[] {
+  const cascade = decision.cascade;
+  if (cascade === undefined) {
+    return [];
+  }
+  const facts: ExplainFact[] = [
+    {
+      label: 'decided by',
+      value: cascade.decidedBy ?? 'rules',
+      because:
+        cascade.decidedBy === 'recall'
+          ? 'similar verified outcomes agreed above the recall thresholds'
+          : cascade.decidedBy === 'judge' || cascade.decidedBy === 'escalate'
+            ? 'the judge answered and its verdict was trusted'
+            : // rules also stands when the judge WAS asked but could not
+              // be trusted — shadow mode, a failed call, no confident
+              // pick, or invoke=never (bro-0ykhg.2 review)
+              'no trusted model pick — the rules left the safe order standing',
+      source: 'the cascade',
+    },
+  ];
+  for (const stage of cascade.stages) {
+    const removed = stage.before.filter(n => !stage.after.includes(n));
+    facts.push({
+      label: stage.stage,
+      value: `${stage.after.length} of ${stage.before.length} contender(s)`,
+      because:
+        (stage.note ??
+          (removed.length === 0
+            ? 'the set passed through unchanged'
+            : `removed ${removed.join(', ')}`)) +
+        (stage.decided !== undefined ? ` — decided ${stage.decided}` : ''),
+      source: `cascade ${stage.latencyMs}ms`,
+    });
+  }
+  return facts;
 }
 
 /** The verdict's own facts — the route and the chain it names. */
@@ -170,6 +214,7 @@ export function routeFacts(decision: RouteDecision): ExplainFact[] {
   const trace = decision.formula;
   return [
     ...verdictFacts(decision),
+    ...cascadeFacts(decision),
     ...chainFacts(decision),
     ...(trace === undefined ? [] : formulaHeadFacts(trace)),
     ...(trace === undefined ? [] : formulaInputFacts(trace)),
