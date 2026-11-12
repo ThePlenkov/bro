@@ -68,6 +68,9 @@ export interface AskOutcome {
   usage?: AcpUsage;
   /** the explanation — when the caller asked for one */
   explanation?: Explanation;
+  /** the routing decision's id — present when the table decided the
+   *  lane; the id an outcome report joins on (spec bro-0ykhg.4) */
+  decisionId?: string;
 }
 
 /** The lane that serves an ask — and the rule that chose it. */
@@ -93,6 +96,9 @@ export interface LanePick {
   snapshot?: HealthSnapshot;
   /** false when the ledger could not be read at decision time */
   healthKnown?: boolean;
+  /** the routing decision's id — the journaled decision this lane came
+   *  from; absent when nobody decided (the operator named the lane) */
+  decisionId?: string;
 }
 
 /** The acp entries, in config order. */
@@ -244,6 +250,7 @@ function tableLanePick(
     decision,
     snapshot: task.snapshot,
     healthKnown: task.healthKnown,
+    decisionId: task.decisionId,
   };
 }
 
@@ -261,6 +268,7 @@ function fallbackLane(providers: Providers, task: TaskDecision | undefined): Lan
     decision: task?.decision,
     snapshot: task?.snapshot,
     healthKnown: task?.healthKnown,
+    decisionId: task?.decisionId,
   };
 }
 
@@ -275,8 +283,10 @@ async function tableDecision(
   return decideRoute({
     dir,
     table,
+    ...(request.routes === undefined ? {} : { tablePath: request.routes }),
     task: {},
     text: request.question,
+    kind: 'ask',
     router,
   });
 }
@@ -466,5 +476,6 @@ export async function runAsk(request: AskRequest, dir: string): Promise<AskOutco
     text: result.text,
     usage: result.usage,
     explanation,
+    ...(lane.decisionId === undefined ? {} : { decisionId: lane.decisionId }),
   };
 }

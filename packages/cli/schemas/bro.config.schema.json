@@ -207,6 +207,15 @@
             "provider",
             "mode"
           ]
+        },
+        "contextId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "taskTextRetentionDays": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false

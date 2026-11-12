@@ -37,6 +37,13 @@ export interface BrouterConfig {
   routes?: string;
   /** the decision model — the judge that picks the route (provider + mode) */
   router?: FleetRouter;
+  /** the outcome namespace for standalone callers — the canonical repo
+   *  id wins when the dir sits in a git project; this names the
+   *  namespace when it does not (spec bro-0ykhg.4) */
+  contextId?: string;
+  /** days a decision's task text persists for recall/replay — default
+   *  30; 0 disables text persistence entirely */
+  taskTextRetentionDays?: number;
 }
 
 /** Where a declared route sits — the model id it was declared under
@@ -213,10 +220,16 @@ export function parseBrouter(raw: unknown): BrouterConfig {
   }
   const routes = routeTablePath(bag);
   const router = decisionModel(bag.router);
+  const contextId = str(bag.contextId);
+  const retention = bag.taskTextRetentionDays;
   return {
     models,
     ...(routes === undefined ? {} : { routes }),
     ...(router === undefined ? {} : { router }),
+    ...(contextId === undefined ? {} : { contextId }),
+    ...(typeof retention === 'number' && Number.isFinite(retention) && retention >= 0
+      ? { taskTextRetentionDays: Math.floor(retention) }
+      : {}),
   };
 }
 

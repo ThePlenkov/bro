@@ -48,7 +48,12 @@ function taskShape(argv: string[]): RouteTask {
 }
 
 /** The decision, rendered. */
-function render(decision: RouteDecisionView, known: boolean): void {
+function render(
+  decision: RouteDecisionView,
+  known: boolean,
+  meta: { decisionId: string; contextId: string; journaled: boolean }
+): void {
+  console.log(`decision: ${meta.decisionId}`);
   console.log(`route: ${decision.route?.name ?? '(none)'}`);
   const chain = decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ');
   console.log(`chain: ${chain || '(empty)'}`);
@@ -131,26 +136,28 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   reportUnserved(unservedChains(table, config?.models ?? {}));
   const shape = taskShape(argv);
   const router = config?.router;
-  const { decision, snapshot, healthKnown } = await decideRoute({
+  const { decision, snapshot, healthKnown, decisionId, contextId, journaled } = await decideRoute({
     dir,
     table,
+    tablePath: path,
     task: shape,
     text: task,
+    kind: 'route',
     ...(router === undefined ? {} : { router }),
   });
   const slices = explainSlicesOrExit(argv);
   if (slices !== undefined) {
     const explanation = await explainPlan({ decision, snapshot, healthKnown });
     if (argv.includes('--json')) {
-      console.log(JSON.stringify(explanation, null, 2));
+      console.log(JSON.stringify({ ...explanation, decisionId, contextId }, null, 2));
       return;
     }
     console.log(renderExplanation(explanation, slices));
     return;
   }
   if (argv.includes('--json')) {
-    console.log(JSON.stringify(decision, null, 2));
+    console.log(JSON.stringify({ ...decision, decisionId, contextId, journaled }, null, 2));
     return;
   }
-  render(decision, healthKnown);
+  render(decision, healthKnown, { decisionId, contextId, journaled });
 }

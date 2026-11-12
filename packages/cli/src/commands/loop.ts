@@ -190,6 +190,7 @@ import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daem
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { explainSpawn } from './loop-explain.ts';
 import { type RouteTableLane, routeTableLane } from './loop-routes.ts';
+import { linkRunToDecision, reconcileOutcomes, reportRoutedOutcome } from './outcome-report.ts';
 import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts';
 import {
   claimUpTo,
@@ -460,6 +461,11 @@ function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string
   // counts it as one (the template arm reserves no quota slot of its
   // own — bro-3xwvu tracks that gap)
   pins[BATCH_MARKER_ENV] = '1';
+  // the routing decision's id — the outcome report joins on it (spec
+  // bro-0ykhg.4); absent on unrouted/template-escape spawns
+  if (lane.decisionId !== undefined) {
+    pins.BRO_ROUTER_DECISION = lane.decisionId;
+  }
   return pins;
 }
 
@@ -479,6 +485,11 @@ export interface LoopLane {
    *  spawns (no fleet.routing declared). */
   class?: string;
   route?: NonNullable<SpawnSpec['route']>;
+  /** The route-table decision's UUID — journaled at decision time;
+   *  pinned on the bead (`router:decision=`), the worker env
+   *  (BRO_ROUTER_DECISION) and the outcome report's join key (spec
+   *  bro-0ykhg.4). */
+  decisionId?: string;
 }
 
 /** Per-run lane picks — undefined means "not given" so config fields
@@ -814,10 +825,29 @@ async function routeTableLaneFor(
     return undefined;
   }
   const label = beadClassInfo(ctx, bead, false);
-  const routed = await routeTableLane(routeTableTask(ctx, tablePath, label));
-  return routed === undefined
-    ? undefined
-    : { lane: await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed), routed };
+  const routed = await routeTableLane({
+    ...routeTableTask(ctx, tablePath, label),
+    dir: ctx.root,
+    beadId: bead.id,
+    text: `${bead.id}: ${bead.title}`,
+  });
+  if (routed === undefined) {
+    return undefined;
+  }
+  const lane = await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
+  if (routed.decisionId !== undefined) {
+    lane.decisionId = routed.decisionId;
+    // the bead pin — `router:decision=<id>` as metadata: idempotent
+    // (set-metadata overwrites), and the merge-time outcome report
+    // resolves the decision through it before falling back to the
+    // journal's run-link reconciliation (spec bro-0ykhg.4)
+    try {
+      ctx.tasks.update(bead.id, { 'set-metadata': `router:decision=${routed.decisionId}` });
+    } catch {
+      /* the pin is best-effort — the journal row still carries beadId */
+    }
+  }
+  return { lane, routed };
 }
 
 async function resolveBeadLane(
@@ -1102,6 +1132,9 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
         // the fleet's own budget must see this worker — the marker rides
         // on every loop spawn, root bead or not (spec bro-9h86l)
         [BATCH_MARKER_ENV]: '1',
+        // the routing decision's id — the worker's own provenance and
+        // the outcome join key (spec bro-0ykhg.4)
+        ...(lane.decisionId === undefined ? {} : { BRO_ROUTER_DECISION: lane.decisionId }),
         TRACEPARENT: tp,
         ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
       }),
@@ -1137,6 +1170,16 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     spawnedMs: Date.now(),
     pid: info.pid,
   };
+  // the journal's run-link repair — the decision row learns its worker
+  // and run ids now that the spawn landed them (spec bro-0ykhg.4);
+  // best-effort, the bead pin already carries the join
+  if (lane.decisionId !== undefined) {
+    void linkRunToDecision(ctx.root, lane.decisionId, {
+      beadId: lead.id,
+      worker: info.id,
+      runId: info.runId,
+    });
+  }
   // the run record stays and rides the worker (bro-wg896): custody of
   // the CLAIM transfers to the registry entry at spawn, but retiring
   // the record here left `bro watch`/`bro status` blind for the
@@ -3591,6 +3634,15 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     }
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
+    // the outcome outbox reconciles at startup (spec bro-0ykhg.4) —
+    // intents a crashed run left undelivered retry here, and the
+    // retention sweep rides the same pass. Best-effort: a store that
+    // cannot answer costs the retry, never the loop.
+    try {
+      await reconcileOutcomes(root);
+    } catch {
+      /* reconciliation is housekeeping */
+    }
     if (everySec === undefined) {
       await guardedRun(ctx, releaseAll);
     } else {
@@ -5037,13 +5089,27 @@ function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
 /** A done-path push outcome — tallied, the park journaled (it never
  *  passed through leave(), so the held claim is the transition the
  *  journal wants), and echoed under --json. */
-function settleOutcome(
+async function settleOutcome(
   ctx: Ctx,
   q: QueueState,
   ids: string[],
   out: Extract<PushOutcome, { kind: 'done' }>
-): void {
+): Promise<void> {
   q.tally[out.result] += 1;
+  // the outcome report (spec bro-0ykhg.4) — a terminal non-merge verdict
+  // flows back to the router by decision id: the bead's pin or the
+  // journal's run-link reconciliation resolves it. 'landed'/'closed'
+  // are merge-lifecycle results the act path owns — reporting them
+  // here would double the merge authority's verdict.
+  if (out.result === 'failed' || out.result === 'parked') {
+    await reportRoutedOutcome({
+      dir: ctx.root,
+      beadId: ids[0],
+      result: out.result,
+      reporter: 'bro:loop',
+      sourceId: 'bro:loop',
+    });
+  }
   if (out.result === 'parked') {
     for (const id of ids) {
       q.parkedClaims.add(id);
@@ -5418,18 +5484,18 @@ async function tryClaim(
     // parked/failed — no PR will ever list for this admission
     releaseCeilingFile(ceilingRes);
   }
-  recordClaimOutcome(ctx, q, ids, out);
+  await recordClaimOutcome(ctx, q, ids, out);
   return true;
 }
 
 /** The post-push bookkeeping half of tryClaim — stack the fresh member
  *  or tally the non-member result (parked ids stay drain-visible). */
-function recordClaimOutcome(
+async function recordClaimOutcome(
   ctx: Ctx,
   q: QueueState,
   ids: string[],
   out: Exclude<PushOutcome, { kind: 'hold' } | { kind: 'infra' }>
-): void {
+): Promise<void> {
   if (out.kind === 'member') {
     q.stack.push(out.member);
     // a worker-pending member reports its pending phase — its `→ PR`
@@ -5437,7 +5503,7 @@ function recordClaimOutcome(
     say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length));
     return;
   }
-  settleOutcome(ctx, q, ids, out);
+  await settleOutcome(ctx, q, ids, out);
 }
 
 /** The held-push branch of a tick — park the next probe for an

@@ -519,6 +519,10 @@ brouterSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  // the outcome namespace for standalone callers + the task-text
+  // retention window (spec bro-0ykhg.4)
+  contextId: js.str,
+  taskTextRetentionDays: { type: 'integer', minimum: 0 },
 });
 
 /** bro.config.json `connectors` section — facade → connector precedence,

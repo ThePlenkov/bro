@@ -13,6 +13,7 @@
  */
 import { SpawnError } from '@broject/core';
 import type { HealthSnapshot, ResolvedClass } from '@broject/core';
+import { journalDecision } from '@broject/brouter';
 import { healthSnapshot, migrateStore, openStore, routerStorePath } from '@broject/router-store';
 import { readRouteTable, resolveRoute, unservedChains } from '@broject/router-routes';
 import type { RouteDecision, RouteTable, ServedDeclaration } from '@broject/router-routes';
@@ -25,6 +26,15 @@ export interface RouteTableLane extends ResolvedClass {
   decision: RouteDecision;
   /** the health the verdict read — the walls and the sessions */
   snapshot: HealthSnapshot;
+  /** the spawn decision's UUID — journaled once; the id the bead pin,
+   *  the worker env and the outcome report all join on (spec
+   *  bro-0ykhg.4) */
+  decisionId?: string;
+  /** the project namespace the decision journaled under */
+  contextId?: string;
+  /** false when the journal could not take the row — the id still
+   *  pins; an outcome for it fails unknown */
+  journaled?: boolean;
 }
 
 /** The health — the router's own ledger. A ledger that cannot be read
@@ -95,7 +105,11 @@ function assertServed(table: RouteTable, file: string, served: ServedDeclaration
   throw new SpawnError(`route table ${file} — routes.${first.route}: ${first.reason}`, 'config');
 }
 
-/** The route a bead lands on — undefined when no table is declared. */
+/** The route a bead lands on — undefined when no table is declared. The
+ *  spawn decision journals under a fresh UUID BEFORE the lane returns:
+ *  the replayable inputs (task shape, candidates, table snapshot) and
+ *  the bead link land in router.db so a later act verdict reports by
+ *  id and a crash between journal and pin writes stays repairable. */
 export async function routeTableLane(opts: {
   /** the route table's path — the operator declares it in the config */
   table?: string;
@@ -104,6 +118,12 @@ export async function routeTableLane(opts: {
   priority?: number;
   /** what the operator declared the router serves — the served universe */
   served?: ServedDeclaration;
+  /** the working dir — the journal and the context id anchor here */
+  dir?: string;
+  /** the bead this spawn serves — journaled as the run link */
+  beadId?: string;
+  /** the task text the decision reads — the bead's title/description */
+  text?: string;
 }): Promise<RouteTableLane | undefined> {
   const file = opts.table;
   if (file === undefined) {
@@ -120,7 +140,8 @@ export async function routeTableLane(opts: {
   }
   assertServed(table, file, opts.served ?? {});
   const snapshot = await routingHealth();
-  const decision = resolveRoute(table, taskShape(opts), snapshot);
+  const shape = taskShape(opts);
+  const decision = resolveRoute(table, shape, snapshot);
   const route = decision.route;
   if (route === undefined) {
     return undefined;
@@ -131,6 +152,31 @@ export async function routeTableLane(opts: {
   if (head === undefined) {
     return undefined;
   }
+  // journal the spawn decision — best-effort: an unavailable store
+  // costs the row, never the spawn (the id still returns for pins)
+  let decisionId: string | undefined;
+  let contextId: string | undefined;
+  let journaled: boolean | undefined;
+  if (opts.dir !== undefined) {
+    const journal = await journalDecision({
+      dir: opts.dir,
+      kind: 'spawn',
+      tablePath: file,
+      taskText: opts.text ?? `${opts.class ?? opts.label ?? 'task'}`,
+      task: shape,
+      features: shape as Record<string, string | number | boolean>,
+      candidates: decision.candidates,
+      table,
+      route: route.name,
+      provider: head.provider,
+      model: head.model,
+      picked: decision.picked,
+      ...(opts.beadId === undefined ? {} : { beadId: opts.beadId }),
+    });
+    decisionId = journal.decisionId;
+    contextId = journal.contextId;
+    journaled = journal.recorded;
+  }
   return {
     class: route.name,
     chain: decision.chain,
@@ -139,5 +185,6 @@ export async function routeTableLane(opts: {
     ...(head.model === undefined ? {} : { model: head.model }),
     decision,
     snapshot,
+    ...(decisionId === undefined ? {} : { decisionId, contextId, journaled }),
   };
 }
