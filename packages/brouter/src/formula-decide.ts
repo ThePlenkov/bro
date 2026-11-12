@@ -38,6 +38,7 @@ import {
   candidates,
   formulaAnswersToFeatures,
   formulaQuestions,
+  inTableOrder,
   mergeTaskFeatures,
   priorOnlyOutcomes,
   resolveRoute,
@@ -299,8 +300,11 @@ async function decideByQuestions(
     trace.scores = scoring.scores;
     if (scoring.skipped !== undefined) {
       addNote(trace, scoring.skipped);
+      // scoring never ran — the table's DECLARATION order stands, the
+      // same order the score tie-break uses; fit order is candidates()'s
+      // ranking, not the fallback the formula contract names
       decision = resolveRoute(table, effective, snapshot, undefined, {
-        set,
+        set: inTableOrder(set, table),
         formula: trace,
         reason: `the table's own order — ${scoring.skipped}`,
       });
@@ -321,15 +325,24 @@ async function decideByQuestions(
   }
 
   // the verdict journals AFTER the decision — the outcome is the route
-  // that actually served, not the static guess routePick journals with
+  // that actually served, not the static guess routePick journals with.
+  // The journal is observability, never a gate: a write failure warns
+  // and the decision stands, the same fail-open the pick path keeps
   if (asked !== null) {
-    await journalFormula({
-      dir,
-      subject: text.slice(0, 80),
-      questions: asked.questions,
-      res: asked.res,
-      outcome: decision.route?.name ?? '',
-    });
+    try {
+      await journalFormula({
+        dir,
+        subject: text.slice(0, 80),
+        questions: asked.questions,
+        res: asked.res,
+        outcome: decision.route?.name ?? '',
+      });
+    } catch (err) {
+      console.error(
+        `warning: the route-formula journal — ` +
+          `${err instanceof Error ? err.message : String(err)}; the decision stands unrecorded`
+      );
+    }
   }
   return { decision, snapshot, healthKnown };
 }
@@ -338,7 +351,14 @@ async function decideByQuestions(
  *  failure); here the formula decides. */
 export async function decideByFormula(input: FormulaDecisionInput): Promise<FormulaTaskDecision> {
   const { dir, table, task, text, router, formula, snapshot, healthKnown } = input;
-  const judge = await formulaJudge(dir, router, input.judge);
+  // 'off' never resolves the decision model — binding the provider can
+  // throw (no lane, no running router) and a mode whose whole point is
+  // not asking must not break on a judge it would never call. A test
+  // seam still passes through: it costs nothing and keeps the trace honest
+  const judge =
+    router?.mode === 'off' && input.judge === undefined
+      ? undefined
+      : await formulaJudge(dir, router, input.judge);
   const trace: FormulaTrace = {
     shape: formula.shape,
     ...(input.formulaPath === undefined ? {} : { file: input.formulaPath }),

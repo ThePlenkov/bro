@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
+import { testRepoInit } from '@broject/core';
 import type { DecideResult, JudgeAnswer, JudgeFacade } from '@broject/core';
 import {
   parseFormulaText,
@@ -273,6 +274,49 @@ describe('the features shape', () => {
     assert.match(decision.formula?.note ?? '', /off/);
   });
 
+  test('off mode never binds the provider — an unresolvable one cannot break it', async () => {
+    const table = FEATURES_TABLE;
+    const f = formula(FEATURES_FORMULA, table);
+    // no judge seam — the production path. 'off' must not resolve the
+    // provider at all: decisionProvider would throw "no router found"
+    // for a name that is no lane and no running router
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table,
+      task: {},
+      text: 'a task',
+      router: { provider: 'no-such-provider', mode: 'off' },
+      formula: f,
+      snapshot: {},
+      healthKnown: true,
+    });
+    assert.equal(decision.route?.name, 'any');
+    assert.match(decision.formula?.note ?? '', /off/);
+  });
+
+  test('a journal write failure warns but the decision stands', async () => {
+    const table = FEATURES_TABLE;
+    const f = formula(FEATURES_FORMULA, table);
+    const dir = scratchDir();
+    testRepoInit(dir);
+    // .git/bro as a FILE — appendRow's mkdir of bro/judge cannot succeed,
+    // so the verdict write throws after the decision is already made
+    writeFileSync(join(dir, '.git', 'bro'), 'in the way');
+    const { judge } = fakeJudge({ tier: choice('pro'), complexity: choice('low') });
+    const { decision } = await decideByFormula({
+      dir,
+      table,
+      task: {},
+      text: 'a task',
+      formula: f,
+      snapshot: {},
+      healthKnown: true,
+      judge,
+    });
+    assert.equal(decision.route?.name, 'pro');
+    assert.equal(decision.picked, 'static');
+  });
+
   test('a low-confidence answer is recorded and never applied', async () => {
     const table = FEATURES_TABLE;
     const f = formula(FEATURES_FORMULA, table);
@@ -424,6 +468,56 @@ describe('the score shape', () => {
     const b = decision.formula?.scores?.find(s => s.route === 'b');
     assert.equal(b?.score, undefined);
     assert.equal(b?.p, 0.9);
+  });
+
+  test('a skipped score falls back to DECLARATION order, not fit order', async () => {
+    // the catch-all is declared FIRST but fits worst — candidates() ranks
+    // it last; the skip contract is table order (the same order the score
+    // tie-break uses), so the declaration-first survivor still wins
+    const table: RouteTable = {
+      kind: 'route',
+      version: 1,
+      routes: [
+        { name: 'any', match: {}, chain: [{ provider: 'c' }] },
+        {
+          name: 'pro',
+          match: { features: { tier: 'pro' } },
+          chain: [{ provider: 'a' }],
+        },
+      ],
+    };
+    const f = formula(
+      [
+        '---',
+        'kind: formula',
+        'shape: score',
+        'questions:',
+        '  risky: { type: bool }',
+        '  tier: { type: choice, options: [free, pro] }',
+        'score: { lambda: 0.5, mu: 0.1 }',
+        '---',
+        'rubric',
+      ].join('\n'),
+      table
+    );
+    const { judge } = fakeJudge({ risky: noul(0.2) }); // tier unanswered — the caller carries it
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table,
+      task: { features: { tier: 'pro' } },
+      text: 'a task',
+      formula: f,
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      // no outcomes seam — the Beta(1,1) prior leaves cost/latency
+      // unknown under positive weights, so scoring skips
+    });
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.picked, 'static');
+    assert.match(decision.reason, /scoring skipped/);
+    // the candidate list the verdict carries is the order that decided
+    assert.equal(decision.candidates[0]?.route.name, 'any');
   });
 
   test('a zero weight needs no measure — unknown cost is simply unread', async () => {

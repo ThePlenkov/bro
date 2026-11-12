@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,14 +12,27 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js'
 const scratch = mkdtempSync(join(tmpdir(), 'brouter-route-surface-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
+/** An empty XDG config home — the operator's ~/.config/bro must never
+ *  leak a brouter.router into a suite that asserts the no-model path. */
+const xdg = join(scratch, 'xdg');
+mkdirSync(xdg, { recursive: true });
+/** A cwd outside every checkout — no bro.config.* project layer reaches
+ *  the spawned CLI either (bro.config.local.* is machine-local). */
+const plain = join(scratch, 'plain');
+mkdirSync(plain, { recursive: true });
+
 /** Run the CLI — a real process, so the exit codes are the real ones. The
  *  router's own state is isolated: the ledger is the operator's, not the
- *  test's. */
+ *  test's, and neither is the decision model's config. */
 function run(args: string[], cwd?: string): { code: number; stdout: string; stderr: string } {
   const proc = spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
-    ...(cwd === undefined ? {} : { cwd }),
-    env: { ...process.env, XDG_STATE_HOME: join(scratch, 'state') },
+    cwd: cwd ?? plain,
+    env: {
+      ...process.env,
+      XDG_STATE_HOME: join(scratch, 'state'),
+      XDG_CONFIG_HOME: xdg,
+    },
   });
   return { code: proc.status ?? -1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
 }
