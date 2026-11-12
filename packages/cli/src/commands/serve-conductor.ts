@@ -2523,6 +2523,11 @@ interface ProviderLane {
    *  per request. Failures are never cached: a lane that recovers is
    *  re-read on the next request. */
   catalogCache?: { at: number; rows: RoutedModel[] };
+  /** The lane's catalog read in flight (bro-5xm9g) — concurrent cold
+   *  /v1/models requests share it (single-flight) instead of each
+   *  paying a fresh child + `session/new`. A settled read leaves only
+   *  catalogCache (success) or nothing (failure) behind. */
+  catalogInflight?: Promise<LaneCatalog>;
 }
 
 /** A routing decision — the LANE that serves the request and the ROUTE
@@ -2998,6 +3003,41 @@ function fastLaneOf(
   return cfg.fastDisabled === true ? { lane: 'session' } : { lane: 'session', unrouted: true };
 }
 
+/** The probe wall gate (bro-5xm9g) — a probe on a cooling lane is
+ *  refused BEFORE `wire.link()` would spawn the pooled peer: the probe
+ *  exists to measure the lane, and a lane that already said no has
+ *  nothing to measure. Answers the cooldown's own 429 + `retry-after`
+ *  and returns true; an open lane returns false and the turn proceeds. */
+function probeWallRefusal(
+  res: ServerResponse,
+  lane: ProviderLane,
+  route: string,
+  t0: number,
+  probe: string
+): boolean {
+  const wall = lane.cooldown.refusal();
+  if (wall === undefined) return false;
+  otelEvent('conductor.turn', {
+    backend: route,
+    probe: true,
+    probe_label: probe,
+    skipped: 'wall',
+    session_reused: false,
+    session_key_ns: 'probe',
+    input_tokens: 0,
+    output_tokens: 0,
+    duration_ms: Date.now() - t0,
+  });
+  res.setHeader('retry-after', String(wall.retryAfterSec));
+  apiError(
+    res,
+    429,
+    'rate_limit_error',
+    `bro conductor: probe skipped — the lane is cooling down (${wall.reason}) — retry in ${wall.retryAfterSec}s`
+  );
+  return true;
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -3053,30 +3093,7 @@ async function messages(
   // lane, and a lane that already said no has nothing to measure
   const probe = probeLabelOf(req);
   const turnKey = probe === undefined ? key : `probe:${lane.entry}`;
-  if (probe !== undefined) {
-    const wall = lane.cooldown.refusal();
-    if (wall !== undefined) {
-      otelEvent('conductor.turn', {
-        backend: route,
-        probe: true,
-        probe_label: probe,
-        skipped: 'wall',
-        session_reused: false,
-        session_key_ns: 'probe',
-        input_tokens: 0,
-        output_tokens: 0,
-        duration_ms: Date.now() - t0,
-      });
-      res.setHeader('retry-after', String(wall.retryAfterSec));
-      apiError(
-        res,
-        429,
-        'rate_limit_error',
-        `bro conductor: probe skipped — the lane is cooling down (${wall.reason}) — retry in ${wall.retryAfterSec}s`
-      );
-      return;
-    }
-  }
+  if (probe !== undefined && probeWallRefusal(res, lane, route, t0, probe)) return;
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined;
@@ -4870,6 +4887,21 @@ async function laneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatal
   if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) {
     return { rows: cached.rows };
   }
+  // single-flight: a cold read already in flight answers every
+  // concurrent request — a client's startup burst pays ONE
+  // catalogModels, not one per request
+  if (lane.catalogInflight !== undefined) return lane.catalogInflight;
+  const inflight = readLaneCatalog(lane, wire).finally(() => {
+    if (lane.catalogInflight === inflight) lane.catalogInflight = undefined;
+  });
+  lane.catalogInflight = inflight;
+  return inflight;
+}
+
+/** The lane's catalog read itself — the uncached half of laneCatalog.
+ *  A lane that cannot be read yields a failure, not a throw: one
+ *  provider being down must not blind the other's models. */
+async function readLaneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatalog> {
   // the catalog override answers for the default lane only — an
   // exposed lane advertises its own entry's models. The rows carry the
   // lane's PRIMARY route: a lane with two routes is advertised once, so

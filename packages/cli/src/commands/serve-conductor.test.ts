@@ -1909,6 +1909,27 @@ describe('serve /v1/* — retained acp sessions', () => {
     }
   });
 
+  test('concurrent cold /v1/models reads share one catalog session/new', async () => {
+    // delayNewMs holds session/new open — both requests are inside the
+    // read before either can populate the cache; single-flight must
+    // collapse them into one catalogModels (review on bro-5xm9g)
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], delayNewMs: 150 });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch(`${url}/v1/models`, { headers: auth }),
+        fetch(`${url}/v1/models`, { headers: auth }),
+      ]);
+      assert.equal(r1.status, 200);
+      assert.equal(r2.status, 200);
+      assert.equal(fake.sessions.length, 1, 'one catalog read served both requests');
+    } finally {
+      await close();
+    }
+  });
+
   test('an edited prefix under a pinned key evicts and restarts', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
       const pin = { headers: { 'x-bro-session': 's' } };
