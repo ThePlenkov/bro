@@ -15,9 +15,10 @@
  * Legacy `<id>.md`-only trees keep resolving to `native` — migration
  * is opt-in by adopting the marker, never a silent cutover.
  */
-import { type Dirent, existsSync, readdirSync } from 'node:fs';
+import { type Dirent, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   type Connector,
   type ConnectorCtx,
@@ -71,12 +72,20 @@ const require = createRequire(import.meta.url);
 function brotocolTemplates(): string[] {
   const dirs: string[] = [];
   try {
+    // the cli bundle emits brotocol's templates/ as a dist asset —
+    // this module's own dir is dist/ in both the package and the bundle
+    dirs.push(join(dirname(fileURLToPath(import.meta.url)), 'templates'));
+  } catch {
+    // import.meta.url always resolves — kept for symmetry with the
+    // require probe below
+  }
+  try {
     dirs.push(join(dirname(dirname(require.resolve('@broject/brotocol'))), 'templates'));
   } catch {
     // package not resolvable from here — specTemplateDir may still work
   }
   dirs.push(specTemplateDir);
-  return [...new Set(dirs)];
+  return [...new Set(dirs.filter(d => existsSync(d)))];
 }
 
 /** `owns:` (KEY-N specs) wins over `scope:` (legacy pathspecs); both
@@ -143,7 +152,21 @@ function specStoreOver(
   };
 
   return {
-    hasSpec: id => get(protocol, id) !== undefined || hasSpecFile(root, specDir, id),
+    hasSpec: id => {
+      const d = get(protocol, id);
+      if (d !== undefined) {
+        // parity with hasSpecFile: a zero-byte .spec.md is a scaffold
+        // stub, not coverage — scan still derives its id from the name
+        try {
+          if (readFileSync(d.path, 'utf8').trim() !== '') {
+            return true;
+          }
+        } catch {
+          /* unreadable doc — fall through to the legacy probe */
+        }
+      }
+      return hasSpecFile(root, specDir, id);
+    },
     scaffold(id, opts) {
       // the legacy index also sees `<id>.md`/dir-spec collisions the
       // protocol glob misses — refuse duplicates across BOTH views,

@@ -715,6 +715,13 @@ function detectSpecTool(dir: string): string {
   if (specDir !== null && existsSync(specDir) && hasSpecDoc(specDir)) {
     return 'brose';
   }
+  // a populated spec dir without *.spec.md is a legacy/native tree;
+  // an absent dir (or an escaping sdd.dir) resolves to brose at
+  // runtime — the registry's first eligible provider — so init names
+  // the same tool the facade would pick
+  if (specDir === null || !existsSync(specDir)) {
+    return 'brose';
+  }
   return 'native';
 }
 
