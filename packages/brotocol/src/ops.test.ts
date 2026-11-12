@@ -202,6 +202,24 @@ describe('update', () => {
     assert.equal(get(protocol, 'I-1')?.id, 'I-1');
   });
 
+  it('refuses an id rename while frontmatter children reference the old id', () => {
+    create(protocol, { template: 'note@1', id: 'M-P', values: { title: 'p' } });
+    create(protocol, {
+      template: 'note@1',
+      id: 'M-C',
+      values: { title: 'c' },
+      parent: 'M-P',
+    });
+    assert.throws(() => update(protocol, 'M-P', { id: 'M-P2' }), /reparent/);
+    assert.equal(get(protocol, 'M-P')?.id, 'M-P');
+    // positional children re-derive parentage — a dir-doc rename stays legal
+    create(protocol, { template: 'note@1', id: 'M-D', values: { title: 'd' }, dir: 'M-D-x' });
+    create(protocol, { template: 'note@1', id: 'M-D-c', values: { title: 'dc' }, parent: 'M-D' });
+    const renamed = update(protocol, 'M-D', { id: 'M-D2' });
+    assert.equal(renamed.id, 'M-D2');
+    assert.equal(get(protocol, 'M-D-c')?.parentId, 'M-D2');
+  });
+
   it('throws on an unknown doc', () => {
     assert.throws(() => update(protocol, 'ghost', {}), /unknown doc/);
   });
@@ -238,5 +256,15 @@ describe('remove', () => {
     assert.ok(again.isDirDoc);
     remove(protocol, 'R-2', { recursive: true });
     assert.ok(!existsSync(dir('R-2-x')));
+  });
+
+  it('refuses recursive removal of the protocol root through its index doc', () => {
+    const { root: r4, dir: d4 } = mktree({ 'spec.md': '---\nid: ROOT-1\n---\n# root\n' });
+    try {
+      assert.throws(() => remove(proto(r4), 'ROOT-1', { recursive: true }), /tree root/);
+      assert.ok(existsSync(d4('spec.md')));
+    } finally {
+      rm(r4);
+    }
   });
 });

@@ -41,6 +41,19 @@ export function update(protocol: Protocol, id: string, fields: Record<string, un
     if (other !== undefined && other.path !== doc.path) {
       throw new Error(`id '${idSet}' is already held by ${other.path}`);
     }
+    if (protocol.parentField !== undefined) {
+      // positional children re-derive parentage on the next scan, but a
+      // frontmatter `parent:` still names the old id — renaming would
+      // orphan it into a graph diagnostic. Refuse; reparent first.
+      const referenced = scan(protocol).some(
+        d => d.path !== doc.path && d.parentEdge === 'frontmatter' && d.parentId === doc.id
+      );
+      if (referenced) {
+        throw new Error(
+          `cannot rename '${doc.id}' — documents declare it as '${protocol.parentField}'; reparent them first`
+        );
+      }
+    }
   }
   // the merge goes through entry lists + fromEntries — no obj[key]
   // writes, so a caller key like `__proto__` becomes a plain own entry

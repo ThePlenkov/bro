@@ -3,7 +3,7 @@
  * its index file (parts stay — they were never the doc) unless
  * `{recursive: true}` removes the whole directory.
  */
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { ioRemove } from './io.ts';
 import type { Protocol } from './protocol.ts';
 import { get, scan } from './scan.ts';
@@ -25,6 +25,11 @@ export function remove(
   const removed: string[] = [];
   if (doc.isDirDoc && opts.recursive === true) {
     const dir = dirname(doc.path);
+    // a root dir-doc's dirname IS the tree — recursive removal would
+    // delete every doc and every non-doc file under it.
+    if (resolve(dir) === resolve(protocol.root)) {
+      throw new Error(`refusing recursive removal of the tree root via '${doc.id}'`);
+    }
     ioRemove(dir, true);
     removed.push(dir);
   } else {
