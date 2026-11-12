@@ -97,8 +97,8 @@ aliases: []
       'packages/brose',
     ]);
     assert.deepEqual(data.aliases, []);
-    assert.equal(keyLines.get('template'), 1);
-    assert.equal(keyLines.get('owns'), 6);
+    assert.equal(keyLines.get('template'), 2);
+    assert.equal(keyLines.get('owns'), 7);
   });
 
   it('returns empty data and the content as body without frontmatter', () => {
@@ -157,6 +157,14 @@ describe('dumpFrontmatter', () => {
     assert.match(dumped, /^'007': x$/m);
     assert.match(dumped, /^'true': y$/m);
     assert.match(dumped, /^'1\.5': z$/m);
+    assert.deepEqual(parseFrontmatter(`---\n${dumped}---\n`).data, data);
+  });
+
+  it('serializes nested arrays as flow lists that re-parse intact', () => {
+    const data = { v: [[1, 2], [3]], m: { n: [[9]] } };
+    const dumped = dumpFrontmatter(data);
+    assert.match(dumped, /- \[1, 2\]/);
+    assert.match(dumped, /- \[9\]/);
     assert.deepEqual(parseFrontmatter(`---\n${dumped}---\n`).data, data);
   });
 

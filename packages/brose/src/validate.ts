@@ -86,11 +86,19 @@ const titleMatch = (tpl: string, doc: string): boolean => {
     if (p === '') {
       continue;
     }
-    let pos = text.indexOf(p, cursor);
-    while (sawLiteral && pos !== -1 && pos <= cursor) {
+    // the last literal must be a suffix — indexOf's first hit can sit
+    // earlier and leave the end check unreachable (`{{n}} Spec` vs
+    // 'Alpha Spec Spec').
+    const isLast = i === parts.length - 1;
+    let pos = isLast ? (text.endsWith(p) ? text.length - p.length : -1) : text.indexOf(p, cursor);
+    while (!isLast && sawLiteral && pos !== -1 && pos <= cursor) {
       pos = text.indexOf(p, pos + 1);
     }
-    if (pos === -1 || (!sawLiteral && (i === 0 ? pos !== 0 : pos < 1))) {
+    if (
+      pos === -1 ||
+      (sawLiteral && pos <= cursor) ||
+      (!sawLiteral && (i === 0 ? pos !== 0 : pos < 1))
+    ) {
       return false;
     }
     sawLiteral = true;

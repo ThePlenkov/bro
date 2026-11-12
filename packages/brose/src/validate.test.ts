@@ -46,6 +46,17 @@ fields:
 ## Follow-ups
 `
 );
+writeFileSync(
+  join(tdir, 'wrap.md'),
+  `---
+name: wrap
+version: 1
+fields:
+  name: { required: true, type: string }
+---
+# {{name}} Spec
+`
+);
 
 const registry = createRegistry({ dirs: [tdir] });
 
@@ -102,7 +113,8 @@ describe('validate — fields', () => {
   it('reports a missing required field', () => {
     const d = validate(doc('nofield.md', VALID.replace('title: n\n', '')), { registry });
     assert.ok(rules(d).includes('field-required'));
-    assert.equal(d[0]!.line, 1);
+    // d[0] is the template-outdated advisory — 'template:' sits on file line 2
+    assert.equal(d[0]!.line, 2);
   });
 
   it('reports a wrong field type and a bad enum value', () => {
@@ -110,7 +122,7 @@ describe('validate — fields', () => {
     const d = validate(doc('badfield.md', bad), { registry });
     assert.ok(rules(d).includes('field-type'));
     assert.ok(rules(d).includes('field-enum'));
-    assert.equal(d.find(x => x.rule === 'field-enum')!.line, 3);
+    assert.equal(d.find(x => x.rule === 'field-enum')!.line, 4);
   });
 });
 
@@ -134,6 +146,19 @@ describe('validate — sections', () => {
       registry,
     });
     assert.deepEqual(errors(d), []);
+  });
+
+  it('anchors a trailing heading literal at the end', () => {
+    const ok = validate(
+      doc('wrap-ok.md', '---\ntemplate: wrap@1\nname: Alpha Spec\n---\n# Alpha Spec Spec\n'),
+      { registry }
+    );
+    assert.deepEqual(errors(ok), []);
+    const bad = validate(
+      doc('wrap-bad.md', '---\ntemplate: wrap@1\nname: x\n---\n# Alpha Spec Extra\n'),
+      { registry }
+    );
+    assert.ok(rules(bad).includes('section-missing'));
   });
 
   it('does not count headings inside fenced code', () => {

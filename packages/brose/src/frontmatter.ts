@@ -249,7 +249,8 @@ const inlineValue = (s: string): unknown => {
 interface Line {
   indent: number;
   text: string;
-  /** 1-based source line within the frontmatter block */
+  /** 1-based file line — the opening `---` is line 1, so block row
+   *  `idx` sits at file line `idx + 2` */
   line: number;
 }
 
@@ -408,7 +409,7 @@ export function parseFrontmatter(content: string): Frontmatter {
       continue;
     }
     const indent = stripped.length - stripped.trimStart().length;
-    lines.push({ indent, text: stripped.trim(), line: idx + 1 });
+    lines.push({ indent, text: stripped.trim(), line: idx + 2 });
   }
   const topIndent = lines[0]?.indent ?? 0;
   const keyLines = new Map<string, number>();
@@ -462,6 +463,22 @@ const scalarOut = (v: unknown): string => {
   return s;
 };
 
+/** Flow-style serialization for values that cannot sit on a block
+ *  line — a nested array emits `[a, b]` / `{k: v}`, which `inlineValue`
+ *  re-reads losslessly where `scalarOut` would flatten it to `'1,2'`. */
+const flowOut = (v: unknown): string => {
+  if (Array.isArray(v)) {
+    return `[${v.map(flowOut).join(', ')}]`;
+  }
+  if (v !== null && typeof v === 'object') {
+    const entries = Object.entries(v as Record<string, unknown>).map(
+      ([k, x]) => `${scalarOut(k)}: ${flowOut(x)}`
+    );
+    return `{${entries.join(', ')}}`;
+  }
+  return scalarOut(v);
+};
+
 const dumpLines = (obj: Record<string, unknown>, indent: string): string[] => {
   const out: string[] = [];
   for (const [k, v] of Object.entries(obj)) {
@@ -484,6 +501,8 @@ const dumpLines = (obj: Record<string, unknown>, indent: string): string[] => {
             out.push(`${indent}  - ${first.trimStart()}`);
             out.push(...entries.slice(1));
           }
+        } else if (Array.isArray(item)) {
+          out.push(`${indent}  - ${flowOut(item)}`);
         } else {
           out.push(`${indent}  - ${scalarOut(item)}`);
         }
