@@ -124,10 +124,12 @@ export function matchGlob(pattern: string, path: string): boolean {
  *  fold would otherwise strip the leading `\` and silently match
  *  `foo`-shaped globs (bro-0ykhg.2 review). */
 export function isRepoRelativePath(path: string): boolean {
-  if (path === '' || path.startsWith('/') || path.startsWith('~') || path.startsWith('\\')) {
+  if (path === '' || path.startsWith('/') || path.startsWith('~')) {
     return false;
   }
-  if (/^[A-Za-z]:/.test(path)) {
+  // Windows forms — any leading `\` (root-relative or UNC) and any
+  // drive prefix are never repo-relative (bro-0ykhg.2 review)
+  if (path.startsWith('\\') || /^[A-Za-z]:/.test(path)) {
     return false;
   }
   return !path.split(/[\\/]/).some(s => s === '..');
