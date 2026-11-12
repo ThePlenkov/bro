@@ -90,7 +90,8 @@ Developing bro itself: see CONTRIBUTING.md.
   own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
   currently `"github-advanced-security"`, `"kilo"`, `"sonarcloud"`,
-  `"codescene"` (rate limits / structural deltas; advisory, may still
+  `"codescene"`, `"codacy"` (rate limits / structural deltas / stale
+  analysis snapshots; advisory, may still
   be read — `check:docs` fails if this quote rots; naming a static
   scanner overrides its must-fix default: findings still read,
   verdicts don't gate).
