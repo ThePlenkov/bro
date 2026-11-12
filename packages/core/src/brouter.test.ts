@@ -115,6 +115,25 @@ describe('parseBrouter', () => {
       }).router?.recall,
       { minRows: 2 }
     );
+    // the parser holds the schema's own bounds — fractional counts and
+    // an over-1 agreement bar drop per-field instead of being floored
+    // or clamped downstream (bro-0ykhg.2 review)
+    assert.deepEqual(
+      parseBrouter({
+        router: {
+          provider: 'orca',
+          mode: 'enforce',
+          recall: { k: 2.5, minAgreement: 1.5, minRows: 0 },
+        },
+      }).router?.recall,
+      {}
+    );
+    assert.deepEqual(
+      parseBrouter({
+        router: { provider: 'orca', mode: 'enforce', recall: { minAgreement: 0.5, k: 1 } },
+      }).router?.recall,
+      { k: 1, minAgreement: 0.5 }
+    );
   });
 
   test('shorthand, object, and ordered-list routes normalize', () => {

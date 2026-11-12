@@ -201,6 +201,11 @@ test('matchGlob — *, **, and ? behave as documented', () => {
   assert.ok(matchGlob('src/*.ts', 'src\\view.ts'));
   assert.ok(matchGlob('src/**/*.ts', 'src\\deep\\view.ts'));
   assert.ok(!matchGlob('src/*.ts', 'lib\\view.ts'));
+  // `?` counts CODE POINTS, not UTF-16 units — one astral character is
+  // one character, so emoji filenames still match (bro-0ykhg.2 review)
+  assert.ok(matchGlob('src/?.ts', 'src/😀.ts'));
+  assert.ok(matchGlob('??.ts', 'a😀.ts'));
+  assert.ok(!matchGlob('?.ts', 'a😀.ts'), '? is exactly one character');
 });
 
 test('isRepoRelativePath — absolute, ~, and .. never pass', () => {

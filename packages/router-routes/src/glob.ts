@@ -26,31 +26,37 @@ type GlobSegment = { any: true } | { any: false; text: string };
  *  on purpose: no RegExp means no ReDoS surface and no regex compile
  *  per match (bro-0ykhg.2 review). */
 function segmentMatch(pattern: string, text: string): boolean {
-  let p = 0;
-  let t = 0;
+  // compare by CODE POINT, not UTF-16 unit — spread iterates code
+  // points, so `?` matches one whole character and an astral filename
+  // (emoji, rare CJK) still matches instead of dying on a lone
+  // surrogate (bro-0ykhg.2 review)
+  const p = [...pattern];
+  const t = [...text];
+  let pi = 0;
+  let ti = 0;
   let starP = -1;
   let starT = 0;
-  while (t < text.length) {
-    const pc = pattern.charAt(p);
-    if (pc !== '' && (pc === '?' || pc === text.charAt(t))) {
-      p += 1;
-      t += 1;
+  while (ti < t.length) {
+    const pc = p.at(pi);
+    if (pc !== undefined && (pc === '?' || pc === t.at(ti))) {
+      pi += 1;
+      ti += 1;
     } else if (pc === '*') {
-      starP = p;
-      starT = t;
-      p += 1;
+      starP = pi;
+      starT = ti;
+      pi += 1;
     } else if (starP !== -1) {
-      p = starP + 1;
+      pi = starP + 1;
       starT += 1;
-      t = starT;
+      ti = starT;
     } else {
       return false;
     }
   }
-  while (pattern.charAt(p) === '*') {
-    p += 1;
+  while (p.at(pi) === '*') {
+    pi += 1;
   }
-  return p >= pattern.length;
+  return pi >= p.length;
 }
 
 /** Compile one glob into segments — leading/trailing slashes and

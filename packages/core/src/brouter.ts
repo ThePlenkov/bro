@@ -281,12 +281,22 @@ function isRouterMode(mode: unknown): mode is FleetRouter['mode'] {
   return typeof mode === 'string' && ROUTER_MODES.has(mode);
 }
 
-/** A positive finite tuning number — absent and bad both drop. */
-function tuningNumber(v: unknown): number | undefined {
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+/** A positive integer tuning count — k and minRows count rows, so a
+ *  fraction is meaningless. */
+function tuningCount(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 ? v : undefined;
 }
 
-/** The T1 recall tuning — {k, minAgreement, minRows}, each optional. */
+/** The agreement bar — a fraction in (0, 1]. */
+function tuningFraction(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1 ? v : undefined;
+}
+
+/** The T1 recall tuning — {k, minAgreement, minRows}, each optional.
+ *  Each field holds the same bounds the emitted JSON schema declares —
+ *  counts are integers >= 1, the agreement bar is (0, 1] — so a value
+ *  the schema would reject drops loudly here instead of being floored
+ *  or clamped silently at the call site (bro-0ykhg.2 review). */
 function recallTuning(raw: unknown): RouterRecall | undefined {
   if (raw === undefined) {
     return undefined;
@@ -297,11 +307,24 @@ function recallTuning(raw: unknown): RouterRecall | undefined {
   }
   const o = raw as Record<string, unknown>;
   const out: RouterRecall = {};
-  const k = tuningNumber(o.k);
-  const minAgreement = tuningNumber(o.minAgreement);
-  const minRows = tuningNumber(o.minRows);
+  const k = tuningCount(o.k);
+  const minAgreement = tuningFraction(o.minAgreement);
+  const minRows = tuningCount(o.minRows);
+  if (o.k !== undefined && k === undefined) {
+    console.error('bro.config: brouter.router.recall.k must be an integer >= 1 — field dropped');
+  }
   if (k !== undefined) out.k = k;
+  if (o.minAgreement !== undefined && minAgreement === undefined) {
+    console.error(
+      'bro.config: brouter.router.recall.minAgreement must be a number in (0, 1] — field dropped'
+    );
+  }
   if (minAgreement !== undefined) out.minAgreement = minAgreement;
+  if (o.minRows !== undefined && minRows === undefined) {
+    console.error(
+      'bro.config: brouter.router.recall.minRows must be an integer >= 1 — field dropped'
+    );
+  }
   if (minRows !== undefined) out.minRows = minRows;
   return out;
 }
