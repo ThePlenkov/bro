@@ -732,10 +732,14 @@ async function spawnFixer(
   let wt = worktree;
   let created = false;
   if (wt === undefined) {
-    const fresh = freshOccupancy(ctx.mainRoot, known);
     const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef, {
-      guard: dir =>
-        occupied({
+      // the occupancy snapshot is taken INSIDE the guard — the ensure path
+      // invokes it while holding the occupancy locks, so a claim that landed
+      // during the lock wait is seen before the branch refresh; a pre-lock
+      // snapshot would approve a checkout a live session just took
+      guard: dir => {
+        const fresh = freshOccupancy(ctx.mainRoot, known);
+        return occupied({
           agents: fresh.agents,
           fixerBead: fixer?.id,
           branch: state.headRef,
@@ -744,7 +748,8 @@ async function spawnFixer(
           scanProc: agentProcessesIn,
           pr,
           watches: fresh.watches,
-        }),
+        });
+      },
       lock: dir => acquireOccupancyLocks(ctx.mainRoot, dir),
     });
     if (ensured.occupied !== undefined) {
@@ -1333,10 +1338,12 @@ function fixerLane(
   if (worktree !== undefined) {
     return { wt: worktree };
   }
-  const fresh = freshOccupancy(ctx.mainRoot, known);
   const ensured = ensureFixerWorktree(ctx.mainRoot, branch, {
-    guard: dir =>
-      occupied({
+    // same in-lock snapshot rule as spawnFixer — the guard runs under the
+    // occupancy locks, so freshOccupancy must be sampled there, not before
+    guard: dir => {
+      const fresh = freshOccupancy(ctx.mainRoot, known);
+      return occupied({
         agents: fresh.agents,
         fixerBead: fixer?.id,
         branch,
@@ -1345,7 +1352,8 @@ function fixerLane(
         scanProc: agentProcessesIn,
         pr,
         watches: fresh.watches,
-      }),
+      });
+    },
     lock: dir => acquireOccupancyLocks(ctx.mainRoot, dir),
   });
   if (ensured.occupied !== undefined) {
