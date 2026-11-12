@@ -28,6 +28,7 @@
 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, eq, gte, sql } from 'drizzle-orm';
+import { invalidateCacheKey } from './cache.ts';
 import type { DecisionRow, StoreFace } from './decisions.ts';
 import { canonicalJson, getDecision } from './decisions.ts';
 import { readReporterToken, redactSecrets, tightenStoreFiles } from './privacy.ts';
@@ -323,11 +324,45 @@ export async function recordOutcome(
       now,
       options.persistText !== false
     );
+    // bro-0ykhg.3 — a VERIFIED outcome that fails the decision's success
+    // predicate drops the cache entry the decision consulted: the memo
+    // may not keep answering with a stage answer the evidence just
+    // disproved. Pending/unverified reports never invalidate — they are
+    // assertions, not evidence.
+    if (verifiedFlag === 1) {
+      await invalidateForOutcome(store, decision, report);
+    }
   } else {
     outcome = await readOutcome(store.db, report.decisionId);
   }
   tightenStoreFiles(store.path);
   return { applied, verified: verifiedFlag === 1, outcome };
+}
+
+/** The cache-invalidation half of an accepted verified outcome — the
+ *  decision's own success predicate labels the report; only a FAILURE
+ *  drops the entry (an unlabelled row — merged with unknown rounds
+ *  under merged_first_round — is unknown, never a verdict). Decisions
+ *  journaled without a cache key have nothing to drop. */
+async function invalidateForOutcome(
+  store: StoreFace,
+  decision: DecisionRow,
+  report: OutcomeReport
+): Promise<void> {
+  const key = decision.cacheKey;
+  if (key === null || key === undefined || key === '') {
+    return;
+  }
+  const predicate = (SUCCESS_PREDICATES as readonly string[]).includes(
+    decision.successPredicate ?? ''
+  )
+    ? (decision.successPredicate as SuccessPredicate)
+    : DEFAULT_SUCCESS_PREDICATE;
+  const label = labelOutcome({ result: report.result, rounds: report.rounds ?? null }, predicate);
+  if (label !== 'failure') {
+    return;
+  }
+  await invalidateCacheKey(store, key);
 }
 
 async function readOutcome(

@@ -56,6 +56,9 @@ export interface AskRequest {
   routes?: string;
   /** the routing formula — absent = the table's order plus the model pick */
   formula?: string;
+  /** bypass the decision cache for this ask (bro-0ykhg.3) —
+   *  `--no-cache`; entries stay, only the consult is skipped */
+  noCache?: boolean;
   /** the explanation's slices — absent = no explanation */
   slices?: ExplainSlice[];
 }
@@ -293,6 +296,7 @@ async function tableDecision(
     kind: 'ask',
     ...(brouter?.router === undefined ? {} : { router: brouter.router }),
     ...(request.formula === undefined ? {} : { formula: request.formula }),
+    ...(request.noCache === undefined ? {} : { noCache: request.noCache }),
   });
 }
 

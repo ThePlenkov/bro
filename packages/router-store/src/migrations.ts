@@ -116,6 +116,28 @@ create index if not exists outcome_reports_decision on outcome_reports (decision
 create virtual table if not exists outcomes_fts using fts5(decision_id unindexed, task_text);
 `,
   },
+  {
+    id: '0003_decision_cache',
+    sql: `
+alter table decisions add column cache_key text;
+alter table decisions add column cache_generation integer;
+alter table decisions add column success_predicate text;
+create table if not exists decision_cache (
+  key_hash text primary key,
+  key_json text not null,
+  context_id text not null,
+  value_json text not null,
+  generation integer not null,
+  created_at integer not null,
+  expires_at integer not null
+);
+create index if not exists decision_cache_context on decision_cache (context_id);
+create table if not exists decision_cache_gen (
+  key_hash text primary key,
+  generation integer not null
+);
+`,
+  },
 ];
 
 /** The bookkeeping table — which migrations ran. */
