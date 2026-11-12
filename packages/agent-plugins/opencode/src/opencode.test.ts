@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import plugin, { jsRuntime, toolSucceeded } from './opencode.ts';
+import plugin, { toolSucceeded } from './opencode.ts';
 
 // Modern OpenCode server plugin only (https://opencode.ai/docs/build/plugins/server/).
 // Behavioral coverage lives in opencode.setup.test.ts (BroSetup).
@@ -10,16 +10,6 @@ describe('plugin shape', () => {
     assert.equal(p.id, 'bro');
     assert.equal(typeof p.setup, 'function');
     assert.equal(p.server, undefined);
-  });
-});
-
-describe('jsRuntime', () => {
-  test('never resolves to process.execPath', () => {
-    assert.notEqual(jsRuntime(), process.execPath);
-  });
-
-  test('names a JS runtime bro can rely on', () => {
-    assert.match(jsRuntime(), /^(node|node\.exe)$/);
   });
 });
 

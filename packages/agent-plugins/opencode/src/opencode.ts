@@ -30,10 +30,20 @@
  * exit, or bad output degrades to no context / no gate / no re-prompt.
  * Nothing here throws into opencode. Spawns are async (server event loop).
  */
-import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  HOOK_TIMEOUT_MS,
+  REHYDRATION_TIMEOUT_MS,
+  RUN_TIMEOUT_MS,
+  callHook,
+  contextOf,
+  createCommandResolver,
+  hookEmitEnv,
+  runCommand,
+  type HookControl,
+} from '@broject/adapter-core/core';
 import { Plugin } from '@opencode/plugin';
 import { Bro, type BroBoard, emptyBoard, parseBoard } from './rpc.ts';
 
@@ -48,298 +58,17 @@ interface PluginOptions {
   skillsDir?: string;
 }
 
-/** Control object from `bro hooks <event>`. */
-interface HookControl {
-  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown };
-  decision?: string;
-  reason?: unknown;
-}
-
-interface Command {
-  cmd: string;
-  args: string[];
-}
-
-/** Per-probe budget for the events that ride on a turn. A wedged connector
- *  already costs up to 4s each and bro runs probes sequentially, so this is an
- *  outer bound, not the expected wait — on timeout the event degrades to "no
- *  context", which is the fail-open answer anyway. */
-const HOOK_TIMEOUT_MS = 15_000;
-
-/** Rehydration gets a longer budget because it shells out to `bd ready` and
- *  scans the worktree set — measured at 20-40s in a loaded repo. It is primed
- *  on `session.created` (see below) so that cost overlaps the user's first
- *  prompt instead of serializing after it. */
-const REHYDRATION_TIMEOUT_MS = 45_000;
-
-const MAX_OUTPUT = 1 << 20;
-
-/** The runtime that executes the sibling CLI.
- *
- *  NOT `process.execPath`. opencode ships as a compiled binary, so inside its
- *  own plugin process `process.execPath` IS opencode — spawning it with
- *  `hooks <event>` starts a TUI instead of running the hook, and the plugin
- *  fails open into silence. `node` on PATH is the right ask anyway: it is what
- *  bro itself requires (`engines.node >= 22.18`), it is what hooks/run.sh
- *  resolves, and the CLI is plain ESM JS, so any runtime will do. */
-export function jsRuntime(): string {
-  return process.platform === 'win32' ? 'node.exe' : 'node';
-}
-
-/**
- * The CLI shipped beside this module: installed as
- * `node_modules/@broject/bro/dist/{opencode,index}.js`, built in a checkout as
- * `packages/cli/dist/{opencode,index}.js`. Same package, so the hook policy
- * can never be a different version than the plugin calling it.
- */
-function siblingCli(): string | null {
-  for (const rel of ['./index.js', '../dist/index.js']) {
-    const candidate = fileURLToPath(new URL(rel, import.meta.url));
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-/** Walk up from this module for a checkout build — a bro.ts materialized
- * into `.opencode/plugins/` or `plugins/opencode/bro/` inside a bro
- * clone resolves the clone's own `packages/cli/dist/index.js`, so hook
- * behavior tracks the checkout. Same walk `.kilo/plugin/bro.ts` and
- * `hooks/run.sh` already do. */
-function checkoutCli(): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (;;) {
-    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js');
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      return null;
-    }
-    dir = parent;
-  }
-}
-
-/** Last-resort npx package spec, pinned to this module's own version —
- * gen-plugins lists this file in VERSIONED_SOURCES, so the pin is
- * rewritten to plugin.json's version on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.3.0';
+/** Last-resort npx fallback specs, pinned first then latest — gen-plugins
+ *  lists this file in VERSIONED_SOURCES, so the pin is rewritten to
+ *  plugin.json's version on every gen/release run. */
+const NPX_SPECS = ['@broject/bro@0.3.0', '@broject/bro'];
 
 /** Env stamped on every `bro hooks` spawn so the CLI's adapter emit
  *  path journals this session into the hook spool — the in-process
  *  adapters bypass run.sh, which owns the shell-side writer
- *  (specs/bro-izpyk.9.md). `BRO_HOOK_HOST` is both the launch marker
- *  and the ledger host name; a CLI that predates the marker ignores
+ *  (specs/bro-izpyk.9.md). A CLI that predates the marker ignores
  *  the env, so old↔new mixes degrade to the pre-emit status quo. */
-const HOOK_ENV: Record<string, string> = {
-  BRO_HOOK_HOST: 'opencode',
-  BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
-  BRO_HOOK_ADAPTER: NPX_PIN.slice(NPX_PIN.lastIndexOf('@') + 1),
-};
-
-/** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
- * probe serves both launch tiers: `hooks` with no event answers "is this
- * a bro that speaks the hook contract" — a bare `bro hooks` returns before
- * it reads stdin, and an older build without the subcommand exits nonzero.
- * A spawn error, timeout, or nonzero exit is "no" — selecting
- * a command that cannot launch is worse than falling through to the next
- * tier. */
-function exitsZero(cmd: string, args: string[]): Promise<boolean> {
-  return new Promise(resolve => {
-    let child: ChildProcess;
-    try {
-      // PATH lookup is the point of both tiers — the probe verifies the
-      // answer before any hook trusts it
-      child = spawn(cmd, args, {
-        stdio: ['pipe', 'ignore', 'ignore'],
-        windowsHide: true,
-        detached: process.platform !== 'win32',
-      }); // NOSONAR typescript:S4036
-    } catch {
-      resolve(false);
-      return;
-    }
-    const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve(code === 0);
-    });
-    child.stdin?.on('error', () => {});
-    child.stdin?.end('');
-  });
-}
-
-/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
- * command is a silent no-op, so exit 0 is the probe — an older bro without
- * the subcommand fails it instead of failing every hook. Same discriminator
- * hooks/run.sh uses. */
-function hasHooksCommand(): Promise<boolean> {
-  return exitsZero('bro', ['hooks']);
-}
-
-/** SIGKILL a hung child on a timer. The spawns below are detached, so the
- * child leads its own process group and `-pid` takes a spawned `gh`/`bd`
- * down with it — a lone child.kill would leave them orphaned. */
-function killAfter(
-  child: ChildProcess,
-  ms: number,
-  onTimeout: () => void
-): ReturnType<typeof setTimeout> {
-  const timer = setTimeout(() => {
-    try {
-      if (child.pid !== undefined) {
-        process.kill(-child.pid, 'SIGKILL');
-      }
-    } catch {
-      // no group to kill (not detached, already gone, or windows)
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // already gone
-      }
-    }
-    onTimeout();
-  }, ms);
-  timer.unref?.();
-  return timer;
-}
-
-async function resolveCommand(options: PluginOptions | undefined): Promise<Command | null> {
-  const override = options?.command;
-  if (typeof override === 'string' && override.trim() !== '') {
-    return { cmd: override, args: [] };
-  }
-  if (override && typeof override === 'object' && typeof override.cmd === 'string') {
-    return {
-      cmd: override.cmd,
-      args: Array.isArray(override.args)
-        ? override.args.filter((a): a is string => typeof a === 'string')
-        : [],
-    };
-  }
-  // local-dist tiers: the bundled sibling (npm `plugin` config-entry form)
-  // first, then the checkout walk-up for a materialized module inside a
-  // clone. The probe asks for the hook contract itself — `--version` would
-  // also pass on a stale dist that predates `bro hooks`, shadowing a
-  // working PATH `bro` while every hook fails open into silence. Each
-  // candidate is probed in order: a sibling that fails must not hide a
-  // working checkout build behind it.
-  for (const entry of [siblingCli(), checkoutCli()]) {
-    if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
-      return { cmd: jsRuntime(), args: [entry] };
-    }
-  }
-  // no local dist — fall back to PATH, and only to a bro that passes the
-  // hooks probe.
-  if (await hasHooksCommand()) {
-    return { cmd: 'bro', args: [] };
-  }
-  // last resort mirrors hooks/run.sh: the published package via npx,
-  // probed cheaply (the hook call itself carries the hook budget — a cold
-  // npx resolve degrades to no-context for that turn, not a hang)
-  if (await exitsZero('npx', ['--version'])) {
-    const specs = [NPX_PIN, '@broject/bro'];
-    for (const spec of specs) {
-      if (await exitsZero('npx', ['-y', '--prefer-offline', spec, 'hooks'])) {
-        return { cmd: 'npx', args: ['-y', '--prefer-offline', spec] };
-      }
-    }
-  }
-  return null;
-}
-
-/** Run one bro hook event. Resolves null for every failure mode, including
- * "bro isn't there" — the caller's only question is whether a valid control
- * object came back.
- *
- *  Async spawn, not spawnSync: opencode runs plugin hooks on the server's event
- *  loop, so a synchronous child would freeze the whole session — and bro's
- *  rehydration probes are measured in tens of seconds, not milliseconds. */
-function callHook(
-  command: Command,
-  event: string,
-  payload: unknown,
-  directory: string,
-  timeoutMs: number
-): Promise<HookControl | null> {
-  return new Promise(resolve => {
-    let child: ChildProcess;
-    try {
-      child = spawn(command.cmd, [...command.args, 'hooks', event], {
-        cwd: directory,
-        env: { ...process.env, ...HOOK_ENV },
-        stdio: ['pipe', 'pipe', 'ignore'],
-        // own process group so killAfter can take spawned children down too
-        windowsHide: true,
-        detached: process.platform !== 'win32',
-      });
-    } catch {
-      resolve(null);
-      return;
-    }
-    let settled = false;
-    const settle = (value: HookControl | null): void => {
-      if (!settled) {
-        settled = true;
-        resolve(value);
-      }
-    };
-    const timer = killAfter(child, timeoutMs, () => settle(null));
-    let out = '';
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      const remaining = MAX_OUTPUT - out.length;
-      if (remaining > 0) {
-        out += chunk.slice(0, remaining);
-      }
-    });
-    child.on('error', () => {
-      clearTimeout(timer);
-      settle(null);
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      // `bro hooks` always exits 0; anything else means the run failed, and a
-      // failed run's stdout is not a control object even if it parses
-      settle(code === 0 ? parseControl(out) : null);
-    });
-    // bro can exit before reading stdin (unrecognized event) — EPIPE here is
-    // bro's answer, not a crash
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(JSON.stringify(payload));
-  });
-}
-
-/** bro prints a single control object per event, but scan for the first
- * parseable line so unrelated chatter on stdout can't swallow the answer. */
-function parseControl(out: string): HookControl | null {
-  for (const line of out.split('\n')) {
-    const text = line.trim();
-    if (!text) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(text) as unknown;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as HookControl;
-      }
-    } catch {
-      // not a control line — keep scanning
-    }
-  }
-  return null;
-}
-
-function contextOf(control: HookControl | null): string {
-  const text = control?.hookSpecificOutput?.additionalContext;
-  return typeof text === 'string' ? text.trim() : '';
-}
+const HOOK_ENV = hookEmitEnv('opencode', { npxPin: NPX_SPECS[0] });
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -391,8 +120,13 @@ function makeCore(input: BroCoreInput) {
   const options = input.options;
   const log = input.log;
   // resolved on first use, not at load — the PATH tier costs a spawn probe
-  // and opencode loads plugins even in repos where bro is inert.
-  let command: Promise<Command | null> | undefined;
+  // and opencode loads plugins even in repos where bro is inert. The
+  // shared resolver owns the ladder (pin → sibling → checkout → PATH →
+  // npx) and the retry-on-failure window every adapter uses.
+  const getCommand = createCommandResolver({
+    command: options?.command,
+    npxSpecs: NPX_SPECS,
+  });
 
   const notify = (level: Level, message: string): void => {
     log(level, message).catch(() => {});
@@ -403,13 +137,12 @@ function makeCore(input: BroCoreInput) {
     payload: unknown,
     timeoutMs = HOOK_TIMEOUT_MS
   ): Promise<HookControl | null> => {
-    command ??= resolveCommand(options);
-    const resolved = await command;
+    const resolved = await getCommand();
     if (!resolved) {
       notify('debug', `bro probe skipped (no cli) for event=${event}`);
       return null;
     }
-    const result = await callHook(resolved, event, payload, directory, timeoutMs);
+    const result = await callHook(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
     if (result === null) {
       notify('debug', `bro probe returned null for event=${event}`);
     }
@@ -422,48 +155,21 @@ function makeCore(input: BroCoreInput) {
    * travels in the result because a nonzero exit IS the answer for
    * gate verbs like `act status`. */
   const exec = (args: string[]): Promise<{ code: number; out: string; err: string }> =>
-    new Promise(resolve => {
-      command ??= resolveCommand(options);
-      void command.then(resolved => {
-        if (resolved === null) {
-          resolve({ code: 127, out: '', err: 'no bro command resolved' });
-          return;
-        }
-        let child: ChildProcess;
-        try {
-          child = spawn(resolved.cmd, [...resolved.args, ...args], {
-            cwd: directory,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-            detached: process.platform !== 'win32',
-          });
-        } catch {
-          resolve({ code: 127, out: '', err: 'spawn failed' });
-          return;
-        }
-        let out = '';
-        let err = '';
-        const cap = (buf: string, chunk: string): string =>
-          buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
-        child.stdout?.setEncoding('utf8');
-        child.stdout?.on('data', (chunk: string) => {
-          out = cap(out, chunk);
-        });
-        child.stderr?.setEncoding('utf8');
-        child.stderr?.on('data', (chunk: string) => {
-          err = cap(err, chunk);
-        });
-        const finish = (code: number): void => resolve({ code, out: out.trim(), err: err.trim() });
-        const timer = killAfter(child, HOOK_TIMEOUT_MS, () => finish(124));
-        child.on('error', () => {
-          clearTimeout(timer);
-          finish(127);
-        });
-        child.on('close', code => {
-          clearTimeout(timer);
-          finish(code ?? 1);
-        });
+    getCommand().then(async resolved => {
+      if (resolved === null) {
+        return { code: 127, out: '', err: 'no bro command resolved' };
+      }
+      const result = await runCommand(resolved.cmd, [...resolved.args, ...args], {
+        cwd: directory,
+        timeoutMs: RUN_TIMEOUT_MS,
       });
+      const code =
+        result.code ?? (result.error !== null && result.error.startsWith('timed out') ? 124 : 127);
+      return {
+        code,
+        out: result.stdout.trim(),
+        err: (result.stderr !== '' ? result.stderr : (result.error ?? '')).trim(),
+      };
     });
 
   /** Rehydration is per session, not per turn: the context hook runs on every
