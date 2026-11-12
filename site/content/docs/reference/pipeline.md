@@ -1,14 +1,14 @@
 ---
 title: "bro pipeline"
-description: "Pipeline customer surface — accept|answer write the verdict store"
+description: "Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker"
 ---
 
-**`bro pipeline`** — Pipeline customer surface — accept|answer write the verdict store
+**`bro pipeline`** — Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker
 
-`bro pipeline accept|answer`
+`bro pipeline run|accept|answer|wake`
 
 | | |
 | --- | --- |
 | group | `pipeline` |
-| npm latest | `0.3.0` |
+| npm latest | `0.3.0` — new in `0.4.0`: run, wake |
 
