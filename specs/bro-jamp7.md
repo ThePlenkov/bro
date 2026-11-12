@@ -8,6 +8,17 @@ scope:
   - packages/cli/src/commands/work.ts
   - packages/cli/src/commands/loop.ts
   - packages/cli/src/commands/drive.ts
+  - packages/cli/src/commands/proc-owner.ts
+  - packages/cli/src/commands/agents.ts
+  - packages/cli/src/commands/hooks.ts
+  - packages/cli/src/commands/claim.ts
+  - packages/cli/src/commands/exec.ts
+  - packages/cli/src/commands/foreign-push.ts
+  - packages/cli/src/commands/githooks.ts
+  - packages/cli/src/commands/herdr-projector.ts
+  - packages/cli/src/commands/orchestrator-role.ts
+  - packages/cli/src/commands/status.ts
+  - packages/cli/src/session-planes/markers.ts
   - specs/project.md
   - REVIEW.md
 ---
@@ -93,6 +104,85 @@ plugins.ts import).
 `packages/rig` never imports `plugins.ts` or `commands/*` and never
 calls `process.exit`; connector resolution goes through core's
 `facade` + `loadConfig` only. Commands keep argv/stdout/exit.
+
+## Slice 2 — fleet lifecycle: the ownership plane (this change)
+
+Slice 1 moved the `rig next` verdict. This slice separates the **fleet
+lifecycle** domain — the read/select half of claim→registry→spawn→exit:
+every durable artifact (registry entries, `.exit`/`.handle` files,
+session markers, worktree claim markers, `/proc`, watch markers)
+classified into the ownership and cleanup verdicts every surface
+needs. The write transitions (spawn commit, stop, claim stamps) stay
+in the connectors/commands — spawn/IO adapters, per the slice rule.
+
+### Moves
+
+| symbol(s) | from | to |
+| --------- | ---- | -- |
+| `ProcHit`, `processesRootedIn`, `agentProcessesIn`, `agentOwner`, `ownerTag`, `hooksDirOf`, `detailMatches`, `WorkEntry`, `liveWorkEntries`, `liveWorkDetails`, `registryEntryState`, `registryEntryHoldsClaim`, `LIVE_MARKER_MS`, marker re-exports | `commands/proc-owner.ts` | `rig/src/proc-owner.ts` |
+| `isLinkedGitDir`, `worktreeGitDir` (fs-read variant), `claimLockPath`, `WorktreeClaimInfo`, `worktreeClaimInfo`, `worktreeClaim`, `worktreeIdleMs` | `commands/work.ts` | `rig/src/worktree-claim.ts` |
+| `OccupancyCtx`, `OccProof`, `occupied`, `occupancyProofs`, `greenOccupancy`, `supervisorFresh`, `supervisedBy`, `branchSlug`, `registryAgents`, `freshOccupancy`, `acquireOccupancyLocks`, `retireOrphanedWorktree` (was `retireIfOrphaned`, takes `dir` not `Ctx`) | `commands/drive.ts` | `rig/src/occupancy.ts` |
+| `remoteLinear`, `ffToRemoteTip`, `reuseFixerWorktree`, `addFixerWorktree`, `ensureFixerWorktree` | `commands/drive.ts` | `rig/src/fixer-worktree.ts` |
+| `FIXER_LABEL`, `fixerRef`, `fixerPrFromRef`, `fixerBeadFor`, `ensureFixerBead`, `FixerAttempt`, `fixerAttemptOf`, `fixerAttemptSpent`, `recordFixerAttempt` | `commands/drive.ts` | `rig/src/fixer.ts` |
+| `REAP_STATES`, `selectReapable` | `commands/agents.ts` | `rig/src/reap.ts` |
+
+- `commands/proc-owner.ts` is deleted; its 11 importers switch to
+  `@broject/rig`. `commands/work.ts` and `commands/drive.ts` re-export
+  the moved public symbols so existing importers (tests included)
+  keep their paths — the thin-adapter shims the follow-up policies
+  slice (bro-u6fp5) removes.
+- `worktreeGitDir` keeps the fs-read implementation (the driver's
+  per-PR hot path must not pay a `git rev-parse` spawn — the core
+  `worktreeGitDir` stays the rev-parse variant for its own callers).
+- `retireOrphanedWorktree` is the same locked check→`git worktree
+  remove`→lifecycle-emit sequence `retireIfOrphaned` ran, with `dir`
+  in place of `ctx` — it was already `ctx.mainRoot`-only. Sync: it
+  never awaited.
+- `fixerPrFromRef` is new: the `drive:pr:<n>` external-ref format had
+  a second copy as a regex in `sweepSettledFixers`; rig owns the
+  format now, the sweep parses through it.
+
+### Dependencies
+
+`rig → {core, drill, act}` — still acyclic (`act → {core, debt}`).
+`@broject/act` enters for the occupancy supervisor plane: `ListedWatch`,
+`watchMarkerKind`, `listWatches` are the watch-marker contract the
+proofs read — re-implementing the kind classifier in rig would fork
+act's marker semantics. Recorded here because the bead sketched
+"core only"; drill and now act are read-plane facts, not engine logic.
+
+### Boundary rule (extended)
+
+Everything above holds: no `plugins.ts`/`commands/*` imports, no
+`process.exit`/`console.*` in `packages/rig`. The moved code already
+satisfied it — `proc-owner.ts` was core-only and the drive sections
+were probe-injected by construction.
+
+### Restart/crash fixtures (the audit's idempotency proof)
+
+`rig/src/fleet.test.ts` drives the claim→registry→spawn→exit
+boundaries with crafted durable state only — a tmpdir git repo, a
+hand-written `agents.json`, `.exit`/`.handle`/`.prompt` artifacts,
+`.work`/`bro/work` markers — no CLI registry, no `process.exit`:
+
+- registry entries across the crash windows: live pid → `running`;
+  dead pid + harvested `exitStatus` → `exited`/`blocked` (wall cause);
+  dead pid, no record → `lost`; pid-less + `runId` inside the
+  handoff TTL → `spawned`, past it → `lost`; pid-less + live
+  self-published handle → `running` (the spawn→pid-patch crash
+  window); `stopped` → `stopped`.
+- `registryEntryHoldsClaim` releases exactly the terminal reads —
+  the litter sweep's cleanup guard: reaped only when no live owner
+  remains, idempotent across re-reads of the same artifacts.
+- `selectReapable` over terminal/spawned/blocked entries + age
+  cutoff + expected-identity pin — a respawn between snapshot and
+  removal can't be reaped as its dead predecessor.
+- occupancy verdicts over the same fixtures: dead-owner residue never
+  occupies; a live handle or fresh marker does; `greenOccupancy`'s
+  TTL adopts only provably-silent owners.
+- `ensureFixerWorktree`/`retireOrphanedWorktree` on a tmpdir repo:
+  orphan retire is idempotent (second pass finds the dir gone), a
+  claimed tree is never removed.
 
 ## Non-goals
 
