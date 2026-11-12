@@ -69,11 +69,15 @@ state, the host only carries the event.
 **3. Surface plane — what the plugin ADDS.** Four asset classes,
 delivered per host capability:
 
-- **`/bro` command** — the unified dispatcher. Bare `/bro` refreshes
-  the board widget (extension/plugin hosts); `/bro <args>` runs
-  `bro <args>` and drops output into the transcript. On manifest
-  hosts there is no command surface — bro reaches the model through
-  hook context + skills instead.
+- **`/bro` command** — the unified dispatcher, with one declared
+  variant. Canonical (shared driver, pi/omp): bare `/bro` refreshes
+  the board widget; `/bro <args>` runs `bro <args>` and drops output
+  into the transcript without a turn. OpenCode's command palette is
+  prompt-submission by design, so its `/bro [args]` runs the verb and
+  submits the output *as the next prompt* (bare defaults to `status`)
+  — the model sees the result immediately; `/act` is the `act`
+  shortcut. On manifest hosts there is no command surface — bro
+  reaches the model through hook context + skills instead.
 - **`bro_*` model tools** — read-verbs pinned to fixed argv so the
   model gets reads, never arbitrary bro: `bro_status` (board JSON),
   `bro_convoy_status`, `bro_act_status`, `bro_fleet`, `bro_next`,

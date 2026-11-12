@@ -51,8 +51,8 @@ tools on one truth.
 
 | asset | mechanism |
 | ----- | --------- |
-| `/bro [args]` | quote-aware `splitArgs` (`"…"`/`'…'` hold multiword) → `bro <args>` → transcript; bare = board refresh |
-| `/act` | dedicated review-loop command |
+| `/bro [args]` | quote-aware `splitArgs` (`"…"`/`'…'` hold multiword) → `core.exec(bro <args>)` → output submitted via `ctx.session.prompt` — **opencode's command idiom is prompt-submission, so the verb's output becomes the next turn's input**; bare defaults to `status`. Nonzero exit appends `(exit N)` |
+| `/act` | `/bro act` shortcut — same prompt-submit path with `act` prepended |
 | `bro_*` tools ×8 | read-verbs pinned to fixed argv: `status --json`, `convoy status`, `act status --json`, `fleet`, `next --list`, `work drill status`, `review act threads`, `status --json` (worktree) — model gets reads, never arbitrary bro |
 | skills | registered into opencode's skill registry from plugin dir; installed copies also reach `~/.agents/skills/` (`bro skills sync`) — deduplicated by design |
 | RPC | `board`, `notify`, `prompt` methods + `changed`, `attention` events — the push channel into the host |
