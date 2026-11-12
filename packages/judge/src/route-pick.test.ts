@@ -220,4 +220,68 @@ describe('routePick', () => {
       assert.equal(got, undefined);
       assert.equal(lastVerdict(dir).outcome, 'edit');
     }));
+
+  test('a merged escalate answer bills both calls and names the escalate model', () =>
+    withRepo(async dir => {
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({
+          ...pick('edit'),
+          lowConfidence: ['route'],
+          model: 't2-model',
+          latencyMs: 10,
+          usage: { costUsd: 0.5, inputTokens: 100 },
+        }),
+        escalate: judgeReturning({
+          ...pick('design'),
+          model: 't3-model',
+          latencyMs: 20,
+          usage: { costUsd: 0.25, inputTokens: 50 },
+        }),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, 'design');
+      const v = lastVerdict(dir);
+      assert.equal(v.model, 't3-model');
+      assert.equal(v.latencyMs, 30);
+      assert.equal(v.costUsd, 0.75);
+    }));
+
+  test('an escalate call that merges nothing keeps the primary model — but still bills', () =>
+    withRepo(async dir => {
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({
+          answers: {},
+          lowConfidence: ['route'],
+          model: 't2-model',
+          latencyMs: 10,
+          usage: { costUsd: 0.5 },
+        }),
+        escalate: judgeReturning({
+          ...pick('design'),
+          lowConfidence: ['route'],
+          model: 't3-model',
+          latencyMs: 20,
+          usage: { costUsd: 0.25 },
+        }),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+      });
+      assert.equal(got, undefined);
+      const v = lastVerdict(dir);
+      // T3's own answer stayed low-confidence — nothing it said routed,
+      // so the journal attributes the verdict to T2 while still paying
+      // for both calls (bro-0ykhg.2 review)
+      assert.equal(v.model, 't2-model');
+      assert.equal(v.latencyMs, 30);
+      assert.equal(v.costUsd, 0.75);
+    }));
 });

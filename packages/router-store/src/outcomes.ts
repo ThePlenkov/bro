@@ -812,6 +812,18 @@ function ftsQueryText(text: string): string {
   return out.map(term => `"${term}"`).join(' OR ');
 }
 
+/** The SQL mirror of labelOutcome's unlabelled shape — under
+ *  merged_first_round the ONLY rows that cannot vote are merged rows
+ *  with unknown rounds, so the recall window excludes exactly them
+ *  BEFORE the limit; 'merged' labels every row and adds nothing. The
+ *  clause must stay in lockstep with labelOutcome — one definition,
+ *  two renderings (bro-0ykhg.2 review). */
+function votableClause(predicate: SuccessPredicate): string {
+  return predicate === 'merged_first_round'
+    ? " and not (o.result = 'merged' and o.rounds is null)"
+    : '';
+}
+
 /** The T1-recall read — BM25-ranked outcome rows inside the decision's
  *  own scope: the active context, the table hash, the formula hash
  *  (NULL matches NULL — a formula-less decision recalls only
@@ -835,12 +847,18 @@ export async function recallOutcomeRows(
      *  can never crowd eligible outcomes out of the window
      *  (bro-0ykhg.2 review) */
     routes?: readonly string[];
+    /** the success predicate — its unlabelled shape is excluded BEFORE
+     *  the limit too, so merged-without-rounds rows can never fill the
+     *  window ahead of labelled evidence (bro-0ykhg.2 review). Defaults
+     *  to the shared default predicate. */
+    predicate?: SuccessPredicate;
     limit?: number;
   }
 ): Promise<RecallOutcomeRow[]> {
   const fts = ftsQueryText(query.text);
   if (fts === '') return [];
   const routes = query.routes ?? [];
+  const predicate = query.predicate ?? DEFAULT_SUCCESS_PREDICATE;
   // the contender names ride as ONE json_each parameter — the SQL text
   // never interpolates data, so there is no injection surface at all
   const routeFilter = routes.length === 0 ? '' : ' and o.route in (select value from json_each(?))';
@@ -861,7 +879,7 @@ export async function recallOutcomeRows(
          from outcomes_fts f
          join outcomes o on o.decision_id = f.decision_id
          where outcomes_fts match ? and o.context_id = ? and o.verified = 1
-           and o.table_hash = ? and o.formula_hash is ?${routeFilter}
+           and o.table_hash = ? and o.formula_hash is ?${routeFilter}${votableClause(predicate)}
          order by bm25(outcomes_fts), o.at desc, o.decision_id
          limit ?`
       )

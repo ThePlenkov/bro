@@ -164,6 +164,7 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
       const low = new Set(res.lowConfidence);
       const escLow = new Set(esc.lowConfidence);
       const mergedAnswers = { ...res.answers };
+      let mergedAny = false;
       for (const [key, answer] of Object.entries(esc.answers)) {
         // the key must have been low-confidence in T2 and confident in
         // T3 — whether or not T2 emitted an answer entry for it: a
@@ -178,15 +179,42 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
             writable: true,
             configurable: true,
           });
+          mergedAny = true;
         }
       }
+      // the journal bills BOTH calls — T3's tokens and wall-clock are
+      // real spend the verdict must carry (bro-0ykhg.2 review). The
+      // model names the judge whose answer actually landed: an
+      // escalate call that merged nothing keeps the primary's name
+      const escCost = esc.usage?.costUsd;
+      const baseCost = res.usage?.costUsd;
+      const escTokens = esc.usage?.inputTokens;
+      const baseTokens = res.usage?.inputTokens;
+      const costUsd =
+        baseCost === undefined && escCost === undefined
+          ? undefined
+          : (baseCost ?? 0) + (escCost ?? 0);
+      const inputTokens =
+        baseTokens === undefined && escTokens === undefined
+          ? undefined
+          : (baseTokens ?? 0) + (escTokens ?? 0);
       res = {
         ...res,
         answers: mergedAnswers,
         lowConfidence: res.lowConfidence.filter(
           k => escLow.has(k) || !Object.hasOwn(esc.answers, k)
         ),
-        model: esc.model ?? res.model,
+        model: mergedAny ? (esc.model ?? res.model) : res.model,
+        latencyMs: res.latencyMs + esc.latencyMs,
+        ...(costUsd === undefined && inputTokens === undefined && res.usage === undefined
+          ? {}
+          : {
+              usage: {
+                ...(res.usage ?? {}),
+                ...(inputTokens === undefined ? {} : { inputTokens }),
+                ...(costUsd === undefined ? {} : { costUsd }),
+              },
+            }),
       };
     } catch {
       /* the escalate judge failed — the first answer stands */

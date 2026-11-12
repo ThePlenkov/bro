@@ -90,7 +90,11 @@ export async function recallOutcomeRowsScoped(
   limit: number,
   /** the current contender route names — pushed into the SQL so the
    *  limit window only ever holds eligible rows (bro-0ykhg.2 review) */
-  routes?: readonly string[]
+  routes?: readonly string[],
+  /** the success predicate — pushed into the SQL too, so the window's
+   *  unlabelled shape never occupies a slot ahead of votable evidence
+   *  (bro-0ykhg.2 review) */
+  predicate?: SuccessPredicate
 ): Promise<RecallOutcomeRow[] | undefined> {
   try {
     const contextId = decisionContextId(scope.dir, {
@@ -110,6 +114,7 @@ export async function recallOutcomeRowsScoped(
         tableHash,
         formulaHash,
         ...(routes === undefined ? {} : { routes }),
+        ...(predicate === undefined ? {} : { predicate }),
         limit,
       });
     } finally {
@@ -134,6 +139,20 @@ export interface RouteVotes {
   route: string;
   successes: number;
   failures: number;
+}
+
+/** The rows allowed to occupy the top-k voting window — the success
+ *  predicate must be able to LABEL them. Unlabelled rows count for
+ *  nothing in recallVotes, so letting them fill the window would crowd
+ *  real votes out of the k slots and silently weaken T1
+ *  (bro-0ykhg.2 review). */
+export function votableRecallRows(
+  rows: RecallOutcomeRow[],
+  predicate: SuccessPredicate = DEFAULT_SUCCESS_PREDICATE
+): RecallOutcomeRow[] {
+  return rows.filter(
+    r => labelOutcome({ result: r.result, rounds: r.rounds }, predicate) !== 'unlabelled'
+  );
 }
 
 /** The votes over the recalled rows — only rows naming a CURRENT

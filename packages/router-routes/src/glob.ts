@@ -18,6 +18,47 @@
  *  only branch that reads it. */
 type GlobSegment = { any: true } | { any: false; text: string };
 
+/** The scan's position — `pi`/`ti` walk the pattern and text,
+ *  `starP`/`starT` remember the last `*` for backtracking. */
+interface SegmentScan {
+  pi: number;
+  ti: number;
+  starP: number;
+  starT: number;
+}
+
+/** One step of the two-pointer scan — the caller guarantees
+ *  `s.ti < t.length`. '?' or an exact match consumes both sides (a '*'
+ *  in the TEXT still matches a '*' pattern char literally — equality is
+ *  tested before the wildcard), '*' records a backtrack point and
+ *  advances the pattern, and a literal mismatch rewinds the text to
+ *  just past the last star. Returns false only when a mismatch has no
+ *  star to backtrack to — the match is dead. */
+function scanStep(p: readonly string[], t: readonly string[], s: SegmentScan): boolean {
+  const pc = p.at(s.pi);
+  const tc = t.at(s.ti);
+  if (pc === '?' || pc === tc) {
+    s.pi += 1;
+    s.ti += 1;
+    return true;
+  }
+  if (pc === '*') {
+    s.starP = s.pi;
+    s.starT = s.ti;
+    s.pi += 1;
+    return true;
+  }
+  // literal mismatch — or the pattern ran out (pc undefined fails
+  // every test above); only star backtracking can still match
+  if (s.starP === -1) {
+    return false;
+  }
+  s.pi = s.starP + 1;
+  s.starT += 1;
+  s.ti = s.starT;
+  return true;
+}
+
 /** One segment's wildcard match — `*` any run of characters, `?`
  *  exactly one, everything else literal. The classic two-pointer scan
  *  with star backtracking; a segment never contains `/` (both sides
@@ -32,45 +73,18 @@ function segmentMatch(pattern: string, text: string): boolean {
   // surrogate (bro-0ykhg.2 review)
   const p = [...pattern];
   const t = [...text];
-  let pi = 0;
-  let ti = 0;
-  let starP = -1;
-  let starT = 0;
-  // every test is a single comparison — the advance order is the
-  // classic algorithm's: '?' wildcard, literal equality (a '*' in the
-  // TEXT still matches a '*' pattern char literally), then star
-  while (ti < t.length) {
-    const pc = p.at(pi);
-    const tc = t.at(ti);
-    if (pc === '?') {
-      pi += 1;
-      ti += 1;
-      continue;
-    }
-    if (pc === tc) {
-      pi += 1;
-      ti += 1;
-      continue;
-    }
-    if (pc === '*') {
-      starP = pi;
-      starT = ti;
-      pi += 1;
-      continue;
-    }
-    // literal mismatch — or the pattern ran out (pc undefined fails
-    // every test above); only star backtracking can still match
-    if (starP === -1) {
+  const s: SegmentScan = { pi: 0, ti: 0, starP: -1, starT: 0 };
+  // a dead mismatch fails immediately — it must NOT fall through to
+  // the trailing-star skip, which would read a spent pattern as a match
+  while (s.ti < t.length) {
+    if (!scanStep(p, t, s)) {
       return false;
     }
-    pi = starP + 1;
-    starT += 1;
-    ti = starT;
   }
-  while (p.at(pi) === '*') {
-    pi += 1;
+  while (p.at(s.pi) === '*') {
+    s.pi += 1;
   }
-  return pi >= p.length;
+  return s.pi >= p.length;
 }
 
 /** Compile one glob into segments — leading/trailing slashes and

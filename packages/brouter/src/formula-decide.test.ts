@@ -827,6 +827,34 @@ describe('the invoke gate (bro-0ykhg.2)', () => {
     assert.equal(decision.route?.name, 'pro');
   });
 
+  test('unlabelled recall rows cannot crowd labelled votes out of the window', async () => {
+    const { judge, calls } = fakeJudge({ tier: choice('pro') });
+    const rows = [
+      // five unlabelled rows outrank the labelled ones — merged with
+      // unknown rounds is no vote under merged_first_round, so they
+      // must not occupy the top-k window either (bro-0ykhg.2 review)
+      ...[1, 2, 3, 4, 5].map(i => ({ route: 'any', result: 'merged', rounds: null, at: i })),
+      { route: 'any', result: 'merged', rounds: 1, at: 6 },
+      { route: 'any', result: 'merged', rounds: 1, at: 7 },
+      { route: 'any', result: 'merged', rounds: 1, at: 8 },
+    ];
+    const { decision } = await decideByFormula({
+      dir: scratchDir(),
+      table: FEATURES_TABLE,
+      task: { features: { tier: 'pro' } },
+      text: 'a task',
+      router: { provider: 'fake', mode: 'enforce' },
+      formula: formula(FEATURES_FORMULA, FEATURES_TABLE),
+      snapshot: {},
+      healthKnown: true,
+      judge,
+      recallRows: rows,
+    });
+    assert.equal(calls.length, 0, 'the three labelled rows still decide — T2 stays shut');
+    assert.equal(decision.route?.name, 'any');
+    assert.equal(decision.cascade?.decidedBy, 'recall');
+  });
+
   test('a judge result with no confident answer decides nothing — rules stand', async () => {
     const { judge } = fakeJudge(
       { tier: choice('pro'), complexity: choice('low') },

@@ -436,6 +436,47 @@ test('recallOutcomeRows filters contenders inside the SQL window', async () => {
   assert.equal(unfiltered.length, 2);
 });
 
+test("recallOutcomeRows excludes the predicate's unlabelled shape before the limit", async () => {
+  const s = await store('recallvotable');
+  const table = { kind: 'route', routes: { pro: { chain: [{ provider: 'a' }] } } };
+  const tableHash = contentHash(table);
+  const text = 'fix the websocket reconnect bug';
+  // three merged-without-rounds rows — unlabelled under the default
+  // merged_first_round predicate, votable successes under 'merged'
+  for (let i = 0; i < 3; i += 1) {
+    const id = await journal(s, { taskText: `${text} variant ${i}`, table });
+    await recordOutcome(s, report(id, { rounds: undefined }), verified);
+  }
+  const labelled = await journal(s, { taskText: text, table });
+  await recordOutcome(s, report(labelled, { rounds: 1 }), verified);
+
+  const base = {
+    contextId: 'repo:test',
+    text: 'websocket reconnect',
+    tableHash,
+    formulaHash: null,
+    limit: 2,
+  };
+  // under merged_first_round the unlabelled rows never reach the
+  // window — the limit fills with votable evidence instead, so three
+  // dead rows cannot crowd one labelled success out (bro-0ykhg.2 review)
+  const first = await recallOutcomeRows(s.db, {
+    ...base,
+    predicate: 'merged_first_round',
+  });
+  assert.equal(first.length, 1, 'only the labelled row is votable');
+  assert.equal(first[0]?.rounds, 1);
+
+  // the default predicate is the same — omitting it changes nothing
+  const implicit = await recallOutcomeRows(s.db, base);
+  assert.equal(implicit.length, 1);
+
+  // under 'merged' the same rows ARE successes — nothing is excluded
+  const any = await recallOutcomeRows(s.db, { ...base, predicate: 'merged' });
+  assert.equal(any.length, 2, 'the limit now holds merged rows');
+  assert.ok(any.every(r => r.result === 'merged'));
+});
+
 test('recallOutcomeRows breaks bm25 ties deterministically — recency, then id', async () => {
   const s = await store('recalldet');
   const table = {

@@ -25,6 +25,7 @@ import {
   recallDecision,
   recallOutcomeRowsScoped,
   recallVotes,
+  votableRecallRows,
 } from './recall.ts';
 
 /** The invoke modes — `brouter.router.invoke`, 'ambiguous' the default. */
@@ -97,11 +98,12 @@ export async function runT1(opts: {
       },
       opts.text,
       // fetch a window wider than k — the scope filters narrow it, the
-      // vote count is what k bounds. The contender names go into the
-      // SQL itself so dead-route rows never occupy the window
-      // (bro-0ykhg.2 review)
+      // vote count is what k bounds. The contender names AND the
+      // predicate's unlabelled shape go into the SQL itself so dead-route
+      // and unvotable rows never occupy the window (bro-0ykhg.2 review)
       opts.tuning.k * 4,
-      opts.contenders.length === 0 ? undefined : opts.contenders
+      opts.contenders.length === 0 ? undefined : opts.contenders,
+      opts.predicate
     ));
   const latencyMs = Date.now() - started;
   if (rows === undefined) {
@@ -116,12 +118,15 @@ export async function runT1(opts: {
   // only the top-k ELIGIBLE rows vote — the wider fetch exists so the
   // scope filters (context/table/formula/verified) can narrow it, and
   // rows naming routes that are no longer contenders never consume a
-  // slot. Agreement and reorder must read the SAME top-k the tuning
-  // names; lower-ranked rows would dilute the vote (bro-0ykhg.2 review)
+  // slot. Unlabelled rows are excluded BEFORE the slice too: they vote
+  // for nothing, so they must not occupy a voting slot either
+  // (bro-0ykhg.2 review). Agreement and reorder must read the SAME
+  // top-k the tuning names; lower-ranked rows would dilute the vote.
   const allowed = new Set(opts.contenders);
-  const eligible = rows
-    .filter(r => r.route !== null && allowed.has(r.route))
-    .slice(0, opts.tuning.k);
+  const eligible = votableRecallRows(
+    rows.filter(r => r.route !== null && allowed.has(r.route)),
+    opts.predicate
+  ).slice(0, opts.tuning.k);
   const { votes, order } = recallVotes(eligible, opts.contenders, opts.predicate);
   const verdict = recallDecision(votes, opts.tuning, opts.contenders);
   if (verdict.decided !== undefined) {
