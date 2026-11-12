@@ -425,8 +425,8 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
 /** Body under `## <name>` heading lines — index scans, not a lazy
  *  `[\s\S]*?` + lookahead pair (sonar S8786 super-linear backtracking).
  *  Callers hand their own literal heading's `matchAll` results and an
- *  optional line-stop predicate, so no pattern is ever evaluated on a
- *  non-literal here (semgrep non-literal-regexp). The heading must end
+ *  optional line-stop predicate — every pattern stays a literal at the
+ *  call site. The heading must end
  *  its line: whitespace after the name has to contain a newline, and
  *  the body starts right after that line's last newline — the same
  *  span the old `\s*\n+` left behind. `stopLine` is tested against
