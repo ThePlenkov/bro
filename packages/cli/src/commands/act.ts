@@ -74,6 +74,7 @@ import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@b
 import { coveredBeadIds } from '@broject/loop';
 import { githubPrWake } from '@broject/github';
 import { collectReviewThreads, refreshDebtLedger, type CollectArgs } from './debt.ts';
+import { reconcileOutcomes, reportRoutedOutcome } from './outcome-report.ts';
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
@@ -283,6 +284,14 @@ async function cmdWait(argv: string[]): Promise<void> {
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
   const rev = reviewHost(undefined, loadBroConfig().connectors);
   const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read');
+  // a watcher's startup drains the outcome outbox — intents a crashed
+  // merge/report pass left undelivered retry here (spec bro-0ykhg.4);
+  // housekeeping, never a gate on the wait itself
+  try {
+    await reconcileOutcomes(process.cwd());
+  } catch {
+    /* reconciliation is best-effort — the next pass retries */
+  }
   const act = loadBroConfig().act;
   const interval = Number(flag(argv, '--interval') ?? '60');
   const timeout = Number(flag(argv, '--timeout') ?? '45');
@@ -469,7 +478,13 @@ async function settleWait(
     await recordSettledVerdict(rev, t, res.state.url, settledLabel(res.state));
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state);
-    await harvestClosedPr(rev, t, res.state.state);
+    await harvestClosedPr(rev, t, res.state.state, argv);
+    // externally-landed merges report too — the already-merged
+    // reconciliation the spec wants (bro-0ykhg.4); own merges already
+    // reported inside cmdMerge and dedupe on the same event id
+    if (res.state.state === 'MERGED') {
+      await reportActOutcome(argv, t, res.state, 'merged');
+    }
     process.exitCode = 0;
     return;
   }
@@ -484,7 +499,7 @@ async function settleWait(
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state);
     if (!res.timedOut) {
-      await harvestClosedPr(rev, t, res.state.state);
+      await harvestClosedPr(rev, t, res.state.state, argv);
     }
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0;
     return;
@@ -1097,6 +1112,14 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
     ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors });
   }
   const t = resolvePr(rev, argv, 'strict');
+  // direct merges drain the outcome outbox too — a merge intent a
+  // crashed wait left behind retries here (spec bro-0ykhg.4);
+  // housekeeping, never a gate on the merge itself
+  try {
+    await reconcileOutcomes(process.cwd());
+  } catch {
+    /* reconciliation is best-effort — the next pass retries */
+  }
 
   const method = mergeMethod(argv);
   if (!method) {
@@ -1119,6 +1142,10 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
     return;
   }
   let mergedHead: { ref: string; sha: string } | undefined;
+  // the outcome report's measures — captured inside the merge slot,
+  // delivered after it releases (the router ack never extends the
+  // critical section; spec bro-0ykhg.4)
+  let outcomeState: PrActState | undefined;
   try {
     const act = loadBroConfig().act;
     // deliberately OFF the shared feed: this fetch IS the merge
@@ -1141,11 +1168,14 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
       // already landed still discharges the claim — the race where the
       // PR merged between the wait's last green poll and this fetch
       closeBeadIfLanded(argv, rev, t, state.state);
-      await harvestClosedPr(rev, t, state.state);
+      await harvestClosedPr(rev, t, state.state, argv);
       if (state.state === 'MERGED') {
         // the merge goal is satisfied — a landed PR is a verdict, not a
-        // lifecycle error (spec: specs/bro-0i1lm.md)
+        // lifecycle error (spec: specs/bro-0i1lm.md). The outcome
+        // report rides the same already-merged reconciliation (spec
+        // bro-0ykhg.4): whoever lands the PR, the router hears it once.
         console.log(landedLine(rev, t, state));
+        await reportActOutcome(argv, t, state, 'merged');
         return settledLabel(state);
       }
       console.error(
@@ -1177,6 +1207,7 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
       },
       queue
     );
+    outcomeState = state;
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot();
@@ -1191,6 +1222,11 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
     if (bead !== undefined) {
       closeLandedBead(rev, t, bead);
     }
+    // the routed task's verdict flows back to the router — the intent
+    // is durable in the outbox before this delivery attempt, so a crash
+    // here retries on the next reconcile, never re-merges (spec
+    // bro-0ykhg.4)
+    await reportActOutcome(argv, t, outcomeState, 'merged');
     if (argv.includes('--cleanup')) {
       cleanupAfterMerge(mergedHead.ref, mergedHead.sha);
     } else {
@@ -1319,6 +1355,40 @@ function clumpBranchLog(rev: ReviewFacade, t: PrTarget): string {
   return gitBranchLog(meta.headSha, meta.baseRef);
 }
 
+/** Report the routed task's terminal verdict back to the router (spec
+ *  bro-0ykhg.4): the decision id resolves through the bead's
+ *  `router:decision` pin or the journal's run-link reconciliation, the
+ *  intent lands in the durable outbox before delivery, and the router's
+ *  acknowledgement is what "reported" means — a store that cannot take
+ *  it leaves the intent for the next reconcile. Best-effort: the act
+ *  verdict never waits on the router. `rounds` counts act rounds —
+ *  fixRounds+1, so a clean first-round merge reports 1 (the
+ *  merged_first_round predicate's success shape). */
+async function reportActOutcome(
+  argv: string[],
+  t: PrTarget,
+  state: PrActState | undefined,
+  result: 'merged' | 'failed' | 'abandoned' | 'parked'
+): Promise<void> {
+  const bead = flag(argv, '--bead')?.split(',')[0]?.trim();
+  try {
+    await reportRoutedOutcome({
+      dir: process.cwd(),
+      ...(bead === undefined || bead === '' ? {} : { beadId: bead }),
+      pr: t.pr,
+      result,
+      ...(state === undefined
+        ? {}
+        : {
+            rounds: state.fixRounds + 1,
+            threads: state.threads.length,
+          }),
+    });
+  } catch {
+    /* the outbox is durable — a failed pass retries on reconcile */
+  }
+}
+
 /** The claim discharge owed even when the merge didn't happen here —
  *  an external merge (or the race past the last green poll) leaves
  *  `--bead` to release exactly as an own-merge would. */
@@ -1333,10 +1403,18 @@ function closeBeadIfLanded(argv: string[], rev: ReviewFacade, t: PrTarget, state
  *  closed branch are still review debt. A harvest failure reports to
  *  stderr but must never change the command's exit code: callers set
  *  their verdict unconditionally right after. */
-async function harvestClosedPr(rev: ReviewFacade, t: PrTarget, state: string): Promise<void> {
+async function harvestClosedPr(
+  rev: ReviewFacade,
+  t: PrTarget,
+  state: string,
+  argv: string[] = []
+): Promise<void> {
   if (state !== 'CLOSED') {
     return;
   }
+  // a closed-unmerged PR is the routed task's 'failed' terminal —
+  // reported through the same durable outbox (spec bro-0ykhg.4)
+  await reportActOutcome(argv, t, undefined, 'failed');
   try {
     await collectReviewThreads(rev, {
       repo: t.repo,

@@ -43,6 +43,79 @@ create table if not exists sessions (
 create index if not exists sessions_lane on sessions (provider, model);
 `,
   },
+  {
+    id: '0002_decisions_outcomes',
+    sql: `
+create table if not exists decisions (
+  decision_id text primary key,
+  context_id text not null,
+  created_at integer not null,
+  task_text text,
+  task_json text,
+  features_json text,
+  candidates_json text,
+  table_json text,
+  table_hash text,
+  formula_text text,
+  formula_hash text,
+  formula_path text,
+  judge_config text,
+  stage_answers text,
+  route text,
+  provider text,
+  model text,
+  picked text,
+  bead_id text,
+  worker text,
+  run_id text,
+  pr text
+);
+create index if not exists decisions_context on decisions (context_id, created_at);
+create index if not exists decisions_bead on decisions (bead_id);
+create index if not exists decisions_run on decisions (run_id);
+create table if not exists outcomes (
+  decision_id text primary key,
+  context_id text not null,
+  table_hash text,
+  formula_hash text,
+  route text,
+  provider text,
+  model text,
+  task_text text,
+  features_json text,
+  result text not null,
+  rounds integer,
+  threads integer,
+  cost real,
+  tokens integer,
+  wall_ms integer,
+  reporter text,
+  event_id text,
+  source_id text,
+  source_revision integer,
+  verified integer not null default 0,
+  at integer not null
+);
+create index if not exists outcomes_context on outcomes (context_id, route, at);
+create index if not exists outcomes_event on outcomes (event_id);
+create table if not exists outcome_reports (
+  id text primary key,
+  decision_id text not null,
+  event_id text not null,
+  reporter text not null,
+  source_id text not null,
+  source_revision integer not null,
+  result text not null,
+  measures text,
+  verified integer not null,
+  accepted integer not null,
+  reason text,
+  at integer not null
+);
+create index if not exists outcome_reports_decision on outcome_reports (decision_id, at);
+create virtual table if not exists outcomes_fts using fts5(decision_id unindexed, task_text);
+`,
+  },
 ];
 
 /** The bookkeeping table — which migrations ran. */

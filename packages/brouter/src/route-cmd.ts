@@ -47,8 +47,22 @@ function taskShape(argv: string[]): RouteTask {
   };
 }
 
+/** The decision-id line every surface prints — `brouter outcome` joins
+ *  on it, so an unjournaled id says so up front (its report fails
+ *  unknown at the store) instead of looking usable. */
+function decisionLine(meta: { decisionId: string; journaled: boolean }): string {
+  return meta.journaled
+    ? `decision: ${meta.decisionId}`
+    : `decision: ${meta.decisionId} (not journaled — an outcome report will fail unknown)`;
+}
+
 /** The decision, rendered. */
-function render(decision: RouteDecisionView, known: boolean): void {
+function render(
+  decision: RouteDecisionView,
+  known: boolean,
+  meta: { decisionId: string; contextId: string; journaled: boolean }
+): void {
+  console.log(decisionLine(meta));
   console.log(`route: ${decision.route?.name ?? '(none)'}`);
   const chain = decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ');
   console.log(`chain: ${chain || '(empty)'}`);
@@ -149,11 +163,13 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   const shape = taskShape(argv);
   const router = config?.router;
   const formula = formulaPath(dir, argv);
-  const { decision, snapshot, healthKnown } = await decideRoute({
+  const { decision, snapshot, healthKnown, decisionId, contextId, journaled } = await decideRoute({
     dir,
     table,
+    tablePath: path,
     task: shape,
     text: task,
+    kind: 'route',
     ...(router === undefined ? {} : { router }),
     ...(formula === undefined ? {} : { formula }),
   });
@@ -161,15 +177,18 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   if (slices !== undefined) {
     const explanation = await explainPlan({ decision, snapshot, healthKnown });
     if (argv.includes('--json')) {
-      console.log(JSON.stringify(explanation, null, 2));
+      console.log(JSON.stringify({ ...explanation, decisionId, contextId }, null, 2));
       return;
     }
+    // the plain explanation names the decision too — same join key the
+    // verdict render prints, so --explain never hides it
+    console.log(decisionLine({ decisionId, journaled }));
     console.log(renderExplanation(explanation, slices));
     return;
   }
   if (argv.includes('--json')) {
-    console.log(JSON.stringify(decision, null, 2));
+    console.log(JSON.stringify({ ...decision, decisionId, contextId, journaled }, null, 2));
     return;
   }
-  render(decision, healthKnown);
+  render(decision, healthKnown, { decisionId, contextId, journaled });
 }
