@@ -119,3 +119,18 @@ exclude_paths:
   # path is bro-built (git common dir + registry-minted ids), never
   # customer input. Same non-literal-path false positive as starter.ts.
   - 'packages/cli/src/pipeline-engines.ts'
+
+  # The io modules ARE the fs seam: every dynamic path in brose/brotocol
+  # funnels through these functions — brose's are operator-named (CLI
+  # args), brotocol's are protocol-configured and every write/remove
+  # passes resolveIn's inside-root proof first. The non-literal-path
+  # rule would flag the one file whose job is path safety.
+  - 'packages/brose/src/io.ts'
+  - 'packages/brotocol/src/io.ts'
+
+  # The frontmatter lexer IS bounded-cursor character reading: `t[i]`/
+  # `t[i]!` on the input string are its fundamental operations, the same
+  # class the object-injection rule flags on keyed lookups. The input is
+  # a bounded scalar, not outside data — reading chars by cursor is the
+  # file's whole job, like the fs seam above.
+  - 'packages/brose/src/frontmatter.ts'

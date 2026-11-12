@@ -42,6 +42,8 @@ is a quick guide, not the complete catalog.
 | `@broject/bro-pack` | Default capability pack — skills and formulas installed by `bro setup --pack`               |
 | `@broject/stack`    | Stacked bead→worktree→PR chains — branch-namespace parsing + sync planning                  |
 | `@broject/retro`    | Retrospect engine — TOML retro plans → prevention actions                                   |
+| `@broject/brose`    | Markdown template engine — `{{key}}` render, `name@version` registry, `brose new\|validate` |
+| `@broject/brotocol` | Filetree protocol — CRUD/search/graph/lint over a configured doc tree + the spec preset     |
 
 All packages are ESM-only and require Node ≥ 22.18. Versions release in
 lockstep; each package page on npm carries its own README.

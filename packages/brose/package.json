@@ -1,0 +1,55 @@
+{
+  "name": "@broject/brose",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "brose": "dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "markdown-it": "^15.0.3",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/brose"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Markdown template engine — frontmatter+section templates, a name@version registry, parse/render/validate/new",
+  "keywords": [
+    "markdown",
+    "template",
+    "frontmatter",
+    "validate",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
+}

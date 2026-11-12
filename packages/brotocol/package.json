@@ -1,0 +1,53 @@
+{
+  "name": "@broject/brotocol",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@broject/brose": "^0.1.0"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/brotocol"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Filetree protocol — CRUD/search/graph ops over a configured tree of templated markdown docs; the spec protocol is the shipped specialization",
+  "keywords": [
+    "markdown",
+    "frontmatter",
+    "filetree",
+    "protocol",
+    "spec",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
+}
