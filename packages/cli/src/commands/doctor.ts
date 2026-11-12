@@ -2707,7 +2707,6 @@ function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
 // an error — doctor reports a broken environment, it must not add one.
 
 export interface SessionLedgerDeps {
-  dir?: string;
   ledger?: LedgerFacade;
   env?: NodeJS.ProcessEnv;
   now?: number;
@@ -2765,20 +2764,30 @@ function addWiring(map: Map<string, WiredHost>, host: string, evidence: string):
 }
 
 /** Claude's plugin registry — `plugins` maps `<name>@<marketplace>` to
- *  install records; a `bro@*` key is a resolved bro plugin. */
-function claudePluginKeys(cfgDir: string): string[] {
+ *  install records; a `bro@*` key is a resolved bro plugin.
+ *  `unreadable` distinguishes "absent or no bro keys" from "present but
+ *  unparseable" — the latter means wiring is UNKNOWN, not absent, and
+ *  reporting a healthy verdict on it would violate the fail-open
+ *  contract (specs/bro-izpyk.1.3.md). */
+function claudePluginKeys(cfgDir: string): { keys: string[]; unreadable: boolean } {
   const text = readText(join(cfgDir, 'plugins', 'installed_plugins.json'));
   if (text === null) {
-    return [];
+    return { keys: [], unreadable: false };
   }
   try {
     const raw = JSON.parse(text) as { plugins?: unknown };
-    if (!isRecord(raw.plugins)) {
-      return [];
+    if (raw.plugins === undefined) {
+      return { keys: [], unreadable: false };
     }
-    return Object.keys(raw.plugins).filter(k => k.startsWith('bro@'));
+    if (!isRecord(raw.plugins)) {
+      return { keys: [], unreadable: true };
+    }
+    return {
+      keys: Object.keys(raw.plugins).filter(k => k.startsWith('bro@')),
+      unreadable: false,
+    };
   } catch {
-    return [];
+    return { keys: [], unreadable: true };
   }
 }
 
@@ -2807,23 +2816,38 @@ function pluginDirEvidence(pluginsDir: string): string | null {
   return candidates.some(existsSync) ? 'plugin dir' : null;
 }
 
+interface WiredHosts {
+  wired: Map<string, WiredHost>;
+  /** Probe targets that exist but can't be parsed — wiring UNKNOWN for
+   *  that host, never silently "not wired" (the fail-open contract:
+   *  unparseable manifests degrade to skip, not a healthy verdict). */
+  unreadable: string[];
+}
+
 /** Wiring probes for the spool-capable manifest hosts (claude, codex,
  *  cursor, devin — the run.sh path; in-process adapters are handled
  *  separately by ledgerAdaptersCheck). Every probe fails open: an
- *  absent or unparseable file is simply not wired. */
-function wiredHosts(env: NodeJS.ProcessEnv, root: string | null): Map<string, WiredHost> {
-  const map = new Map<string, WiredHost>();
+ *  absent file is simply not wired; a present-but-unparseable manifest
+ *  lands in `unreadable` instead of reading as absent. */
+function wiredHosts(env: NodeJS.ProcessEnv, root: string | null): WiredHosts {
+  const wired = new Map<string, WiredHost>();
+  const unreadable: string[] = [];
   const home = probeHome(env);
 
-  // claude — plugin registry + hand-wired settings hooks
+  // claude — plugin registry + hand-wired settings hooks (user-level
+  // settings.json AND settings.local.json, plus the repo pair)
   const claudeCfg =
     env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR.trim() !== ''
       ? env.CLAUDE_CONFIG_DIR
       : join(home, '.claude');
-  for (const key of claudePluginKeys(claudeCfg)) {
-    addWiring(map, 'claude', `plugin ${key}`);
+  const registry = claudePluginKeys(claudeCfg);
+  for (const key of registry.keys) {
+    addWiring(wired, 'claude', `plugin ${key}`);
   }
-  const claudeSettings = [join(claudeCfg, 'settings.json')];
+  if (registry.unreadable) {
+    unreadable.push('claude plugin registry');
+  }
+  const claudeSettings = [join(claudeCfg, 'settings.json'), join(claudeCfg, 'settings.local.json')];
   if (root !== null) {
     claudeSettings.push(
       join(root, '.claude', 'settings.json'),
@@ -2831,24 +2855,36 @@ function wiredHosts(env: NodeJS.ProcessEnv, root: string | null): Map<string, Wi
     );
   }
   if (claudeSettings.some(carriesBroHook)) {
-    addWiring(map, 'claude', 'settings hooks');
+    addWiring(wired, 'claude', 'settings hooks');
   }
 
-  // devin — resolved plugin lockfile + project hook chain
-  if (broPluginResolved(devinPluginLockfile(env))) {
-    addWiring(map, 'devin', 'plugin resolved');
+  // devin — resolved plugin lockfile + project hook chain; a lockfile
+  // that exists but won't parse is unreadable wiring evidence, same
+  // rule as the claude registry
+  const devinLock = devinPluginLockfile(env);
+  if (broPluginResolved(devinLock)) {
+    addWiring(wired, 'devin', 'plugin resolved');
+  } else {
+    const lockText = readText(devinLock);
+    if (lockText !== null) {
+      try {
+        JSON.parse(lockText);
+      } catch {
+        unreadable.push('devin plugin lockfile');
+      }
+    }
   }
   if (root !== null && carriesBroHook(join(root, '.devin', 'hooks.v1.json'))) {
-    addWiring(map, 'devin', '.devin/hooks.v1.json');
+    addWiring(wired, 'devin', '.devin/hooks.v1.json');
   }
 
   // cursor — plugin dir + project hooks file
   const cursorPlugins = pluginDirEvidence(join(home, '.cursor', 'plugins'));
   if (cursorPlugins !== null) {
-    addWiring(map, 'cursor', cursorPlugins);
+    addWiring(wired, 'cursor', cursorPlugins);
   }
   if (root !== null && carriesBroHook(join(root, '.cursor', 'hooks.json'))) {
-    addWiring(map, 'cursor', '.cursor/hooks.json');
+    addWiring(wired, 'cursor', '.cursor/hooks.json');
   }
 
   // codex — plugin dir under CODEX_HOME (or ~/.codex)
@@ -2858,10 +2894,10 @@ function wiredHosts(env: NodeJS.ProcessEnv, root: string | null): Map<string, Wi
       : join(home, '.codex');
   const codexPlugins = pluginDirEvidence(join(codexHome, 'plugins'));
   if (codexPlugins !== null) {
-    addWiring(map, 'codex', codexPlugins);
+    addWiring(wired, 'codex', codexPlugins);
   }
 
-  return map;
+  return { wired, unreadable };
 }
 
 /** A stats day is day-granular — the day's last instant stands in for
@@ -2940,7 +2976,7 @@ async function ledgerSilentCheck(
       `ledger unavailable — ${err instanceof Error ? err.message : String(err)}`
     );
   }
-  const wired = wiredHosts(env, root);
+  const { wired, unreadable } = wiredHosts(env, root);
   // the installs table is wiring evidence too — a host that fired once
   // proves its plugin was installed even when the on-disk probe can't
   // see the layout
@@ -2955,16 +2991,32 @@ async function ledgerSilentCheck(
     w => now - (activity.get(w.host) ?? 0) >= silentWindowMs
   );
   const windowDays = Math.round(silentWindowMs / 86_400_000);
+  // an unparseable manifest means wiring is UNKNOWN — never let it read
+  // as "no wiring detected" (fail-open contract, specs/bro-izpyk.1.3.md)
+  const unknownNote =
+    unreadable.length > 0 ? `; ${unreadable.join(', ')} unreadable — wiring unknown` : '';
   if (silent.length === 0) {
-    return wired.size === 0
-      ? check('ledger-silent', 'ok', 'no bro host wiring detected')
-      : check('ledger-silent', 'ok', `${wired.size} wired host(s) fired within ${windowDays}d`);
+    if (wired.size === 0) {
+      return unreadable.length > 0
+        ? check(
+            'ledger-silent',
+            'skip',
+            `${unreadable.join(', ')} unreadable — cannot prove wiring state`,
+            'fix the manifest or verify the host plugin install — `bro sessions` lists what the ledger sees'
+          )
+        : check('ledger-silent', 'ok', 'no bro host wiring detected');
+    }
+    return check(
+      'ledger-silent',
+      'ok',
+      `${wired.size} wired host(s) fired within ${windowDays}d${unknownNote}`
+    );
   }
   const detail = silent.map(w => `${w.host} (${w.evidence.join(' + ')})`).join(', ');
   return check(
     'ledger-silent',
     'warn',
-    `${detail} — wired but no ledger rows in ${windowDays}d`,
+    `${detail} — wired but no ledger rows in ${windowDays}d${unknownNote}`,
     'verify the host plugin install — `bro sessions` lists what the ledger sees'
   );
 }

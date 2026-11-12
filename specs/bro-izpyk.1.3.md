@@ -84,12 +84,18 @@ the worst host×event pair. Ok row at zero.
 
 ### 3. `ledger-drain` — ledger freshness
 
-- `pendingBytes` = Σ over `hookSpoolFiles(spool)` of
-  `max(0, size − cursor[spoolCursorKey(stat)])` — bytes appended since the
-  last ingest, per file (`.1` rotated rows and the live file both count;
-  a missing cursor entry means the file's inode was never ingested → its
-  full size is pending). `spoolCursorKey` (`ino:birthtimeMs`) is exported
-  from core so the key computation can't drift from the store's.
+- `pendingBytes` = Σ over `hookSpoolFiles(spool)` of `size − offset`,
+  where `offset = cursor[spoolCursorKey(stat)] ?? 0` — bytes appended
+  since the last ingest, per file (`.1` rotated rows and the live file
+  both count; a missing cursor entry means the file's inode was never
+  ingested → its full size is pending). Cursor-reset rule, shared with
+  `readBatches`: when the file's size falls below the stored offset
+  (truncated or recreated under the same `ino:birthtime` key), the
+  offset resets to 0 and the entire file counts as pending — the value
+  is `size − (size < offset ? 0 : offset)`, never a `max(0, …)` clamp
+  that would report a shrunken file as fully consumed.
+  `spoolCursorKey` (`ino:birthtimeMs`) is exported from core so the key
+  computation can't drift from the store's.
 - `ledgerAge` = `now − max(mtime of ledger.db, ledger.db-wal)` — the wal
   matters because `append()` writes frames without a checkpoint.
 - warn when `pendingBytes ≥ MAX_SPOOL_BYTES/4` (256 KiB of the 1 MiB

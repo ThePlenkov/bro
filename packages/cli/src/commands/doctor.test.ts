@@ -364,16 +364,23 @@ const fakeSourceCheckout = (dir: string): string => {
 // every probe path inside the tmp dir — the dev machine's real
 // ~/.cursor, ~/.codex, ~/.claude and XDG state can't leak verdicts.
 
-/** Env for sessionLedgerChecks — HOME/XDG/CLAUDE_CONFIG_DIR/CODEX_HOME/
- *  BRO_HOOK_SPOOL all resolve under the fixture; `over` tweaks one key. */
+/** Env for sessionLedgerChecks — an explicit allowlist, never a
+ *  `...process.env` spread: ambient BRO_* pins (watchdog, spool) and
+ *  whatever else the dev shell carries must not leak verdicts. Every
+ *  homedir() fallback the probes can hit is pinned under `dir` —
+ *  os.homedir() reads the real home, not env.HOME, so the adapter
+ *  dirs get their own keys (XDG_CONFIG_HOME for opencode/kilo,
+ *  PI_CODING_AGENT_DIR/OMP_AGENT_DIR for pi/omp). `over` tweaks one key. */
 function ledgerEnv(dir: string, over: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
-    ...process.env,
     HOME: dir,
     XDG_STATE_HOME: join(dir, 'state'),
     XDG_DATA_HOME: join(dir, 'data'),
+    XDG_CONFIG_HOME: join(dir, 'config'),
     CLAUDE_CONFIG_DIR: join(dir, 'claude'),
     CODEX_HOME: join(dir, 'codex'),
+    PI_CODING_AGENT_DIR: join(dir, 'pi-agent'),
+    OMP_AGENT_DIR: join(dir, 'omp-agent'),
     BRO_HOOK_SPOOL: join(dir, 'state', 'bro', 'hooks.spool'),
     ...over,
   };
@@ -2147,6 +2154,47 @@ describe('bro doctor', () => {
       const c = byName(checks, 'ledger-silent');
       assert.equal(c.status, 'skip', JSON.stringify(c));
       assert.match(c.detail, /ledger unavailable/);
+    }));
+
+  test('ledger-silent: user-level settings.local.json wiring counts', async () =>
+    withEnv({}, async dir => {
+      // CLAUDE_CONFIG_DIR/settings.local.json — the file the probe
+      // missed before; the launcher signature alone is the evidence
+      mkdirSync(join(dir, 'claude'), { recursive: true });
+      writeFileSync(
+        join(dir, 'claude', 'settings.local.json'),
+        JSON.stringify({
+          hooks: { PreToolUse: [{ hooks: [{ command: 'bash /p/hooks/run.sh' }] }] },
+        })
+      );
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /claude \(settings hooks\)/);
+    }));
+
+  test('ledger-silent: an unparseable claude registry skips — wiring unknown, not absent', async () =>
+    withEnv({}, async dir => {
+      mkdirSync(join(dir, 'claude', 'plugins'), { recursive: true });
+      writeFileSync(join(dir, 'claude', 'plugins', 'installed_plugins.json'), '{not json');
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'skip', JSON.stringify(c));
+      assert.match(c.detail, /claude plugin registry unreadable/);
+    }));
+
+  test('ledger-silent: an unparseable devin lockfile skips the same way', async () =>
+    withEnv({}, async dir => {
+      const lockDir = join(dir, 'data', 'devin', 'cli', 'plugins');
+      mkdirSync(lockDir, { recursive: true });
+      writeFileSync(join(lockDir, 'lock.json'), 'not-json{');
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-silent');
+      assert.equal(c.status, 'skip', JSON.stringify(c));
+      assert.match(c.detail, /devin plugin lockfile unreadable/);
     }));
 
   test('ledger-killed: three unpaired starts past the watchdog warn with the count', async () =>
