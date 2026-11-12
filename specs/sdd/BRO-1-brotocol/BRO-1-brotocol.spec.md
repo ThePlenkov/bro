@@ -9,7 +9,6 @@ owns:
   - packages/cli/src/spec-connectors.ts
   - packages/cli/src/spec-drift.ts
   - packages/cli/src/commands/spec.ts
-  - skills/sdd/
   - packages/brose
   - packages/brotocol
 aliases: []
@@ -315,6 +314,8 @@ Implementation beads under `bro-bntld`; pure moves first:
 4. `@broject/openspec` connector package.
 5. `@broject/speckit` connector package.
 6. Methodology — `skills/sdd` rewritten around the protocol + docs.
+   Split into child spec BRO-2 (policy-spec identity on agent docs +
+   the skill rewrite); `skills/sdd/` owns moves with it.
 7. `bro spec new` KEY-N allocation — blocked on bro-y1jtm landing the
    format (its .2/.5 children).
 8. Connector-only plugin shape — blocks standalone connector
