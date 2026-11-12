@@ -619,6 +619,19 @@ describe('hooks e2e — permission + fail-open', () => {
       assert.equal(codex.code, 0);
       assert.match(codex.stdout, /"behavior":"allow"/);
       assert.doesNotMatch(codex.stdout, /"decision":"approve"/);
+      // npm protocol aliases resolve to a different package — the
+      // observe Tier-0 answer must not auto-approve them (coderabbit
+      // security finding); a bare version still approves
+      const alias = hook(f, 'permission', {
+        tool_input: { command: 'npx bro@npm:other status' },
+      });
+      assert.equal(alias.code, 0);
+      assert.doesNotMatch(alias.stdout, /approve|"behavior":"allow"/);
+      const ver = hook(f, 'permission', {
+        tool_input: { command: 'npx -y bro@1.2.3 status' },
+      });
+      assert.equal(ver.code, 0);
+      assert.match(ver.stdout, /"decision":"approve"/);
     });
   });
 

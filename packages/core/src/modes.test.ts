@@ -218,6 +218,11 @@ describe('parseModeCommand', () => {
     assert.equal(parseModeCommand('bro mode off'), 'observe');
     assert.equal(parseModeCommand('npx bro mode plan'), 'plan');
     assert.equal(parseModeCommand('npx -y @broject/bro@1.2.3 mode orchestrate'), 'orchestrate');
+    assert.equal(parseModeCommand('npx bro@1.2.3 mode code'), 'code');
+    // npm protocol aliases resolve to a DIFFERENT package — never bind
+    assert.equal(parseModeCommand('npx bro@npm:other mode code'), null);
+    assert.equal(parseModeCommand('npx @broject/bro@npm:other mode code'), null);
+    assert.equal(parseModeCommand('npx bro@github:u/r mode code'), null);
     assert.equal(parseModeCommand('bro mode get'), null); // get is not a set
     assert.equal(parseModeCommand('bro mode bogus'), null);
     assert.equal(parseModeCommand('bro mode'), null);

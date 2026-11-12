@@ -302,8 +302,9 @@ async function runClear(
   ledger: LedgerFacade | undefined
 ): Promise<void> {
   const file = modeFilePath(env, sess.host, sess.sid);
-  if (file !== null) {
-    removeModeFile(file);
+  const warnings: string[] = [];
+  if (file !== null && !removeModeFile(file)) {
+    warnings.push(`could not remove mode file ${file} — the old mode still applies`);
   }
   // the ledger projection follows the post-clear effective mode —
   // modes.default may re-activate the session
@@ -313,7 +314,6 @@ async function runClear(
     sid: sess.sid,
     defaultMode: modesDefault(dir),
   });
-  const warnings: string[] = [];
   await ledgerSetMode(ledger, sess.host, sess.sid, res.mode, warnings);
   if (args.json) {
     console.log(
@@ -462,7 +462,9 @@ async function runRender(
   const project = sessionProject(dir);
   if (project === undefined) {
     if (args.json) {
-      console.log(JSON.stringify({ rendered: [], warnings: ['project unresolvable'] }, null, 2));
+      console.log(
+        JSON.stringify({ project: null, rendered: [], warnings: ['project unresolvable'] }, null, 2)
+      );
     } else {
       console.log('project unresolvable — snapshots need a git project id');
     }
@@ -472,8 +474,14 @@ async function runRender(
   const warnings: string[] = [];
   for (const mode of modes) {
     try {
-      await render(dir, mode);
-      rendered.push(mode);
+      const res = await render(dir, mode);
+      // the renderer reports { ok:false } on a thrown/unsettled sweep —
+      // that is a warning, not a rendered mode
+      if (typeof res === 'object' && res !== null && (res as { ok?: unknown }).ok === false) {
+        warnings.push(`render ${mode} produced no usable snapshot`);
+      } else {
+        rendered.push(mode);
+      }
     } catch (err) {
       warnings.push(`render ${mode} failed (${err instanceof Error ? err.message : String(err)})`);
     }
@@ -523,6 +531,15 @@ export async function runModeCommand(argv: string[], deps: ModeDeps = {}): Promi
     }
     throw new CommandError(
       `error: no session id resolvable — pass --session <id> [--host <h>] or run inside an agent session\n${USAGE}`,
+      EXIT.usage
+    );
+  }
+  if (args.session !== undefined && sess.host === 'unknown') {
+    // an explicit --session with an undetectable host would write
+    // `unknown-<sid>.mode` — a file no hook ever reads (hooks key on
+    // their detected host). Fail loud instead of silently missing.
+    throw new CommandError(
+      `error: --session needs --host <h> — the host cannot be detected outside an agent session\n${USAGE}`,
       EXIT.usage
     );
   }

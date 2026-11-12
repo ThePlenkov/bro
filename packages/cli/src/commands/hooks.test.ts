@@ -196,6 +196,19 @@ describe('isSelfToolCommand', () => {
     assert.ok(!isSelfToolCommand('npx --package=other-package bro'));
   });
 
+  test('rejects npm protocol aliases — they resolve to a different package', () => {
+    // `name@npm:other` / `name@github:u/r` are alias specs, not versions —
+    // auto-approving them would run an arbitrary package as "bro"
+    assert.ok(!isSelfToolCommand('npx bro@npm:other status'));
+    assert.ok(!isSelfToolCommand('npx @broject/bro@npm:other status'));
+    assert.ok(!isSelfToolCommand('npx bro@github:u/r status'));
+    assert.ok(!isSelfToolCommand('npx bro@1.2.3/npm:other status'));
+    // bare versions and dist-tags still approve
+    assert.ok(isSelfToolCommand('npx bro@1.2.3 status'));
+    assert.ok(isSelfToolCommand('npx @broject/bro@latest status'));
+    assert.ok(isSelfToolCommand('npx bro@0.3.0-beta.1 status'));
+  });
+
   test('rejects npx flags that change what runs or where it comes from', () => {
     // --call runs a shell string; --registry picks the fetch source;
     // --prefix/--cache consume the next token, so `bro` becomes a flag

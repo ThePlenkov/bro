@@ -107,11 +107,14 @@ export function writeModeFile(path: string, mode: Mode, project?: string): void 
   renameSync(tmp, path);
 }
 
-export function removeModeFile(path: string): void {
+export function removeModeFile(path: string): boolean {
   try {
     rmSync(path, { force: true });
+    return true;
   } catch {
-    // removal is best-effort — a stuck file just keeps its old mode
+    // removal failure is reported, not hidden — a stuck file keeps its
+    // old mode and the caller must not claim it cleared
+    return false;
   }
 }
 
@@ -384,7 +387,10 @@ export function parseModeCommand(cmd: string): Mode | null {
     const afterNpx = tokens.slice(1);
     const execIdx = modeNpxExecIndex(afterNpx);
     const exec = execIdx >= 0 ? afterNpx[execIdx] : undefined;
-    if (exec === undefined || !/^(?:@broject\/)?bro(?:@[\w.:-]+)?$/i.test(exec)) {
+    // the version/tag charset excludes ':' — npm protocol aliases
+    // (`bro@npm:other`, `bro@github:u/r`) are NOT the self tool and must
+    // never bind a mode (same grammar as isSelfToolCommand)
+    if (exec === undefined || !/^(?:@broject\/)?bro(?:@[\w.-]+)?$/i.test(exec)) {
       return null;
     }
     rest = afterNpx.slice(execIdx + 1);

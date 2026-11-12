@@ -17,7 +17,9 @@ probes. Active modes pay the full pipeline.
 ```bash
 bro mode                          # this session's effective mode + source
 bro mode code                     # activate — full interactive behavior
-bro mode plan|review|orchestrate  # the other active modes
+bro mode plan     # planning/rehydration mode
+bro mode review   # review/debt mode
+bro mode orchestrate  # supervisor duties on top of code
 bro mode off                      # pin observe even under modes.default
 bro mode clear                    # drop the file → modes.default / observe
 bro mode list [--json]            # every session mode on the machine

@@ -272,4 +272,56 @@ describe('runModeCommand', () => {
       f.cleanup();
     }
   });
+
+  test('--session with an undetectable host fails usage — never writes unknown-*.mode', async () => {
+    const f = envFixture();
+    try {
+      const { root: repo } = initRepo('bro-mode-host-');
+      try {
+        for (const argv of [
+          ['code', '--session', 's1'],
+          ['get', '--session', 's1'],
+          ['clear', '--session', 's1'],
+        ]) {
+          const out = await capture(() =>
+            runModeCommand(argv, { dir: repo, env: f.env, ledger: fakeLedger().ledger })
+          );
+          assert.notEqual(out.code, 0, JSON.stringify(argv));
+          assert.match(out.err.join('\n'), /--host/, JSON.stringify(argv));
+        }
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  test('render reports an unsettled renderer as a warning, not a rendered mode', async () => {
+    const f = envFixture();
+    try {
+      const { root: repo } = initRepo('bro-mode-renderbad-');
+      try {
+        const out = await capture(() =>
+          runModeCommand(['render', '--mode', 'code', '--json'], {
+            dir: repo,
+            env: f.env,
+            ledger: fakeLedger().ledger,
+            render: async () => ({ ok: false, lines: 3, events: [], project: 'p', mode: 'code' }),
+          })
+        );
+        const payload = JSON.parse(out.out.join('\n')) as {
+          rendered: string[];
+          warnings: string[];
+        };
+        assert.deepEqual(payload.rendered, []);
+        assert.equal(payload.warnings.length, 1);
+        assert.match(payload.warnings[0]!, /no usable snapshot/);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    } finally {
+      f.cleanup();
+    }
+  });
 });

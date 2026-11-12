@@ -356,7 +356,21 @@ permission_self_tool() {
     case "$_w" in
       -y|--yes|--no-install|-q|--quiet) continue ;;
       -*) set +f; return 1 ;;
-      bro|bro@*|@broject/bro|@broject/bro@*) _self=1; break ;;
+      bro|@broject/bro) _self=1; break ;;
+      bro@*|@broject/bro@*)
+        # a versioned self spec — the version must be a bare
+        # version/tag: '/' or ':' marks an npm alias/path spec
+        # (bro@npm:other, bro@github:u/r) that resolves to a DIFFERENT
+        # package — never auto-approve it (mirrors isSelfToolCommand's
+        # [\w.-] charset, which excludes both)
+        case "$_w" in
+          @broject/bro@*) _v=${_w#@broject/bro@} ;;
+          *) _v=${_w#bro@} ;;
+        esac
+        case "$_v" in
+          ''|*:*|*/*) break ;;   # alias/path/empty — not the self tool
+          *) _self=1; break ;;
+        esac ;;
       *) break ;;
     esac
   done
@@ -949,7 +963,10 @@ EOF
     # exists while a collected def targets that event, and .trace marks
     # a def whose match clause reads the session trace — post-tool must
     # then reach Node so the journal it evaluates stays complete.
-    if [ -z "$NEED_NODE" ]; then
+    # observe never runs guards (guardLines returns []), so its stamp
+    # can never appear — checking it would pin NEED_NODE forever and
+    # defeat the observe fast path.
+    if [ -z "$NEED_NODE" ] && [ "$HOOK_MODE" != observe ]; then
       GUARDSD=$HOOKS/guards
       if [ ! -f "$GUARDSD/.stamp" ]; then
         NEED_NODE=1
@@ -1051,7 +1068,7 @@ EOF
     case "$_mode_cmd" in *\\*) _mode_cmd= ;; esac
     [ -n "$_mode_cmd" ] \
       && printf %s "$_mode_cmd" \
-        | grep -qE '(^|[^[:alnum:]_-])bro([[:space:]]+[^[:space:];&|`$()<>\\]+)*[[:space:]]+mode([[:space:]]|$)' \
+        | grep -qE '(^|[^[:alnum:]_-])bro(@[^[:space:];&|`$()<>\\]+)?([[:space:]]+[^[:space:];&|`$()<>\\]+)*[[:space:]]+mode([[:space:]]|$)' \
       && NEED_NODE=1
   fi
 

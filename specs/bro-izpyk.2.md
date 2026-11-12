@@ -13,10 +13,11 @@ otherwise.
 ## Vocabulary (from the epic spec)
 
 - `observe` — passive. Ledger/spool keep recording (F1 visibility), inbox
-  delivery stays on, `preTool` safety vetoes and guards the user explicitly
-  declared still apply where cheap; no rehydration, no parallel-work nudges,
-  no goal/heartbeat context, no armed-work stop gates, no connector probes
-  that are not `activeIn`-declared for `observe`.
+  delivery stays on, and `preTool` safety vetoes (session-cap) still apply;
+  no rehydration, no parallel-work nudges, no goal/heartbeat context, no
+  armed-work stop gates, no connector probes that are not `activeIn`-declared
+  for `observe`, and no declared guards — `guardLines` returns `[]` in
+  `observe` (guards are active behavior).
 - `plan` — rehydration + ready tasks + specs/plan context; planning surface.
 - `code` — today's full interactive behavior (arming, gates, nudges, beads,
   worktree, sdd, pulses' supervisor rearm).

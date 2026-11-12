@@ -49,7 +49,7 @@
     {
       "required": ["project", "rendered", "warnings"],
       "properties": {
-        "project": { "type": "string" },
+        "project": { "type": ["string", "null"], "description": "null when the project id cannot resolve" },
         "rendered": { "type": "array", "items": { "type": "string" } },
         "warnings": { "type": "array", "items": { "type": "string" } }
       }

@@ -385,9 +385,12 @@ function sessionModeOverlay(
   const modeFiles =
     injected ??
     new Map(
-      listModeFiles()
-        .filter(f => f.mode !== undefined)
-        .map(f => [sessionFileStem(f.host, f.sid), f.mode as Mode] as const)
+      // an unreadable/invalid mode file resolves to observe at hook
+      // time — the overlay must show that, not fall back to a stale
+      // ledger mode
+      listModeFiles().map(
+        f => [sessionFileStem(f.host, f.sid), (f.mode ?? 'observe') as Mode] as const
+      )
     );
   return (host, sid) => modeFiles.get(sessionFileStem(host, sid));
 }

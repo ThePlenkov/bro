@@ -90,6 +90,7 @@ import {
   sessionMode,
   sessionProject,
   sessionStartProbe,
+  snapshotModeDir,
   stopGateContributions,
   unrefPendingChildren,
   withFileLock,
@@ -479,7 +480,10 @@ export function isSelfToolCommand(cmd: string): boolean {
     return false;
   }
   const exec = npxExecutable(cmd.trim().split(/\s+/).slice(1));
-  return exec !== undefined && /^(?:@broject\/)?bro(?:@[\w.:-]+)?$/.test(exec);
+  // ':' is excluded from the version charset — npm protocol aliases
+  // (`bro@npm:other`) resolve to a DIFFERENT package and must fall
+  // through to a prompt, never an auto-approve
+  return exec !== undefined && /^(?:@broject\/)?bro(?:@[\w.-]+)?$/.test(exec);
 }
 
 /** `-p`/`--package` in every spelling npx accepts — the package-set
@@ -720,7 +724,10 @@ function bindModeCommand(cmd: string, sessionId: string, dir: string): void {
   try {
     writeModeFile(file, mode, hookProjectIdFor(dir) ?? '');
   } catch {
-    // binding is best-effort — a failed write just leaves the old mode
+    // binding is best-effort — and a failed write must NOT project the
+    // requested mode into the ledger: hooks keep reading the old file,
+    // so the ledger would claim a mode nothing runs
+    return;
   }
   void ledgerFacade()
     .setMode({ host: hookHost, sid: sessionId }, mode)
@@ -753,11 +760,11 @@ function snapshotEventFor(cliEvent: string): ModeSnapshotEvent | undefined {
 
 /** Throttled detached snapshot render — a mode-active session whose
  *  snapshot missed or went stale re-renders for next time without
- *  paying the sweep on THIS event's critical path. The spawn cursor
- *  file bounds respawns to one per SNAPSHOT_SPAWN_MIN_MS per
- *  (project, mode). */
+ *  paying the sweep on THIS event's critical path. Every hook event is
+ *  a fresh process, so the throttle cursor is a `.spawned` file inside
+ *  the mode dir — its mtime bounds respawns to one per
+ *  SNAPSHOT_SPAWN_MIN_MS per (project, mode) across ALL hook processes. */
 const SNAPSHOT_SPAWN_MIN_MS = 60_000;
-const snapshotSpawnSeen = new Map<string, number>();
 
 /** Tier-1 snapshot lines for a rehydrate event (specs/bro-izpyk.2.md):
  *  a mode-active session reads the pre-rendered sessionStart sweep when
@@ -792,13 +799,25 @@ function maybeSpawnSnapshotRender(dir: string, mode: Mode): void {
   if (entry === undefined || !existsSync(entry)) {
     return;
   }
-  const key = `${projectId}|${mode}`;
-  const now = Date.now();
-  const last = snapshotSpawnSeen.get(key);
-  if (last !== undefined && now - last < SNAPSHOT_SPAWN_MIN_MS) {
+  const modeDir = snapshotModeDir(process.env, projectId, mode);
+  if (modeDir === null) {
     return;
   }
-  snapshotSpawnSeen.set(key, now);
+  const cursor = join(modeDir, '.spawned');
+  const now = Date.now();
+  try {
+    if (now - statSync(cursor).mtimeMs < SNAPSHOT_SPAWN_MIN_MS) {
+      return;
+    }
+  } catch {
+    // no cursor yet — this miss spawns the render
+  }
+  try {
+    mkdirSync(modeDir, { recursive: true });
+    writeFileSync(cursor, `${now}\n`);
+  } catch {
+    // cursor is best-effort — a failed write just re-spawns next miss
+  }
   try {
     const child = spawn(
       process.execPath,
@@ -2027,8 +2046,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   const outcome = input.tool_response?.success;
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
   // `bro mode <name>` binds to this session here — runs in EVERY mode,
-  // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md)
-  bindModeCommand(cmd, sessionId, process.cwd());
+  // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
+  // A proven-failed call binds nothing (the mode was never applied);
+  // hosts that cannot report an outcome still bind.
+  if (outcome !== false) {
+    bindModeCommand(cmd, sessionId, process.cwd());
+  }
   // observe is fully passive (specs/bro-izpyk.2.md): the trace journal
   // and OTLP flush above still run (passive telemetry), the
   // activeIn-filtered postTool probes still deliver (notify's mailbox
@@ -2761,7 +2784,6 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   hookMode = undefined;
   hookHost = undefined;
   hookProjectId = undefined;
-  snapshotSpawnSeen.clear();
   // run.sh spools a start/end pair on every launch — including the
   // early-return paths below (operator commands, the capability probe,
   // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any

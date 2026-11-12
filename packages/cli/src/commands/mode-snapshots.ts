@@ -18,10 +18,12 @@
  * a stale or missing snapshot as a miss and re-render detached.
  */
 
+import { rmSync } from 'node:fs';
 import {
   MODE_SNAPSHOT_EVENTS,
   sessionProject,
   sessionStartProbe,
+  snapshotEventPath,
   touchSnapshotStamp,
   writeModeSnapshot,
   type ConnectorCtx,
@@ -94,6 +96,14 @@ export async function renderModeSnapshots(
   for (const event of MODE_SNAPSHOT_EVENTS) {
     if (writeModeSnapshot(env, project, mode, event, text)) {
       events.push(event);
+    } else {
+      // a failed write must not leave the PREVIOUS render's file
+      // answering under the about-to-be-refreshed stamp — drop it so
+      // the event reads as a miss instead of serving stale context
+      const stale = snapshotEventPath(env, project, mode, event);
+      if (stale !== null) {
+        rmSync(stale, { force: true });
+      }
     }
   }
   touchSnapshotStamp(env, project, mode);
