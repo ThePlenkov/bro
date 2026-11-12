@@ -27,9 +27,11 @@
  * returns for the pins.
  */
 import type { FleetRouter, HealthSnapshot, JudgeFacade } from '@broject/core';
+import { readFileSync } from 'node:fs';
 import {
   candidates,
-  readFormula,
+  FormulaError,
+  parseFormulaText,
   resolveRoute,
   validateFormulaTable,
 } from '@broject/router-routes';
@@ -47,7 +49,7 @@ import type { DecisionKind } from '@broject/router-store';
 import { decisionJudge } from './decision-model.ts';
 import { decideByFormula, type FormulaTaskDecision } from './formula-decide.ts';
 import { ledgerHealth } from './ledger.ts';
-import { formulaTextOf, routerOutcomeStats } from './outcome-stats.ts';
+import { routerOutcomeStats } from './outcome-stats.ts';
 
 /** The verdict for a task — the route, and whether the health was known. */
 export interface TaskDecision {
@@ -76,13 +78,24 @@ export interface DecisionLinks {
   pr?: string;
 }
 
-/** The formula the path decides with — the file read and cross-checked
- *  against the table. Every problem is a FormulaError, thrown once:
- *  an invalid formula fails loud, never silently routes around itself. */
-function loadFormula(path: string, table: RouteTable): Formula {
-  const formula = readFormula(path);
+/** The formula the path decides with — the file read ONCE, cross-checked
+ *  against the table, and handed back as the same bytes it parsed: the
+ *  score shape's stats hash and the journal snapshot derive from this
+ *  one read, so the contract and its namespace can never split on a
+ *  mid-decision file change. Every problem is a FormulaError, thrown
+ *  once: an invalid formula fails loud, never silently routes around
+ *  itself. */
+function loadFormula(path: string, table: RouteTable): { formula: Formula; text: string } {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new FormulaError([`${path}: cannot read formula — ${msg}`], path);
+  }
+  const formula = parseFormulaText(text, path);
   validateFormulaTable(formula, table, path);
-  return formula;
+  return { formula, text };
 }
 
 /** The decision model's pick — the judge over the candidate routes.
@@ -161,10 +174,12 @@ export async function decideRoute(input: {
   links?: DecisionLinks;
 }): Promise<TaskDecision> {
   const { snapshot, known } = await ledgerHealth();
-  // the formula, parsed once — the verdict reads it, the score shape's
-  // stats source hashes it, the journal snapshots it
-  const formula = input.formula === undefined ? undefined : loadFormula(input.formula, input.table);
-  const formulaText = input.formula === undefined ? undefined : formulaTextOf(input.formula);
+  // the formula's bytes, read once — the verdict parses them, the score
+  // shape's stats source hashes them, the journal snapshots them: one
+  // read, one contract, one namespace (no read-twice TOCTOU)
+  const loaded = input.formula === undefined ? undefined : loadFormula(input.formula, input.table);
+  const formula = loaded?.formula;
+  const formulaText = loaded?.text;
   // the score shape's outcome stats — the live read-model over router.db
   // unless a test seam supplied one; built only for `shape: score`, the
   // one shape that consumes it (spec bro-0ykhg.7)

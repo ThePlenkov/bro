@@ -7,7 +7,10 @@
  * writes under, the same `contentHash(table)`/`textHash(formulaText)`
  * digests, the read-model's 30-day window — then a synchronous reduce
  * per candidate through `reduceOutcomeStats`, the JS half of
- * `outcomeStats` the store package exports for exactly this seam.
+ * `outcomeStats` the store package exports for exactly this seam. The
+ * rows arrive pre-grouped by route, so `statsFor` reduces only the
+ * candidate's own slice — a scoring pass touches each row once, not
+ * once per candidate.
  *
  * `statsFor` is synchronous by contract (score.ts: a scoring pass
  * never awaits IO it does not need), so the async fetch happens ONCE
@@ -21,7 +24,6 @@
  * window, rows) is fixed at construction; `statsFor` reads the route,
  * the task's features, and the formula's `success` predicate per call.
  */
-import { readFileSync } from 'node:fs';
 import {
   priorOnlyOutcomes,
   type OutcomeStatsSource,
@@ -59,15 +61,69 @@ export interface RouterOutcomeStatsInput {
   now?: number;
 }
 
-/** The formula file's raw text — best-effort like every journal
- *  snapshot: the decision stands even when the bytes cannot be re-read
- *  (the hash then stays unknown and the stats stay the prior). */
-export function formulaTextOf(path: string): string | undefined {
+/** The decision's namespace digests — context, table and formula
+ *  hashes resolved exactly as the journal resolves them; undefined
+ *  when any input cannot produce one (the caller degrades to the
+ *  prior). */
+function outcomeScope(
+  input: RouterOutcomeStatsInput,
+  formulaText: string
+): { contextId: string; tableHash: string; formulaHash: string } | undefined {
   try {
-    return readFileSync(path, 'utf8');
+    return {
+      contextId: decisionContextId(input.dir, { tablePath: input.tablePath }),
+      tableHash: contentHash(input.table),
+      formulaHash: textHash(formulaText),
+    };
   } catch {
     return undefined;
   }
+}
+
+/** The one async read — migrate, fetch the verified rows inside the
+ *  window and the decision's scope, close. Undefined on any failure:
+ *  the caller degrades to the prior. */
+async function fetchScopedRows(
+  scope: { contextId: string; tableHash: string; formulaHash: string },
+  now?: number
+): Promise<StatsRow[] | undefined> {
+  const handle = openStore(routerStorePath());
+  if (!handle.ok) {
+    return undefined;
+  }
+  try {
+    migrateStore(handle.db);
+    const at = now ?? Date.now();
+    return await outcomeStatsRows(handle.db, {
+      contextId: scope.contextId,
+      tableHash: scope.tableHash,
+      formulaHash: scope.formulaHash,
+      since: at - OUTCOME_WINDOW_MS,
+      now: at,
+    });
+  } catch {
+    return undefined;
+  } finally {
+    handle.close();
+  }
+}
+
+/** Rows grouped by route name — `statsFor` then reduces only the
+ *  candidate's own slice, so a scoring pass touches each row once, not
+ *  once per candidate. Rows with no route can never match a candidate
+ *  name, so they never enter the map. */
+function groupRowsByRoute(rows: StatsRow[]): Map<string, StatsRow[]> {
+  const byRoute = new Map<string, StatsRow[]>();
+  for (const row of rows) {
+    if (row.route === null) continue;
+    const bucket = byRoute.get(row.route);
+    if (bucket === undefined) {
+      byRoute.set(row.route, [row]);
+    } else {
+      bucket.push(row);
+    }
+  }
+  return byRoute;
 }
 
 /** The live outcome stats for one decision — the `OutcomeStatsSource`
@@ -76,43 +132,22 @@ export function formulaTextOf(path: string): string | undefined {
 export async function routerOutcomeStats(
   input: RouterOutcomeStatsInput
 ): Promise<OutcomeStatsSource> {
-  if (input.formulaText === undefined) {
+  const formulaText = input.formulaText;
+  if (formulaText === undefined) {
     return priorOnlyOutcomes;
   }
-  let contextId: string;
-  let tableHash: string;
-  let formulaHash: string;
-  try {
-    contextId = decisionContextId(input.dir, { tablePath: input.tablePath });
-    tableHash = contentHash(input.table);
-    formulaHash = textHash(input.formulaText);
-  } catch {
+  const scope = outcomeScope(input, formulaText);
+  if (scope === undefined) {
     return priorOnlyOutcomes;
   }
-  const handle = openStore(routerStorePath());
-  if (!handle.ok) {
+  const rows = await fetchScopedRows(scope, input.now);
+  if (rows === undefined) {
     return priorOnlyOutcomes;
   }
-  let rows: StatsRow[];
-  try {
-    migrateStore(handle.db);
-    const now = input.now ?? Date.now();
-    rows = await outcomeStatsRows(handle.db, {
-      contextId,
-      tableHash,
-      formulaHash,
-      since: now - OUTCOME_WINDOW_MS,
-      now,
-    });
-  } catch {
-    return priorOnlyOutcomes;
-  } finally {
-    handle.close();
-  }
+  const byRoute = groupRowsByRoute(rows);
   return {
     statsFor(route, features, formula) {
-      const stats = reduceOutcomeStats(rows, {
-        route: route.name,
+      const stats = reduceOutcomeStats(byRoute.get(route.name) ?? [], {
         features,
         featureKeys: Object.keys(formula.questions),
         success: formula.success,

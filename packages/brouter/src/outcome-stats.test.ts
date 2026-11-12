@@ -21,6 +21,7 @@ import {
   recordOutcome,
   routerStorePath,
   type OutcomeReport,
+  type RecordOutcomeOptions,
   type StoreHandle,
 } from '@broject/router-store';
 import { decisionContextId } from './context.ts';
@@ -140,6 +141,34 @@ function report(decisionId: string, over: Partial<OutcomeReport> = {}): OutcomeR
 
 const verified = { verify: () => true };
 
+type Store = Extract<StoreHandle, { ok: true }>;
+
+/** Journal a decision and land an outcome on it — the pair every
+ *  stats test seeds. `options` overrides the verified default
+ *  (persistText, a backdated `now`, or `{}` for a pending row). */
+async function seedOutcome(
+  s: Store,
+  over: {
+    contextId: string;
+    route?: string;
+    features?: Record<string, string | number | boolean>;
+    table?: RouteTable;
+    formulaText?: string;
+    report?: Partial<OutcomeReport>;
+    options?: RecordOutcomeOptions;
+  }
+): Promise<string> {
+  const decisionId = await journal(s, {
+    contextId: over.contextId,
+    ...(over.route === undefined ? {} : { route: over.route }),
+    ...(over.features === undefined ? {} : { features: over.features }),
+    ...(over.table === undefined ? {} : { table: over.table }),
+    ...(over.formulaText === undefined ? {} : { formulaText: over.formulaText }),
+  });
+  await recordOutcome(s, report(decisionId, over.report), over.options ?? verified);
+  return decisionId;
+}
+
 /** Build the live source for a scratch dir — the same inputs
  *  decideRoute passes. */
 function statsSource(dir: string, over: { tablePath: string; now?: number; formulaText?: string }) {
@@ -159,27 +188,18 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const tp = tablePath();
     const contextId = decisionContextId(dir, { tablePath: tp });
     // route a: one first-round merge, one failure — both measured
-    const a1 = await journal(s, { contextId, route: 'a' });
-    await recordOutcome(
-      s,
-      report(a1, { result: 'merged', rounds: 1, cost: 0.5, wallMs: 2000 }),
-      verified
-    );
-    const a2 = await journal(s, { contextId, route: 'a' });
-    await recordOutcome(
-      s,
-      report(a2, {
-        result: 'failed',
-        rounds: 3,
-        eventId: 'evt-a2',
-        cost: 1.5,
-        wallMs: 6000,
-      }),
-      verified
-    );
+    await seedOutcome(s, {
+      contextId,
+      route: 'a',
+      report: { result: 'merged', rounds: 1, cost: 0.5, wallMs: 2000 },
+    });
+    await seedOutcome(s, {
+      contextId,
+      route: 'a',
+      report: { result: 'failed', rounds: 3, cost: 1.5, wallMs: 6000 },
+    });
     // route b: one first-round merge, measures NULL — unknown, not zero
-    const b1 = await journal(s, { contextId, route: 'b' });
-    await recordOutcome(s, report(b1, { rounds: 1 }), verified);
+    await seedOutcome(s, { contextId, route: 'b', report: { rounds: 1 } });
 
     const source = await statsSource(dir, { tablePath: tp });
     const a = source.statsFor(route('a'), { risk: false, tier: 'pro' }, FORMULA, TABLE);
@@ -200,13 +220,13 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const dir = scratchDir();
     const tp = tablePath();
     const contextId = decisionContextId(dir, { tablePath: tp });
-    const id = await journal(s, {
+    await seedOutcome(s, {
       contextId,
       route: 'a',
       // an extra non-question key rides along — the bucket ignores it
       features: { risk: false, tier: 'pro', extra: 'ignored' },
+      report: { rounds: 1 },
     });
-    await recordOutcome(s, report(id, { rounds: 1 }), verified);
 
     const source = await statsSource(dir, { tablePath: tp });
     // same question-key values → the row counts, whatever else differs
@@ -229,30 +249,29 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const dir = scratchDir();
     const tp = tablePath();
     const contextId = decisionContextId(dir, { tablePath: tp });
-    const inScope = await journal(s, { contextId, route: 'a' });
-    await recordOutcome(s, report(inScope, { rounds: 1 }), verified);
+    await seedOutcome(s, { contextId, route: 'a', report: { rounds: 1 } });
     // a different context
-    const otherCtx = await journal(s, { contextId: 'ctx:other', route: 'a' });
-    await recordOutcome(s, report(otherCtx, { rounds: 1 }), verified);
+    await seedOutcome(s, { contextId: 'ctx:other', route: 'a', report: { rounds: 1 } });
     // a different table hash
-    const otherTable = await journal(s, {
+    await seedOutcome(s, {
       contextId,
       route: 'a',
       table: { kind: 'route', version: 1, routes: [] },
+      report: { rounds: 1 },
     });
-    await recordOutcome(s, report(otherTable, { rounds: 1 }), verified);
     // a different formula hash
-    const otherFormula = await journal(s, {
+    await seedOutcome(s, {
       contextId,
       route: 'a',
       formulaText: '---\nkind: formula\nshape: pick\n---\nother\n',
+      report: { rounds: 1 },
     });
-    await recordOutcome(s, report(otherFormula, { rounds: 1 }), verified);
     // expired — outside the 30-day window
-    const old = await journal(s, { contextId, route: 'a' });
-    await recordOutcome(s, report(old, { rounds: 1, eventId: 'evt-old' }), {
-      ...verified,
-      now: Date.now() - 31 * 24 * 60 * 60 * 1000,
+    await seedOutcome(s, {
+      contextId,
+      route: 'a',
+      report: { rounds: 1 },
+      options: { ...verified, now: Date.now() - 31 * 24 * 60 * 60 * 1000 },
     });
 
     const source = await statsSource(dir, { tablePath: tp });
@@ -271,8 +290,8 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const dir = scratchDir();
     const tp = tablePath();
     const contextId = decisionContextId(dir, { tablePath: tp });
-    const pending = await journal(s, { contextId, route: 'a' });
-    await recordOutcome(s, report(pending, { rounds: 1 })); // no verify → pending
+    // no verify → the row stays pending, never verified
+    await seedOutcome(s, { contextId, route: 'a', report: { rounds: 1 }, options: {} });
     const source = await statsSource(dir, { tablePath: tp });
     const a = source.statsFor(route('a'), { risk: false, tier: 'pro' }, FORMULA, TABLE);
     assert.equal(a.n, 0);
@@ -285,9 +304,13 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const dir = scratchDir();
     const tp = tablePath();
     const contextId = decisionContextId(dir, { tablePath: tp });
-    const id = await journal(s, { contextId, route: 'a' });
     // persistText: false — the outcome row keeps NULL features_json
-    await recordOutcome(s, report(id, { rounds: 1 }), { ...verified, persistText: false });
+    await seedOutcome(s, {
+      contextId,
+      route: 'a',
+      report: { rounds: 1 },
+      options: { ...verified, persistText: false },
+    });
     const source = await statsSource(dir, { tablePath: tp });
     const featured = source.statsFor(route('a'), { risk: false, tier: 'pro' }, FORMULA, TABLE);
     assert.equal(featured.n, 0);
@@ -304,8 +327,11 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const tp = tablePath();
     const contextId = decisionContextId(dir, { tablePath: tp });
     // merged after three rounds — a failure under merged_first_round
-    const id = await journal(s, { contextId, route: 'a' });
-    await recordOutcome(s, report(id, { result: 'merged', rounds: 3 }), verified);
+    await seedOutcome(s, {
+      contextId,
+      route: 'a',
+      report: { result: 'merged', rounds: 3 },
+    });
     const source = await statsSource(dir, { tablePath: tp });
     const first = source.statsFor(route('a'), { risk: false, tier: 'pro' }, FORMULA, TABLE);
     assert.equal(first.n, 1);
@@ -324,8 +350,7 @@ describe('routerOutcomeStats — the live OutcomeStatsSource', () => {
     const contextId = decisionContextId(dir, { tablePath: tp });
     // a live verified row sits in this namespace — the no-text source
     // must still answer the prior because no hash can join it
-    const id = await journal(s, { contextId, route: 'a', features: {} });
-    await recordOutcome(s, report(id, { rounds: 1 }), verified);
+    await seedOutcome(s, { contextId, route: 'a', features: {}, report: { rounds: 1 } });
     // no formula text — the hash cannot be computed, no row can join
     // (inline: the helper's default would fill the text back in)
     const noText = await routerOutcomeStats({ dir, tablePath: tp, table: TABLE });
@@ -363,18 +388,16 @@ describe('decideRoute — the score shape ranks on live stats', () => {
     const contextId = decisionContextId(dir, { tablePath: tp });
     // route a failed after fixes, route b merged first round — both in
     // the {risk:false, tier:pro} bucket the judge's answers will form
-    const a = await journal(s, { contextId, route: 'a', features: { risk: false, tier: 'pro' } });
-    await recordOutcome(
-      s,
-      report(a, { result: 'failed', rounds: 2, cost: 0.4, wallMs: 5000 }),
-      verified
-    );
-    const b = await journal(s, { contextId, route: 'b', features: { risk: false, tier: 'pro' } });
-    await recordOutcome(
-      s,
-      report(b, { result: 'merged', rounds: 1, cost: 0.1, wallMs: 1000 }),
-      verified
-    );
+    await seedOutcome(s, {
+      contextId,
+      route: 'a',
+      report: { result: 'failed', rounds: 2, cost: 0.4, wallMs: 5000 },
+    });
+    await seedOutcome(s, {
+      contextId,
+      route: 'b',
+      report: { result: 'merged', rounds: 1, cost: 0.1, wallMs: 1000 },
+    });
 
     const judge = fakeJudge({
       risk: { type: 'noul', noul: 0.2, confidence: 0.9, decidedBy: 'fake' },
@@ -416,6 +439,78 @@ describe('decideRoute — the score shape ranks on live stats', () => {
 /** The built CLI — the live smoke a user actually touches. */
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js');
 
+/** The two-route table the smoke CLI reads — declaration order a then b. */
+function writeSmokeTable(path: string): void {
+  writeFileSync(
+    path,
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.a]',
+      'chain = [{ provider = "a" }]',
+      '',
+      '[routes.b]',
+      'chain = [{ provider = "b" }]',
+      '',
+    ].join('\n')
+  );
+}
+
+/** Seed one verified outcome against the CLI's own parsed table — the
+ *  hashes the adapter will compute at decision time. */
+async function seedCliOutcome(
+  s: Store,
+  over: { contextId: string; table: RouteTable; route: string; report: Partial<OutcomeReport> }
+): Promise<void> {
+  const decisionId = newDecisionId();
+  assert.equal(
+    await recordDecision(s, {
+      kind: 'route',
+      contextId: over.contextId,
+      decisionId,
+      taskText: 'smoke task',
+      features: {},
+      route: over.route,
+      provider: over.route,
+      model: 'm',
+      table: over.table,
+      formulaText: FORMULA_MD,
+    }),
+    true
+  );
+  await recordOutcome(s, report(decisionId, over.report), verified);
+}
+
+/** The built CLI's route verdict — the same isolated XDG env the unit
+ *  tests seed into. */
+function runRouteCli(cwd: string, tablePath: string) {
+  return spawnSync(
+    process.execPath,
+    [
+      CLI,
+      'route',
+      'ship',
+      'the',
+      'feature',
+      '--routes',
+      tablePath,
+      '--formula',
+      FORMULA_PATH,
+      '--json',
+    ],
+    {
+      encoding: 'utf8',
+      cwd,
+      env: {
+        ...process.env,
+        XDG_STATE_HOME: join(scratch, 'state'),
+        XDG_CONFIG_HOME: join(scratch, 'xdg-empty'),
+      },
+    }
+  );
+}
+
 describe('live smoke — seeded outcomes rank a real route decision', () => {
   test('brouter route --formula score.md picks the verified winner', async t => {
     if (!existsSync(CLI)) return t.skip();
@@ -424,67 +519,25 @@ describe('live smoke — seeded outcomes rank a real route decision', () => {
       // the CLI's cwd — no .git, no config: contextId is the table's
       const plain = scratchDir();
       const tablePath = join(scratch, 'smoke-routes.toml');
-      writeFileSync(
-        tablePath,
-        [
-          'kind = "route"',
-          'version = 1',
-          '',
-          '[routes.a]',
-          'chain = [{ provider = "a" }]',
-          '',
-          '[routes.b]',
-          'chain = [{ provider = "b" }]',
-          '',
-        ].join('\n')
-      );
+      writeSmokeTable(tablePath);
       // seed against the EXACT objects the CLI will hash: the parsed
       // table and the formula file's bytes
       const cliTable = readRouteTable(tablePath);
       const contextId = decisionContextId(plain, { tablePath });
-      const seed = async (routeName: string, over: Partial<OutcomeReport>) => {
-        const decisionId = newDecisionId();
-        assert.equal(
-          await recordDecision(s, {
-            kind: 'route',
-            contextId,
-            decisionId,
-            taskText: 'smoke task',
-            features: {},
-            route: routeName,
-            provider: routeName,
-            model: 'm',
-            table: cliTable,
-            formulaText: FORMULA_MD,
-          }),
-          true
-        );
-        await recordOutcome(s, report(decisionId, over), verified);
-      };
-      await seed('a', { result: 'failed', rounds: 2 });
-      await seed('b', { result: 'merged', rounds: 1 });
+      await seedCliOutcome(s, {
+        contextId,
+        table: cliTable,
+        route: 'a',
+        report: { result: 'failed', rounds: 2 },
+      });
+      await seedCliOutcome(s, {
+        contextId,
+        table: cliTable,
+        route: 'b',
+        report: { result: 'merged', rounds: 1 },
+      });
 
-      const xdg = join(scratch, 'xdg-empty');
-      const proc = spawnSync(
-        process.execPath,
-        [
-          CLI,
-          'route',
-          'ship',
-          'the',
-          'feature',
-          '--routes',
-          tablePath,
-          '--formula',
-          FORMULA_PATH,
-          '--json',
-        ],
-        {
-          encoding: 'utf8',
-          cwd: plain,
-          env: { ...process.env, XDG_STATE_HOME: join(scratch, 'state'), XDG_CONFIG_HOME: xdg },
-        }
-      );
+      const proc = runRouteCli(plain, tablePath);
       assert.equal(proc.status, 0, proc.stderr);
       const decision = JSON.parse(proc.stdout);
       // b's verified p (2/3) beats a's (1/3) — table order would pick a
