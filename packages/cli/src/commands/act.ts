@@ -268,10 +268,12 @@ function printStatus(state: PrActState, gate: ExitGate): void {
           }) — wait for re-review`
     );
     // the review body can carry an objection no thread anchors — show
-    // it so a "stale" label is never read without the whole ask
-    const body = v.body?.replace(/\s+/g, ' ').trim();
-    if (body) {
-      console.log(`    body: "${body.length > 120 ? `${body.slice(0, 120)}…` : body}"`);
+    // ALL of it, untruncated, so a "stale" label is never read without
+    // the whole ask (VetoReview.body contract — codeant/coderabbit on
+    // PR #1020)
+    const body = vetoBodyText(v);
+    if (body !== '') {
+      console.log(`    body: "${body}"`);
     }
   }
   const live = listWatches(process.cwd()).filter(l => l.alive && l.watch.pr === state.pr);
@@ -1810,16 +1812,17 @@ function cmdReply(argv: string[]): void {
  *  review history reads honestly afterwards. */
 const DEFAULT_DISMISS_MESSAGE = 'stale review — all referenced threads resolved (bro act dismiss)';
 
-/** One-line body excerpt for veto display — a review body can carry
- *  an objection no thread anchors (the stale rule only sees threaded
- *  asks), so every dismissal decision surfaces the whole text for the
- *  human/agent reading it (codeant/coderabbit on PR #1020). */
-const vetoBodyNote = (v: VetoReview, max = 160): string => {
-  const b = v.body?.replace(/\s+/g, ' ').trim();
-  if (!b) {
-    return '';
-  }
-  return ` — body: "${b.length > max ? `${b.slice(0, max)}…` : b}"`;
+/** The veto's body as a single display line — whitespace-collapsed and
+ *  NEVER truncated: `VetoReview.body` exists because a body-level
+ *  objection has no thread anchor, so every dismissal-decision surface
+ *  must show the whole text — any cutoff could hide the ask that
+ *  matters past it (codeant/coderabbit on PR #1020). */
+const vetoBodyText = (v: VetoReview): string => v.body?.replace(/\s+/g, ' ').trim() ?? '';
+
+/** One-line body note for veto display — the full text per vetoBodyText. */
+const vetoBodyNote = (v: VetoReview): string => {
+  const b = vetoBodyText(v);
+  return b === '' ? '' : ` — body: "${b}"`;
 };
 
 /**
@@ -1905,7 +1908,19 @@ async function cmdDismiss(argv: string[]): Promise<void> {
   }
   const message = flag(argv, '--message') ?? DEFAULT_DISMISS_MESSAGE;
   let failed = 0;
-  for (const v of toDismiss) {
+  for (const candidate of toDismiss) {
+    // re-probe before EACH mutation, not only once before the loop: a
+    // thread reopened by an earlier dismissal in this same batch must
+    // not be cleared off the batch snapshot — the residual window
+    // narrows to this entry's own probe→mutation gap (no host lock
+    // closes it fully; codeant/coderabbit on PR #1020). The fresh
+    // veto object is the one dismissed — author/threads may have moved.
+    const probed = await rev.vetoReviews(t);
+    const v = probed.find(c => c.id === candidate.id && c.stale);
+    if (v === undefined) {
+      console.log(`act: ${describe(candidate)} no longer stale on re-read — skipped`);
+      continue;
+    }
     // the body surfaces BEFORE the mutation — a body-level objection is
     // invisible to the thread rule, so the operator/agent deciding the
     // dismissal reads the whole review here

@@ -1140,7 +1140,13 @@ const facade = {
       s.dismissals = (s.dismissals ?? []).concat([{ pr: t.pr, review: reviewId, message }])
       const drop = (list) => (list ?? []).filter((v) => v.id !== reviewId)
       const settle = (entry) => {
-        const vetoes = drop(entry.vetoReviews)
+        // settle the SAME effective list vetoReviews() resolves —
+        // entry.vetoReviews ?? s.vetoReviews — or an entry inheriting
+        // the flat list drops to [] and its surviving live vetoes
+        // vanish while reviewDecision still flips (codeant/coderabbit
+        // on PR #1020). The filtered result persists on the selected
+        // PR's entry only; s.vetoReviews stays for other inheritors.
+        const vetoes = drop(entry.vetoReviews ?? s.vetoReviews)
         entry.vetoReviews = vetoes
         if (vetoes.length === 0 && entry.reviewDecision === 'CHANGES_REQUESTED') {
           entry.reviewDecision = 'REVIEW_REQUIRED'

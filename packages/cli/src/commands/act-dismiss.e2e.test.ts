@@ -186,6 +186,109 @@ describe('act dismiss — stale veto reviews (bro-n1foa)', () => {
     });
   });
 
+  test('the FULL review body surfaces — no cutoff hides a late objection', () => {
+    const { root, main, state } = fixture();
+    inside(main, root, () => {
+      // the actionable ask sits past both historical cutoffs (120 in
+      // status, 160 in dismiss) — a truncated view would offer the
+      // dismissal without ever showing it (VetoReview.body contract)
+      const tail = 'the real ask: rotate the signing key before merge';
+      const bodied = { ...STALE_VETO, body: `${'filler '.repeat(30)}${tail}` };
+      seedVeto(state, [bodied]);
+      const status = runCli(['act', 'status', '7'], { cwd: main });
+      assert.ok(status.stdout.includes(tail), status.stdout);
+      const dry = runCli(['act', 'dismiss', '7', '--dry-run'], { cwd: main });
+      assert.ok(dry.stdout.includes(tail), dry.stdout);
+      const done = runCli(['act', 'dismiss', '7'], { cwd: main });
+      assert.equal(done.code, 0, done.stderr);
+      assert.ok(done.stdout.includes(tail), done.stdout);
+    });
+  });
+
+  test('a veto going live mid-batch is caught by its own pre-mutation re-probe', () => {
+    const { root, main, state } = fixture();
+    inside(main, root, () => {
+      const STALE_A = { ...STALE_VETO, id: 'PRR_a', author: 'kody-ai' };
+      const STALE_B = { ...STALE_VETO, id: 'PRR_b', author: 'alice' };
+      const LIVE_B = { ...STALE_B, stale: false };
+      writeHostState(state, {
+        prState: 'OPEN',
+        mergeable: 'MERGEABLE',
+        mergeState: 'CLEAN',
+        reviewDecision: 'CHANGES_REQUESTED',
+        vetoReviews: [STALE_A, STALE_B],
+        // vetoReviews() call order: initial probe → pre-loop re-read →
+        // per-entry probe for A → per-entry probe for B. B goes live
+        // during A's dismissal — only its own re-probe can catch that.
+        readQueues: {
+          vetoReviews: [
+            [STALE_A, STALE_B],
+            [STALE_A, STALE_B],
+            [STALE_A, STALE_B],
+            [STALE_A, LIVE_B],
+          ],
+        },
+      });
+      const r = runCli(['act', 'dismiss', '7'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /act: dismissed kody-ai's review PRR_a/);
+      assert.match(r.stdout, /alice's review PRR_b .*no longer stale on re-read — skipped/);
+      const after = readHostState(state);
+      // only A was dismissed — B's live veto was never touched
+      assert.deepEqual(after.dismissals, [
+        {
+          pr: 7,
+          review: 'PRR_a',
+          message: 'stale review — all referenced threads resolved (bro act dismiss)',
+        },
+      ]);
+    });
+  });
+
+  test('a PR inheriting the flat veto list settles only its own share', () => {
+    const { root, main, state } = fixture();
+    inside(main, root, () => {
+      // pr7's entry carries NO vetoReviews — it inherits s.vetoReviews
+      // (stale+live) exactly like the read path resolves it; the fake's
+      // dismissal must settle that same effective list, not drop to []
+      writeHostState(state, {
+        prState: 'OPEN',
+        mergeable: 'MERGEABLE',
+        mergeState: 'CLEAN',
+        vetoReviews: [STALE_VETO, LIVE_VETO],
+        prs: {
+          'work/pr7': {
+            number: 7,
+            state: 'OPEN',
+            headRef: 'work/pr7',
+            reviewDecision: 'CHANGES_REQUESTED',
+          },
+          'work/pr8': {
+            number: 8,
+            state: 'OPEN',
+            headRef: 'work/pr8',
+            reviewDecision: 'CHANGES_REQUESTED',
+            vetoReviews: [LIVE_VETO],
+          },
+        },
+      });
+      const done = runCli(['act', 'dismiss', '7'], { cwd: main });
+      assert.equal(done.code, 0, done.stderr);
+      const after = readHostState(state);
+      const prs = after.prs as Record<string, { reviewDecision?: string; vetoReviews?: unknown[] }>;
+      // the inherited live veto survives on pr7 — its decision must NOT flip
+      assert.deepEqual(prs['work/pr7']!.vetoReviews, [LIVE_VETO]);
+      assert.equal(prs['work/pr7']!.reviewDecision, 'CHANGES_REQUESTED');
+      // the flat list is untouched — the settle persisted only to pr7's entry
+      assert.deepEqual(after.vetoReviews, [STALE_VETO, LIVE_VETO]);
+      assert.deepEqual(prs['work/pr8']!.vetoReviews, [LIVE_VETO]);
+      // and the gate still blocks on the surviving live veto
+      const status = runCli(['act', 'status', '7'], { cwd: main });
+      assert.equal(status.code, 1, status.stdout);
+      assert.match(status.stdout, /review_decision=CHANGES_REQUESTED/);
+    });
+  });
+
   test('dismissing on one PR never settles another PR’s standing veto', () => {
     const { root, main, state } = fixture();
     inside(main, root, () => {
