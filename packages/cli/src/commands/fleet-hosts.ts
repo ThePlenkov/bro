@@ -168,13 +168,15 @@ function foldSessions(map: Map<string, HostAcc>, sessions: SessionRow[], boot: n
 
 /** A stats day is day-granular — the latest possible instant on that UTC
  *  day stands in for last-seen (installs/sessions carry exact ms and
- *  almost always dominate; this only matters for append()-fed hosts). */
-function statDayEndMs(day: string): number {
+ *  almost always dominate; this only matters for append()-fed hosts).
+ *  The stand-in is clamped at `now`: a stats row for the CURRENT day
+ *  would otherwise date the host into the future and print "0s". */
+function statDayEndMs(day: string, now: number): number {
   const t = Date.parse(`${day}T00:00:00.000Z`);
-  return Number.isFinite(t) ? t + 86_400_000 - 1 : 0;
+  return Number.isFinite(t) ? Math.min(t + 86_400_000 - 1, now) : 0;
 }
 
-function foldStats(map: Map<string, HostAcc>, stats: HookStat[]): void {
+function foldStats(map: Map<string, HostAcc>, stats: HookStat[], now: number): void {
   for (const st of stats) {
     const a = accFor(map, st.host);
     a.events += st.n;
@@ -186,7 +188,7 @@ function foldStats(map: Map<string, HostAcc>, stats: HookStat[]): void {
     if (st.errors > 0 && (a.lastErrorDay === undefined || st.day > a.lastErrorDay)) {
       a.lastErrorDay = st.day;
     }
-    a.lastSeen = Math.max(a.lastSeen, statDayEndMs(st.day));
+    a.lastSeen = Math.max(a.lastSeen, statDayEndMs(st.day, now));
   }
 }
 
@@ -289,7 +291,7 @@ export async function collectFleetHosts(
   const acc = new Map<string, HostAcc>();
   foldInstalls(acc, installs);
   foldSessions(acc, sessions, boot);
-  foldStats(acc, stats);
+  foldStats(acc, stats, now);
   const hosts = [...acc.values()]
     .map(a => hostRow(a, now))
     .sort((a, b) => b.lastSeen - a.lastSeen || a.host.localeCompare(b.host));

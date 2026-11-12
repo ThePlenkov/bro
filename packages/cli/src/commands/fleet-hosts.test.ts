@@ -173,6 +173,28 @@ describe('collectFleetHosts', () => {
     assert.equal(p.hosts[0]!.events, 3);
   });
 
+  test('a stats row for the current day never dates a host into the future', async () => {
+    const ledger = stubLedger({
+      installs: [install({ host: 'claude', lastSeen: T0 - 2 * HOUR })],
+      stats: [
+        {
+          day: '2026-11-20',
+          host: 'claude',
+          event: 'SessionStart',
+          n: 3,
+          p50: 5,
+          p95: 9,
+          timeouts: 0,
+          errors: 0,
+        },
+      ],
+    });
+    const p = await collectFleetHosts(ledger, { now: T0, bootTimeMs: BOOT });
+    // day-end (23:59:59.999) clamps at now — lastSeen is never > generatedAt
+    assert.equal(p.hosts[0]!.lastSeen, T0);
+    assert.ok(p.hosts[0]!.lastSeen <= p.generatedAt);
+  });
+
   test('sessions group per project; null project falls back to cwd bucket', async () => {
     const ledger = stubLedger({
       sessions: [
