@@ -42,6 +42,9 @@ dry run — nothing written
 
 The diff is read from the same file the write would replace and is computed
 from the same merge the write performs — what the operator saw is what lands.
+The key line carries the row counts; under it the diff names the rows the
+write removes — a curated row the router no longer serves is listed by name,
+because the block is regenerated, not accumulated (bro-t3jiq.1).
 With `--json` the machine shape is the block alone.
 
 ### The round-trip test

@@ -246,10 +246,13 @@ silently.
 
 The diff is the CLIENT LAYER's (layer 4, #942), and it is a diff of the
 SETTINGS OBJECT, key by key: the client's own key is replaced — with the
-row count before and after — and every other key is untouched. It names the
-KEYS, not the rows: a curated row the router no longer serves is not listed
-one by one, because the block is regenerated, not accumulated. The block
-itself is printed on its own.
+row count before and after — and every other key is untouched. It names
+the KEYS, and it names the ROWS the write removes: the block is
+regenerated, not accumulated, so a curated row the router no longer
+serves is listed by name under the change (`dropped` on the diff entry,
+printed one per line) — the operator reads which curated entries the
+write would take before it lands (bro-t3jiq.1). The block itself is
+printed on its own.
 
 **Acceptance:** the written block round-trips through the adapter's reader; a
 live check with the real client against a running router shows the models

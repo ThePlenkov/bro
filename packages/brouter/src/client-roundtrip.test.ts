@@ -119,6 +119,85 @@ test('the diff names the change — the rows it holds, before and after', () => 
   assert.match(text, /modelPicker: changed — 1 model row\(s\) → 2 model row\(s\)/);
 });
 
+test('the diff names the rows the write removes — the curated entries it takes', () => {
+  const changes = settingsDiff(
+    {
+      theme: 'auto',
+      modelPicker: {
+        options: [
+          { model: 'devin-acp/claude-opus-5-5-medium' },
+          { model: 'devin-acp/swe-2-high' },
+          { model: 'devin-acp/gone-1' },
+        ],
+      },
+    },
+    {
+      theme: 'auto',
+      modelPicker: {
+        options: [
+          // still served — a refreshed label does not make it a dropped row
+          { model: 'devin-acp/claude-opus-5-5-medium', label: 'Opus 5.5' },
+          { model: 'devin-acp/swe-2-high' },
+        ],
+      },
+    }
+  );
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.kind, 'changed');
+  assert.deepEqual(changes[0]?.dropped, ['devin-acp/gone-1']);
+  const text = formatSettingsDiff('/tmp/settings.json', changes);
+  assert.match(text, /modelPicker: changed — 3 model row\(s\) → 2 model row\(s\)/);
+  assert.match(text, /dropped 1 row\(s\):\n {6}- devin-acp\/gone-1/);
+});
+
+test('a removed key names every row it carried', () => {
+  const changes = settingsDiff({ modelPicker: { options: [{ model: 'a' }, { model: 'b' }] } }, {});
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.kind, 'removed');
+  assert.deepEqual(changes[0]?.dropped, ['a', 'b']);
+});
+
+test('a change that drops no rows carries no dropped list', () => {
+  const changes = settingsDiff(
+    { modelPicker: { options: [{ model: 'a' }] } },
+    { modelPicker: { options: [{ model: 'a' }, { model: 'b' }] } }
+  );
+  assert.equal(changes[0]?.dropped, undefined);
+  const text = formatSettingsDiff('/tmp/settings.json', changes);
+  assert.doesNotMatch(text, /dropped/);
+});
+
+test('the dry run names the curated row the router no longer serves', async () => {
+  const { server, url } = await servingCatalog();
+  const path = join(scratch, 'stale-picker.json');
+  writeFileSync(
+    path,
+    JSON.stringify({
+      theme: 'auto',
+      modelPicker: {
+        options: [
+          { model: 'devin-acp/claude-opus-5-5-medium' },
+          { model: 'devin-acp/retired-model' },
+        ],
+        replaceBuiltInOptions: true,
+      },
+    })
+  );
+  try {
+    const outcome = await runClient(
+      { client: 'claude-code', write: false, settings: path, wire: false, json: false },
+      { url, token: 'tok' }
+    );
+    assert.equal(outcome.changes.length, 1);
+    assert.equal(outcome.changes[0]?.kind, 'changed');
+    // the served catalog has three models; the file's stale row is the
+    // only one the write removes — the two it still serves are not named
+    assert.deepEqual(outcome.changes[0]?.dropped, ['devin-acp/retired-model']);
+  } finally {
+    server.close();
+  }
+});
+
 test('a key the write does not own is never in the diff', () => {
   const changes = settingsDiff({ theme: 'auto' }, { theme: 'auto' });
   assert.deepEqual(changes, []);
