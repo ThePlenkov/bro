@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JudgeUnavailable, scrubEnv, testGit } from '@broject/core';
@@ -196,6 +196,31 @@ describe('routeMatrix', () => {
         mode: 'shadow',
       });
       assert.equal(matrixRows(dir)[0]!.outcome, 'unanswered');
+    }));
+
+  test('a journal append failure never aborts the route — the verdict is lost, the spawn stands', () =>
+    withRepo(async dir => {
+      const { judge } = judgeReturning(both(0, 'coding'));
+      // poison the journal path — <git-common>/bro/judge exists as a
+      // FILE, so the verdicts.jsonl append cannot land
+      mkdirSync(join(dir, '.git', 'bro'), { recursive: true });
+      writeFileSync(join(dir, '.git', 'bro', 'judge'), 'x');
+      const orig = console.error;
+      console.error = () => {};
+      try {
+        const pick = await routeMatrix({
+          dir,
+          judge,
+          state: {},
+          subject: 'fx-j',
+          matrix: MATRIX,
+          mode: 'shadow',
+        });
+        assert.equal(pick, undefined);
+      } finally {
+        console.error = orig;
+      }
+      assert.equal(matrixRows(dir).length, 0); // nothing journaled, nothing thrown
     }));
 
   test('JudgeUnavailable propagates — the caller owns warn-and-stand', () =>

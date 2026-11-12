@@ -785,7 +785,19 @@ export function spawnStepAgent(
     req.class,
     info
   );
-  return applyFleetRouter(dir, env, req.molStep, info, routed, opts)
+  return applyFleetRouter(
+    dir,
+    env,
+    req.molStep,
+    // an explicit --class pin withholds info from the class router —
+    // the matrix's info read must not re-open its eligibility (the pin
+    // is the top precedence tier; loop.ts gates the same pin on
+    // ctx.sel.class directly). applyFleetMatrix still gets the real
+    // info: it judges the task, not the lane.
+    req.class === undefined ? info : undefined,
+    routed,
+    opts
+  )
     .then(async route => {
       // the matrix verdict is journaled shadow-side; the spawn's lane
       // is untouched (enforce refuses inside applyFleetMatrix until the

@@ -822,8 +822,10 @@ function requireTypedRouterGrade(provider: string, entry: ProviderEntry): void {
  *  complexity+mode; `matrixVerdict` picks deterministically; the
  *  verdict journals under 'route-matrix'. v1 is shadow-only: the pick
  *  is journaled, the spawn proceeds on its static lane untouched.
- *  'enforce' is refused loudly — enforcement is the follow-up bead and
- *  a config claiming it while only journaling would lie. JudgeUnavailable
+ *  'enforce' is refused loudly whenever the matrix is armed — ahead of
+ *  the nothing-to-judge return, so blank task text cannot slip a spawn
+ *  past the refusal — enforcement is the follow-up bead and a config
+ *  claiming it while only journaling would lie. JudgeUnavailable
  *  is "no verdict" — warn and stand, fail-open like every judge call. */
 export async function applyFleetMatrix(
   dir: string,
@@ -833,21 +835,33 @@ export async function applyFleetMatrix(
   opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<void> {
   const matrix = env.fleet?.matrix;
-  if (
-    matrix === undefined ||
-    matrix.provider === undefined ||
-    matrix.mode === 'off' ||
-    Object.keys(matrix.models).length === 0 ||
-    info === undefined ||
-    ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
-  ) {
+  if (matrix === undefined) {
     return;
   }
+  if (matrix.provider === undefined) {
+    return;
+  }
+  if (matrix.mode === 'off') {
+    return;
+  }
+  if (Object.keys(matrix.models).length === 0) {
+    return;
+  }
+  // 'enforce' refuses loudly whenever the matrix is armed — BEFORE the
+  // nothing-to-judge early return: a spawn with blank task text must
+  // not slip past the refusal (the config claim is the lie, not this
+  // spawn's text)
   if (matrix.mode === 'enforce') {
     throw new SpawnError(
       `fleet.matrix.mode "enforce" is not implemented — the matrix router is shadow-only (spec bro-v0pvd.1); set "shadow" or "off"`,
       'config'
     );
+  }
+  if (
+    info === undefined ||
+    ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
+  ) {
+    return;
   }
   const providers = env.providers ?? {};
   let entry: ProviderEntry;

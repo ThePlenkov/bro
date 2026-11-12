@@ -184,7 +184,7 @@ import {
   settleAcpSessions,
   worktreeTelemetryDims,
 } from '../agent-connectors.ts';
-import { otelHeader, otelSpan } from '@broject/providers';
+import { type AcpSeam, type FetchFn, otelHeader, otelSpan } from '@broject/providers';
 import { loadBroConfig } from '../plugins.ts';
 import { runActCommand } from './act.ts';
 import { flag, positionals } from './args.ts';
@@ -876,7 +876,7 @@ async function routeTableLaneFor(
 async function resolveBeadLane(
   ctx: Ctx,
   bead: ReadyBead,
-  opts: { router?: boolean } = {}
+  opts: { router?: boolean; fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<LoopLane> {
   // the route table is the router's own routing face — when the
   // operator declares one, it answers
@@ -900,12 +900,12 @@ async function resolveBeadLane(
   const route =
     opts.router === false || ctx.sel.class !== undefined
       ? routed
-      : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed);
+      : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed, opts);
   // the matrix router (bro-v0pvd.1) judges the TASK's complexity+mode —
   // orthogonal to the class pin, so --class does not suppress it; only
   // the dry-run escape (router:false) does, same as the class router
   if (opts.router !== false) {
-    await applyFleetMatrix(ctx.root, ctx.env, bead.id, info);
+    await applyFleetMatrix(ctx.root, ctx.env, bead.id, info, opts);
   }
   return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route);
 }

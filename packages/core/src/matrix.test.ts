@@ -237,4 +237,14 @@ describe('matrixVerdict', () => {
     const v = matrixVerdict(MATRIX, verdict(0, 'underwater-diving'));
     assert.deepEqual(v, { kind: 'unanswered' });
   });
+
+  test('a non-finite score is no verdict — never a clamped guess or a spurious no-fit', () => {
+    assert.deepEqual(matrixVerdict(MATRIX, verdict(NaN, 'coding')), { kind: 'unanswered' });
+    assert.deepEqual(matrixVerdict(MATRIX, verdict(Infinity, 'coding')), {
+      kind: 'unanswered',
+    });
+    assert.deepEqual(matrixVerdict(MATRIX, verdict(-Infinity, 'coding')), {
+      kind: 'unanswered',
+    });
+  });
 });

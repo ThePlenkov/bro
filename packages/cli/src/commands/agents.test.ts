@@ -1843,6 +1843,74 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
       fx.restore();
     }
   });
+
+  test('enforce refuses even when the bead carries no task text — the config claim cannot slip', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]); // no title/description
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+        await assert.rejects(
+          () => spawn(fx, {}, { fetch }),
+          /fleet\.matrix\.mode "enforce" is not implemented/
+        );
+        assert.equal(calls.length, 0); // refused before any judge call
+        assert.equal(matrixRows(fx).length, 0);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('an explicit --class pins the lane — matrix-armed info never re-opens the class router', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'sweep the ledger' }]);
+    try {
+      // BOTH routers armed — the matrix's bead read must not leak
+      // `info` into applyFleetRouter's eligibility: the --class pin is
+      // the top precedence tier and an unlabelled bead must not be
+      // reclassified because the matrix wanted the same `bd show`
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node {promptFile}', provider: 'alt' } },
+          providers: {
+            alt: { type: 'cli', command: 'node {promptFile}' },
+            local: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'local-1' },
+            orca: ORCA_TYPED,
+          },
+          fleet: {
+            routing: {
+              default: { chain: ['alt'] },
+              sweep: { chain: [{ provider: 'local', model: 'sweep-1' }] },
+            },
+            router: { provider: 'orca', mode: 'enforce' },
+            profiles: { sweeps: { provider: 'local', model: 'sweep-1' } },
+            matrix: {
+              provider: 'orca',
+              mode: 'shadow',
+              models: { cheap: { provider: 'local' } },
+            },
+          },
+        })
+      );
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+        await spawn(fx, { class: 'sweep' }, { fetch });
+        assert.equal(calls.length, 1); // the matrix judged the task — the class router did not
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        assert.equal(entry.class, 'sweep'); // the --class pin stands
+        assert.equal(entry.provider, 'local'); // sweep's chain head — not reclassified to default
+        assert.equal(entry.model, 'sweep-1');
+        const classRows = readJournal(fx.main).filter(
+          (r): r is Verdict => 'questions' in r && r.kind === ROUTE_CLASS_KIND
+        );
+        assert.equal(classRows.length, 0); // no route-class verdict journaled
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
 });
 
 describe('bro agents down <target>', () => {

@@ -132,7 +132,15 @@ export async function routeMatrix(opts: {
     ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
     outcome: outcomeOf(verdict),
   };
-  appendRow(opts.dir, row);
+  try {
+    appendRow(opts.dir, row);
+  } catch (err) {
+    // the journal is the shadow record, never a gate — a verdict that
+    // cannot persist must not abort the spawn it was only annotating
+    console.error(
+      `warning: route-matrix journal append failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   if (opts.mode === 'enforce') {
     return verdict.kind === 'pick' ? verdict : undefined;
   }
