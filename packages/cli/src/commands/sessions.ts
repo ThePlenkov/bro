@@ -32,8 +32,10 @@ import {
   EXIT,
   facade,
   hasHelpFlag,
+  listModeFiles,
   printUsage,
   readAgentRegistry,
+  sessionFileStem,
   sessionProject,
   type LedgerFacade,
   type Mode,
@@ -232,6 +234,10 @@ export interface CollectSessionsOpts {
   now?: number;
   bootTimeMs?: number;
   beadFor?: (row: SessionRow) => string | undefined;
+  /** Live mode-file overlay (specs/bro-izpyk.2.md) — the hook-time
+   *  truth wins over the ledger projection, which only updates on
+   *  setMode writes. Absent → the ledger mode stands. */
+  modeFor?: (host: string, sid: string) => Mode | undefined;
 }
 
 /** Ledger rows → view rows: derived state, resolved bead, --live filter.
@@ -268,7 +274,7 @@ export async function collectSessionViews(
       project: s.project,
       cwd: s.cwd,
       branch: s.branch,
-      mode: s.mode,
+      mode: opts.modeFor?.(s.host, s.sid) ?? s.mode,
       state,
       pid: s.pid,
       pidStart: s.pidStart,
@@ -354,6 +360,9 @@ export interface SessionsDeps {
   now?: number;
   bootTimeMs?: number;
   beadFor?: (row: SessionRow) => string | undefined;
+  /** Mode-file overlay source — defaults to the live sessions/ dir;
+   *  tests inject a map. */
+  modeFiles?: ReadonlyMap<string, Mode>;
 }
 
 /** Resolve the ledger facade — injectable for tests; production goes
@@ -388,6 +397,18 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
     }
   }
   const ledger = sessionsLedger(dir, deps);
+  // live mode files are the hook-time truth — overlay them onto the
+  // ledger projection so `bro sessions` never shows a stale mode
+  // (specs/bro-izpyk.2.md). Keyed by the sanitized stem both sides share.
+  const modeFiles =
+    deps.modeFiles ??
+    new Map(
+      listModeFiles()
+        .filter(f => f.mode !== undefined)
+        .map(f => [sessionFileStem(f.host, f.sid), f.mode as Mode] as const)
+    );
+  const modeFor = (host: string, sid: string): Mode | undefined =>
+    modeFiles.get(sessionFileStem(host, sid));
   let views: SessionViews;
   try {
     views = await collectSessionViews(ledger, {
@@ -397,6 +418,7 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
       ...(deps.now !== undefined ? { now: deps.now } : {}),
       ...(deps.bootTimeMs !== undefined ? { bootTimeMs: deps.bootTimeMs } : {}),
       ...(deps.beadFor !== undefined ? { beadFor: deps.beadFor } : {}),
+      modeFor,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

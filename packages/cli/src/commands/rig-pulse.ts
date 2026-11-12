@@ -287,6 +287,13 @@ export const rigConnector: Connector = {
       return rigPulseCheckpoint(ctx.dir, 'tool call');
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): rig supervision is a code+
+  // plane duty — orchestrate supervises, code works; passive modes
+  // never checkpoint.
+  activeIn: {
+    sessionStart: ['code', 'orchestrate'],
+    postTool: ['code', 'orchestrate'],
+  },
 };
 
 /** One checkpoint for every lifecycle event: decide, spawn, record,

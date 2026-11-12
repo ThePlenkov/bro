@@ -366,6 +366,7 @@ export type {
 } from './stacks.ts';
 export {
   collectGuards,
+  connectorHookActive,
   connectorHooks,
   connectors,
   ensureAuth,
@@ -427,6 +428,38 @@ export {
 } from './hook-spool.ts';
 export type { SpoolOutcome, SpoolRow } from './hook-spool.ts';
 export { isMode, MODES } from './ledger.ts';
+export {
+  broStateDir,
+  hookHostOf,
+  inboxPath,
+  listModeFiles,
+  MODE_SNAPSHOT_EVENTS,
+  MODE_SNAPSHOT_TTL_MS,
+  modeFilePath,
+  modeSessionsDir,
+  parseModeCommand,
+  readModeFile,
+  readModeSnapshot,
+  removeModeFile,
+  safeSessionFilePart,
+  sessionFileStem,
+  sessionIdFromEnv,
+  sessionMode,
+  SESSION_ENV_VARS,
+  snapshotEventPath,
+  snapshotFresh,
+  snapshotModeDir,
+  snapshotStampPath,
+  touchSnapshotStamp,
+  writeModeFile,
+  writeModeSnapshot,
+} from './modes.ts';
+export type {
+  ModeFileEntry,
+  ModeSnapshotEvent,
+  ModeSource,
+  SessionModeResolution,
+} from './modes.ts';
 export type {
   HookStat,
   InstallRow,

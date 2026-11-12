@@ -2585,4 +2585,12 @@ export const workConnector: Connector = {
       }
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): worktree nudges and the dirty-
+  // worktree stop gate are code-plane behavior — orchestrate descends
+  // too; plan/review/observe stay passive.
+  activeIn: {
+    sessionStart: ['code', 'orchestrate'],
+    parallelWork: ['code', 'orchestrate'],
+    stopGate: ['code', 'orchestrate'],
+  },
 };

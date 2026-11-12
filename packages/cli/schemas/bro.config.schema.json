@@ -1024,6 +1024,21 @@
       },
       "additionalProperties": false
     },
+    "modes": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "enum": [
+            "observe",
+            "plan",
+            "code",
+            "review",
+            "orchestrate"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "notify": {
       "type": "object",
       "properties": {

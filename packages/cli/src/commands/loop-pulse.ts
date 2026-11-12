@@ -51,4 +51,11 @@ export const loopConnector: Connector = {
       return supervisorCheckpoint(ctx.dir, 'tool call');
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): supervisor rearm is a code+
+  // plane duty — orchestrate dispatches, code executes; passive modes
+  // never checkpoint.
+  activeIn: {
+    sessionStart: ['code', 'orchestrate'],
+    postTool: ['code', 'orchestrate'],
+  },
 };

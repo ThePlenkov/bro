@@ -45,7 +45,10 @@ interface Fixture {
 
 function hookFixture(): Fixture {
   const { root, main } = initRepo('bro-hooks-e2e-', m => {
-    writeFileSync(join(m, 'bro.config.json'), '{}');
+    // modes.default:code — these fixtures exercise the ACTIVE pipeline
+    // (arming, gates, drains, guards); observe is the implicit default
+    // and would make every assertion passive (specs/bro-izpyk.2.md)
+    writeFileSync(join(m, 'bro.config.json'), '{"modes":{"default":"code"}}');
   });
   // --git-common-dir is relative ('.git') in the main worktree
   const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
@@ -357,7 +360,10 @@ describe('hooks e2e — sdd nudge scope + dedup (bro-6a3dq)', () => {
         assignee: 'tester',
       },
     ]);
-    writeFileSync(join(f.main, 'bro.config.json'), '{"sdd":{"mode":"gate"}}');
+    writeFileSync(
+      join(f.main, 'bro.config.json'),
+      '{"sdd":{"mode":"gate"},"modes":{"default":"code"}}'
+    );
     const env = {
       PATH: `${binDir}:${process.env.PATH}`,
       FAKE_BD_DB: db,
@@ -1999,7 +2005,12 @@ describe('hooks e2e — perf journal', () => {
 describe('hooks e2e — guard injection', () => {
   const guardFixture = (defs: Record<string, unknown>[]): Fixture => {
     const { root, main } = initRepo('bro-guard-e2e-', m => {
-      writeFileSync(join(m, 'bro.config.json'), JSON.stringify({ guard: { defs } }));
+      // guards are active behavior — observe returns [] before eval
+      // (specs/bro-izpyk.2.md), so the fixture pins the code plane
+      writeFileSync(
+        join(m, 'bro.config.json'),
+        JSON.stringify({ guard: { defs }, modes: { default: 'code' } })
+      );
     });
     const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
     return { root, main, markerDir: join(common, 'bro', 'hooks') };
@@ -2235,7 +2246,10 @@ describe('hooks e2e — run.sh fast path (bro-arm83)', () => {
     inside(f.main, f.root, () => {
       // sdd config before priming — a config newer than .stamp defers on
       // its own and would mask the legs under test
-      writeFileSync(join(f.main, 'bro.config.json'), '{"sdd":{"mode":"nudge"}}');
+      writeFileSync(
+        join(f.main, 'bro.config.json'),
+        '{"sdd":{"mode":"nudge"},"modes":{"default":"code"}}'
+      );
       prime(f);
 
       // open frame in the snapshot — only "frame":null proves none
