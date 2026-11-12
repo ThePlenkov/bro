@@ -406,6 +406,7 @@ export {
   ledgerFacade,
   openLedgerStore,
   sessionProject,
+  spoolCursorKey,
 } from './ledger-store.ts';
 export type {
   DrainIntoResult,
@@ -418,6 +419,7 @@ export type {
   LedgerStoreResult,
 } from './ledger-store.ts';
 export {
+  hookSpoolFiles,
   isSpoolOutcome,
   parseSpoolLine,
   resolveHookSpoolPath,

@@ -27,8 +27,12 @@ import type {
   ConfigDiagnostic,
   DoltHeadHealth,
   DoltRemote,
+  HookStat,
+  InstallRow,
+  LedgerFacade,
   ProviderEntry,
   ProviderSurface,
+  SessionRow,
 } from '@broject/core';
 import {
   bdTry,
@@ -45,22 +49,26 @@ import {
   gitCommonDir,
   gitTry,
   hasHelpFlag,
+  hookSpoolFiles,
   isEnvName,
   janitorDidWork,
   janitorLine,
+  ledgerDbPath,
   listDoltRemotes,
   loadConfig,
   loadConfigLayers,
-  PROVIDER_REGISTRY,
+  openLedgerStore,
   pidAlive,
   printUsage,
   probeBdCompat,
+  PROVIDER_REGISTRY,
   psEwwEnvTokens,
   psRegroupPaths,
   psTokenize,
   probeDoltRemote,
   procStat,
   runJanitor,
+  spoolCursorKey,
 } from '@broject/core';
 import {
   assertSonarHostTrusted,
@@ -83,7 +91,15 @@ import {
 import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
 import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
 import { daemonProbe, readDriveMarker } from './daemon.ts';
+import { HOST_QUIET_MS } from './fleet-hosts.ts';
+import {
+  hookSpoolWatchdogSeconds,
+  MAX_SPOOL_BYTES,
+  readHookSpool,
+  resolveHookSpoolPath,
+} from './hook-spool.ts';
 import { pluginRows } from './plugins.ts';
+import { fmtAge } from './sessions.ts';
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -2680,6 +2696,462 @@ function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
   }
 }
 
+// --- session-ledger health (bro-izpyk.1.3) ---------------------------------
+// Three doctor rows over the F1a/F1b surfaces: the hook spool
+// (readHookSpool — the same aggregate `bro hooks status` renders) and the
+// session ledger (facade('ledger') — the same read path `bro sessions` /
+// `bro fleet hosts` use; its reads opportunistically drain pending spool
+// rows, which is exactly why the freshness row measures the ingest cursor
+// BEFORE any facade read runs). Every probe fails open: a missing spool,
+// ledger, node:sqlite, or plugin manifest degrades to a skip row, never
+// an error — doctor reports a broken environment, it must not add one.
+
+export interface SessionLedgerDeps {
+  dir?: string;
+  ledger?: LedgerFacade;
+  env?: NodeJS.ProcessEnv;
+  now?: number;
+}
+
+/** Silence horizon — the fleet-hosts board's own `silent` bucket
+ *  (HOST_QUIET_MS, 7d): a host quieter than a week is off, not between
+ *  uses. Read inside the check, never at module top level —
+ *  fleet-hosts.ts sits on the doctor↔plugins import cycle, so a
+ *  top-level `const X = HOST_QUIET_MS` hits its TDZ whenever a sibling
+ *  entry (fleet.test, contract.test) loads doctor.ts before
+ *  fleet-hosts.ts finishes initializing. */
+const LEDGER_SILENT_WINDOW = (): number => HOST_QUIET_MS;
+/** Killed-start window + warn floor — the same 24h `bro hooks status`
+ *  defaults to; ≥3 unpaired starts past the watchdog in a day is a
+ *  pattern, one stray kill (host restart mid-hook, laptop sleep) is
+ *  noise. */
+const LEDGER_KILLED_WINDOW_MS = 24 * 60 * 60 * 1000;
+const LEDGER_KILLED_WARN_MIN = 3;
+/** Drain freshness — pending bytes ≥ a quarter of the spool rotation
+ *  bound AND no ledger write in a day means rows are piling up with
+ *  nothing consuming them. Drains are lazy/on-read and there is no
+ *  resident worker yet (specs/bro-izpyk.1.1.md), so a small backlog is
+ *  normal; a large old one is not. */
+const LEDGER_DRAIN_WARN_BYTES = MAX_SPOOL_BYTES / 4;
+const LEDGER_DRAIN_STALE_MS = 24 * 60 * 60 * 1000;
+
+interface WiredHost {
+  host: string;
+  /** short evidence labels — 'plugin bro@bro', '.devin/hooks.v1.json', … */
+  evidence: string[];
+}
+
+/** `$HOME` for probes — env-pinned first so tests and relocated homes
+ *  resolve the way the host's own config dir does. */
+function probeHome(env: NodeJS.ProcessEnv): string {
+  const h = env.HOME;
+  return h !== undefined && h !== '' ? h : homedir();
+}
+
+function readText(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function addWiring(map: Map<string, WiredHost>, host: string, evidence: string): void {
+  const w = map.get(host) ?? { host, evidence: [] };
+  if (!w.evidence.includes(evidence)) {
+    w.evidence.push(evidence);
+  }
+  map.set(host, w);
+}
+
+/** Claude's plugin registry — `plugins` maps `<name>@<marketplace>` to
+ *  install records; a `bro@*` key is a resolved bro plugin. */
+function claudePluginKeys(cfgDir: string): string[] {
+  const text = readText(join(cfgDir, 'plugins', 'installed_plugins.json'));
+  if (text === null) {
+    return [];
+  }
+  try {
+    const raw = JSON.parse(text) as { plugins?: unknown };
+    if (!isRecord(raw.plugins)) {
+      return [];
+    }
+    return Object.keys(raw.plugins).filter(k => k.startsWith('bro@'));
+  } catch {
+    return [];
+  }
+}
+
+/** A settings/hooks file carrying the bro launcher signature —
+ *  DEVIN_BRO_HOOK (`hooks/run.sh` or a `bro hooks` invocation) is
+ *  host-agnostic despite the name; it is the same pattern the
+ *  devin-chain probe applies. */
+function carriesBroHook(path: string): boolean {
+  const text = readText(path);
+  return text !== null && DEVIN_BRO_HOOK.test(text);
+}
+
+/** `<config>/plugins/` bro entries — `bro`, `local/bro`, or one
+ *  marketplace level down (`<mkt>/bro`). Null = no bro plugin dir. */
+function pluginDirEvidence(pluginsDir: string): string | null {
+  const candidates = [join(pluginsDir, 'bro'), join(pluginsDir, 'local', 'bro')];
+  try {
+    for (const e of readdirSync(pluginsDir, { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        candidates.push(join(pluginsDir, e.name, 'bro'));
+      }
+    }
+  } catch {
+    // unreadable plugins dir — the fixed candidates still apply
+  }
+  return candidates.some(existsSync) ? 'plugin dir' : null;
+}
+
+/** Wiring probes for the spool-capable manifest hosts (claude, codex,
+ *  cursor, devin — the run.sh path; in-process adapters are handled
+ *  separately by ledgerAdaptersCheck). Every probe fails open: an
+ *  absent or unparseable file is simply not wired. */
+function wiredHosts(env: NodeJS.ProcessEnv, root: string | null): Map<string, WiredHost> {
+  const map = new Map<string, WiredHost>();
+  const home = probeHome(env);
+
+  // claude — plugin registry + hand-wired settings hooks
+  const claudeCfg =
+    env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR.trim() !== ''
+      ? env.CLAUDE_CONFIG_DIR
+      : join(home, '.claude');
+  for (const key of claudePluginKeys(claudeCfg)) {
+    addWiring(map, 'claude', `plugin ${key}`);
+  }
+  const claudeSettings = [join(claudeCfg, 'settings.json')];
+  if (root !== null) {
+    claudeSettings.push(
+      join(root, '.claude', 'settings.json'),
+      join(root, '.claude', 'settings.local.json')
+    );
+  }
+  if (claudeSettings.some(carriesBroHook)) {
+    addWiring(map, 'claude', 'settings hooks');
+  }
+
+  // devin — resolved plugin lockfile + project hook chain
+  if (broPluginResolved(devinPluginLockfile(env))) {
+    addWiring(map, 'devin', 'plugin resolved');
+  }
+  if (root !== null && carriesBroHook(join(root, '.devin', 'hooks.v1.json'))) {
+    addWiring(map, 'devin', '.devin/hooks.v1.json');
+  }
+
+  // cursor — plugin dir + project hooks file
+  const cursorPlugins = pluginDirEvidence(join(home, '.cursor', 'plugins'));
+  if (cursorPlugins !== null) {
+    addWiring(map, 'cursor', cursorPlugins);
+  }
+  if (root !== null && carriesBroHook(join(root, '.cursor', 'hooks.json'))) {
+    addWiring(map, 'cursor', '.cursor/hooks.json');
+  }
+
+  // codex — plugin dir under CODEX_HOME (or ~/.codex)
+  const codexHome =
+    env.CODEX_HOME !== undefined && env.CODEX_HOME.trim() !== ''
+      ? env.CODEX_HOME
+      : join(home, '.codex');
+  const codexPlugins = pluginDirEvidence(join(codexHome, 'plugins'));
+  if (codexPlugins !== null) {
+    addWiring(map, 'codex', codexPlugins);
+  }
+
+  return map;
+}
+
+/** A stats day is day-granular — the day's last instant stands in for
+ *  last-seen, clamped at now (same rule fleet-hosts applies). */
+function hookStatDayEndMs(day: string, now: number): number {
+  const t = Date.parse(`${day}T00:00:00.000Z`);
+  return Number.isFinite(t) ? Math.min(t + 86_400_000 - 1, now) : 0;
+}
+
+/** host → freshest ledger timestamp across installs, sessions and stats
+ *  days — the "last activity" the silence verdict compares against the
+ *  window. */
+function hostLastActivity(
+  installs: InstallRow[],
+  sessions: SessionRow[],
+  stats: HookStat[],
+  now: number
+): Map<string, number> {
+  const map = new Map<string, number>();
+  const bump = (host: string, t: number): void => {
+    if (t > (map.get(host) ?? 0)) {
+      map.set(host, t);
+    }
+  };
+  for (const i of installs) {
+    bump(i.host, i.lastSeen);
+  }
+  for (const s of sessions) {
+    bump(s.host, s.lastSeen);
+  }
+  for (const st of stats) {
+    bump(st.host, hookStatDayEndMs(st.day, now));
+  }
+  return map;
+}
+
+/** `ledger-silent` — a host with proven wiring but zero ledger rows in
+ *  the window. Wiring evidence is on-disk probes plus the installs table
+ *  itself (a past firing is wiring proof — it covers hosts whose plugin
+ *  layout the probes don't know). */
+async function ledgerSilentCheck(
+  dir: string,
+  env: NodeJS.ProcessEnv,
+  root: string | null,
+  now: number,
+  deps: SessionLedgerDeps
+): Promise<DoctorCheck> {
+  let ledger: LedgerFacade;
+  try {
+    if (deps.ledger !== undefined) {
+      ledger = deps.ledger;
+    } else {
+      const prefer = loadBroConfig(dir).connectors;
+      ledger = facade('ledger', { dir }, prefer === undefined ? {} : { prefer });
+    }
+  } catch (err) {
+    return check(
+      'ledger-silent',
+      'skip',
+      `ledger unavailable — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  let installs: InstallRow[];
+  let sessions: SessionRow[];
+  let stats: HookStat[];
+  try {
+    [installs, sessions, stats] = await Promise.all([
+      ledger.installs(),
+      ledger.sessions(),
+      ledger.stats(),
+    ]);
+  } catch (err) {
+    return check(
+      'ledger-silent',
+      'skip',
+      `ledger unavailable — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const wired = wiredHosts(env, root);
+  // the installs table is wiring evidence too — a host that fired once
+  // proves its plugin was installed even when the on-disk probe can't
+  // see the layout
+  for (const i of installs) {
+    if (!wired.has(i.host)) {
+      addWiring(wired, i.host, 'ledger install');
+    }
+  }
+  const activity = hostLastActivity(installs, sessions, stats, now);
+  const silentWindowMs = LEDGER_SILENT_WINDOW();
+  const silent = [...wired.values()].filter(
+    w => now - (activity.get(w.host) ?? 0) >= silentWindowMs
+  );
+  const windowDays = Math.round(silentWindowMs / 86_400_000);
+  if (silent.length === 0) {
+    return wired.size === 0
+      ? check('ledger-silent', 'ok', 'no bro host wiring detected')
+      : check('ledger-silent', 'ok', `${wired.size} wired host(s) fired within ${windowDays}d`);
+  }
+  const detail = silent.map(w => `${w.host} (${w.evidence.join(' + ')})`).join(', ');
+  return check(
+    'ledger-silent',
+    'warn',
+    `${detail} — wired but no ledger rows in ${windowDays}d`,
+    'verify the host plugin install — `bro sessions` lists what the ledger sees'
+  );
+}
+
+/** `ledger-killed` — spool starts with no end past the watchdog (host
+ *  kills), summed over the last 24h like `bro hooks status`. */
+function ledgerKilledCheck(env: NodeJS.ProcessEnv, now: number): DoctorCheck {
+  const spool = resolveHookSpoolPath(env);
+  if (spool === null) {
+    return check('ledger-killed', 'skip', 'hook spooling disabled (BRO_HOOK_SPOOL=0)');
+  }
+  if (!existsSync(spool) && !existsSync(`${spool}.1`)) {
+    return check('ledger-killed', 'skip', 'no spool file — nothing recorded');
+  }
+  const rows = readHookSpool(spool, {
+    sinceMs: now - LEDGER_KILLED_WINDOW_MS,
+    nowMs: now,
+    watchdogSeconds: hookSpoolWatchdogSeconds(env),
+  });
+  let killed = 0;
+  let worst: { host: string; event: string; killed: number } | undefined;
+  for (const r of rows) {
+    killed += r.killed;
+    if (r.killed > (worst?.killed ?? 0)) {
+      worst = { host: r.host, event: r.event, killed: r.killed };
+    }
+  }
+  if (killed >= LEDGER_KILLED_WARN_MIN) {
+    return check(
+      'ledger-killed',
+      'warn',
+      `${killed} hook starts killed by hosts in 24h — worst ${worst?.host ?? '?'} ${worst?.event ?? '?'} ×${worst?.killed ?? 0}`,
+      'hosts are killing bro hooks past the watchdog — check hook cost or raise BRO_HOOK_WATCHDOG_S'
+    );
+  }
+  return check(
+    'ledger-killed',
+    'ok',
+    killed === 0
+      ? 'no killed hook starts in 24h'
+      : `${killed} killed start(s) in 24h — below the warn threshold`
+  );
+}
+
+function fmtKiB(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes}B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)}KiB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MiB`;
+}
+
+/** `ledger-drain` — bytes the ingest cursor hasn't consumed vs the
+ *  ledger's last write. Runs BEFORE any facade read: the facade drains
+ *  pending rows on read, so measuring after would always look fresh.
+ *  The cursor lives on LedgerStore, not LedgerFacade (read commands
+ *  never see the ingest surface) — the probe opens the store directly,
+ *  guarded by existsSync so a missing db is reported, never created. */
+async function ledgerDrainCheck(env: NodeJS.ProcessEnv, now: number): Promise<DoctorCheck> {
+  const spool = resolveHookSpoolPath(env);
+  if (spool === null) {
+    return check('ledger-drain', 'skip', 'hook spooling disabled (BRO_HOOK_SPOOL=0)');
+  }
+  const files = hookSpoolFiles(spool);
+  const stats = files.map(f => {
+    try {
+      const st = statSync(f);
+      return st.isFile() ? st : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  if (stats.every(s => s === undefined)) {
+    return check('ledger-drain', 'skip', 'no spool file — nothing recorded');
+  }
+  const dbPath = ledgerDbPath(env);
+  const dbExists = existsSync(dbPath);
+  let cursor: Record<string, number> = {};
+  if (dbExists) {
+    try {
+      const opened = await openLedgerStore(dbPath);
+      if (!opened.ok) {
+        return check('ledger-drain', 'skip', `ledger store unreadable — ${opened.reason}`);
+      }
+      try {
+        cursor = opened.store.loadCursor();
+      } finally {
+        opened.close();
+      }
+    } catch (err) {
+      return check(
+        'ledger-drain',
+        'skip',
+        `ledger store unreadable — ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  // no db → empty cursor: every spool byte is pending, and the ledger's
+  // age is infinite — the extreme "worker not draining" case. Same
+  // truncation rule readBatches applies: a cursor past the file's size
+  // means recreated content, so the whole file is pending again.
+  let pending = 0;
+  for (const st of stats) {
+    if (st === undefined) {
+      continue;
+    }
+    const seen = cursor[spoolCursorKey(st)] ?? 0;
+    pending += st.size - (st.size < seen ? 0 : seen);
+  }
+  let ledgerWrite = 0;
+  for (const f of [dbPath, `${dbPath}-wal`]) {
+    try {
+      ledgerWrite = Math.max(ledgerWrite, statSync(f).mtimeMs);
+    } catch {
+      // absent sidecar — the main file's mtime stands
+    }
+  }
+  const ledgerAgeMs = ledgerWrite === 0 ? Number.POSITIVE_INFINITY : now - ledgerWrite;
+  if (pending >= LEDGER_DRAIN_WARN_BYTES && ledgerAgeMs >= LEDGER_DRAIN_STALE_MS) {
+    const age = ledgerWrite === 0 ? 'never' : `${fmtAge(ledgerWrite, now)} ago`;
+    return check(
+      'ledger-drain',
+      'warn',
+      `hooks.spool ${fmtKiB(pending)} pending — ledger last written ${age}`,
+      'drains are lazy — `bro hooks status` or `bro sessions` ingests pending rows; a persistent backlog risks rotation loss'
+    );
+  }
+  return check('ledger-drain', 'ok', `ledger keeping up — ${fmtKiB(pending)} spool bytes pending`);
+}
+
+/** `ledger-adapters` — informational skip row: client adapters
+ *  (opencode/kilo/pi/omp) spawn `bro hooks` directly and bypass run.sh,
+ *  so they write no spool rows and the ledger can't see them — a known
+ *  coverage gap (specs/bro-izpyk.1.1.md non-goals), not a silent install.
+ *  Named so "why doesn't `bro sessions` show my opencode session" has a
+ *  visible answer instead of an installed-but-silent warn that could
+ *  never clear. */
+function ledgerAdaptersCheck(dir: string, env: NodeJS.ProcessEnv): DoctorCheck {
+  const installed = [
+    ...new Set(
+      pluginRows(dir, env)
+        .filter(r => r.state !== 'absent')
+        .map(r => r.client)
+    ),
+  ].sort();
+  if (installed.length === 0) {
+    return check('ledger-adapters', 'skip', 'no client adapters installed');
+  }
+  return check(
+    'ledger-adapters',
+    'skip',
+    `${installed.join(', ')} adapter(s) installed — in-process adapters bypass the hook spool; the ledger can't see them yet`,
+    'adapter spool writes are a follow-up — `bro sessions` will not list these hosts'
+  );
+}
+
+/** The four ledger-health rows. Async because facade reads are; never
+ *  throws — each sub-check degrades to skip on its own. */
+export async function sessionLedgerChecks(
+  dir: string = process.cwd(),
+  deps: SessionLedgerDeps = {}
+): Promise<DoctorCheck[]> {
+  const env = deps.env ?? process.env;
+  const now = deps.now ?? Date.now();
+  const root = repoRoot(dir);
+  // freshness FIRST — the ingest cursor must be read before any facade
+  // read drains the spool, or the backlog measurement sees post-drain
+  // state and can never fire
+  const drain = await ledgerDrainCheck(env, now).catch(err =>
+    check(
+      'ledger-drain',
+      'skip',
+      `probe failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  );
+  const silent = await ledgerSilentCheck(dir, env, root, now, deps).catch(err =>
+    check(
+      'ledger-silent',
+      'skip',
+      `probe failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  );
+  return [silent, ledgerKilledCheck(env, now), drain, ledgerAdaptersCheck(dir, env)];
+}
+
 export function runDoctorChecks(
   dir: string = process.cwd(),
   opts: { strict?: boolean } = {}
@@ -2787,7 +3259,7 @@ function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget
   );
 }
 
-export function runDoctorCommand(argv: string[]): void {
+export async function runDoctorCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     printUsage('usage: bro doctor [--json] [--strict]', 0);
   }
@@ -2796,6 +3268,13 @@ export function runDoctorCommand(argv: string[]): void {
   const strict = argv.includes('--strict');
   const dir = process.cwd();
   const checks = runDoctorChecks(dir, { strict });
+  // the session-ledger rows are async (facade reads) and fail open
+  // internally — a broken ledger adds skip rows, never a crash
+  try {
+    checks.push(...(await sessionLedgerChecks(dir)));
+  } catch {
+    // belt-and-suspenders: doctor must never die on a probe bug
+  }
   const budget = readBudget(dir);
   if (json) {
     console.log(
