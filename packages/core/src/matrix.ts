@@ -104,20 +104,14 @@ function vocabList(raw: unknown, min: number, max: number): string[] | undefined
   if (!Array.isArray(raw)) {
     return undefined;
   }
-  if (raw.length < min) {
-    return undefined;
-  }
-  if (raw.length > max) {
+  if (raw.length < min || raw.length > max) {
     return undefined;
   }
   const out: string[] = [];
   const seen = new Set<string>();
   for (const v of raw) {
     const s = str(v);
-    if (s === undefined) {
-      return undefined;
-    }
-    if (seen.has(s)) {
+    if (s === undefined || seen.has(s)) {
       return undefined;
     }
     seen.add(s);
@@ -126,34 +120,43 @@ function vocabList(raw: unknown, min: number, max: number): string[] | undefined
   return out;
 }
 
-/** A declared vocabulary or the fallback scale — a present-but-invalid
- *  declaration warns and falls back WHOLESALE (replace, never merge:
- *  the declared scale IS the vocabulary the judge scores on). */
-function matrixVocab(
-  raw: unknown,
-  fallback: readonly string[],
-  min: number,
-  max: number,
-  problem: string
-): string[] {
-  const declared = vocabList(raw, min, max);
+/** `fleet.matrix.mode` vocabulary — the shadow|enforce|off contract. */
+const MATRIX_MODES = ['shadow', 'enforce', 'off'] as const;
+
+/** Per-vocabulary spec — fallback scale, entry-count bounds, and the
+ *  warning an invalid declaration earns (replace, never merge: the
+ *  declared scale IS the vocabulary the judge scores on). */
+const MATRIX_VOCABS = {
+  complexity: {
+    fallback: DEFAULT_MATRIX_COMPLEXITY,
+    min: 2,
+    max: 10,
+    problem:
+      'fleet.matrix.complexity must be 2–10 unique non-empty level names — default scale used',
+  },
+  modes: {
+    fallback: DEFAULT_MATRIX_MODES,
+    min: 1,
+    max: 32,
+    problem: 'fleet.matrix.modes must be unique non-empty mode names — default modes used',
+  },
+} as const;
+
+/** A declared vocabulary list or the fallback scale — a present-but-
+ *  invalid declaration warns and falls back WHOLESALE. */
+function matrixVocab(raw: unknown, field: keyof typeof MATRIX_VOCABS): string[] {
+  const spec = MATRIX_VOCABS[field];
+  const declared = vocabList(raw, spec.min, spec.max);
   if (raw !== undefined && declared === undefined) {
-    console.error(`bro.config: ${problem}`);
+    console.error(`bro.config: ${spec.problem}`);
   }
-  return declared ?? [...fallback];
+  return declared ?? [...spec.fallback];
 }
 
 /** `fleet.matrix.mode` — the shadow|enforce|off vocabulary; absent or
  *  anything else is not a mode (the caller keeps the shadow default). */
 function matrixMode(raw: unknown): FleetMatrix['mode'] | undefined {
-  switch (raw) {
-    case 'shadow':
-    case 'enforce':
-    case 'off':
-      return raw;
-    default:
-      return undefined;
-  }
+  return MATRIX_MODES.find(mode => mode === raw);
 }
 
 /** The section's scalar fields — `provider` names the judge call
@@ -189,10 +192,7 @@ function usableSubset(raw: unknown[], vocab: string[]): string[] | undefined {
   const seen = new Set<string>();
   for (const item of raw) {
     const s = str(item);
-    if (s === undefined) {
-      return undefined;
-    }
-    if (seen.has(s)) {
+    if (s === undefined || seen.has(s)) {
       return undefined;
     }
     if (!vocab.includes(s)) {
@@ -351,20 +351,8 @@ export function fleetMatrix(raw: unknown): FleetMatrix | undefined {
     console.error('bro.config: fleet.matrix must be an object — section dropped');
     return undefined;
   }
-  const complexity = matrixVocab(
-    raw.complexity,
-    DEFAULT_MATRIX_COMPLEXITY,
-    2,
-    10,
-    'fleet.matrix.complexity must be 2–10 unique non-empty level names — default scale used'
-  );
-  const modes = matrixVocab(
-    raw.modes,
-    DEFAULT_MATRIX_MODES,
-    1,
-    32,
-    'fleet.matrix.modes must be unique non-empty mode names — default modes used'
-  );
+  const complexity = matrixVocab(raw.complexity, 'complexity');
+  const modes = matrixVocab(raw.modes, 'modes');
   return {
     ...matrixScalars(raw),
     complexity,
@@ -397,10 +385,7 @@ function judgedCoordinates(
 ): { mode: string; level: string } | undefined {
   const cx = confidentAnswer(res, 'complexity');
   const md = confidentAnswer(res, 'mode');
-  if (cx?.type !== 'score') {
-    return undefined;
-  }
-  if (md?.type !== 'choice') {
+  if (cx?.type !== 'score' || md?.type !== 'choice') {
     return undefined;
   }
   if (!Number.isFinite(cx.score)) {
