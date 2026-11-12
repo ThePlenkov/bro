@@ -1074,21 +1074,26 @@ export function ledgerFacade(
     return h.store;
   };
   /** Opportunistic drain on the same connection — the size/ino cursor
-   *  check makes the no-op case a couple of stats. */
+   *  check makes the no-op case a couple of stats. A failed drain costs
+   *  freshness, never the read — but the reason is kept so read surfaces
+   *  can say the listing may be stale instead of implying it is fresh. */
+  let drainError: string | undefined;
   const fresh = (s: LedgerStore): void => {
     const spoolPath = resolveHookSpoolPath(env);
     if (spoolPath === null) {
+      drainError = undefined;
       return;
     }
     try {
       drainIntoStore(s, spoolPath);
-    } catch {
-      // the ledger is a record, not a gate — a failed drain costs
-      // freshness, never the read
+      drainError = undefined;
+    } catch (err) {
+      drainError = err instanceof Error ? err.message : String(err);
     }
   };
   return {
     append: async rows => (await store()).append(rows),
+    drainWarning: () => drainError,
     sessions: async (q?: SessionQuery) => {
       const s = await store();
       fresh(s);

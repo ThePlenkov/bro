@@ -58,6 +58,14 @@ exclude_paths:
   # (packages/devin/src/usage.ts) unflagged.
   - 'packages/router-store/src/store.ts'
 
+  # The store-privacy pass IS path construction too: every fs op lands
+  # on dirname(dbPath) and its WAL/SHM/journal sidecars — dbPath comes
+  # from routerStorePath() (the XDG-built default) or the operator's own
+  # --path flag, never request data. The module's whole job is chmod /
+  # stat / read on those computed paths, so the non-literal-path rule
+  # flags the file's function, same false positive as store.ts above.
+  - 'packages/router-store/src/privacy.ts'
+
   # The health snapshot IS a keyed map: the key is bro's own
   # `<provider>/<model>` (a lane without a model keys as the bare
   # provider), and Codacy's object-injection rule reads every dynamic key

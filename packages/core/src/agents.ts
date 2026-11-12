@@ -31,7 +31,7 @@ import type { Lease } from './leases.ts';
 import type { OnWall } from './routing.ts';
 import { acquireFileLock } from './filelock.ts';
 import { BD_NO_STORE } from './bd.ts';
-import { gitTry } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry } from './git.ts';
 import { taskStoreAt } from './tasks.ts';
 
 export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped' | 'blocked';
@@ -815,7 +815,13 @@ export function agentEntryBlocked(entry: AgentRegistryEntry, now = Date.now()): 
 /** `<git-common-dir>/bro/agents.json` — shared across linked worktrees,
  *  same anchor as the hooks markers and stack edges. */
 export function agentRegistryPath(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  // bounded like every sync probe — a stalled git (hung mount, dead
+  // credential helper) must not freeze a read surface that walks many
+  // cwds; a timeout reads as "no registry", the bead stays unresolved
+  const r = gitTry(
+    ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    GIT_SYNC_PROBE_TIMEOUT_MS
+  );
   const common = r.code === 0 ? r.out.trim() : '';
   return common === '' ? null : join(common, 'bro', 'agents.json');
 }

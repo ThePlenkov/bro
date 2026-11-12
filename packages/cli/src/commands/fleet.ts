@@ -50,6 +50,7 @@ import {
 } from '../agent-connectors.ts';
 import { occupancyLine, type FleetOccupancy } from './agents.ts';
 import { flag } from './args.ts';
+import { runFleetHostsCommand } from './fleet-hosts.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { parseWorktreePorcelain, worktreePathFor, type WorktreeInfo } from './work.ts';
 
@@ -584,7 +585,7 @@ async function runFleetLive(
 
 export async function runFleetCommand(argv: string[]): Promise<void> {
   const dir = process.cwd();
-  if (dispatchFleetSubcommand(dir, argv)) {
+  if (await dispatchFleetSubcommand(dir, argv)) {
     return;
   }
   if (hasHelpFlag(argv)) {
@@ -625,7 +626,7 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError);
 }
 
-function dispatchFleetSubcommand(dir: string, argv: string[]): boolean {
+async function dispatchFleetSubcommand(dir: string, argv: string[]): Promise<boolean> {
   if (argv[0] === 'leases') {
     try {
       runFleetLeasesCommand(dir, argv.slice(1));
@@ -642,6 +643,12 @@ function dispatchFleetSubcommand(dir: string, argv: string[]): boolean {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(2);
     }
+    return true;
+  }
+  // hosts is the ledger read surface (bro-izpyk.1.2) — async facade
+  // reads; CommandError carries its own exit code through dispatchFatal
+  if (argv[0] === 'hosts') {
+    await runFleetHostsCommand(dir, argv.slice(1));
     return true;
   }
   return false;

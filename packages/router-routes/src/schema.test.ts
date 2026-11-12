@@ -134,3 +134,39 @@ test('a written table reads back from the disk', () => {
   assert.equal(table.routes.length, 1);
   assert.equal(table.routes[0]?.name, 'edit');
 });
+
+test('match.features parses scalars and lists into the features namespace', () => {
+  const table = routeTable({
+    ...VALID,
+    routes: {
+      edit: {
+        match: { features: { mode: 'coding', tier: ['low', 'mid'], needs_ui: true, effort: 2 } },
+        chain: ['p'],
+      },
+    },
+  });
+  assert.deepEqual(table.routes[0]?.match.features, {
+    mode: 'coding',
+    tier: ['low', 'mid'],
+    needs_ui: true,
+    effort: 2,
+  });
+});
+
+test('a match.features value that is not a scalar or list is an error', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { match: { features: { mode: { nested: 1 } } }, chain: ['p'] } },
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0]!, /routes\.edit\.match\.features\.mode/);
+});
+
+test('an empty match.features list is an error', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { match: { features: { mode: [] } }, chain: ['p'] } },
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0]!, /routes\.edit\.match\.features\.mode/);
+});

@@ -143,4 +143,9 @@ export interface LedgerFacade {
   /** p50/p95, timeouts, errors per host×event×day. */
   stats(q?: StatsQuery): Promise<HookStat[]>;
   setMode(s: SessionKey, mode: Mode): Promise<void>;
+  /** Why the last opportunistic spool drain failed, when it did —
+   *  read surfaces warn "the listing may be stale" instead of
+   *  presenting a silently-old ledger as fresh. Optional: backends
+   *  without a spool drain have nothing to report. */
+  drainWarning?(): string | undefined;
 }

@@ -513,12 +513,20 @@ brouterSection.jsonSchema = js.obj({
     js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
   ),
   routes: js.str,
+  // the routing formula — the md file whose frontmatter is the machine
+  // contract (typed questions, hard filters, score weights) and whose
+  // body is the prose the decision model reads
+  formula: js.str,
   // the decision model — the judge that picks the route. The same shape
   // the fleet's router keeps: a provider and a mode.
   router: js.obj(
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  // the outcome namespace for standalone callers + the task-text
+  // retention window (spec bro-0ykhg.4)
+  contextId: js.str,
+  taskTextRetentionDays: { type: 'integer', minimum: 0 },
 });
 
 /** bro.config.json `connectors` section — facade → connector precedence,
