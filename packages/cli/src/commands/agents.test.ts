@@ -1787,18 +1787,163 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
     }
   });
 
-  test('enforce is refused loudly — shadow-only until the follow-up bead', async () => {
+  test('enforce pick routes the spawn to the picked lane — provider + model + matrix provenance', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'sweep the ledger' }]);
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+        await spawn(fx, {}, { fetch });
+        assert.equal(calls.length, 1);
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        // low+coding → 'cheap' row → its direct provider binding 'local'
+        // (entry default model local-1) — NOT the static 'alt' lane
+        assert.equal(entry.provider, 'local');
+        assert.equal(entry.model, 'local-1');
+        assert.equal(entry.matrix, 'cheap'); // the pick's row name is provenance
+        const rows = matrixRows(fx);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.outcome, 'cheap');
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('enforce profile binding resolves piecewise — the preset provider+model ride the pick', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'rewrite the consensus layer' }]);
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        // high+coding → 'max' row → profile 'sweeps' {provider: local,
+        // model: sweep-1} — the profile's model pin beats the entry's
+        const { fetch } = fakeFetch(matrixReply(2, 'coding'));
+        await spawn(fx, {}, { fetch });
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        assert.equal(entry.provider, 'local');
+        assert.equal(entry.model, 'sweep-1');
+        assert.equal(entry.matrix, 'max');
+        await agents(['down', 'fx-1']);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('enforce no-fit holds — SpawnError, no spawn, verdict journaled', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'review the rollout plan' }]);
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        // 'review' mode: neither row declares it → no-fit — enforce
+        // must NOT fall back to the static lane (spec bro-v0pvd.1.1)
+        const { fetch, calls } = fakeFetch(matrixReply(1, 'review'));
+        await assert.rejects(
+          () => spawn(fx, {}, { fetch }),
+          /no lane fits the judged task.*mode "review"/
+        );
+        assert.equal(calls.length, 1); // the judge ran — the verdict held
+        assert.equal(matrixRows(fx)[0]!.outcome, 'no-fit');
+        assert.equal(readAgentRegistry(fx.main)['fx-1'], undefined); // nothing spawned
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('enforce unanswered holds — a dimmed judge never falls back to the static lane', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open', title: 'x' }]);
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        // confidence 0.1 < judge.confidence 0.6 → both answers
+        // lowConfidence → unanswered verdict → hold, not spawn-static
+        const { fetch } = fakeFetch(matrixReply(0, 'coding', 0.1));
+        await assert.rejects(
+          () => spawn(fx, {}, { fetch }),
+          /could not score the task under enforce/
+        );
+        assert.equal(matrixRows(fx)[0]!.outcome, 'unanswered');
+        assert.equal(readAgentRegistry(fx.main)['fx-1'], undefined);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('enforce with no task text holds unanswered — no judge call, no spawn', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]); // no title/description
     try {
       withMatrix(fx, 'enforce');
       await withKey(async () => {
         const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
         await assert.rejects(
           () => spawn(fx, {}, { fetch }),
-          /fleet\.matrix\.mode "enforce" is not implemented/
+          /could not score the task under enforce/
         );
-        assert.equal(calls.length, 0); // refused before any judge call
-        assert.equal(matrixRows(fx).length, 0);
+        assert.equal(calls.length, 0); // nothing to judge → synthesized hold
+        assert.equal(matrixRows(fx).length, 0); // no verdict existed to journal
+        assert.equal(readAgentRegistry(fx.main)['fx-1'], undefined);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('enforce on a prose-grade judge provider is a config error naming provider + mode', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'x' }]);
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node {promptFile}', provider: 'alt' } },
+          providers: {
+            alt: { type: 'cli', command: 'node {promptFile}' },
+            local: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'local-1' },
+            // openai-compat wire → prose call grade — enforce needs typed
+            orca: {
+              type: 'api',
+              baseUrl: 'https://orca.test',
+              apiKeyEnv: 'ORCA_TEST_KEY',
+              models: { 'gpt-x': 'openai-compat' },
+            },
+          },
+          fleet: {
+            matrix: {
+              provider: 'orca',
+              mode: 'enforce',
+              models: { cheap: { provider: 'local' } },
+            },
+          },
+        })
+      );
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
+        await assert.rejects(
+          () => spawn(fx, {}, { fetch }),
+          /fleet\.matrix\.provider "orca".*prose-grade/
+        );
+        assert.equal(calls.length, 0); // refused at config validation, before the call
+        assert.equal(readAgentRegistry(fx.main)['fx-1'], undefined);
+      });
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('an explicit --provider outranks the pick piecewise — the verdict still journals', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'sweep the ledger' }]);
+    try {
+      withMatrix(fx, 'enforce');
+      await withKey(async () => {
+        const { fetch } = fakeFetch(matrixReply(0, 'coding'));
+        await spawn(fx, { provider: 'alt' }, { fetch });
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        assert.equal(entry.provider, 'alt'); // the flag wins the lane
+        assert.equal(entry.matrix, 'cheap'); // the pick still stamps provenance
+        assert.equal(matrixRows(fx)[0]!.outcome, 'cheap');
+        await agents(['down', 'fx-1']);
       });
     } finally {
       fx.restore();
@@ -1834,28 +1979,10 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
       await withKey(async () => {
         const { fetch } = fakeFetch({ status: 500, body: {} });
         const r = await capture(() => spawn(fx, {}, { fetch }));
-        assert.match(r.err.join('\n'), /fleet\.matrix\.provider "orca".*spawn proceeds unrouted/);
+        assert.match(r.err.join('\n'), /fleet\.matrix\.provider "orca".*static lane unrouted/);
         const entry = readAgentRegistry(fx.main)['fx-1']!;
         assert.equal(entry.provider, 'alt');
         await agents(['down', 'fx-1']);
-      });
-    } finally {
-      fx.restore();
-    }
-  });
-
-  test('enforce refuses even when the bead carries no task text — the config claim cannot slip', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }]); // no title/description
-    try {
-      withMatrix(fx, 'enforce');
-      await withKey(async () => {
-        const { fetch, calls } = fakeFetch(matrixReply(0, 'coding'));
-        await assert.rejects(
-          () => spawn(fx, {}, { fetch }),
-          /fleet\.matrix\.mode "enforce" is not implemented/
-        );
-        assert.equal(calls.length, 0); // refused before any judge call
-        assert.equal(matrixRows(fx).length, 0);
       });
     } finally {
       fx.restore();

@@ -100,6 +100,7 @@ import {
   fleetOccupancyFor,
   fleetProfileOf,
   loadAgentEnv,
+  matrixLanePick,
   pidAlive,
   profileModelFor,
   resolveAgentConnector,
@@ -470,6 +471,7 @@ function statusDetail(backends: AgentBackendPlane[], target: string, json: boole
   if (a.provider !== undefined) console.log(`provider  ${a.provider}`);
   if (a.model !== undefined) console.log(`model     ${a.model}`);
   if (a.class !== undefined) console.log(`class     ${a.class}`);
+  if (a.matrix !== undefined) console.log(`matrix    ${a.matrix}`);
   if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`);
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`);
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`);
@@ -799,18 +801,25 @@ export function spawnStepAgent(
     opts
   )
     .then(async route => {
-      // the matrix verdict is journaled shadow-side; the spawn's lane
-      // is untouched (enforce refuses inside applyFleetMatrix until the
-      // follow-up bead lands the pick→lane resolution)
-      await applyFleetMatrix(dir, env, req.molStep, info, opts);
-      return route;
+      // the matrix verdict is journaled under every armed mode; under
+      // 'enforce' it also resolves the lane — a pick binds
+      // provider/model/autoApprove piecewise below, while no-fit and
+      // unanswered hold via matrixLanePick's MatrixHoldError (spec
+      // bro-v0pvd.1.1). Shadow returns undefined: journal only, the
+      // static lane proceeds untouched.
+      const verdict = await applyFleetMatrix(dir, env, req.molStep, info, opts);
+      return { route, matrixPick: matrixLanePick(verdict, env) };
     })
-    .then(route => {
-      const provider = req.provider ?? profile?.provider ?? route?.provider;
+    .then(({ route, matrixPick }) => {
+      // precedence: explicit flags > --profile > matrix pick > class
+      // route head > static lane. The matrix pick sits below every
+      // operator pick and above every config default — under enforce
+      // it is the task-shape authority (spec bro-v0pvd.1.1)
+      const provider = req.provider ?? profile?.provider ?? matrixPick?.provider ?? route?.provider;
       let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
       if (req.provider !== undefined) {
         namedBy = 'flag';
-      } else if (profile !== undefined) {
+      } else if (profile !== undefined || matrixPick !== undefined) {
         namedBy = 'profile';
       }
       return resolveSpawnProvider(
@@ -822,19 +831,27 @@ export function spawnStepAgent(
             req.model ??
             // a profile's model rides only on its own provider's lane
             profileModelFor(profile, provider) ??
+            // the matrix pick's model rides only on the lane it picked —
+            // an explicit provider override must not inherit it
+            (provider !== undefined && provider === matrixPick?.provider
+              ? matrixPick?.model
+              : undefined) ??
             // the routed model pin pairs with the routed provider — an
             // explicit provider override must not inherit chain[0]'s model
             (provider !== undefined && provider === route?.provider ? route.model : undefined),
-          autoApprove: req.autoApprove ?? profile?.autoApprove,
+          autoApprove: req.autoApprove ?? profile?.autoApprove ?? matrixPick?.autoApprove,
         },
         namedBy
       ).then(async pick => {
         // a flag-named profile's provider is an explicit pick — it
         // outranks the table like --provider does, so matching the chain
         // head must not arm the walk (a provider-less profile only
-        // presets fields; routing stays armed for it)
+        // presets fields; routing stays armed for it). A matrix pick
+        // suppresses the walk the same way: its lane is already the
+        // vetted one, chain candidates were never capability-checked
         const routeSpec =
           route !== undefined &&
+          matrixPick === undefined &&
           req.provider === undefined &&
           profile?.provider === undefined &&
           provider === route.provider
@@ -891,6 +908,9 @@ export function spawnStepAgent(
             account: pick.account,
             model: pick.model,
             class: route?.class,
+            // the fleet.matrix lane the enforce pick resolved to —
+            // absent on shadow/off/unrouted spawns (spec bro-v0pvd.1.1)
+            matrix: matrixPick?.lane,
             delegatedBy: req.delegatedBy,
             worker: pick.worker,
             resumeSessionId: req.resumeSessionId,

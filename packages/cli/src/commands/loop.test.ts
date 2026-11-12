@@ -324,6 +324,115 @@ describe('resolveLoopLane — fleet.routing per-bead class (bro-zmned)', () => {
   });
 });
 
+// --- the matrix pick — fleet.matrix enforce's verdict→lane tier (bro-v0pvd.1.1) ---
+
+describe('resolveLoopLane — fleet.matrix pick (bro-v0pvd.1.1)', () => {
+  const sweepRoute = (env: AgentConnectorEnv) =>
+    resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'sweep' });
+
+  test('the pick sits above the route head and config defaults; the walk stays suppressed', async () => {
+    const env = routedEnv({ sweeps: { provider: 'kilo', model: 'free-1' } });
+    env.agents = { native: { provider: 'devin' } };
+    const lane = await resolveLoopLane(
+      env,
+      {},
+      laneCfg({ provider: 'devin', agent: 'x {promptFile}' }),
+      sweepRoute(env),
+      { lane: 'max', provider: 'fancy', model: 'm-9' }
+    );
+    // matrix > route head > cfgProfile > loop.provider > backend
+    assert.equal(lane.provider, 'fancy');
+    assert.equal(lane.model, 'm-9'); // the pick's model rides its own lane
+    assert.equal(lane.matrix, 'max'); // the row name is provenance
+    assert.equal(lane.class, 'sweep'); // class routing is orthogonal — still stamps
+    // a pick engaged → the chain walk never arms: its candidates were
+    // never capability-vetted
+    assert.equal(lane.route, undefined);
+  });
+
+  test('an acp-bound pick carries model + autoApprove into the worker argv', async () => {
+    const env = routedEnv();
+    const lane = await resolveLoopLane(env, {}, laneCfg(), sweepRoute(env), {
+      lane: 'max',
+      provider: 'devin',
+      model: 'swe-2',
+      autoApprove: true,
+    });
+    assert.equal(lane.provider, 'devin');
+    assert.equal(lane.model, 'swe-2');
+    const argv = argvOf(lane.worker);
+    assert.equal(argv.includes('--auto-approve'), true);
+    assert.equal(argv.includes('swe-2'), true);
+    assert.equal(lane.matrix, 'max');
+  });
+
+  test('an explicit --provider outranks the pick and never inherits its model', async () => {
+    const env = routedEnv();
+    const lane = await resolveLoopLane(env, { provider: 'kilo' }, laneCfg(), sweepRoute(env), {
+      lane: 'max',
+      provider: 'devin',
+      model: 'swe-2',
+    });
+    assert.equal(lane.provider, 'kilo');
+    // kilo IS the route head — its own pin applies; the pick's swe-2
+    // belonged to devin's lane and drops with the override
+    assert.equal(lane.model, 'free-1');
+    assert.equal(lane.matrix, 'max'); // the verdict still stamps provenance
+  });
+
+  test('a pick suppresses the chain walk even when it lands on the route head', async () => {
+    const env = routedEnv();
+    const route = sweepRoute(env);
+    // baseline — no pick: the head match arms the walk's candidates
+    const unrouted = await resolveLoopLane(env, {}, laneCfg(), route);
+    assert.notEqual(unrouted.route, undefined);
+    const lane = await resolveLoopLane(env, {}, laneCfg(), route, {
+      lane: 'max',
+      provider: 'kilo',
+    });
+    assert.equal(lane.provider, 'kilo');
+    assert.equal(lane.model, 'free-1'); // the head's own pin still applies
+    assert.equal(lane.route, undefined); // the pick engaged — no walk
+    assert.equal(lane.matrix, 'max');
+  });
+
+  test('a flag --profile outranks the pick; a config profile sits below it', async () => {
+    const env = routedEnv({ fancy: { provider: 'fancy', model: 'm-9' } });
+    const route = sweepRoute(env);
+    const flagged = await resolveLoopLane(env, { profile: 'fancy' }, laneCfg(), route, {
+      lane: 'max',
+      provider: 'devin',
+      model: 'swe-2',
+    });
+    assert.equal(flagged.provider, 'fancy');
+    assert.equal(flagged.model, 'm-9');
+    const confd = await resolveLoopLane(env, {}, laneCfg({ profile: 'fancy' }), route, {
+      lane: 'max',
+      provider: 'devin',
+      model: 'swe-2',
+    });
+    // loop.profile is a standing default — the enforce pick is the
+    // task-shape authority and outranks it
+    assert.equal(confd.provider, 'devin');
+    assert.equal(confd.model, 'swe-2');
+    assert.equal(confd.matrix, 'max');
+  });
+
+  test('a pick with no routing table still binds the lane (enforce without fleet.routing)', async () => {
+    const env = laneEnv({ devin: { type: 'acp', command: 'devin acp' } });
+    const lane = await resolveLoopLane(env, {}, laneCfg(), undefined, {
+      lane: 'max',
+      provider: 'devin',
+      model: 'swe-2',
+    });
+    assert.equal(lane.provider, 'devin');
+    assert.equal(lane.model, 'swe-2');
+    assert.equal(lane.matrix, 'max');
+    assert.equal(lane.class, undefined);
+    assert.equal(lane.route, undefined);
+  });
+});
+
 // --- wallWaitUntil — the wall settle's wait clock (spec bro-36bhc) -------------
 
 describe('wallWaitUntil — the provider wall wait (bro-36bhc)', () => {

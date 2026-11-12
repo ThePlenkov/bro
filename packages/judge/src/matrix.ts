@@ -95,10 +95,12 @@ function outcomeOf(verdict: ReturnType<typeof matrixVerdict>): string {
 
 /** One routing decision — decide over the task's state, reduce the
  *  answers through the deterministic matrix, journal the verdict.
- *  Returns the pick only under `enforce` (the caller resolves its
- *  profile/provider binding into a spawn lane — the follow-up bead);
- *  `shadow` returns undefined, `off` returns undefined WITHOUT a judge
- *  call. JudgeUnavailable propagates to the caller. */
+ *  `enforce` returns the WHOLE verdict — pick, no-fit, or
+ *  unanswered — so the caller can tell "routed" from "held" without
+ *  re-reading the journal (spec bro-v0pvd.1.1); `shadow` returns
+ *  undefined (the verdict is the whole point — journaled, never
+ *  acted on), `off` returns undefined WITHOUT a judge call.
+ *  JudgeUnavailable propagates to the caller. */
 export async function routeMatrix(opts: {
   /** Working dir — the journal anchors to its git common dir. */
   dir: string;
@@ -142,7 +144,7 @@ export async function routeMatrix(opts: {
     );
   }
   if (opts.mode === 'enforce') {
-    return verdict.kind === 'pick' ? verdict : undefined;
+    return verdict;
   }
   return undefined;
 }

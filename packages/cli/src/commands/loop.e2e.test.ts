@@ -27,6 +27,7 @@ import {
   killRunHandles,
   readHostState,
   runCli,
+  tmpDir,
   writeHostState,
 } from './testrepo.ts';
 
@@ -1374,6 +1375,206 @@ describe('bro loop fleet.routing', () => {
       assert.match(r.stdout, /provider: sweeper/);
       assert.equal(bead(f.db, 'fx-a')?.status, 'open');
     });
+  });
+});
+
+/** fleet.matrix e2e (bro-v0pvd.1.1) — an `api` judge provider answers
+ *  the router's decide() over a local systemone-wire stub, so enforce
+ *  mode runs end-to-end: a no-fit verdict must PARK the bead (deferred,
+ *  noted, never spawned on the static lane), and a later state change
+ *  (`bd undefer`) re-judges into a pick that lands on the matrix lane —
+ *  never `regular`. loop.agent is 'false' so only a provider command
+ *  can land anything; `agents.native.provider` is the static lane the
+ *  pick must beat. */
+describe('bro loop fleet.matrix', () => {
+  /** The wire's two-question reply — score 0 = 'low', score 2 = 'high'
+   *  on the default scale; the mode choice names a declared mode. */
+  const judgeReply = (score: number, mode: string): Record<string, unknown> => ({
+    model: 'jev-1',
+    answers: {
+      complexity: {
+        type: 'score',
+        score,
+        probabilities: { [String(score)]: 0.9 },
+        confidence: 0.9,
+      },
+      mode: { type: 'choice', choice: mode, probabilities: { [mode]: 0.9 }, confidence: 0.9 },
+    },
+  });
+  /** call 1 judges a task no row covers (mode 'review' — rows only
+   *  take 'coding') → no-fit; every later call scores 'high'+'coding'
+   *  → only the 'max' row's ceiling reaches it. */
+  const NO_FIT = judgeReply(0, 'review');
+  const PICK = judgeReply(2, 'coding');
+
+  /** The stub itself — a systemone-wire server in its OWN process:
+   *  f.run() blocks this test's event loop in spawnSync, so an
+   *  in-process server could never answer the CLI's decide() call
+   *  (the first draft timed out exactly there). Replies rotate by
+   *  call count — the last entry repeats — and every call appends
+   *  its count to JUDGE_CALLS_FILE for the parent's assertions. */
+  const JUDGE_STUB = `const http = require('node:http')
+const fs = require('node:fs')
+const replies = JSON.parse(process.env.JUDGE_REPLIES)
+const callsFile = process.env.JUDGE_CALLS_FILE
+let calls = 0
+http.createServer((req, res) => {
+  calls += 1
+  fs.appendFileSync(callsFile, calls + '\\n')
+  req.resume()
+  req.on('end', () => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(replies[Math.min(calls - 1, replies.length - 1)]))
+  })
+}).listen(0, '127.0.0.1', function () {
+  console.log('JUDGE_PORT=' + this.address().port)
+})
+`;
+
+  const judgeStub = async (
+    replies: Array<Record<string, unknown>>
+  ): Promise<{ port: number; calls: () => number; close: () => void }> => {
+    const callsFile = join(tmpDir('bro-judge-'), 'calls');
+    const child = spawn(process.execPath, ['-e', JUDGE_STUB], {
+      env: {
+        ...process.env,
+        JUDGE_REPLIES: JSON.stringify(replies),
+        JUDGE_CALLS_FILE: callsFile,
+      },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      let buf = '';
+      const timer = setTimeout(() => reject(new Error('judge stub never bound')), 10_000);
+      child.stdout!.on('data', d => {
+        buf += String(d);
+        const m = /JUDGE_PORT=(\d+)/.exec(buf);
+        if (m !== null) {
+          clearTimeout(timer);
+          resolve(Number(m[1]));
+        }
+      });
+      child.once('error', reject);
+      child.once('exit', code => reject(new Error(`judge stub exited ${code}`)));
+    });
+    return {
+      port,
+      calls: () =>
+        existsSync(callsFile)
+          ? readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).length
+          : 0,
+      close: () => child.kill(),
+    };
+  };
+
+  const matrixLane = (
+    port: number,
+    loopCfg: Record<string, unknown> = {},
+    rows: Array<Record<string, unknown>> = SHIP_IT
+  ): Fixture =>
+    loopFixture(rows, { agent: 'false', ...loopCfg }, 'land', host => ({
+      agents: { native: { provider: 'regular' } },
+      providers: {
+        regular: { type: 'cli', command: `node ${host.agent}` },
+        maxlane: { type: 'cli', command: `node ${host.agent}` },
+        judge: {
+          type: 'api',
+          baseUrl: `http://127.0.0.1:${port}`,
+          apiKeyCommand: `printf 'judge-key'`,
+          models: { 'jev-1': 'systemone' },
+        },
+      },
+      fleet: {
+        matrix: {
+          provider: 'judge',
+          mode: 'enforce',
+          // cheap-first ordering — 'max' is declared second so the
+          // hard filter, not row order, is what keeps 'high' off 'cheap'
+          models: {
+            cheap: { modes: ['coding'], complexity: ['low'], provider: 'regular' },
+            max: {
+              modes: ['coding'],
+              complexity: ['low', 'medium', 'high'],
+              provider: 'maxlane',
+            },
+          },
+        },
+      },
+    }));
+
+  test('enforce no-fit parks the bead; a state change re-judges into the matrix lane', async () => {
+    const judge = await judgeStub([NO_FIT, PICK]);
+    try {
+      const f = matrixLane(judge.port);
+      inside(f.main, f.root, () => {
+        // run 1 — the judge's first verdict covers nothing: the bead
+        // defers (hidden from ready), notes the hold, and NEVER spawns
+        // — the static 'regular' lane must not silently take it
+        const r1 = f.run();
+        assert.match(r1.stdout, /held by fleet\.matrix/, r1.stderr);
+        assert.match(r1.stdout, /1 parked/);
+        const held = bead(f.db, 'fx-a');
+        assert.equal(held?.status, 'deferred');
+        assert.match(String(held?.notes), /fleet\.matrix — no lane fits/);
+        assert.equal(existsSync(f.worktree), false);
+        assert.equal(spawns(f), '');
+        // the verdict still journaled — shadow's record contract holds
+        // under enforce too
+        const journal = readFileSync(
+          join(f.main, '.git', 'bro', 'judge', 'verdicts.jsonl'),
+          'utf8'
+        );
+        assert.match(journal, /route-matrix/);
+        assert.match(journal, /no-fit/);
+
+        // the state change — `bd undefer` releases the snooze early;
+        // the next ready read re-claims and re-judges (stub call 2
+        // picks 'max' → provider 'maxlane', beating the static lane)
+        const un = spawnSync(join(f.root, 'bin', 'bd'), ['undefer', 'fx-a'], {
+          cwd: f.main,
+          env: f.env,
+          encoding: 'utf8',
+        });
+        assert.equal(un.status, 0, un.stderr);
+
+        const r2 = f.run();
+        assert.match(r2.stdout, /loop: fx-a landed/, r2.stderr);
+        // provider=maxlane proves the pick outranked agents.native's
+        // 'regular'; class=- proves no fleet.routing table was needed
+        assert.match(spawns(f), /work opened pr \[bead=fx-a provider=maxlane class=-\]/);
+        assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
+        // the picked row name rides the registry entry as provenance
+        const registry = JSON.parse(
+          readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
+        ) as Record<string, { matrix?: string; provider?: string }>;
+        assert.equal(registry['fx-a']?.matrix, 'max');
+        assert.equal(registry['fx-a']?.provider, 'maxlane');
+        // exactly one decide() per spawn — resolveBeadLane judges once,
+        // the connector spawn never re-judges
+        assert.equal(judge.calls(), 2);
+      });
+    } finally {
+      judge.close();
+    }
+  });
+
+  test('enforce unanswered holds the same way — only a confident pick spawns', async () => {
+    const judge = await judgeStub([{ model: 'jev-1', answers: {} }]);
+    try {
+      const f = matrixLane(judge.port);
+      inside(f.main, f.root, () => {
+        const r = f.run();
+        assert.match(r.stdout, /held by fleet\.matrix/, r.stderr);
+        assert.match(r.stdout, /1 parked/);
+        const held = bead(f.db, 'fx-a');
+        assert.equal(held?.status, 'deferred');
+        assert.match(String(held?.notes), /could not score the task under enforce/);
+        assert.equal(existsSync(f.worktree), false);
+        assert.equal(spawns(f), '');
+      });
+    } finally {
+      judge.close();
+    }
   });
 });
 

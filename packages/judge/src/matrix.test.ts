@@ -134,11 +134,11 @@ describe('routeMatrix', () => {
       assert.equal(v.answers['mode']!.type, 'choice');
     }));
 
-  test('enforce returns the pick; a no-fit verdict returns undefined', () =>
+  test('enforce returns the no-fit verdict — the caller owns the hold', () =>
     withRepo(async dir => {
       const { judge } = judgeReturning(both(2, 'review'));
       // 'review' mode: neither row declares it → no-fit under enforce
-      const pick = await routeMatrix({
+      const verdict = await routeMatrix({
         dir,
         judge,
         state: {},
@@ -146,8 +146,26 @@ describe('routeMatrix', () => {
         matrix: MATRIX,
         mode: 'enforce',
       });
-      assert.equal(pick, undefined);
+      // the WHOLE verdict returns under enforce (spec bro-v0pvd.1.1) —
+      // pick/no-fit/unanswered all reach the caller; collapsing
+      // no-fit to undefined would hide the hold
+      assert.deepEqual(verdict, { kind: 'no-fit', mode: 'review', complexity: 'high' });
       assert.equal(matrixRows(dir)[0]!.outcome, 'no-fit');
+    }));
+
+  test('enforce returns the unanswered verdict — the caller owns the hold', () =>
+    withRepo(async dir => {
+      const { judge } = judgeReturning({ answers: {}, lowConfidence: ['complexity', 'mode'] });
+      const verdict = await routeMatrix({
+        dir,
+        judge,
+        state: {},
+        subject: 'fx-u',
+        matrix: MATRIX,
+        mode: 'enforce',
+      });
+      assert.deepEqual(verdict, { kind: 'unanswered' });
+      assert.equal(matrixRows(dir)[0]!.outcome, 'unanswered');
     }));
 
   test('enforce returns a confident pick as the verdict object', () =>
