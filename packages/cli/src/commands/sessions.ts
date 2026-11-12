@@ -8,11 +8,13 @@
  *   bro sessions --host claude   one host
  *   bro sessions --live          only sessions live now (derived state)
  *   bro sessions --json          the same rows, machine-readable
+ *   bro sessions resume <id|--last|--pick>   run the host's resume argv (F4)
  *
  * The ledger (`facade('ledger')`) drains pending spool rows on every
- * read, so the listing is always fresh — no worker tick, no lock. The
- * command is read-only: `resume` is F4 (bro-izpyk.4) scope and is NOT
- * implemented here.
+ * read, so the listing is always fresh — no worker tick, no lock.
+ * `bro sessions resume` (F4, bro-izpyk.4) resolves a session and runs
+ * its host's `SessionPlane.resumeArgv` — or reports that the host has
+ * no resume command bro knows, never a guess.
  *
  * Two fields are resolved client-side because the ledger does not (and
  * must not — the write path is F1a's) carry them:
@@ -44,8 +46,14 @@ import {
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
+// side effect: registers the resumeArgv planes (claude|codex|opencode|
+// cursor) and @broject/devin's plane — the read path `bro sessions
+// resume` resolves through (specs/bro-izpyk.4.md)
+import '../session-planes/resume.ts';
+import { runSessionsResume } from './sessions-resume.ts';
 
 const USAGE = `usage: bro sessions [--project|--all] [--host <h>] [--live] [--json]
+       bro sessions resume [--print] [--last|--pick] [<host>:<sid>|<sid>|<agentId>]
 
   --project    only sessions of the current project (worktrees fold in)
   --all        every session on the machine — the default
@@ -56,7 +64,12 @@ const USAGE = `usage: bro sessions [--project|--all] [--host <h>] [--live] [--js
 State is derived at read time: a session last seen before this boot is
 'interrupted'; the ledger itself only records 'live' today. The bead
 column resolves bro-spawned agents through the per-project agent
-registry — interactive sessions show —.`;
+registry — interactive sessions show —.
+
+resume runs the host CLI's own resume command in the session's cwd —
+<host>:<sid>, a sid (exact or unique prefix), an agentId, --last, or
+--pick; --print shows the argv without spawning. A host with no resume
+command is reported, never guessed.`;
 
 export interface SessionsArgs {
   project: boolean;
@@ -149,7 +162,7 @@ export function displayWorktree(cwd: string | null): string {
   return cwd;
 }
 
-function shortSid(sid: string): string {
+export function shortSid(sid: string): string {
   return sid.length > 12 ? `${sid.slice(0, 12)}…` : sid;
 }
 
@@ -396,6 +409,20 @@ function sessionModeOverlay(
 }
 
 export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}): Promise<void> {
+  // `resume` is a subcommand with its own grammar — delegate before
+  // sessionsArgs would reject the positional as an unexpected arg.
+  // The command framework's helpFirst() leads argv with the help
+  // token, so `bro sessions resume --help` arrives as
+  // ['--help','resume',…] — the subcommand is the first token after
+  // an optional leading help flag. The 'resume' word is stripped and
+  // everything else (help included) passes through to the subcommand's
+  // own parser.
+  const HELP_TOKENS = new Set(['--help', '-h']);
+  const sub = HELP_TOKENS.has(argv[0] ?? '') ? argv[1] : argv[0];
+  if (sub === 'resume') {
+    const at = argv.indexOf('resume');
+    return runSessionsResume([...argv.slice(0, at), ...argv.slice(at + 1)], deps);
+  }
   if (hasHelpFlag(argv)) {
     printUsage(USAGE, EXIT.ok);
   }

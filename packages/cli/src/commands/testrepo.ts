@@ -162,6 +162,12 @@ export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = devNull;
   env.BRO_HOOK_SPOOL = '0';
+  // machine state must not leak in either — without a pin the child
+  // falls back to $HOME/.local/state and reads the HOST's ledger,
+  // mailbox, and inbox (the F4 sessions leg would report this box's
+  // interrupted sessions inside a fixture's 'nothing to resume').
+  // Per-call tmpdir: each spawned CLI gets a fresh, swept state home.
+  env.XDG_STATE_HOME = tmpDir('bro-e2e-state-');
   return { ...env, ...extra };
 }
 

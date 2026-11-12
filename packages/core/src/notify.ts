@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import type { Connector, ConnectorCtx } from './connectors.ts';
 import { isEventInput, type EventEnvelope, type EventInput } from './events.ts';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { drainSessionInbox, type SessionInboxEntry } from './session-inbox.ts';
 
 /** The repo mailbox — `<git-common>/bro/notify`; null outside a repo.
  *  Bounded lookup + in-process cache — hook drains call this on every
@@ -683,10 +684,28 @@ export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
   return out.slice(0, Math.max(0, limit));
 }
 
-/** The notify connector — the read side of the mailbox. Its postTool
- *  probe delivers unseen drops into session context, so a child event
- *  reaches the session mid-turn instead of waiting for a session-end
- *  summary. Probes are fail-open like every connector. */
+/** The context line for one inbox entry — the `bro msg` delivery
+ *  render (specs/bro-izpyk.4.md). Same vocabulary as renderDrop:
+ *  `[msg <kind> <from> → <host>:<sid>] <text> ↳<cause>`; a passthrough
+ *  foreign line (no from/kind) renders its raw text so nothing the
+ *  writer didn't author is ever eaten. */
+export function renderInboxEntry(entry: SessionInboxEntry, host: string, sid: string): string {
+  if (entry.from === undefined && entry.kind === undefined && entry.cause === undefined) {
+    return entry.text;
+  }
+  const kind =
+    entry.kind === undefined || entry.kind === 'note' || entry.kind === '' ? '' : `${entry.kind} `;
+  const re = entry.cause === undefined ? '' : ` ↳${entry.cause}`;
+  return `[msg ${kind}${entry.from ?? 'unknown'} → ${host}:${sid}] ${entry.text}${re}`;
+}
+
+/** The notify connector — the read side of the mailbox AND the F4
+ *  session inbox. Its postTool probe delivers unseen drops into session
+ *  context, so a child event reaches the session mid-turn instead of
+ *  waiting for a session-end summary; the inbox leg (bro-izpyk.4)
+ *  drains `inbox/<host>-<sid>` the same way — run.sh's `[ -s ]` check
+ *  already woke Node for it. Probes are fail-open like every
+ *  connector. */
 export const notifyConnector: Connector = {
   name: 'notify',
   hooks: () => {
@@ -695,7 +714,30 @@ export const notifyConnector: Connector = {
         const msgs = drainMailbox(ctx.dir, ctx.sessionId ?? '', {
           for: mailboxIdentity(ctx.sessionId),
         }).map(renderDrop);
-        return msgs.length > 0 ? [`bro notify — ${msgs.length} mailbox message(s):`, ...msgs] : [];
+        // The F4 inbox leg — only when the host is proven: an
+        // 'unknown'/absent host has no `<host>-<sid>` stem run.sh could
+        // have gated on, and those sessions are served by the mailbox
+        // `to: <sid>` address instead (never both — `bro msg` picks one
+        // channel per session).
+        const host = ctx.host;
+        const sid = ctx.sessionId;
+        const drained =
+          host === undefined || host === 'unknown' || sid === undefined || sid === ''
+            ? null
+            : drainSessionInbox(process.env, host, sid);
+        const inbox = (drained?.entries ?? []).map(e => renderInboxEntry(e, host ?? '', sid ?? ''));
+        const all = [...msgs, ...inbox];
+        if (all.length === 0) {
+          return [];
+        }
+        // Byte-identical header whenever only mailbox drops drained —
+        // the common case every existing reader/tests see; inbox
+        // deliveries get the honest combined label.
+        const header =
+          inbox.length === 0
+            ? `bro notify — ${all.length} mailbox message(s):`
+            : `bro messages — ${all.length} message(s):`;
+        return [header, ...all];
       } catch {
         return [];
       }

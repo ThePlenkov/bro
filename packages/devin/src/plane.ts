@@ -876,6 +876,13 @@ export const devinSessionPlane: SessionPlane = {
   listLive(bag, workerEnv) {
     return listDevinSessions(devinSessionDirs(bag, workerEnv), devinProcDir(bag));
   },
+  // `devin --resume <id>` reopens a session by id — the ledger sid IS
+  // the native session id (the hook payload's session_id), so the argv
+  // needs no translation. `cwd` is unused: devin scopes resume by id,
+  // and the launcher spawns with the session's recorded cwd anyway.
+  resumeArgv(nativeSessionId) {
+    return ['devin', '--resume', nativeSessionId];
+  },
 };
 
 registerSessionPlane(devinSessionPlane);

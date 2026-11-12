@@ -471,6 +471,12 @@ export type {
   ModeSource,
   SessionModeResolution,
 } from './modes.ts';
+export {
+  appendSessionInbox,
+  drainSessionInbox,
+  sessionInboxDir,
+} from './session-inbox.ts';
+export type { SessionInboxEntry } from './session-inbox.ts';
 export type {
   HookStat,
   InstallRow,
@@ -582,6 +588,7 @@ export {
   notifyDir,
   peekMailbox,
   renderDrop,
+  renderInboxEntry,
   userMailboxDir,
 } from './notify.ts';
 export type {

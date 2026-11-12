@@ -75,6 +75,7 @@ const GUIDES: Record<string, string> = {
   rig: 'fleet',
   watch: 'fleet',
   notify: 'events',
+  msg: 'events',
   bus: 'events',
   sinks: 'events',
   judge: 'judge',
