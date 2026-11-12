@@ -84,6 +84,7 @@ import {
   type ProcHit,
 } from './proc-owner.ts';
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
+import { cleanupTmpDirs } from './tmp-sweep.ts';
 export { LIVE_MARKER_MS };
 
 export interface WorktreeInfo {
@@ -1057,6 +1058,10 @@ function cmdPrune(argv: string[]): void {
     usage();
   }
   pruneStaleEntries();
+  // stale OS temp dirs ride the same prune — `drive`'s periodic
+  // `work prune --loop` child is the sweeper's cadence (spec bro-d9znu).
+  // quietKeeps: kept lines are the sweep's noise floor at pass cadence.
+  cleanupTmpDirs(argv.includes('--dry-run'), { quietKeeps: true });
   if (!argv.includes('--loop')) {
     return;
   }
