@@ -132,13 +132,14 @@ head and every static fallback:
 
 ### Provenance — `matrix` rides like `class`
 
-The picked row's name stamps the full `class` mirror: `SpawnSpec.
-matrix` → `BRO_AGENT_MATRIX` env pin (AGENT_PIN_KEYS — connector-
-owned, unforgeable) + registry `matrix` field + `AgentInfo.matrix`
-+ lifecycle spawn detail; `LoopLane.matrix` → `provenancePins` +
-the template arm's env merge + `spawnWorker`'s spec. The
-`route-matrix` journal row remains the decision record (subject =
-molStep, outcome = lane name | no-fit | unanswered).
+The picked row's name stamps the full `class` mirror:
+`SpawnSpec.matrix` → `BRO_AGENT_MATRIX` env pin (AGENT_PIN_KEYS —
+connector-owned, unforgeable), registry `matrix` field,
+`AgentInfo.matrix`, and lifecycle spawn detail;
+`LoopLane.matrix` → `provenancePins`, the template arm's env merge,
+and `spawnWorker`'s spec. The `route-matrix` journal row remains
+the decision record (subject = molStep, outcome = lane name |
+no-fit | unanswered).
 
 ### The no-fit consumer — defer, re-judge on wake
 

@@ -2457,7 +2457,25 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       // state change", never a silent static-lane spawn and never a
       // hot re-claim loop. The claim custody record dies with the
       // released claims; the park row + note carry the verdict.
-      parkBeads(ctx, beads, `loop: ${msg}`);
+      // The lead was only PROBED on the registry path (claimStep owns
+      // the real claim under the spawn lock, and it never ran) — take
+      // the claim first or the defer writes assignee-clear onto a bead
+      // this run never owned, racing a foreign claim's assignee with
+      // it. A raced claim means a foreign owner re-judges the bead
+      // themselves: park only the members this run did claim (a store
+      // blip gets the same members-only park — never defer what we
+      // cannot own). Leaving the lead open instead would re-claim and
+      // re-judge it every tick — the hot loop the defer exists to
+      // prevent.
+      let parkSet = beads;
+      if (ctx.agents !== undefined) {
+        try {
+          parkSet = claimUpTo([lead], 1, ctx.root).length > 0 ? beads : beads.slice(1);
+        } catch {
+          parkSet = beads.slice(1);
+        }
+      }
+      parkBeads(ctx, parkSet, `loop: ${msg}`);
       endLoopRun(ctx.root, loopSlug(lead.id));
       say(ctx, `loop: ${lead.id} held by fleet.matrix — ${msg} — parked`);
       return { kind: 'done', result: 'parked' };
