@@ -32,8 +32,10 @@ import {
   EXIT,
   facade,
   hasHelpFlag,
+  listModeFiles,
   printUsage,
   readAgentRegistry,
+  sessionFileStem,
   sessionProject,
   type LedgerFacade,
   type Mode,
@@ -232,6 +234,10 @@ export interface CollectSessionsOpts {
   now?: number;
   bootTimeMs?: number;
   beadFor?: (row: SessionRow) => string | undefined;
+  /** Live mode-file overlay (specs/bro-izpyk.2.md) — the hook-time
+   *  truth wins over the ledger projection, which only updates on
+   *  setMode writes. Absent → the ledger mode stands. */
+  modeFor?: (host: string, sid: string) => Mode | undefined;
 }
 
 /** Ledger rows → view rows: derived state, resolved bead, --live filter.
@@ -268,7 +274,7 @@ export async function collectSessionViews(
       project: s.project,
       cwd: s.cwd,
       branch: s.branch,
-      mode: s.mode,
+      mode: opts.modeFor?.(s.host, s.sid) ?? s.mode,
       state,
       pid: s.pid,
       pidStart: s.pidStart,
@@ -354,6 +360,9 @@ export interface SessionsDeps {
   now?: number;
   bootTimeMs?: number;
   beadFor?: (row: SessionRow) => string | undefined;
+  /** Mode-file overlay source — defaults to the live sessions/ dir;
+   *  tests inject a map. */
+  modeFiles?: ReadonlyMap<string, Mode>;
 }
 
 /** Resolve the ledger facade — injectable for tests; production goes
@@ -364,6 +373,26 @@ function sessionsLedger(dir: string, deps: SessionsDeps): LedgerFacade {
   }
   const prefer = loadBroConfig(dir).connectors;
   return facade('ledger', { dir }, prefer === undefined ? {} : { prefer });
+}
+
+/** Live mode files are the hook-time truth — overlay them onto the
+ *  ledger projection so `bro sessions` never shows a stale mode
+ *  (specs/bro-izpyk.2.md). Keyed by the sanitized stem both sides
+ *  share; tests inject the map directly. */
+function sessionModeOverlay(
+  injected?: ReadonlyMap<string, Mode>
+): (host: string, sid: string) => Mode | undefined {
+  const modeFiles =
+    injected ??
+    new Map(
+      // an unreadable/invalid mode file resolves to observe at hook
+      // time — the overlay must show that, not fall back to a stale
+      // ledger mode
+      listModeFiles().map(
+        f => [sessionFileStem(f.host, f.sid), (f.mode ?? 'observe') as Mode] as const
+      )
+    );
+  return (host, sid) => modeFiles.get(sessionFileStem(host, sid));
 }
 
 export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}): Promise<void> {
@@ -388,6 +417,7 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
     }
   }
   const ledger = sessionsLedger(dir, deps);
+  const modeFor = sessionModeOverlay(deps.modeFiles);
   let views: SessionViews;
   try {
     views = await collectSessionViews(ledger, {
@@ -397,6 +427,7 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
       ...(deps.now !== undefined ? { now: deps.now } : {}),
       ...(deps.bootTimeMs !== undefined ? { bootTimeMs: deps.bootTimeMs } : {}),
       ...(deps.beadFor !== undefined ? { beadFor: deps.beadFor } : {}),
+      modeFor,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

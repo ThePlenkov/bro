@@ -51,6 +51,10 @@ function stackFixture(
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost', ...opts.connectors },
+      // modes.default:code — the post-tool chain-registration tests
+      // exercise ACTIVE hook behavior (arming side-effects); observe is
+      // the implicit default and would skip it (specs/bro-izpyk.2.md)
+      modes: { default: 'code' },
     })
   );
   git(['add', 'bro.config.json'], main);

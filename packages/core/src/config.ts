@@ -55,6 +55,7 @@ import {
   type FleetWallTtls,
   type RoutingTable,
 } from './routing.ts';
+import { isMode, MODES, type Mode } from './ledger.ts';
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const;
 export type StoreBackend = (typeof STORE_BACKENDS)[number];
@@ -809,6 +810,24 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
 
 sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
 
+/** bro.config.json `modes` section — the project-wide session-mode
+ *  default (specs/bro-izpyk.2.md). `default` names the mode a session
+ *  resolves when it has NO mode file; absent means `observe` and —
+ *  critically — nothing is materialized, so a project that never opts
+ *  in pays zero per-hook cost. Per-session `bro mode <name>` files
+ *  always win over this default. */
+export const modesSection: ConfigSection<{ default?: Mode }> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { default?: unknown };
+  if (obj.default !== undefined && !isMode(obj.default)) {
+    console.error(
+      `bro.config: modes.default must be one of ${MODES.map(m => `"${m}"`).join('|')} — got ${JSON.stringify(obj.default)}`
+    );
+  }
+  return isMode(obj.default) ? { default: obj.default } : {};
+};
+
+modesSection.jsonSchema = js.obj({ default: { enum: MODES } });
+
 /** The exposed providers — the ROUTES the gateway answers to. Two
  *  spellings: an array of entry names (route ≡ entry, today's form) or a
  *  map of route → entry name (the public name is chosen; the entry keeps
@@ -1556,6 +1575,7 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   providers: providersSection as ConfigSection<unknown>,
   brouter: brouterSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
+  modes: modesSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
   spawn: spawnSection as ConfigSection<unknown>,
@@ -1668,6 +1688,10 @@ export interface BroConfig {
    *  context; `gate` also lets the stop gate block once. `dir` holds
    *  `specs/<id>.md` files; a `spec:` link in the description counts. */
   sdd: { mode: SddMode; dir: string };
+  /** Session-mode project policy (specs/bro-izpyk.2.md) — `default`
+   *  names the mode sessions without a mode file resolve to; absent
+   *  means `observe` and no mode file is ever materialized. */
+  modes: { default?: Mode };
   /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
    *  on every backend's spawn — counts live registry agents across all
    *  backends; 0 means uncapped. Default 3. `profiles` holds the named
@@ -1787,6 +1811,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   providers: {},
   brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
+  modes: {},
   fleet: {
     maxConcurrent: 3,
     profiles: {},
@@ -2046,6 +2071,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   act: 'policy',
   debt: 'policy',
   sdd: 'policy',
+  modes: 'policy',
   guard: 'policy',
   sweep: 'policy',
   stack: 'policy',

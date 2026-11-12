@@ -309,6 +309,110 @@ cursor_permission_ask() {
   printf '%s\n' '{"permission":"ask"}'
 }
 
+# --- session mode (specs/bro-izpyk.2.md) --------------------------------------
+#
+# Tier-0 mode check: $XDG_STATE_HOME/bro/sessions/<host>-<sid>.mode —
+# line 1 is the mode (observe|plan|code|review|orchestrate). A missing or
+# invalid file resolves to `observe` unless a bro.config* names `modes`
+# (the cheap probe below defers to Node, which resolves modes.default
+# and materializes the file). `observe` keeps the cheap fast path —
+# post-tool/prompt-submit run today's could-emit checks, every other
+# session event exits before Node entirely — while an ACTIVE mode pays
+# the full pipeline on every event. The mode file is the hook-time
+# truth; the ledger's mode column is only a projection of it.
+#
+# HOOK_MODE values: observe | plan | code | review | orchestrate —
+# empty means "unresolved": sid-less/host-unknown events and the
+# modes.default deferral keep today's unrestricted behavior.
+HOOK_MODE=
+HOOK_MODE_FILE=
+HOOK_INBOX=
+
+# permission_shell_answer — the observe-mode permission answer, mirroring
+# hooks.ts emitPermission: a bare `bro`/`bd`/`npx bro…` invocation (no
+# shell metacharacters, no package override) approves in the host's
+# vocabulary; anything else gets Cursor's `ask` and silence elsewhere —
+# identical to the non-match outcome the Node path produces today.
+permission_self_tool() {
+  # $1 = the tool_input.command string. Metacharacters veto outright —
+  # a chained/piped/redirected command is never a self-tool call.
+  printf '%s' "$1" | grep -qE '[;&|`$()<>\\]' && return 1
+  _t=$(printf '%s' "$1" | sed 's/^[[:space:]]*//')
+  case "$_t" in
+    bro|bd|bro[[:space:]]*|bd[[:space:]]*) return 0 ;;
+    npx|npx[[:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  # npx form — a package selector anywhere vetoes (JS checks every
+  # token); flags between npx and the executable must be the known
+  # no-value set, and the first real token must name bro itself.
+  printf '%s' "$_t" | grep -qE '(^|[[:space:]])(-p|--package)([[:space:]=]|$)' && return 1
+  _self=0; _skip=0
+  # set -f: word splitting must not pathname-expand a `*`/`?` token —
+  # JS splits on whitespace only
+  set -f
+  for _w in $_t; do
+    [ "$_skip" = 0 ] && { _skip=1; continue; }   # drop the leading npx
+    case "$_w" in
+      -y|--yes|--no-install|-q|--quiet) continue ;;
+      -*) set +f; return 1 ;;
+      bro|@broject/bro) _self=1; break ;;
+      bro@*|@broject/bro@*)
+        # a versioned self spec — the version must be a bare
+        # version/tag: '/' or ':' marks an npm alias/path spec
+        # (bro@npm:other, bro@github:u/r) that resolves to a DIFFERENT
+        # package — never auto-approve it (mirrors isSelfToolCommand's
+        # [\w.-] charset, which excludes both)
+        case "$_w" in
+          @broject/bro@*) _v=${_w#@broject/bro@} ;;
+          *) _v=${_w#bro@} ;;
+        esac
+        case "$_v" in
+          ''|*:*|*/*) break ;;   # alias/path/empty — not the self tool
+          *) _self=1; break ;;
+        esac ;;
+      *) break ;;
+    esac
+  done
+  set +f
+  [ "$_self" = 1 ]
+}
+
+permission_shell_answer() {
+  [ "$EVENT" = permission ] || return 0
+  # extract tool_input.command — first "command":"…" string, the same
+  # grep technique hook_spool_sid uses. JSON escapes (\" \\) make the
+  # extraction ambiguous → non-match → today's outcome, never a guess.
+  _cmd=$(printf %s "$PAYLOAD" \
+    | grep -oE '"command"[[:space:]]*:[[:space:]]*"[^"]*"' 2>/dev/null \
+    | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+  # a command carrying a JSON escape extracted ambiguously — treat as
+  # non-match (today's outcome) rather than approve a guess
+  case "$_cmd" in *\\*) _cmd= ;; esac
+  if [ -n "$_cmd" ] && permission_self_tool "$_cmd"; then
+    case "$PAYLOAD" in
+      *'"turn_id"'*)
+        printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+        ;;
+      *)
+        if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+          printf '%s\n' '{"permission":"allow"}'
+        else
+          printf '%s\n' '{"decision":"approve"}'
+        fi
+        ;;
+    esac
+    hook_spool_end 0 fastpath 2>/dev/null || :
+    exit 0
+  fi
+  # non-match — identical to the Node path's non-answer: cursor must
+  # still say `ask` (silence is a deny there); every other host stays
+  # silent and pairs the start row like any other fast-path exit.
+  cursor_permission_ask
+  hook_spool_end 0 fastpath 2>/dev/null || :
+  exit 0
+}
+
 # --- hook spool (v2) ---------------------------------------------------------
 #
 # Tier-0 telemetry: every launch appends a start row and exactly one end
@@ -529,6 +633,74 @@ fi
 # never bro launches and write nothing.
 hook_spool_start
 
+# --- session mode resolution (Tier-0, specs/bro-izpyk.2.md) -------------------
+# The mode file is the hook-time truth hooks.js also reads — resolving it
+# here lets observe sessions skip Node on events that cannot emit, and
+# lets active modes skip the could-emit fast path entirely. Everything
+# fails open: an unreadable state dir, a missing HOME, a garbage mode
+# file all resolve to observe/unrestricted, never a blocked hook.
+if [ -n "${HOOK_SPOOL_HOST:-}" ] && [ "$HOOK_SPOOL_HOST" != "unknown" ] \
+   && [ -n "${HOOK_SPOOL_SID:-}" ]; then
+  if [ -n "${XDG_STATE_HOME:-}" ]; then
+    _bro_state=$XDG_STATE_HOME/bro
+  elif [ -n "${HOME:-}" ]; then
+    _bro_state=$HOME/.local/state/bro
+  else
+    _bro_state=
+  fi
+  if [ -n "$_bro_state" ]; then
+    _msid=$(printf '%s' "$HOOK_SPOOL_SID" | sed 's/[^A-Za-z0-9_.-]/_/g')
+    HOOK_MODE_FILE=$_bro_state/sessions/$HOOK_SPOOL_HOST-$_msid.mode
+    HOOK_INBOX=$_bro_state/inbox/$HOOK_SPOOL_HOST-$_msid
+    if [ -f "$HOOK_MODE_FILE" ]; then
+      _m=$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q}' "$HOOK_MODE_FILE" 2>/dev/null)
+      case "$_m" in
+        observe|plan|code|review|orchestrate) HOOK_MODE=$_m ;;
+        *) HOOK_MODE=observe ;;   # invalid content → observe, fail-open
+      esac
+    else
+      # no file → modes.default probe: the four project config names at
+      # the session base (plus its main worktree root when resolvable
+      # cheaply) and the two global names; any containing the word
+      # `modes` defers to Node — hooks.js resolves the section,
+      # materializes the file, and updates the ledger. HOOK_MODE stays
+      # empty = unrestricted = today's behavior until the file exists.
+      # The base is the same one Node's hookProjectDir picks for
+      # non-cursor hosts (DEVIN_PROJECT_DIR ?? cwd) — probing $PWD
+      # alone would miss modes.default whenever the host runs the hook
+      # outside the project dir.
+      _mbase=${DEVIN_PROJECT_DIR:-$PWD}
+      _mdirs=$_mbase
+      _mgit=$(git -C "$_mbase" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+      case "$_mgit" in
+        /*) _mroot=${_mgit%/*} ;;
+        ?*) _mroot=$_mbase/$_mgit; _mroot=${_mroot%/*} ;;
+        *)  _mroot= ;;
+      esac
+      [ -n "$_mroot" ] && [ "$_mroot" != "$_mbase" ] && _mdirs="$_mdirs
+$_mroot"
+      _mfound=
+      while IFS= read -r _md; do
+        [ -n "$_md" ] || continue
+        for _mn in bro.config.ts bro.config.json bro.config.local.ts bro.config.local.json; do
+          [ -f "$_md/$_mn" ] || continue
+          grep -qE '(^|[^[:alnum:]_])modes([^[:alnum:]_]|$)' "$_md/$_mn" 2>/dev/null && _mfound=1 && break 2
+        done
+      done <<EOF
+$_mdirs
+EOF
+      if [ -z "$_mfound" ]; then
+        for _mn in config.ts config.json; do
+          _mg="${XDG_CONFIG_HOME:-${HOME:-}/.config}/bro/$_mn"
+          [ -f "$_mg" ] || continue
+          grep -qE '(^|[^[:alnum:]_])modes([^[:alnum:]_]|$)' "$_mg" 2>/dev/null && _mfound=1 && break
+        done
+      fi
+      [ -n "$_mfound" ] || HOOK_MODE=observe
+    fi
+  fi
+fi
+
 case "$EVENT" in
 post-tool|prompt-submit)
   # same base the hook resolves for non-cursor hosts
@@ -538,6 +710,13 @@ post-tool|prompt-submit)
   # the spool+mktemp both failed, or this event never needed one: no
   # payload to inspect, so the checks cannot prove a no-op → defer
   [ "$CAPTURED" = 1 ] || NEED_NODE=1
+
+  # an ACTIVE session mode always reaches Node — the could-emit checks
+  # below are the observe/unrestricted fast path only (specs/bro-izpyk.2.md)
+  case "$HOOK_MODE" in
+    observe|'') ;;
+    *) NEED_NODE=1 ;;
+  esac
 
   # foreign-schema payload — cursor/codex need schema translation, the
   # hydrate leg, and CURSOR_PROJECT_DIR/workspace_roots resolution;
@@ -784,7 +963,10 @@ EOF
     # exists while a collected def targets that event, and .trace marks
     # a def whose match clause reads the session trace — post-tool must
     # then reach Node so the journal it evaluates stays complete.
-    if [ -z "$NEED_NODE" ]; then
+    # observe never runs guards (guardLines returns []), so its stamp
+    # can never appear — checking it would pin NEED_NODE forever and
+    # defeat the observe fast path.
+    if [ -z "$NEED_NODE" ] && [ "$HOOK_MODE" != observe ]; then
       GUARDSD=$HOOKS/guards
       if [ ! -f "$GUARDSD/.stamp" ]; then
         NEED_NODE=1
@@ -873,12 +1055,66 @@ EOF
     NEED_NODE=1
   fi
 
+  # `bro mode <name>` typed into the session binds through the post-tool
+  # hook — a fast-path exit would swallow the write, so the command
+  # itself forces Node (specs/bro-izpyk.2.md). Only the tool_input.command
+  # field is scanned (prompt text mentioning "bro mode" must not pay
+  # Node); Node's parseModeCommand does the real parse — a false
+  # positive here just runs the hook it would have run anyway.
+  if [ -z "$NEED_NODE" ]; then
+    _mode_cmd=$(printf %s "$PAYLOAD" \
+      | grep -oE '"command"[[:space:]]*:[[:space:]]*"[^"]*"' 2>/dev/null \
+      | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+    case "$_mode_cmd" in *\\*) _mode_cmd= ;; esac
+    [ -n "$_mode_cmd" ] \
+      && printf %s "$_mode_cmd" \
+        | grep -qE '(^|[^[:alnum:]_-])bro(@[^[:space:];&|`$()<>\\]+)?([[:space:]]+[^[:space:];&|`$()<>\\]+)*[[:space:]]+mode([[:space:]]|$)' \
+      && NEED_NODE=1
+  fi
+
+  # the F4 per-session inbox drop wakes the session — non-empty means
+  # Node must run so the drain delivers (F2 only wires the wake)
+  if [ -z "$NEED_NODE" ] && [ -n "$HOOK_INBOX" ] && [ -s "$HOOK_INBOX" ]; then
+    NEED_NODE=1
+  fi
+
   if [ -z "$NEED_NODE" ]; then
     # resolved to a shell no-op — still a firing: pair the start row so
     # observe-mode volume reaches the ledger instead of looking like a
     # host kill
     hook_spool_end 0 fastpath
     exit 0
+  fi
+  ;;
+session-start|post-compaction|pre-compact|stop)
+  # observe is fully passive (specs/bro-izpyk.2.md): no rehydration, no
+  # goal reminder, no stop gates — these events cannot emit anything a
+  # passive session needs, so they never pay Node. An inbox drop or a
+  # pending user-level mailbox message falls through to Node instead.
+  # pre-tool is deliberately absent: the safety vetoes (session-cap)
+  # stay live in every mode. Unresolved modes ('' = sid-less, host-
+  # unknown, or a modes.default deferral) keep today's Node path.
+  if [ "$HOOK_MODE" = observe ]; then
+    if [ -n "$HOOK_INBOX" ] && [ -s "$HOOK_INBOX" ]; then
+      : # inbox drop — Node drains it
+    elif [ -n "${XDG_STATE_HOME:-}${HOME:-}" ] \
+         && mailbox_pending "${XDG_STATE_HOME:-$HOME/.local/state}/bro/notify"; then
+      : # user-level mailbox has mail — Node drains it
+    else
+      hook_spool_end 0 fastpath
+      cursor_permission_ask
+      exit 0
+    fi
+  fi
+  ;;
+permission)
+  # observe answers in Tier-0 (specs/bro-izpyk.2.md): the conservative
+  # self-tool approve / cursor ask / silence triple mirrors emitPermission
+  # without Node. Every other mode reaches Node unchanged — including
+  # the session-cap refusal the permission path carries for pre-tool-
+  # less hosts.
+  if [ "$HOOK_MODE" = observe ]; then
+    permission_shell_answer
   fi
   ;;
 *) ;;

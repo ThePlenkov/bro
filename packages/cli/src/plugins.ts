@@ -83,6 +83,7 @@ import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
+import { runModeCommand } from './commands/mode.ts';
 import { runSessionsCommand } from './commands/sessions.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
 import { runGoalCommand } from './commands/goal.ts';
@@ -384,6 +385,33 @@ export const PLUGINS: BroPlugin[] = [
       json: 'schemas/cli/sessions.schema.json',
       exits: {
         0: 'sessions printed',
+        1: 'ledger unavailable',
+        2: 'usage',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'mode',
+    group: 'fleet',
+    summary:
+      'Per-session behaviour mode — observe | plan | code | review | orchestrate; get, set, list, clear, render snapshots [--json]',
+    run: argv => runModeCommand(argv),
+    contract: {
+      flags: {
+        '--json': 'mode payload as JSON — get: {session, warnings}; list: {modes, warnings}',
+        '--session <sid>': 'target session id — default: session env / hook identity',
+        '--host <h>': 'target host (claude, codex, cursor, devin, …)',
+        '--mode <m>': 'render only this mode (bro mode render)',
+      },
+      subs: {
+        get: {},
+        list: {},
+        clear: {},
+        render: {},
+      },
+      json: 'schemas/cli/mode.schema.json',
+      exits: {
+        0: 'mode printed/set/cleared/rendered — or hook-binding notice',
         1: 'ledger unavailable',
         2: 'usage',
       },

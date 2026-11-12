@@ -9,6 +9,7 @@ import {
   facadeAuth,
   isOwnClaim,
   parallelWorkLines,
+  postToolLines,
   preToolVerdicts,
   promptContextLines,
   registerConnector,
@@ -252,6 +253,55 @@ describe('connectors', () => {
     const dir = process.cwd();
     assert.ok((await sessionStartLines({ dir })).includes('acme: 2 assigned'));
     assert.ok((await parallelWorkLines({ dir })).includes('acme: plane-mq claimed'));
+  });
+
+  test('activeIn gates each probe kind by ctx.mode (specs/bro-izpyk.2.md)', async () => {
+    const ran: string[] = [];
+    registerConnector({
+      name: 'acme-modes',
+      activeIn: {
+        sessionStart: ['code'],
+        postTool: ['plan', 'code'],
+        // parallelWork undeclared → runs in every resolved mode
+      },
+      hooks: () => ({
+        sessionStart: () => {
+          ran.push('sessionStart');
+          return ['acme-modes: start'];
+        },
+        parallelWork: () => {
+          ran.push('parallelWork');
+          return ['acme-modes: parallel'];
+        },
+        postTool: () => {
+          ran.push('postTool');
+          return ['acme-modes: post'];
+        },
+      }),
+    });
+    const dir = process.cwd();
+    // observe — only the undeclared kind runs (other connectors may
+    // still contribute their own lines; assert on OUR marker)
+    ran.length = 0;
+    assert.ok(!(await sessionStartLines({ dir, mode: 'observe' })).includes('acme-modes: start'));
+    assert.ok(!(await postToolLines({ dir, mode: 'observe' })).includes('acme-modes: post'));
+    assert.ok((await parallelWorkLines({ dir, mode: 'observe' })).includes('acme-modes: parallel'));
+    assert.deepEqual(ran.sort(), ['parallelWork']);
+    // code — every declared kind runs
+    ran.length = 0;
+    assert.ok((await sessionStartLines({ dir, mode: 'code' })).includes('acme-modes: start'));
+    assert.ok((await postToolLines({ dir, mode: 'code' })).includes('acme-modes: post'));
+    assert.ok((await parallelWorkLines({ dir, mode: 'code' })).includes('acme-modes: parallel'));
+    assert.deepEqual(ran.sort(), ['parallelWork', 'postTool', 'sessionStart']);
+    // plan — sessionStart stays gated, postTool joins
+    ran.length = 0;
+    assert.ok(!(await sessionStartLines({ dir, mode: 'plan' })).includes('acme-modes: start'));
+    assert.ok((await postToolLines({ dir, mode: 'plan' })).includes('acme-modes: post'));
+    // undefined mode (library callers) — unrestricted, everything runs
+    ran.length = 0;
+    assert.ok((await sessionStartLines({ dir })).includes('acme-modes: start'));
+    assert.ok((await postToolLines({ dir })).includes('acme-modes: post'));
+    unregisterConnector('acme-modes');
   });
 
   test("facadeAuth returns the serving connector's remediation line", () => {

@@ -509,4 +509,13 @@ export const learnConnector: Connector = {
       );
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): session-start and prompt-submit
+  // lesson injection is active rehydration — every active mode gets it,
+  // observe stays passive. postTool is deliberately undeclared: the
+  // trace journal + lesson match are passive learning and run in every
+  // mode, observe included.
+  activeIn: {
+    sessionStart: ['plan', 'code', 'review', 'orchestrate'],
+    promptSubmit: ['plan', 'code', 'review', 'orchestrate'],
+  },
 };

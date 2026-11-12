@@ -109,4 +109,12 @@ export const drillConnector: Connector = {
       ];
     },
   }),
+  // mode gating (specs/bro-izpyk.2.md): drill frames are descent-plane
+  // state — code and orchestrate sessions descend; plan/review/observe
+  // stay passive.
+  activeIn: {
+    sessionStart: ['code', 'orchestrate'],
+    promptSubmit: ['code', 'orchestrate'],
+    stopGate: ['code', 'orchestrate'],
+  },
 };

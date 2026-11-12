@@ -14,6 +14,7 @@
       "members": [
         "fleet",
         "sessions",
+        "mode",
         "delegate",
         "agents",
         "status",
@@ -332,6 +333,36 @@
         "json": "schemas/cli/sessions.schema.json",
         "exits": {
           "0": "sessions printed",
+          "1": "ledger unavailable",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
+    "mode": {
+      "name": "mode",
+      "group": "fleet",
+      "summary": "Per-session behaviour mode — observe | plan | code | review | orchestrate; get, set, list, clear, render snapshots [--json]",
+      "spellings": ["mode", "fleet mode"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "mode payload as JSON — get: {session, warnings}; list: {modes, warnings}",
+          "--session <sid>": "target session id — default: session env / hook identity",
+          "--host <h>": "target host (claude, codex, cursor, devin, …)",
+          "--mode <m>": "render only this mode (bro mode render)"
+        },
+        "subs": {
+          "get": {},
+          "list": {},
+          "clear": {},
+          "render": {}
+        },
+        "json": "schemas/cli/mode.schema.json",
+        "exits": {
+          "0": "mode printed/set/cleared/rendered — or hook-binding notice",
           "1": "ledger unavailable",
           "2": "usage"
         }

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Mode"
+  short_description: "Show or set this session's bro behavior mode — observe is passive, the active modes opt in"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $mode to show this session's effective bro mode."
+policy:
+  allow_implicit_invocation: true
