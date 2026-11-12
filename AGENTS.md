@@ -1,5 +1,13 @@
 # bro — agent's sidekick
 
+<!-- BEGIN bro:sdd -->
+id: BRO-3
+title: bro — agent's sidekick
+area: policy
+status: active
+core: [BRO-1]
+<!-- END bro:sdd -->
+
 `bro` is a CLI carrying agent-workflow mechanics so prompts don't have to:
 review debt on merged PRs, the open-PR review loop, and scoped drill frames
 over beads. In a repo with `bro.config.json` or `.beads/`:

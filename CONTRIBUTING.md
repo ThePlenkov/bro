@@ -1,5 +1,13 @@
 # CONTRIBUTING.md — developing bro
 
+<!-- BEGIN bro:sdd -->
+id: BRO-5
+title: CONTRIBUTING.md — developing bro
+area: policy
+status: active
+core: [BRO-1]
+<!-- END bro:sdd -->
+
 `bro` is the agent's sidekick CLI. Skills are instructions — bro is the hands.
 Heavy mechanics live in `packages/*`; `skills/` holds thin prompt wrappers only.
 

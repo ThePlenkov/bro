@@ -1,5 +1,13 @@
 # Review policy — bro
 
+<!-- BEGIN bro:sdd -->
+id: BRO-4
+title: Review policy — bro
+area: policy
+status: active
+core: [BRO-1]
+<!-- END bro:sdd -->
+
 ## Skip these paths — do not review
 
 Generated or vendored content; reviewing them burns the review budget on
