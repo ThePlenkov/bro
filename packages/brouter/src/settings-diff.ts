@@ -9,7 +9,12 @@
  *
  * The diff says what changed, not how many bytes moved: a block of 547
  * model rows is one line in this diff, and the block itself is still
- * printed on its own.
+ * printed on its own. What the one line cannot say is WHICH rows the
+ * write takes — the block is regenerated, not accumulated, so a curated
+ * row the router no longer serves disappears silently. The diff names
+ * those rows: `dropped` carries them, and the formatter prints them
+ * under the change, so the operator reads which curated entries the
+ * write would remove before it lands.
  */
 
 /** One key's change. */
@@ -20,13 +25,54 @@ export interface SettingsChange {
   kind: 'added' | 'removed' | 'changed';
   /** what changed, in the operator's words */
   detail: string;
+  /** the rows the change drops — the curated entries the write takes,
+   *  named (present only when the key holds a row block and rows drop) */
+  dropped?: string[];
+}
+
+/** The rows of a model block — the block's own `options` shape. */
+function blockRows(value: unknown): unknown[] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const options = (value as { options?: unknown }).options;
+  return Array.isArray(options) ? options : undefined;
 }
 
 /** The rows of a model block — the block's own shape. */
 function rowCount(value: unknown): number | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  const options = (value as { options?: unknown }).options;
-  return Array.isArray(options) ? options.length : undefined;
+  const rows = blockRows(value);
+  return rows === undefined ? undefined : rows.length;
+}
+
+/** One row's name — what the operator reads it by. A row is named by its
+ *  own id field (`model`, then `id`, then `name`), by itself when it is a
+ *  scalar, and by its JSON when it is neither: a row the diff cannot name
+ *  is a row the operator cannot check. The name is the row's IDENTITY —
+ *  a row the write still serves keeps its place even when the write
+ *  refreshes its label or handling; only a name gone from the new block
+ *  is a dropped row. */
+function rowName(row: unknown): string {
+  if (typeof row === 'object' && row !== null) {
+    const record = row as Record<string, unknown>;
+    for (const key of ['model', 'id', 'name']) {
+      const value = record[key];
+      if (typeof value === 'string' && value !== '') return value;
+    }
+    return JSON.stringify(row);
+  }
+  return String(row);
+}
+
+/** The names of the rows `before` carries that `after` does not — the
+ *  curated entries the write takes with it, in the file's own order.
+ *  Undefined when the before-value holds no row block or nothing drops:
+ *  `dropped` absent means the change removes no rows, and an empty list
+ *  would say the same thing louder. */
+function droppedRows(before: unknown, after: unknown): string[] | undefined {
+  const was = blockRows(before);
+  if (was === undefined) return undefined;
+  const now = new Set((blockRows(after) ?? []).map(rowName));
+  const dropped = [...new Set(was.map(rowName).filter(name => !now.has(name)))];
+  return dropped.length === 0 ? undefined : dropped;
 }
 
 /** One value, said in a few words. */
@@ -69,10 +115,14 @@ function changeOf(
     return { key, kind: 'added', detail: summarize(now) };
   }
   if (JSON.stringify(was) === JSON.stringify(now)) return undefined;
+  // the rows the new block no longer carries — named, so the operator
+  // reads which curated entries the write takes
+  const dropped = droppedRows(was, now);
   return {
     key,
     kind: 'changed',
     detail: `${summarize(was)} → ${summarize(now)}`,
+    ...(dropped === undefined ? {} : { dropped }),
   };
 }
 
@@ -85,7 +135,14 @@ function removalsOf(
     .filter(key => !Object.hasOwn(after, key))
     .map(key => {
       const was = before[key];
-      return { key, kind: 'removed' as const, detail: summarize(was) };
+      // the whole key goes — every row it carried goes with it
+      const dropped = droppedRows(was, undefined);
+      return {
+        key,
+        kind: 'removed' as const,
+        detail: summarize(was),
+        ...(dropped === undefined ? {} : { dropped }),
+      };
     });
 }
 
@@ -100,9 +157,20 @@ export function settingsDiff(
   return [...changed, ...removalsOf(before, after)];
 }
 
-/** The diff, as the operator reads it — one line per changed key. */
+/** The diff, as the operator reads it — one line per changed key, the
+ *  dropped rows named under the change that takes them. No cap on the
+ *  list: a truncated list would hide exactly the rows the diff exists
+ *  to name. */
 export function formatSettingsDiff(path: string, changes: SettingsChange[]): string {
   if (changes.length === 0) return `${path}: no change`;
-  const lines = changes.map(c => `  ${c.key}: ${c.kind} — ${c.detail}`);
+  const lines = changes.flatMap(change => {
+    const head = `  ${change.key}: ${change.kind} — ${change.detail}`;
+    if (change.dropped === undefined) return [head];
+    return [
+      head,
+      `    dropped ${change.dropped.length} row(s):`,
+      ...change.dropped.map(name => `      - ${name}`),
+    ];
+  });
   return [`${path}:`, ...lines].join('\n');
 }
