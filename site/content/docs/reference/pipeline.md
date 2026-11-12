@@ -1,11 +1,11 @@
 ---
 title: "bro pipeline"
-description: "Pipeline customer surface — run|accept|answer"
+description: "Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker"
 ---
 
-**`bro pipeline`** — Pipeline customer surface — run|accept|answer
+**`bro pipeline`** — Pipeline surface — run|accept|answer|wake: queue→run starter, verdict store, settled-run waker
 
-`bro pipeline run|accept|answer`
+`bro pipeline run|accept|answer|wake`
 
 | | |
 | --- | --- |

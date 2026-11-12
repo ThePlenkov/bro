@@ -95,8 +95,10 @@ export interface JournalLocator {
 }
 
 /** Run ids name a file — bound them to a path-safe token (the default
- *  `mintRunId` hex always passes). */
-const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+ *  `mintRunId` hex always passes). Exported for the waker's mark-file
+ *  writer, which derives run ids from journal filenames but must not
+ *  trust that forever. */
+export const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
 
 /** `<git-common>/bro/pipeline/` — the shared plane every pipeline
  *  file lives in (journals, customer channels): linked worktrees see
