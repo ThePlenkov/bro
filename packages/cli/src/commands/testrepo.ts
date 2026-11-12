@@ -1036,6 +1036,8 @@ const facade = {
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
       // who landed it — the host's merge record (GitHub's mergedBy.login)
       mergedBy: per.mergedBy ?? s.mergedBy,
+      // the review verdict axis (bro-n1foa) — seeded flat or per-PR
+      reviewDecision: per.reviewDecision ?? s.reviewDecision,
       ...over,
     }
   }),
@@ -1113,6 +1115,52 @@ const facade = {
   }),
   resolveThread: () => {},
   replyThread: () => {},
+  // the standing-veto probe + dismissal (bro-n1foa) — host.json carries
+  // the reviews verbatim under vetoReviews; dismissReview records the
+  // call and clears the entry, moving reviewDecision when the last
+  // veto lifts so a post-dismiss act status reads the new world
+  vetoReviews: async (t) =>
+    withState((s) => {
+      // readQueues.vetoReviews — the same mid-flight race scripting as
+      // readQueues.threads: each call shifts one list, so a test can
+      // script 'stale at the first probe, live at the pre-dismissal
+      // re-read' (the TOCTOU narrowing, codeant/coderabbit round)
+      const vq = s.readQueues?.vetoReviews
+      if (Array.isArray(vq) && vq.length > 0) {
+        s.readQueues.vetoReviews = vq.slice(1)
+        return (vq[0] ?? []).map((v) => ({ ...v }))
+      }
+      const per = s.prs
+        ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
+        : {}
+      return ((per.vetoReviews ?? s.vetoReviews) ?? []).map((v) => ({ ...v }))
+    }),
+  dismissReview: (t, reviewId, message) =>
+    withState((s) => {
+      s.dismissals = (s.dismissals ?? []).concat([{ pr: t.pr, review: reviewId, message }])
+      const drop = (list) => (list ?? []).filter((v) => v.id !== reviewId)
+      const settle = (entry) => {
+        // settle the SAME effective list vetoReviews() resolves —
+        // entry.vetoReviews ?? s.vetoReviews — or an entry inheriting
+        // the flat list drops to [] and its surviving live vetoes
+        // vanish while reviewDecision still flips (codeant/coderabbit
+        // on PR #1020). The filtered result persists on the selected
+        // PR's entry only; s.vetoReviews stays for other inheritors.
+        const vetoes = drop(entry.vetoReviews ?? s.vetoReviews)
+        entry.vetoReviews = vetoes
+        if (vetoes.length === 0 && entry.reviewDecision === 'CHANGES_REQUESTED') {
+          entry.reviewDecision = 'REVIEW_REQUIRED'
+        }
+      }
+      // only the targeted PR's entry settles — a dismissal on PR 7 must
+      // never rewrite PR 8's standing veto (multi-PR gate fidelity)
+      if (s.prs) {
+        const p = Object.values(s.prs).find((p) => p.number === t.pr)
+        if (p) settle(p)
+      } else {
+        settle(s)
+      }
+    }),
   // per-PR labels/body — the prs map's entries carry them; the flat
   // single-PR path uses s.labels/s.prBody (spec bro-c650l ownership)
   labels: (t) => {

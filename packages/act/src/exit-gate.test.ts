@@ -67,9 +67,80 @@ describe('evaluateExitGate', () => {
     const g = evaluateExitGate(open({ reviewDecision: 'CHANGES_REQUESTED', openThreads: 0 }));
     assert.equal(g.ok, false);
     assert.match(g.blockers[0]!, /CHANGES_REQUESTED/);
-    // APPROVED and a missing decision never block
+    // APPROVED, REVIEW_REQUIRED and a missing decision never block
     assert.equal(evaluateExitGate(open({ reviewDecision: 'APPROVED' })).ok, true);
+    assert.equal(evaluateExitGate(open({ reviewDecision: 'REVIEW_REQUIRED' })).ok, true);
     assert.equal(evaluateExitGate(open()).ok, true);
+  });
+
+  it('names the stale/live veto split when the probe enumerated it', () => {
+    // a stale veto is one `bro act dismiss` away; a live one waits on
+    // re-review — the blocker carries both halves when both stand
+    const staleOnly = evaluateExitGate(
+      open({
+        reviewDecision: 'CHANGES_REQUESTED',
+        vetoReviews: [
+          {
+            id: 'PRR_1',
+            author: 'kody-ai',
+            submittedAt: '2026-10-01T00:00:00Z',
+            commitSha: 'b'.repeat(40),
+            threads: 15,
+            stale: true,
+          },
+        ],
+      })
+    );
+    assert.equal(staleOnly.ok, false);
+    assert.match(staleOnly.blockers[0]!, /1 stale veto\(s\) by kody-ai/);
+    assert.match(staleOnly.blockers[0]!, /bro act dismiss 1/);
+    const liveOnly = evaluateExitGate(
+      open({
+        reviewDecision: 'CHANGES_REQUESTED',
+        vetoReviews: [
+          {
+            id: 'PRR_2',
+            author: 'bob',
+            submittedAt: '2026-10-01T00:00:00Z',
+            commitSha: 'b'.repeat(40),
+            threads: 2,
+            stale: false,
+          },
+        ],
+      })
+    );
+    assert.match(liveOnly.blockers[0]!, /1 live veto\(s\) by bob — wait for re-review/);
+    assert.doesNotMatch(liveOnly.blockers[0]!, /act dismiss/);
+    const mixed = evaluateExitGate(
+      open({
+        reviewDecision: 'CHANGES_REQUESTED',
+        vetoReviews: [
+          {
+            id: 'PRR_1',
+            author: 'kody-ai',
+            submittedAt: '2026-10-01T00:00:00Z',
+            commitSha: 'b'.repeat(40),
+            threads: 15,
+            stale: true,
+          },
+          {
+            id: 'PRR_2',
+            author: 'bob',
+            submittedAt: '2026-10-01T00:00:00Z',
+            commitSha: 'b'.repeat(40),
+            threads: 2,
+            stale: false,
+          },
+        ],
+      })
+    );
+    assert.match(mixed.blockers[0]!, /stale veto\(s\) by kody-ai/);
+    assert.match(mixed.blockers[0]!, /live veto\(s\) by bob/);
+    // an enumerated-but-empty list (veto already cleared) still
+    // blocks — the host says CHANGES_REQUESTED until the next fetch,
+    // and the generic wording covers the unenumerated case too
+    const empty = evaluateExitGate(open({ reviewDecision: 'CHANGES_REQUESTED', vetoReviews: [] }));
+    assert.match(empty.blockers[0]!, /dismiss a stale review or wait for re-review/);
   });
 
   it('is not blocked by stale pending statuses on a merged PR', () => {

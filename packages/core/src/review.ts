@@ -88,6 +88,43 @@ export interface ApprovalProbeOpts {
   approvers?: readonly string[];
 }
 
+/** A standing CHANGES_REQUESTED review — the host veto behind
+ *  `reviewDecision=CHANGES_REQUESTED` (bro-n1foa). `id` is the host's
+ *  opaque review node id — the dismissal handle. `stale` marks the
+ *  dismissible case: at least one thread the review's comments reference
+ *  exists and EVERY one is resolved AND outdated. Zero referenced
+ *  threads is NOT stale — a body-only veto's objection can live in the
+ *  review body with no thread anchor, and staleness needs positive
+ *  evidence, never absence of it (dismissal is destructive-leaning). */
+export interface VetoReview {
+  /** The host's review node id — pass to `dismissReview` verbatim. */
+  id: string;
+  /** Reviewer login as the host reports it ('unknown' when the account
+   *  is unattributable — the veto still stands on the host). */
+  author: string;
+  /** ISO timestamp the review was submitted — '' when unbound. */
+  submittedAt: string;
+  /** Head sha the review was submitted against — '' when the host
+   *  can't bind it. */
+  commitSha: string;
+  /** Threads the review's comments reference — 0 means the veto
+   *  carries no thread evidence (a body-only objection), which reads
+   *  LIVE: no thread anchor is not proof the ask went stale. */
+  threads: number;
+  /** ≥1 referenced thread AND every one resolved AND outdated — the
+   *  stale-review rule. Resolved-but-current does not count: a "won't
+   *  fix" resolve on live code is not evidence the veto's ask went
+   *  stale. */
+  stale: boolean;
+  /** The review's body text, verbatim — '' or absent when the host
+   *  can't provide it. Thread refs only cover INLINE objections; a
+   *  body-level ask ("also run a security audit") is invisible to the
+   *  stale rule, so consumers surfacing a dismissal decision MUST show
+   *  this — the human/agent dismissing is the decision point and needs
+   *  the whole objection, not just its threaded half. */
+  body?: string;
+}
+
 /** One review thread — `comment` is the thread's first comment (what
  *  consumers read); `comments` is the full ordered history, which the
  *  act gate needs to tell a thread that was resolved and then
@@ -269,6 +306,16 @@ export interface ReviewFacade {
    *  shape typechecking, and the fetch normalizes it away. */
   humanApproved?(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict | boolean;
   humanApprovedAsync?(t: PrTarget, opts?: ApprovalProbeOpts): Promise<ApprovalVerdict | boolean>;
+  /** The standing CHANGES_REQUESTED reviews on the PR — latest decision
+   *  review per reviewer, each annotated with thread staleness (the
+   *  dismissible set behind reviewDecision=CHANGES_REQUESTED,
+   *  bro-n1foa). Optional + lazy like humanApproved: probed only when
+   *  the gate sees the veto — every other read pays nothing. A host
+   *  without the probe leaves the veto undifferentiated: the gate
+   *  still blocks on reviewDecision, `act dismiss` reports the host
+   *  unsupported. Fails closed — a truncated page throws, never a
+   *  partial veto list. */
+  vetoReviews?(t: PrTarget): Promise<VetoReview[]>;
   /** PR detail for harvest — throws when the PR isn't merged/closed in a
    *  harvestable state or a MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo;
@@ -320,6 +367,13 @@ export interface ReviewFacade {
   reviewThreads(t: PrTarget): Promise<ReviewThread[]>;
   resolveThread(id: string, unresolve?: boolean): void;
   replyThread(id: string, body: string): void;
+  /** Dismiss a review — clears its standing verdict on the host so
+   *  reviewDecision can move (the GitHub `dismissPullRequestReview`
+   *  mutation; `reviewId` is the VetoReview.id the probe reported).
+   *  `message` is the dismissal note the host records — REQUIRED by
+   *  the host contract, so callers always pass one. Optional — a host
+   *  without review dismissal can't clear vetoes programmatically. */
+  dismissReview?(t: PrTarget, reviewId: string, message: string): void;
 
   labels(t: PrTarget): string[];
   prUpdatedAt(t: PrTarget): string | null;

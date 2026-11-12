@@ -358,6 +358,7 @@ export type {
   ReviewFacade,
   ReviewThread,
   ScanOpts,
+  VetoReview,
 } from './review.ts';
 export {
   countMergesInRange,

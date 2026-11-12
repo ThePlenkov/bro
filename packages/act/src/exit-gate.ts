@@ -47,6 +47,37 @@ function approvalReason(state: PrActState): string {
   return 'approval probe unanswerable';
 }
 
+/** The CHANGES_REQUESTED blocker — names the stale/live veto split
+ *  when the probe enumerated it (bro-n1foa): a stale veto is one
+ *  `bro act dismiss` away from clearing, a live one waits on
+ *  re-review. An unenumerated veto (probe absent, failed, or the host
+ *  can't say) keeps the generic wording — the block itself never
+ *  depended on the enumeration. */
+function changesRequestedBlocker(state: PrActState): string {
+  const vetoes = state.vetoReviews;
+  if (vetoes === undefined || vetoes.length === 0) {
+    return (
+      'reviewDecision=CHANGES_REQUESTED — a reviewer veto stands; ' +
+      'dismiss a stale review or wait for re-review'
+    );
+  }
+  const stale = vetoes.filter(v => v.stale);
+  const live = vetoes.filter(v => !v.stale);
+  const parts: string[] = [];
+  if (stale.length > 0) {
+    parts.push(
+      `${stale.length} stale veto(s) by ${stale.map(v => v.author).join(', ')} — ` +
+        `\`bro act dismiss ${state.pr}\` clears them`
+    );
+  }
+  if (live.length > 0) {
+    parts.push(
+      `${live.length} live veto(s) by ${live.map(v => v.author).join(', ')} — wait for re-review`
+    );
+  }
+  return `reviewDecision=CHANGES_REQUESTED — ${parts.join('; ')}`;
+}
+
 export function evaluateExitGate(
   state: PrActState,
   opts?: { requireApproval?: boolean }
@@ -120,12 +151,11 @@ export function evaluateExitGate(
   // reviewDecision is a third axis beside threads and checks: a
   // standing CHANGES_REQUESTED vetoes the merge on the host even when
   // every thread resolved (bro-n1foa — #931 refused with
-  // open_threads=0). A review whose threads all resolved is stale and
-  // dismissible; anything else waits on the reviewer's re-review.
+  // open_threads=0). A review whose threads all resolved+outdated is
+  // stale and dismissible (`bro act dismiss`); anything else waits on
+  // the reviewer's re-review.
   if (state.reviewDecision === 'CHANGES_REQUESTED') {
-    blockers.push(
-      'reviewDecision=CHANGES_REQUESTED — a reviewer veto stands; dismiss a stale review or wait for re-review'
-    );
+    blockers.push(changesRequestedBlocker(state));
   }
   // act.requireApproval — the hostile-input hardening: agent output
   // never auto-lands without a trusted human's approving review on the
