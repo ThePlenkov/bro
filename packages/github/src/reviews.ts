@@ -574,6 +574,10 @@ export interface PrReviewNode {
   state?: string;
   submittedAt?: string;
   commit?: { oid?: string } | null;
+  /** The review body — free text that can carry an objection no
+   *  thread anchors (the veto staleness rule can't see it; dismissal
+   *  surfaces it for the human decision instead). */
+  body?: string;
   author?: { __typename?: string; login?: string } | null;
 }
 
@@ -668,7 +672,7 @@ export function headApprovalVerdict(
 }
 
 function reviewsQuery(afterClause: string): string {
-  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{id state submittedAt commit{oid} author{__typename login}}}}}}`;
+  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{id state submittedAt commit{oid} body author{__typename login}}}}}}`;
 }
 
 /** `, after: "…"` — the cursor is host data interpolated into a GraphQL
@@ -1104,6 +1108,10 @@ async function vetoReviews(t: PrTarget): Promise<VetoReview[]> {
       submittedAt: v.submittedAt ?? '',
       commitSha: v.commit?.oid ?? '',
       threads: refs.length,
+      // the body rides along verbatim — thread refs can't see a
+      // body-level objection, so the dismissal decision gets the whole
+      // text to read (codeant/coderabbit on PR #1020)
+      body: v.body ?? '',
       // staleness needs POSITIVE evidence — ≥1 referenced thread, all
       // resolved+outdated. Zero refs is NOT stale: a body-only veto's
       // objection can live in the review body with no thread anchor,

@@ -43,6 +43,7 @@ import {
   type ReviewFacade,
   type ReviewThread,
   type TaskRow,
+  type VetoReview,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
@@ -266,6 +267,12 @@ function printStatus(state: PrActState, gate: ExitGate): void {
               : `${v.threads} referenced thread(s) not all settled`
           }) — wait for re-review`
     );
+    // the review body can carry an objection no thread anchors — show
+    // it so a "stale" label is never read without the whole ask
+    const body = v.body?.replace(/\s+/g, ' ').trim();
+    if (body) {
+      console.log(`    body: "${body.length > 120 ? `${body.slice(0, 120)}…` : body}"`);
+    }
   }
   const live = listWatches(process.cwd()).filter(l => l.alive && l.watch.pr === state.pr);
   console.log(
@@ -1803,6 +1810,18 @@ function cmdReply(argv: string[]): void {
  *  review history reads honestly afterwards. */
 const DEFAULT_DISMISS_MESSAGE = 'stale review — all referenced threads resolved (bro act dismiss)';
 
+/** One-line body excerpt for veto display — a review body can carry
+ *  an objection no thread anchors (the stale rule only sees threaded
+ *  asks), so every dismissal decision surfaces the whole text for the
+ *  human/agent reading it (codeant/coderabbit on PR #1020). */
+const vetoBodyNote = (v: VetoReview, max = 160): string => {
+  const b = v.body?.replace(/\s+/g, ' ').trim();
+  if (!b) {
+    return '';
+  }
+  return ` — body: "${b.length > max ? `${b.slice(0, max)}…` : b}"`;
+};
+
 /**
  * `bro act dismiss` — clear STALE standing veto reviews
  * (reviewDecision=CHANGES_REQUESTED whose referenced threads are all
@@ -1840,7 +1859,7 @@ async function cmdDismiss(argv: string[]): Promise<void> {
   const vetoes = await rev.vetoReviews(t);
   const stale = vetoes.filter(v => v.stale);
   // stale ⇒ ≥1 referenced thread — the count is always real here
-  const describe = (v: (typeof stale)[number]): string =>
+  const describe = (v: VetoReview): string =>
     `${v.author}'s review ${v.id} — ${v.threads} thread(s) resolved+outdated`;
   if (argv.includes('--dry-run')) {
     if (stale.length === 0) {
@@ -1852,7 +1871,7 @@ async function cmdDismiss(argv: string[]): Promise<void> {
       return;
     }
     for (const v of stale) {
-      console.log(`would dismiss ${describe(v)}`);
+      console.log(`would dismiss ${describe(v)}${vetoBodyNote(v)}`);
     }
     return;
   }
@@ -1864,9 +1883,33 @@ async function cmdDismiss(argv: string[]): Promise<void> {
     );
     return;
   }
+  // re-read immediately before mutating: a thread reopened (or a fresh
+  // objection posted) between the first probe and the dismissal loop
+  // must not be cleared off a stale snapshot — the window can't fully
+  // close without a host lock, but this narrows it to the mutation
+  // call itself (coderabbit on PR #1020). The fresh veto objects are
+  // the ones dismissed — author/threads may have moved too.
+  const fresh = await rev.vetoReviews(t);
+  const stillStale = new Map(fresh.filter(v => v.stale).map(v => [v.id, v]));
+  const toDismiss = stale
+    .map(v => stillStale.get(v.id))
+    .filter((v): v is VetoReview => v !== undefined);
+  for (const v of stale) {
+    if (!stillStale.has(v.id)) {
+      console.log(`act: ${describe(v)} no longer stale on re-read — skipped`);
+    }
+  }
+  if (toDismiss.length === 0) {
+    console.log('act dismiss: no veto still stale — nothing dismissed');
+    return;
+  }
   const message = flag(argv, '--message') ?? DEFAULT_DISMISS_MESSAGE;
   let failed = 0;
-  for (const v of stale) {
+  for (const v of toDismiss) {
+    // the body surfaces BEFORE the mutation — a body-level objection is
+    // invisible to the thread rule, so the operator/agent deciding the
+    // dismissal reads the whole review here
+    console.log(`dismissing ${describe(v)}${vetoBodyNote(v)}`);
     try {
       rev.dismissReview!(t, v.id, message);
       console.log(`act: dismissed ${describe(v)}`);
@@ -1887,7 +1930,7 @@ async function cmdDismiss(argv: string[]): Promise<void> {
   // must fetch, not serve the pre-dismissal veto for up to a TTL
   dropActState(t);
   if (failed > 0) {
-    console.error(`act dismiss: ${failed} of ${stale.length} dismissal(s) failed`);
+    console.error(`act dismiss: ${failed} of ${toDismiss.length} dismissal(s) failed`);
     process.exitCode = 1;
   }
 }

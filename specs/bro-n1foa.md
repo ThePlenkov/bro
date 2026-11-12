@@ -63,6 +63,22 @@ but nothing could say WHICH review was stale or clear it.
   the record so the report can say "0 referenced threads —
   body-only veto" honestly instead of implying thread evidence
   existed.
+- **The review body rides the record** (`VetoReview.body`) because
+  thread refs only cover INLINE objections — a body-level ask ("also
+  run a security audit") is invisible to the stale rule even when
+  every thread settled (coderabbit-ai on PR #1020). `act status`
+  prints a body excerpt under each veto and `act dismiss` prints it
+  BEFORE mutating, so the dismissal — which stays an explicit
+  operator/agent act — is an informed human decision, not a blind
+  one. The tool provides evidence; it cannot machine-verify free
+  text, so a body that may carry an independent objection is the
+  human's call to dismiss or leave.
+- **Dismissal re-verifies before mutating**: `act dismiss` re-reads
+  `vetoReviews` immediately before the dismissal loop and only
+  clears reviews STILL stale — a thread reopened (or objection
+  reposted) between the first probe and the mutation is skipped and
+  named. The residual window narrows to the mutation call itself;
+  no host lock exists to close it fully.
 - **Fail closed**: a truncated reviews, threads, or comments page
   throws — the state fetch degrades `vetoReviews` to undefined (the
   gate still blocks on `reviewDecision`; only the enumeration is
@@ -95,6 +111,9 @@ but nothing could say WHICH review was stale or clear it.
 - A veto whose only attributed comment sits past a thread's
   comments:first:100 page → still attributed → `stale` computed on
   the full comment set, never the truncated window.
+- A veto stale at the first `act dismiss` probe but live at the
+  pre-mutation re-read → skipped and named, never dismissed off the
+  stale snapshot.
 - Latest-per-reviewer fold: an older CR superseded by the same
   reviewer's APPROVED (or DISMISSED) is not a standing veto.
 - `dismissReview` sends `dismissPullRequestReview` with the review

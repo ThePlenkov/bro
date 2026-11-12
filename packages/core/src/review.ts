@@ -116,6 +116,13 @@ export interface VetoReview {
    *  fix" resolve on live code is not evidence the veto's ask went
    *  stale. */
   stale: boolean;
+  /** The review's body text, verbatim — '' or absent when the host
+   *  can't provide it. Thread refs only cover INLINE objections; a
+   *  body-level ask ("also run a security audit") is invisible to the
+   *  stale rule, so consumers surfacing a dismissal decision MUST show
+   *  this — the human/agent dismissing is the decision point and needs
+   *  the whole objection, not just its threaded half. */
+  body?: string;
 }
 
 /** One review thread — `comment` is the thread's first comment (what

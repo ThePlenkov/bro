@@ -1273,12 +1273,14 @@ const vnode = (
   typename: string,
   state: string,
   sha: string,
-  at: string
+  at: string,
+  body?: string
 ): PrReviewNode => ({
   ...(id !== undefined ? { id } : {}),
   state,
   submittedAt: at,
   commit: { oid: sha },
+  ...(body !== undefined ? { body } : {}),
   author: login === null ? null : { __typename: typename, login },
 });
 
@@ -1418,7 +1420,17 @@ describe('githubReview vetoReviews', { skip: WIN32 }, () => {
   test('a veto whose referenced threads all resolved+outdated reads stale', async () => {
     const p1 = vpage(
       HEAD_SHA,
-      [vnode('PRR_1', 'kody-ai', 'Bot', 'CHANGES_REQUESTED', HEAD_SHA, T('01'))],
+      [
+        vnode(
+          'PRR_1',
+          'kody-ai',
+          'Bot',
+          'CHANGES_REQUESTED',
+          HEAD_SHA,
+          T('01'),
+          'findings inline — also please audit the auth path'
+        ),
+      ],
       null
     );
     const threads = tpage([
@@ -1438,6 +1450,9 @@ describe('githubReview vetoReviews', { skip: WIN32 }, () => {
           commitSha: HEAD_SHA,
           threads: 2,
           stale: true,
+          // the body rides verbatim — a body-level objection is
+          // invisible to the thread rule, so dismissal surfaces it
+          body: 'findings inline — also please audit the auth path',
         });
       },
       { FAKE_GH_REVIEWS_P1: p1, FAKE_GH_VETO_THREADS: threads }

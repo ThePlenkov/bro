@@ -140,4 +140,89 @@ describe('act dismiss — stale veto reviews (bro-n1foa)', () => {
       );
     });
   });
+
+  test('the review body surfaces in status and before every dismissal', () => {
+    const { root, main, state } = fixture();
+    inside(main, root, () => {
+      // a body-level objection is invisible to the thread rule — the
+      // command must print it so the dismissal is an informed decision
+      const bodied = { ...STALE_VETO, body: 'please also run a security audit\non the auth path' };
+      seedVeto(state, [bodied]);
+      const excerpt = /body: "please also run a security audit on the auth path"/;
+      const status = runCli(['act', 'status', '7'], { cwd: main });
+      assert.match(status.stdout, excerpt);
+      const dry = runCli(['act', 'dismiss', '7', '--dry-run'], { cwd: main });
+      assert.match(dry.stdout, /would dismiss kody-ai's review PRR_stale/);
+      assert.match(dry.stdout, excerpt);
+      const done = runCli(['act', 'dismiss', '7'], { cwd: main });
+      assert.equal(done.code, 0, done.stderr);
+      assert.match(done.stdout, /dismissing kody-ai's review PRR_stale/);
+      assert.match(done.stdout, excerpt);
+    });
+  });
+
+  test('a veto that goes live between probe and mutation is skipped, never dismissed', () => {
+    const { root, main, state } = fixture();
+    inside(main, root, () => {
+      // script the mid-flight flip: stale at the first probe, live at
+      // the pre-dismissal re-read — the TOCTOU window the re-read narrows
+      writeHostState(state, {
+        prState: 'OPEN',
+        mergeable: 'MERGEABLE',
+        mergeState: 'CLEAN',
+        reviewDecision: 'CHANGES_REQUESTED',
+        vetoReviews: [STALE_VETO],
+        readQueues: { vetoReviews: [[STALE_VETO], [LIVE_VETO]] },
+      });
+      const r = runCli(['act', 'dismiss', '7'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /no longer stale on re-read — skipped/);
+      assert.match(r.stdout, /no veto still stale — nothing dismissed/);
+      const after = readHostState(state);
+      assert.equal(after.dismissals, undefined);
+      // the seeded veto still stands — nothing was cleared off the
+      // stale snapshot
+      assert.deepEqual(after.vetoReviews, [STALE_VETO]);
+    });
+  });
+
+  test('dismissing on one PR never settles another PR’s standing veto', () => {
+    const { root, main, state } = fixture();
+    inside(main, root, () => {
+      // PR 8 carries CHANGES_REQUESTED with an EMPTY veto list — the
+      // exact shape the fake host used to rewrite on any dismissal
+      writeHostState(state, {
+        prState: 'OPEN',
+        mergeable: 'MERGEABLE',
+        mergeState: 'CLEAN',
+        prs: {
+          'work/pr7': {
+            number: 7,
+            state: 'OPEN',
+            headRef: 'work/pr7',
+            reviewDecision: 'CHANGES_REQUESTED',
+            vetoReviews: [STALE_VETO],
+          },
+          'work/pr8': {
+            number: 8,
+            state: 'OPEN',
+            headRef: 'work/pr8',
+            reviewDecision: 'CHANGES_REQUESTED',
+            vetoReviews: [],
+          },
+        },
+      });
+      const done = runCli(['act', 'dismiss', '7'], { cwd: main });
+      assert.equal(done.code, 0, done.stderr);
+      const after = readHostState(state);
+      const prs = after.prs as Record<string, { reviewDecision?: string; vetoReviews?: unknown[] }>;
+      // PR 7's stale veto cleared and its decision moved…
+      assert.equal(prs['work/pr7']!.reviewDecision, 'REVIEW_REQUIRED');
+      assert.deepEqual(prs['work/pr7']!.vetoReviews, []);
+      // …while PR 8's standing veto is untouched — the dismissal was
+      // scoped to the targeted PR
+      assert.equal(prs['work/pr8']!.reviewDecision, 'CHANGES_REQUESTED');
+      assert.deepEqual(prs['work/pr8']!.vetoReviews, []);
+    });
+  });
 });

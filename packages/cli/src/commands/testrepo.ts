@@ -1121,6 +1121,15 @@ const facade = {
   // veto lifts so a post-dismiss act status reads the new world
   vetoReviews: async (t) =>
     withState((s) => {
+      // readQueues.vetoReviews — the same mid-flight race scripting as
+      // readQueues.threads: each call shifts one list, so a test can
+      // script 'stale at the first probe, live at the pre-dismissal
+      // re-read' (the TOCTOU narrowing, codeant/coderabbit round)
+      const vq = s.readQueues?.vetoReviews
+      if (Array.isArray(vq) && vq.length > 0) {
+        s.readQueues.vetoReviews = vq.slice(1)
+        return (vq[0] ?? []).map((v) => ({ ...v }))
+      }
       const per = s.prs
         ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
         : {}
@@ -1137,10 +1146,14 @@ const facade = {
           entry.reviewDecision = 'REVIEW_REQUIRED'
         }
       }
+      // only the targeted PR's entry settles — a dismissal on PR 7 must
+      // never rewrite PR 8's standing veto (multi-PR gate fidelity)
       if (s.prs) {
-        for (const p of Object.values(s.prs)) settle(p)
+        const p = Object.values(s.prs).find((p) => p.number === t.pr)
+        if (p) settle(p)
+      } else {
+        settle(s)
       }
-      settle(s)
     }),
   // per-PR labels/body — the prs map's entries carry them; the flat
   // single-PR path uses s.labels/s.prBody (spec bro-c650l ownership)

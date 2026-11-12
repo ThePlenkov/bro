@@ -195,7 +195,7 @@ export const PLUGINS: BroPlugin[] = [
             '--message <t>': 'the dismissal note the host records',
           },
           exits: {
-            0: 'stale vetoes dismissed (or none standing)',
+            0: 'stale vetoes dismissed — or none standing/eligible (live vetoes are never dismissed)',
             1: 'host cannot enumerate/dismiss reviews, PR not OPEN, or a dismissal failed',
             2: 'usage — no PR for the current branch',
           },
