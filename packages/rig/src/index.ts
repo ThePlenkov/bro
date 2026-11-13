@@ -46,6 +46,26 @@ export {
   type StackSlot,
   type WorkerRef,
 } from './policies/loop.ts';
+export {
+  buildCiFixerPrompt,
+  buildFixerPrompt,
+  buildRebaseFixerPrompt,
+  buildSastFixerPrompt,
+  drivePolicy,
+  fetchBaseTip,
+  freshDrivePass,
+  runDrive,
+  type BaseTip,
+  type DriveActCfg,
+  type DriveCtx,
+  type DriveDeps,
+  type DrivePass,
+  type DrivePolicy,
+  type DriveSpawnRequest,
+  type DriveWakeReport,
+  type DriveWork,
+  type PrVerdict,
+} from './policies/drive.ts';
 
 // --- fleet lifecycle: the ownership plane (bro-jamp7 slice 2) -------------
 export {

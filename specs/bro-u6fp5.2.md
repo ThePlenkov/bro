@@ -56,7 +56,7 @@ Every external touch the pass makes becomes one of three things:
   `liveWorkEntries`, the fixer plane — `ensureFixerBead`/
   `fixerBeadFor`/`fixerPrFromRef`/`fixerAttemptSpent`/
   `recordFixerAttempt`/`FIXER_LABEL`, `ensureFixerWorktree`,
-  `Policy`, `LoopActCfg` reused as the act-cfg pick). These ride on
+  `Policy`). These ride on
   `DriveDeps` as object fields (`deps.rev`, `deps.store`,
   `deps.stateCache`) or are imported directly.
 - **`DriveDeps` methods** — the cli-module leaves and ambient IO the
@@ -73,7 +73,11 @@ Every external touch the pass makes becomes one of three things:
   and the two signals (`publishAlert`, `signalForeignPush`).
 - **`DriveCtx` run state** — `mainRoot`, `repo`, `host` (the reviews
   connector's name — fixer prompts name host-CLI syntax), `act`
-  (`LoopActCfg`), `merge`, `json`, `connector?`, `occTtlMs`,
+  (`DriveActCfg` — the six normalized act knobs; standalone rather
+  than `LoopActCfg`'s alias because `ignoreChecks` is the
+  `IgnoreCheckRule[]` the config normalizer guarantees, not the
+  wider `IgnoreCheckEntry[]` the fetch opts accept), `merge`, `json`,
+  `connector?`, `occTtlMs`,
   `everySec?`, `litter` (the sweep throttle), and `work` — the
   per-pass `DrivePass` (worktree map, agent/occupancy snapshots,
   watch markers, judge budget, per-PR head SHAs, the open-PR set and
