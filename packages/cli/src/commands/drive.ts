@@ -78,6 +78,7 @@ import {
   busSubscribe,
   checkBeads,
   type ClaimFacade,
+  type ClaimRow,
   ensureAuth,
   facade,
   facadeName,
@@ -538,8 +539,17 @@ function lanePauseTick(ctx: Ctx): void {
 async function litterSweep(ctx: Ctx): Promise<void> {
   const entry = SELF_ENTRY;
   if (entry === null) {
-    // imported by a test harness — no CLI argv to respawn; run in-pass
-    sayLitterSweep(ctx, litterSweepTick(ctx));
+    // imported by a test harness — no CLI argv to respawn; run in-pass.
+    // The child path's claims leg comes via `work prune --loop`; the
+    // in-pass tick prefetches the same union leg from the ctx's own
+    // facade — marker-only only when the ledger is absent (bro-izpyk.10)
+    const claims =
+      ctx.claims === undefined
+        ? undefined
+        : await ctx.claims
+            .list(ctx.project === undefined ? {} : { project: ctx.project })
+            .catch(() => []);
+    sayLitterSweep(ctx, litterSweepTick(ctx, claims));
     return;
   }
   await new Promise<void>(resolvePromise => {
@@ -580,7 +590,7 @@ async function litterSweep(ctx: Ctx): Promise<void> {
  *  "occupied" on every /proc plane until the sweep kills them. Only
  *  reached when SELF_ENTRY is unset (test harness) — the supervisor
  *  path sweeps in a child so the scans never touch the event loop. */
-function litterSweepTick(ctx: Ctx): LitterReap {
+function litterSweepTick(ctx: Ctx, sessionClaims?: ClaimRow[]): LitterReap {
   // the sweep's git helpers narrate via console.log — under --json
   // route them to stderr like the loop audit does, or the verdict
   // stream corrupts
@@ -603,6 +613,7 @@ function litterSweepTick(ctx: Ctx): LitterReap {
       // sweep, which is exactly what the cadence exists for). --once is
       // a foreground pass — the default bound reaps in-pass.
       nxKillWaitMs: ctx.everySec === undefined ? undefined : 0,
+      sessionClaims,
     });
   } finally {
     console.log = log;

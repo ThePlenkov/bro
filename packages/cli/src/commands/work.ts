@@ -964,8 +964,9 @@ function litterFacades(root: string): {
  *  live ledger claims, prefetched once for the sweep. Undefined on any
  *  failure: the marker/registry/plane verdicts still run — a dead
  *  claims store must not make the sweep trust dead sessions LESS, it
- *  just loses the union leg. */
-async function litterClaims(root: string): Promise<ClaimRow[] | undefined> {
+ *  just loses the union leg. Exported for the loop closeout's own
+ *  in-process sweep — the same leg `work prune --loop` threads. */
+export async function litterClaims(root: string): Promise<ClaimRow[] | undefined> {
   try {
     const project = sessionProject(root);
     return await facade('claims', { dir: root }, { prefer: loadConfig(root).connectors }).list(

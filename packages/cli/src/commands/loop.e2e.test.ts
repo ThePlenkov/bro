@@ -11,7 +11,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { agentExitFileName } from '@broject/core';
+import { agentExitFileName, claimsFacade, sessionProject } from '@broject/core';
 import {
   assertLandedBead,
   bead,
@@ -971,6 +971,36 @@ describe('bro loop e2e', () => {
       // the dirty tree stays — a surviving tail, not a silent sweep
       assert.equal(existsSync(dirty), true);
       assert.match(r.stdout, /worktrees: .*main--fx-y \[loop\/fx-y\]/);
+    });
+  });
+
+  test('close-out keeps litter a live ledger claim pins (bro-izpyk.10)', async () => {
+    // codeant #1056: the closeout runs reapLoopLitter in-process — it
+    // must thread the same sessionClaims union `work prune --loop`
+    // gets, or a foreign session's live worktree: claim is invisible
+    // and the sweep reaps the tree out from under it
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-claim', title: 'claimed', status: 'closed' }]);
+    const wt = join(f.root, 'main--fx-claim');
+    git(['worktree', 'add', '-b', 'loop/fx-claim', wt], f.main);
+    // pin the state home so the seeded claim and the spawned loop read
+    // the same ledger db (e2e env mints a fresh one per process)
+    const stateHome = tmpDir('bro-e2e-claims-');
+    f.env['XDG_STATE_HOME'] = stateHome;
+    const project = sessionProject(f.main);
+    const res = await claimsFacade({
+      env: { ...process.env, XDG_STATE_HOME: stateHome },
+    }).claim(
+      `worktree:${wt}`,
+      { host: 'devin', sid: 'sess-keeper' },
+      project === undefined ? {} : { project }
+    );
+    assert.equal(res.ok, true, 'claim seed failed');
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      // never reaped — it surfaces as a surviving worktree tail instead
+      assert.doesNotMatch(r.stdout, /reaped: .*main--fx-claim/);
+      assert.equal(existsSync(wt), true);
+      assert.match(r.stdout, /worktrees: .*main--fx-claim \[loop\/fx-claim\]/);
     });
   });
 });
