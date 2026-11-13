@@ -17,9 +17,10 @@
  * `e2e` throws (a `fail` would loop `work` forever, a `pass` would fake
  * verification), so the pending intent becomes the crash marker and the
  * run parks `attempts-exhausted` for an operator. The accept `emit`
- * transport proper is bro-qjji2.11's; this binds the seam to an
- * idempotent mailbox drop. The resume/wake path is bro-v0pvd.3's — this
- * map only serves FRESH `runPipeline` invocations.
+ * transport is pipeline-emit.ts (bro-qjji2.11): customer-routed —
+ * agent → the A2A session surface, user → notify/mailbox — idempotent
+ * on the bundle's content key. The resume/wake path is bro-v0pvd.3's —
+ * this map only serves FRESH `runPipeline` invocations.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -29,7 +30,6 @@ import {
   type AgentRegistryEntry,
   type DecideResult,
   deriveProviderWalls,
-  dropMailbox,
   type JudgeFacade,
   loadConfig,
   notifyDir,
@@ -82,6 +82,7 @@ import { judgeFacade } from '@broject/judge';
 import { captureLessons } from '@broject/learn';
 import { fleetCapOf, fleetOccupancyFor, loadAgentEnv } from './agent-connectors.ts';
 import { type StepSpawnRequest, spawnStepAgent } from './commands/agents.ts';
+import { pipelineEmit } from './pipeline-emit.ts';
 
 /** The pipeline plane dir — where run journals, customer channels, and
  *  the formula sidecars live (`<git-common>/bro/pipeline`). Reused for
@@ -367,38 +368,17 @@ function fleetEngine(
 
 // --- accept engine -----------------------------------------------------------
 
-/** Idempotent emit — surfaces the evidence bundle on the customer
- *  channel (the notify mailbox for a human customer) keyed by
- *  (runId, stage) so the stage's recheck never double-notifies. The full
- *  emit TRANSPORT (A2A surface, rich notify) is bro-qjji2.11; this binds
- *  the seam. Dedup rides a sentinel beside the pipeline plane. */
-function acceptEmit(dir: string) {
-  return (call: StageCall, bundle: unknown): void => {
-    const plane = pipelinePlaneDir(dir);
-    const sentinel =
-      plane !== null
-        ? join(plane, `.emit-${call.runId}-${call.stage.name}`)
-        : join(notifyDir(dir), `.emit-${call.runId}-${call.stage.name}`);
-    if (existsSync(sentinel)) {
-      return;
-    }
-    const text =
-      `pipeline run ${call.runId} reached the accept gate for ${call.item}.\n\n` +
-      `Evidence bundle:\n${JSON.stringify(bundle, null, 2)}\n\n` +
-      `Record the customer's verdict: bro pipeline accept ${call.item} <accepted|rejected|abandon>`;
-    dropMailbox(notifyDir(dir), text, `pipeline-accept-${call.runId}`);
-    try {
-      writeFileSync(sentinel, new Date().toISOString());
-    } catch {
-      // a sentinel write failure degrades to re-notify on recheck —
-      // noisy but never wrong
-    }
-  };
-}
-
+/** The production emit transport (specs/bro-qjji2.11.md) — routes the
+ *  evidence bundle to the run's customer channel: agent customers get
+ *  the A2A surface (`sendSessionMessage` — session inbox + events
+ *  record), user customers get the notify/mailbox broadcast. Dedup
+ *  rides a content-scoped sentinel beside the pipeline plane so the
+ *  stage's recheck re-emit never double-delivers and a post-rejection
+ *  re-entry with fresh evidence still notifies. The transport itself
+ *  lives in pipeline-emit.ts; this binds the seam. */
 function acceptEngine(dir: string): EngineMap['accept'] {
   return acceptStage({
-    emit: acceptEmit(dir),
+    emit: pipelineEmit({ dir }),
     verdictStore: fileVerdictStore(dir),
   });
 }

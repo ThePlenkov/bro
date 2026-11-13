@@ -108,6 +108,14 @@ export interface TargetDelivery {
   session?: MsgSessionRow;
   to: string;
   inbox: boolean;
+  /** The events `to` is the session KEY (`<host>:<sid>`) — a ledger/bus
+   *  record the mailbox drain's `addressedTo` can never match, so a
+   *  `published` result on this delivery is a record, never receipt.
+   *  Absent means the `to` is the mailbox vocabulary (agentId, raw sid,
+   *  `orchestrator`) the drain can match. Carried through to
+   *  `SentDelivery` so consumers never re-derive the channel by
+   *  re-parsing the address string. */
+  recordOnly?: boolean;
   /** Human label for output — 'claude:abc…' or the raw address. */
   label: string;
   /** A caveat the sender must see — today only the ended-session
@@ -135,6 +143,7 @@ function inboxCapable(r: MsgSessionRow): boolean {
 
 function deliveryFor(r: MsgSessionRow): TargetDelivery {
   const inbox = inboxCapable(r);
+  const sessionKey = key(r);
   // The events `to` picks the ONE channel that can deliver:
   //   inbox row        → the session KEY ('host:sid') — a record the
   //                      mailbox's addressedTo can never match, so the
@@ -145,12 +154,16 @@ function deliveryFor(r: MsgSessionRow): TargetDelivery {
   //                      live channel for a host run.sh cannot prove
   //   'ended' row      → the session key — nothing can deliver to a
   //                      finished session; the record still names it
-  const to = inbox ? key(r) : r.host === 'unknown' && r.state !== 'ended' ? r.sid : key(r);
+  const to = inbox ? sessionKey : r.host === 'unknown' && r.state !== 'ended' ? r.sid : sessionKey;
   return {
     session: r,
     to,
+    // A session-key `to` is the record-only case — flagged here, where
+    // the channel is chosen, so a sid containing ':' cannot blur the
+    // classification downstream
+    ...(to === sessionKey ? { recordOnly: true } : {}),
     inbox,
-    label: key(r),
+    label: sessionKey,
     ...(r.state === 'ended'
       ? { note: 'session ended — recorded only, its hooks will never fire' }
       : {}),
@@ -288,6 +301,11 @@ export interface SentDelivery {
    *  failed; the record is best-effort). 'mailbox' — the events
    *  transport is the only channel. 'inbox+record' — both landed. */
   channel: 'inbox' | 'mailbox' | 'inbox+record';
+  /** Carried from TargetDelivery — the publish went to the session
+   *  key, an address the mailbox drain's `addressedTo` can never
+   *  match: `published` on this row is a ledger/bus record, never
+   *  receipt. */
+  recordOnly?: boolean;
   inboxPath?: string;
   locator?: string;
   published: boolean;
@@ -409,6 +427,7 @@ async function sendOneDelivery(
     label: d.label,
     channel: 'mailbox',
     published: false,
+    ...(d.recordOnly === true ? { recordOnly: true } : {}),
   };
   const inbox = appendDeliveryInbox(d, opts, shared);
   if (inbox.path !== null) {
