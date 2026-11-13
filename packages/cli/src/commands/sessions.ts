@@ -440,9 +440,7 @@ export function sessionTableLines(rows: SessionViewRow[], now: number): string[]
       case 'branch':
         return r.branch ?? '—';
       case 'claims':
-        return r.claims === undefined || r.claims.length === 0
-          ? '—'
-          : r.claims.map(displayClaimUri).join(', ');
+        return !r.claims || r.claims.length === 0 ? '—' : r.claims.map(displayClaimUri).join(', ');
       case 'resume':
         // availability mark only — the full argv lives in --json and
         // `bro sessions resume`/`bro fleet resume` render it for launch

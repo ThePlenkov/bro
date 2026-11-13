@@ -11,7 +11,7 @@
       "items": {
         "type": "object",
         "additionalProperties": true,
-        "required": ["host", "sid", "state", "mode", "lastSeen"],
+        "required": ["host", "sid", "state", "mode", "lastSeen", "claims", "resumeArgv"],
         "properties": {
           "host": { "type": "string" },
           "sid": { "type": "string" },
