@@ -1132,6 +1132,53 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     });
   });
 
+  test('a marked in-process adapter launch journals its own spool pair (bro-izpyk.9)', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const spool = join(f.root, 'adapter.spool');
+      // the adapters' real spawn shape — BRO_HOOK_HOST is the marker the
+      // emit path claims; PROOT/ADAPTER are the enrichment run.sh derives
+      const result = runCli(['hooks', 'post-tool'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's-e2e', tool_name: 'Read' }),
+        env: {
+          BRO_HOOK_SPOOL: spool,
+          BRO_HOOK_HOST: 'pi',
+          BRO_HOOK_PROOT: '/opt/pi-plugin',
+          BRO_HOOK_ADAPTER: '9.9.9',
+          XDG_STATE_HOME: join(f.root, 'xdg-state'),
+        },
+      });
+      assert.equal(result.code, 0, result.stderr);
+      const lines = readFileSync(spool, 'utf8').trim().split('\n');
+      assert.equal(lines.length, 2, lines.join('\n'));
+      const start = lines.at(0)?.split('\t');
+      const end = lines.at(1)?.split('\t');
+      // v2 wire: v2 ts start|end id host sid event pid ppid agent adapter
+      // proot launcher [rc outcome] cwd
+      assert.equal(start?.at(0), 'v2');
+      assert.equal(start?.at(2), 'start');
+      assert.equal(start?.at(4), 'pi');
+      assert.equal(start?.at(5), 's-e2e');
+      assert.equal(start?.at(6), 'post-tool');
+      assert.equal(start?.at(10), '9.9.9'); // adapter version column
+      assert.equal(start?.at(11), '/opt/pi-plugin');
+      assert.equal(end?.at(2), 'end');
+      assert.equal(end?.at(3), start?.at(3)); // same pair id
+      assert.equal(end?.at(13), '0');
+      assert.equal(end?.at(14), 'ok');
+      // the unmarked launch writes nothing — run.sh's own spawn shape
+      const bare = join(f.root, 'bare.spool');
+      const quiet = runCli(['hooks', 'post-tool'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's-e2e', tool_name: 'Read' }),
+        env: { BRO_HOOK_SPOOL: bare, XDG_STATE_HOME: join(f.root, 'xdg-state2') },
+      });
+      assert.equal(quiet.code, 0, quiet.stderr);
+      assert.equal(existsSync(bare), false);
+    });
+  });
+
   test('run.sh spools one fail-open outcome under dash and bash', () => {
     const cases: SpoolScenario[] = [
       {

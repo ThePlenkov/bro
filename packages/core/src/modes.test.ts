@@ -163,6 +163,22 @@ describe('identity', () => {
     assert.equal(hookHostOf({}, {}), 'unknown');
     assert.equal(hookHostOf({}), 'unknown');
   });
+
+  test('hookHostOf honors the explicit BRO_HOOK_HOST marker', () => {
+    // a direct adapter launch stamps its kind on the `bro hooks` spawn —
+    // an explicit claim that wins over every legacy env/payload
+    // inference. Synthetic slugs: the contract is marker precedence, not
+    // which hosts stamp it (adapter-name coverage lives in CLI tests).
+    for (const kind of ['xhost', 'emit-host-9', 'h2']) {
+      assert.equal(hookHostOf({ BRO_HOOK_HOST: kind }), kind);
+    }
+    // precedence: the marker beats a payload fingerprint AND a legacy env
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: 'xhost', CURSOR_PLUGIN_ROOT: '/x' }), 'xhost');
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: 'emit-host-9' }, { turn_id: 't' }), 'emit-host-9');
+    // a malformed marker is ignored — inference proceeds as before
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: 'UPPER!' }), 'unknown');
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: '', CURSOR_PLUGIN_ROOT: '/x' }), 'cursor');
+  });
 });
 
 describe('sessionMode resolution', () => {

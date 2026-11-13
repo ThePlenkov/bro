@@ -43,6 +43,7 @@ import {
   broEnabled,
   callHook,
   contextOf,
+  hookEmitEnv,
   resolveCommand,
   statusCrumb,
   statusJson,
@@ -97,6 +98,10 @@ const LINEAGE_EVENTS = {
 
 /** What a host must supply: the parts that are genuinely its own. */
 export interface BroHostShape<Ctx extends BroContext> {
+  /** The ledger host name — stamped on every `bro hooks` spawn as
+   *  `BRO_HOOK_HOST` so the session ledger sees this host's firings
+   *  (specs/bro-izpyk.9.md). */
+  kind: string;
   /** The host's stop event. */
   stop: string;
   /** Register a handler. */
@@ -114,6 +119,10 @@ export interface BroHostShape<Ctx extends BroContext> {
   /** Whether this stop event is an abort/error the gate must not
    *  resurrect — pi's settle gate is the only host with outcomes. */
   stopAborted?(event: unknown): boolean;
+  /** The npx spec to fall back to — the published version of this adapter.
+   *  sharedBinding forwards it to the binding and stamps its version
+   *  into the hook env's BRO_HOOK_ADAPTER column. */
+  readonly npxPin?: string;
 }
 
 /**
@@ -169,6 +178,8 @@ export function sharedBinding<Ctx extends BroContext>(
       content.push({ type: 'text', text });
       return { content };
     },
+    npxPin: host.npxPin,
+    hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin }),
   };
 }
 
@@ -223,6 +234,9 @@ export interface BroHostBinding<Ctx = unknown> {
   appendToolResult(event: unknown, text: string): unknown;
   /** The npx spec to fall back to — the published version of this adapter. */
   readonly npxPin?: string;
+  /** Env stamped on every `bro hooks` spawn — the `BRO_HOOK_HOST`
+   *  marker block `hookEmitEnv` builds (specs/bro-izpyk.9.md). */
+  readonly hookEnv?: Record<string, string>;
 }
 
 /** The host API surface the shared surfaces need.
@@ -355,7 +369,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return null;
     }
     const cmd = await command();
-    return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs);
+    return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
   };
 
   const paint = (ctx: Ctx): void => {

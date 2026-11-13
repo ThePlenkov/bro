@@ -205,21 +205,48 @@ export async function resolveCommand(opts: ResolveOptions = {}): Promise<Command
 }
 
 /**
+ * The env an in-process adapter stamps on its `bro hooks` spawn so the
+ * CLI's adapter emit path can journal the session into the hook spool
+ * (specs/bro-izpyk.9.md): `BRO_HOOK_HOST` is the ledger host name (and
+ * the launch marker — presence means "direct adapter call, no run.sh"),
+ * `BRO_HOOK_PROOT` this module's own directory (the installed plugin
+ * root), `BRO_HOOK_ADAPTER` the adapter version parsed off the npx pin.
+ * A CLI that predates the marker ignores the env — rollout is safe in
+ * both directions.
+ */
+export function hookEmitEnv(kind: string, opts: { npxPin?: string } = {}): Record<string, string> {
+  const env: Record<string, string> = {
+    BRO_HOOK_HOST: kind,
+    BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
+  };
+  // '@broject/bro@X.Y.Z' → 'X.Y.Z' — the pin is version-synced, so the
+  // stamped version tracks releases without a second source
+  const at = opts.npxPin?.lastIndexOf('@') ?? -1;
+  if (opts.npxPin !== undefined && at > 0) {
+    env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
+  }
+  return env;
+}
+
+/**
  * Run one `bro hooks <event>` with the payload on stdin; resolve null on
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
+ * `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
  */
 export async function callHook(
   command: Command,
   event: string,
   payload: unknown,
   cwd: string,
-  timeoutMs: number
+  timeoutMs: number,
+  extraEnv?: Record<string, string>
 ): Promise<HookControl | null> {
   const { promise, resolve } = Promise.withResolvers<HookControl | null>();
   let child: ChildProcess;
   try {
     child = spawn(command.cmd, [...command.args, 'hooks', event], {
       cwd,
+      env: extraEnv === undefined ? undefined : { ...process.env, ...extraEnv },
       stdio: ['pipe', 'pipe', 'ignore'],
       windowsHide: true,
       detached: process.platform !== 'win32',

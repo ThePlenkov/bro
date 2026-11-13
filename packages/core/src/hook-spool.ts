@@ -1,5 +1,6 @@
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 /**
  * Hook spool — the Tier-0 wire format `hooks/run.sh` appends to
@@ -224,4 +225,84 @@ export function resolveHookSpoolPath(env: NodeJS.ProcessEnv = process.env): stri
 /** Drain order — the rotated `.1` holds older rows than the live file. */
 export function hookSpoolFiles(spoolPath: string): string[] {
   return [`${spoolPath}.1`, spoolPath];
+}
+
+// --- writer ------------------------------------------------------------------
+//
+// run.sh owns the shell-side writer; this is the NODE-side one — the
+// in-process adapters (opencode/kilo/pi/omp) spawn `bro hooks` directly
+// and never touch run.sh, so `bro hooks` emits the same v2 pair for them
+// (specs/bro-izpyk.9.md). Same wire contract, same file, same drain —
+// `parseSpoolLine` round-trips every row below.
+
+/** Mid-row TSV fields must not carry tab/newline — run.sh's
+ *  `_spool_field` does `tr -d '\011\012\015'`; same rule here. `cwd`
+ *  stays last so its own tabs would survive, but the sanitize is cheap
+ *  and a dirty tail only corrupts the free-text field itself. */
+function spoolField(value: string | number | undefined): string {
+  if (value === undefined) {
+    return '';
+  }
+  return String(value).replace(/[\t\n\r]/g, '');
+}
+
+/** One `SpoolRow` → the wire line (with trailing newline). Inverse of
+ *  `parseSpoolLine` — v1 emits the short row, v2 the enriched one; the
+ *  field order is the parser's documented layout verbatim. */
+export function formatSpoolRow(row: SpoolRow): string {
+  const fields: Array<string | number | undefined> =
+    row.version === 2
+      ? [
+          'v2',
+          row.ts,
+          row.phase,
+          row.id,
+          row.host,
+          row.sid,
+          row.event,
+          row.pid,
+          row.ppid,
+          row.agent,
+          row.adapter,
+          row.pluginRoot,
+          row.launcher,
+          ...(row.phase === 'end' ? [row.rc, row.outcome] : []),
+          row.cwd,
+        ]
+      : [
+          'v1',
+          row.ts,
+          row.phase,
+          row.id,
+          row.host,
+          row.event,
+          ...(row.phase === 'end' ? [row.rc, row.outcome] : []),
+          row.cwd,
+        ];
+  return `${fields.map(spoolField).join('\t')}\n`;
+}
+
+/** Append rows to the resolved spool — the emit path's whole write.
+ *  Fail-open like run.sh: a disabled/unwritable spool is a false, never
+ *  a throw (a telemetry problem must not break the hook it guards). */
+export function appendHookSpoolRows(
+  rows: SpoolRow[],
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  const path = resolveHookSpoolPath(env);
+  if (path === null || rows.length === 0) {
+    return false;
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    // one write(2) for the whole batch — O_APPEND makes each call's
+    // offset+data one kernel step, so concurrent writers append rather
+    // than overwrite; POSIX gives no interleave guarantee for regular
+    // files, but a torn row is exactly what parseSpoolLine drops —
+    // a rare lost row, never a corrupted file
+    appendFileSync(path, rows.map(formatSpoolRow).join(''));
+    return true;
+  } catch {
+    return false;
+  }
 }

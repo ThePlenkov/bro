@@ -159,6 +159,8 @@ const NPX_PIN = '@broject/bro@0.3.0';
 function binding(pi: PiApi): BroHostBinding<ExtContext> {
   return {
     ...sharedBinding<ExtContext>({
+      kind: 'pi',
+      npxPin: NPX_PIN,
       stop: 'agent_before_settle',
       on(event, handler) {
         pi.on(event as never, handler as never);
@@ -250,7 +252,6 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
       const filtered = p === '' ? items : items.filter(x => x.startsWith(p));
       return filtered.map(x => ({ label: x, value: x }));
     },
-    npxPin: NPX_PIN,
   };
 }
 

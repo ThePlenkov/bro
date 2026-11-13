@@ -3149,29 +3149,60 @@ async function ledgerDrainCheck(env: NodeJS.ProcessEnv, now: number): Promise<Do
   return check('ledger-drain', 'ok', `ledger keeping up — ${fmtKiB(pending)} spool bytes pending`);
 }
 
-/** `ledger-adapters` — informational skip row: client adapters
- *  (opencode/kilo/pi/omp) spawn `bro hooks` directly and bypass run.sh,
- *  so they write no spool rows and the ledger can't see them — a known
- *  coverage gap (specs/bro-izpyk.1.1.md non-goals), not a silent install.
- *  Named so "why doesn't `bro sessions` show my opencode session" has a
- *  visible answer instead of an installed-but-silent warn that could
- *  never clear. */
+/** The in-process adapters — they spawn `bro hooks` directly and bypass
+ *  run.sh, so their ledger coverage rides on the `BRO_HOOK_HOST` emit
+ *  marker stamped into the installed artifact (specs/bro-izpyk.9.md). */
+const IN_PROCESS_ADAPTERS = new Set(['opencode', 'kilo', 'pi', 'omp']);
+
+/** Does this installed adapter carry the emit marker? File surfaces are
+ *  read directly; opencode's bundle dir is probed through its
+ *  entrypoint `index.ts`. A missing/unreadable artifact answers false —
+ *  the row only runs on rows whose state was non-absent, so a vanished
+ *  file is exactly the stale-install case the warn names. */
+function adapterEmitProbe(path: string): boolean {
+  try {
+    const target = statSync(path).isDirectory() ? join(path, 'index.ts') : path;
+    return readFileSync(target, 'utf8').includes('BRO_HOOK_HOST');
+  } catch {
+    return false;
+  }
+}
+
+/** `ledger-adapters` — do the installed in-process adapters journal
+ *  sessions? Each of opencode/kilo/pi/omp covers itself once its
+ *  installed artifact carries `BRO_HOOK_HOST` — the launch marker the
+ *  CLI's adapter emit path reads (specs/bro-izpyk.9.md). An installed
+ *  artifact without it predates the emit path: installed-but-invisible
+ *  is `ledger-silent`'s exact shape, so it warns with the reinstall
+ *  hint. No in-process adapters → skip; the row exists to answer "why
+ *  doesn't `bro sessions` show my opencode session", not to nag. */
 function ledgerAdaptersCheck(dir: string, env: NodeJS.ProcessEnv): DoctorCheck {
-  const installed = [
-    ...new Set(
-      pluginRows(dir, env)
-        .filter(r => r.state !== 'absent')
-        .map(r => r.client)
-    ),
-  ].sort();
+  const installed = pluginRows(dir, env).filter(
+    r => r.state !== 'absent' && IN_PROCESS_ADAPTERS.has(r.client)
+  );
   if (installed.length === 0) {
-    return check('ledger-adapters', 'skip', 'no client adapters installed');
+    return check('ledger-adapters', 'skip', 'no in-process adapters installed');
+  }
+  // one row per client — a client installed in several scopes shares its
+  // artifact bytes, so coverage dedupes by name
+  const uncovered = [
+    ...new Set(installed.filter(r => !adapterEmitProbe(r.path)).map(r => r.client)),
+  ].sort();
+  const covered = [
+    ...new Set(installed.map(r => r.client).filter(c => !uncovered.includes(c))),
+  ].sort();
+  if (uncovered.length > 0) {
+    return check(
+      'ledger-adapters',
+      'warn',
+      `${uncovered.join(', ')} adapter(s) predate the emit path — the ledger can't see their sessions`,
+      'reinstall to refresh the artifact: `bro plugins install <client>`'
+    );
   }
   return check(
     'ledger-adapters',
-    'skip',
-    `${installed.join(', ')} adapter(s) installed — in-process adapters bypass the hook spool; the ledger can't see them yet`,
-    'adapter spool writes are a follow-up — `bro sessions` will not list these hosts'
+    'ok',
+    `${covered.join(', ')} adapter(s) journal sessions into the ledger`
   );
 }
 

@@ -70,6 +70,8 @@ const NPX_PIN = '@broject/bro@0.3.0';
 function binding(pi: OmpApi): BroHostBinding<OmpContext> {
   return {
     ...sharedBinding<OmpContext>({
+      kind: 'omp',
+      npxPin: NPX_PIN,
       stop: 'session_stop',
       on(event, handler) {
         pi.on(event, handler);
@@ -91,7 +93,6 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
         return stop.stop_hook_active === true;
       },
     }),
-    npxPin: NPX_PIN,
   };
 }
 

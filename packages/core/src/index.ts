@@ -431,6 +431,8 @@ export type {
   LedgerStoreResult,
 } from './ledger-store.ts';
 export {
+  appendHookSpoolRows,
+  formatSpoolRow,
   hookSpoolFiles,
   isSpoolOutcome,
   parseSpoolLine,
@@ -661,6 +663,7 @@ export {
   clearSessionPlanes,
   countSessionReservations,
   isBatchSpawn,
+  normalizeHookPayload,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
@@ -674,6 +677,7 @@ export {
   sessionSlotsDir,
 } from './session-planes.ts';
 export type {
+  CanonicalHookEvent,
   DiscoveredSession,
   ReservationLane,
   SessionPlane,

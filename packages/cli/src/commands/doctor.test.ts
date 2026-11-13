@@ -2324,17 +2324,58 @@ describe('bro doctor', () => {
       assert.match(byName(missing, 'ledger-drain').detail, /no spool file/);
     }));
 
-  test('ledger-adapters: in-process adapters are named as ledger-blind', async () =>
+  test('ledger-adapters: a pre-emit adapter artifact warns with the reinstall hint', async () =>
     withEnv({}, async dir => {
-      // pi's local-scope target — any content is a non-absent row
+      // pi's local-scope target — a non-absent row whose bytes predate
+      // the BRO_HOOK_HOST emit marker (specs/bro-izpyk.9.md)
       mkdirSync(join(dir, '.pi', 'extensions'), { recursive: true });
       writeFileSync(join(dir, '.pi', 'extensions', 'bro.ts'), '// fixture\n');
       const env = ledgerEnv(dir);
       const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
       const c = byName(checks, 'ledger-adapters');
-      assert.equal(c.status, 'skip', JSON.stringify(c));
-      assert.match(c.detail, /pi adapter\(s\) installed/);
-      assert.match(c.detail, /bypass the hook spool/);
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /pi adapter\(s\) predate the emit path/);
+      assert.match(c.hint ?? '', /bro plugins install/);
+    }));
+
+  test('ledger-adapters: an adapter carrying the emit marker reports ok', async () =>
+    withEnv({}, async dir => {
+      mkdirSync(join(dir, '.pi', 'extensions'), { recursive: true });
+      writeFileSync(join(dir, '.pi', 'extensions', 'bro.ts'), "// fixture\nBRO_HOOK_HOST: 'pi'\n");
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-adapters');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+      assert.match(c.detail, /pi adapter\(s\) journal sessions/);
+    }));
+
+  test('ledger-adapters: mixed coverage warns on the stale one only', async () =>
+    withEnv({}, async dir => {
+      // kilo covered (marker in the installed file), pi stale
+      mkdirSync(join(dir, 'config', 'kilo', 'bro'), { recursive: true });
+      writeFileSync(join(dir, 'config', 'kilo', 'bro', 'bro.ts'), "BRO_HOOK_HOST: 'kilo'\n");
+      mkdirSync(join(dir, '.pi', 'extensions'), { recursive: true });
+      writeFileSync(join(dir, '.pi', 'extensions', 'bro.ts'), '// old\n');
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-adapters');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /pi adapter/);
+      assert.doesNotMatch(c.detail, /kilo adapter/);
+    }));
+
+  test('ledger-adapters: opencode coverage probes the bundle index.ts', async () =>
+    withEnv({}, async dir => {
+      // the bundle surface is a directory — the marker lives in the
+      // generated entrypoint, not at the dir level
+      const bundle = join(dir, 'config', 'opencode', 'plugins', 'bro');
+      mkdirSync(bundle, { recursive: true });
+      writeFileSync(join(bundle, 'index.ts'), "BRO_HOOK_HOST: 'opencode'\n");
+      const env = ledgerEnv(dir);
+      const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
+      const c = byName(checks, 'ledger-adapters');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+      assert.match(c.detail, /opencode adapter\(s\) journal sessions/);
     }));
 
   test('ledger-adapters: no adapters installed skips quietly', async () =>
@@ -2343,6 +2384,6 @@ describe('bro doctor', () => {
       const checks = await sessionLedgerChecks(dir, { env, ledger: fixtureLedger(env) });
       const c = byName(checks, 'ledger-adapters');
       assert.equal(c.status, 'skip');
-      assert.match(c.detail, /no client adapters installed/);
+      assert.match(c.detail, /no in-process adapters installed/);
     }));
 });

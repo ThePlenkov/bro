@@ -11,6 +11,7 @@ import {
   clearSessionPlanes,
   countSessionReservations,
   isBatchSpawn,
+  normalizeHookPayload,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
@@ -590,5 +591,37 @@ describe('the work budget lane (bro-tdndq)', () => {
         rmSync(budgetDir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('normalizeHookPayload (bro-izpyk.9)', () => {
+  test('session_id is the canonical sid; tool_name/cwd ride along', () => {
+    assert.deepEqual(normalizeHookPayload({ session_id: 's-1', tool_name: 'Edit', cwd: '/repo' }), {
+      sid: 's-1',
+      tool: 'Edit',
+      cwd: '/repo',
+    });
+  });
+
+  test('alternate identity spellings are honored in order', () => {
+    assert.deepEqual(normalizeHookPayload({ conversation_id: 'c-1' }), { sid: 'c-1' });
+    assert.deepEqual(normalizeHookPayload({ sessionID: 's-2' }), { sid: 's-2' });
+    // session_id wins over the alternates; first non-empty string wins
+    assert.deepEqual(
+      normalizeHookPayload({ session_id: '', conversation_id: 'c-2', sessionID: 's-3' }),
+      { sid: 'c-2' }
+    );
+    assert.deepEqual(normalizeHookPayload({ toolName: 'Bash', session_id: 's' }), {
+      sid: 's',
+      tool: 'Bash',
+    });
+  });
+
+  test('non-object payloads and absent keys normalize to an empty event', () => {
+    for (const p of [null, undefined, 'x', 42, ['a'], {}]) {
+      assert.deepEqual(normalizeHookPayload(p), {});
+    }
+    // non-strings never leak into the canonical event
+    assert.deepEqual(normalizeHookPayload({ session_id: 9, tool_name: {}, cwd: ['/x'] }), {});
   });
 });

@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  appendHookSpoolRows,
+  formatSpoolRow,
   hookSpoolFiles,
   isSpoolOutcome,
   parseSpoolLine,
   resolveHookSpoolPath,
   SPOOL_OUTCOMES,
+  type SpoolRow,
 } from './hook-spool.ts';
 
 test('v1 start and end rows parse with cwd re-joined', () => {
@@ -121,4 +127,121 @@ test('resolveHookSpoolPath honors the env contract', () => {
 
 test('hookSpoolFiles drains the rotated file before the live one', () => {
   assert.deepEqual(hookSpoolFiles('/s/hooks.spool'), ['/s/hooks.spool.1', '/s/hooks.spool']);
+});
+
+// --- writer (bro-izpyk.9) ------------------------------------------------------
+// formatSpoolRow/appendHookSpoolRows are the Node-side Tier-0 writer the
+// in-process adapters' `bro hooks` path uses — run.sh's contract, so the
+// round-trip through parseSpoolLine IS the assertion.
+
+// synthetic host slugs — core tests exercise the wire contract, the
+// real adapter names belong to the CLI/plugin layer
+const V2_START: SpoolRow = {
+  version: 2,
+  ts: 1700000000,
+  phase: 'start',
+  id: 'p-1',
+  host: 'xhost',
+  sid: 'sess-9',
+  event: 'session-start',
+  pid: 4242,
+  ppid: 100,
+  agent: 'agent-x',
+  adapter: '0.3.0',
+  pluginRoot: '/opt/bro',
+  launcher: 'tmux',
+  cwd: '/work/repo',
+};
+
+test('formatSpoolRow round-trips a full v2 pair through parseSpoolLine', () => {
+  const start = parseSpoolLine(formatSpoolRow(V2_START).trimEnd());
+  assert.deepEqual(start, V2_START);
+  const end: SpoolRow = { ...V2_START, ts: 1700000005, phase: 'end', rc: 0, outcome: 'ok' };
+  assert.deepEqual(parseSpoolLine(formatSpoolRow(end).trimEnd()), end);
+});
+
+test('formatSpoolRow emits absent v2 enrichments as empty fields', () => {
+  const row = parseSpoolLine(
+    formatSpoolRow({
+      version: 2,
+      ts: 1,
+      phase: 'start',
+      id: 'i',
+      host: 'yhost',
+      event: 'post-tool',
+      cwd: '/r',
+    }).trimEnd()
+  );
+  assert.deepEqual(row, {
+    version: 2,
+    ts: 1,
+    phase: 'start',
+    id: 'i',
+    host: 'yhost',
+    event: 'post-tool',
+    cwd: '/r',
+    // every enrichment slot parsed to undefined — not a column shift
+    sid: undefined,
+    pid: undefined,
+    ppid: undefined,
+    agent: undefined,
+    adapter: undefined,
+    pluginRoot: undefined,
+    launcher: undefined,
+  });
+});
+
+test('formatSpoolRow writes the v1 layout too', () => {
+  const row: SpoolRow = {
+    version: 1,
+    ts: 2,
+    phase: 'end',
+    id: 'i',
+    host: 'cursor',
+    event: 'post-tool',
+    rc: 0,
+    outcome: 'ok',
+    cwd: '/r',
+  };
+  assert.deepEqual(parseSpoolLine(formatSpoolRow(row).trimEnd()), row);
+});
+
+test('formatSpoolRow strips tab/newline from mid-row fields', () => {
+  const row: SpoolRow = {
+    version: 2,
+    ts: 1,
+    phase: 'start',
+    id: 'i\td',
+    host: 'op\nencode',
+    event: 'ev\r',
+    cwd: '/r',
+  };
+  const line = formatSpoolRow(row);
+  assert.equal(line.split('\t').length, 14, line);
+  assert.equal(line.endsWith('\n'), true);
+  assert.equal(line.includes('i\td'), false);
+});
+
+test('appendHookSpoolRows appends a parseable batch and honors the contract', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-spool-write-'));
+  try {
+    const spool = join(dir, 'nested', 'hooks.spool');
+    const env = { BRO_HOOK_SPOOL: spool, HOME: dir };
+    const pair = [V2_START, { ...V2_START, phase: 'end' as const, rc: 0, outcome: 'ok' as const }];
+    assert.equal(appendHookSpoolRows(pair, env), true);
+    // the parent dir was created; the file parses row-for-row
+    const rows = readFileSync(spool, 'utf8').trim().split('\n').map(parseSpoolLine);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]?.phase, 'start');
+    assert.equal(rows[1]?.outcome, 'ok');
+    // a second append extends, never truncates
+    assert.equal(appendHookSpoolRows([V2_START], env), true);
+    assert.equal(readFileSync(spool, 'utf8').trim().split('\n').length, 3);
+    // disabled / empty / unwritable are false, never a throw
+    assert.equal(appendHookSpoolRows(pair, { BRO_HOOK_SPOOL: '0' }), false);
+    assert.equal(appendHookSpoolRows([], env), false);
+    assert.equal(appendHookSpoolRows(pair, { BRO_HOOK_SPOOL: join(dir, 'x\0y') }), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

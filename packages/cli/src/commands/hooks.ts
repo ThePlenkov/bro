@@ -129,6 +129,7 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
+import { adapterEmitBegin } from './hook-emit.ts';
 import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
 import { drainHookSpool } from '@broject/core';
 import { renderModeSnapshots } from './mode-snapshots.ts';
@@ -2978,85 +2979,109 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // success differently (a boolean field, split event names, or not at
   // all), and policy below must not know which host sent the payload
   const { root, input } = prepareHookInput(event, raw, cursorClient);
-  // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
-  // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
-  // gate for a human session that isn't there, so every event is pure
-  // deadline cost. Only session-lifecycle events skip; the git-hook and
-  // operator paths above stay live — installed shims (provenance, the
-  // shared-ref guard) are a different contract the flag must not weaken.
-  if (process.env.BRO_HOOKS === '0') {
-    answerCursorPermission(event, input);
-    return;
-  }
-  if (!broEnabled(root) || !enterHookProject(root)) {
-    answerCursorPermission(event, input);
-    return;
-  }
-  // session mode — file > `modes.default` > `observe`, resolved once
-  // per event before any probe runs (specs/bro-izpyk.2.md). Every
-  // collector below reads it through hookCtx/ctx.mode; `observe`
-  // sessions get the passive path, mode-active sessions the gated
-  // pipeline + Tier-1 snapshots.
-  resolveHookSessionMode(root, typeof input.session_id === 'string' ? input.session_id : '', raw);
-  perfBuf = [];
-  const t0 = Date.now();
-  const deadlineTimer = nodeSetTimeout(() => {
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-    // the answer goes out before the journal flush — silence on a
-    // permission event is a deny, and a stalled flushPerf must not take
-    // the answer down with it (emit is already synchronous)
-    if (!permissionAnswerEmitted) {
+  // the in-process adapters (opencode/kilo/pi/omp) spawn this command
+  // directly — no run.sh means no shell-side spool pair, so the Node
+  // side journals the same v2 start/end when a session plane claims
+  // the launch via BRO_HOOK_HOST (specs/bro-izpyk.9.md). No-op for
+  // every run.sh host — their launches carry no marker.
+  const emit = adapterEmitBegin(
+    event,
+    raw,
+    typeof input.session_id === 'string' ? input.session_id : ''
+  );
+  try {
+    // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
+    // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
+    // gate for a human session that isn't there, so every event is pure
+    // deadline cost. Only session-lifecycle events skip; the git-hook and
+    // operator paths above stay live — installed shims (provenance, the
+    // shared-ref guard) are a different contract the flag must not weaken.
+    if (process.env.BRO_HOOKS === '0') {
       answerCursorPermission(event, input);
+      emit.mark('fastpath');
+      return;
     }
-    flushPerf(sessionId, event, t0, true);
-    // drain barrier — a bare exit can cut a still-queued write; the
-    // run.sh watchdog backstops a pipe that never drains
-    process.stdout.write('', () => process.exit(0));
-  }, hookDeadlineMs());
-  deadlineTimer.unref();
-  const spanState = {
-    evSpan: undefined as any,
-    evSpanEnded: false,
-    evSpanError: undefined as
-      | { attrs?: Record<string, unknown>; status?: 'error' | 'ok' }
-      | undefined,
-  };
-  void lazyOtelSpan()
-    .then((otelSpan: any) => {
-      try {
-        const span = otelSpan('hook.event', {
-          'hook.event': event,
-          'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
-        });
-        if (spanState.evSpanEnded) {
-          try {
-            span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
-          } catch {
-            // ignore
-          }
-          return;
-        }
-        spanState.evSpan = span;
-      } catch {
-        spanState.evSpan = undefined;
+    if (!broEnabled(root) || !enterHookProject(root)) {
+      answerCursorPermission(event, input);
+      emit.mark('fastpath');
+      return;
+    }
+    // session mode — file > `modes.default` > `observe`, resolved once
+    // per event before any probe runs (specs/bro-izpyk.2.md). Every
+    // collector below reads it through hookCtx/ctx.mode; `observe`
+    // sessions get the passive path, mode-active sessions the gated
+    // pipeline + Tier-1 snapshots.
+    resolveHookSessionMode(root, typeof input.session_id === 'string' ? input.session_id : '', raw);
+    perfBuf = [];
+    const t0 = Date.now();
+    const deadlineTimer = nodeSetTimeout(() => {
+      const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+      // the answer goes out before the journal flush — silence on a
+      // permission event is a deny, and a stalled flushPerf must not take
+      // the answer down with it (emit is already synchronous)
+      if (!permissionAnswerEmitted) {
+        answerCursorPermission(event, input);
       }
-    })
-    // a failed dynamic import is fail-open — no span, no unhandled rejection
-    .catch(() => {});
-  const ok = await dispatchWithSpan(event, raw, input, spanState);
-  clearTimeout(deadlineTimer);
-  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-  flushPerf(sessionId, event, t0);
-  emitHook(event, input, {
-    sessionId,
-    client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
-    durationMs: Date.now() - t0,
-    ok,
-    error: ok ? undefined : 'dispatch threw',
-    dir: root,
-  });
-  // A probe that raced past its budget leaves its bd/gh child running —
-  // unref the stragglers so the hook exits with the answer it sent,
-  // not when the last subprocess closes.
-  unrefPendingChildren();
+      flushPerf(sessionId, event, t0, true);
+      // the deadline is the adapter path's watchdog — journal the kill
+      // like run.sh's expired run before the exit
+      emit.end('watchdog');
+      // drain barrier — a bare exit can cut a still-queued write; the
+      // run.sh watchdog backstops a pipe that never drains
+      process.stdout.write('', () => process.exit(0));
+    }, hookDeadlineMs());
+    deadlineTimer.unref();
+    const spanState = {
+      evSpan: undefined as any,
+      evSpanEnded: false,
+      evSpanError: undefined as
+        | { attrs?: Record<string, unknown>; status?: 'error' | 'ok' }
+        | undefined,
+    };
+    void lazyOtelSpan()
+      .then((otelSpan: any) => {
+        try {
+          const span = otelSpan('hook.event', {
+            'hook.event': event,
+            'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+          });
+          if (spanState.evSpanEnded) {
+            try {
+              span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
+            } catch {
+              // ignore
+            }
+            return;
+          }
+          spanState.evSpan = span;
+        } catch {
+          spanState.evSpan = undefined;
+        }
+      })
+      // a failed dynamic import is fail-open — no span, no unhandled rejection
+      .catch(() => {});
+    const ok = await dispatchWithSpan(event, raw, input, spanState);
+    clearTimeout(deadlineTimer);
+    if (!ok) {
+      emit.mark('error');
+    }
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+    flushPerf(sessionId, event, t0);
+    emitHook(event, input, {
+      sessionId,
+      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+      durationMs: Date.now() - t0,
+      ok,
+      error: ok ? undefined : 'dispatch threw',
+      dir: root,
+    });
+    // A probe that raced past its budget leaves its bd/gh child running —
+    // unref the stragglers so the hook exits with the answer it sent,
+    // not when the last subprocess closes.
+    unrefPendingChildren();
+  } finally {
+    // every exit pairs its start — first-write-wins keeps the early
+    // outcomes (fastpath/error/watchdog) over this default
+    emit.end();
+  }
 }
