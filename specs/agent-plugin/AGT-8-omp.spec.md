@@ -94,8 +94,17 @@ one.
 - Live: native stop block on armed claim, mode-bridge injections
   visible in each mode, `/bro` passthrough, widget paint.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx, S2 pre-tool guard, S3 stop gate (only host
+  with native `decision:block` — the scenario asserts the block
+  surfaces natively, not via reprompt), S4 `/bro` dispatch,
+  S7 fail-open, S9 skills, S10 native correlation (mode bridges:
+  Plan/Goal/Vibe/Prewalk/Advisor). Pending — S5/S6/S8 driver
+  verification.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: full asset inventory, mode-bridge
   correlation contract, native stop-block mechanics.
+- 2026-11-12 — v3: Verify gains the AGT-1 scenario map; S3 asserts native decision:block surfacing.

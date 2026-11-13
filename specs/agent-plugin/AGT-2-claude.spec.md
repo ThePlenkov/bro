@@ -99,9 +99,20 @@ bro@bro`. No generated artifact beyond hooks.json.
 - Live: rehydration on start, SDD nudge on prompt, single stop-gate
   block on armed claim, skills invocable by name.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx (SessionStart/UserPromptSubmit), S2 pre-tool
+  deny (PreToolUse → tool result), S3 stop block (native Stop
+  hook — strongest cell in the family), S7 fail-open (`run.sh`
+  chain), S8 dep-degraded, S9 skills (full set via plugin),
+  S10 native correlation. Not applicable — S4 `/bro` (no command
+  surface by design), S6 per-turn sequence (manifest hooks are
+  event-driven, not turn-scoped), S5 compaction (no compaction
+  event on this host). Pending — live e2e driver for claude.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: added assets-absence declaration
   (no /bro, no tools), skills-only delivery, native-correlation
   notes.
+- 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); catalog is contract per R7/R8.
