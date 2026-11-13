@@ -1445,7 +1445,13 @@ http.createServer((req, res) => {
     });
     const port = await new Promise<number>((resolve, reject) => {
       let buf = '';
-      const timer = setTimeout(() => reject(new Error('judge stub never bound')), 10_000);
+      // a child that never reports its port must not outlive the wait —
+      // kill it before rejecting, and clear the timer on every settle
+      // path so a late bind can't fire a stale rejection
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error('judge stub never bound'));
+      }, 10_000);
       child.stdout!.on('data', d => {
         buf += String(d);
         const m = /JUDGE_PORT=(\d+)/.exec(buf);
@@ -1454,8 +1460,14 @@ http.createServer((req, res) => {
           resolve(Number(m[1]));
         }
       });
-      child.once('error', reject);
-      child.once('exit', code => reject(new Error(`judge stub exited ${code}`)));
+      child.once('error', err => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.once('exit', code => {
+        clearTimeout(timer);
+        reject(new Error(`judge stub exited ${code}`));
+      });
     });
     return {
       port,
@@ -1575,6 +1587,47 @@ http.createServer((req, res) => {
     } finally {
       judge.close();
     }
+  });
+
+  test('enforce with no fallback lane refuses at startup — judge outage fails open to the static lane', () => {
+    // matrix-only enforce: no loop.agent/loop.provider/profile,
+    // agents.<backend>.provider, or fleet.routing — the pick could
+    // route every bead, but a judge outage has no lane to fall back
+    // to, so preflight refuses the config loudly instead of spawning
+    // on an empty template mid-queue (spec bro-v0pvd.1.1)
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { agent: '' },
+      'land',
+      () => ({
+        providers: {
+          judge: {
+            type: 'api',
+            baseUrl: 'http://127.0.0.1:1',
+            apiKeyCommand: `printf 'judge-key'`,
+            models: { 'jev-1': 'systemone' },
+          },
+          maxlane: { type: 'cli', command: 'false' },
+        },
+        fleet: {
+          matrix: {
+            provider: 'judge',
+            mode: 'enforce',
+            models: {
+              max: { modes: ['coding'], complexity: ['low'], provider: 'maxlane' },
+            },
+          },
+        },
+      })
+    );
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /fleet\.matrix enforce has no fallback lane/);
+      // nothing claimed, nothing judged, nothing spawned
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open');
+      assert.equal(spawns(f), '');
+    });
   });
 });
 

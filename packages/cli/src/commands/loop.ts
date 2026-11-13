@@ -866,7 +866,8 @@ function routeTableTask(
  *  runs that declare none). */
 async function routeTableLaneFor(
   ctx: Ctx,
-  bead: ReadyBead
+  bead: ReadyBead,
+  matrix?: MatrixLanePick
 ): Promise<{ lane: LoopLane; routed: RouteTableLane } | undefined> {
   const tablePath = ctx.env.brouter?.routes;
   if (tablePath === undefined) {
@@ -886,7 +887,7 @@ async function routeTableLaneFor(
   if (routed === undefined) {
     return undefined;
   }
-  const lane = await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
+  const lane = await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed, matrix);
   if (routed.decisionId !== undefined) {
     lane.decisionId = routed.decisionId;
     // the bead pin — `router:decision=<id>` as metadata: idempotent
@@ -907,20 +908,15 @@ async function resolveBeadLane(
   bead: ReadyBead,
   opts: { router?: boolean; fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<LoopLane> {
-  // the route table is the router's own routing face — when the
-  // operator declares one, it answers
-  const tableLane = await routeTableLaneFor(ctx, bead);
-  if (tableLane !== undefined) {
-    explainSpawn({ slices: ctx.explain, bead: bead.id, routed: tableLane.routed });
-    return tableLane.lane;
-  }
   // the matrix router (bro-v0pvd.1 + bro-v0pvd.1.1) judges the TASK's
-  // complexity+mode — orthogonal to fleet.routing AND the class pin,
-  // so it fires whether or not a routing table is declared (an
-  // enforce matrix without fleet.routing must still hold/pick —
-  // gating it on ctx.routing would silently bypass enforce). Only
-  // the dry-run escape (router:false) skips it, same as the class
-  // router: a render must not spend a judge call or journal a verdict.
+  // complexity+mode — orthogonal to fleet.routing, the class pin, AND
+  // the route table, so it runs before ANY routing face answers: an
+  // enforce hold must not be bypassed by a table lane, and an enforce
+  // pick binds provider/model/autoApprove above the table's route head
+  // piecewise (spec precedence: explicit picks > matrix > class route >
+  // static lane). Only the dry-run escape (router:false) skips it,
+  // same as the class router: a render must not spend a judge call or
+  // journal a verdict.
   const info = beadClassInfo(ctx, bead, opts.router !== false);
   const verdict =
     opts.router === false
@@ -930,6 +926,15 @@ async function resolveBeadLane(
   // in resolveLoopLane; no-fit/unanswered under enforce throw
   // MatrixHoldError — the caller's park consumer owns the queue hold
   const matrixPick = matrixLanePick(verdict, ctx.env);
+  // the route table is the router's own routing face — when the
+  // operator declares one and it answers, its lane stands; the matrix
+  // pick (when engaged) binds inside resolveLoopLane above the route
+  // head, and an enforce hold already threw above
+  const tableLane = await routeTableLaneFor(ctx, bead, matrixPick);
+  if (tableLane !== undefined) {
+    explainSpawn({ slices: ctx.explain, bead: bead.id, routed: tableLane.routed });
+    return tableLane.lane;
+  }
   if (!ctx.routing) {
     // no routing table — the static lane stands unless an enforce pick
     // engaged; shadow/off/judge-down return ctx.lane untouched
@@ -1619,8 +1624,13 @@ function reopenBead(ctx: Ctx, id: string): void {
  *  to wait the wall out, so the snooze IS the reset (bro-36bhc — the
  *  convoy-run wait contract; a 2h cooldown would outlive a 15-minute
  *  wall and undershoot a 6-hour one). A past/stale stamp collapses to
- *  an immediate wake. */
-function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number): void {
+ *  an immediate wake.
+ *
+ *  Returns the members whose defer write FAILED — they remain
+ *  in_progress under this run's claim, so the caller must keep (or
+ *  otherwise settle) their custody record rather than reporting a
+ *  clean park (a deferred bead needs no owner; a claimed one does). */
+function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number): ReadyBead[] {
   // parkedWakeMin has no natural ceiling — an absurd value overflows the
   // clock into a toISOString() RangeError BEFORE the per-bead catch,
   // aborting the park and leaving claims in progress. Past a decade the
@@ -1637,14 +1647,17 @@ function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number)
       : min > 0
         ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
         : { status: 'deferred', assignee: '' };
+  const failed: ReadyBead[] = [];
   for (const b of openBeads(ctx, beads)) {
     noteBead(ctx.tasks, b.id, msg);
     try {
       ctx.tasks.update(b.id, patch);
     } catch (err) {
       console.error(`loop: could not defer ${b.id} — ${String(err)}`);
+      failed.push(b);
     }
   }
+  return failed;
 }
 
 /** One `bd show` batch answers the whole clump's statuses — a store
@@ -2475,8 +2488,25 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
           parkSet = beads.slice(1);
         }
       }
-      parkBeads(ctx, parkSet, `loop: ${msg}`);
-      endLoopRun(ctx.root, loopSlug(lead.id));
+      const undeferred = parkBeads(ctx, parkSet, `loop: ${msg}`);
+      if (undeferred.length === 0) {
+        // every member deferred — the claims released into the snooze,
+        // so the custody record dies with them
+        endLoopRun(ctx.root, loopSlug(lead.id));
+      } else {
+        // a member whose defer write failed is still in_progress under
+        // this run's claim — deleting the custody record would orphan
+        // it into the litter sweep mid-hold. Retain the record instead:
+        // the claim stays owned until this loop exits and the sweep
+        // releases it back to the queue. (Reopening here could
+        // hot-loop a backend with no defer concept — the bead would
+        // re-claim, re-judge, and fail to park every tick.)
+        say(
+          ctx,
+          `loop: ${undeferred.map(b => b.id).join(', ')} could not defer — ` +
+            `custody retained until exit`
+        );
+      }
       say(ctx, `loop: ${lead.id} held by fleet.matrix — ${msg} — parked`);
       return { kind: 'done', result: 'parked' };
     }
@@ -3892,9 +3922,25 @@ async function resolveRunLaneInner(
   const flagPin = flagTierPin(env, sel);
   const agent = effectiveAgent(lane, sel, env, cfg);
   if (lane.worker === undefined && agent === '' && !routing) {
+    // an armed enforce matrix judges every bead per spawn, but its
+    // judge-outage contract fails open to the static lane — with no
+    // lane source at all the first judge-down would spawn on an empty
+    // template, so preflight refuses the config instead of letting a
+    // matrix-only run discover it mid-queue (spec bro-v0pvd.1.1)
+    const matrix = env.fleet?.matrix;
+    const enforceNeedsFallback =
+      matrix !== undefined &&
+      matrix.provider !== undefined &&
+      matrix.mode === 'enforce' &&
+      Object.keys(matrix.models).length > 0;
     console.error(
-      'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
-        '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
+      enforceNeedsFallback
+        ? 'bro loop: fleet.matrix enforce has no fallback lane — a judge outage ' +
+            'fails open to the static lane, so configure one alongside the ' +
+            'matrix (loop.provider/loop.profile/loop.agent, ' +
+            'agents.<backend>.provider, or fleet.routing)'
+        : 'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
+            '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
     );
     process.exit(2);
   }
