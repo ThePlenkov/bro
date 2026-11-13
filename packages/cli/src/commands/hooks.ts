@@ -98,6 +98,7 @@ import {
   writeModeFile,
   GUARD_EVENTS,
   MODE_SNAPSHOT_EVENTS,
+  type ClaimFacade,
   type ClaimRow,
   type ConnectorCtx,
   type GateContribution,
@@ -979,16 +980,28 @@ export function claimNudgeLines(
 /** Foreign sessions' live claims on this project — the ledger twin of
  *  the .work marker nudge (bro-izpyk.10): machine-wide, heartbeat-
  *  renewed, liveness-swept. Empty when the session can't self-exclude
- *  (no session id or unproven host — own claims must never nudge back)
- *  and on any read failure: the marker leg still answers. */
-async function otherLiveClaims(dir: string, sessionId: string): Promise<ClaimRow[]> {
+ *  (no session id or unproven host — own claims must never nudge back),
+ *  when the project can't be resolved — an unscoped list is machine-
+ *  wide and would nudge OTHER projects' claims as work in this repo —
+ *  and on any read failure: the marker leg still answers. `deps` is
+ *  the test seam — production callers leave it to the module
+ *  singletons (hookHost, the hookClaims facade, hookProjectIdFor). */
+export async function otherLiveClaims(
+  dir: string,
+  sessionId: string,
+  deps?: { claims?: ClaimFacade; host?: string; project?: string | null }
+): Promise<ClaimRow[]> {
   try {
-    if (sessionId === '' || hookHost === undefined || hookHost === '' || hookHost === 'unknown') {
+    const host = deps?.host ?? hookHost;
+    if (sessionId === '' || host === undefined || host === '' || host === 'unknown') {
       return [];
     }
-    hookClaims ??= claimsFacade();
-    const project = hookProjectIdFor(dir);
-    return await hookClaims.list(project === null ? {} : { project });
+    const claims = deps?.claims ?? (hookClaims ??= claimsFacade());
+    const project = deps?.project === undefined ? hookProjectIdFor(dir) : deps.project;
+    if (project === null) {
+      return [];
+    }
+    return await claims.list({ project });
   } catch {
     return [];
   }

@@ -621,6 +621,21 @@ function fixerVerdictRefusal(ctx: DriveCtx, beadId: string): string | undefined 
   return `rig next → ${rig.verdict}${rig.detail === undefined ? '' : ` — ${rig.detail}`}`;
 }
 
+/** A post-await claims re-read for one decision — the pass snapshot
+ *  (ctx.work.claims) predates the awaited probes since, so a ledger-only
+ *  claim landing in that window is invisible to a verdict that reuses
+ *  it. The in-lock refresh can't go async — this read lands right
+ *  before it, narrowing the stale window to the lock wait itself (the
+ *  residual the spec accepts: claims write outside the occupancy
+ *  locks). A missing dep or a failed read falls back to the pass
+ *  snapshot — never `[]`, which would misreport an unreadable claims
+ *  plane as an empty one (bro-izpyk.10, PR #1056 review). */
+async function claimsRefresh(ctx: DriveCtx): Promise<ClaimRow[]> {
+  return ctx.deps.claims === undefined
+    ? ctx.work.claims
+    : await ctx.deps.claims().catch(() => ctx.work.claims);
+}
+
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
  *  read right before the spawn (the gap since the pass-level check
  *  covered the worktree create + state refetch, long enough for another
@@ -632,6 +647,10 @@ function fixerVerdictRefusal(ctx: DriveCtx, beadId: string): string | undefined 
 async function spawnFixerAgent(ctx: DriveCtx, pr: number, s: FixerSpawn): Promise<PrVerdict> {
   const link = ctx.deps.rev.prLink(ctx.repo, pr);
   const known = ctx.work.agents;
+  // ledger claims write outside the occupancy locks — re-read after the
+  // awaits upstream (thread refetch, meta/check probes, annotation) so a
+  // claim landing in that window still vetoes the spawn
+  const claims = await claimsRefresh(ctx);
   let release: () => void;
   try {
     release = acquireOccupancyLocks(ctx.mainRoot, s.wt);
@@ -644,7 +663,7 @@ async function spawnFixerAgent(ctx: DriveCtx, pr: number, s: FixerSpawn): Promis
     };
   }
   try {
-    const fresh = freshOccupancy(ctx.mainRoot, known, ctx.work.claims);
+    const fresh = freshOccupancy(ctx.mainRoot, known, claims);
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: s.fixer?.id,
@@ -829,7 +848,10 @@ async function spawnFixer(
       // refresh + check + remove all run inside retireOrphanedWorktree under
       // both occupancy locks: a claimant writes its registry entry +
       // .work marker under the same locks, so a claim lands before the
-      // check or after the remove — never between
+      // check or after the remove — never between. Ledger claims write
+      // outside those locks, so the claims leg re-reads here — a claim
+      // written during the refetch await is otherwise invisible to the
+      // pass snapshot (bro-izpyk.10)
       const retire = retireOrphanedWorktree(
         ctx.mainRoot,
         pr,
@@ -837,7 +859,7 @@ async function spawnFixer(
         state.headRef,
         fixer?.id,
         known,
-        ctx.work.claims
+        await claimsRefresh(ctx)
       );
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire };
@@ -925,7 +947,9 @@ async function spawnRebaseFixer(
       state.headRef,
       fixer?.id,
       ctx.work.agents,
-      ctx.work.claims
+      // the same post-await re-read spawnFixer runs — a ledger claim
+      // landing during the fetch/probe window above vetoes the removal
+      await claimsRefresh(ctx)
     );
   };
   // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are

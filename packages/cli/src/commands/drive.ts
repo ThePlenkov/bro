@@ -542,13 +542,14 @@ async function litterSweep(ctx: Ctx): Promise<void> {
     // imported by a test harness — no CLI argv to respawn; run in-pass.
     // The child path's claims leg comes via `work prune --loop`; the
     // in-pass tick prefetches the same union leg from the ctx's own
-    // facade — marker-only only when the ledger is absent (bro-izpyk.10)
+    // facade — marker-only on an absent ledger OR a failed read, the
+    // same `undefined` litterClaims returns (bro-izpyk.10)
     const claims =
       ctx.claims === undefined
         ? undefined
         : await ctx.claims
             .list(ctx.project === undefined ? {} : { project: ctx.project })
-            .catch(() => []);
+            .catch(() => undefined);
     sayLitterSweep(ctx, litterSweepTick(ctx, claims));
     return;
   }

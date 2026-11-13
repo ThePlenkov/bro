@@ -6,7 +6,7 @@
  *  the same seam `loopPolicy`'s tests set (bro-u6fp5.1). */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -869,5 +869,82 @@ describe('drivePolicy.pass — the enumeration+service sweep', () => {
     const verdicts = w.jsonRows.map(r => (r as { verdict?: string }).verdict);
     assert.deepEqual(verdicts, ['merged']);
     assert.deepEqual(w.merges, [7]);
+  });
+
+  // PR #1056 review: the retirement check happens after the awaited
+  // thread refetch — a ledger claim landing in that window must still
+  // veto the removal, so the retire path re-reads the claims loader
+  // instead of reusing the pass-start snapshot
+  test('a claim landing during the thread refetch vetoes the created-tree retire', async () => {
+    const { root, main } = initRepo('drive-claim-retire-');
+    try {
+      const w = world();
+      w.ctx.mainRoot = main;
+      git(['checkout', '-qb', 'work/x'], main);
+      git(['checkout', '-q', 'main'], main);
+      let claimCalls = 0;
+      w.ctx.deps.claims = async () => {
+        claimCalls += 1;
+        // call 1 is the pass snapshot — empty; the post-await re-read
+        // sees a ledger-only claim written during the thread refetch
+        return claimCalls === 1 ? [] : [claimRow({ resource: 'branch:work/x' })];
+      };
+      let threadCalls = 0;
+      (w.ctx.deps.rev as { reviewThreads: unknown }).reviewThreads = async () => {
+        threadCalls += 1;
+        // the gate fetch sees the open thread; the spawn-path refetch
+        // finds it resolved — the just-created tree retires unless a
+        // claimant appeared meanwhile
+        return threadCalls === 1
+          ? [{ id: 't1', resolved: false, outdated: false, comment: null } as ReviewThread]
+          : [];
+      };
+      w.candidates = { branches: ['work/x'], complete: true };
+      w.prsByBranch = { 'work/x': [7] };
+      w.metaQueue = [openMeta()];
+      await drivePolicy.pass(w.ctx);
+      const verdicts = w.jsonRows.map(r => (r as { verdict?: string }).verdict);
+      assert.deepEqual(verdicts, ['occupied']);
+      assert.ok(claimCalls >= 2, 'the retire path re-reads the claims loader');
+      assert.ok(existsSync(join(root, 'main--x')), 'a claim-held worktree is never removed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a failed claims re-read falls back to the pass snapshot — the retire still runs', async () => {
+    const { root, main } = initRepo('drive-claim-retire2-');
+    try {
+      const w = world();
+      w.ctx.mainRoot = main;
+      git(['checkout', '-qb', 'work/x'], main);
+      git(['checkout', '-q', 'main'], main);
+      let claimCalls = 0;
+      w.ctx.deps.claims = async () => {
+        claimCalls += 1;
+        if (claimCalls === 1) {
+          return [];
+        }
+        throw new Error('ledger gone mid-pass');
+      };
+      let threadCalls = 0;
+      (w.ctx.deps.rev as { reviewThreads: unknown }).reviewThreads = async () => {
+        threadCalls += 1;
+        return threadCalls === 1
+          ? [{ id: 't1', resolved: false, outdated: false, comment: null } as ReviewThread]
+          : [];
+      };
+      w.candidates = { branches: ['work/x'], complete: true };
+      w.prsByBranch = { 'work/x': [7] };
+      w.metaQueue = [openMeta()];
+      await drivePolicy.pass(w.ctx);
+      const verdicts = w.jsonRows.map(r => (r as { verdict?: string }).verdict);
+      // the snapshot was empty and the re-read failed → marker-only
+      // verdict: the orphaned tree retires as before
+      assert.deepEqual(verdicts, ['threads-resolved']);
+      assert.equal(existsSync(join(root, 'main--x')), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

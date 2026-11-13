@@ -24,13 +24,14 @@ import {
   readCodexInstructions,
   armDetail,
   claimNudgeLines,
+  otherLiveClaims,
   otherLiveWork,
   recordGuardEvents,
   stopGateOutcome,
   takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
-import { procStat, type ClaimRow, type GateContribution } from '@broject/core';
+import { procStat, type ClaimFacade, type ClaimRow, type GateContribution } from '@broject/core';
 import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts';
 
 function foreignLock(lock: string): ChildProcess {
@@ -731,6 +732,77 @@ describe('claimNudgeLines — the claims leg of the parallel-work nudge (bro-izp
   test('sessions the marker leg already printed dedup on the short sid', () => {
     const lines = claimNudgeLines([row({ sid: 'sess-abcdef' })], self, new Set(['sess-abc']));
     assert.deepEqual(lines, []);
+  });
+});
+
+describe('otherLiveClaims — the nudge leg stays project-scoped (bro-izpyk.10, PR #1056)', () => {
+  const facade = (list: ClaimFacade['list']): ClaimFacade => ({
+    claim: async () => ({ ok: true }),
+    release: async () => {},
+    list,
+  });
+  const row: ClaimRow = {
+    resource: 'worktree:/repo/main',
+    host: 'devin',
+    sid: 'sess-foreign1',
+    project: 'p1',
+    exclusive: false,
+    leaseUntil: Date.now() + 60_000,
+    claimedAt: Date.now(),
+    ttlMs: 60_000,
+  };
+
+  test('an unresolvable project returns nothing — never a machine-wide list', async () => {
+    const seen: unknown[] = [];
+    const rows = await otherLiveClaims('/no/such/dir', 'sess-x', {
+      host: 'devin',
+      claims: facade(async (q: unknown) => {
+        seen.push(q);
+        return [row];
+      }),
+      project: null,
+    });
+    assert.deepEqual(rows, []);
+    assert.deepEqual(seen, [], 'a null project must not reach the facade');
+  });
+
+  test('a resolved project lists claims scoped to it', async () => {
+    const seen: unknown[] = [];
+    const rows = await otherLiveClaims('/any/dir', 'sess-x', {
+      host: 'devin',
+      claims: facade(async (q: unknown) => {
+        seen.push(q);
+        return [row];
+      }),
+      project: 'p1',
+    });
+    assert.deepEqual(seen, [{ project: 'p1' }]);
+    assert.deepEqual(rows, [row]);
+  });
+
+  test('a facade failure still answers empty — the marker leg covers', async () => {
+    const rows = await otherLiveClaims('/any/dir', 'sess-x', {
+      host: 'devin',
+      claims: facade(async () => {
+        throw new Error('ledger gone');
+      }),
+      project: 'p1',
+    });
+    assert.deepEqual(rows, []);
+  });
+
+  test('an unproven host self-excludes before the project read', async () => {
+    const seen: unknown[] = [];
+    const rows = await otherLiveClaims('/any/dir', 'sess-x', {
+      host: 'unknown',
+      claims: facade(async (q: unknown) => {
+        seen.push(q);
+        return [row];
+      }),
+      project: 'p1',
+    });
+    assert.deepEqual(rows, []);
+    assert.deepEqual(seen, []);
   });
 });
 
