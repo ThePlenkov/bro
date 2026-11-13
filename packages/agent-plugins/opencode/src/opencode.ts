@@ -629,6 +629,11 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
   },
 ];
 
+/** Tool registration options — `codemode: false` keeps the reads as
+ * direct `bro_*` function tools; the plugin SDK's `Info.options` type
+ * predates the field, so the literal is widened once here. */
+const BRO_TOOL_OPTIONS = { namespace: 'bro', codemode: false } as const;
+
 /** `/bro` arguments — whitespace-split with "…"/'…' holding a multiword
  * value together (`/bro learn capture "a note"` must not shred the
  * note into four argv entries). Unmatched quotes degrade to the plain
@@ -905,7 +910,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           name: tool.name,
           description: tool.description,
           input: { type: 'object', properties: {}, additionalProperties: false },
-          options: { namespace: 'bro' },
+          options: BRO_TOOL_OPTIONS,
           execute: async () => {
             const { code, out, err } = await core.exec(tool.args);
             const body = out || err || '(no output)';

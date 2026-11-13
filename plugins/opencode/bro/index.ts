@@ -960,6 +960,13 @@ const BRO_TOOLS = [
     args: ['status', '--json'],
   },
 ];
+/** Tool registration options — `codemode: false` keeps the reads as
+ * direct `bro_*` function tools; the plugin SDK's `Info.options` type
+ * predates the field, so the literal is widened once here. */
+const BRO_TOOL_OPTIONS = {
+  namespace: 'bro',
+  codemode: false,
+};
 /** `/bro` arguments — whitespace-split with "…"/'…' holding a multiword
  * value together (`/bro learn capture "a note"` must not shred the
  * note into four argv entries). Unmatched quotes degrade to the plain
@@ -1188,7 +1195,7 @@ async function BroSetup(ctx) {
             properties: {},
             additionalProperties: false,
           },
-          options: { namespace: 'bro' },
+          options: BRO_TOOL_OPTIONS,
           execute: async () => {
             const { code, out, err } = await core.exec(tool.args);
             const body = out || err || '(no output)';

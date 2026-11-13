@@ -89,7 +89,9 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   together; HTTP method stays reachable.
 - **R3** — Stop stays reprompt-once via `stop_hook_active` +
   persisted `stop-gated` set.
-- **R4** — 8 `bro_*` tools keep pinned argv — reads only.
+- **R4** — 8 `bro_*` tools keep pinned argv — reads only — and must
+  reach the model as **direct function tools** (`codemode: false`);
+  codemode-only exposure hides them from the tool catalog.
 - **R5** — `/bro` quote-aware splitting preserved (`learn capture
   "a note"` must not shred).
 - **R6** — Skills dedup: plugin-dir registration vs
@@ -99,6 +101,9 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
 ## Verify
 
 - `host-matrix.test.ts` opencode row; adapter tests; `check:plugins`.
+- `packages/agent-e2e` opencode e2e: real `opencode run` against an
+  aimock provider — asserts journal traffic, mock reply in output,
+  and ≥8 `bro_*` direct tools in the request's `tools` array.
 - Live (dogfooded in SDD work): `opencode run` sessions — hydration
   context, board widget, `bro_*` tools callable, `/bro` output,
   attention toasts; `POST /api/rpc/bro/board` returns board JSON.
@@ -116,3 +121,9 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   a pinned `options.command` like every other tier, tool/command
   reads run under `RUN_TIMEOUT_MS` (60s, was 15s), and resolution
   retries a failed answer after `RESOLVE_RETRY_MS`.
+- 2026-11-13 — v4: e2e-caught conformance fix — `bro_*` tools were
+  registered without `codemode: false`, so opencode exposed them only
+  through the `execute` code-mode tool and the model-facing `tools`
+  array carried zero `bro_*` entries. Tools now register with
+  `codemode: false` → direct `bro_*` function tools; R4 hardened,
+  Verify gains the agent-e2e journal assertion.
