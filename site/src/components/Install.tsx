@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState } from 'react';
 
 const clients: { name: string; cmd: string; file?: boolean }[] = [
   { name: 'Claude Code', cmd: '/plugin marketplace add ThePlenkov/bro\n/plugin install bro@bro' },
@@ -14,23 +14,23 @@ const clients: { name: string; cmd: string; file?: boolean }[] = [
     file: true,
   },
   { name: 'Kilo · pi', cmd: 'bro plugins install kilo\nbro plugins install pi' },
-  { name: 'just the CLI', cmd: 'npx -y @broject/bro --help' },
-]
+  { name: 'just the CLI', cmd: 'npm i -g @broject/bro\nbro --help' },
+];
 
 export function Install() {
-  const [active, setActive] = useState(0)
-  const [copied, setCopied] = useState(false)
-  const { cmd, file } = clients[active]
+  const [active, setActive] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const { cmd, file } = clients[active];
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(cmd)
+      await navigator.clipboard.writeText(cmd);
     } catch {
-      return
+      return;
     }
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
-  }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
 
   return (
     <div className="install">
@@ -50,8 +50,16 @@ export function Install() {
       </div>
       <div className="install-cmd">
         <pre>
-          {cmd.split('\n').map((l) => (
-            <div key={l}>{file ? l : <><span className="prompt">$</span> {l}</>}</div>
+          {cmd.split('\n').map(l => (
+            <div key={l}>
+              {file ? (
+                l
+              ) : (
+                <>
+                  <span className="prompt">$</span> {l}
+                </>
+              )}
+            </div>
           ))}
         </pre>
         <button type="button" className="copy" onClick={copy} aria-label="Copy install command">
@@ -59,5 +67,16 @@ export function Install() {
         </button>
       </div>
     </div>
-  )
+  );
+}
+
+export function InstallSection() {
+  return (
+    <section className="feature-section install-section" id="install">
+      <h2>Install.</h2>
+      <p>Pick your client. Requirements, repo wiring and the rest live in the docs.</p>
+      <Install />
+      <a href={`${import.meta.env.BASE_URL}docs`}>Getting started →</a>
+    </section>
+  );
 }
