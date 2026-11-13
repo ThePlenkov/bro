@@ -11,8 +11,7 @@
  *  The caller's BRO_AGENT_ID rides as delegatedBy provenance on both.
  *  The CLI surface lives in delegate-cli.ts; both it and the agents
  *  plane's exec('delegate') run the delegate() dispatcher here. */
-import { randomBytes } from 'node:crypto';
-import { resolveStepClass, type AgentInfo, type ResolvedClass } from '@broject/core';
+import { mintAdhocStep, resolveStepClass, type AgentInfo, type ResolvedClass } from '@broject/core';
 import { type AcpSeam, type FetchFn } from '@broject/providers';
 import { beadsDir } from '@broject/convoy';
 import { type AgentConnectorEnv } from '../agent-connectors.ts';
@@ -76,7 +75,14 @@ export interface DelegateSel {
   delegatedBy?: string;
 }
 
-export type DelegateOpts = { fetch?: FetchFn; acp?: AcpSeam };
+export type DelegateOpts = {
+  fetch?: FetchFn;
+  acp?: AcpSeam;
+  /** Test seam — scripted candidates for --detach's adhoc molStep
+   *  mint (mintAdhocStep's re-mint loop consumes them in order), so a
+   *  registry hit is exercised without brute-forcing randomBytes. */
+  mintStep?: () => string;
+};
 
 /** fleet.routing is "declared" only when it holds at least one lane —
  *  an empty table reads the same as none. */
@@ -135,7 +141,7 @@ async function delegateDetach(
     env,
     {
       lane: 'batch',
-      molStep: `adhoc-${randomBytes(4).toString('hex')}`,
+      molStep: mintAdhocStep(dir, opts.mintStep),
       connector: req.connector,
       worktree: req.worktree,
       // the composed work order — ask text + the shared learn+retro

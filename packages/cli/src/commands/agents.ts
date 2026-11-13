@@ -55,7 +55,6 @@ import {
   statSync,
 } from 'node:fs';
 import { basename } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import {
   CommandError,
   isCommandError,
@@ -65,6 +64,7 @@ import {
   hasHelpFlag,
   isBatchSpawn,
   localLeaseStore,
+  mintAdhocStep,
   printUsage,
   projectId,
   readAgentRegistry,
@@ -1452,7 +1452,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       'run requires a prompt — positional text, --prompt <text>, or --prompt-file <file> (or --for <bead>)'
     );
   }
-  const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`;
+  const molStep = forBead ?? mintAdhocStep(dir);
   const beads = flag(argv, '--beads-dir') ?? beadsDir();
   // the similarity floor (spec bro-7dila): an ad-hoc spawn has no claim
   // to dedup on, so a live agent/session in this repo whose prompt or

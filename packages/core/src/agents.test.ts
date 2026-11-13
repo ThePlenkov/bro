@@ -21,6 +21,7 @@ import {
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
+  mintAdhocStep,
   mintAgentId,
   patchAgentRegistry,
   probeStep,
@@ -468,6 +469,37 @@ describe('mintAgentId', () => {
     const b = mintAgentId('native');
     assert.match(a, /^native-[0-9a-f]{8}$/);
     assert.notEqual(a, b);
+  });
+});
+
+describe('mintAdhocStep', () => {
+  test('adhoc-<8hex>, unique per call; no registry outside a repo', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-adhoc-'));
+    try {
+      const a = mintAdhocStep(dir);
+      const b = mintAdhocStep(dir);
+      assert.match(a, /^adhoc-[0-9a-f]{8}$/);
+      assert.notEqual(a, b);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('re-mints while the candidate keys a registry entry — the hit row is never rewritten', () => {
+    withRepo(dir => {
+      writeAgentRegistry(dir, {
+        'adhoc-taken': { agentId: 'native-old', backend: 'native', spawnedAt: 't' },
+        'bro-x1': { agentId: 'native-x', backend: 'native', spawnedAt: 't' },
+      });
+      const scripted = ['adhoc-taken', 'adhoc-taken', 'adhoc-free1'];
+      let i = 0;
+      const id = mintAdhocStep(dir, () => scripted[i++]!);
+      assert.equal(id, 'adhoc-free1');
+      assert.equal(i, 3, 'both taken candidates re-minted');
+      const reg = readAgentRegistry(dir);
+      assert.equal(reg['adhoc-taken']!.agentId, 'native-old');
+      assert.equal(Object.keys(reg).length, 2);
+    });
   });
 });
 

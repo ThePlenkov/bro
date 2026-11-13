@@ -1052,6 +1052,34 @@ export function entryRunId(entry: AgentRegistryEntry): string | undefined {
     : undefined;
 }
 
+/** Fresh phantom step id for an ad-hoc spawn (`bro agents run`,
+ *  `bro fleet delegate --detach`; spec bro-fqen0, bro-ejblu) —
+ *  `adhoc-<8hex>`, re-minted while the candidate already keys a
+ *  registry entry: a blind hit would die on the live-agent conflict
+ *  or respawn over a dead row this run never owned (spec bro-ejblu).
+ *  The check rides the registry lock so the read can't go stale
+ *  mid-verdict; the spawn's own locked prologue still revalidates, so
+ *  the residual mint→spawn window degrades to the loud conflict,
+ *  never a silent overwrite of a live agent. Outside a git common dir
+ *  there is no registry to collide with — mint and go. `mint` is the
+ *  test seam — scripted candidates force a registry hit. */
+export function mintAdhocStep(
+  dir: string,
+  mint: () => string = () => `adhoc-${randomBytes(4).toString('hex')}`
+): string {
+  if (agentRegistryPath(dir) === null) {
+    return mint();
+  }
+  return withAgentRegistryLock(dir, () => {
+    const registry = readAgentRegistry(dir);
+    let candidate = mint();
+    while (registry[candidate] !== undefined) {
+      candidate = mint();
+    }
+    return candidate;
+  });
+}
+
 // --- shared-store claims -------------------------------------------------------
 
 /** The store a shared-store claim addresses — BEADS_DIR-pinned via
