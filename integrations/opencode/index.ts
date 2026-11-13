@@ -775,29 +775,6 @@ function makeCore(input) {
    * to it. */
   const live = /* @__PURE__ */ new Map();
   let liveSeq = 0;
-  /** `session.created` primes rehydration while opencode is still waiting on a
-   * prompt — the probe costs real seconds, and this is the only window where
-   * paying it doesn't sit on the critical path of a turn. */
-  const onSessionCreated = props => {
-    const sessionID = props.sessionID;
-    if (typeof sessionID === 'string') {
-      live.set(sessionID, ++liveSeq);
-      hydrate(sessionID, 'session-start');
-    }
-  };
-  /** `message.updated` arrives before the matching `session.idle` —
-   * `time.completed` with no `error` is what separates a finished turn from
-   * one the user aborted or the provider failed. The latest assistant update
-   * is the verdict: a clean step followed by one that aborts, errors, or is
-   * still streaming erases the earlier completion. */
-  const onMessageUpdated = props => {
-    const info = asRecord(props.info);
-    if (info?.role !== 'assistant' || typeof info.sessionID !== 'string') return;
-    if (!live.has(info.sessionID)) live.set(info.sessionID, ++liveSeq);
-    if (asRecord(info.time)?.completed !== void 0 && info.error === void 0)
-      clean.add(info.sessionID);
-    else clean.delete(info.sessionID);
-  };
   /** `session.deleted` retires the per-session structures — they live as
    * long as the plugin process, not the session, so without this a
    * long-lived server accumulates dead entries. */
@@ -818,9 +795,10 @@ function makeCore(input) {
     rehydration.delete(sessionID);
     hydrate(sessionID, 'post-compaction');
   };
-  /** `session.idle` is the stop gate. Gated sessions pass `stop_hook_active`,
-   * so bro skips its own re-evaluation — the one-shot guard is bro's, not
-   * duplicated here. */
+  /** Turn completion is the stop gate — `session.idle` on v1 hosts,
+   *  `session.execution.succeeded` on v2. Gated sessions pass
+   *  `stop_hook_active`, so bro skips its own re-evaluation — the
+   *  one-shot guard is bro's, not duplicated here. */
   const onSessionIdle = async props => {
     const sessionID = props.sessionID;
     if (typeof sessionID !== 'string' || !clean.delete(sessionID)) return;
@@ -855,23 +833,40 @@ function makeCore(input) {
       await log('error', `stop gate could not re-prompt: ${errorText(err)}`);
     }
   };
-  /** Dispatches the event stream into core handlers. */
+  /** Dispatches the v2 event stream into core handlers.
+   *
+   *  opencode ≥2.x never emits the v1 names — `session.idle` is declared
+   *  in the schema but nothing publishes it (opencode#55358), and
+   *  `session.created`/`message.updated`/`session.compacted` are absent
+   *  from the public stream (verified live on 2.2.7). The v2 lifecycle
+   *  is `session.execution.{started,succeeded,failed,interrupted}` plus
+   *  `session.compaction.*` and `session.deleted` (that name survived).
+   *  A succeeded execution is simultaneously the clean-turn verdict and
+   *  the idle moment, so it feeds both the `clean` set and the stop
+   *  gate in one step. */
   const onEvent = async (type, props) => {
+    const sessionID = typeof props.sessionID === 'string' ? props.sessionID : void 0;
+    if (sessionID !== void 0 && !live.has(sessionID)) live.set(sessionID, ++liveSeq);
     switch (type) {
-      case 'session.created':
-        onSessionCreated(props);
+      case 'session.execution.started':
+        if (sessionID !== void 0) hydrate(sessionID, 'session-start');
         break;
-      case 'message.updated':
-        onMessageUpdated(props);
+      case 'session.execution.succeeded':
+        if (sessionID !== void 0) {
+          clean.add(sessionID);
+          await onSessionIdle({ sessionID });
+        }
         break;
-      case 'session.compacted':
+      case 'session.execution.failed':
+      case 'session.execution.interrupted':
+        if (sessionID !== void 0) clean.delete(sessionID);
+        break;
+      case 'session.compaction.succeeded':
+      case 'session.compaction.ended':
         onSessionCompacted(props);
         break;
       case 'session.deleted':
         onSessionDeleted(props);
-        break;
-      case 'session.idle':
-        await onSessionIdle(props);
         break;
     }
   };
