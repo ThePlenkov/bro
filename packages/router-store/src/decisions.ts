@@ -12,7 +12,7 @@
  * non-joinable by the readers, never silently assigned an outcome.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { eq, or } from 'drizzle-orm';
+import { and, asc, eq, gte, or } from 'drizzle-orm';
 import type { RouterDb } from './store.ts';
 import { decisions } from './schema.ts';
 import { redactSecrets, tightenStoreFiles } from './privacy.ts';
@@ -238,6 +238,32 @@ export async function linkDecision(
     return true;
   } catch {
     return false;
+  }
+}
+
+/** The journal scan — every decision in the window, oldest first.
+ *  The bench replay (spec bro-0ykhg.5) reads the whole journal this
+ *  way; `contextId` and `since` narrow it. Ordering is
+ *  (created_at, decision_id) so a replay is deterministic. An
+ *  unreadable store answers [] like every ledger read — the caller
+ *  reports the empty window, never a crash. */
+export async function listDecisions(
+  db: RouterDb,
+  query: { contextId?: string; since?: number } = {}
+): Promise<DecisionRow[]> {
+  try {
+    const clauses = [
+      query.contextId !== undefined ? eq(decisions.contextId, query.contextId) : undefined,
+      query.since !== undefined ? gte(decisions.createdAt, query.since) : undefined,
+    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+    const rows = await db
+      .select()
+      .from(decisions)
+      .where(clauses.length === 0 ? undefined : and(...clauses))
+      .orderBy(asc(decisions.createdAt), asc(decisions.decisionId));
+    return rows as DecisionRow[];
+  } catch {
+    return [];
   }
 }
 

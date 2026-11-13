@@ -1,0 +1,83 @@
+{
+  "generatedAt": "2026-11-13T05:02:31.373Z",
+  "journal": {
+    "path": "/home/pepl/.local/state/brouter/router.db",
+    "window": {
+      "since": null,
+      "until": 1794469178152
+    },
+    "contexts": ["ff2326744c2b2dbd"],
+    "decisions": 2,
+    "replayable": 2,
+    "skipped": {},
+    "outcomeClasses": {
+      "success": 0,
+      "failure": 0,
+      "unlabelled": 0,
+      "unverified": 0,
+      "none": 2
+    },
+    "outcomeResults": {}
+  },
+  "invoke": {
+    "mode": "ambiguous",
+    "ambiguousSkips": 1
+  },
+  "calibration": {
+    "status": "unavailable",
+    "reason": "calibration needs a paired-run dataset with measured outcomes per compared route (bro-l8c4f.9) — none is pinned"
+  },
+  "contenders": [
+    {
+      "id": "systemone",
+      "kind": "model",
+      "provider": "systemone",
+      "status": "failed",
+      "error": "the env var named by providers.systemone.apiKeyEnv is not set — export a TypeSafe API key (https://docs.typesafe.ai)",
+      "answered": 0,
+      "abstained": 0,
+      "skipped": 1,
+      "failed": 1,
+      "agreement": null,
+      "latencyMs": null,
+      "cost": {
+        "totalUsd": 0,
+        "knownCalls": 0,
+        "unknownCalls": 0
+      },
+      "costUsdPer1k": 0,
+      "picks": {}
+    }
+  ],
+  "detail": [
+    {
+      "decisionId": "2994f207-8c69-466e-80ce-23a0444cffdd",
+      "contextId": "ff2326744c2b2dbd",
+      "createdAt": 1794469177839,
+      "observedRoute": "ui",
+      "outcomeClass": "none",
+      "predicate": "merged_first_round",
+      "picks": {
+        "systemone": "failed"
+      }
+    },
+    {
+      "decisionId": "34720166-a7d2-4f95-8c17-bae04bfd9df3",
+      "contextId": "ff2326744c2b2dbd",
+      "createdAt": 1794469178152,
+      "observedRoute": "fallback",
+      "outcomeClass": "none",
+      "predicate": "merged_first_round",
+      "picks": {
+        "systemone": "skipped"
+      }
+    }
+  ],
+  "notes": [
+    "historical agreement compares picks to the route that historically executed — it is agreement, not routing accuracy; the observed route is not a counterfactual oracle and an untried route is unknown, never incorrect",
+    "agreement counts verified successful outcomes under each decision’s own success predicate only; failed/abandoned/parked rows carry no agreement target, unlabelled and unverified rows are excluded and counted",
+    "calibration requires a paired-run dataset with measured outcomes per compared route (bro-l8c4f.9) — not measured here",
+    "T1 recall is frozen to outcome rows accepted before each decision, its own outcome excluded — recall cannot retrieve its test label",
+    "replay writes nothing to router.db — no journal rows, no cache entries, no outcome reports"
+  ]
+}
