@@ -134,13 +134,17 @@ export interface GateContribution {
 
 /** A connector's verdict on an about-to-run tool call — the guard plane's
  *  vocabulary. `block` vetoes the call outright; `input` rewrites the
- *  call's tool_input (merged across connectors in order). Both absent is
- *  abstention. */
+ *  call's tool_input (merged across connectors in order); `warn` is the
+ *  advisory tier (specs/bro-izpyk.8.md) — rendered as context, the call
+ *  still runs. All absent is abstention. */
 export interface PreToolVerdict {
   /** Reason line — presence means "do not run this". */
   block?: string;
   /** Args override — merged onto the call's tool_input. */
   input?: Record<string, unknown>;
+  /** Advisory line — never vetoes; the hook renders it as context so the
+   *  session sees the caveat on the call it was about to run. */
+  warn?: string;
 }
 
 /** What `bro exec` hands the taskFinish probes — one finished shell
