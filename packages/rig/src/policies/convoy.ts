@@ -271,7 +271,6 @@ export const convoyPolicy: ConvoyPolicy = {
    *  stopped is the operator verdict, a live entry means occupied,
    *  attempts exhausted fails, anything else retries. */
   onLost(ctx, item) {
-    const { deps, cfg } = ctx;
     if (item.refusal !== undefined) {
       return refusalStep(ctx, item, item.refusal);
     }
