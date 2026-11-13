@@ -1796,19 +1796,19 @@
             "properties": {
               "requestsPerHour": {
                 "type": "number",
-                "minimum": 0
+                "exclusiveMinimum": 0
               },
               "burst": {
                 "type": "number",
-                "minimum": 0
+                "exclusiveMinimum": 0
               },
               "spawnCost": {
                 "type": "number",
-                "minimum": 0
+                "exclusiveMinimum": 0
               },
               "turnCost": {
                 "type": "number",
-                "minimum": 0
+                "exclusiveMinimum": 0
               },
               "maxSessions": {
                 "type": "integer",

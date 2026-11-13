@@ -52,22 +52,26 @@ describe('serve /v1/messages — the lane quota gate (bro-ezboq)', () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  test('an unaffordable spawn refuses 429 BEFORE any session opens', async () => {
-    // burst 40 < spawnCost 50 — the bucket can never admit one open
+  test('an exhausted bucket refuses a new spawn 429 BEFORE any session opens', async () => {
+    // capacity 60: conv-a pays spawn 50 + turn 10 → empty; conv-b's
+    // open then costs 50 it cannot afford (burst < spawnCost configs
+    // drop at parse — the rateGate rule — so exhaustion is the live
+    // refusal path)
     const cfg = base({
-      'dv-acp': { requestsPerHour: 100, spawnCost: 50, burst: 40, turnCost: 1 },
+      'dv-acp': { requestsPerHour: 120, spawnCost: 50, burst: 60, turnCost: 10 },
     });
     const fake = fakeAcpAgent({ replyText: 'ok' });
     const { url, close } = await listen(
       deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
     );
     try {
-      const res = await post(url, [m('hi')]);
+      assert.equal((await post(url, [m('conv-a')])).status, 200);
+      const res = await post(url, [m('conv-b')]);
       assert.equal(res.status, 429);
       assert.ok(Number(res.headers.get('retry-after')) > 0);
       assert.match(await res.text(), /budget/);
-      // the proof: no session was paid for
-      assert.equal(fake.sessions.length, 0);
+      // the proof: the refused open paid for no second session
+      assert.equal(fake.sessions.length, 1);
     } finally {
       await close();
     }
@@ -146,8 +150,13 @@ describe('serve /v1/messages — the lane quota gate (bro-ezboq)', () => {
     );
     try {
       const first = post(url, [m('slow')]);
-      // let the first request reach its in-flight open
-      await new Promise(r => setTimeout(r, 150));
+      // the prompt reaching the fake means the turn is held inside
+      // holdPromptUntil — in-flight for certain, no clock involved
+      const deadline = Date.now() + 5_000;
+      while (fake.prompts.length === 0) {
+        if (Date.now() > deadline) throw new Error('first turn never reached the peer');
+        await new Promise(r => setTimeout(r, 10));
+      }
       const second = await post(url, [m('other')]);
       assert.equal(second.status, 429);
       assert.match(await second.text(), /queue/);
@@ -223,6 +232,12 @@ describe('conductorConfig — serve.limits parsing', () => {
               },
               'bad-entry': { requestsPerHour: -5, maxSessions: 1.5 },
               'empty-entry': {},
+              // capacity (burst ?? rph) below spawnCost can never admit
+              // one open — the rateGate rule drops the entry
+              'bad-burst': { requestsPerHour: 100, spawnCost: 50, burst: 10 },
+              // no burst — capacity defaults to requestsPerHour, which
+              // clears spawnCost, so the entry survives
+              'no-burst': { requestsPerHour: 100, spawnCost: 50, maxSessions: 2 },
             },
           },
           // the backend must resolve — a bare serve.backend with no
@@ -244,6 +259,10 @@ describe('conductorConfig — serve.limits parsing', () => {
       // negative rph drops; fractional maxSessions drops; empty entry drops
       assert.equal(cfg.limits?.['bad-entry'], undefined);
       assert.equal(cfg.limits?.['empty-entry'], undefined);
+      assert.equal(cfg.limits?.['bad-burst'], undefined);
+      const noBurst = cfg.limits?.['no-burst'];
+      assert.equal(noBurst?.spawnCost, 50);
+      assert.equal(noBurst?.maxSessions, 2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

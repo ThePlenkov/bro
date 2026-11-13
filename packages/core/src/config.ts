@@ -1104,6 +1104,15 @@ function serveLaneLimits(raw: unknown): ServeLaneLimits | undefined {
   if (maxSessions !== undefined) out.maxSessions = maxSessions;
   const maxQueue = posInt(o.maxQueue);
   if (maxQueue !== undefined) out.maxQueue = maxQueue;
+  // a bucket that can never afford one open is a config error, not a
+  // pace (the rateGate rule, spec bro-y3jvd): capacity is burst ?? rph
+  if (
+    out.requestsPerHour !== undefined &&
+    out.spawnCost !== undefined &&
+    (out.burst ?? out.requestsPerHour) < out.spawnCost
+  ) {
+    return undefined;
+  }
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
@@ -1267,10 +1276,10 @@ serveSection.jsonSchema = js.obj({
   // limits; every axis optional, the loader drops malformed values
   limits: js.map(
     js.obj({
-      requestsPerHour: js.num(0),
-      burst: js.num(0),
-      spawnCost: js.num(0),
-      turnCost: js.num(0),
+      requestsPerHour: { type: 'number', exclusiveMinimum: 0 },
+      burst: { type: 'number', exclusiveMinimum: 0 },
+      spawnCost: { type: 'number', exclusiveMinimum: 0 },
+      turnCost: { type: 'number', exclusiveMinimum: 0 },
       maxSessions: js.int(1),
       maxQueue: js.int(1),
     })

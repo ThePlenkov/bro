@@ -135,3 +135,22 @@ back, and the cheaper check should fail first.
   refund on failed retain; reuse pays turnCost only; replay pays 0;
   `maxSessions`/`maxQueue` refuse; absent limits ⇒ ungated; ledger
   namespaces isolate `serve:` from fleet keys.
+
+## Changelog
+
+- **2026-11-13** — initial spec + implementation (PR #1066).
+- **2026-11-13** — review round 1 (amazon-q threads on #1066):
+  - `serveLaneLimits` now drops an entry whose bucket can never admit
+    one open — `capacity = burst ?? requestsPerHour < spawnCost` is a
+    config error, the same rule `providers.*.rateGate` enforces
+    (bro-y3jvd). Previously such an entry armed a gate that refused
+    forever with a retry-after that could never come true.
+  - `serve.limits` jsonSchema rate fields moved from `minimum: 0` to
+    `exclusiveMinimum: 0` — the parser's `> 0` rule and the schema now
+    agree; `requestsPerHour: 0` fails validation instead of silently
+    dropping to an ungated lane.
+  - The spawn-refusal e2e now drains the bucket dynamically
+    (spawn+turn charges) instead of relying on a statically
+    impossible `burst < spawnCost` config that parse now rejects.
+  - The `maxQueue` test synchronizes on the prompt reaching the fake
+    peer (`holdPromptUntil`) instead of a 150ms wall-clock sleep.
