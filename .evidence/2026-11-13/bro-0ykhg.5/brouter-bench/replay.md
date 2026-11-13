@@ -5,9 +5,9 @@ decisions: 2 journaled · 2 replayable · skipped none
 outcomes: success=0, failure=0, unlabelled=0, unverified=0, none=2 · verified results none
 invoke=ambiguous · ambiguous-gate skips 1/2
 
-| contender   | kind  | agreement                                                                                                                     | labelled | p50 ms | p95 ms | cost/1k | skipped | failed |
-| ----------- | ----- | ----------------------------------------------------------------------------------------------------------------------------- | -------- | ------ | ------ | ------- | ------- | ------ |
-| systemone ⚠ | model | failed — the env var named by providers.systemone.apiKeyEnv is not set — export a TypeSafe API key (https://docs.typesafe.ai) | 0        | —      | —      | $0.0000 | 1       | 1      |
+| contender   | kind  | agreement                                                                                                                       | labelled | p50 ms | p95 ms | cost/1k | skipped | failed |
+| ----------- | ----- | ------------------------------------------------------------------------------------------------------------------------------- | -------- | ------ | ------ | ------- | ------- | ------ |
+| systemone ⚠ | model | failed — the env var named by providers.systemone.apiKeyEnv is not set — export a TypeSafe API key (<https://docs.typesafe.ai>) | 0        | —      | —      | $0.0000 | 1       | 1      |
 
 agreement = historical agreement over verified-success outcomes — not routing accuracy
 
