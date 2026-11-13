@@ -85,8 +85,10 @@ Moves the whole `runMol`/`runQueue` FSM — it was already policy-shaped:
 - `RunArgs` — the knobs (mols/open/attempts/pollSec/retryDelaySec/json).
 - `MolVerdict`/`MolResult`/`RunStep` — the verdict taxonomy.
 - The classification helpers — `precheck`, `molAttempt`, `pollAgent`,
-  `afterRun`, `refusalOutcome`, `blockedDecision`, `dagVerdict`, the
-  fast-fail backoff — verbatim; they *are* the FSM's decision points.
+  `afterRun`, `refusalStep`/`agentLostStep` (the onLost halves of the
+  old `refusalOutcome`/`afterRun` agent sections), `blockedDecision`,
+  `dagVerdict`, the fast-fail backoff — verbatim logic; they *are* the
+  FSM's decision points.
 
 The FSM's decision points route through the `Policy` verbs:
 
