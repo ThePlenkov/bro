@@ -249,37 +249,40 @@ function isAgentCustomer(
   return false;
 }
 
+/** One emit's resolved context — the legs take this instead of a
+ *  positional arg list (codescene: excess function arguments). */
+interface EmitCtx {
+  call: StageCall;
+  text: string;
+  key: string;
+  deps: PipelineEmitDeps;
+  env: NodeJS.ProcessEnv;
+  ledger: LedgerFacade | undefined;
+  events: EventsFacade | undefined;
+  send: typeof sendSessionMessage;
+  warn: (msg: string) => void;
+}
+
 /** The A2A leg — sendSessionMessage owns per-session channel choice
  *  (inbox file vs addressed mailbox drop) and the events record.
  *  Returns true when at least one leg landed delivery. */
-async function deliverAgent(
-  customer: string,
-  call: StageCall,
-  text: string,
-  key: string,
-  deps: PipelineEmitDeps,
-  env: NodeJS.ProcessEnv,
-  ledger: LedgerFacade | undefined,
-  events: EventsFacade | undefined,
-  send: typeof sendSessionMessage,
-  warn: (msg: string) => void
-): Promise<boolean> {
-  const res = await send({
-    dir: deps.dir,
-    env,
+async function deliverAgent(customer: string, ctx: EmitCtx): Promise<boolean> {
+  const res = await ctx.send({
+    dir: ctx.deps.dir,
+    env: ctx.env,
     target: customer,
-    text,
+    text: ctx.text,
     kind: 'ask',
-    inReplyTo: call.runId,
-    key,
-    ...(ledger !== undefined ? { ledger } : {}),
-    ...(events !== undefined ? { events } : {}),
+    inReplyTo: ctx.call.runId,
+    key: ctx.key,
+    ...(ctx.ledger !== undefined ? { ledger: ctx.ledger } : {}),
+    ...(ctx.events !== undefined ? { events: ctx.events } : {}),
   });
   for (const w of res.warnings) {
-    warn(w);
+    ctx.warn(w);
   }
   if (res.error !== undefined) {
-    warn(`pipeline-emit: ${res.error} — bundle not delivered`);
+    ctx.warn(`pipeline-emit: ${res.error} — bundle not delivered`);
   }
   return res.deliveries.some(d => d.inboxPath !== undefined || d.published);
 }
@@ -287,30 +290,23 @@ async function deliverAgent(
 /** The user leg — one broadcast `notify`/`ask` event through the
  *  events facade (the `bro notify` surface). Returns the publish
  *  result's `published` flag. */
-async function deliverUser(
-  call: StageCall,
-  text: string,
-  key: string,
-  env: NodeJS.ProcessEnv,
-  events: EventsFacade | undefined,
-  warn: (msg: string) => void
-): Promise<boolean> {
-  if (events === undefined) {
-    warn('pipeline-emit: no events transport — evidence bundle not delivered');
+async function deliverUser(ctx: EmitCtx): Promise<boolean> {
+  if (ctx.events === undefined) {
+    ctx.warn('pipeline-emit: no events transport — evidence bundle not delivered');
     return false;
   }
-  const source = emitSource(env);
+  const source = emitSource(ctx.env);
   const event: EventInput = {
     topic: 'notify',
     kind: 'ask',
-    payload: text,
-    key,
-    cause: call.runId,
+    payload: ctx.text,
+    key: ctx.key,
+    cause: ctx.call.runId,
     ...(source !== undefined ? { source } : {}),
   };
-  const res = await events.publish(event);
+  const res = await ctx.events.publish(event);
   if (!res.published) {
-    warn(`pipeline-emit: notify publish failed — ${res.reason ?? 'unknown reason'}`);
+    ctx.warn(`pipeline-emit: notify publish failed — ${res.reason ?? 'unknown reason'}`);
     return false;
   }
   return true;
@@ -348,9 +344,18 @@ export function pipelineEmit(deps: PipelineEmitDeps): PipelineEmit {
     const ledger = resolveLedger(deps.dir, deps);
     const rows = await ledgerRows(ledger, warn);
     const agent = isAgentCustomer(customer, rows, registryAgentIds(deps.dir, deps));
-    const landed = agent
-      ? await deliverAgent(customer, call, text, key, deps, env, ledger, events, send, warn)
-      : await deliverUser(call, text, key, env, events, warn);
+    const ctx: EmitCtx = {
+      call,
+      text,
+      key,
+      deps,
+      env,
+      ledger,
+      events,
+      send,
+      warn,
+    };
+    const landed = agent ? await deliverAgent(customer, ctx) : await deliverUser(ctx);
     if (!landed) {
       return; // no sentinel — the next wake's recheck retries
     }
