@@ -22,6 +22,7 @@ export {
   findDecisions,
   getDecision,
   linkDecision,
+  listDecisions,
   newDecisionId,
   recordDecision,
   textHash,
@@ -35,6 +36,7 @@ export { migrateStore, migrationIds } from './migrations.ts';
 export {
   DEFAULT_SUCCESS_PREDICATE,
   expireTaskText,
+  getOutcome,
   labelOutcome,
   nextSourceRevision,
   outcomeReportLog,

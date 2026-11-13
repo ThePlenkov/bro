@@ -16,6 +16,27 @@
 
 export { agentPlugins } from './agent-plugins.ts';
 export {
+  BUILTIN_CONTENDERS,
+  type BenchContender,
+  type BenchReplayOptions,
+  type BenchReplayReport,
+  type ContenderAnswer,
+  type ContenderInput,
+  type ContenderMetrics,
+  classifyOutcome,
+  formatBenchReport,
+  type JournalReport,
+  type OutcomeClass,
+  parseJudgeId,
+  parseReplayDecision,
+  type ReplayCandidate,
+  type ReplayDecision,
+  type ReplaySkipReason,
+  resolveContenders,
+  runBenchReplay,
+  type SkippedDecision,
+} from './bench-replay.ts';
+export {
   type ModelFamily,
   modelFamily,
   type ServedModel,

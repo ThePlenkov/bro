@@ -6,6 +6,7 @@
  * verdict a task gets (the route).
  */
 import { definePlugin, type CommandPlugin } from '@broject/command';
+import { runBenchReplayCommand } from './bench-cmd.ts';
 import { runHealthCommand } from './health-cmd.ts';
 import { runOutcomeCommand } from './outcome-cmd.ts';
 import { runRouteCommand } from './route-cmd.ts';
@@ -58,5 +59,11 @@ export function routePlugins(): CommandPlugin[] {
     },
   });
 
-  return [store, routes, health, route, outcome, stats];
+  const bench = definePlugin({
+    name: 'bench',
+    summary: 'The classifier bench — replay: re-ask the decision journal',
+    run: argv => runBenchReplayCommand(argv),
+  });
+
+  return [store, routes, health, route, outcome, stats, bench];
 }

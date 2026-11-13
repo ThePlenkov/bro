@@ -373,6 +373,16 @@ async function readOutcome(
   return rows[0] as OutcomeRow | undefined;
 }
 
+/** One resolved outcome row — the bench replay's per-decision join
+ *  (spec bro-0ykhg.5). Undefined when no report ever landed; pending
+ *  (unverified) rows come back too — the caller classifies them. */
+export async function getOutcome(
+  db: StoreFace['db'],
+  decisionId: string
+): Promise<OutcomeRow | undefined> {
+  return readOutcome(db, decisionId);
+}
+
 /** Land the accepted report on the outcomes row — the decision supplies
  *  the grouping columns (context, hashes, route, features, text); the
  *  report supplies the verdict and measures. */
@@ -887,6 +897,16 @@ export async function recallOutcomeRows(
      *  window ahead of labelled evidence (bro-0ykhg.2 review). Defaults
      *  to the shared default predicate. */
     predicate?: SuccessPredicate;
+    /** the replay freeze (spec bro-0ykhg.5) — only outcomes accepted
+     *  BEFORE this epoch ms vote: a replayed decision sees the evidence
+     *  that existed when it was made, never its own outcome. Compared
+     *  on FIRST-accepted (`outcome_reports`), not `outcomes.at` — an
+     *  upsert rewrites `at` on every accepted update, so last-write
+     *  would wrongly evict evidence that existed at the cutoff */
+    before?: number;
+    /** the decision being replayed — its own outcome never votes,
+     *  whatever timestamp it carries */
+    excludeDecisionId?: string;
     limit?: number;
   }
 ): Promise<RecallOutcomeRow[]> {
@@ -897,6 +917,14 @@ export async function recallOutcomeRows(
   // the contender names ride as ONE json_each parameter — the SQL text
   // never interpolates data, so there is no injection surface at all
   const routeFilter = routes.length === 0 ? '' : ' and o.route in (select value from json_each(?))';
+  // the freeze compares the first VERIFIED-accepted time — outcomes.at
+  // is the last accepted update, which a post-cutoff correction
+  // rewrites; a row pending until after the cutoff was never evidence
+  const beforeClause =
+    query.before === undefined
+      ? ''
+      : ' and (select min(r.at) from outcome_reports r where r.decision_id = o.decision_id and r.accepted = 1 and r.verified = 1) < ?';
+  const excludeClause = query.excludeDecisionId === undefined ? '' : ' and o.decision_id <> ?';
   const args: Array<string | number | null> = [
     fts,
     query.contextId,
@@ -906,6 +934,12 @@ export async function recallOutcomeRows(
   if (routes.length > 0) {
     args.push(JSON.stringify(routes));
   }
+  if (query.before !== undefined) {
+    args.push(query.before);
+  }
+  if (query.excludeDecisionId !== undefined) {
+    args.push(query.excludeDecisionId);
+  }
   args.push(query.limit ?? 20);
   try {
     const rows = db.$client
@@ -914,7 +948,7 @@ export async function recallOutcomeRows(
          from outcomes_fts f
          join outcomes o on o.decision_id = f.decision_id
          where outcomes_fts match ? and o.context_id = ? and o.verified = 1
-           and o.table_hash = ? and o.formula_hash is ?${routeFilter}${votableClause(predicate)}
+           and o.table_hash = ? and o.formula_hash is ?${routeFilter}${votableClause(predicate)}${beforeClause}${excludeClause}
          order by bm25(outcomes_fts), o.at desc, o.decision_id
          limit ?`
       )
