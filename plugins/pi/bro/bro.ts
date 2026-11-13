@@ -700,6 +700,8 @@ function createBroDriver(host, api) {
 			properties: {},
 			additionalProperties: false
 		},
+		loadMode: "essential",
+		approval: "read",
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
