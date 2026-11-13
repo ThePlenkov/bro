@@ -15,8 +15,9 @@
  * T1 recall cluster under `recall`.
  * `judgeConfigHash` covers the effective judge provider, model,
  * parameters and escalation configuration — never credential material
- * (the runtime `apiKey` a proxied entry carries is stripped, and env
- * var NAMES are references, not secrets). Keys are computable before
+ * or credential references (the runtime `apiKey` a proxied entry
+ * carries is stripped, and `apiKeyEnv`/`apiKeyCommand` name where the
+ * key comes from, not what is asked). Keys are computable before
  * T2: inferred answers belong only in the VALUE, never the lookup.
  *
  * The value is the stage answers — the DecideResult (or the pick
@@ -106,10 +107,16 @@ export function normalizeTask(task: RouteTask): Record<string, unknown> {
 
 /** The provider entry's answer-shaping projection — a WHITELIST per
  *  kind: the fields that decide what the judge is asked and how the
- *  reply is read. `apiKey` is runtime credential material and never
- *  enters a hash (a proxied served entry embeds the router's token —
- *  it rotates per boot and must not churn the key); `mcpServers` can
- *  carry secrets and `rateGate` is spawn admission, not answer shape. */
+ *  reply is read. Credential material never enters a hash: `apiKey`
+ *  is runtime secret (a proxied served entry embeds the router's
+ *  token — it rotates per boot), and `apiKeyEnv`/`apiKeyCommand` are
+ *  credential REFERENCES — which env var or command supplies the key
+ *  changes nothing the judge is asked nor how its reply is read, so
+ *  two entries differing only there share answers and share a key.
+ *  `mcpServers` can carry secrets and `rateGate` is spawn admission,
+ *  not answer shape. (Keeping password-adjacent values out of the
+ *  hash also keeps js/insufficient-password-hash quiet — the hash is
+ *  identity, never verification.) */
 function sanitizedEntry(entry: ProviderEntry): Record<string, unknown> {
   switch (entry.type) {
     case 'api':
@@ -119,8 +126,6 @@ function sanitizedEntry(entry: ProviderEntry): Record<string, unknown> {
         baseUrl: entry.baseUrl,
         models: entry.models,
         model: entry.model,
-        apiKeyEnv: entry.apiKeyEnv,
-        apiKeyCommand: entry.apiKeyCommand,
       };
     case 'acp':
       return {
@@ -129,7 +134,6 @@ function sanitizedEntry(entry: ProviderEntry): Record<string, unknown> {
         command: entry.command,
         profile: entry.profile,
         model: entry.model,
-        apiKeyEnv: entry.apiKeyEnv,
         sessionRm: entry.sessionRm,
         autoApprove: entry.autoApprove,
         wallPause: entry.wallPause,
