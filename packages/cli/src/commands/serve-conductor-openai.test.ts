@@ -644,6 +644,80 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
     }
   });
 
+  // bro-5nvwi — a tool result is a user-side payload: content the wire
+  // accepted but the agent cannot see is a 400, never a silent ''.
+  test('a tool message carrying an image_url part answers 400', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' });
+    const { r, close } = await postChat(fake, {
+      messages: [
+        {
+          role: 'tool',
+          tool_call_id: 'call_1',
+          content: [
+            { type: 'text', text: 'shot: ' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } },
+          ],
+        },
+      ],
+    });
+    try {
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.type, 'invalid_request_error');
+      assert.match(body.error.message, /tool messages support text content only/);
+      // and nothing reached the agent — no turn was paid for
+      assert.equal(fake.prompts.length, 0);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a tool message with array text content still joins verbatim', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+    const { close } = await postChat(fake, {
+      messages: [
+        {
+          role: 'tool',
+          tool_call_id: 'call_1',
+          content: [
+            { type: 'text', text: 'var-' },
+            { type: 'text', text: 'file' },
+          ],
+        },
+      ],
+    });
+    try {
+      assert.match(fake.prompts[0] ?? '', /<tool_result for="call_1">var-file<\/tool_result>/);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a system message carrying an image_url part answers 400 — same tier contract', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' });
+    const { r, close } = await postChat(fake, {
+      messages: [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'be terse' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } },
+          ],
+        },
+        { role: 'user', content: 'x' },
+      ],
+    });
+    try {
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.type, 'invalid_request_error');
+      assert.match(body.error.message, /system\/developer messages support text content only/);
+      assert.equal(fake.prompts.length, 0);
+    } finally {
+      await close();
+    }
+  });
+
   test('a tool_call reply lands as tool_calls + finish_reason tool_calls', async () => {
     const fake = fakeAcpAgent({
       replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
