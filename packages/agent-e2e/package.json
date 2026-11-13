@@ -1,0 +1,13 @@
+{
+  "name": "@broject/agent-e2e",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "tsx --test src/**/*.e2e.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@copilotkit/aimock": "^1.48.0"
+  }
+}
