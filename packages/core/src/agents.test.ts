@@ -493,7 +493,11 @@ describe('mintAdhocStep', () => {
       });
       const scripted = ['adhoc-taken', 'adhoc-taken', 'adhoc-free1'];
       let i = 0;
-      const id = mintAdhocStep(dir, () => scripted[i++]!);
+      const id = mintAdhocStep(dir, () => {
+        // an under-seeded script must fail loudly, not mint `undefined`
+        if (i >= scripted.length) throw new Error('scripted mint exhausted');
+        return scripted[i++]!;
+      });
       assert.equal(id, 'adhoc-free1');
       assert.equal(i, 3, 'both taken candidates re-minted');
       const reg = readAgentRegistry(dir);
