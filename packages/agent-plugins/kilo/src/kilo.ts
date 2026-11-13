@@ -169,7 +169,16 @@ async function runBroHook(event: string, input: unknown): Promise<unknown> {
   }
   const result = await spawnCollect(argv[0], argv.slice(1), {
     input: payload,
-    env: { ...process.env, BRO_HOOK_INPUT: '1' },
+    env: {
+      ...process.env,
+      BRO_HOOK_INPUT: '1',
+      // the adapter emit markers — BRO_HOOK_HOST both marks this a
+      // direct in-process launch (no run.sh) and names the ledger host;
+      // PROOT is this module's own dir (specs/bro-izpyk.9.md). A CLI
+      // that predates the markers ignores the env.
+      BRO_HOOK_HOST: 'kilo',
+      BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
+    },
     timeoutMs: HOOK_TIMEOUT_MS,
   });
   if (result.error !== null || result.code !== 0 || !result.stdout) {

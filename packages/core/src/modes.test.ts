@@ -163,6 +163,20 @@ describe('identity', () => {
     assert.equal(hookHostOf({}, {}), 'unknown');
     assert.equal(hookHostOf({}), 'unknown');
   });
+
+  test("hookHostOf honors the adapters' explicit BRO_HOOK_HOST marker", () => {
+    // the in-process adapters stamp their kind on the `bro hooks` spawn —
+    // an explicit claim that wins over every legacy env/payload inference
+    for (const kind of ['opencode', 'kilo', 'pi', 'omp']) {
+      assert.equal(hookHostOf({ BRO_HOOK_HOST: kind }), kind);
+    }
+    // precedence: the marker beats a payload fingerprint AND a legacy env
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: 'pi', CURSOR_PLUGIN_ROOT: '/x' }), 'pi');
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: 'kilo' }, { turn_id: 't' }), 'kilo');
+    // a malformed marker is ignored — inference proceeds as before
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: 'UPPER!' }), 'unknown');
+    assert.equal(hookHostOf({ BRO_HOOK_HOST: '', CURSOR_PLUGIN_ROOT: '/x' }), 'cursor');
+  });
 });
 
 describe('sessionMode resolution', () => {

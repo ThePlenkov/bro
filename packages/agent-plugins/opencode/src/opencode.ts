@@ -127,6 +127,18 @@ function checkoutCli(): string | null {
  * rewritten to plugin.json's version on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.3.0';
 
+/** Env stamped on every `bro hooks` spawn so the CLI's adapter emit
+ *  path journals this session into the hook spool — the in-process
+ *  adapters bypass run.sh, which owns the shell-side writer
+ *  (specs/bro-izpyk.9.md). `BRO_HOOK_HOST` is both the launch marker
+ *  and the ledger host name; a CLI that predates the marker ignores
+ *  the env, so old↔new mixes degrade to the pre-emit status quo. */
+const HOOK_ENV: Record<string, string> = {
+  BRO_HOOK_HOST: 'opencode',
+  BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
+  BRO_HOOK_ADAPTER: NPX_PIN.slice(NPX_PIN.lastIndexOf('@') + 1),
+};
+
 /** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
  * probe serves both launch tiers: `hooks` with no event answers "is this
  * a bro that speaks the hook contract" — a bare `bro hooks` returns before
@@ -261,6 +273,7 @@ function callHook(
     try {
       child = spawn(command.cmd, [...command.args, 'hooks', event], {
         cwd: directory,
+        env: { ...process.env, ...HOOK_ENV },
         stdio: ['pipe', 'pipe', 'ignore'],
         // own process group so killAfter can take spawned children down too
         windowsHide: true,

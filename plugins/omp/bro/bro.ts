@@ -126,10 +126,30 @@ async function resolveCommand(opts = {}) {
 	return null;
 }
 /**
+* The env an in-process adapter stamps on its `bro hooks` spawn so the
+* CLI's adapter emit path can journal the session into the hook spool
+* (specs/bro-izpyk.9.md): `BRO_HOOK_HOST` is the ledger host name (and
+* the launch marker — presence means "direct adapter call, no run.sh"),
+* `BRO_HOOK_PROOT` this module's own directory (the installed plugin
+* root), `BRO_HOOK_ADAPTER` the adapter version parsed off the npx pin.
+* A CLI that predates the marker ignores the env — rollout is safe in
+* both directions.
+*/
+function hookEmitEnv(kind, opts = {}) {
+	const env = {
+		BRO_HOOK_HOST: kind,
+		BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url))
+	};
+	const at = opts.npxPin?.lastIndexOf("@") ?? -1;
+	if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
+	return env;
+}
+/**
 * Run one `bro hooks <event>` with the payload on stdin; resolve null on
 * every failure mode — spawn error, timeout, nonzero exit, garbage out.
+* `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
 */
-async function callHook(command, event, payload, cwd, timeoutMs) {
+async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -139,6 +159,10 @@ async function callHook(command, event, payload, cwd, timeoutMs) {
 			event
 		], {
 			cwd,
+			env: extraEnv === void 0 ? void 0 : {
+				...process.env,
+				...extraEnv
+			},
 			stdio: [
 				"pipe",
 				"pipe",
@@ -386,7 +410,9 @@ function sharedBinding(host) {
 				text
 			});
 			return { content };
-		}
+		},
+		npxPin: host.npxPin,
+		hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin })
 	};
 }
 /**
@@ -443,7 +469,7 @@ function createBroDriver(host, api) {
 	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
 		if (!broEnabled(cwd)) return null;
 		const cmd = await command();
-		return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs);
+		return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
 	};
 	const paint = (ctx) => {
 		if (!host.canPaint(ctx)) return;
@@ -817,31 +843,30 @@ const NPX_PIN = "@broject/bro@0.3.0";
 * another's.
 */
 function binding(pi) {
-	return {
-		...sharedBinding({
-			stop: "session_stop",
-			on(event, handler) {
-				pi.on(event, handler);
-			},
-			paint(ctx, lines, crumb) {
-				ctx.ui.setWidget(BOARD_KEY, lines);
-				ctx.ui.setStatus(BOARD_KEY, crumb);
-			},
-			notify(ctx, text, level) {
-				ctx.ui.notify(text, level);
-			},
-			refuseStop(reason) {
-				return {
-					decision: "block",
-					reason
-				};
-			},
-			stopAlreadyRefused(event) {
-				return event.stop_hook_active === true;
-			}
-		}),
-		npxPin: NPX_PIN
-	};
+	return { ...sharedBinding({
+		kind: "omp",
+		npxPin: NPX_PIN,
+		stop: "session_stop",
+		on(event, handler) {
+			pi.on(event, handler);
+		},
+		paint(ctx, lines, crumb) {
+			ctx.ui.setWidget(BOARD_KEY, lines);
+			ctx.ui.setStatus(BOARD_KEY, crumb);
+		},
+		notify(ctx, text, level) {
+			ctx.ui.notify(text, level);
+		},
+		refuseStop(reason) {
+			return {
+				decision: "block",
+				reason
+			};
+		},
+		stopAlreadyRefused(event) {
+			return event.stop_hook_active === true;
+		}
+	}) };
 }
 /** The extension entry point — omp calls this with its API. */
 function broExtension(pi) {

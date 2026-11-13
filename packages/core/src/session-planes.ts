@@ -84,6 +84,69 @@ export interface SessionPlane {
    *  quota paths never reach it because such a plane claims no cli and
    *  counts nothing. */
   resumeArgv?(nativeSessionId: string, cwd: string): string[] | null;
+  /** Is this `bro hooks` invocation this host's own direct call? The
+   *  in-process adapters (opencode/kilo/pi/omp) spawn `bro hooks`
+   *  themselves and bypass hooks/run.sh — they stamp `BRO_HOOK_HOST`
+   *  on the spawn env, so the plane's check is env-marker identity
+   *  (epic spec SessionPlane sketch, impl specs/bro-izpyk.9.md).
+   *  Optional: run.sh hosts never set the marker, so a plane without
+   *  it simply never claims a launch — the ledger's adapter emit path
+   *  stays off. */
+  detectHook?(env: NodeJS.ProcessEnv): boolean;
+  /** One hook payload → the canonical fields the ledger cares about —
+   *  session id, event, tool, cwd. Every adapter sends `session_id`
+   *  today, so `normalizeHookPayload` is the shared answer; the member
+   *  exists so a host whose payload spells identity differently owns
+   *  its own mapping. */
+  normalizeHook?(payload: unknown): CanonicalHookEvent;
+}
+
+/** The canonical identity of one hook firing — the fields a
+ *  `SessionPlane.normalizeHook` promises out of a host payload (epic
+ *  spec SessionPlane sketch: "session id, event, tool, cwd"). All
+ *  optional: a payload that carries none of them still parses — the
+ *  emit path records what it can prove. */
+export interface CanonicalHookEvent {
+  /** The host's native session id. */
+  sid?: string;
+  /** The canonical bro event name when the host sent a raw one. */
+  event?: string;
+  /** The tool a tool-scoped event names. */
+  tool?: string;
+  /** The session's working directory when the payload carries it. */
+  cwd?: string;
+}
+
+/** The shared `normalizeHook` — first string `session_id` /
+ *  `conversation_id` / `sessionID` wins, `tool_name`/`toolName` is the
+ *  tool, `cwd` is a string cwd. Every in-process adapter already emits
+ *  `session_id` (the same key hooks.ts's HookInput reads), so the
+ *  common case is one lookup; the extra keys cover hosts whose payload
+ *  spells identity differently without a bespoke plane. */
+export function normalizeHookPayload(payload: unknown): CanonicalHookEvent {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return {};
+  }
+  const p = payload as Record<string, unknown>;
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v !== '' ? v : undefined;
+  // defined-keys only — the canonical event carries what the payload
+  // proved; absent keys stay absent so `ev.sid === undefined` is the
+  // probe, never "key exists, value undefined"
+  const out: CanonicalHookEvent = {};
+  const sid = str(p.session_id) ?? str(p.conversation_id) ?? str(p.sessionID);
+  if (sid !== undefined) {
+    out.sid = sid;
+  }
+  const tool = str(p.tool_name) ?? str(p.toolName);
+  if (tool !== undefined) {
+    out.tool = tool;
+  }
+  const cwd = str(p.cwd);
+  if (cwd !== undefined) {
+    out.cwd = cwd;
+  }
+  return out;
 }
 
 /** One live session a session-plane sees — a worker the registry never
