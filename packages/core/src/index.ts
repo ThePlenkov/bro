@@ -624,6 +624,7 @@ export {
   INSTANT_DEATH_MS,
   isAgentCause,
   isAgentLearnCheck,
+  mintAdhocStep,
   mintAgentId,
   mintRunId,
   patchAgentRegistry,

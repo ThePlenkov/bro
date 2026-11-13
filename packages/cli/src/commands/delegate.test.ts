@@ -284,6 +284,41 @@ describe('bro fleet delegate — --detach', () => {
       fx.restore();
     }
   });
+
+  test('a minted id that hits the registry re-mints — the seeded row is never rewritten', async () => {
+    const fx = fixture();
+    try {
+      // a dead adhoc row the blind mint could land on — pre-fix the
+      // spawn would respawn over it and overwrite a row it never ran
+      writeAgentRegistry(fx.main, {
+        'adhoc-taken00': {
+          agentId: 'native-dead',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          exitStatus: 0,
+          // a classified terminal row — the spawn's death-harvest
+          // sweep skips it instead of rewriting it mid-test
+          cause: 'ok',
+        },
+      });
+      const scripted = ['adhoc-taken00', 'adhoc-free000'];
+      let i = 0;
+      const r = await delegate(
+        fx.main,
+        loadAgentEnv(fx.main),
+        { prompt: LONG_RUN, mode: 'detach', beadsDir: fx.beads },
+        { mintStep: () => scripted[i++] ?? 'adhoc-overflow' }
+      );
+      assert.equal(r.mode, 'detach');
+      assert.equal(r.agent.molStep, 'adhoc-free000', 'registry hit re-minted');
+      const reg = readAgentRegistry(fx.main);
+      assert.equal(reg['adhoc-taken00']!.agentId, 'native-dead', 'hit row untouched');
+      assert.equal(reg['adhoc-taken00']!.exitStatus, 0);
+      assert.equal(reg['adhoc-free000']!.agentId, r.agent.id);
+    } finally {
+      fx.restore();
+    }
+  });
 });
 
 describe('bro fleet delegate — CLI surface', () => {
