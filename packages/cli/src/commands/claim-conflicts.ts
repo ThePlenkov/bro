@@ -112,11 +112,12 @@ type GlobTok =
 
 function globTokens(glob: string): GlobTok[] {
   const t: GlobTok[] = [];
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
+  const chars = [...glob]; // code points — the same alphabet globMatch reads
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
     if (c === '*') {
-      if (glob[i + 1] === '*') {
-        if (glob[i + 2] === '/') {
+      if (chars[i + 1] === '*') {
+        if (chars[i + 2] === '/') {
           t.push({ k: 'skip', skipTo: t.length + 3 }, { k: 'any' }, { k: 'lit', c: '/' });
           i += 2;
         } else {
@@ -162,8 +163,7 @@ function globMatch(glob: string, path: string): boolean {
     return out;
   };
   let cur = closure([0]);
-  for (let pi = 0; pi < path.length; pi++) {
-    const ch = path[pi]; // code units — same alphabet the tokenizer used
+  for (const ch of path) {
     const next = new Set<number>();
     for (const i of cur) {
       if (i >= n) {
