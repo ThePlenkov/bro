@@ -330,7 +330,7 @@
     "sessions": {
       "name": "sessions",
       "group": "fleet",
-      "summary": "Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree [--json]",
+      "summary": "Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, claims, resume, worktree [--json]",
       "spellings": ["sessions", "fleet sessions"],
       "aliases": [],
       "hidden": false,

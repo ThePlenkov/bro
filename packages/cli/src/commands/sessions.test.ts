@@ -1,12 +1,14 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ledgerFacade,
   sessionProject,
   writeAgentRegistry,
+  type ClaimFacade,
+  type ClaimRow,
   type LedgerFacade,
   type LedgerSessionRow,
   type SessionRow,
@@ -63,6 +65,33 @@ function srow(partial: Partial<SessionRow> & { host: string; sid: string }): Ses
     started: null,
     lastSeen: T0 - 60_000,
     spawnedBy: null,
+    ...partial,
+  };
+}
+
+/** A ClaimFacade stub — `list` answers the seeded rows (or throws the
+ *  seeded fault); claim/release are inert for a read-surface test. */
+function claimsFixture(rows: ClaimRow[] | Error): ClaimFacade {
+  return {
+    claim: async () => ({ ok: true }),
+    release: async () => {},
+    list: async () => {
+      if (rows instanceof Error) {
+        throw rows;
+      }
+      return rows;
+    },
+  };
+}
+
+function crow(
+  partial: Partial<ClaimRow> & { resource: string; host: string; sid: string }
+): ClaimRow {
+  return {
+    project: null,
+    exclusive: false,
+    leaseUntil: null,
+    claimedAt: T0 - 60_000,
     ...partial,
   };
 }
@@ -144,6 +173,8 @@ describe('bro sessions', () => {
         'MODE',
         'AGENT',
         'BEAD',
+        'CLAIMS',
+        'RESUME',
         'WORKTREE',
         'BRANCH',
         'STARTED',
@@ -151,6 +182,12 @@ describe('bro sessions', () => {
       ]) {
         assert.ok(header!.includes(col), `missing column ${col}`);
       }
+      // spec §3: CLAIMS and RESUME sit immediately after BEAD
+      const order = ['BEAD', 'CLAIMS', 'RESUME', 'WORKTREE'].map(c => header!.indexOf(c));
+      assert.ok(
+        order.every((p, i) => i === 0 || p > order[i - 1]!),
+        `column order ${order}`
+      );
       assert.ok(row!.includes('claude'));
       assert.ok(row!.includes('abcdef123456'));
       assert.ok(row!.includes('agent-7'));
@@ -223,6 +260,7 @@ describe('bro sessions', () => {
           runSessionsCommand(['--json'], {
             dir: main,
             ledger: f.ledger,
+            claims: claimsFixture([]),
             now: T0,
             bootTimeMs: BOOT,
           })
@@ -250,7 +288,12 @@ describe('bro sessions', () => {
         sess({ host: 'codex', sid: 's-dead', lastSeen: BOOT - 1 }),
       ]);
       const out = await capture(() =>
-        runSessionsCommand(['--json'], { ledger: f.ledger, now: T0, bootTimeMs: BOOT })
+        runSessionsCommand(['--json'], {
+          ledger: f.ledger,
+          claims: claimsFixture([]),
+          now: T0,
+          bootTimeMs: BOOT,
+        })
       );
       assert.equal(out.code, 0);
       const payload = JSON.parse(out.out.join('\n')) as {
@@ -280,6 +323,7 @@ describe('bro sessions', () => {
       const hostOnly = await capture(() =>
         runSessionsCommand(['--json', '--host', 'codex'], {
           ledger: f.ledger,
+          claims: claimsFixture([]),
           now: T0,
           bootTimeMs: BOOT,
         })
@@ -291,6 +335,7 @@ describe('bro sessions', () => {
       const liveOnly = await capture(() =>
         runSessionsCommand(['--json', '--live'], {
           ledger: f.ledger,
+          claims: claimsFixture([]),
           now: T0,
           bootTimeMs: BOOT,
         })
@@ -326,6 +371,7 @@ describe('bro sessions', () => {
           runSessionsCommand(['--json', '--project'], {
             dir: main,
             ledger: f.ledger,
+            claims: claimsFixture([]),
             now: T0,
             bootTimeMs: BOOT,
           })
@@ -344,16 +390,160 @@ describe('bro sessions', () => {
     }
   });
 
+  test('claims join: held URIs land on the holding session only', async () => {
+    const f = ledgerFixture();
+    try {
+      await f.ledger.append([
+        sess({ host: 'claude', sid: 's-holder', lastSeen: T0 }),
+        sess({ host: 'codex', sid: 's-empty', lastSeen: T0 }),
+      ]);
+      const claims = claimsFixture([
+        crow({ resource: 'role:orchestrator@abc123', host: 'claude', sid: 's-holder' }),
+        crow({ resource: `worktree:${homedir()}/proj`, host: 'claude', sid: 's-holder' }),
+        crow({ resource: 'worktree:/elsewhere', host: 'claude', sid: 's-other' }),
+      ]);
+      const views = await collectSessionViews(f.ledger, {
+        now: T0,
+        bootTimeMs: BOOT,
+        claims,
+      });
+      const bySid = new Map(views.rows.map(r => [r.sid, r]));
+      assert.deepEqual(bySid.get('s-holder')!.claims, [
+        'role:orchestrator@abc123',
+        `worktree:${homedir()}/proj`,
+      ]);
+      // no claims held → absent field renders —
+      assert.equal(bySid.get('s-empty')!.claims, undefined);
+      const [header, holder, empty] = sessionTableLines(views.rows, T0);
+      assert.ok(header!.includes('CLAIMS'));
+      // worktree: URIs ~-collapse in the cell; the join keeps full URIs for --json
+      assert.ok(holder!.includes(`worktree:~/proj`));
+      assert.ok(holder!.includes('role:orchestrator@abc123'));
+      assert.ok(!holder!.includes('/elsewhere'), 'a foreign session claim must not bleed over');
+      // CLAIMS is the 7th column (index 6) — 2+ spaces separate cells
+      assert.equal(empty!.split(/\s{2,}/)[6], '—');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  test('claims join: --json carries full URIs, unfiltered by project', async () => {
+    const f = ledgerFixture();
+    try {
+      await f.ledger.append([sess({ host: 'claude', sid: 's1', lastSeen: T0 })]);
+      const claims = claimsFixture([
+        crow({ resource: 'pr:41', host: 'claude', sid: 's1' }),
+        // task:* never reaches the claims table — bd owns it (spec
+        // §Non-goals), so the fixture holds a role claim instead
+        crow({ resource: 'role:fixer@abc123', host: 'claude', sid: 's1' }),
+      ]);
+      const out = await capture(() =>
+        runSessionsCommand(['--json'], {
+          ledger: f.ledger,
+          claims,
+          now: T0,
+          bootTimeMs: BOOT,
+        })
+      );
+      assert.equal(out.code, 0);
+      const payload = JSON.parse(out.out.join('\n')) as {
+        sessions: Array<{ sid: string; claims: string[] }>;
+      };
+      assert.deepEqual(payload.sessions[0]!.claims, ['pr:41', 'role:fixer@abc123']);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  test('claims list failure degrades to a warning, rows still render', async () => {
+    const f = ledgerFixture();
+    try {
+      await f.ledger.append([sess({ host: 'claude', sid: 's1', lastSeen: T0 })]);
+      const views = await collectSessionViews(f.ledger, {
+        now: T0,
+        bootTimeMs: BOOT,
+        claims: claimsFixture(new Error('sqlite is gone')),
+      });
+      assert.equal(views.rows.length, 1);
+      assert.equal(views.rows[0]!.claims, undefined);
+      assert.ok(views.warnings.some(w => w.includes('claims unavailable')));
+      const [header, row] = sessionTableLines(views.rows, T0);
+      assert.ok(header!.includes('CLAIMS'));
+      assert.ok(row!.includes('—'));
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  test('no claims facade → claims column dashes, no warning', async () => {
+    const f = ledgerFixture();
+    try {
+      await f.ledger.append([sess({ host: 'claude', sid: 's1', lastSeen: T0 })]);
+      const views = await collectSessionViews(f.ledger, { now: T0, bootTimeMs: BOOT });
+      assert.equal(views.rows[0]!.claims, undefined);
+      assert.equal(views.warnings.length, 0);
+      const [, row] = sessionTableLines(views.rows, T0);
+      assert.ok(row!.includes('—'));
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  test('resume marker: resumable hosts render yes + argv, unknown hosts —', async () => {
+    const f = ledgerFixture();
+    try {
+      await f.ledger.append([
+        sess({ host: 'claude', sid: 's-claude', lastSeen: T0 }),
+        sess({ host: 'ghost', sid: 's-ghost', lastSeen: T0 }),
+      ]);
+      const views = await collectSessionViews(f.ledger, { now: T0, bootTimeMs: BOOT });
+      const bySid = new Map(views.rows.map(r => [r.sid, r]));
+      assert.deepEqual(bySid.get('s-claude')!.resumeArgv, ['claude', '--resume', 's-claude']);
+      assert.equal(bySid.get('s-ghost')!.resumeArgv, null);
+      const [header, claude, ghost] = sessionTableLines(views.rows, T0);
+      assert.ok(header!.includes('RESUME'));
+      // RESUME is the 8th column (index 7)
+      assert.equal(claude!.split(/\s{2,}/)[7], 'yes');
+      assert.equal(ghost!.split(/\s{2,}/)[7], '—');
+      const out = await capture(() =>
+        runSessionsCommand(['--json'], {
+          ledger: f.ledger,
+          claims: claimsFixture([]),
+          now: T0,
+          bootTimeMs: BOOT,
+        })
+      );
+      const payload = JSON.parse(out.out.join('\n')) as {
+        sessions: Array<{ sid: string; resumeArgv: string[] | null }>;
+      };
+      const jsonBySid = new Map(payload.sessions.map(s => [s.sid, s]));
+      assert.deepEqual(jsonBySid.get('s-claude')!.resumeArgv, ['claude', '--resume', 's-claude']);
+      assert.equal(jsonBySid.get('s-ghost')!.resumeArgv, null);
+    } finally {
+      f.cleanup();
+    }
+  });
+
   test('empty ledger prints the empty line, not a crash', async () => {
     const f = ledgerFixture();
     try {
       const out = await capture(() =>
-        runSessionsCommand([], { ledger: f.ledger, now: T0, bootTimeMs: BOOT })
+        runSessionsCommand([], {
+          ledger: f.ledger,
+          claims: claimsFixture([]),
+          now: T0,
+          bootTimeMs: BOOT,
+        })
       );
       assert.equal(out.code, 0);
       assert.ok(out.out.join('\n').includes('no sessions recorded'));
       const live = await capture(() =>
-        runSessionsCommand(['--live'], { ledger: f.ledger, now: T0, bootTimeMs: BOOT })
+        runSessionsCommand(['--live'], {
+          ledger: f.ledger,
+          claims: claimsFixture([]),
+          now: T0,
+          bootTimeMs: BOOT,
+        })
       );
       assert.ok(live.out.join('\n').includes('no live sessions'));
     } finally {
@@ -366,7 +556,12 @@ describe('bro sessions', () => {
     try {
       for (const argv of [['--project', '--all'], ['bogus'], ['--host='], ['--unknown']]) {
         const out = await capture(() =>
-          runSessionsCommand(argv, { ledger: f.ledger, now: T0, bootTimeMs: BOOT })
+          runSessionsCommand(argv, {
+            ledger: f.ledger,
+            claims: claimsFixture([]),
+            now: T0,
+            bootTimeMs: BOOT,
+          })
         );
         assert.equal(out.code, 2, `argv ${argv.join(' ')} should exit 2`);
       }
