@@ -8,6 +8,7 @@ import { fakeAcpAgent } from '@broject/providers/testkit';
 import { capture, initRepo, installFakeBd, killRun } from './testrepo.ts';
 import { delegate } from './delegate.ts';
 import { runDelegateCommand } from './delegate-cli.ts';
+import { delegateWallCheck } from './delegate-provider.ts';
 
 // real host planes would flake spawn tests — the registry clear is the belt
 clearExternalPlanes();
@@ -199,6 +200,74 @@ describe('bro fleet delegate — --wait', () => {
         }
       );
       assert.deepEqual(fake.prompts, []);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('a wall landed during acpOpen refuses at turn admission — no session was opened (bro-acjzf)', async () => {
+    const fx = fixture();
+    try {
+      const fake = fakeAcpAgent({ replyText: 'never reached' });
+      await assert.rejects(
+        () =>
+          delegate(
+            fx.main,
+            env(),
+            { prompt: 'hi', provider: 'p', mode: 'wait' },
+            {
+              acp: {
+                // the peer resolver runs INSIDE acpOpen — the wall lands
+                // in the exact refuseWalled → session/new window a
+                // concurrent worker's death can hit
+                peer: () => {
+                  writeAgentRegistry(fx.main, {
+                    'dead-worker': {
+                      agentId: 'native-dead',
+                      backend: 'native',
+                      spawnedAt: new Date().toISOString(),
+                      provider: 'p',
+                      cause: 'rate_limited',
+                    },
+                  });
+                  return fake.app;
+                },
+              },
+            }
+          ),
+        (err: unknown) => {
+          assert.match(String(err), /p walled — rate_limited/);
+          assert.match(String(err), /no session was opened/);
+          return true;
+        }
+      );
+      assert.deepEqual(fake.sessions, []);
+      assert.deepEqual(fake.prompts, []);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('delegateWallCheck — a clean registry admits, a walled provider refuses with a retry hint', () => {
+    const fx = fixture();
+    try {
+      assert.equal(delegateWallCheck(fx.main, 'p').refusal(), undefined);
+      writeAgentRegistry(fx.main, {
+        'dead-worker': {
+          agentId: 'native-dead',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          provider: 'p',
+          cause: 'rate_limited',
+        },
+      });
+      const refusal = delegateWallCheck(fx.main, 'p').refusal();
+      assert.ok(refusal !== undefined, 'a live wall refuses');
+      assert.match(refusal.reason, /p walled — rate_limited/);
+      assert.match(refusal.reason, /--detach to a different lane/);
+      assert.ok(refusal.retryAfterSec >= 1, 'a retry hint rides the refusal');
+      // p's wall refuses only p — another provider's lane stays open
+      assert.equal(delegateWallCheck(fx.main, 'other').refusal(), undefined);
     } finally {
       fx.restore();
     }

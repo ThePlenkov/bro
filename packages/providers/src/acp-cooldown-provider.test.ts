@@ -4,10 +4,9 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { acpOpen, acpPooledTurn, acpSessionRetain } from './acp.ts';
-import type { AcpPeer } from './acp.ts';
 import { AcpDeadLoopGuard } from './acp-guard.ts';
 import type { AcpGuardCtx } from './acp-guard.ts';
-import { AcpCooldownError, AcpLaneCooldown } from './acp-cooldown.ts';
+import { AcpCooldownError, AcpLaneCooldown, type AcpWallCheck } from './acp-cooldown.ts';
 import { fakeAcpAgent } from './testkit.ts';
 
 const ENTRY = { type: 'acp', command: 'dv acp' } as const;
@@ -52,6 +51,40 @@ describe('acp wall cooldown (bro-i6811)', () => {
         AcpCooldownError
       );
       assert.equal(fake.sessions.length, 0);
+    } finally {
+      peer.close();
+    }
+  });
+
+  test('a structural wall check refuses on a guardless ctx — the delegate lane shape (bro-acjzf)', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
+    try {
+      // delegate --wait's shape: no `guard` leg (a per-request ctx has
+      // no churn to measure), and the wall verdict is any AcpWallCheck —
+      // the registry/ledger walls ride the admission seam without an
+      // AcpLaneCooldown behind them
+      let reads = 0;
+      const check: AcpWallCheck = {
+        refusal: () => {
+          reads += 1;
+          return { reason: 'p walled — rate_limited', retryAfterSec: 42 };
+        },
+      };
+      await assert.rejects(
+        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+          by: 'delegate',
+          guard: { scope: 'delegate:p', cooldown: check },
+        }),
+        (err: unknown) =>
+          err instanceof AcpCooldownError &&
+          err.retryAfterSec === 42 &&
+          /p walled — rate_limited/.test(err.message)
+      );
+      // the verdict was read at admission — and NO session was opened
+      assert.equal(reads, 1);
+      assert.equal(fake.sessions.length, 0);
+      assert.equal(fake.prompts.length, 0);
     } finally {
       peer.close();
     }

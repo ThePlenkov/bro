@@ -467,7 +467,7 @@ async function acpSessionOpen(
   // it hands back is THIS session's debt — the caller resolves it on
   // the first completed turn; a failed open leaves it counted (that
   // is the churn the budgets measure).
-  const charge = gc?.guard.open(gc);
+  const charge = gc?.guard?.open(gc);
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
@@ -838,7 +838,7 @@ function breakPeer(err: unknown, peer: AcpPeer): void {
  *  the failure: it names what actually went wrong. A healthy peer is
  *  left alone. */
 function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
-  if (gc?.peer === undefined) {
+  if (gc?.peer === undefined || gc.guard === undefined) {
     return;
   }
   const trip = gc.guard.peerTrip(gc);
