@@ -11,6 +11,13 @@ import { renderAcpUpdate, runAcpWorker } from './acp-worker.ts';
 import type { AcpWorkerSpec } from './acp-worker.ts';
 import { fakeAcpAgent } from './testkit.ts';
 
+// node --test runs each file in its own process — BRO_TELEMETRY=0 here
+// keeps worker spans from queueing on the ambient provider.env/env
+// endpoint and draining into the trace test's collector (same guard
+// acp-proxy.test.ts carries). The trace test deletes/restores the var
+// inside its own window, so only the incidental emissions die.
+process.env.BRO_TELEMETRY = '0';
+
 const MODEL_OPTION: SessionConfigOption = {
   type: 'select',
   id: 'model-pick',
