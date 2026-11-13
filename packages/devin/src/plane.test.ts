@@ -95,11 +95,18 @@ const withProc = (
     if (tty !== undefined || startJiffies !== undefined) {
       // the real shape: pid (comm) state ppid pgrp session tty_nr …
       // …starttime(22) — the comm may wrap in parens and hold spaces,
-      // the parser goes after the last ')'; starttime sits at rest[19]
-      writeFileSync(
-        join(dir, 'stat'),
-        `${pid} (devin acp) S 1 1 1 ${tty ?? 0} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ${startJiffies ?? 0}\n`
-      );
+      // so both parsers go after the last ')' and index the tail:
+      // tty_nr is rest[4] (field 7), starttime rest[19] (field 22).
+      // Assign by index — a hand-counted zero run landing the start a
+      // field off reads as 0, and the pin fails open unseen.
+      const rest = Array.from({ length: 20 }, () => '0');
+      rest[0] = 'S'; // state
+      rest[1] = '1'; // ppid
+      rest[2] = '1'; // pgrp
+      rest[3] = '1'; // session
+      rest[4] = String(tty ?? 0); // tty_nr — field 7
+      rest[19] = String(startJiffies ?? 0); // starttime — field 22
+      writeFileSync(join(dir, 'stat'), `${pid} (devin acp) ${rest.join(' ')}\n`);
     }
     // the identity the live-session count checks: argv[0] is the cli
     writeFileSync(join(dir, 'cmdline'), `${argv0}\0--flag\0`);
@@ -274,8 +281,19 @@ describe('countDevinSessions', () => {
     withProc((procDir, mk) => {
       withLockDir(dir => {
         // a real session: process started, devin wrote its lock — the
-        // pid's start sits before the file's change bound
-        mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies() - 60_000);
+        // pid's start sits before the file's change bound. Clamp at
+        // jiffy 1: a host up under ten minutes has no ten-minute-old
+        // pid, and a negative start reads as unparseable → fail-open,
+        // which would pass without exercising the pin. A boot-time
+        // start still precedes the just-written lock's bound.
+        mk(
+          process.pid,
+          'PATH=/bin\0',
+          null,
+          'devin',
+          undefined,
+          Math.max(1, nowJiffies() - 60_000)
+        );
         writeFileSync(join(dir, 'live.lock'), String(process.pid));
         assert.equal(countDevinSessions([dir], undefined, procDir), 1);
       });
