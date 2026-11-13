@@ -2,7 +2,9 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -136,6 +138,21 @@ const spawnDevinCli = (env: Record<string, string> = {}): ChildProcess => {
   const bin = join(dir, 'devin');
   symlinkSync('/bin/sleep', bin);
   return spawn(bin, ['30'], { stdio: 'ignore', env: { ...process.env, ...env } });
+};
+
+/** An `lstart=,command=` row as ps prints it — `day mon dd hh:mm:ss
+ *  yyyy` (the 5-token spelling; a same-year row drops the year on
+ *  some ps builds) followed by the space-joined argv. The start must
+ *  be a REAL time — an epoch-0 row `Date.parse`s to a negative,
+ *  TZ-shifted startMs, which is no honest live-session fixture. */
+const psRow = (startMs: number, argv0: string): string => {
+  const d = new Date(startMs);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()];
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][
+    d.getMonth()
+  ];
+  return `${day} ${mon} ${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${d.getFullYear()} ${argv0}`;
 };
 
 describe('devinSessionPlane', () => {
@@ -325,6 +342,185 @@ describe('countDevinSessions', () => {
     const file = join(tmpDir('bro-devin-nodir-'), 'notdir');
     writeFileSync(file, 'x');
     assert.throws(() => countDevinSessions([file]), /not a directory|ENOTDIR/);
+  });
+});
+
+describe('the no-/proc ps identity fallback (spec bro-74y7n)', () => {
+  /** A procDir that cannot exist — the ps path's only gate. */
+  const absentProc = (): string => join(tmpdir(), 'bro-proc-absent-');
+
+  test('a devin argv0 counts; a foreign argv0 is a recycled pid — stale', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'a.lock'), String(process.pid));
+      const now = Date.now();
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => psRow(now, 'devin')),
+        1
+      );
+      // the session died, the number now belongs to another program —
+      // the phantom the /proc cmdline check catches on linux, caught
+      // here by argv[0]
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => psRow(now, 'tailscaled')),
+        0
+      );
+    });
+  });
+
+  test('an argv0 may arrive as a path — the basename carries the identity', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'a.lock'), String(process.pid));
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () =>
+          psRow(Date.now(), '/usr/local/bin/devin')
+        ),
+        1
+      );
+    });
+  });
+
+  test('a ps that cannot answer counts — the count fails closed', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'a.lock'), String(process.pid));
+      // a failed spawn / nonzero exit — a live pid ps fails to match
+      // is indistinguishable from no ps at all; NEVER 'gone'
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => undefined),
+        1
+      );
+    });
+  });
+
+  test('a clean run naming no such pid reads the lock stale', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'gone.lock'), String(process.pid));
+      // empty stdout on a successful run: the pid died between the
+      // liveness probe and the ps call — proven gone, not unverifiable
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => ''),
+        0
+      );
+    });
+  });
+
+  test('a row ps printed but cannot be split still counts — unverifiable is not stale', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'weird.lock'), String(process.pid));
+      // no Date.parse-able lstart prefix — neither fact can be trusted
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => 'total garbage'),
+        1
+      );
+    });
+  });
+
+  test('a devin argv0 whose lstart postdates the lock bound is a stranger', () => {
+    withLockDir(dir => {
+      // devin argv0 passes the identity check — the serve-churn shape
+      // (bro-q0v0e). The lock's write bound is what proves it a
+      // stranger: this pid started minutes after the file changed.
+      const lock = join(dir, 'recycled.lock');
+      writeFileSync(lock, String(process.pid));
+      const aged = new Date(Date.now() - 10 * 60_000);
+      utimesSync(lock, aged, aged);
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => psRow(Date.now(), 'devin')),
+        0
+      );
+    });
+  });
+
+  test('a start inside the skew bound counts — the lock/child race is not staleness', () => {
+    withLockDir(dir => {
+      const lock = join(dir, 'resumed.lock');
+      writeFileSync(lock, String(process.pid));
+      const aged = new Date(Date.now() - 30_000);
+      utimesSync(lock, aged, aged);
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => psRow(Date.now(), 'devin')),
+        1
+      );
+    });
+  });
+
+  test('one lock costs ONE ps call — identity and the start pin read the same row', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'a.lock'), String(process.pid));
+      let calls = 0;
+      const ps = (): string => {
+        calls += 1;
+        // a SECOND read could already see the number recycled — the
+        // verdict must come off the first row alone (same-pid TOCTOU)
+        return calls === 1 ? psRow(Date.now(), 'devin') : psRow(Date.now(), 'tailscaled');
+      };
+      assert.equal(countDevinSessions([dir], undefined, absentProc(), ps), 1);
+      assert.equal(calls, 1);
+    });
+  });
+
+  test('a live session whose row carries no lstart stays counted', () => {
+    withLockDir(dir => {
+      // a bare program name is not a split-able row — no parseable
+      // lstart prefix means the argv boundary cannot be trusted
+      // either, so the pin fails open like an absent /proc/<pid>/stat
+      const lock = join(dir, 'nostart.lock');
+      writeFileSync(lock, String(process.pid));
+      const aged = new Date(Date.now() - 10 * 60_000);
+      utimesSync(lock, aged, aged);
+      assert.equal(
+        countDevinSessions([dir], undefined, absentProc(), () => 'devin'),
+        1
+      );
+    });
+  });
+
+  test('listDevinSessions rows a ps-verified live pid — classifier facts stay unverifiable', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'sess.lock'), String(process.pid));
+      const rows = listDevinSessions([dir], absentProc(), () => psRow(Date.now(), 'devin'));
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.name, 'sess');
+      // environ/fd have no ps spelling — the row degrades per the
+      // undercount contract, never inventing a worker
+      assert.equal(rows[0]!.worker, false);
+      assert.equal(rows[0]!.agentId, undefined);
+    });
+  });
+
+  test('the real ps answers for a live devin-named child — and against a foreign one', () => {
+    // integration through the real `ps` binary — argv[0] is the
+    // invoked path's basename on any host, but CI runs linux. The
+    // fixture must carry the NAME 'devin' on a binary that stays
+    // alive: a symlinked sleep dies on the multicall's unknown applet
+    // — a copy of the node binary named devin is the honest shape
+    // (node renames its comm to node-MainThread, which is exactly why
+    // the probe reads argv[0] and not comm)
+    if (process.platform !== 'linux') {
+      return;
+    }
+    const bindir = mkdtempSync(join(tmpdir(), 'bro-devin-bin-'));
+    const bin = join(bindir, 'devin');
+    try {
+      linkSync(process.execPath, bin);
+    } catch {
+      copyFileSync(process.execPath, bin); // cross-device tmp — no hardlink
+    }
+    const devin = spawn(bin, ['-e', 'setTimeout(() => {}, 15000)'], { stdio: 'ignore' });
+    const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+    if (!devin.pid || !sleeper.pid) {
+      throw new Error('spawn failed to create child process');
+    }
+    try {
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'live.lock'), String(devin.pid));
+        writeFileSync(join(dir, 'stale.lock'), String(sleeper.pid));
+        assert.equal(countDevinSessions([dir], undefined, absentProc()), 1);
+      });
+    } finally {
+      devin.kill('SIGKILL');
+      sleeper.kill('SIGKILL');
+      rmSync(bindir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -532,13 +728,17 @@ describe('countDevinWorkers', () => {
     withLockDir(dir => {
       writeFileSync(join(dir, 'a.lock'), String(process.pid));
       const absent = join(tmpdir(), 'bro-proc-absent-');
+      // the lock's pid must be a LIVE devin session for the gate to be
+      // reached at all — a no-/proc host answers identity over the ps
+      // probe, scripted here (spec bro-74y7n)
+      const devinPs = (): string => psRow(Date.now(), 'devin --resume');
       assert.throws(
-        () => countDevinWorkers([dir], devinPidIsWorker, undefined, absent),
+        () => countDevinWorkers([dir], devinPidIsWorker, undefined, absent, devinPs),
         (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
       );
       // an injected classifier doesn't probe /proc — no throw
       assert.equal(
-        countDevinWorkers([dir], () => false, undefined, absent),
+        countDevinWorkers([dir], () => false, undefined, absent, devinPs),
         0
       );
     });
