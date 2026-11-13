@@ -193,13 +193,22 @@ export {
 } from './stages/route.ts';
 export type {
   EvidenceRow,
+  ProofKind,
+  ProofRef,
   RowVerdict,
+  SeamEvidenceRow,
   VerifyDeps,
   VerifyPayload,
   VerifySpec,
   VerifyVerdict,
 } from './stages/verify.ts';
-export { ROW_VERDICTS, VERIFY_VERDICTS, verifyStage } from './stages/verify.ts';
+export {
+  formatProof,
+  PROOF_KINDS,
+  ROW_VERDICTS,
+  VERIFY_VERDICTS,
+  verifyStage,
+} from './stages/verify.ts';
 export type {
   FleetDeps,
   FleetDiff,

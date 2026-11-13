@@ -6,15 +6,19 @@ import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal, type PipelineJournal } from '../journal.ts';
 import {
   PARK_ALERTS,
+  type RunOptions,
   resumePipeline,
   runPipeline,
-  type RunOptions,
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
 import { settled } from '../testkit.ts';
 import {
   type EvidenceRow,
+  formatProof,
+  type ProofKind,
+  type ProofRef,
+  type SeamEvidenceRow,
   type VerifyDeps,
   type VerifyPayload,
   type VerifySpec,
@@ -60,12 +64,25 @@ const specSpy = (s: TaskSpec | undefined): SpecSpy => {
   };
 };
 
-const pass = (ac: string, proof = `run:${ac}`): EvidenceRow => ({ ac, verdict: 'pass', proof });
-const fail = (ac: string, proof = `run:${ac}`): EvidenceRow => ({ ac, verdict: 'fail', proof });
+/** A typed proof ref — `kind`/`ref`/`ts` exactly as the seam emits. */
+const proof = (kind: ProofKind, ref: string, ts?: string): ProofRef => ({
+  kind,
+  ref,
+  ...(ts !== undefined ? { ts } : {}),
+});
+
+const pass = (
+  ac: string,
+  p: ProofRef | string = proof('test-run', `run:${ac}`)
+): SeamEvidenceRow => ({ ac, verdict: 'pass', proof: p });
+const fail = (
+  ac: string,
+  p: ProofRef | string = proof('test-run', `run:${ac}`)
+): SeamEvidenceRow => ({ ac, verdict: 'fail', proof: p });
 
 interface E2eSpy {
   calls: { call: StageCall; ac: string }[];
-  fn: (call: StageCall, ac: string) => Promise<EvidenceRow>;
+  fn: (call: StageCall, ac: string) => Promise<SeamEvidenceRow>;
 }
 
 /** A scripted e2e seam — records each (call, ac) it served and answers
@@ -73,13 +90,13 @@ interface E2eSpy {
  *  up by criterion (falling back to pass), a queue shifts answers per
  *  invocation (the last sticks). */
 const e2eSpy = (
-  script: ((ac: string) => EvidenceRow) | Record<string, EvidenceRow> | EvidenceRow[]
+  script: ((ac: string) => SeamEvidenceRow) | Record<string, SeamEvidenceRow> | SeamEvidenceRow[]
 ): E2eSpy => {
   const calls: E2eSpy['calls'] = [];
   let i = 0;
   return {
     calls,
-    fn: async (call: StageCall, ac: string): Promise<EvidenceRow> => {
+    fn: async (call: StageCall, ac: string): Promise<SeamEvidenceRow> => {
       calls.push({ call, ac });
       if (typeof script === 'function') {
         return script(ac);
@@ -161,14 +178,14 @@ describe('verify — the AC list', () => {
 describe('verify — verdicts', () => {
   test('every row pass → verified — the rows and summary ride the payload', async () => {
     const sp = specSpy(spec(ACS));
-    const e = e2eSpy(ac => pass(ac, `probe:${ac}`));
+    const e = e2eSpy(ac => pass(ac, proof('test-run', `probe:${ac}`, '2026-11-11T00:00:00Z')));
     const res = await invoke(sp, e.fn);
     assert.equal(res.verdict, 'verified');
     const p = res.payload as VerifyPayload;
     assert.equal(p.rows.length, 3);
     assert.deepEqual(
       p.rows.map(r => [r.ac, r.verdict, r.proof]),
-      ACS.map(ac => [ac, 'pass', `probe:${ac}`])
+      ACS.map(ac => [ac, 'pass', proof('test-run', `probe:${ac}`, '2026-11-11T00:00:00Z')])
     );
     assert.equal(p.summary, 'all 3 acceptance criteria verified');
     assert.equal(p.notes, undefined); // notes belong to failed
@@ -178,8 +195,8 @@ describe('verify — verdicts', () => {
     const sp = specSpy(spec(ACS));
     const e = e2eSpy({
       [ACS[0]]: pass(ACS[0]),
-      [ACS[1]]: fail(ACS[1], 'e2e-run-77'),
-      [ACS[2]]: fail(ACS[2], 'e2e-run-78'),
+      [ACS[1]]: fail(ACS[1], proof('test-run', 'e2e-run-77')),
+      [ACS[2]]: fail(ACS[2], proof('file-fact', 'e2e-run-78')),
     });
     const res = await invoke(sp, e.fn);
     assert.equal(res.verdict, 'failed');
@@ -193,7 +210,8 @@ describe('verify — verdicts', () => {
     assert.equal(
       p.notes,
       'address the failed acceptance criteria — ' +
-        `${ACS[1]} (evidence: e2e-run-77); ${ACS[2]} (evidence: e2e-run-78)`
+        `${ACS[1]} (evidence: test-run:e2e-run-77); ` +
+        `${ACS[2]} (evidence: file-fact:e2e-run-78)`
     );
   });
 
@@ -228,6 +246,30 @@ describe('verify — fail loud', () => {
     ['a missing proof', { ac: ACS[0], verdict: 'pass' }],
     ['an empty proof', { ac: ACS[0], verdict: 'pass', proof: '' }],
     ['a non-string proof', { ac: ACS[0], verdict: 'pass', proof: 42 }],
+    ['a null proof', { ac: ACS[0], verdict: 'pass', proof: null }],
+    ['a proof record with no kind', { ac: ACS[0], verdict: 'pass', proof: { ref: 'r' } }],
+    [
+      'a proof kind outside the enum',
+      { ac: ACS[0], verdict: 'pass', proof: { kind: 'vibes', ref: 'r' } },
+    ],
+    ['a proof record with no ref', { ac: ACS[0], verdict: 'pass', proof: { kind: 'probe' } }],
+    [
+      'a proof record with an empty ref',
+      { ac: ACS[0], verdict: 'pass', proof: { kind: 'probe', ref: '' } },
+    ],
+    [
+      'a proof record with a non-string ref',
+      { ac: ACS[0], verdict: 'pass', proof: { kind: 'probe', ref: 7 } },
+    ],
+    [
+      'a proof record with a non-string ts',
+      { ac: ACS[0], verdict: 'pass', proof: { kind: 'probe', ref: 'r', ts: 42 } },
+    ],
+    [
+      'a proof record with an empty ts',
+      { ac: ACS[0], verdict: 'pass', proof: { kind: 'probe', ref: 'r', ts: '' } },
+    ],
+    ['a proof array', { ac: ACS[0], verdict: 'pass', proof: ['r'] }],
     ['an ac for a different criterion', { ac: 'something else', verdict: 'pass', proof: 'r' }],
     ['a missing ac', { verdict: 'pass', proof: 'run-1' }],
     ['a bare string', 'pass'],
@@ -236,7 +278,7 @@ describe('verify — fail loud', () => {
   for (const [name, row] of CASES) {
     test(`${name} throws — unreadable evidence is never journaled`, async () => {
       const sp = specSpy(spec(ACS.slice(0, 1)));
-      const e = e2eSpy(() => row as EvidenceRow);
+      const e = e2eSpy(() => row as SeamEvidenceRow);
       await assert.rejects(() => invoke(sp, e.fn), /malformed evidence row/);
     });
   }
@@ -244,7 +286,7 @@ describe('verify — fail loud', () => {
   test('a row failing later in the list still throws — partial evidence settles nothing', async () => {
     const sp = specSpy(spec(ACS));
     const e = e2eSpy(ac =>
-      ac === ACS[2] ? ({ ac, verdict: 'maybe' } as unknown as EvidenceRow) : pass(ac)
+      ac === ACS[2] ? ({ ac, verdict: 'maybe' } as unknown as SeamEvidenceRow) : pass(ac)
     );
     await assert.rejects(() => invoke(sp, e.fn), /malformed evidence row/);
     assert.equal(e.calls.length, 3); // the bad answer, not the count, is the failure
@@ -259,6 +301,44 @@ describe('verify — fail loud', () => {
         }),
       /e2e runner is down/
     );
+  });
+});
+
+describe('verify — typed proof refs (bro-qjji2.14)', () => {
+  test('a typed proof journals verbatim — kind, ref, ts all survive', async () => {
+    const sp = specSpy(spec(ACS.slice(0, 1)));
+    const p = proof('file-fact', 'src/x.ts:exports-main', '2026-11-11T01:02:03Z');
+    const res = await invoke(sp, e2eSpy(() => pass(ACS[0], p)).fn);
+    assert.equal(res.verdict, 'verified');
+    const row = (res.payload as VerifyPayload).rows[0] as EvidenceRow;
+    assert.deepEqual(row.proof, p);
+  });
+
+  test('a legacy bare-string proof normalizes to the generic probe kind', async () => {
+    const sp = specSpy(spec(ACS.slice(0, 1)));
+    const res = await invoke(sp, e2eSpy(() => pass(ACS[0], 'e2e-run-42')).fn);
+    assert.equal(res.verdict, 'verified');
+    const row = (res.payload as VerifyPayload).rows[0] as EvidenceRow;
+    assert.deepEqual(row.proof, { kind: 'probe', ref: 'e2e-run-42' });
+  });
+
+  test('canonicalization drops producer fields outside the schema', async () => {
+    const sp = specSpy(spec(ACS.slice(0, 1)));
+    const fat = {
+      kind: 'probe',
+      ref: 'artifact-1',
+      detail: 'extra producer field',
+      nested: { ignored: true },
+    } as unknown as ProofRef;
+    const res = await invoke(sp, e2eSpy(() => pass(ACS[0], fat)).fn);
+    const row = (res.payload as VerifyPayload).rows[0] as EvidenceRow;
+    assert.deepEqual(row.proof, { kind: 'probe', ref: 'artifact-1' });
+  });
+
+  test('formatProof renders kind:ref — the one text form consumers share', () => {
+    assert.equal(formatProof(proof('test-run', 'run-9', '2026-11-11T00:00:00Z')), 'test-run:run-9');
+    assert.equal(formatProof({ kind: 'probe', ref: 'e2e-run-9' }), 'probe:e2e-run-9');
+    assert.equal(formatProof({ kind: 'file-fact', ref: 'f.ts:1' }), 'file-fact:f.ts:1');
   });
 });
 
@@ -320,7 +400,9 @@ describe('verify inside runPipeline — the spec DAG', () => {
   test('failed → work re-entry — the composed scope is journaled with the verdict', async () => {
     const jn = memoryJournal();
     const sp = specSpy(spec(ACS.slice(0, 2)));
-    // first verify round: the second AC fails; the re-work's verify passes all
+    // first verify round: the second AC fails — a LEGACY bare-string
+    // proof, normalized to the probe kind end-to-end; the re-work's
+    // verify passes all
     let n = 0;
     const e = e2eSpy(ac => (n++ < 2 && ac === ACS[1] ? fail(ac, 'e2e-run-9') : pass(ac)));
     const { res, workCalls } = runDag(deps(sp, e.fn), {}, jn);
@@ -338,11 +420,15 @@ describe('verify inside runPipeline — the spec DAG', () => {
     assert.equal(failed.length, 1);
     const fp = failed[0].payload as VerifyPayload;
     // the passing AC is not scope — exact composition, never a
-    // substring check: its text inside another row is not membership
+    // substring check: its text inside another row is not membership.
+    // The bare-string proof normalized to the generic probe kind.
     assert.equal(
       fp.notes,
-      `address the failed acceptance criteria — ${ACS[1]} (evidence: e2e-run-9)`
+      `address the failed acceptance criteria — ${ACS[1]} (evidence: probe:e2e-run-9)`
     );
+    // and the journaled row carries the canonical typed ref
+    const failedRow = fp.rows.find(r => r.ac === ACS[1]);
+    assert.deepEqual(failedRow?.proof, { kind: 'probe', ref: 'e2e-run-9' });
     // the re-entry is SCOPED — fix_round + the failed rows' scope, same
     // contract as review.fix / accept.rejected
     assert.equal(workCalls[1].fixRound, 1);
