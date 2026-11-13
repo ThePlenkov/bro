@@ -64,7 +64,9 @@ const happyScript = (complexity = 'complex') => ({
   e2e: spy([
     {
       verdict: 'verified',
-      payload: { rows: [{ ac: 'ships', verdict: 'pass', proof: 'run-1' }] },
+      payload: {
+        rows: [{ ac: 'ships', verdict: 'pass', proof: { kind: 'test-run', ref: 'run-1' } }],
+      },
     },
   ]),
   accept: spy([{ verdict: 'accepted', payload: { accepted_by: 'customer-1' } }]),

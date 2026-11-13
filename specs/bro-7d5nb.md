@@ -240,8 +240,11 @@ next stage reads:
   (`done|rate_limited|crash|stopped`); the verdict is a mapping, not
   a new enum.
 - **verify** → `{ rows: [{ ac: string, verdict: pass|fail,
-  proof: ref }], summary? }` — one row per declared AC;
-  `failed` composes the failing rows into the fix-scope notes.
+  proof: { kind: test-run|probe|file-fact, ref, ts? } }],
+  summary? }` — one row per declared AC; `proof` is the typed ref
+  (bro-qjji2.14 — the seam may still answer a bare string, which
+  journals normalized to `{kind: probe, ref}`); `failed` composes
+  the failing rows into the fix-scope notes.
 - **review** → `{ verdict: push|fix|abandon, notes }` — the internal
   review pass on the worktree diff via `routing.review.chain`.
 - **accept** → `{ accepted_by, notes? }` — `accepted_by` is the
@@ -280,7 +283,9 @@ next stage reads:
 - **verify** — self-validation against the item's declared AC via the
   `e2e` engine (agentic e2e pipeline): each criterion produces an
   evidence row `{ac, verdict, proof}` — a test run, a rendered probe,
-  a file fact — never the worker's bare claim. `verified` requires
+  a file fact — never the worker's bare claim. `proof` is a typed
+  `{kind, ref, ts?}` ref so the journaled evidence the accept bundle
+  and retros read is machine-checkable. `verified` requires
   every row passing. `failed` composes the failing rows into the
   fix-scope and re-enters `work`. `unverifiable` — the item carries
   no usable AC — parks with an alert: a task that cannot be verified

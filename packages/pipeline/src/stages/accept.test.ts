@@ -98,6 +98,8 @@ const rec = (
   ...extra,
 });
 
+// a PRE-.14 journaled verify payload — bare-string proofs still read:
+// the bundle carries payloads as unknown and never re-validates rows
 const VERIFY_ROWS = { rows: [{ ac: 'ships', verdict: 'pass', proof: 'run-1' }] };
 
 /** The minimal evidence journal: a settled verify row the bundle
