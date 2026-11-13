@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@broject/act": "^0.3.0",
+    "@broject/convoy": "^0.3.0",
     "@broject/core": "^0.3.0",
     "@broject/drill": "^0.3.0"
   },
