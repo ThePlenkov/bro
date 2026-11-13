@@ -80,3 +80,14 @@ for (const [kind, argv] of Object.entries(RESUME_ARGV)) {
 export function sessionResumeArgv(host: string, sid: string, cwd: string): string[] | null {
   return sessionPlane(host)?.resumeArgv?.(sid, cwd) ?? null;
 }
+
+/** sessionResumeArgv, fail-safe — a plane that throws reports like a
+ *  host with no resume command; it never takes a read surface
+ *  (`bro sessions`, `bro fleet resume`) down with it. */
+export function safeResumeArgv(host: string, sid: string, cwd: string): string[] | null {
+  try {
+    return sessionResumeArgv(host, sid, cwd);
+  } catch {
+    return null;
+  }
+}

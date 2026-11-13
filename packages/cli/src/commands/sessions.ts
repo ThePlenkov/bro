@@ -61,11 +61,11 @@ import {
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
-// side effect: registers the resumeArgv planes (claude|codex|opencode|
-// cursor) and @broject/devin's plane — the read path `bro sessions
-// resume` resolves through (specs/bro-izpyk.4.md)
-import '../session-planes/resume.ts';
-import { sessionResumeArgv } from '../session-planes/resume.ts';
+// side effect (the import itself): registers the resumeArgv planes
+// (claude|codex|opencode|cursor) and @broject/devin's plane — the read
+// path `bro sessions` / `bro sessions resume` resolves through
+// (specs/bro-izpyk.4.md)
+import { safeResumeArgv } from '../session-planes/resume.ts';
 import { runSessionsResume } from './sessions-resume.ts';
 
 const USAGE = `usage: bro sessions [--project|--all] [--host <h>] [--live] [--json]
@@ -317,20 +317,9 @@ async function claimsBySession(
     }
   }
   for (const held of bySession.values()) {
-    held.sort();
+    held.sort((a, b) => a.localeCompare(b));
   }
   return bySession;
-}
-
-/** The plane's resumeArgv, fail-safe — the same fail-closed rule
- *  `bro fleet resume` applies: a plane that throws reports like a
- *  host with no resume command, it never takes the listing down. */
-function safeResumeArgv(host: string, sid: string, cwd: string): string[] | null {
-  try {
-    return sessionResumeArgv(host, sid, cwd);
-  } catch {
-    return null;
-  }
 }
 
 /** Ledger rows → view rows: derived state, resolved bead, --live filter.

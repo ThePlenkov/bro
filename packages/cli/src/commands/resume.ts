@@ -43,7 +43,7 @@ import { rearmPass } from './act.ts';
 import { loadAgentEnv } from '../agent-connectors.ts';
 import { collectAgentBackends } from './agents.ts';
 import { loadBroConfig } from '../plugins.ts';
-import { sessionResumeArgv } from '../session-planes/resume.ts';
+import { safeResumeArgv } from '../session-planes/resume.ts';
 import {
   deriveSessionState,
   displayWorktree,
@@ -181,18 +181,6 @@ export interface InterruptedSessionsDeps {
   ledger?: LedgerFacade;
   now?: number;
   bootTimeMs?: number;
-}
-
-/** The plane's resumeArgv, fail-safe — a plane that throws must not
- *  take the whole recovery pass down with it; the row reports
- *  'unsupported' instead (the honest answer for a broken plane is the
- *  same as no plane). */
-function safeResumeArgv(host: string, sid: string, cwd: string): string[] | null {
-  try {
-    return sessionResumeArgv(host, sid, cwd);
-  } catch {
-    return null;
-  }
 }
 
 /** Interrupted sessions across the machine ledger — `deriveSessionState`
