@@ -1,8 +1,16 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from '@broject/core';
 /** A scratch dir swept on exit — the fixture-leak contract: a test
@@ -49,6 +57,11 @@ const withLockDir = (fn: (dir: string) => void): void => {
  *  (a controlling-terminal device number) additionally scripts
  *  <pid>/stat — without it the tty probe reads "no data" and the
  *  stdin probe decides. */
+/** A /proc starttime (field 22, jiffies since boot) reading as
+ *  "started now" — the lock-bound check converts it against this
+ *  host's real uptime, so the fixture scripts the real clock. */
+const nowJiffies = (): number => Math.round(uptime() * 100);
+
 const withProc = (
   fn: (
     procDir: string,
@@ -57,7 +70,8 @@ const withProc = (
       environ: string | null,
       stdinTo: string | null,
       argv0?: string,
-      tty?: number
+      tty?: number,
+      startJiffies?: number
     ) => void
   ) => void
 ): void => {
@@ -67,7 +81,8 @@ const withProc = (
     environ: string | null,
     stdinTo: string | null,
     argv0 = 'devin',
-    tty?: number
+    tty?: number,
+    startJiffies?: number
   ): void => {
     const dir = join(procDir, String(pid));
     mkdirSync(join(dir, 'fd'), { recursive: true });
@@ -77,11 +92,14 @@ const withProc = (
     if (stdinTo !== null) {
       symlinkSync(stdinTo, join(dir, 'fd', '0'));
     }
-    if (tty !== undefined) {
-      // the real shape: pid (comm) state ppid pgrp session tty_nr … —
-      // the comm may wrap in parens and hold spaces, the parser goes
-      // after the last ')'
-      writeFileSync(join(dir, 'stat'), `${pid} (devin acp) S 1 1 1 ${tty} ${tty} 0\n`);
+    if (tty !== undefined || startJiffies !== undefined) {
+      // the real shape: pid (comm) state ppid pgrp session tty_nr …
+      // …starttime(22) — the comm may wrap in parens and hold spaces,
+      // the parser goes after the last ')'; starttime sits at rest[19]
+      writeFileSync(
+        join(dir, 'stat'),
+        `${pid} (devin acp) S 1 1 1 ${tty ?? 0} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ${startJiffies ?? 0}\n`
+      );
     }
     // the identity the live-session count checks: argv[0] is the cli
     writeFileSync(join(dir, 'cmdline'), `${argv0}\0--flag\0`);
@@ -215,6 +233,67 @@ describe('countDevinSessions', () => {
         rmSync(join(procDir, String(process.pid)), { recursive: true, force: true });
         writeFileSync(join(dir, 'gone.lock'), String(process.pid));
         assert.equal(countDevinSessions([dir], undefined, procDir), 0);
+      });
+    });
+  });
+
+  test('a pid recycled into ANOTHER devin process is stale — its start postdates the lock', () => {
+    withProc((procDir, mk) => {
+      withLockDir(dir => {
+        // devin argv[0] passes the comm check — the serve-churn shape
+        // (bro-q0v0e): a dead session's number landed on `devin acp` /
+        // `devin rm`. The lock's own write bound is what proves it a
+        // stranger: this pid started minutes after the file changed.
+        mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies());
+        const lock = join(dir, 'recycled.lock');
+        writeFileSync(lock, String(process.pid));
+        const aged = new Date(Date.now() - 10 * 60_000);
+        utimesSync(lock, aged, aged);
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0);
+      });
+    });
+  });
+
+  test('a start inside the skew bound still counts — the lock/child race is not staleness', () => {
+    withProc((procDir, mk) => {
+      withLockDir(dir => {
+        // observed live: a `devin --resume`'s acp child can start a
+        // second or two after the lock lands — the pin's tolerance is
+        // 60s, and 30s inside it stays a session
+        mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies());
+        const lock = join(dir, 'resumed.lock');
+        writeFileSync(lock, String(process.pid));
+        const aged = new Date(Date.now() - 30_000);
+        utimesSync(lock, aged, aged);
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1);
+      });
+    });
+  });
+
+  test('a lock the count just watched being written counts — the start precedes it', () => {
+    withProc((procDir, mk) => {
+      withLockDir(dir => {
+        // a real session: process started, devin wrote its lock — the
+        // pid's start sits before the file's change bound
+        mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies() - 60_000);
+        writeFileSync(join(dir, 'live.lock'), String(process.pid));
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1);
+      });
+    });
+  });
+
+  test('no pid stat — the start pin is unverifiable and the pid stays counted', () => {
+    withProc((procDir, mk) => {
+      withLockDir(dir => {
+        // argv0 reads devin but /proc/<pid>/stat is absent (a macOS
+        // fixture shape): nothing can prove staleness — the pin must
+        // not invent it
+        mk(process.pid, 'PATH=/bin\0', null, 'devin');
+        const lock = join(dir, 'blind.lock');
+        writeFileSync(lock, String(process.pid));
+        const aged = new Date(Date.now() - 10 * 60_000);
+        utimesSync(lock, aged, aged);
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1);
       });
     });
   });
@@ -476,6 +555,19 @@ describe('listDevinSessions', () => {
         // worker lane holds: live, but not verifiably a worker
         assert.equal(rows[0]!.worker, false);
         assert.equal(rows[0]!.agentId, undefined);
+      });
+    });
+  });
+
+  test('a stale (recycled-pid) lock yields no row — the write bound rejects it', () => {
+    withProc((procDir, mk) => {
+      mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies());
+      withLockDir(dir => {
+        const lock = join(dir, 'phantom.lock');
+        writeFileSync(lock, String(process.pid));
+        const aged = new Date(Date.now() - 10 * 60_000);
+        utimesSync(lock, aged, aged);
+        assert.equal(listDevinSessions([dir], procDir).length, 0);
       });
     });
   });
