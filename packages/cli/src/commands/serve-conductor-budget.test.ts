@@ -225,6 +225,9 @@ describe('conductorConfig — serve.limits parsing', () => {
               'empty-entry': {},
             },
           },
+          // the backend must resolve — a bare serve.backend with no
+          // providers entry is a loud startup error, not a config
+          providers: { 'devin-acp': { type: 'acp', command: 'dv acp' } },
         })
       );
       const cfg = conductorConfig({}, dir);
