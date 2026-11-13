@@ -20,6 +20,32 @@ export {
   type RunArgs,
   type RunDeps,
 } from './policies/convoy.ts';
+export {
+  clumpTitle,
+  diskProbes,
+  freshLoopQueue,
+  loopPolicy,
+  noteBead,
+  runLoop,
+  wallWaitUntil,
+  loopWatch,
+  stackPlan,
+  type CeilingRes,
+  type ItemResult,
+  type LoopActCfg,
+  type LoopCtx,
+  type LoopDeps,
+  type LoopLane,
+  type LoopMember,
+  type LoopPolicy,
+  type LoopQueue,
+  type LoopRunStamp,
+  type LoopWork,
+  type PushOutcome,
+  type ServiceVerdict,
+  type StackSlot,
+  type WorkerRef,
+} from './policies/loop.ts';
 
 // --- fleet lifecycle: the ownership plane (bro-jamp7 slice 2) -------------
 export {
