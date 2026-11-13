@@ -156,8 +156,11 @@ function psIdentity(out: string): PsIdentity {
   return { present: true };
 }
 
-/** The real ps probe — `ps -p <pid> -o lstart=,command=` (`command`
- *  is the POSIX spelling; `args`/`args=` aliases print the same).
+/** The real ps probe — `ps -ww -p <pid> -o lstart=,command=` (`command`
+ *  is the POSIX spelling; `args`/`args=` aliases print the same). `-ww`
+ *  unpins the output width — a BSD ps caps `command` at the default
+ *  width and a long argv[0] path would arrive CUT, misreading the
+ *  basename (the same `-ww` doctor's and refguard's argv reads run).
  *  LC_ALL/LC_TIME pin lstart's month spelling so Date.parse reads it
  *  on any locale; TZ stays unpinned so lstart renders in the same
  *  zone Date.parse interprets. */
@@ -165,7 +168,7 @@ function psPidRow(pid: number): string | undefined {
   try {
     return execFileSync(
       'ps', // NOSONAR — PATH lookup is the contract
-      ['-p', String(pid), '-o', 'lstart=,command='],
+      ['-ww', '-p', String(pid), '-o', 'lstart=,command='],
       {
         encoding: 'utf8',
         timeout: 1000,
@@ -195,25 +198,9 @@ function psPidRow(pid: number): string | undefined {
  *  An unreadable /proc entry cannot clear a lock (the count fails
  *  closed — a quota that cannot be established is not walked past), so
  *  it counts as live. A host without procDir answers the same question
- *  over `ps` (spec bro-74y7n) — `command=` carries the same argv[0]
- *  the cmdline read basenames. */
-function isDevinProcess(pid: number, procDir = '/proc', ps: PsPidProbe = psPidRow): boolean {
-  if (!existsSync(procDir)) {
-    // a host without /proc answers over ps — same verdicts the cmdline
-    // read holds: a probe that cannot answer disproves nothing (the
-    // count fails closed), a clean run naming no such pid proves the
-    // lock stale, and a live pid answering a foreign argv[0] is a
-    // recycled number
-    const out = ps(pid);
-    if (out === undefined) {
-      return true;
-    }
-    const row = psIdentity(out);
-    if (!row.present) {
-      return false;
-    }
-    return row.argv0 === undefined ? true : row.argv0 === 'devin';
-  }
+ *  over `ps` inside lockIsLiveSession (spec bro-74y7n) — `command=`
+ *  carries the same argv[0] the cmdline read basenames. */
+function isDevinProcess(pid: number, procDir = '/proc'): boolean {
   let cmdline: string;
   try {
     cmdline = readFileSync(join(procDir, String(pid), 'cmdline'), 'utf8');
@@ -227,9 +214,8 @@ function isDevinProcess(pid: number, procDir = '/proc', ps: PsPidProbe = psPidRo
     ) {
       return false;
     }
-    // no /proc at all (a host without it), an unreadable entry, or an
-    // entry without a command line: the identity cannot be disproved —
-    // count it
+    // an unreadable entry, or an entry without a command line: the
+    // identity cannot be disproved — count it
     return true;
   }
   const argv0 = cmdline.split('\0')[0] ?? '';
@@ -285,17 +271,9 @@ const LOCK_PID_SKEW_MS = 60_000;
 /** The pid's /proc starttime (field 22, jiffies since boot) → epoch ms.
  *  Undefined when the stat is unreadable or malformed: the same
  *  fail-open contract as the cmdline read — an unverifiable pid stays
- *  counted, never a false "stale". A host without procDir answers the
- *  same fact from ps's lstart (spec bro-74y7n). */
-function procStartMs(pid: number, procDir: string, ps: PsPidProbe = psPidRow): number | undefined {
-  if (!existsSync(procDir)) {
-    const out = ps(pid);
-    if (out === undefined) {
-      return undefined;
-    }
-    const row = psIdentity(out);
-    return row.present ? row.startMs : undefined;
-  }
+ *  counted, never a false "stale". A host without procDir reads the
+ *  same fact off the lock check's ONE ps snapshot (spec bro-74y7n). */
+function procStartMs(pid: number, procDir: string): number | undefined {
   let raw: string;
   try {
     raw = readFileSync(join(procDir, String(pid), 'stat'), 'utf8');
@@ -342,10 +320,34 @@ function lockIsLiveSession(
   procDir: string,
   ps: PsPidProbe
 ): pid is number {
-  if (pid === undefined) {
+  if (pid === undefined || !pidAlive(pid)) {
     return false;
   }
-  if (!pidAlive(pid) || !isDevinProcess(pid, procDir, ps)) {
+  if (!existsSync(procDir)) {
+    // a host without /proc answers identity AND the start pin off ONE
+    // ps snapshot (spec bro-74y7n) — two reads let a pid recycled
+    // mid-check pass identity on the first and answer a stranger's
+    // start on the second (same-number TOCTOU). The verdicts are the
+    // ones the cmdline/stat reads hold: a probe that cannot answer
+    // disproves nothing (the count fails closed), a clean run naming
+    // no such pid proves the lock stale, a live pid answering a
+    // foreign argv[0] is a recycled number, and an unverifiable fact
+    // fails open like an unreadable /proc entry.
+    const out = ps(pid);
+    if (out === undefined) {
+      return true;
+    }
+    const row = psIdentity(out);
+    if (!row.present || (row.argv0 !== undefined && row.argv0 !== 'devin')) {
+      return false;
+    }
+    const bound = lockWriteBoundMs(lockPath);
+    if (bound === undefined || row.startMs === undefined) {
+      return true;
+    }
+    return row.startMs <= bound + LOCK_PID_SKEW_MS;
+  }
+  if (!isDevinProcess(pid, procDir)) {
     return false;
   }
   const bound = lockWriteBoundMs(lockPath);
@@ -354,7 +356,7 @@ function lockIsLiveSession(
     // same fail-closed contract the cmdline read holds
     return true;
   }
-  const start = procStartMs(pid, procDir, ps);
+  const start = procStartMs(pid, procDir);
   if (start === undefined) {
     return true;
   }

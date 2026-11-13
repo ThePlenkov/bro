@@ -140,6 +140,21 @@ const spawnDevinCli = (env: Record<string, string> = {}): ChildProcess => {
   return spawn(bin, ['30'], { stdio: 'ignore', env: { ...process.env, ...env } });
 };
 
+/** An `lstart=,command=` row as ps prints it — `day mon dd hh:mm:ss
+ *  yyyy` (the 5-token spelling; a same-year row drops the year on
+ *  some ps builds) followed by the space-joined argv. The start must
+ *  be a REAL time — an epoch-0 row `Date.parse`s to a negative,
+ *  TZ-shifted startMs, which is no honest live-session fixture. */
+const psRow = (startMs: number, argv0: string): string => {
+  const d = new Date(startMs);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()];
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][
+    d.getMonth()
+  ];
+  return `${day} ${mon} ${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${d.getFullYear()} ${argv0}`;
+};
+
 describe('devinSessionPlane', () => {
   test('detects the devin cli and nothing else', () => {
     assert.equal(devinSessionPlane.kind, 'devin');
@@ -334,30 +349,6 @@ describe('the no-/proc ps identity fallback (spec bro-74y7n)', () => {
   /** A procDir that cannot exist — the ps path's only gate. */
   const absentProc = (): string => join(tmpdir(), 'bro-proc-absent-');
 
-  /** An `lstart=,command=` row as ps prints it — `day mon dd hh:mm:ss
-   *  yyyy` (the 5-token spelling; a same-year row drops the year on
-   *  some ps builds) followed by the space-joined argv. */
-  const psRow = (startMs: number, argv0: string): string => {
-    const d = new Date(startMs);
-    const p = (n: number): string => String(n).padStart(2, '0');
-    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()];
-    const mon = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ][d.getMonth()];
-    return `${day} ${mon} ${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${d.getFullYear()} ${argv0}`;
-  };
-
   test('a devin argv0 counts; a foreign argv0 is a recycled pid — stale', () => {
     withLockDir(dir => {
       writeFileSync(join(dir, 'a.lock'), String(process.pid));
@@ -449,6 +440,21 @@ describe('the no-/proc ps identity fallback (spec bro-74y7n)', () => {
         countDevinSessions([dir], undefined, absentProc(), () => psRow(Date.now(), 'devin')),
         1
       );
+    });
+  });
+
+  test('one lock costs ONE ps call — identity and the start pin read the same row', () => {
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'a.lock'), String(process.pid));
+      let calls = 0;
+      const ps = (): string => {
+        calls += 1;
+        // a SECOND read could already see the number recycled — the
+        // verdict must come off the first row alone (same-pid TOCTOU)
+        return calls === 1 ? psRow(Date.now(), 'devin') : psRow(Date.now(), 'tailscaled');
+      };
+      assert.equal(countDevinSessions([dir], undefined, absentProc(), ps), 1);
+      assert.equal(calls, 1);
     });
   });
 
@@ -725,7 +731,7 @@ describe('countDevinWorkers', () => {
       // the lock's pid must be a LIVE devin session for the gate to be
       // reached at all — a no-/proc host answers identity over the ps
       // probe, scripted here (spec bro-74y7n)
-      const devinPs = (): string => `Thu Jan 1 00:00:00 1970 devin --resume`;
+      const devinPs = (): string => psRow(Date.now(), 'devin --resume');
       assert.throws(
         () => countDevinWorkers([dir], devinPidIsWorker, undefined, absent, devinPs),
         (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'

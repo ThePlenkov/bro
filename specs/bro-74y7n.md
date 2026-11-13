@@ -18,7 +18,8 @@ exactly the bug the pins fixed on Linux.
 ## Design — the same two facts, answered by `ps`
 
 A host without `procDir` answers the same two questions over
-`ps -p <pid> -o lstart=,command=`:
+`ps -ww -p <pid> -o lstart=,command=` — `-ww` unpins the output width so
+a BSD `command` column cannot truncate a long argv[0] path:
 
 - **identity** — `command` is the space-joined argv vector; argv[0]'s
   basename is the exact identity `/proc/<pid>/cmdline` carries
@@ -37,7 +38,9 @@ A host without `procDir` answers the same two questions over
   unpinned so `lstart` renders in the same zone `Date.parse` interprets —
   the conventions `live-procs.ts`'s darwin scan already runs.
 
-The probe is one `execFileSync` per pid, injectable as `psProbe` through
+The probe is one `execFileSync` per pid per lock check — identity and
+starttime ride the SAME snapshot, since a second read could see the
+number already recycled (same-pid TOCTOU). Injectable as `psProbe` through
 `countDevinSessions` / `countDevinWorkers` / `countDevinBatchWorkers` /
 `listDevinSessions` — the same test-injection convention `procDir`
 carries. A present `procDir` takes the /proc path verbatim: scripted
