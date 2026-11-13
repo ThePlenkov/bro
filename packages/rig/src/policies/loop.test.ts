@@ -148,7 +148,10 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
     endRun: () => {},
     runLog: () => null,
     projectScope: () => ({ kind: 'test' }),
-    claimCandidates: () => candidates.at(-1) ?? { candidates: [], foreign: 0 },
+    claimCandidates: () => {
+      const next = candidates.length > 1 ? candidates.shift() : candidates[0];
+      return next ?? { candidates: [], foreign: 0 };
+    },
     claimUpTo: () => [],
     laneFor: async () => ({}) as LoopLane,
     matrixHold: () => false,
