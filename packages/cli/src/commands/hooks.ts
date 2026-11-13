@@ -993,7 +993,10 @@ export async function otherLiveClaims(
 ): Promise<ClaimRow[]> {
   try {
     const host = deps?.host ?? hookHost;
-    if (sessionId === '' || host === undefined || host === '' || host === 'unknown') {
+    if (sessionId === '' || host === undefined) {
+      return [];
+    }
+    if (host === '' || host === 'unknown') {
       return [];
     }
     const claims = deps?.claims ?? (hookClaims ??= claimsFacade());
