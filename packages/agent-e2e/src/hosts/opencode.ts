@@ -2,6 +2,7 @@
  *  the fixture HOME, writes a project opencode.json pointing the
  *  `mock` provider at the llm-mock endpoint, and runs `opencode run`
  *  headless. */
+import { spawn, type ChildProcess } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO, run, runBro, type E2eEnv, type RunResult } from '../env.ts';
@@ -87,3 +88,106 @@ export async function runOpencode(
 }
 
 export { runBro };
+
+/* Serve mode — `opencode run` exits with the turn, so session.idle (the
+ *  stop gate's trigger) never reaches the plugin. `opencode serve` keeps
+ *  the session processor alive server-side: prompt via the v2 API, the
+ *  gate fires, the reprompt lands as a second turn — all observable. */
+
+export interface OpencodeServer {
+  url: string;
+  /** SIGKILL the server's process group. */
+  stop(): Promise<void>;
+}
+
+const SERVER_PASSWORD = 'e2e';
+
+/** `opencode serve` on a random localhost port, fixture env, plugin
+ *  already installed. Resolves once /doc answers; kills on timeout. */
+export async function startOpencodeServer(
+  e: E2eEnv,
+  opts: { port?: number; timeoutMs?: number } = {}
+): Promise<OpencodeServer> {
+  const port = opts.port ?? 16000 + Math.floor(Math.random() * 2000);
+  const url = `http://127.0.0.1:${port}`;
+  const child: ChildProcess = spawn(
+    'opencode',
+    ['serve', '--hostname', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: e.proj,
+      env: { ...e.env, MOCK_LLM_API_KEY: 'e2e', OPENCODE_PASSWORD: SERVER_PASSWORD },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    }
+  );
+  let stderrTail = '';
+  child.stderr?.on('data', c => {
+    stderrTail = (stderrTail + c).slice(-4000);
+  });
+  child.stdout?.on('data', () => {});
+  const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+  for (;;) {
+    try {
+      const r = await fetch(`${url}/doc`);
+      if (r.ok) {
+        break;
+      }
+    } catch {
+      // not up yet
+    }
+    if (Date.now() > deadline) {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+      throw new Error(`opencode serve did not start:\n${stderrTail}`);
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+  return {
+    url,
+    stop: () =>
+      new Promise(resolve => {
+        try {
+          if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          try {
+            child.kill('SIGKILL');
+          } catch {}
+        }
+        child.once('close', () => resolve());
+        setTimeout(resolve, 3000).unref?.();
+      }),
+  };
+}
+
+/** One `opencode api --server <url> <operation>` call — the supported
+ *  client path (handles OPENCODE_PASSWORD auth). `params` fill OpenAPI
+ *  path/query params (`sessionID` etc.), `data` is the JSON body. */
+export async function opencodeApi(
+  e: E2eEnv,
+  serverUrl: string,
+  operation: string,
+  opts: { data?: unknown; params?: Record<string, string> } = {}
+): Promise<unknown> {
+  const args = ['api', '--server', serverUrl, operation];
+  for (const [k, v] of Object.entries(opts.params ?? {})) {
+    args.push('--param', `${k}=${v}`);
+  }
+  if (opts.data !== undefined) {
+    args.push('--data', JSON.stringify(opts.data));
+  }
+  const res = await run('opencode', args, {
+    cwd: e.proj,
+    env: { ...e.env, OPENCODE_PASSWORD: SERVER_PASSWORD },
+    timeoutMs: 30_000,
+  });
+  if (res.code !== 0) {
+    throw new Error(
+      `opencode api ${operation} exited ${res.code}: ${(res.stderr || res.stdout).slice(-500)}`
+    );
+  }
+  const out = res.stdout.trim();
+  return out === '' ? undefined : (JSON.parse(out) as unknown);
+}

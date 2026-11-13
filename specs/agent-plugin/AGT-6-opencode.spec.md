@@ -44,7 +44,7 @@ tools on one truth.
 | post-tool | `tool.execute.after` | context, observe — `synthesized` (`isError`) |
 | pre-tool | `tool.execute.before` | block, rewrite — `tool_input` merges over original args |
 | permission | `permission.hook("evaluate")` | approve — command joined from `resources` |
-| stop | `event` → `session.idle` | reprompt, context — `stop_hook_active` skip |
+| stop | `event` → `session.execution.succeeded` | reprompt, context — `stop_hook_active` skip |
 | post-compaction | — | gap (compaction hook covers it) |
 
 ### What the plugin adds — the full inventory
@@ -61,10 +61,13 @@ tools on one truth.
 
 ### `/bro` + stop-gate specifics
 
-- Stop: no pre-stop slot → `session.idle` delivers the blocker as
+- Stop: no pre-stop slot → `session.execution.succeeded` (v2's
+  completion event — `session.idle` is schema-declared but never
+  published, opencode#55358) delivers the blocker as
   ONE synthesized prompt (`reprompt` via `session.prompt`/
-  `synthetic`), later idles skipped via persisted `stop-gated`
+  `synthetic`), later executions skipped via persisted `stop-gated`
   storage + `stop_hook_active`. `stopRefusal: 'reprompt'`.
+  `execution.failed`/`.interrupted` never gate.
 - Hydration: `context` hook pushes the snapshot into `event.system`
   once per session, re-pushed every model request (cache keeps it
   cheap); prompt nudges queue in `pendingPromptContext`.
@@ -104,6 +107,9 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
 - `packages/agent-e2e` opencode e2e: real `opencode run` against an
   aimock provider — asserts journal traffic, mock reply in output,
   and ≥8 `bro_*` direct tools in the request's `tools` array.
+  FakeBro scenarios: session-start context reaches the model request,
+  stop gate blocks→reprompts→passes through `opencode serve`,
+  pre-tool veto reaches the model as the tool result.
 - Live (dogfooded in SDD work): `opencode run` sessions — hydration
   context, board widget, `bro_*` tools callable, `/bro` output,
   attention toasts; `POST /api/rpc/bro/board` returns board JSON.
@@ -127,3 +133,14 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   array carried zero `bro_*` entries. Tools now register with
   `codemode: false` → direct `bro_*` function tools; R4 hardened,
   Verify gains the agent-e2e journal assertion.
+- 2026-11-13 — v5: e2e-caught lifecycle fix — the event-stream stop
+  gate listened for v1 names (`session.idle`, `message.updated`,
+  `session.created`, `session.compacted`) that opencode v2 never
+  publishes; the gate was dead in production. Bus handling moved to
+  the verified v2 taxonomy: `session.execution.started` primes
+  rehydration, `.succeeded` marks the clean turn AND fires the gate,
+  `.failed`/`.interrupted` disarm it; `session.compaction.*` re-primes
+  post-compaction; `session.deleted` unchanged. `packages/agent-e2e`
+  gains FakeBro (scripted `bro hooks` responder + journal) and the
+  serve-mode driver; the stop-gate scenario now runs live against
+  `opencode serve`.
