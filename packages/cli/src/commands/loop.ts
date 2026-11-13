@@ -174,6 +174,9 @@ import {
   fleetProfileOf,
   liveSessionKeysByKind,
   loadAgentEnv,
+  MatrixHoldError,
+  type MatrixLanePick,
+  matrixLanePick,
   profileModelFor,
   providerWallsFor,
   resolveAgentConnector,
@@ -415,6 +418,9 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_AGENT_PROVIDER',
     'BRO_AGENT_MODEL',
     'BRO_AGENT_CLASS',
+    // the fleet.matrix lane is per-spawn provenance too — a parent
+    // worker's pick must not label this child's (spec bro-v0pvd.1.1)
+    'BRO_AGENT_MATRIX',
     'BRO_SESSION_ID',
     'BRO_MOL_ID',
     // telemetry dims are per-spawn facts (spec bro-xgejl.1) — a parent
@@ -489,6 +495,9 @@ export interface LoopLane {
    *  bro-1x7p). Provenance like provider/model; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string;
+  /** The fleet.matrix lane the spawn routed to (enforce pick's row
+   *  name — spec bro-v0pvd.1.1); absent on shadow/off/unrouted lanes. */
+  matrix?: string;
   route?: NonNullable<SpawnSpec['route']>;
   /** The route-table decision's UUID — journaled at decision time;
    *  pinned on the bead (`router:decision=`), the worker env
@@ -517,14 +526,17 @@ export interface LoopLaneSel {
  *  is the facade's own — explicit flag pick → flag-named
  *  fleet.profiles preset → the routed chain head (spec bro-1x7p: a
  *  declared `fleet.routing` resolves the bead's class per spawn and its
- *  chain head supplies the initial provider) → config picks (`loop.profile`,
+ *  chain head supplies the initial provider) → the fleet.matrix pick
+ *  (spec bro-v0pvd.1.1: below every operator pick, above the route head
+ *  and config defaults) → config picks (`loop.profile`,
  *  `loop.provider`) → `agents.native.provider` → legacy template. A bad
  *  name throws SpawnError — the caller exits before a bead is claimed. */
 export async function resolveLoopLane(
   env: AgentConnectorEnv,
   sel: LoopLaneSel,
   cfg: LoopConfig,
-  route?: ResolvedClass
+  route?: ResolvedClass,
+  matrix?: MatrixLanePick
 ): Promise<LoopLane> {
   const agentIsProvider = sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent);
   if (agentIsProvider && sel.provider !== undefined && sel.provider !== sel.agent) {
@@ -541,7 +553,8 @@ export async function resolveLoopLane(
     sel,
     cfg,
     route,
-    agentIsProvider
+    agentIsProvider,
+    matrix
   );
   const pick = await resolveSpawnProvider(
     env,
@@ -553,9 +566,12 @@ export async function resolveLoopLane(
   // a flag-named profile's provider is an explicit pick — outranks the
   // table like --provider/--agent, so matching the chain head must not
   // arm the walk. A config-named profile is the standing default and
-  // keeps routing (same tiers as lanePicks' provider order)
+  // keeps routing (same tiers as lanePicks' provider order). A matrix
+  // pick suppresses the walk the same way — its lane is already the
+  // vetted one; chain candidates were never capability-checked.
   const routeSpec =
     route !== undefined &&
+    matrix === undefined &&
     sel.provider === undefined &&
     !agentIsProvider &&
     flagProvider === undefined &&
@@ -579,6 +595,10 @@ export async function resolveLoopLane(
   return {
     ...lane,
     ...(route === undefined ? {} : { class: route.class }),
+    // the fleet.matrix lane the enforce pick resolved to — provenance
+    // like class; absent on shadow/off/unrouted lanes (spec
+    // bro-v0pvd.1.1)
+    ...(matrix === undefined ? {} : { matrix: matrix.lane }),
     ...(routeSpec === undefined ? {} : { route: routeSpec }),
   };
 }
@@ -618,7 +638,8 @@ function lanePicks(
   sel: LoopLaneSel,
   cfg: LoopConfig,
   route: ResolvedClass | undefined,
-  agentIsProvider: boolean
+  agentIsProvider: boolean,
+  matrix?: MatrixLanePick
 ): {
   provider?: string;
   model?: string;
@@ -636,6 +657,10 @@ function lanePicks(
     sel.provider ??
     (agentIsProvider ? sel.agent : undefined) ??
     flagProfile?.provider ??
+    // the matrix pick sits below every operator pick and above the
+    // class-route head + config defaults — under enforce it is the
+    // task-shape authority (spec bro-v0pvd.1.1)
+    matrix?.provider ??
     route?.provider ??
     cfgProfile?.provider ??
     (cfg.provider !== '' ? cfg.provider : undefined);
@@ -643,6 +668,9 @@ function lanePicks(
     sel.model ??
     // a profile's model rides only on its own provider's lane
     profileModelFor(flagProfile, provider) ??
+    // the matrix pick's model rides only on the lane it picked — an
+    // override provider never inherits it
+    (provider !== undefined && provider === matrix?.provider ? matrix?.model : undefined) ??
     // the chain head's model pin pairs with ITS provider only — an
     // override provider never inherits chain[0]'s model
     (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
@@ -651,7 +679,8 @@ function lanePicks(
   return {
     provider,
     model,
-    autoApprove: sel.autoApprove ?? profile?.autoApprove,
+    autoApprove:
+      sel.autoApprove ?? flagProfile?.autoApprove ?? matrix?.autoApprove ?? cfgProfile?.autoApprove,
     profileSourced: profile?.provider !== undefined,
     flagProvider: flagProfile?.provider,
   };
@@ -837,7 +866,8 @@ function routeTableTask(
  *  runs that declare none). */
 async function routeTableLaneFor(
   ctx: Ctx,
-  bead: ReadyBead
+  bead: ReadyBead,
+  matrix?: MatrixLanePick
 ): Promise<{ lane: LoopLane; routed: RouteTableLane } | undefined> {
   const tablePath = ctx.env.brouter?.routes;
   if (tablePath === undefined) {
@@ -857,7 +887,7 @@ async function routeTableLaneFor(
   if (routed === undefined) {
     return undefined;
   }
-  const lane = await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
+  const lane = await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed, matrix);
   if (routed.decisionId !== undefined) {
     lane.decisionId = routed.decisionId;
     // the bead pin — `router:decision=<id>` as metadata: idempotent
@@ -878,17 +908,40 @@ async function resolveBeadLane(
   bead: ReadyBead,
   opts: { router?: boolean; fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<LoopLane> {
+  // the matrix router (bro-v0pvd.1 + bro-v0pvd.1.1) judges the TASK's
+  // complexity+mode — orthogonal to fleet.routing, the class pin, AND
+  // the route table, so it runs before ANY routing face answers: an
+  // enforce hold must not be bypassed by a table lane, and an enforce
+  // pick binds provider/model/autoApprove above the table's route head
+  // piecewise (spec precedence: explicit picks > matrix > class route >
+  // static lane). Only the dry-run escape (router:false) skips it,
+  // same as the class router: a render must not spend a judge call or
+  // journal a verdict.
+  const info = beadClassInfo(ctx, bead, opts.router !== false);
+  const verdict =
+    opts.router === false
+      ? undefined
+      : await applyFleetMatrix(ctx.root, ctx.env, bead.id, info, opts);
+  // verdict → lane: a pick binds provider/model/autoApprove piecewise
+  // in resolveLoopLane; no-fit/unanswered under enforce throw
+  // MatrixHoldError — the caller's park consumer owns the queue hold
+  const matrixPick = matrixLanePick(verdict, ctx.env);
   // the route table is the router's own routing face — when the
-  // operator declares one, it answers
-  const tableLane = await routeTableLaneFor(ctx, bead);
+  // operator declares one and it answers, its lane stands; the matrix
+  // pick (when engaged) binds inside resolveLoopLane above the route
+  // head, and an enforce hold already threw above
+  const tableLane = await routeTableLaneFor(ctx, bead, matrixPick);
   if (tableLane !== undefined) {
     explainSpawn({ slices: ctx.explain, bead: bead.id, routed: tableLane.routed });
     return tableLane.lane;
   }
   if (!ctx.routing) {
-    return ctx.lane;
+    // no routing table — the static lane stands unless an enforce pick
+    // engaged; shadow/off/judge-down return ctx.lane untouched
+    return matrixPick === undefined
+      ? ctx.lane
+      : resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, undefined, matrixPick);
   }
-  const info = beadClassInfo(ctx, bead, opts.router !== false);
   const routed = routeStepClass(
     ctx.env.fleet,
     ctx.env.providers ?? {},
@@ -901,13 +954,7 @@ async function resolveBeadLane(
     opts.router === false || ctx.sel.class !== undefined
       ? routed
       : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed, opts);
-  // the matrix router (bro-v0pvd.1) judges the TASK's complexity+mode —
-  // orthogonal to the class pin, so --class does not suppress it; only
-  // the dry-run escape (router:false) does, same as the class router
-  if (opts.router !== false) {
-    await applyFleetMatrix(ctx.root, ctx.env, bead.id, info, opts);
-  }
-  return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route);
+  return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route, matrixPick);
 }
 
 /** Dry-run rendering for an argv worker — single-quotes only the args
@@ -1007,6 +1054,10 @@ function spawnAgent(
       ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
       ...provenancePins(ctx, leadId, lane),
       ...(lane.class === undefined ? {} : { BRO_AGENT_CLASS: lane.class }),
+      // the fleet.matrix lane the enforce pick resolved to — same
+      // provenance pin the registry path stamps via spec.matrix
+      // (spec bro-v0pvd.1.1); absent on shadow/off/unrouted lanes
+      ...(lane.matrix === undefined ? {} : { BRO_AGENT_MATRIX: lane.matrix }),
     });
     const slug = loopSlug(leadId);
     const log = loopRunLog(ctx.root, slug);
@@ -1173,6 +1224,9 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
       // the routing lane the spawn resolved to — provenance the registry
       // records and the BRO_AGENT_CLASS env pin both read spec.class
       class: lane.class,
+      // the fleet.matrix lane the enforce pick resolved to — same
+      // provenance contract (spec bro-v0pvd.1.1)
+      matrix: lane.matrix,
       ...(lane.route === undefined ? {} : { route: lane.route }),
       // an explicit worker keeps the backend's own command fallback from
       // re-reading loop.agent config — a --agent flag override would
@@ -1570,8 +1624,13 @@ function reopenBead(ctx: Ctx, id: string): void {
  *  to wait the wall out, so the snooze IS the reset (bro-36bhc — the
  *  convoy-run wait contract; a 2h cooldown would outlive a 15-minute
  *  wall and undershoot a 6-hour one). A past/stale stamp collapses to
- *  an immediate wake. */
-function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number): void {
+ *  an immediate wake.
+ *
+ *  Returns the members whose defer write FAILED — they remain
+ *  in_progress under this run's claim, so the caller must keep (or
+ *  otherwise settle) their custody record rather than reporting a
+ *  clean park (a deferred bead needs no owner; a claimed one does). */
+function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number): ReadyBead[] {
   // parkedWakeMin has no natural ceiling — an absurd value overflows the
   // clock into a toISOString() RangeError BEFORE the per-bead catch,
   // aborting the park and leaving claims in progress. Past a decade the
@@ -1588,14 +1647,17 @@ function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number)
       : min > 0
         ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
         : { status: 'deferred', assignee: '' };
+  const failed: ReadyBead[] = [];
   for (const b of openBeads(ctx, beads)) {
     noteBead(ctx.tasks, b.id, msg);
     try {
       ctx.tasks.update(b.id, patch);
     } catch (err) {
       console.error(`loop: could not defer ${b.id} — ${String(err)}`);
+      failed.push(b);
     }
   }
+  return failed;
 }
 
 /** One `bd show` batch answers the whole clump's statuses — a store
@@ -2401,6 +2463,53 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     lane = await resolveBeadLane(ctx, lead);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof MatrixHoldError) {
+      // the matrix held this task (enforce no-fit/unanswered — spec
+      // bro-v0pvd.1.1): defer the WHOLE clump so the beads hide from
+      // ready and re-judge on wake — "stay queued, re-evaluate on next
+      // state change", never a silent static-lane spawn and never a
+      // hot re-claim loop. The claim custody record dies with the
+      // released claims; the park row + note carry the verdict.
+      // The lead was only PROBED on the registry path (claimStep owns
+      // the real claim under the spawn lock, and it never ran) — take
+      // the claim first or the defer writes assignee-clear onto a bead
+      // this run never owned, racing a foreign claim's assignee with
+      // it. A raced claim means a foreign owner re-judges the bead
+      // themselves: park only the members this run did claim (a store
+      // blip gets the same members-only park — never defer what we
+      // cannot own). Leaving the lead open instead would re-claim and
+      // re-judge it every tick — the hot loop the defer exists to
+      // prevent.
+      let parkSet = beads;
+      if (ctx.agents !== undefined) {
+        try {
+          parkSet = claimUpTo([lead], 1, ctx.root).length > 0 ? beads : beads.slice(1);
+        } catch {
+          parkSet = beads.slice(1);
+        }
+      }
+      const undeferred = parkBeads(ctx, parkSet, `loop: ${msg}`);
+      if (undeferred.length === 0) {
+        // every member deferred — the claims released into the snooze,
+        // so the custody record dies with them
+        endLoopRun(ctx.root, loopSlug(lead.id));
+      } else {
+        // a member whose defer write failed is still in_progress under
+        // this run's claim — deleting the custody record would orphan
+        // it into the litter sweep mid-hold. Retain the record instead:
+        // the claim stays owned until this loop exits and the sweep
+        // releases it back to the queue. (Reopening here could
+        // hot-loop a backend with no defer concept — the bead would
+        // re-claim, re-judge, and fail to park every tick.)
+        say(
+          ctx,
+          `loop: ${undeferred.map(b => b.id).join(', ')} could not defer — ` +
+            `custody retained until exit`
+        );
+      }
+      say(ctx, `loop: ${lead.id} held by fleet.matrix — ${msg} — parked`);
+      return { kind: 'done', result: 'parked' };
+    }
     // the registry path only probed the lead (claimStep owns the real
     // claim under the spawn lock) — take the claim here or the park
     // can't hold the bead off the queue and it re-fails every pass.
@@ -3813,9 +3922,25 @@ async function resolveRunLaneInner(
   const flagPin = flagTierPin(env, sel);
   const agent = effectiveAgent(lane, sel, env, cfg);
   if (lane.worker === undefined && agent === '' && !routing) {
+    // an armed enforce matrix judges every bead per spawn, but its
+    // judge-outage contract fails open to the static lane — with no
+    // lane source at all the first judge-down would spawn on an empty
+    // template, so preflight refuses the config instead of letting a
+    // matrix-only run discover it mid-queue (spec bro-v0pvd.1.1)
+    const matrix = env.fleet?.matrix;
+    const enforceNeedsFallback =
+      matrix !== undefined &&
+      matrix.provider !== undefined &&
+      matrix.mode === 'enforce' &&
+      Object.keys(matrix.models).length > 0;
     console.error(
-      'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
-        '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
+      enforceNeedsFallback
+        ? 'bro loop: fleet.matrix enforce has no fallback lane — a judge outage ' +
+            'fails open to the static lane, so configure one alongside the ' +
+            'matrix (loop.provider/loop.profile/loop.agent, ' +
+            'agents.<backend>.provider, or fleet.routing)'
+        : 'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
+            '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
     );
     process.exit(2);
   }

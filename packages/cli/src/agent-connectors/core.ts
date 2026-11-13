@@ -76,6 +76,7 @@ import {
   loadConfig,
   localLeaseStore,
   mainWorktreeRoot,
+  type MatrixVerdict,
   type ModelRoute,
   mintAgentId,
   mintRunId,
@@ -752,7 +753,7 @@ export async function applyFleetRouter(
     throw err;
   }
   if (router.mode === 'enforce') {
-    requireTypedRouterGrade(router.provider, entry);
+    requireTypedRouterGrade(router.provider, entry, 'fleet.router.provider');
   }
   // the judge + providers stack is heavy (the acp binding pulls the
   // SDK) — lazy-import it only when a router actually fires, the same
@@ -795,73 +796,76 @@ export async function applyFleetRouter(
 
 /** enforce's typed-grade gate — a prose-grade call surface under
  *  'enforce' is a config error naming provider + mode, never a silent
- *  demotion ('shadow' accepts prose: it journals, picks nothing). */
-function requireTypedRouterGrade(provider: string, entry: ProviderEntry): void {
+ *  demotion ('shadow' accepts prose: it journals, picks nothing). `key`
+ *  is the config field the error names — fleet.router.provider and
+ *  fleet.matrix.provider share the contract (spec bro-v0pvd.1.1). */
+function requireTypedRouterGrade(provider: string, entry: ProviderEntry, key: string): void {
   let grade: 'typed' | 'prose';
   try {
     grade = providerCallGrade(entry);
   } catch (err) {
     throw new SpawnError(
-      `fleet.router.provider "${provider}" — ${err instanceof Error ? err.message : String(err)}`,
+      `${key} "${provider}" — ${err instanceof Error ? err.message : String(err)}`,
       'config'
     );
   }
   if (grade !== 'typed') {
     throw new SpawnError(
-      `fleet.router.provider "${provider}" resolves to a prose-grade call surface — ` +
+      `${key} "${provider}" resolves to a prose-grade call surface — ` +
         `mode 'enforce' requires a typed judgment (a systemone-wire api model or a jev-family acp pin)`,
       'config'
     );
   }
 }
 
-/** The fleet matrix's spawn seam (spec bro-v0pvd.1) — fires on EVERY
- *  spawn when `fleet.matrix` is armed: provider named, mode not 'off',
- *  at least one model row, and `info` carrying task text (title or
- *  description — nothing to judge otherwise). ONE decide() asks
- *  complexity+mode; `matrixVerdict` picks deterministically; the
- *  verdict journals under 'route-matrix'. v1 is shadow-only: the pick
- *  is journaled, the spawn proceeds on its static lane untouched.
- *  'enforce' is refused loudly whenever the matrix is armed — ahead of
- *  the nothing-to-judge return, so blank task text cannot slip a spawn
- *  past the refusal — enforcement is the follow-up bead and a config
- *  claiming it while only journaling would lie. JudgeUnavailable
- *  is "no verdict" — warn and stand, fail-open like every judge call. */
+/** The fleet matrix's spawn seam (spec bro-v0pvd.1 + bro-v0pvd.1.1) —
+ *  fires on EVERY spawn when `fleet.matrix` is armed: provider named,
+ *  mode not 'off', at least one model row, and `info` carrying task
+ *  text (title or description — nothing to judge otherwise). ONE
+ *  decide() asks complexity+mode; `matrixVerdict` picks
+ *  deterministically; the verdict journals under 'route-matrix' and
+ *  RETURNS to the caller under 'enforce': a pick becomes the lane's
+ *  provider/model/policy binding (matrixLanePick), no-fit and
+ *  unanswered become MatrixHoldError holds. 'shadow' keeps v1's
+ *  contract — journal only, spawn proceeds on its static lane
+ *  untouched — so it returns undefined for every verdict. 'off'
+ *  never calls the judge. Enforce additionally requires a typed
+ *  call surface — prose-grade is a config error naming provider +
+ *  mode. JudgeUnavailable is "no verdict" — warn and stand,
+ *  fail-open like every judge call: an outage is infra, never a
+ *  hold. */
 export async function applyFleetMatrix(
   dir: string,
   env: AgentConnectorEnv,
   molStep: string,
   info: { title?: string; description?: string } | undefined,
   opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
-): Promise<void> {
+): Promise<MatrixVerdict | undefined> {
   const matrix = env.fleet?.matrix;
   if (matrix === undefined) {
-    return;
+    return undefined;
   }
   if (matrix.provider === undefined) {
-    return;
+    return undefined;
   }
   if (matrix.mode === 'off') {
-    return;
+    return undefined;
   }
   if (Object.keys(matrix.models).length === 0) {
-    return;
+    return undefined;
   }
-  // 'enforce' refuses loudly whenever the matrix is armed — BEFORE the
-  // nothing-to-judge early return: a spawn with blank task text must
-  // not slip past the refusal (the config claim is the lie, not this
-  // spawn's text)
-  if (matrix.mode === 'enforce') {
-    throw new SpawnError(
-      `fleet.matrix.mode "enforce" is not implemented — the matrix router is shadow-only (spec bro-v0pvd.1); set "shadow" or "off"`,
-      'config'
-    );
-  }
+  const armed = matrix.mode;
   if (
     info === undefined ||
     ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
   ) {
-    return;
+    // nothing to judge — shadow stands (the spawn has no text to
+    // route on); enforce holds: an unscoreable task cannot pick a
+    // lane, and route-or-queue is enforce's whole contract
+    if (armed === 'enforce') {
+      return { kind: 'unanswered' };
+    }
+    return undefined;
   }
   const providers = env.providers ?? {};
   let entry: ProviderEntry;
@@ -872,6 +876,9 @@ export async function applyFleetMatrix(
       throw new SpawnError(`fleet.matrix.provider — ${err.message}`, 'config');
     }
     throw err;
+  }
+  if (armed === 'enforce') {
+    requireTypedRouterGrade(matrix.provider, entry, 'fleet.matrix.provider');
   }
   // same lazy-import trick as applyFleetRouter — the judge stack is
   // heavy (the acp binding pulls the SDK); only an armed matrix pays it
@@ -887,7 +894,7 @@ export async function applyFleetMatrix(
     { confidence: jcfg.confidence, timeoutMs: jcfg.timeoutMs }
   );
   try {
-    await routeMatrix({
+    return await routeMatrix({
       dir,
       judge,
       state: { molStep, title: info.title ?? '', description: info.description ?? '' },
@@ -898,12 +905,103 @@ export async function applyFleetMatrix(
   } catch (err) {
     if (err instanceof JudgeUnavailable) {
       console.error(
-        `warning: fleet.matrix.provider "${matrix.provider}" — ${err.message}; spawn proceeds unrouted`
+        `warning: fleet.matrix.provider "${matrix.provider}" — ${err.message}; ` +
+          `spawn proceeds on the static lane unrouted`
       );
-      return;
+      return undefined;
     }
     throw err;
   }
+}
+
+/** A fleet.matrix verdict that keeps the task OFF its lane — enforce's
+ *  no-fit (nothing can take the judged shape) and unanswered (the
+ *  judge could not score it) both hold: route-or-queue is the whole
+ *  contract, so a completed enforce verdict never falls back to the
+ *  static lane silently (spec bro-v0pvd.1.1). A SpawnError subclass —
+ *  every existing refusal surface treats it honestly (die on
+ *  `agents up`, 503 on serve); its own class lets the loop park the
+ *  bead as "held by the matrix" rather than "routing broke". The
+ *  'cap' kind reads as "no lane has capacity for this" on every
+ *  surface that renders kinds. */
+export class MatrixHoldError extends SpawnError {
+  constructor(message: string) {
+    super(message, 'cap');
+    this.name = 'MatrixHoldError';
+  }
+}
+
+/** The spawn-lane fields a 'pick' verdict resolves to — provider is
+ *  the matrix-picked lane, model/autoApprove its profile preset's
+ *  pins (provider-direct rows carry neither). */
+export interface MatrixLanePick {
+  /** The picked row's name — provenance (SpawnSpec.matrix /
+   *  LoopLane.matrix). */
+  lane: string;
+  provider: string;
+  model?: string;
+  autoApprove?: boolean;
+}
+
+/** The verdict→lane resolver both spawn seams share (spec
+ *  bro-v0pvd.1.1). `undefined` verdict = matrix off / shadow /
+ *  judge-down → the static lane proceeds untouched. A non-pick
+ *  verdict under enforce THROWS MatrixHoldError — no-fit names the
+ *  judged mode+complexity, unanswered names the hold policy.
+ *  Capability-only rows (no profile, no provider) are journaled
+ *  under shadow but unspawnable under enforce → hold, never a
+ *  silent static-lane spawn. */
+export function matrixLanePick(
+  verdict: MatrixVerdict | undefined,
+  env: AgentConnectorEnv
+): MatrixLanePick | undefined {
+  if (verdict === undefined) {
+    return undefined;
+  }
+  if (verdict.kind === 'no-fit') {
+    throw new MatrixHoldError(
+      `fleet.matrix — no lane fits the judged task (mode "${verdict.mode}", ` +
+        `complexity "${verdict.complexity}"); the task stays queued and is ` +
+        `re-judged when its state changes`
+    );
+  }
+  if (verdict.kind === 'unanswered') {
+    throw new MatrixHoldError(
+      `fleet.matrix — the judge could not score the task under enforce ` +
+        `(unanswered); only a confident pick spawns, the task stays queued ` +
+        `and is re-judged when its state changes`
+    );
+  }
+  const pick = verdict;
+  const rowName = pick.model;
+  // the row's bindings — the pick carries the row's name in `model`
+  // (the lane id) plus the declared profile/provider
+  if (pick.profile !== undefined) {
+    // profile preset wins over a direct provider binding — the preset
+    // is the richer binding (model + autoApprove can ride it)
+    let profile: FleetProfile;
+    try {
+      profile = fleetProfileOf(env, pick.profile);
+    } catch (err) {
+      if (err instanceof SpawnError) {
+        throw new SpawnError(`fleet.matrix.models.${rowName}.profile — ${err.message}`, 'config');
+      }
+      throw err;
+    }
+    return {
+      lane: rowName,
+      provider: profile.provider,
+      model: profileModelFor(profile, profile.provider),
+      autoApprove: profile.autoApprove,
+    };
+  }
+  if (pick.provider !== undefined) {
+    return { lane: rowName, provider: pick.provider };
+  }
+  throw new MatrixHoldError(
+    `fleet.matrix.models.${rowName} declares neither profile nor provider — ` +
+      `a capability-only row is journaled under shadow but cannot spawn under enforce`
+  );
 }
 
 /** Pick the serving backend: explicit --connector → connectors.agents →
@@ -1182,6 +1280,9 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_AGENT_PROVIDER',
   'BRO_AGENT_MODEL',
   'BRO_AGENT_CLASS',
+  // the fleet.matrix lane is connector-owned too — a caller-supplied
+  // BRO_AGENT_MATRIX would forge which capability row the task picked
+  'BRO_AGENT_MATRIX',
   // delegation provenance is connector-owned too — a caller-supplied
   // BRO_DELEGATED_BY would let a spawn forge which agent asked for it
   'BRO_DELEGATED_BY',
@@ -1364,6 +1465,12 @@ const agentEnvPins = (
   }
   if (spec.class !== undefined) {
     pins.push(['BRO_AGENT_CLASS', spec.class]);
+  }
+  // matrix provenance pin (spec bro-v0pvd.1.1) — the enforce pick's
+  // row name rides BRO_AGENT_MATRIX like class rides BRO_AGENT_CLASS;
+  // shadow/off spawns carry no pin at all
+  if (spec.matrix !== undefined) {
+    pins.push(['BRO_AGENT_MATRIX', spec.matrix]);
   }
   if (spec.delegatedBy !== undefined) {
     pins.push(['BRO_DELEGATED_BY', spec.delegatedBy]);
@@ -2951,6 +3058,9 @@ function commitSpawn(
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
     class: spec.class,
+    // the fleet.matrix lane (enforce pick's row name) — same
+    // provenance write; a respawn re-stamps, an unrouted one clears
+    matrix: spec.matrix,
     // the chain position the walk admitted at — a respawn's resume
     // point when the chain repeats a provider; an unrouted (re)spawn
     // clears a stale pin
@@ -3046,6 +3156,7 @@ function recordSpawnClaim(
       ...(spec.provider !== undefined ? { provider: spec.provider } : {}),
       ...(spec.model !== undefined ? { model: spec.model } : {}),
       ...(spec.class !== undefined ? { class: spec.class } : {}),
+      ...(spec.matrix !== undefined ? { matrix: spec.matrix } : {}),
     },
   });
 }
@@ -3698,10 +3809,11 @@ const infoLearn = (entry: AgentRegistryEntry): Pick<AgentInfo, 'learnCheck' | 'l
  *  (or unrouted) spawn (the row says so by omission, honestly). */
 const infoProvenance = (
   entry: AgentRegistryEntry
-): Pick<AgentInfo, 'provider' | 'model' | 'class' | 'delegatedBy'> => ({
+): Pick<AgentInfo, 'provider' | 'model' | 'class' | 'matrix' | 'delegatedBy'> => ({
   provider: typeof entry.provider === 'string' ? entry.provider : undefined,
   model: typeof entry.model === 'string' ? entry.model : undefined,
   class: typeof entry.class === 'string' ? entry.class : undefined,
+  matrix: typeof entry.matrix === 'string' ? entry.matrix : undefined,
   delegatedBy: typeof entry.delegatedBy === 'string' ? entry.delegatedBy : undefined,
 });
 

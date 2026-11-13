@@ -506,6 +506,10 @@ export interface SpawnSpec {
    *  spec bro-1x7p). Provenance like provider; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string;
+  /** The fleet.matrix lane the spawn routed to (the enforce pick's
+   *  row name — spec bro-v0pvd.1.1). Provenance like class; absent
+   *  on shadow/unrouted spawns. */
+  matrix?: string;
   /** The agentId of the agent that delegated this spawn
    *  (`bro fleet delegate --detach` — spec bro-z8tng). Provenance like
    *  provider; stamped into the registry and pinned into the worker's
@@ -589,6 +593,9 @@ export interface AgentInfo {
   /** Routing lane the spawn resolved to (fleet.routing class) —
    *  absent on unrouted spawns. */
   class?: string;
+  /** The fleet.matrix lane the spawn routed to (enforce pick's row
+   *  name) — absent on shadow/unrouted spawns (spec bro-v0pvd.1.1). */
+  matrix?: string;
   /** agentId of the delegating agent — `bro fleet delegate --detach`
    *  provenance; absent on direct spawns. */
   delegatedBy?: string;
@@ -711,6 +718,9 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string;
+  /** The fleet.matrix lane the run routed to (enforce pick's row
+   *  name — spec bro-v0pvd.1.1); absent on shadow/unrouted entries. */
+  matrix?: string;
   /** The chain position the routed run was admitted at — the resume
    *  point the next chain walk reads when the chain repeats this
    *  provider (spec bro-1x7p). Absent on unrouted entries. */

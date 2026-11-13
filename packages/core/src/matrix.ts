@@ -8,9 +8,11 @@
  * model — a low-ceiling row is unreachable at high complexity even
  * when the judge is wrong.
  *
- * v1 is shadow-only on the spawn path: the pick journals beside the
- * spawn, it never acts. `enforce` exists in the vocabulary for the
- * follow-up bead; the spawn seam refuses it loudly until then.
+ * `shadow` journals the pick beside the spawn without acting on it;
+ * `enforce` (spec bro-v0pvd.1.1) returns the whole verdict — pick,
+ * no-fit, or unanswered — and the spawn seams honor it: a pick binds
+ * the lane, the non-pick kinds hold the task queued for re-judging.
+ * `off` never calls the judge.
  */
 import type { DecideResult } from './judge.ts';
 
