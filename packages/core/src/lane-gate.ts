@@ -11,10 +11,11 @@
  * budget. One JSON file per `<lane>/<model>` key, updated under a
  * filelock so two bro processes can't race a take.
  */
+
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { withFileLock } from './filelock.ts';
 
 /** A provider entry's `rateGate` config — the pacing knobs for one
@@ -98,6 +99,11 @@ const refill = (l: LaneGateLedger, cfg: LaneRateGate, now: number): number =>
 export interface LaneGateOpts {
   now?: number;
   dir?: string;
+  /** The charge override — what this take spends, in bucket tokens.
+   *  Absent ⇒ `cfg.spawnCost` (the fleet spawn semantic, spec
+   *  bro-y3jvd). The serve lane's per-turn/per-open charges pass
+   *  explicit costs (spec bro-ezboq). */
+  cost?: number;
   /** The refund half — hand `spawnCost` back to the bucket instead of
    *  charging it (a spawn that died before launch never ran, spec
    *  bro-y3jvd). Always succeeds, capped at capacity: a refund can
@@ -128,12 +134,13 @@ export function laneGateTake(
       writeLedger(path, { tokens: credited, updatedAt: now });
       return { ok: true as const, tokens: credited };
     }
-    if (tokens < cfg.spawnCost) {
+    const cost = opts.cost ?? cfg.spawnCost;
+    if (tokens < cost) {
       // cost > capacity can never satisfy — refuse without the wait
-      const retryAfterSec = Math.ceil(((cfg.spawnCost - tokens) / cfg.requestsPerHour) * 3600);
+      const retryAfterSec = Math.ceil(((cost - tokens) / cfg.requestsPerHour) * 3600);
       return { ok: false as const, retryAfterSec };
     }
-    const left = tokens - cfg.spawnCost;
+    const left = tokens - cost;
     writeLedger(path, { tokens: left, updatedAt: now });
     return { ok: true as const, tokens: left };
   });
