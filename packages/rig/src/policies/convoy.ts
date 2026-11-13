@@ -22,6 +22,7 @@
 import {
   AgentNotFound,
   agentEntryBlocked,
+  isBdNotFound,
   SpawnError,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -58,6 +59,10 @@ export interface MolResult {
   verdict: MolVerdict;
   attempts: number;
   detail?: string;
+  /** Set when this settle tripped the infra streak (bro-zaydc): the
+   *  queue must stop here — the remaining mols are reported 'parked'
+   *  untouched, never spawned into a dead spawn boundary. */
+  queueStop?: boolean;
 }
 
 /** Everything the loop needs, injectable — tests drive the whole
@@ -97,6 +102,9 @@ export interface ConvoyCtx {
   /** The mol ids select() pops — runQueue seeds it from cfg.mols +
    *  --open before the first pick. */
   queue?: string[];
+  /** Consecutive work-boundary failures that produced no worker — the
+   *  infra-streak circuit breaker (spec bro-zaydc). */
+  infraStreak?: number;
 }
 
 /** One molecule under the policy — the driver's record. `attempts`
@@ -133,6 +141,13 @@ const TERMINAL: ReadonlySet<AgentState> = new Set(['exited', 'lost', 'stopped', 
 /** Status probes failing in a row before the worker is treated as
  *  gone — a flaky backend must not wedge the queue forever. */
 const STATUS_FAIL_LIMIT = 10;
+/** Consecutive spawn-level failures with zero attempts before the
+ *  queue stops (spec bro-zaydc) — a dead bro binary, a wedged claim
+ *  store, a missing multiplexer. Under the limit the mol holds a poll
+ *  tick and retries (the cu3q8 hold, bounded); at the limit the streak
+ *  is the outage's proof and the queue parks instead of draining one
+ *  'error' per mol. */
+const INFRA_FAIL_LIMIT = 3;
 
 const isoEta = (ms: number): string => {
   if (ms >= 3_600_000) {
@@ -308,10 +323,85 @@ export const convoyPolicy: ConvoyPolicy = {
         await ctx.deps.onFailed?.(r);
       }
       results.push(r);
+      if (r.queueStop === true) {
+        // the infra streak tripped — park the rest of the queue
+        // untouched; a dead spawn boundary must not be fed mol after
+        // mol (spec bro-zaydc)
+        const why = r.detail ?? 'infra down';
+        ctx.deps.say(`run: queue stopped — ${why}`);
+        for (const mol of ctx.queue ?? []) {
+          const parked: MolResult = {
+            mol,
+            verdict: 'parked',
+            attempts: 0,
+            detail: `queue stopped — ${why}`,
+          };
+          await ctx.deps.onParked?.(parked); // NOSONAR — serial by contract
+          results.push(parked);
+        }
+        break;
+      }
     }
     return results;
   },
 };
+
+/** The infra streak's increment — consecutive work-boundary failures
+ *  that produced no worker (spec bro-zaydc). */
+const bumpInfra = (ctx: ConvoyCtx): number => (ctx.infraStreak = (ctx.infraStreak ?? 0) + 1);
+
+/** A spawn throw that produced no worker and no classified answer —
+ *  'unavailable'/'config'/'input' SpawnError kinds (the taxonomy's
+ *  non-work classes — the loop refuses to burn fix rounds on the same
+ *  set) or any unclassified throw (spawnSync timeout, ENOENT, a wedged
+ *  store, SpawnInputError — in the convoy shape every mol spawns into
+ *  the same worktree/config, so these are systemic). Under
+ *  INFRA_FAIL_LIMIT the mol holds a poll tick and retries — no attempt
+ *  burned: attempts counts workers, and no worker ever existed. At the
+ *  limit the mol settles 'error' flagged queueStop — the queue parks
+ *  the rest instead of draining. */
+function infraFail(ctx: ConvoyCtx, item: ConvoyItem, why: string): RunStep {
+  const streak = bumpInfra(ctx);
+  if (streak >= INFRA_FAIL_LIMIT) {
+    return {
+      mol: item.mol,
+      verdict: 'error',
+      attempts: item.attempts,
+      detail: `${why} — infra down (${streak} consecutive spawn-level failures)`,
+      queueStop: true,
+    };
+  }
+  ctx.deps.say(
+    `run ${item.mol}: spawn-level failure ${streak}/${INFRA_FAIL_LIMIT} — ${why} — ` +
+      `retry in ${ctx.cfg.pollSec}s`
+  );
+  return { waitSec: ctx.cfg.pollSec };
+}
+
+/** A read failure — the mol or its probes could not be read (a stalled
+ *  store hits loadMol/next before spawn is ever reached). The mol
+ *  settles 'error' immediately — a permanent miss must not pay the
+ *  infra retries, and post-run a worker may be live (never a blind
+ *  re-spawn). Only a SYSTEMIC failure counts the streak: a lookup miss
+ *  (bd reports the mol id absent) is a per-mol data defect — three bad
+ *  ids are not an outage and must not park a healthy queue. Anything
+ *  else (a stalled store, ETIMEDOUT) is the outage's signature — K in
+ *  a row trips the same queueStop. */
+function readSettle(ctx: ConvoyCtx, item: ConvoyItem, spent: number, err: unknown): MolResult {
+  const why = errText(err);
+  if (isBdNotFound(err)) {
+    return { mol: item.mol, verdict: 'error', attempts: spent, detail: why };
+  }
+  const streak = bumpInfra(ctx);
+  const stop = streak >= INFRA_FAIL_LIMIT;
+  return {
+    mol: item.mol,
+    verdict: 'error',
+    attempts: spent,
+    detail: stop ? `${why} — infra down (${streak} consecutive spawn-level failures)` : why,
+    ...(stop ? { queueStop: true as const } : {}),
+  };
+}
 
 /** The spawn-refusal half of onLost — a SpawnError is a signal, not a
  *  verdict. The error's kind is the thrower's own word when it knows
@@ -323,9 +413,17 @@ export const convoyPolicy: ConvoyPolicy = {
 function refusalStep(ctx: ConvoyCtx, item: ConvoyItem, err: SpawnError): RunStep {
   const { deps, cfg } = ctx;
   if (err.kind === 'cap') {
+    ctx.infraStreak = 0; // a classified refusal — the machinery answered
     deps.say(`run ${item.mol}: fleet cap full — waiting a poll tick`);
     return { waitSec: cfg.pollSec };
   }
+  // infra-class kinds produce no worker and no per-mol answer — the
+  // streak owns them (unavailable/config/input are systemic in the
+  // convoy shape: one shared worktree/config for every mol's spawn)
+  if (err.kind === 'unavailable' || err.kind === 'config' || err.kind === 'input') {
+    return infraFail(ctx, item, err.message);
+  }
+  ctx.infraStreak = 0; // 'conflict'/untyped — the machinery answered
   const e = deps.entry(item.mol);
   if (e !== undefined && agentEntryBlocked(e, deps.now())) {
     const d = blockedDecision(
@@ -402,13 +500,12 @@ function agentLostStep(ctx: ConvoyCtx, item: ConvoyItem, last: AgentInfo): RunSt
  *  or a MolResult when the mol already settles the run (complete, a
  *  pending human gate, unreadable, a closed dependency loop). */
 function precheck(ctx: ConvoyCtx, item: ConvoyItem): ConvoyNext | MolResult {
-  let mol: Molecule;
+  let n: ConvoyNext;
   try {
-    mol = ctx.deps.loadMol(item.mol);
+    n = ctx.deps.next(ctx.deps.loadMol(item.mol));
   } catch (err) {
-    return { mol: item.mol, verdict: 'error', attempts: item.attempts, detail: errText(err) };
+    return readSettle(ctx, item, item.attempts, err);
   }
-  const n = ctx.deps.next(mol);
   item.next = n;
   if (n.state === 'complete') {
     return { mol: item.mol, verdict: 'done', attempts: item.attempts };
@@ -430,7 +527,7 @@ function afterRun(ctx: ConvoyCtx, item: ConvoyItem): RunStep {
   try {
     after = ctx.deps.next(ctx.deps.loadMol(item.mol));
   } catch (err) {
-    return { mol: item.mol, verdict: 'error', attempts: spent, detail: errText(err) };
+    return readSettle(ctx, item, spent, err);
   }
   item.next = after;
   if (after.state === 'complete') {
@@ -475,9 +572,14 @@ async function molAttempt(
 ): Promise<{ step: RunStep; delaySec: number }> {
   let step: RunStep;
   let delaySec = ctx.cfg.retryDelaySec;
+  let spawned = false;
   try {
     const t0 = ctx.deps.now();
     const agent = await ctx.deps.spawn(item.mol);
+    spawned = true;
+    // a resolved spawn proves the machinery answered — the outage
+    // streak only counts throws that produced no worker (bro-zaydc)
+    ctx.infraStreak = 0;
     ctx.deps.say(`run ${item.mol}: agent ${agent.id} up — polling`);
     const last = await pollAgent(ctx, agent);
     step = afterRun(ctx, { ...item, agent: last });
@@ -491,10 +593,24 @@ async function molAttempt(
       }
     }
   } catch (err) {
-    step =
-      err instanceof SpawnError
-        ? convoyPolicy.onLost(ctx, { ...item, refusal: err })
-        : { mol: item.mol, verdict: 'error', attempts: item.attempts, detail: errText(err) };
+    if (spawned) {
+      // a worker exists — a post-spawn throw (poll, classification) is
+      // not a spawn-level failure: settle 'error' terminal, never a
+      // blind retry that could stack a second worker on the mol. The
+      // resolved spawn already proved the machinery answered, so this
+      // feeds no streak either (bro-zaydc)
+      step = {
+        mol: item.mol,
+        verdict: 'error',
+        attempts: item.attempts + 1,
+        detail: errText(err),
+      };
+    } else {
+      step =
+        err instanceof SpawnError
+          ? convoyPolicy.onLost(ctx, { ...item, refusal: err })
+          : infraFail(ctx, item, errText(err));
+    }
   }
   return { step, delaySec };
 }

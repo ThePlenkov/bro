@@ -258,7 +258,11 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
       failed += 1;
     }
   }
-  say(`run: queue drained — ${results.length - failed}/${results.length} settled`);
+  const stopped = results.some(r => r.queueStop === true);
+  say(
+    `run: queue ${stopped ? 'stopped' : 'drained'} — ` +
+      `${results.length - failed}/${results.length} settled`
+  );
   if (failed > 0) {
     process.exitCode = 1;
   }
