@@ -57,8 +57,14 @@ no classified answer was given. A failure is counted at three sites:
   existed). This is the cu3q8 hold, bounded by the streak.
 - **Precheck read throw** (`loadMol`/`next` — a stalled store) and the
   **post-run re-read throw**: counted, but the mol settles `'error'`
-  immediately — a permanent "mol not found" must not pay retries, and
-  post-run a worker may be live (never blind-retry a spawn).
+  immediately — a permanent miss must not pay retries, and post-run a
+  worker may be live (never blind-retry a spawn). A *lookup miss* — bd
+  reporting the mol id itself absent (`isBdNotFound`) — is a per-mol
+  data defect, not the outage: it settles `'error'` WITHOUT counting,
+  so three bad ids cannot park a healthy queue. A throw after a
+  *resolved* spawn (poll, classification — a worker may exist) is
+  likewise outside the streak: the mol settles `'error'` terminal at
+  the spent attempt, never a blind spawn-level retry.
 - **Streak reset**: any outcome proving the spawn machinery answered —
   a resolved `deps.spawn` (a worker exists, whatever happens to it
   next) or a *classified* `SpawnError` — `'cap'` waits and the
@@ -110,4 +116,6 @@ happened — the exact lie the incident printed).
 - Recovery: spawn fails twice then succeeds → mol completes, queue
   continues.
 - Precheck read failures count toward the streak (stalled store
-  trips the queue after K mols).
+  trips the queue after K mols) — but mol-id lookup misses settle
+  `'error'` without counting, and a post-spawn classification throw
+  settles `'error'` terminal (one spawn, no retry, no streak).

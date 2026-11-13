@@ -636,6 +636,60 @@ describe('infra streak — systemic spawn failure stops the queue (bro-zaydc)', 
     assert.equal(w.spawns.length, 0); // no mol ever reached the spawn boundary
   });
 
+  test('missing mol ids are per-mol defects — they never feed the streak', async () => {
+    const w = world();
+    // bad ids throw bd's lookup-miss signature; only the last mol exists
+    w.nexts.set('m-4', [next('complete')]);
+    const rs = await runQueue(w.deps, { ...CFG, mols: ['bad-1', 'bad-2', 'bad-3', 'm-4'] });
+    assert.deepEqual(
+      rs.map(r => r.verdict),
+      ['error', 'error', 'error', 'done']
+    );
+    assert.ok(rs.every(r => r.queueStop !== true)); // three bad ids ≠ the outage
+  });
+
+  test('a miss between systemic throws does not count — only the outage feeds', async () => {
+    const w = world();
+    w.deps.loadMol = id => {
+      if (id === 'bad-1') {
+        throw new Error(`molecule ${id} not found`);
+      }
+      throw new Error('spawnSync timeout ETIMEDOUT');
+    };
+    // bad-1 first: if it counted, m-2 would be the third failure — with
+    // the miss excluded the streak reaches K only at m-3
+    const rs = await runQueue(w.deps, { ...CFG, mols: ['bad-1', 'm-1', 'm-2', 'm-3', 'm-4'] });
+    assert.deepEqual(
+      rs.map(r => r.verdict),
+      ['error', 'error', 'error', 'error', 'parked']
+    );
+    assert.equal(rs[3].queueStop, true);
+    assert.equal(rs[4].mol, 'm-4');
+  });
+
+  test('post-spawn classification throws settle error — no respawn, no streak feed', async () => {
+    const w = world();
+    for (const m of ['m-1', 'm-2', 'm-3', 'm-4']) {
+      w.nexts.set(m, [next('step')]);
+    }
+    for (const a of ['n-1', 'n-2', 'n-3', 'n-4']) {
+      w.states.set(a, [{ state: 'blocked', cause: 'quota' }]);
+    }
+    // the registry read behind blocked classification throws — a worker
+    // already exists, so the mol must settle, never blind-retry the spawn
+    w.deps.entry = () => {
+      throw new Error('agents registry unreadable');
+    };
+    const rs = await runQueue(w.deps, { ...CFG, mols: ['m-1', 'm-2', 'm-3', 'm-4'] });
+    assert.deepEqual(
+      rs.map(r => r.verdict),
+      ['error', 'error', 'error', 'error']
+    );
+    assert.equal(rs[0].attempts, 1); // the spawned worker counts
+    assert.equal(w.spawns.length, 4); // one spawn per mol — no retry stacked workers
+    assert.ok(rs.every(r => r.queueStop !== true)); // the machinery answered every time
+  });
+
   test('queue-stopped parks fire onParked per mol', async () => {
     const w = world();
     const seq: string[] = [];

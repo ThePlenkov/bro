@@ -275,9 +275,12 @@ function errText(err: unknown): string {
 /** bd's exact lookup-miss signals — `bd show <id>` on an absent row
  *  prints `Issue <id> not found` on stderr and a
  *  `no issues found matching the provided IDs` error payload on
- *  stdout. Only these mark a miss — anything else containing "not
- *  found" (a malformed payload, a dead store) must stay thrown. */
-const BD_NOT_FOUND = /Issue \S+ not found|no issues found matching the provided IDs/i;
+ *  stdout; `bd mol show <id>` on an absent molecule exits nonzero with
+ *  `molecule '<id>' not found` in its stdout error payload. Only these
+ *  mark a miss — anything else containing "not found" (a malformed
+ *  payload, a dead store) must stay thrown. */
+const BD_NOT_FOUND =
+  /Issue \S+ not found|no issues found matching the provided IDs|molecule '?\S+'? not found/i;
 
 /** Classifier for a thrown bd error: true when the backend reported the
  *  requested id absent. Scans stderr *and* stdout — bd writes the

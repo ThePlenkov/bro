@@ -247,6 +247,16 @@ describe('isBdNotFound', () => {
       ),
       true
     )
+    // `bd mol show <id>` reports an absent molecule on stdout's error payload
+    assert.equal(
+      isBdNotFound(
+        Object.assign(new Error('exit 1'), {
+          stdout: '{"error":"molecule \'bd-x\' not found"}',
+        })
+      ),
+      true
+    )
+    assert.equal(isBdNotFound(new Error("molecule 'bd-x' not found")), true)
     assert.equal(isBdNotFound(new Error('database is locked')), false)
   })
 })

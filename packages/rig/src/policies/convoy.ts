@@ -22,6 +22,7 @@
 import {
   AgentNotFound,
   agentEntryBlocked,
+  isBdNotFound,
   SpawnError,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -377,13 +378,20 @@ function infraFail(ctx: ConvoyCtx, item: ConvoyItem, why: string): RunStep {
   return { waitSec: ctx.cfg.pollSec };
 }
 
-/** A zero-attempt read failure — the mol or its probes could not be
- *  read (a stalled store hits loadMol/next before spawn is ever
- *  reached). The mol settles 'error' immediately — a permanent miss
- *  must not pay the infra retries, and post-run a worker may be live
- *  (never a blind re-spawn) — but it still counts the streak: K in a
- *  row trips the same queueStop. */
-function infraSettle(ctx: ConvoyCtx, item: ConvoyItem, spent: number, why: string): MolResult {
+/** A read failure — the mol or its probes could not be read (a stalled
+ *  store hits loadMol/next before spawn is ever reached). The mol
+ *  settles 'error' immediately — a permanent miss must not pay the
+ *  infra retries, and post-run a worker may be live (never a blind
+ *  re-spawn). Only a SYSTEMIC failure counts the streak: a lookup miss
+ *  (bd reports the mol id absent) is a per-mol data defect — three bad
+ *  ids are not an outage and must not park a healthy queue. Anything
+ *  else (a stalled store, ETIMEDOUT) is the outage's signature — K in
+ *  a row trips the same queueStop. */
+function readSettle(ctx: ConvoyCtx, item: ConvoyItem, spent: number, err: unknown): MolResult {
+  const why = errText(err);
+  if (isBdNotFound(err)) {
+    return { mol: item.mol, verdict: 'error', attempts: spent, detail: why };
+  }
   const streak = bumpInfra(ctx);
   const stop = streak >= INFRA_FAIL_LIMIT;
   return {
@@ -496,7 +504,7 @@ function precheck(ctx: ConvoyCtx, item: ConvoyItem): ConvoyNext | MolResult {
   try {
     n = ctx.deps.next(ctx.deps.loadMol(item.mol));
   } catch (err) {
-    return infraSettle(ctx, item, item.attempts, errText(err));
+    return readSettle(ctx, item, item.attempts, err);
   }
   item.next = n;
   if (n.state === 'complete') {
@@ -519,7 +527,7 @@ function afterRun(ctx: ConvoyCtx, item: ConvoyItem): RunStep {
   try {
     after = ctx.deps.next(ctx.deps.loadMol(item.mol));
   } catch (err) {
-    return infraSettle(ctx, item, spent, errText(err));
+    return readSettle(ctx, item, spent, err);
   }
   item.next = after;
   if (after.state === 'complete') {
@@ -564,9 +572,11 @@ async function molAttempt(
 ): Promise<{ step: RunStep; delaySec: number }> {
   let step: RunStep;
   let delaySec = ctx.cfg.retryDelaySec;
+  let spawned = false;
   try {
     const t0 = ctx.deps.now();
     const agent = await ctx.deps.spawn(item.mol);
+    spawned = true;
     // a resolved spawn proves the machinery answered — the outage
     // streak only counts throws that produced no worker (bro-zaydc)
     ctx.infraStreak = 0;
@@ -583,10 +593,24 @@ async function molAttempt(
       }
     }
   } catch (err) {
-    step =
-      err instanceof SpawnError
-        ? convoyPolicy.onLost(ctx, { ...item, refusal: err })
-        : infraFail(ctx, item, errText(err));
+    if (spawned) {
+      // a worker exists — a post-spawn throw (poll, classification) is
+      // not a spawn-level failure: settle 'error' terminal, never a
+      // blind retry that could stack a second worker on the mol. The
+      // resolved spawn already proved the machinery answered, so this
+      // feeds no streak either (bro-zaydc)
+      step = {
+        mol: item.mol,
+        verdict: 'error',
+        attempts: item.attempts + 1,
+        detail: errText(err),
+      };
+    } else {
+      step =
+        err instanceof SpawnError
+          ? convoyPolicy.onLost(ctx, { ...item, refusal: err })
+          : infraFail(ctx, item, errText(err));
+    }
   }
   return { step, delaySec };
 }
