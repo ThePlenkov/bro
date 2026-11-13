@@ -129,9 +129,9 @@ The mapping the parent spec named:
   alert, exactly as before.
 - **onLost** — the settled-fixer sweep's per-row verdict: a fixer
   bead whose PR left the open set (`fixerPrFromRef` ∉ `work.prs`,
-  bead not already closed) is probed once — `!OPEN` → `settleSessions`
-  + `closeFixer` + the settled say line; still-open or probe failure
-  → nothing. `sweepFixers` is the driver iterating
+  bead not already closed) is probed once — `!OPEN` →
+  `settleSessions` + `closeFixer` + the settled say line; still-open
+  or probe failure → nothing. `sweepFixers` is the driver iterating
   `store.list({labels:[FIXER_LABEL]})`.
 
 `pass` (the old `driveOnce`) and `run` (the old `runDrive` tail —
