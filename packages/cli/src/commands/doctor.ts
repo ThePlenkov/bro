@@ -1646,8 +1646,12 @@ function providerRefCheck(
  *  warn: not wanting claude workers is a choice, not a defect (same
  *  posture as the plugins row's `bro plugins install` nudge). */
 function claudePresetCheck(providers: Record<string, ProviderEntry>): DoctorCheck | null {
+  // `claude` the binary, not the substring — `claude-code-acp` (the
+  // claude-acp preset) is a different program and must not suppress
+  // the nudge. Match a whitespace-delimited token whose basename is
+  // exactly `claude` (path-qualified spellings still count).
   const runs = Object.values(providers).some(
-    e => (e.type === 'cli' || e.type === 'acp') && /\bclaude\b/.test(e.command)
+    e => (e.type === 'cli' || e.type === 'acp') && /(^|[\s/])claude(?=\s|$)/.test(e.command)
   );
   if (runs || !probeBin('claude').found) {
     return null;

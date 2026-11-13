@@ -1483,6 +1483,21 @@ describe('bro doctor', () => {
       }
     ));
 
+  test('providers: a claude-acp-only provider does not suppress the nudge', () =>
+    withEnv(
+      {
+        config: { providers: { 'claude-acp': { type: 'acp', command: 'claude-code-acp' } } },
+        bins: ['gh', 'claude'],
+      },
+      dir => {
+        const rows = runDoctorChecks(dir).filter(c => c.name === 'providers');
+        assert.ok(
+          rows.some(c => c.detail.includes('claude CLI on PATH')),
+          JSON.stringify(rows)
+        );
+      }
+    ));
+
   test('providers: no claude on PATH, no nudge', () =>
     withEnv({ config: {}, bins: ['gh'] }, dir => {
       const rows = runDoctorChecks(dir).filter(c => c.name === 'providers');
