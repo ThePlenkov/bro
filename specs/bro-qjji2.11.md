@@ -106,8 +106,17 @@ msg` attribution rule); a sourceless publish claims no coalescing
 identity and supersedes nothing — the sentinel still dedupes.
 
 Ordering is at-least-once, never at-most-once: the sentinel is
-written only AFTER a leg reports delivery (publish `published:true`
-/ a landed inbox path or addressed drop). A transport failure —
+written only AFTER a leg reports delivery — a landed inbox path,
+or a publish (`published:true`) whose `to` is an address the
+mailbox drain can match (agentId / raw sessionId / `orchestrator`).
+A publish addressed to the session KEY `<host>:<sid>` is a
+ledger/bus RECORD only — `addressedTo` never matches a session
+key — so when the inbox write fails or the session already ended,
+`published:true` names a record nobody received: not delivery, no
+sentinel, and the next wake retries. `sendSessionMessage` marks
+those deliveries `recordOnly` at `deliveryFor` — the flag is set
+where the channel is chosen, never re-derived by re-parsing `to`
+(a sid may itself carry a `:`). A transport failure —
 `published:false`, zero deliveries, a throw — leaves no sentinel
 and the next wake's recheck retries; a crash between delivery and
 sentinel re-delivers once (the contract's tolerated duplicate,
@@ -164,8 +173,9 @@ are the only imports — no new core surface.
   (user label → notify publish; `orchestrator`/`host:sid`/registry
   agentId/ledger `spawnedBy`/sid → `sendSessionMessage`), dedup
   (second emit of the same bundle delivers once; a changed bundle
-  re-delivers), undelivered → no sentinel → retry, sentinel-write
-  failure → warn-only.
+  re-delivers), undelivered → no sentinel → retry, record-only
+  publishes (ended session, failed inbox write, colon-bearing sid)
+  → no sentinel → retry, sentinel-write failure → warn-only.
 - `npm run build`, `npm run typecheck`, `npm test`.
 - Live smoke: a real `runPipeline` accept park in a tmp repo with
   the prod `engines(dir)` map (or the emit adapter bound directly)

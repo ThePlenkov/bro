@@ -364,9 +364,15 @@ describe('pipelineEmit — idempotency', () => {
     await insideAsync(main, root, async () => {
       // sendSessionMessage's shape when the inbox append fails but the
       // events publish lands: channel 'mailbox', `to` the session KEY —
-      // an address addressedTo can never match
+      // an address addressedTo can never match, flagged recordOnly
       const send = sendStub([
-        { to: 'claude:w1', label: 'claude:w1', channel: 'mailbox', published: true },
+        {
+          to: 'claude:w1',
+          label: 'claude:w1',
+          channel: 'mailbox',
+          recordOnly: true,
+          published: true,
+        },
       ]);
       const { d } = deps(main, {
         sendMessage: send.fn as PipelineEmitDeps['sendMessage'],
@@ -376,6 +382,56 @@ describe('pipelineEmit — idempotency', () => {
       await emit(call('claude:w1'), b);
       await emit(call('claude:w1'), b);
       assert.equal(send.calls.length, 2, 'record-only delivery must not dedupe');
+    });
+  });
+
+  test('a sid containing a colon does not blur drainability — recordOnly rides the delivery', async () => {
+    const { root, main } = initRepo('bro-emit-colonsid-');
+    await insideAsync(main, root, async () => {
+      const events = eventsStub(true);
+      // The real sendSessionMessage against a row whose sid carries a
+      // ':': the session key 'devin:a:b' defeats a regex drainability
+      // test (two colons) — only the recordOnly flag tells the truth.
+      const { d } = deps(main, {
+        ledger: ledgerStub([sessionRow({ host: 'devin', sid: 'a:b', state: 'ended' })]),
+        events: events.facade,
+      });
+      d.sendMessage = undefined; // the real sendSessionMessage flags recordOnly
+      const emit = pipelineEmit(d);
+      const b = bundle();
+      await emit(call('devin:a:b'), b);
+      await emit(call('devin:a:b'), b);
+      assert.equal(
+        events.calls.length,
+        2,
+        'a record-only publish to a colon-sid must not dedupe (no sentinel)'
+      );
+      assert.equal(events.calls[0]!.to, 'devin:a:b');
+    });
+  });
+
+  test("an 'unknown'-host row with a colon sid still drains by sessionId — delivered", async () => {
+    const { root, main } = initRepo('bro-emit-colonsid-drain-');
+    await insideAsync(main, root, async () => {
+      const events = eventsStub(true);
+      // 'unknown' host → deliveryFor publishes to the raw sid 'a:b',
+      // which addressedTo matches by sessionId — a live channel even
+      // though the string looks like a session key.
+      const { d } = deps(main, {
+        ledger: ledgerStub([sessionRow({ host: 'unknown', sid: 'a:b' })]),
+        events: events.facade,
+      });
+      d.sendMessage = undefined; // the real sendSessionMessage flags recordOnly
+      const emit = pipelineEmit(d);
+      const b = bundle();
+      await emit(call('unknown:a:b'), b);
+      await emit(call('unknown:a:b'), b);
+      assert.equal(
+        events.calls.length,
+        1,
+        'a drainable sid publish is delivery — the sentinel dedupes'
+      );
+      assert.equal(events.calls[0]!.to, 'a:b');
     });
   });
 

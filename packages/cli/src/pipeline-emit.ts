@@ -293,12 +293,14 @@ async function deliverAgent(customer: string, ctx: EmitCtx): Promise<boolean> {
   // A publish counts as delivery only when its `to` is an address the
   // mailbox drain can match — agentId/sessionId/orchestrator
   // (addressedTo never matches a session key). sendSessionMessage
-  // addresses inbox-capable and ended rows by '<host>:<sid>', so when
-  // the inbox write fails — or the session already ended — the publish
-  // is a ledger/bus record only: nobody received the bundle, the
-  // sentinel must stay unwritten, and the next wake retries.
+  // flags the session-key publishes `recordOnly` at deliveryFor —
+  // where the channel is chosen — so when the inbox write fails or
+  // the session already ended, the publish is a ledger/bus record
+  // only: nobody received the bundle, the sentinel must stay
+  // unwritten, and the next wake retries. (Re-parsing `d.to` with
+  // SESSION_KEY_RE would misfile a sid that itself contains ':'.)
   return res.deliveries.some(
-    d => d.inboxPath !== undefined || (d.published && !SESSION_KEY_RE.test(d.to))
+    d => d.inboxPath !== undefined || (d.published && d.recordOnly !== true)
   );
 }
 
