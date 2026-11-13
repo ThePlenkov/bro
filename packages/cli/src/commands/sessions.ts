@@ -27,6 +27,19 @@
  *    is its agentId and `<git-common>/bro/agents.json` maps
  *    `molStep → { agentId }`, where molStep IS the bead/step id.
  *    Interactive sessions and unresolvable lookups render `—`.
+ *
+ * The epic's claims and resume fields (deferred by specs/bro-izpyk.1.2.md
+ * until the claims plane existed) join at read time now
+ * (specs/bro-izpyk.11.md):
+ *
+ *  - claims: one `ClaimFacade.list({})` per collect pass, grouped by
+ *    session key onto each row — held resource URIs (`worktree:`,
+ *    `role:`, `branch:`, …), never a per-row query. `task:*` stays out
+ *    by design: the bd claim is its source of truth and the facade
+ *    does not enumerate it.
+ *  - resume: `sessionResumeArgv(host, sid, cwd)` marks whether the
+ *    host has a resume command bro knows — the same plane lookup
+ *    `bro sessions resume` and `bro fleet resume` render.
  */
 import { homedir, uptime } from 'node:os';
 import {
@@ -39,6 +52,8 @@ import {
   readAgentRegistry,
   sessionFileStem,
   sessionProject,
+  type ClaimFacade,
+  type ClaimRow,
   type LedgerFacade,
   type Mode,
   type SessionRow,
@@ -50,6 +65,7 @@ import { loadBroConfig } from '../plugins.ts';
 // cursor) and @broject/devin's plane — the read path `bro sessions
 // resume` resolves through (specs/bro-izpyk.4.md)
 import '../session-planes/resume.ts';
+import { sessionResumeArgv } from '../session-planes/resume.ts';
 import { runSessionsResume } from './sessions-resume.ts';
 
 const USAGE = `usage: bro sessions [--project|--all] [--host <h>] [--live] [--json]
@@ -64,7 +80,10 @@ const USAGE = `usage: bro sessions [--project|--all] [--host <h>] [--live] [--js
 State is derived at read time: a session last seen before this boot is
 'interrupted'; the ledger itself only records 'live' today. The bead
 column resolves bro-spawned agents through the per-project agent
-registry — interactive sessions show —.
+registry — interactive sessions show —. CLAIMS lists the resource
+URIs the session holds (bro claim list); RESUME marks whether the
+host has a resume command — 'bro sessions resume <host>:<sid>' runs
+it, --json carries the resolved argv.
 
 resume runs the host CLI's own resume command in the session's cwd —
 <host>:<sid>, a sid (exact or unique prefix), an agentId, --last, or
@@ -166,8 +185,9 @@ export function shortSid(sid: string): string {
   return sid.length > 12 ? `${sid.slice(0, 12)}…` : sid;
 }
 
-/** One rendered session — the SessionRow fields plus the two
- *  client-resolved columns (`state` derived, `bead`). */
+/** One rendered session — the SessionRow fields plus the
+ *  client-resolved columns (`state` derived, `bead`, `claims`,
+ *  `resumeArgv`). */
 export interface SessionViewRow {
   host: string;
   sid: string;
@@ -184,6 +204,12 @@ export interface SessionViewRow {
   spawnedBy: string | null;
   /** Resolved molStep/bead for bro-spawned sessions; undefined → `—`. */
   bead?: string;
+  /** Resource URIs this session holds, sorted — joined in from
+   *  `ClaimFacade.list`; absent when the claims plane was not read. */
+  claims?: string[];
+  /** The host's resume argv — null when the host has no resume command
+   *  bro knows (or the plane threw); absent when never computed. */
+  resumeArgv?: string[] | null;
 }
 
 export interface SessionViews {
@@ -247,10 +273,64 @@ export interface CollectSessionsOpts {
   now?: number;
   bootTimeMs?: number;
   beadFor?: (row: SessionRow) => string | undefined;
+  /** Claims plane for the CLAIMS column — absent → the join is skipped
+   *  silently (the test seam for claim-free collects). A `list` throw
+   *  degrades to a warning, never a failed listing. */
+  claims?: ClaimFacade;
   /** Live mode-file overlay (specs/bro-izpyk.2.md) — the hook-time
    *  truth wins over the ledger projection, which only updates on
    *  setMode writes. Absent → the ledger mode stands. */
   modeFor?: (host: string, sid: string) => Mode | undefined;
+}
+
+/** `host\0sid` — the composite key the claims join groups on. */
+function sessionKeyOf(host: string, sid: string): string {
+  return `${host}\0${sid}`;
+}
+
+/** One machine-wide `claims.list` grouped by session key — the claims
+ *  table is small, so this beats a per-row `{session}` query. Sorted
+ *  URI lists keep rendering deterministic. A `list` failure is a
+ *  warning, never a failed listing: the column renders `—` and the
+ *  sessions themselves still answer. */
+async function claimsBySession(
+  claims: ClaimFacade,
+  warnings: string[]
+): Promise<Map<string, string[]>> {
+  const bySession = new Map<string, string[]>();
+  let rows: ClaimRow[];
+  try {
+    rows = await claims.list({});
+  } catch (err) {
+    warnings.push(
+      `claims unavailable — the CLAIMS column is incomplete (${err instanceof Error ? err.message : String(err)})`
+    );
+    return bySession;
+  }
+  for (const c of rows) {
+    const key = sessionKeyOf(c.host, c.sid);
+    const held = bySession.get(key);
+    if (held === undefined) {
+      bySession.set(key, [c.resource]);
+    } else {
+      held.push(c.resource);
+    }
+  }
+  for (const held of bySession.values()) {
+    held.sort();
+  }
+  return bySession;
+}
+
+/** The plane's resumeArgv, fail-safe — the same fail-closed rule
+ *  `bro fleet resume` applies: a plane that throws reports like a
+ *  host with no resume command, it never takes the listing down. */
+function safeResumeArgv(host: string, sid: string, cwd: string): string[] | null {
+  try {
+    return sessionResumeArgv(host, sid, cwd);
+  } catch {
+    return null;
+  }
 }
 
 /** Ledger rows → view rows: derived state, resolved bead, --live filter.
@@ -274,6 +354,7 @@ export async function collectSessionViews(
   if (drain !== undefined) {
     warnings.push(`spool drain failed — the listing may be stale (${drain})`);
   }
+  const held = opts.claims === undefined ? undefined : await claimsBySession(opts.claims, warnings);
   const rows: SessionViewRow[] = [];
   for (const s of stored) {
     const state = deriveSessionState(s, boot);
@@ -281,6 +362,7 @@ export async function collectSessionViews(
       continue;
     }
     const bead = beadFor(s);
+    const claims = held?.get(sessionKeyOf(s.host, s.sid));
     rows.push({
       host: s.host,
       sid: s.sid,
@@ -295,13 +377,17 @@ export async function collectSessionViews(
       lastSeen: s.lastSeen,
       spawnedBy: s.spawnedBy,
       ...(bead !== undefined ? { bead } : {}),
+      ...(claims !== undefined ? { claims } : {}),
+      resumeArgv: safeResumeArgv(s.host, s.sid, s.cwd ?? ''),
     });
   }
   return { rows, warnings };
 }
 
 /** The --json row — every SessionRow field (state already derived) plus
- *  the resolved bead. Times stay epoch ms: the ledger's native unit. */
+ *  the resolved bead, held claims, and the resolved resume argv (null
+ *  when the host has none — the same verdict `bro sessions resume`
+ *  reports). Times stay epoch ms: the ledger's native unit. */
 export function sessionJsonRow(r: SessionViewRow): Record<string, unknown> {
   return {
     host: r.host,
@@ -317,13 +403,28 @@ export function sessionJsonRow(r: SessionViewRow): Record<string, unknown> {
     lastSeen: r.lastSeen,
     spawnedBy: r.spawnedBy,
     bead: r.bead ?? null,
+    claims: r.claims ?? [],
+    resumeArgv: r.resumeArgv ?? null,
   };
+}
+
+/** A held-resource URI as a table cell — `worktree:` paths get the same
+ *  `~` collapse the WORKTREE column uses; every other scheme renders
+ *  verbatim. Display-only: --json carries the full URI. */
+export function displayClaimUri(uri: string): string {
+  if (uri.startsWith('worktree:')) {
+    return `worktree:${displayWorktree(uri.slice('worktree:'.length))}`;
+  }
+  return uri;
 }
 
 /** Table lines — padded columns, `—` for absent facts. Exported pure so
  *  tests see exactly what the TTY gets. */
 export function sessionTableLines(rows: SessionViewRow[], now: number): string[] {
-  const cols: [keyof SessionViewRow | 'worktree' | 'agent' | 'seen' | 'startedAge', string][] = [
+  const cols: [
+    keyof SessionViewRow | 'worktree' | 'agent' | 'seen' | 'startedAge' | 'resume',
+    string,
+  ][] = [
     ['host', 'HOST'],
     ['sid', 'SID'],
     ['state', 'STATE'],
@@ -332,6 +433,8 @@ export function sessionTableLines(rows: SessionViewRow[], now: number): string[]
     ['bead', 'BEAD'],
     ['worktree', 'WORKTREE'],
     ['branch', 'BRANCH'],
+    ['claims', 'CLAIMS'],
+    ['resume', 'RESUME'],
     ['startedAge', 'STARTED'],
     ['seen', 'SEEN'],
   ];
@@ -347,6 +450,14 @@ export function sessionTableLines(rows: SessionViewRow[], now: number): string[]
         return displayWorktree(r.cwd);
       case 'branch':
         return r.branch ?? '—';
+      case 'claims':
+        return r.claims === undefined || r.claims.length === 0
+          ? '—'
+          : r.claims.map(displayClaimUri).join(', ');
+      case 'resume':
+        // availability mark only — the full argv lives in --json and
+        // `bro sessions resume`/`bro fleet resume` render it for launch
+        return r.resumeArgv === null || r.resumeArgv === undefined ? '—' : 'yes';
       case 'startedAge':
         return fmtAge(r.started, now);
       case 'seen':
@@ -370,6 +481,9 @@ export function sessionTableLines(rows: SessionViewRow[], now: number): string[]
 export interface SessionsDeps {
   dir?: string;
   ledger?: LedgerFacade;
+  /** Claims plane for the CLAIMS column — injectable for tests;
+   *  production resolves facade('claims') beside the ledger. */
+  claims?: ClaimFacade;
   now?: number;
   bootTimeMs?: number;
   beadFor?: (row: SessionRow) => string | undefined;
@@ -386,6 +500,28 @@ function sessionsLedger(dir: string, deps: SessionsDeps): LedgerFacade {
   }
   const prefer = loadBroConfig(dir).connectors;
   return facade('ledger', { dir }, prefer === undefined ? {} : { prefer });
+}
+
+/** Resolve the claims facade for the CLAIMS column — injectable; a
+ *  resolution failure is a warning line, never a failed listing (the
+ *  sessions themselves still answer — degrade like the spool drain). */
+function sessionsClaims(
+  dir: string,
+  deps: SessionsDeps,
+  warnings: string[]
+): ClaimFacade | undefined {
+  if (deps.claims !== undefined) {
+    return deps.claims;
+  }
+  try {
+    const prefer = loadBroConfig(dir).connectors;
+    return facade('claims', { dir }, prefer === undefined ? {} : { prefer });
+  } catch (err) {
+    warnings.push(
+      `claims unavailable — the CLAIMS column is incomplete (${err instanceof Error ? err.message : String(err)})`
+    );
+    return undefined;
+  }
 }
 
 /** Live mode files are the hook-time truth — overlay them onto the
@@ -445,6 +581,10 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
   }
   const ledger = sessionsLedger(dir, deps);
   const modeFor = sessionModeOverlay(deps.modeFiles);
+  // collect-time warnings — a claims-resolution failure surfaces here
+  // because the collect's own warning list belongs to it
+  const preWarnings: string[] = [];
+  const claims = sessionsClaims(dir, deps, preWarnings);
   let views: SessionViews;
   try {
     views = await collectSessionViews(ledger, {
@@ -454,12 +594,14 @@ export async function runSessionsCommand(argv: string[], deps: SessionsDeps = {}
       ...(deps.now !== undefined ? { now: deps.now } : {}),
       ...(deps.bootTimeMs !== undefined ? { bootTimeMs: deps.bootTimeMs } : {}),
       ...(deps.beadFor !== undefined ? { beadFor: deps.beadFor } : {}),
+      ...(claims !== undefined ? { claims } : {}),
       modeFor,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new CommandError(`error: ledger unavailable — ${msg}`, EXIT.error);
   }
+  views.warnings.unshift(...preWarnings);
   const now = deps.now ?? Date.now();
   if (args.json) {
     console.log(

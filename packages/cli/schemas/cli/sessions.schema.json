@@ -28,7 +28,17 @@
           "started": { "type": ["number", "null"], "description": "epoch ms" },
           "lastSeen": { "type": "number", "description": "epoch ms" },
           "spawnedBy": { "type": ["string", "null"] },
-          "bead": { "type": ["string", "null"] }
+          "bead": { "type": ["string", "null"] },
+          "claims": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "resource URIs this session holds (ClaimFacade.list)"
+          },
+          "resumeArgv": {
+            "type": ["array", "null"],
+            "items": { "type": "string" },
+            "description": "the host's resume argv — null when the host has no resume command"
+          }
         }
       }
     },
