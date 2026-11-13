@@ -143,6 +143,9 @@ export type ContenderAnswer =
        *  possibly incurred but never reported, so the call counts as
        *  unknown-cost (a bind failure or an abort skip made no call) */
       callMade?: boolean;
+      /** elapsed ms when a call was made — failed calls belong in the
+       *  latency distribution too */
+      latencyMs?: number;
     };
 
 /** The per-decision input every contender sees — identical for all of
@@ -422,9 +425,13 @@ function modelContender(deps: {
   entry: ProviderEntry;
   providers: Record<string, ProviderEntry>;
   judge: JudgeConfig;
+  /** the command's shared decide() budget — `judge.maxDecisionsPerRun`
+   *  is a per-invocation cost bound enforced by the consuming command
+   *  (judge config contract); every model contender spends from it */
+  runBudget: { remaining: number };
   makeJudge?: (provider: string, model: string | undefined) => JudgeFacade | Promise<JudgeFacade>;
 }): BenchContender {
-  const { id, provider, model, entry, providers, judge } = deps;
+  const { id, provider, model, entry, providers, judge, runBudget } = deps;
   let facade: JudgeFacade | undefined;
   let bindFailure: string | undefined;
   const bind = async (): Promise<JudgeFacade> => {
@@ -459,11 +466,18 @@ function modelContender(deps: {
     provider,
     ...(model === undefined ? {} : { model }),
     answer: async input => {
+      // the invoke gate decides first — a decision it never asked is a
+      // skip even on an aborted contender, never an execution failure
+      if (!input.askModel) {
+        return { status: 'skipped', reason: input.gateReason };
+      }
       if (aborted !== undefined) {
         return { status: 'failed', error: `contender aborted — ${aborted}` };
       }
-      if (!input.askModel) {
-        return { status: 'skipped', reason: input.gateReason };
+      if (runBudget.remaining <= 0) {
+        // the configured per-invocation decide() bound is spent — an
+        // explicit no-call skip, not a silent pass and never a failure
+        return { status: 'skipped', reason: 'run-budget' };
       }
       const { decision } = input;
       const options = decision.candidates.map(c => ({ name: c.name, description: c.description }));
@@ -478,6 +492,7 @@ function modelContender(deps: {
       try {
         const judge = await bind();
         bound = true;
+        runBudget.remaining -= 1; // the invocation is the spend — count it before it lands
         res = await judge.decide(state, questions);
       } catch (err) {
         streak += 1;
@@ -490,7 +505,11 @@ function modelContender(deps: {
         if (streak >= MODEL_ABORT_STREAK) {
           aborted = `${streak} consecutive decide() failures — last: ${error}`;
         }
-        return { status: 'failed', error, ...(bound ? { callMade: true } : {}) };
+        return {
+          status: 'failed',
+          error,
+          ...(bound ? { callMade: true, latencyMs: performance.now() - started } : {}),
+        };
       }
       streak = 0;
       const latencyMs = performance.now() - started;
@@ -542,8 +561,15 @@ export function resolveContenders(opts: {
   judge: JudgeConfig;
   db: RouterDb;
   recall: RecallTuning;
+  /** the run's shared decide() budget — injected so the report can
+   *  tell the bound was hit; defaults to `judge.maxDecisionsPerRun`
+   *  (absent = unbounded, the test seam's shape) */
+  runBudget?: { remaining: number };
   makeJudge?: (provider: string, model: string | undefined) => JudgeFacade | Promise<JudgeFacade>;
 }): BenchContender[] {
+  const runBudget = opts.runBudget ?? {
+    remaining: opts.judge.maxDecisionsPerRun ?? Number.POSITIVE_INFINITY,
+  };
   const out: BenchContender[] = [];
   // dedup — a repeated id would collide on the detail record's picks
   for (const id of [...new Set(opts.judges)]) {
@@ -575,6 +601,7 @@ export function resolveContenders(opts: {
         entry,
         providers: opts.providers,
         judge: opts.judge,
+        runBudget,
         ...(opts.makeJudge === undefined ? {} : { makeJudge: opts.makeJudge }),
       })
     );
@@ -918,12 +945,19 @@ export async function runBenchReplay(opts: BenchReplayOptions): Promise<BenchRep
     const recallT = recallTuning(opts.recall ?? cfg.brouter?.router?.recall);
     const providers = opts.providers ?? synthesizedProviders(jcfgAll.judge, jcfgAll.providers);
     const judges = opts.judges ?? defaultJudges(cfg.brouter?.router?.provider);
+    // the configured decide() bound — `judge.maxDecisionsPerRun` is a
+    // per-invocation cost bound the replay command enforces itself;
+    // every model contender spends from this one purse
+    const runBudget = {
+      remaining: jcfg.maxDecisionsPerRun ?? Number.POSITIVE_INFINITY,
+    };
     const contenders = resolveContenders({
       judges,
       providers,
       judge: jcfg,
       db,
       recall: recallT,
+      runBudget,
       ...(opts.makeJudge === undefined ? {} : { makeJudge: opts.makeJudge }),
     });
 
@@ -1015,7 +1049,15 @@ export async function runBenchReplay(opts: BenchReplayOptions): Promise<BenchRep
       },
       contenders: metrics,
       detail,
-      notes: [...REPORT_NOTES],
+      notes: [
+        ...REPORT_NOTES,
+        ...(runBudget.remaining <= 0
+          ? [
+              'judge.maxDecisionsPerRun bounded this replay — decisions past ' +
+                'the bound report skipped (run-budget)',
+            ]
+          : []),
+      ],
     };
   } finally {
     close();

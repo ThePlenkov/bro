@@ -32,12 +32,16 @@ import {
 const INVOKE_MODES: readonly InvokeMode[] = ['always', 'ambiguous', 'never'];
 
 /** `--since` — an ISO timestamp or epoch milliseconds. */
-function parseSince(raw: string | undefined): number | undefined {
+export function parseSince(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   if (/^\d+$/.test(raw)) {
     const ms = Number(raw);
-    if (!Number.isSafeInteger(ms)) {
-      console.error(`brouter bench: --since epoch must be a safe integer — got ${raw}`);
+    // a safe integer can still sit outside Date's range — new Date()
+    // would be Invalid and the report's toISOString() would RangeError
+    if (!Number.isSafeInteger(ms) || !Number.isFinite(new Date(ms).getTime())) {
+      console.error(
+        `brouter bench: --since epoch must be a safe integer inside Date range — got ${raw}`
+      );
       process.exit(2);
     }
     return ms;

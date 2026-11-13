@@ -13,6 +13,7 @@ import {
   type OutcomeReport,
   type StoreHandle,
 } from '@broject/router-store';
+import { parseSince } from './bench-cmd.ts';
 import {
   classifyOutcome,
   formatBenchReport,
@@ -441,6 +442,123 @@ describe('brouter bench replay', () => {
       assert.equal(m.costUsdPer1k, 'unknown');
       assert.equal(m.cost.knownCalls, 2);
       assert.equal(m.cost.unknownCalls, 1);
+      // the failed call still reached the provider — its latency is
+      // measured and lands in the distribution (2 answers + 1 failure)
+      assert.equal(m.latencyMs?.n, 3);
+    } finally {
+      close();
+    }
+  });
+
+  test('a gated decision on an aborted contender is a skip, never a failure', async () => {
+    const { s, close, path } = await store('gate-abort');
+    try {
+      const ctx = 'ctx:gate-abort';
+      for (let i = 0; i < 5; i += 1) {
+        await journal(s, { contextId: ctx, route: 'ui' }); // multi-candidate → asked
+      }
+      // a singleton trails the five failures — the ambiguous gate
+      // never asks it, so the abort must not miscount it as a failure
+      const singletonId = await journal(s, {
+        contextId: ctx,
+        route: 'ui',
+        candidates: [CANDIDATES[0]],
+      });
+      const report = await runBenchReplay({
+        dir: scratch,
+        db: s.db,
+        storePath: path,
+        contextId: ctx,
+        judges: ['fake-provider'],
+        providers: FAKE_PROVIDERS,
+        judge: JUDGE_CFG,
+        makeJudge: async () => fakeJudge([new Error('provider down')], []),
+        invoke: 'ambiguous',
+        now: T0 + 120_000,
+      });
+      const m = contender(report, 'fake-provider')!;
+      assert.equal(m.failed, 5);
+      assert.equal(m.skipped, 1);
+      const singleton = report.detail.find(d => d.decisionId === singletonId)!;
+      assert.equal(singleton.picks['fake-provider'], 'skipped');
+    } finally {
+      close();
+    }
+  });
+
+  test('the configured decide() budget bounds the run — past it, explicit skips', async () => {
+    const { s, close, path } = await store('budget');
+    const calls: Array<{ state: unknown; questions: Record<string, unknown> }> = [];
+    try {
+      const ctx = 'ctx:budget';
+      await journal(s, { contextId: ctx, route: 'ui' });
+      await journal(s, { contextId: ctx, route: 'ui' });
+      const report = await runBenchReplay({
+        dir: scratch,
+        db: s.db,
+        storePath: path,
+        contextId: ctx,
+        judges: ['fake-provider'],
+        providers: FAKE_PROVIDERS,
+        judge: { confidence: 0.7, timeoutMs: 5_000, maxDecisionsPerRun: 1 } as never,
+        makeJudge: async () => fakeJudge([choice('ui'), choice('ui')], calls),
+        invoke: 'always',
+        now: T0 + 120_000,
+      });
+      const m = contender(report, 'fake-provider')!;
+      // one call spent the bound — the second decision is a no-call
+      // skip, and the report says the bound was hit
+      assert.equal(m.answered, 1);
+      assert.equal(m.skipped, 1);
+      assert.equal(m.failed, 0);
+      assert.equal(calls.length, 1);
+      assert.ok(report.notes.some(n => n.includes('maxDecisionsPerRun')));
+    } finally {
+      close();
+    }
+  });
+
+  test('t1-recall freezes on first-accepted — a post-decision update keeps the evidence', async () => {
+    const { s, close } = await store('recall-upd');
+    try {
+      const ctx = 'ctx:recall-upd';
+      const T1 = T0 + 10_000;
+      // pre-decision evidence: two verified fallback successes
+      const ev: string[] = [];
+      for (let i = 0; i < 2; i += 1) {
+        const d = await journal(s, {
+          contextId: ctx,
+          at: T1 - 5_000 - i,
+          taskText: 'fix the flaky test',
+          route: 'fallback',
+        });
+        await outcome(s, d, { result: 'merged', rounds: 1, now: T1 - 4_000 - i });
+        ev.push(d);
+      }
+      const target = await journal(s, {
+        contextId: ctx,
+        at: T1,
+        taskText: 'fix the flaky test',
+        route: 'ui',
+      });
+      // post-decision corrections re-accept both rows — outcomes.at
+      // moves past the cutoff while the audit keeps first-accepted
+      for (const d of ev) {
+        s.db.$client.prepare('update outcomes set at = ? where decision_id = ?').run(T1 + 9_000, d);
+      }
+
+      const report = await runBenchReplay({
+        dir: scratch,
+        db: s.db,
+        contextId: ctx,
+        judges: ['t1-recall'],
+        recall: { k: 5, minAgreement: 0.5, minRows: 2 },
+        now: T1 + 20_000,
+      });
+      const row = report.detail.find(d => d.decisionId === target)!;
+      // first-accepted < cutoff → both rows still vote 'fallback';
+      // last-write-at would have evicted them and abstained
+      assert.equal(row.picks['t1-recall'], 'fallback');
     } finally {
       close();
     }
@@ -754,6 +872,33 @@ describe('brouter bench replay', () => {
       assert.match(md, /not routing accuracy/);
     } finally {
       close();
+    }
+  });
+});
+
+describe('brouter bench cmd', () => {
+  test('--since epoch must be a safe integer inside Date range', () => {
+    assert.equal(parseSince(undefined), undefined);
+    assert.equal(parseSince('1700000000000'), 1_700_000_000_000);
+    assert.equal(parseSince('2026-11-13T00:00:00Z'), Date.parse('2026-11-13T00:00:00Z'));
+
+    const origExit = process.exit;
+    const origErr = console.error;
+    const errs: string[] = [];
+    process.exit = ((code?: number) => {
+      throw new Error(`exit:${code}`);
+    }) as never;
+    console.error = ((m: string) => errs.push(m)) as never;
+    try {
+      // a safe integer past Date's ±8.64e15 — old check let it through
+      // and formatBenchReport() RangeError'd on toISOString()
+      assert.throws(() => parseSince('8640000000000001'), /exit:2/);
+      assert.throws(() => parseSince('99999999999999999999'), /exit:2/);
+      assert.throws(() => parseSince('not-a-date'), /exit:2/);
+      assert.match(errs[0] ?? '', /safe integer inside Date range/);
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
     }
   });
 });

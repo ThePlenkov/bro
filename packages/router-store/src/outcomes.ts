@@ -899,7 +899,10 @@ export async function recallOutcomeRows(
     predicate?: SuccessPredicate;
     /** the replay freeze (spec bro-0ykhg.5) — only outcomes accepted
      *  BEFORE this epoch ms vote: a replayed decision sees the evidence
-     *  that existed when it was made, never its own outcome */
+     *  that existed when it was made, never its own outcome. Compared
+     *  on FIRST-accepted (`outcome_reports`), not `outcomes.at` — an
+     *  upsert rewrites `at` on every accepted update, so last-write
+     *  would wrongly evict evidence that existed at the cutoff */
     before?: number;
     /** the decision being replayed — its own outcome never votes,
      *  whatever timestamp it carries */
@@ -914,7 +917,13 @@ export async function recallOutcomeRows(
   // the contender names ride as ONE json_each parameter — the SQL text
   // never interpolates data, so there is no injection surface at all
   const routeFilter = routes.length === 0 ? '' : ' and o.route in (select value from json_each(?))';
-  const beforeClause = query.before === undefined ? '' : ' and o.at < ?';
+  // the freeze compares the first VERIFIED-accepted time — outcomes.at
+  // is the last accepted update, which a post-cutoff correction
+  // rewrites; a row pending until after the cutoff was never evidence
+  const beforeClause =
+    query.before === undefined
+      ? ''
+      : ' and (select min(r.at) from outcome_reports r where r.decision_id = o.decision_id and r.accepted = 1 and r.verified = 1) < ?';
   const excludeClause = query.excludeDecisionId === undefined ? '' : ' and o.decision_id <> ?';
   const args: Array<string | number | null> = [
     fts,
