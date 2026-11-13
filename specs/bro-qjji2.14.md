@@ -87,8 +87,19 @@ notes stay compact.
   verify payloads as `unknown` and never re-validates rows, so
   pre-.14 journals with bare-string proofs still emit and read.
 - The seam keeps accepting bare strings (above) — no `--engines`
-  module breaks on upgrade; new producers emit the typed shape for
-  machine-checkable evidence.
+  module answering through `verifyStage` breaks on upgrade; new
+  producers emit the typed shape for machine-checkable evidence.
+- The string tolerance is a SEAM-INPUT contract only. `SeamEvidenceRow`
+  widens what the per-AC `e2e` dep may answer; `EvidenceRow` /
+  `VerifyPayload` is the canonical journaled OUTPUT — always typed.
+  An `--engines` module that swaps the whole `e2e` engine (instead of
+  binding its runner as `verifyStage`'s `e2e` dep) bypasses `checkRow`
+  and journals its payload verbatim — it owns the typed shape itself.
+  `EngineResult.payload` is `unknown` to the runner, so no shared
+  boundary can normalize it; `verifyStage` is the normalization point
+  by design, and consumers already read verify payloads as `unknown`
+  (`accept`'s bundle never re-validates rows — pre-.14 bare-string
+  payloads still emit and read).
 - No store migration, no journal rewrite, no CLI surface change —
   `bro pipeline accept|answer` are verdict channels, not evidence
   producers.
