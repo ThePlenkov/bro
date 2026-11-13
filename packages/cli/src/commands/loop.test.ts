@@ -20,13 +20,11 @@ import {
   claimAuthorityNote,
   declaredClaimCapability,
   loopRefTails,
-  loopWatch,
   resolveBeadsDir,
   resolveLoopLane,
   resumeSessionFor,
   skipLeasedBeads,
   syncAfterAudit,
-  wallWaitUntil,
 } from './loop.ts';
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
 
@@ -433,41 +431,6 @@ describe('resolveLoopLane — fleet.matrix pick (bro-v0pvd.1.1)', () => {
   });
 });
 
-// --- wallWaitUntil — the wall settle's wait clock (spec bro-36bhc) -------------
-
-describe('wallWaitUntil — the provider wall wait (bro-36bhc)', () => {
-  const now = Date.parse('2026-10-20T12:00:00Z');
-
-  test('a rate_limited death with a future reset waits the provider clock', () => {
-    assert.equal(
-      wallWaitUntil('rate_limited', '2026-10-20T12:15:00Z', now),
-      Date.parse('2026-10-20T12:15:00Z')
-    );
-  });
-
-  test('a stale reset still waits — on a floor that escalates per wall death, capped', () => {
-    const stale = '2026-10-20T11:59:00Z';
-    assert.equal(wallWaitUntil('rate_limited', stale, now), now + 30_000);
-    assert.equal(wallWaitUntil('rate_limited', stale, now, 2), now + 60_000);
-    assert.equal(wallWaitUntil('rate_limited', stale, now, 3), now + 120_000);
-    // a provider lying about its reset every time can never spin the
-    // loop back into the respawn-burn — the floor saturates at 15m
-    assert.equal(wallWaitUntil('rate_limited', stale, now, 20), now + 15 * 60_000);
-  });
-
-  test('non-waitable causes and unusable resets are never a wait', () => {
-    // quota/auth park — they are walls with no honest clock; a
-    // rate_limited death whose provider reported no (or garbage)
-    // reset is indefinite — the same park the blocked state gives it
-    assert.equal(wallWaitUntil('quota', '2026-10-20T12:15:00Z', now), undefined);
-    assert.equal(wallWaitUntil('auth', '2026-10-20T12:15:00Z', now), undefined);
-    assert.equal(wallWaitUntil('crash', '2026-10-20T12:15:00Z', now), undefined);
-    assert.equal(wallWaitUntil('rate_limited', undefined, now), undefined);
-    assert.equal(wallWaitUntil('rate_limited', 'not-a-time', now), undefined);
-    assert.equal(wallWaitUntil(undefined, '2026-10-20T12:15:00Z', now), undefined);
-  });
-});
-
 describe('loopRefTails', () => {
   test('a clean repo reports no tails', () => {
     const { root, main } = initRepo('bro-loop-audit-');
@@ -499,20 +462,6 @@ describe('loopRefTails', () => {
       assert.deepEqual(worktrees, []);
       assert.deepEqual(branches, []);
     });
-  });
-});
-
-describe('loopWatch — the member watch payload (bro-0aa87)', () => {
-  test('claims merge+cleanup supervision and bounds the TTL to the item budget', () => {
-    const w = loopWatch(7, '[#7](https://x/pull/7)', '/wt/bro--bro-x', DEFAULT_LOOP_CONFIG);
-    assert.equal(w.pr, 7);
-    assert.equal(w.merge, true);
-    assert.equal(w.cleanup, true);
-    assert.equal(w.workdir, '/wt/bro--bro-x');
-    // (stall 45 + merge 45) × (fixRounds 3 + 1) — the worst-case item minutes
-    assert.equal(w.timeoutMin, (45 + 45) * (3 + 1));
-    const scaled = loopWatch(7, 'l', '/wt', { stallMin: 1, mergeTimeoutMin: 2, fixRounds: 0 });
-    assert.equal(scaled.timeoutMin, 3);
   });
 });
 

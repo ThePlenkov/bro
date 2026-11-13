@@ -35,7 +35,8 @@
     "@broject/act": "^0.3.0",
     "@broject/convoy": "^0.3.0",
     "@broject/core": "^0.3.0",
-    "@broject/drill": "^0.3.0"
+    "@broject/drill": "^0.3.0",
+    "@broject/loop": "^0.3.0"
   },
   "description": "bro lifecycle engine — the re-entry verdict and fleet ownership plane over durable state (specs bro-oy3k1, bro-jamp7)",
   "keywords": [
