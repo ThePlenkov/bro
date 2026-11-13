@@ -1053,6 +1053,24 @@ describe('config layers (spec bro-9vmx)', () => {
   });
 });
 
+describe('loadConfig claims (spec bro-izpyk.8)', () => {
+  test('absent section → conflicts defaults to warn', () => {
+    assert.deepEqual(load().claims, { conflicts: 'warn' });
+    assert.deepEqual(load({ personality: 'mentor' }).claims, { conflicts: 'warn' });
+  });
+
+  test('block and off parse through', () => {
+    assert.equal(load({ claims: { conflicts: 'block' } }).claims.conflicts, 'block');
+    assert.equal(load({ claims: { conflicts: 'off' } }).claims.conflicts, 'off');
+  });
+
+  test('a bad value downgrades to warn, never upgrades', () => {
+    assert.equal(load({ claims: { conflicts: 'veto' } }).claims.conflicts, 'warn');
+    assert.equal(load({ claims: { conflicts: 7 } }).claims.conflicts, 'warn');
+    assert.equal(load({ claims: 'nope' }).claims.conflicts, 'warn');
+  });
+});
+
 describe('repoOptedIn', () => {
   test('any bro.config.* or .beads marks the repo, walking up', () => {
     const dir = realpathSync(tmpDir('bro-optin-'));

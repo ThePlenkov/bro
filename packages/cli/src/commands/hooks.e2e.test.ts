@@ -1808,6 +1808,54 @@ exec /bin/cat "$@"
       assert.equal(r.stdout.trim(), '');
     });
   });
+
+  // bro-izpyk.8 — the claims-conflict verdict end to end: a foreign live
+  // worktree claim surfaces as additionalContext (warn default) and as a
+  // veto once the project opts into claims.conflicts=block. The fixtures
+  // run modes.default:code, so the connector's activeIn gate lets the
+  // probe fire (observe sessions would get the inbox note instead).
+  test('pre-tool warns on a foreign worktree claim; block opt-in vetoes', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const stateHome = join(f.root, 'xdg-state');
+      // a different session holds worktree:<main> exclusively — minted
+      // through the real `bro claim` path so the row lives in the same
+      // claims store the hook's verdict reads
+      const claim = runCli(
+        ['claim', 'worktree', '--exclusive', '--session', 'other-1', '--host', 'codex'],
+        { cwd: f.main, env: { XDG_STATE_HOME: stateHome } }
+      );
+      assert.equal(claim.code, 0, claim.stderr);
+
+      const r = hook(f, 'pre-tool', {
+        session_id: 's1',
+        tool_name: 'bash',
+        tool_input: { command: 'ls' },
+      });
+      assert.equal(r.code, 0, r.stderr);
+      const out = JSON.parse(r.stdout) as {
+        hookSpecificOutput?: { additionalContext?: string };
+      };
+      assert.match(
+        out.hookSpecificOutput?.additionalContext ?? '',
+        /claim conflict — worktree:.*held by codex-other-1/
+      );
+
+      // the spec's opt-in — project config turns the advisory into a veto
+      writeFileSync(
+        join(f.main, 'bro.config.json'),
+        '{"modes":{"default":"code"},"claims":{"conflicts":"block"}}'
+      );
+      const blocked = hook(f, 'pre-tool', {
+        session_id: 's1',
+        tool_name: 'bash',
+        tool_input: { command: 'ls' },
+      });
+      assert.equal(blocked.code, 0, blocked.stderr);
+      assert.match(blocked.stdout, BLOCK);
+      assert.match(blocked.stdout, /bro claim release/);
+    });
+  });
 });
 
 describe('hooks e2e — BRO_HOOKS=0 machine-backend trees (bro-ddksm)', () => {

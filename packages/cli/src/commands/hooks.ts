@@ -73,6 +73,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
   acquireFileLock,
+  appendSessionInbox,
   claimsFacade,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
@@ -2087,6 +2088,23 @@ function claimWorktreeArm(sessionId: string, detail: string): void {
           dir,
         }
       )
+      .then(res => {
+        // a refused arm claim was silently dropped before bro-izpyk.8 —
+        // the result resolves after this event's output, so the note
+        // rides the session inbox and drains on the NEXT hook (the
+        // pre-tool verdict separately re-derives the standing state).
+        if (res.ok) {
+          return;
+        }
+        const c = res.conflict;
+        const holder = c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`;
+        appendSessionInbox(process.env, host, sessionId, {
+          ts: Date.now(),
+          from: 'bro',
+          kind: 'info',
+          text: `claim conflict — worktree:${dir} is held by ${holder}; work arm is not leased`,
+        });
+      })
       .catch(() => {});
   } catch {
     // claims are best-effort — arming must never stall a session
@@ -2433,7 +2451,14 @@ async function emitPreTool(input: HookInput): Promise<void> {
       Object.assign(merged, v.input);
     }
   }
-  if (Object.keys(merged).length > 0) {
+  // `warn` verdicts (bro-izpyk.8 — the advisory tier) ride one emit with
+  // the input merge: additionalContext for the hosts that render it,
+  // permissionDecisionReason on codex (its schema's only string slot —
+  // an 'allow' with a reason IS the warn channel there).
+  const warns = verdicts.flatMap(v => (v.warn === undefined ? [] : [v.warn]));
+  const warnText = warns.join('\n');
+  const hasMerged = Object.keys(merged).length > 0;
+  if (warnText !== '' || hasMerged) {
     if (codexClient) {
       const base =
         typeof input.tool_input === 'object' && input.tool_input !== null ? input.tool_input : {};
@@ -2441,11 +2466,18 @@ async function emitPreTool(input: HookInput): Promise<void> {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'allow',
-          updatedInput: { ...base, ...merged },
+          ...(warnText !== '' ? { permissionDecisionReason: warnText } : {}),
+          ...(hasMerged ? { updatedInput: { ...base, ...merged } } : {}),
         },
       });
     } else {
-      emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } });
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          ...(warnText !== '' ? { additionalContext: warnText } : {}),
+          ...(hasMerged ? { tool_input: merged } : {}),
+        },
+      });
     }
   }
 }

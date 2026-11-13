@@ -297,6 +297,19 @@
       },
       "additionalProperties": false
     },
+    "claims": {
+      "type": "object",
+      "properties": {
+        "conflicts": {
+          "enum": [
+            "warn",
+            "block",
+            "off"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "connectors": {
       "type": "object",
       "additionalProperties": {

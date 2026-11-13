@@ -72,9 +72,12 @@ export {
   DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
   brouterSection,
+  CLAIM_CONFLICT_POLICIES,
+  claimsSection,
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isClaimConflictPolicy,
   isIntegerIndexKey,
   js,
   loadConfig,
@@ -234,6 +237,7 @@ export {
 } from './dataref.ts';
 export type {
   BroConfig,
+  ClaimConflictPolicy,
   ConfigLayerHit,
   ConfigLayerName,
   ConfigLayersResult,

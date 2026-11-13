@@ -36,10 +36,13 @@ import {
   type ClaimFacade,
   type ClaimResult,
   type ClaimRow,
+  type EventsFacade,
+  type LedgerFacade,
   type SessionKey,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { agentOwner } from '@broject/rig';
+import { noteRefusedClaim } from './claim-conflicts.ts';
 
 const USAGE = `usage: bro claim <resource> [--ttl <sec>] [--exclusive|--shared] [--session <sid>] [--host <h>] [--json]
        bro claim release <resource> [--session <sid>] [--host <h>] [--json]
@@ -133,6 +136,10 @@ export interface ClaimDeps {
   dir?: string;
   env?: NodeJS.ProcessEnv;
   claims?: ClaimFacade;
+  /** Facades the observe-mode conflict note delivers through — injected
+   *  in tests; production resolves like `bro msg` does. */
+  ledger?: LedgerFacade;
+  events?: EventsFacade;
   now?: number;
 }
 
@@ -431,12 +438,40 @@ async function runClaimRelease(
   console.log(`released ${uri} for ${key.host}-${key.sid}`);
 }
 
+/** The ledger facade for the conflict note — `bro msg`'s degrade rule:
+ *  a store that cannot open means mailbox-address delivery, not a failed
+ *  claim report. */
+function claimLedger(dir: string, deps: ClaimDeps): LedgerFacade | undefined {
+  if (deps.ledger !== undefined) {
+    return deps.ledger;
+  }
+  try {
+    const prefer = loadConfig(dir).connectors;
+    return facade('ledger', { dir }, prefer === undefined ? {} : { prefer });
+  } catch {
+    return undefined;
+  }
+}
+
+function claimEvents(dir: string, deps: ClaimDeps): EventsFacade | undefined {
+  if (deps.events !== undefined) {
+    return deps.events;
+  }
+  try {
+    const prefer = loadConfig(dir).connectors;
+    return facade('events', { dir }, prefer === undefined ? {} : { prefer });
+  } catch {
+    return undefined;
+  }
+}
+
 async function runClaimAcquire(
   args: ClaimArgs,
   claims: ClaimFacade,
   key: SessionKey,
   resource: string,
-  dir: string
+  dir: string,
+  deps: ClaimDeps
 ): Promise<void> {
   // the caller's pid proves liveness only for the caller's OWN session —
   // `--session/--host` targeting another session gets a pid-less claim
@@ -474,6 +509,22 @@ async function runClaimAcquire(
   // a refused claim is a verdict, not a crash — exit 1 so scripts see it
   if (!result.ok) {
     process.exitCode = EXIT.error;
+    // the spec's observe half (bro-izpyk.8): the refused session's inbox
+    // carries the conflict into context on the next hook. Active-mode
+    // callers get nothing — the pre-tool verdict re-derives it.
+    const env = deps.env ?? process.env;
+    const ledger = claimLedger(dir, deps);
+    const events = claimEvents(dir, deps);
+    await noteRefusedClaim({
+      dir,
+      env,
+      session: key,
+      resource,
+      conflict: result.conflict,
+      ...(ledger !== undefined ? { ledger } : {}),
+      ...(events !== undefined ? { events } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
   }
 }
 
@@ -506,5 +557,5 @@ export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Pro
     await runClaimRelease(args, claims, key, uri, dir);
     return;
   }
-  await runClaimAcquire(args, claims, key, uri, dir);
+  await runClaimAcquire(args, claims, key, uri, dir, deps);
 }
