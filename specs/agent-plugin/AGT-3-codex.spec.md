@@ -99,8 +99,18 @@ must fill.
 - Live: rehydration on start/resume, self-tool approve, single
   stop-gate block; `/goal`-style native flows untouched.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx, S2 pre-tool guard, S3 stop gate, S5
+  compaction, S6 multi-turn (all eight events observed), S7
+  fail-open, S8 dep-degraded, S9 skills, S10 native correlation
+  (`INSTRUCTIONS.md` ownership table). Not applicable — S4 `/bro`
+  (no command surface). Codex uniquely exercises the permission
+  approve cell — its scenario asserts the approve reaches the
+  host's permission prompt.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: assets inventory, INSTRUCTIONS.md
   ownership table promoted to contract, unobservable-outcome rule.
+- 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); permission-approve cell gets its own scenario assertion.

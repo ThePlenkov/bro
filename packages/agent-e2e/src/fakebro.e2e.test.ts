@@ -23,7 +23,7 @@ const hasTools = (b: { tools?: unknown[] }): boolean =>
 const agentRequests = (journal: JournalEntry[]) =>
   journal.map(en => en.body as { messages?: unknown[]; tools?: unknown[] }).filter(hasTools);
 
-test('session-start context reaches the model request', {
+test('S1: session-start context reaches the model request', {
   skip: which('opencode') === null && 'opencode binary not on PATH',
 }, async () => {
   await using mock = await startMock();
@@ -57,7 +57,7 @@ test('session-start context reaches the model request', {
   assert.ok(saw, 'session-start context never reached the model request body');
 });
 
-test('stop gate blocks once, reprompts, then passes', {
+test('S3: stop gate blocks once, reprompts, then passes', {
   skip: which('opencode') === null && 'opencode binary not on PATH',
 }, async () => {
   await using mock = await startMock();
@@ -126,7 +126,7 @@ test('stop gate blocks once, reprompts, then passes', {
   }
 });
 
-test('pre-tool guard vetoes a tool call and the veto reaches the model', {
+test('S2: pre-tool guard vetoes a tool call and the veto reaches the model', {
   skip: which('opencode') === null && 'opencode binary not on PATH',
 }, async () => {
   await using mock = await startMock();

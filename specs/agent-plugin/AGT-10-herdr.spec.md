@@ -81,9 +81,16 @@ surface document the operator workflow.
 - Negative: no bro hook events fire from herdr itself; hosted
   agent's own plugin unaffected.
 
+- **Scenario map** (AGT-1 §Test scenarios): not applicable —
+  herdr is the supervision plane, outside HOOK_MATRIX by design;
+  no hook events, no `/bro`, no `bro_*` tools. Conformance is
+  herdr-specific: pane mirror, ACP watch, board surfaces —
+  verified by observation checks, never S-IDs.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: asset inventory reframed as
   supervision-plane (pane mirror, ACP watch, board surfaces),
   lifecycle-boundary rule made explicit.
+- 2026-11-12 — v3: Verify declares the S-catalog not-applicable — supervision plane conformance is observation-based.

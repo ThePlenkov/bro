@@ -95,8 +95,16 @@ All calls async + fail-open.
 - Live: board widget, hidden hydration, `/bro` output,
   `bro_status` result, one settle-gate reprompt on armed claim.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx, S3 stop gate (settle reprompt), S4 `/bro`
+  dispatch + `bro_status` tool, S7 fail-open, S9 skills, S10
+  native correlation. Not applicable — S2 pre-tool guard
+  (`tool_call` event unwired — declared gap). Pending — S5/S6/
+  S8 driver verification.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: /bro dispatcher semantics, bro_status
   tool, widget lifecycle, settle-gate one-shot mechanics.
+- 2026-11-12 — v3: Verify gains the AGT-1 scenario map; S2 declared not-applicable (tool_call unwired).
