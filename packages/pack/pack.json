@@ -13,6 +13,7 @@
     "bro-herdr",
     "brouter",
     "check",
+    "client-adapters",
     "convoy",
     "daemon",
     "debt",

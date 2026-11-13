@@ -15,7 +15,7 @@
  * The targets are the client's, not the router's — a client release
  * retires them.
  */
-import { modelFamily, type ModelFamily, type ServedModel } from '../catalog.ts';
+import { modelFamily, type ModelFamily, type ServedModel } from '@broject/brouter';
 import type { ClientAdapter, RouterEndpoint } from '../adapter.ts';
 
 /** The model each family borrows its handling from — pinned to the

@@ -1,51 +1,57 @@
 ---
 
 name: brouter
-description: "Use when the model list a client shows is wrong, filtered, or empty — the router's served catalog, the client model blocks (claude-code pilot), `brouter client <id> --write`, `bro router`, or the brouter package boundary. Mechanics live in @broject/brouter; this skill carries the contract and policy only."
+description: "Use when the model list a client shows is wrong, filtered, or empty — the router's served catalog, `bro router`, the route table and explain surface, or the brouter package boundary. Client model blocks (claude-code pilot) live in the client-adapters skill. Mechanics live in @broject/brouter; this skill carries the contract and policy only."
 ---
 
 # /brouter (bro)
 
 **Mechanics live in the `@broject/brouter` package.** bro is the rig
 (workflow, fleet, review loop); the router is the other half — it serves
-the model catalog and renders it in each client's own vocabulary.
+the model catalog and drives the agents behind it.
+
+The thin-client adapters — rendering the catalog in each client's own
+vocabulary (Claude Code's `modelPicker` and its kin) — are
+`@broject/client-adapters`, a separate package (spec bro-0ykhg.6): they
+break on CLIENT releases, not on routing changes. See the
+`client-adapters` skill; `bro router client …` mounts them beside this
+surface.
 
 ## The boundary
 
-| Owns                                             | bro                          | brouter                 |
-| ------------------------------------------------ | ---------------------------- | ----------------------- |
-| the served catalog (which models, which lane)    | reads it                     | owns it                 |
-| the client adapters (the model block per client) | —                            | owns it                 |
-| the protocol clients (an ACP client, `ask`)      | —                            | owns it                 |
-| the gateway itself                               | `bro serve` (until the move) | `brouter serve` (later) |
-| the agent workflow (skills, hooks, fleet, beads) | owns it                      | —                       |
+| Owns                                             | bro                          | brouter                 | client-adapters |
+| ------------------------------------------------ | ---------------------------- | ----------------------- | --------------- |
+| the served catalog (which models, which lane)    | reads it                     | owns it                 | reads it        |
+| the client adapters (the model block per client) | —                            | —                       | owns it         |
+| the protocol clients (an ACP client, `ask`)      | —                            | owns it                 | —               |
+| the gateway itself                               | `bro serve` (until the move) | `brouter serve` (later) | —               |
+| the agent workflow (skills, hooks, fleet, beads) | owns it                      | —                       | —               |
 
-One-way: **bro depends on brouter, never the reverse.** brouter runs
-without beads, without the bus, without a git repo.
+One-way: **bro depends on brouter, client-adapters depends on brouter —
+never the reverse.** Both run without beads, without the bus, without a
+git repo.
 
-## The problem it solves
+## The honest id
 
-The router serves the truth; the CLIENT decides what to show. Claude
-Code's discovery keeps only the ids matching `/(claude|anthropic)/i` —
-so an honest `<entry>/<model>` id never reaches the picker (measured
-against the live gateway: 547 served, 89 survive).
-
-The fix is a rendering, not a filter bypass: the served models, in the
-client's own vocabulary, written into the client's own settings.
+The router serves the truth; the id is `<entry>/<model>` — no protocol,
+no re-spelling. A label is a label; the id is what the client sends.
+What a CLIENT does with that id (its own filter, its own picker) is the
+adapter's business — the router never renames a model to survive a
+client's filter.
 
 ## Commands
 
 | Command                                                                                   | What it does                                                                       |
 | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `brouter models [--json]`                                                                 | the served catalog, read off the running router                                    |
-| `brouter clients [--json]`                                                                | the client adapters — id, title, settings key, settings path                       |
-| `brouter client <id> [--write] [--settings P] [--wire] [--json]`                          | render the model block; `--write` merges it into the client's settings             |
+| `brouter clients [--json]`                                                                | the agent clients — installed / configured / connector / ready                     |
+| `brouter client …`                                                                        | moved — prints `bro router client …` (@broject/client-adapters)                    |
 | `brouter store path \| migrate \| stats [--path P] [--json]`                              | the router's own ledger — where it lives, what it holds                            |
 | `brouter routes list \| validate [--routes P]`                                            | the route table — the routes, or the problems                                      |
 | `brouter health [--json] [--path P]`                                                      | what can serve right now — the walls and the open sessions                         |
 | `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why                   |
 | `brouter ask "<question>" [--provider P] [--model M] [--explain[=SLICES]]`                | ask one agent — `--explain` says which agent served, which model, and what it cost |
-| `bro router …`                                                                            | the same surfaces, bro's spelling (the wrapper)                                    |
+| `bro router …`                                                                            | the same surfaces plus `client <id>` — bro's spelling (the wrapper)                |
 
 ## The explain surface
 
@@ -107,73 +113,7 @@ decide. A proxied model answers in prose (the gateway has no
 `/v1/systemone` route), so it journals in `shadow` and is refused under
 `enforce`.
 
-## The claude-code block
-
-```jsonc
-{
-  "modelPicker": {
-    "options": [
-      {
-        "model": "devin-acp/swe-2-high", // the honest id, verbatim
-        "label": "devin-acp/SWE-2", // the catalog's own label
-        "description": "devin-acp", // where it comes from
-        "behavesAs": "claude-sonnet-5-5" // the handling it borrows
-      }
-    ],
-    "replaceBuiltInOptions": true // Default + the served models
-  }
-}
-```
-
-- `behavesAs` — the model whose client-side handling (prompt profile,
-  capability, effort defaults, context window) the row borrows. Without
-  it the client warns "isn't recognized · context assumed to be 200k
-  tokens". The targets are the CLIENT's, pinned to the client version —
-  a client release retires them, not the catalog.
-- `replaceBuiltInOptions: true` — the built-in lineup AND the client's
-  own filtered discovery are hidden. Without it the served models are
-  added after the built-in lineup and the filtered leftovers stay.
-
-## Policy
-
-- **Honest ids, always.** `<entry>/<model>` — no protocol, no
-  re-spelling. A label is a label; the id is what the client sends.
-- **No credential in a settings file.** The router's token rides the
-  client's own credential mechanism; the wiring a client gets is ENV
-  only.
-- **The merge never eats.** Writing the model block preserves every
-  other key of the client's settings.
-- **Absent = off.** An unregistered client changes nothing; an unknown
-  client id is an error naming the known ones.
-- **The router never renames a model to survive a client's filter.**
-  That is the client's business, and the adapter's.
-
-## The order that matters
-
-A client reads its settings at START — so the router must be up and the
-settings must carry the block BEFORE the client starts:
-
-1. the router is up (`bro serve`),
-2. the client's model block is written (`brouter client claude-code --write`),
-3. the client starts.
-
-Step 2 without step 1 writes a stale catalog; step 3 without step 2
-shows the client's own (filtered) lineup.
-
 ## Config
-
-`serve.client.<client>` — where the block lands and which binary the
-launch stage runs:
-
-```jsonc
-{
-  "serve": {
-    "client": {
-      "claude-code": { "settingsPath": "~/.claude/settings.json" }
-    }
-  }
-}
-```
 
 `brouter.models` (bro.config.json) is the operator's model list — the
 model→lane registry (spec bro-n1p0s); it is the served catalog's

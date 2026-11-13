@@ -91,7 +91,7 @@ exclude_paths:
   # transcript files are the client's own. Codacy's path rule reads any
   # computed path as uncontrolled data; the same shapes ship on main
   # unflagged.
-  - 'scripts/claude-code-live-check.ts'
+  - 'packages/client-adapters/scripts/claude-code-live-check.ts'
 
   # The title matcher walks a formula's title PATTERN — a string, split
   # into literal spans and `{{var}}` wildcards. There is no object and no

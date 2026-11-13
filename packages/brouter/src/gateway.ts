@@ -15,7 +15,15 @@ import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
 import { routerUrl } from './router-url.ts';
-import type { RouterEndpoint } from './adapter.ts';
+
+/** Where the router lives — the loopback endpoint and the credential
+ *  the router's own plane demands. The client adapters consume this
+ *  type through brouter's public API; it is declared here because the
+ *  catalog read is what takes it. */
+export interface RouterEndpoint {
+  url: string;
+  token: string;
+}
 
 /** The statuses that carry a redirect — the read refuses them. */
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);

@@ -31,8 +31,8 @@
  * scratch workdir — against a third-party endpoint this flag lets that
  * endpoint run anything the operator can.
  *
- *   node scripts/claude-code-live-check.ts [--url <url> --token <token>]
- *                                           [--config-dir <dir>] [--keep]
+ *   node packages/client-adapters/scripts/claude-code-live-check.ts \
+ *        [--url <url> --token <token>] [--config-dir <dir>] [--keep]
  *
  * The router's endpoint comes from the router's own state file unless
  * the operator names one. The token is never printed.
@@ -53,15 +53,14 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
-  CLAUDE_CODE_BEHAVES_AS,
-  claudeCodeAdapter,
   modelFamily,
   type RouterEndpoint,
   readCatalog,
   readRouterEndpoint,
   routerUrl,
   type ServedModel,
-} from '../packages/brouter/src/index.ts';
+} from '../../brouter/src/index.ts';
+import { CLAUDE_CODE_BEHAVES_AS, claudeCodeAdapter } from '../src/index.ts';
 
 /** The prompt — the agent must run a tool, or the loop is never tested. */
 const TOOL_PROMPT = 'Run the command `echo bro-live-check` and then answer with its output.';

@@ -1,5 +1,5 @@
 /**
- * brouter — the client seam.
+ * client-adapters — the client seam.
  *
  * A thin client (Claude Code, Codex, a REPL) holds the router's model
  * list in its OWN vocabulary: its own settings file, its own key, its
@@ -10,15 +10,14 @@
  * The seam is deliberately small: an adapter never talks to the
  * router, never reads a token, never spawns anything. It renders a
  * block and describes the wiring; the caller does the rest.
+ *
+ * `RouterEndpoint` — where the router lives — is the ROUTER's type
+ * (brouter's catalog API reads it); it is re-exported here so an
+ * adapter's signature names it without a second declaration.
  */
-import type { ServedModel } from './catalog.ts';
+import type { RouterEndpoint, ServedModel } from '@broject/brouter';
 
-/** Where the router lives — the loopback endpoint and the credential
- *  the router's own plane demands. */
-export interface RouterEndpoint {
-  url: string;
-  token: string;
-}
+export type { RouterEndpoint } from '@broject/brouter';
 
 /** The per-client seam. */
 export interface ClientAdapter {

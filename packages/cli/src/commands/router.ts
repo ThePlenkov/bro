@@ -11,10 +11,11 @@
  *   bro router providers [--json]                   the configured providers
  *   bro router client <id> [--write] [--settings P] [--wire] [--json]
  *
- * The wrapper mounts the ROUTER'S OWN plugins (`routerPlugins()`), not a
- * second implementation: one set of commands, two spellings. What the
- * wrapper adds is POLICY — where the endpoint comes from and which
- * settings file a client gets:
+ * The wrapper mounts the ROUTER'S OWN plugins (`routerPlugins()`) plus
+ * the client adapters' (`clientAdapterPlugins()` — `@broject/client-
+ * adapters`, spec bro-0ykhg.6), not a second implementation: one set
+ * of commands, two spellings. What the wrapper adds is POLICY — where
+ * the endpoint comes from and which settings file a client gets:
  *
  *  - the endpoint comes from bro's LIVE gateway state (a dead listener
  *    is an error, not a read that never answers);
@@ -22,6 +23,7 @@
  *    lands in.
  */
 import { defineCommand, runCommand } from '@broject/command';
+import { clientAdapterPlugins } from '@broject/client-adapters';
 import { routerPlugins, routerUrl } from '@broject/brouter';
 import type { RouterEndpoint } from '@broject/brouter';
 import { flag } from './args.ts';
@@ -56,14 +58,16 @@ function configuredSettingsPath(client: string): string | undefined {
 
 /** The router's commands, mounted under bro. The parent path makes the
  *  help text name the command the way the user spells it (`bro router`). */
+const policy = {
+  endpoint: broEndpoint,
+  settingsPath: configuredSettingsPath,
+};
+
 const router = defineCommand(
   {
     name: 'router',
     summary: 'The model router — the served catalog and the clients it renders for',
-    plugins: routerPlugins({
-      endpoint: broEndpoint,
-      settingsPath: configuredSettingsPath,
-    }),
+    plugins: [...routerPlugins(policy), ...clientAdapterPlugins(policy)],
   },
   'bro'
 );

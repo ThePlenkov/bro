@@ -12,12 +12,14 @@
  * ONE implementation: the wrapper is a mount, never a second switch.
  *
  * The set is split by theme, so every file holds one surface: the
- * catalog (what the router serves), the clients (who consumes it), and
- * the routes (what it serves NEXT).
+ * catalog (what the router serves), the agents (the protocol clients
+ * that drive them), and the routes (what it serves NEXT). The thin-
+ * client adapters — Claude Code's model block and its kin — are
+ * `@broject/client-adapters`, mounted beside this set, never inside it.
  */
 import type { CommandPlugin } from '@broject/command';
+import { agentPlugins } from './agent-plugins.ts';
 import { catalogPlugins } from './catalog-plugins.ts';
-import { clientPlugins } from './client-plugins.ts';
 import { routePlugins } from './route-plugins.ts';
 import type { RouterPolicy } from './policy.ts';
 
@@ -27,5 +29,5 @@ export type { RouterPolicy } from './policy.ts';
  *  each. `policy` carries the host's answers; the defaults are the
  *  router's own. */
 export function routerPlugins(policy: RouterPolicy = {}): CommandPlugin[] {
-  return [...catalogPlugins(policy), ...clientPlugins(policy), ...routePlugins()];
+  return [...catalogPlugins(policy), ...agentPlugins(), ...routePlugins()];
 }
