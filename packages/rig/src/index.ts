@@ -6,6 +6,21 @@ export {
   type ReadyBead,
 } from './ready.ts';
 
+// --- policies: the lifecycle contract + first port (bro-u6fp5) ----------
+export { type Policy } from './policy.ts';
+export {
+  convoyPolicy,
+  runMol,
+  runQueue,
+  type ConvoyCtx,
+  type ConvoyItem,
+  type ConvoyPolicy,
+  type MolResult,
+  type MolVerdict,
+  type RunArgs,
+  type RunDeps,
+} from './policies/convoy.ts';
+
 // --- fleet lifecycle: the ownership plane (bro-jamp7 slice 2) -------------
 export {
   LIVE_MARKER_MS,

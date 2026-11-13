@@ -13,7 +13,7 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "files": [
@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@broject/act": "^0.3.0",
+    "@broject/convoy": "^0.3.0",
     "@broject/core": "^0.3.0",
     "@broject/drill": "^0.3.0"
   },
