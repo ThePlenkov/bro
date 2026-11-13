@@ -63,10 +63,13 @@
  * No recheck hook: `spec` is not a spawn-like intent, so a
  * verdict-less record re-fires inside the attempt budget like the
  * judge stages'. Re-fire re-reads the (possibly annotated) spec and
- * re-judges; `annotate` is an append, so a crash inside the
- * annotate→verdict window can leave a duplicated `## Questions`
- * section — semantic idempotence (the unanswered questions are still
- * unanswered), not literal.
+ * re-judges; `annotate` dedups an identical section on content
+ * (taskSpec's crash-window repair, bro-qjji2.13), so a crash inside
+ * the annotate→verdict window re-firing the SAME outcome appends
+ * nothing — literal idempotence. A differing artifact still appends
+ * (a second questions round after answers is new spec history), and
+ * semantic idempotence (the unanswered questions are still
+ * unanswered) holds either way.
  */
 import { createHash } from 'node:crypto';
 import type { MaybePromise, TaskSpec, TaskSpecFacade } from '@broject/core';
@@ -460,8 +463,10 @@ function drainOutcome(
  *  records land on the item under `## Answers` before `consume`
  *  stamps the drain point: a crash between the two re-feeds the rows
  *  on the next wake — the annotate is append-shaped, so a re-drain
- *  adds a fresh section, never a clobber (the marker's whole job is
- *  making the NORMAL wake exactly-once). Malformed records are
+ *  of the same records dedups inside taskSpec (content-identical →
+ *  no second section) and differing records still add a fresh
+ *  section, never a clobber (the marker's whole job is making the
+ *  NORMAL wake exactly-once). Malformed records are
  *  consumed too — consumed does not mean landed; it means "was
  *  offered once" — so the same bad row can't re-alert every wake. */
 async function landAnswers(

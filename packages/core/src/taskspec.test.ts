@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { TaskRow, TaskStore } from './tasks.ts';
-import { parseTaskSpecBody, taskSpecFacade, type TaskSpec } from './taskspec.ts';
+import { parseTaskSpecBody, type TaskSpec, taskSpecFacade } from './taskspec.ts';
 
 /** In-memory TaskStore — the facade's only demands are get/update;
  *  update applies the patch back so a spec() re-read sees the write. */
@@ -300,5 +300,121 @@ describe('taskSpecFacade — annotate write', () => {
     const { store, updates } = fakeStore(rows);
     taskSpecFacade(store).annotate('t1', 'Questions', ['who decides?\nand when?']);
     assert.equal(updates[0]?.[1].description, 'body\n\n## Questions\nwho decides?\nand when?');
+  });
+});
+
+describe('taskSpecFacade — annotate crash-window dedup', () => {
+  test('an identical re-annotate is a no-op — the re-fire appends nothing', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'the body' }];
+    const { store, updates } = fakeStore(rows);
+    const f = taskSpecFacade(store);
+    f.annotate('t1', 'Questions', ['- q1', '- q2']);
+    f.annotate('t1', 'Questions', ['- q1', '- q2']);
+    assert.equal(updates.length, 1); // the second call wrote nothing
+    assert.equal(rows[0]?.description?.split('## Questions').length, 2); // one section
+  });
+
+  test('different content under the same heading still appends — spec history', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body' }];
+    const { store, updates } = fakeStore(rows);
+    const f = taskSpecFacade(store);
+    f.annotate('t1', 'Questions', ['- q1']);
+    f.annotate('t1', 'Questions', ['- q3']); // a new questions round
+    assert.equal(updates.length, 2);
+    assert.match(rows[0]?.description ?? '', /## Questions\n- q1\n\n## Questions\n- q3/);
+  });
+
+  test('the heading name matches case-insensitively', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body\n\n## questions\n- q1' }];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Questions', ['- q1']);
+    assert.equal(updates.length, 0);
+  });
+
+  test('every same-named section is scanned — an interleaved Answers does not hide the match', () => {
+    const rows: TaskRow[] = [
+      {
+        id: 't1',
+        description: 'body\n\n## Questions\n- q1\n- q2\n\n## Answers\n- a1',
+      },
+    ];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Questions', ['- q1', '- q2']);
+    assert.equal(updates.length, 0);
+  });
+
+  test('a match on ANY same-named section dedups — the earlier round counts', () => {
+    const rows: TaskRow[] = [
+      { id: 't1', description: 'body\n\n## Questions\n- q1\n\n## Questions\n- q9' },
+    ];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Questions', ['- q1']);
+    assert.equal(updates.length, 0);
+  });
+
+  test('a fenced ## Questions never matches — it is an example, not a section', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body\n\n```md\n## Questions\n- q1\n```' }];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Questions', ['- q1']);
+    assert.equal(updates.length, 1); // the live append still lands
+  });
+
+  test('prefix and superset content are different artifacts — no substring dedup', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body\n\n## Questions\n- q1\n- q2' }];
+    const { store, updates } = fakeStore(rows);
+    const f = taskSpecFacade(store);
+    f.annotate('t1', 'Questions', ['- q1']); // subset of the stored list
+    f.annotate('t1', 'Questions', ['- q1', '- q2', '- q3']); // superset
+    assert.equal(updates.length, 2);
+  });
+
+  test('interior blank lines are content — only trailing separators drop', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body\n\n## Questions\n- q1\n\n- q2' }];
+    const { store, updates } = fakeStore(rows);
+    const f = taskSpecFacade(store);
+    f.annotate('t1', 'Questions', ['- q1', '', '- q2']); // identical → dedup
+    assert.equal(updates.length, 0);
+    f.annotate('t1', 'Questions', ['- q1', '- q2']); // the blank was content
+    assert.equal(updates.length, 1);
+  });
+
+  test('a multi-line artifact element compares as the flattened body lines', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body' }];
+    const { store, updates } = fakeStore(rows);
+    const f = taskSpecFacade(store);
+    f.annotate('t1', 'Answers', ['line one\nline two']); // one element, two body lines
+    f.annotate('t1', 'Answers', ['line one\nline two']);
+    f.annotate('t1', 'Answers', ['line one', 'line two']); // same written artifact
+    assert.equal(updates.length, 1);
+    assert.match(rows[0]?.description ?? '', /## Answers\nline one\nline two/);
+  });
+
+  test('a different heading name never dedups', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body\n\n## Questions\n- q1' }];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Declined', ['- q1']);
+    assert.equal(updates.length, 1);
+  });
+
+  test('the managed dup guard still throws first — even on identical content', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: '## Acceptance\n- a' }];
+    const f = taskSpecFacade(fakeStore(rows).store);
+    assert.throws(() => f.annotate('t1', 'Acceptance', ['- a']), /already exists/);
+  });
+
+  test('the dedup path writes nothing — the bro: trailer never moves', () => {
+    const rows: TaskRow[] = [
+      {
+        id: 't1',
+        description: 'body\n\n## Questions\n- q\n\n<!-- bro: {"type":"task"} -->',
+      },
+    ];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Questions', ['- q']);
+    assert.equal(updates.length, 0);
+    assert.equal(
+      rows[0]?.description,
+      'body\n\n## Questions\n- q\n\n<!-- bro: {"type":"task"} -->'
+    );
   });
 });

@@ -37,6 +37,14 @@
  * trailer keeps its body-last position across the append
  * (taskmeta.ts's contract).
  *
+ * The append is content-idempotent: an existing live level-2 section
+ * with the same heading name (case-insensitive) and identical content
+ * lines makes annotate a no-op — a crash inside the annotate→verdict
+ * window re-fires intake, and the re-judged identical artifact must
+ * not accrete a second `## Questions`. Differing content still
+ * appends: spec history is never deduplicated away (spec
+ * specs/bro-qjji2.13.md).
+ *
  * The parser is deliberately regex-free on the line path — heading,
  * fence, and bullet probes are linear string scans, so a hostile
  * body can't wedge the event loop (CodeQL polynomial-regex).
@@ -73,7 +81,11 @@ export interface TaskSpecFacade {
    *  item, an empty or multi-line heading, an empty artifact, a
    *  managed section name that already exists, and a line whose
    *  segments open structure (an ATX heading or code fence — an
-   *  artifact's text never becomes a section) all throw. */
+   *  artifact's text never becomes a section) all throw. An identical
+   *  section already on the item — same heading name
+   *  case-insensitively, same content lines — makes the call a no-op:
+   *  the crash-window re-fire's own earlier write, never a second
+   *  copy; consumers must not rely on append-always. */
   annotate(id: string, heading: string, lines: readonly string[]): void;
 }
 
@@ -444,6 +456,88 @@ function appendSection(row: TaskRow, section: string): string {
   return withMeta(body, bodyMeta(row.description));
 }
 
+/** A live level-2 heading's content span — one dedup candidate.
+ *  `name` is headingName'd (closing sequence stripped), case
+ *  preserved — compares lowercased. `lines` are the raw body lines
+ *  up to the next live heading or EOF, trailing blanks NOT yet
+ *  dropped. */
+interface SectionSpan {
+  name: string;
+  lines: string[];
+}
+
+/** Every live level-2 section's content — one fence/heading walk over
+ *  the same machinery the parser uses, so the dedup sees exactly the
+ *  sections the spec read does: a `## X` inside ```/~~~ is an example,
+ *  never a section; fence lines inside a section are literal content;
+ *  ANY live heading (any level) closes the open span — a `###`
+ *  subsection ends `## Questions`' content the same way it ends a
+ *  managed section's. */
+function sectionSpans(body: string): SectionSpan[] {
+  const spans: SectionSpan[] = [];
+  let fence: FenceMark | null = null;
+  let cur: SectionSpan | null = null;
+  for (const raw of body.split(/\r?\n/)) {
+    const f = fenceOf(raw);
+    if (fence !== null) {
+      if (cur !== null) cur.lines.push(raw);
+      if (f !== null && closesOn(f, fence)) fence = null;
+      continue;
+    }
+    if (f !== null) {
+      if (cur !== null) cur.lines.push(raw);
+      fence = f;
+      continue;
+    }
+    const h = headingOf(raw);
+    if (h !== null) {
+      cur = h.level === 2 ? { name: h.name, lines: [] } : null;
+      if (cur !== null) spans.push(cur);
+      continue;
+    }
+    if (cur !== null) cur.lines.push(raw);
+  }
+  return spans;
+}
+
+/** Trailing blank-only lines are the `\n\n` separator before the next
+ *  section (or stripMeta's trimEnd at EOF), never artifact content —
+ *  the dedup compare drops them on both sides. Leading and interior
+ *  blanks stay exact. */
+function trimTrailingBlanks(lines: readonly string[]): string[] {
+  let e = lines.length;
+  while (e > 0 && (lines[e - 1] ?? '').trim() === '') e--;
+  return lines.slice(0, e);
+}
+
+/** Artifact elements can carry embedded line breaks (a multi-line
+ *  answer lands as ONE element) — flatten to the body-line sequence
+ *  the append's `lines.join('\n')` actually writes, so `['a\nb']`
+ *  and `['a','b']` compare as the same artifact. */
+const flattenLines = (lines: readonly string[]): string[] => lines.flatMap(l => l.split(/\r?\n/));
+
+/** Line-for-line equality — never substring: `- q1\n- q2` inside
+ *  `- q1\n- q2\n- q3` is a different artifact. */
+const sameLines = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((l, i) => l === b[i]);
+
+/** annotate's crash-window dedup — a re-fire after an annotate that
+ *  already landed must not accrete a second identical section. An
+ *  existing live level-2 section with the same heading name
+ *  (case-insensitive) and identical content lines IS the same
+ *  artifact: skip the append. EVERY same-named section is a
+ *  candidate, not just the last — an `## Answers` drain can
+ *  interleave between two identical `## Questions` annotates. Managed
+ *  names never reach here (guardDuplicate throws first); a false
+ *  negative only restores the plain append. */
+function alreadyAnnotated(body: string, h: string, lines: readonly string[]): boolean {
+  const name = headingName(h).toLowerCase();
+  const want = trimTrailingBlanks(flattenLines(lines));
+  return sectionSpans(body).some(
+    s => s.name.toLowerCase() === name && sameLines(trimTrailingBlanks(s.lines), want)
+  );
+}
+
 /**
  * The prod adapter — the TaskSpecFacade over a TaskStore. bd is the
  * first store it binds (`taskSpecFacade(taskStore(dir))`); any
@@ -465,6 +559,11 @@ export function taskSpecFacade(store: TaskStore): TaskSpecFacade {
         throw new Error(`taskSpec annotate: item "${id}" is not in the store`);
       }
       guardDuplicate(row, h, id);
+      // crash-window dedup — the same artifact already on the item is
+      // this re-fire's own earlier write; appending would only accrete.
+      if (alreadyAnnotated(stripMeta(row.description), h, lines)) {
+        return;
+      }
       store.update(id, { description: appendSection(row, `## ${h}\n${lines.join('\n')}`) });
     },
   };
