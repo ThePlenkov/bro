@@ -66,6 +66,8 @@ esac
 const FAIL_SHIM = '#!/bin/sh\nexit 1\n';
 const BRO_SHIM = '#!/bin/sh\n[ "$1" = "--version" ] && { echo "0.2.3"; exit 0; }\nexit 0\n';
 const CURL_SHIM = '#!/bin/sh\necho "curl 8.5.0 (fake)"\n';
+const CLAUDE_SHIM =
+  '#!/bin/sh\n[ "$1" = "--version" ] && { echo "2.0.0 (Claude Code, fake)"; exit 0; }\nexit 0\n';
 
 interface EnvOpts {
   /** object → JSON.stringify'd; string → written verbatim (invalid JSON tests) */
@@ -80,7 +82,7 @@ interface EnvOpts {
   /** true → a placeholder origin; a string → used verbatim as the origin url */
   remote?: boolean | string;
   /** shims to drop into bin/ — absent name = binary missing from PATH */
-  bins?: Array<'bd' | 'gh' | 'bro' | 'npx' | 'curl'>;
+  bins?: Array<'bd' | 'gh' | 'bro' | 'npx' | 'curl' | 'claude'>;
   env?: Record<string, string>;
 }
 
@@ -96,6 +98,7 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
     bro: BRO_SHIM,
     npx: FAIL_SHIM,
     curl: CURL_SHIM,
+    claude: CLAUDE_SHIM,
   };
   for (const name of opts.bins ?? []) {
     const path = join(bin, name);
@@ -1457,6 +1460,33 @@ describe('bro doctor', () => {
     withEnv({ config: { judge: { provider: 'systemone' } }, bins: ['gh'] }, dir => {
       const rows = runDoctorChecks(dir).filter(c => c.name === 'providers');
       assert.ok(!rows.some(c => c.status === 'warn'), JSON.stringify(rows));
+    }));
+
+  test('providers: claude on PATH with no provider running it nudges the preset (bro-yslbm)', () =>
+    withEnv({ config: {}, bins: ['gh', 'claude'] }, dir => {
+      const rows = runDoctorChecks(dir).filter(c => c.name === 'providers');
+      const nudge = rows.find(c => c.detail.includes('claude CLI on PATH'));
+      assert.ok(nudge !== undefined, JSON.stringify(rows));
+      assert.equal(nudge.status, 'ok');
+      assert.match(nudge.hint ?? '', /bro providers add claude/);
+    }));
+
+  test('providers: a provider already running claude gets no nudge', () =>
+    withEnv(
+      {
+        config: { providers: { claude: { type: 'cli', command: 'claude -p < {promptFile}' } } },
+        bins: ['gh', 'claude'],
+      },
+      dir => {
+        const rows = runDoctorChecks(dir).filter(c => c.name === 'providers');
+        assert.ok(!rows.some(c => c.detail.includes('claude CLI on PATH')), JSON.stringify(rows));
+      }
+    ));
+
+  test('providers: no claude on PATH, no nudge', () =>
+    withEnv({ config: {}, bins: ['gh'] }, dir => {
+      const rows = runDoctorChecks(dir).filter(c => c.name === 'providers');
+      assert.ok(!rows.some(c => c.detail.includes('claude CLI on PATH')), JSON.stringify(rows));
     }));
 
   test('build row: absent stamp is ok; a foreign session or a stamp behind HEAD warns (bro-fatja)', () =>

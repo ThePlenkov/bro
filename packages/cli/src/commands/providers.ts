@@ -3,7 +3,7 @@
  *   bro providers models [name…]      list every provider's models as <provider>/<model>
  *   bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
  *   bro providers add <preset> [--name <name>] [--global] [--force]
- *                                     add a preset ACP provider entry
+ *                                     add a preset provider entry
  *   bro providers test <name>         smoke-test an ACP provider connection
  */
 import { execFile as execFileCb } from 'node:child_process';
@@ -32,7 +32,7 @@ const USAGE = `usage:
   bro providers models [name…]      list every provider's models as <provider>/<model>
   bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
   bro providers add <preset> [--name <name>] [--global] [--force]
-                                    add a preset ACP provider entry
+                                    add a preset provider entry
   bro providers test <name>         smoke-test an ACP provider connection
 `;
 const die = (msg: string): never => {
@@ -104,14 +104,26 @@ function readConfigJson(path: string): Record<string, unknown> {
   }
 }
 
-const PRESETS: Record<string, { command: string }> = {
-  kilo: { command: 'kilo --acp' },
-  'claude-code': { command: 'claude --acp' },
-  codex: { command: 'codex --acp' },
-  'gemini-cli': { command: 'gemini --acp' },
-  goose: { command: 'goose acp' },
-  opencode: { command: 'opencode acp' },
-  devin: { command: 'devin --acp' },
+/** The `bro providers add` table — verified command lines keyed by
+ *  preset name, each carrying the kind its entry is written with.
+ *  `claude` is the cli preset (spec bro-yslbm): current claude builds
+ *  expose no `--acp` flag, so `claude -p` on the prompt file's stdin is
+ *  the worker shape; `claude-acp` is the ACP route through the Zed
+ *  adapter binary. */
+const PRESETS: Record<string, { type: 'acp' | 'cli'; command: string }> = {
+  kilo: { type: 'acp', command: 'kilo --acp' },
+  'claude-code': { type: 'acp', command: 'claude --acp' },
+  claude: {
+    type: 'cli',
+    command:
+      'claude -p --dangerously-skip-permissions --output-format stream-json --verbose < {promptFile}',
+  },
+  'claude-acp': { type: 'acp', command: 'claude-code-acp' },
+  codex: { type: 'acp', command: 'codex --acp' },
+  'gemini-cli': { type: 'acp', command: 'gemini --acp' },
+  goose: { type: 'acp', command: 'goose acp' },
+  opencode: { type: 'acp', command: 'opencode acp' },
+  devin: { type: 'acp', command: 'devin --acp' },
 };
 
 interface Opts {
@@ -394,7 +406,7 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     if (Object.hasOwn(providers, providerName) && !parsed.force) {
       die(`providers.${providerName} already exists — use --force to overwrite`);
     }
-    const entry: ProviderEntry = { type: 'acp', command: p.command };
+    const entry: ProviderEntry = { type: p.type, command: p.command };
     if (parseProviderEntry(providerName, entry) === null) {
       die('generated entry failed validation');
     }

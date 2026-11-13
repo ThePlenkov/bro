@@ -1640,6 +1640,26 @@ function providerRefCheck(
   return null;
 }
 
+/** The claude-preset nudge (spec bro-yslbm): `claude` resolves on PATH
+ *  but no provider entry runs it — a fleet brain going unused while
+ *  `bro providers add claude` is one command away. ok+hint, never a
+ *  warn: not wanting claude workers is a choice, not a defect (same
+ *  posture as the plugins row's `bro plugins install` nudge). */
+function claudePresetCheck(providers: Record<string, ProviderEntry>): DoctorCheck | null {
+  const runs = Object.values(providers).some(
+    e => (e.type === 'cli' || e.type === 'acp') && /\bclaude\b/.test(e.command)
+  );
+  if (runs || !probeBin('claude').found) {
+    return null;
+  }
+  return check(
+    'providers',
+    'ok',
+    'claude CLI on PATH but no provider runs it',
+    '`bro providers add claude [--global]` — the cli preset spawns `claude -p` workers'
+  );
+}
+
 function providerChecks(dir: string): DoctorCheck[] {
   const env = loadAgentEnv(dir);
   const providers = env.providers ?? {};
@@ -1654,7 +1674,8 @@ function providerChecks(dir: string): DoctorCheck[] {
     ...providerRefs(jcfg, env)
       .map(r => providerRefCheck(effective, r))
       .filter(present),
-  ];
+    claudePresetCheck(providers),
+  ].filter(present);
 }
 
 // --- conductor classifier guard (bro-9ww2q) -------------------------------

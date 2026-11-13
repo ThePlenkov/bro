@@ -335,6 +335,31 @@ describe('bro providers add', () => {
     });
   });
 
+  test("add 'claude' writes the cli preset — the verified claude -p line", async () => {
+    const { root: dir, main } = initRepo('bro-prov-add-');
+    await insideAsync(main, dir, async () => {
+      await runProvidersCommand(['add', 'claude']);
+      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
+      assert.deepEqual(cfg.providers.claude, {
+        type: 'cli',
+        command:
+          'claude -p --dangerously-skip-permissions --output-format stream-json --verbose < {promptFile}',
+      });
+    });
+  });
+
+  test("add 'claude-acp' writes the adapter-backed acp preset", async () => {
+    const { root: dir, main } = initRepo('bro-prov-add-');
+    await insideAsync(main, dir, async () => {
+      await runProvidersCommand(['add', 'claude-acp']);
+      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
+      assert.deepEqual(cfg.providers['claude-acp'], {
+        type: 'acp',
+        command: 'claude-code-acp',
+      });
+    });
+  });
+
   test('add refuses if bro.config.ts shadows', async () => {
     const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
