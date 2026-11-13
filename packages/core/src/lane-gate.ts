@@ -129,8 +129,11 @@ export function laneGateTake(
     const tokens = refill(cur, cfg, now);
     if (opts.refund === true) {
       // the refund never refuses and never overfills — the lane only
-      // gets back what the failed spawn spent
-      const credited = Math.min(capacityOf(cfg), tokens + cfg.spawnCost);
+      // gets back what the failed work spent; `cost` names that spend
+      // (default spawnCost — the fleet spawn semantic), so a caller
+      // refunding a turn charge hands back the turn's own price
+      const back = opts.cost ?? cfg.spawnCost;
+      const credited = Math.min(capacityOf(cfg), tokens + back);
       writeLedger(path, { tokens: credited, updatedAt: now });
       return { ok: true as const, tokens: credited };
     }

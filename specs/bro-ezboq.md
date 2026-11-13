@@ -154,3 +154,22 @@ back, and the cheaper check should fail first.
     impossible `burst < spawnCost` config that parse now rejects.
   - The `maxQueue` test synchronizes on the prompt reaching the fake
     peer (`holdPromptUntil`) instead of a 150ms wall-clock sleep.
+- **2026-11-14** — review round 2 (kilo/coderabbit/codeant threads):
+  - The first-turn `turnCost` charge moved BEFORE `acpSessionRetain` —
+    a turn the bucket cannot afford now refuses with literally zero
+    provider spend (previously the session opened, was disposed, and
+    the spawn charge stayed: a 429 that still cost quota).
+  - Refunds are spend-boundary exact: `laneGateTake` refund honors an
+    explicit `cost`, `budgetTake` reports whether a debit landed, and
+    the retained path refunds by stage — nothing reached the provider
+    ⇒ spawn+turn back; `session/new` accepted but pin/setup died ⇒
+    spawn stays (the open WAS paid, via `PooledTurnOpts.onSessionOpened`),
+    turn back; prompt attempted ⇒ both stand.
+  - `maxQueue` counts a synchronous `inflight` slot reserved in
+    `acpTurn` right after the check — the `assertSessionCap` await
+    window can no longer hide a second request.
+  - `maxSessions` tallies in-flight one-shot opens (`oneShotOpens`) —
+    they hold provider sessions no conversation key names.
+  - `serveLaneLimits` also drops entries whose `turnCost` exceeds
+    bucket capacity — a gate that refuses every prompt is the same
+    degenerate config as one that refuses every spawn.
