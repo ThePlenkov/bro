@@ -12,7 +12,7 @@
   "scripts": {
     "prepare": "node ../../scripts/gen-pack.ts",
     "prepack": "node ../../scripts/gen-pack.ts",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "files": [

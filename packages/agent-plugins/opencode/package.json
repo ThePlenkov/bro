@@ -21,7 +21,7 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts src/**/*.test.tsx",
+    "test": "tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "typecheck": "tsc --noEmit",
     "build": "tsdown"
   },

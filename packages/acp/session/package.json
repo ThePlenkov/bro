@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
