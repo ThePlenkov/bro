@@ -258,6 +258,38 @@ describe('the key', () => {
     assert.equal(await judgeConfigHash(dir, { provider: 'missing', mode: 'enforce' }), undefined);
   });
 
+  test('judgeConfigHash ignores credential references — apiKeyEnv/apiKeyCommand share a key', async () => {
+    const dir = scratchDir();
+    const apiConfig = (cred: Record<string, string>, baseUrl = 'https://judge.example') =>
+      writeFileSync(
+        join(dir, 'bro.config.json'),
+        JSON.stringify({
+          providers: {
+            j: {
+              type: 'api',
+              baseUrl,
+              models: { m: 'systemone' },
+              model: 'm',
+              ...cred,
+            },
+          },
+        })
+      );
+    apiConfig({ apiKeyEnv: 'JUDGE_KEY_A' });
+    const before = await judgeConfigHash(dir, { provider: 'j', mode: 'enforce' });
+    assert.ok(before !== undefined);
+    // a different env var name — where the key comes from changes
+    // nothing the judge is asked, so the key is shared
+    apiConfig({ apiKeyEnv: 'JUDGE_KEY_B' });
+    assert.equal(await judgeConfigHash(dir, { provider: 'j', mode: 'enforce' }), before);
+    // a key command instead of an env var — still the same key
+    apiConfig({ apiKeyCommand: 'cat /run/secrets/judge-key' });
+    assert.equal(await judgeConfigHash(dir, { provider: 'j', mode: 'enforce' }), before);
+    // an answer-shaping change still misses
+    apiConfig({ apiKeyEnv: 'JUDGE_KEY_A' }, 'https://judge.example/v2');
+    assert.notEqual(await judgeConfigHash(dir, { provider: 'j', mode: 'enforce' }), before);
+  });
+
   test('buildCacheKey — exact carries text+fields, recall needs a cluster', async () => {
     const dir = scratchDir();
     const tp = tablePath();

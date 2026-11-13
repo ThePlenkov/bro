@@ -19,7 +19,10 @@ the cache is a mode of the router, never required.
   the normalized full task text and carried T0 fields/features (`exact`)
   or the scoped T1 recall cluster (`recall`). `judgeConfigHash` covers the
   effective judge provider, model, parameters and escalation configuration,
-  never credential material. `key_json` is stored data, so it keeps the
+  never credential material or credential references — `apiKeyEnv` and
+  `apiKeyCommand` name where the key comes from, not what is asked, so
+  entries differing only there share a key. `key_json` is stored data, so
+  it keeps the
   ledger's retention contract: with `taskTextRetentionDays: 0` the exact
   text lands as its sha256 — hashes and structured inputs persist, free
   text never does (a retention flip changes the key by construction).
