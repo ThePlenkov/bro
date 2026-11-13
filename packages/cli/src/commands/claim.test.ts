@@ -75,18 +75,25 @@ test('expandResourceWords maps shorthands and passes URIs through', () => {
   assert.throws(() => expandResourceWords(['brnch'], dir));
 });
 
-test('expandResourceWords rejects globs too complex for the hook matcher', () => {
+test('glob bound gates acquire, never release', async () => {
   const dir = root;
   const blowup = '*a'.repeat(30) + '*b'; // > MAX_CLAIM_GLOB_WILDCARDS wildcards
-  assert.throws(() => expandResourceWords(['path', blowup], dir), /too complex to evaluate safely/);
-  // the URI pass-through is the same admission gate, not a bypass
-  assert.throws(
-    () => expandResourceWords([`path:${blowup}`], dir),
+  const env = { BRO_SESSION_ID: 'sid-1', CLAUDE_PLUGIN_ROOT: '/p' } as NodeJS.ProcessEnv;
+  // acquire rejects pathological globs — shorthand and URI forms alike
+  await assert.rejects(
+    runClaimCommand(['path', blowup], { dir, env, claims: fakeClaims() }),
     /too complex to evaluate safely/
   );
-  const toolong = 'x'.repeat(201); // > MAX_CLAIM_GLOB_LENGTH
-  assert.throws(() => expandResourceWords(['path', toolong], dir), /too complex/);
-  // a normal glob still passes
+  await assert.rejects(
+    runClaimCommand([`path:${blowup}`], { dir, env, claims: fakeClaims() }),
+    /too complex to evaluate safely/
+  );
+  // release stays reachable for ANY stored path: URI — a claim admitted
+  // before the bound existed must not wait on TTL expiry to be freed
+  const claims = fakeClaims();
+  await runClaimCommand(['release', `path:${blowup}`], { dir, env, claims });
+  assert.ok(claims.calls.some(c => c === `release:path:${blowup}:claude-sid-1`));
+  // a normal glob still expands
   assert.equal(expandResourceWords(['path', 'src/**/*.ts'], dir), 'path:src/**/*.ts');
 });
 

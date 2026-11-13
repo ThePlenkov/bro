@@ -230,11 +230,6 @@ function expandBareResource(a: string, dir: string): string {
 export function expandResourceArg(arg: string, dir: string): string {
   const a = arg.trim();
   if (/^[a-z][a-z0-9-]*:\S+/i.test(a)) {
-    // URI form skips the shorthand validators — `path:` still needs its
-    // glob bound checked (the admission gate is per-scheme, not per-syntax)
-    if (a.startsWith('path:')) {
-      assertClaimGlobBounded(a.slice('path:'.length));
-    }
     return a;
   }
   return expandBareResource(a, dir);
@@ -273,8 +268,10 @@ function prResourceUri(value: string): string {
 }
 
 /** A `path:` glob must stay evaluatable on the synchronous pre-tool
- *  path — reject shapes whose translated regex could backtrack through
- *  the hook timeout (the matcher refuses the same bound defensively). */
+ *  path — reject un-evaluatable shapes at ACQUIRE (the matcher refuses
+ *  the same bound defensively). Enforced in runClaimAcquire, not in
+ *  resource expansion: release expands through the same path and a
+ *  claim stored before the bound existed must stay releasable. */
 function assertClaimGlobBounded(glob: string): void {
   if (!claimGlobWithinBounds(glob)) {
     throw new CommandError(
@@ -289,7 +286,6 @@ function pathResourceUri(value: string): string {
   if (value === '') {
     throw new CommandError('error: path needs a glob — `bro claim path <glob>`', EXIT.usage);
   }
-  assertClaimGlobBounded(value);
   return `path:${value}`;
 }
 
@@ -497,6 +493,12 @@ async function runClaimAcquire(
   dir: string,
   deps: ClaimDeps
 ): Promise<void> {
+  // the glob bound is an acquire gate, not a URI gate: expansion is
+  // shared with release, which must reach the store for any `path:` URI
+  // including one a pre-bound `bro claim` managed to store
+  if (resource.startsWith('path:')) {
+    assertClaimGlobBounded(resource.slice('path:'.length));
+  }
   // the caller's pid proves liveness only for the caller's OWN session —
   // `--session/--host` targeting another session gets a pid-less claim
   // (TTL + that session's heartbeat carry it) rather than a lease the
