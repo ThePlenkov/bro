@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { agentPromptPath, loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
 import { clearExternalPlanes, readAgentRegistry, writeAgentRegistry } from '@broject/core';
-import { fakeAcpAgent } from '@broject/providers/testkit';
+import { fakeAcpAgent, fakeFetch } from '@broject/providers/testkit';
 import { capture, initRepo, installFakeBd, killRun } from './testrepo.ts';
 import { delegate } from './delegate.ts';
 import { runDelegateCommand } from './delegate-cli.ts';
@@ -315,6 +315,130 @@ describe('bro fleet delegate — --detach', () => {
       assert.equal(reg['adhoc-taken00']!.agentId, 'native-dead', 'hit row untouched');
       assert.equal(reg['adhoc-taken00']!.exitStatus, 0);
       assert.equal(reg['adhoc-free000']!.agentId, r.agent.id);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  /** Routing fixture — a declared table + an armed class router. The
+   *  spawned worker's command IS the chain provider's template (cli
+   *  entries substitute for the backend's), so chain heads carry the
+   *  same long-running node command the base fixture uses. */
+  const ORCA = {
+    type: 'api',
+    baseUrl: 'https://orca.test',
+    apiKeyEnv: 'ORCA_TEST_KEY',
+    models: { 'jev-1.0': 'systemone' },
+  };
+  const withRouting = (fx: Fixture, mode: string): void => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({
+        agents: { native: { command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' } },
+        providers: {
+          alt: { type: 'cli', command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' },
+          sweeps: { type: 'cli', command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' },
+          orca: ORCA,
+        },
+        fleet: {
+          routing: {
+            default: { chain: ['alt'] },
+            sweep: { chain: ['sweeps'] },
+          },
+          router: { provider: 'orca', mode },
+        },
+      })
+    );
+  };
+
+  // spec bro-ejdn3 — a class-less --detach mints a phantom adhoc-*
+  // molStep: no bead, no title/description — nothing for the router to
+  // classify. The resolved `default` lane stands under BOTH modes and
+  // the judge is never asked (the phantom used to fire the router on
+  // empty state — enforce could land the work on an unrelated lane)
+  for (const mode of ['shadow', 'enforce'] as const) {
+    test(`class-less --detach under router ${mode}: default lane stands, no judge call`, async () => {
+      const fx = fixture();
+      try {
+        withRouting(fx, mode);
+        const { fetch, calls } = fakeFetch();
+        const r = await delegate(
+          fx.main,
+          loadAgentEnv(fx.main),
+          { prompt: LONG_RUN, mode: 'detach', beadsDir: fx.beads },
+          { fetch }
+        );
+        assert.equal(calls.length, 0); // nothing to judge → no decide call
+        assert.equal(r.mode, 'detach');
+        if (r.mode !== 'detach') {
+          return assert.fail('detach mode expected');
+        }
+        assert.match(r.agent.molStep, /^adhoc-[0-9a-f]{8}$/);
+        const entry = readAgentRegistry(fx.main)[r.agent.molStep];
+        assert.ok(entry, 'registry entry for the adhoc step');
+        assert.equal(entry.class, 'default');
+        assert.equal(entry.provider, 'alt');
+      } finally {
+        fx.restore();
+      }
+    });
+  }
+
+  test('class-less --detach with routing but no default lane refuses — config error names the class', async () => {
+    const fx = fixture();
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' } },
+          providers: {
+            sweeps: { type: 'cli', command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' },
+            orca: ORCA,
+          },
+          fleet: {
+            routing: { sweep: { chain: ['sweeps'] } }, // no `default`
+            router: { provider: 'orca', mode: 'enforce' },
+          },
+        })
+      );
+      const { fetch, calls } = fakeFetch();
+      await assert.rejects(
+        () =>
+          delegate(
+            fx.main,
+            loadAgentEnv(fx.main),
+            { prompt: LONG_RUN, mode: 'detach', beadsDir: fx.beads },
+            { fetch }
+          ),
+        /no class "default"/
+      );
+      assert.equal(calls.length, 0);
+      assert.deepEqual(readAgentRegistry(fx.main), {});
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('explicit --class --detach lands on the pinned lane — the router stays out of it', async () => {
+    const fx = fixture();
+    try {
+      withRouting(fx, 'enforce');
+      const { fetch, calls } = fakeFetch();
+      const r = await delegate(
+        fx.main,
+        loadAgentEnv(fx.main),
+        { prompt: LONG_RUN, mode: 'detach', class: 'sweep', beadsDir: fx.beads },
+        { fetch }
+      );
+      assert.equal(calls.length, 0);
+      assert.equal(r.mode, 'detach');
+      if (r.mode !== 'detach') {
+        return assert.fail('detach mode expected');
+      }
+      const entry = readAgentRegistry(fx.main)[r.agent.molStep];
+      assert.ok(entry, 'registry entry for the adhoc step');
+      assert.equal(entry.class, 'sweep');
+      assert.equal(entry.provider, 'sweeps');
     } finally {
       fx.restore();
     }

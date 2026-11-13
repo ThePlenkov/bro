@@ -1527,7 +1527,9 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
   });
 
   test('enforce on a prose-grade provider is a config error naming provider + mode', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    // the bead needs judgeable text — nothing-to-judge stands on the
+    // resolved class before the router's grade gate ever engages
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'step one' }]);
     try {
       withRouter(fx, 'enforce', ORCA_PROSE);
       await assert.rejects(
@@ -1577,7 +1579,8 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
   });
 
   test('JudgeUnavailable is "no verdict" — warn and stand on the resolved class', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    // title so the router engages — a text-less step never reaches the judge
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'step one' }]);
     try {
       withRouter(fx, 'enforce', ORCA_TYPED);
       await withKey(async () => {
@@ -1611,6 +1614,46 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
       const entry = readAgentRegistry(fx.main)['fx-1']!;
       assert.equal(entry.class, undefined);
       await agents(['down', 'fx-1']);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  // spec bro-ejdn3 — a step carrying no judgeable text never reaches the
+  // router: a phantom adhoc-* molStep (delegate --detach / agents run
+  // mint one, no bead exists) or a text-less bead resolves the same way —
+  // the resolved class stands under BOTH modes, zero judge spend
+  for (const mode of ['shadow', 'enforce'] as const) {
+    test(`nothing to judge under ${mode}: resolved class stands, no judge call`, async () => {
+      const fx = fixture([{ id: 'fx-1', status: 'open' }]); // no title/description
+      try {
+        withRouter(fx, mode, ORCA_TYPED);
+        const { fetch, calls } = fakeFetch(typedReply('sweep', 0.99));
+        await spawn(fx, {}, { fetch });
+        assert.equal(calls.length, 0); // the judge was never asked to classify nothing
+        const entry = readAgentRegistry(fx.main)['fx-1']!;
+        assert.equal(entry.class, 'default');
+        assert.equal(entry.provider, 'alt');
+        assert.equal(routeRows(fx).length, 0); // no verdict — there was nothing to classify
+        await agents(['down', 'fx-1']);
+      } finally {
+        fx.restore();
+      }
+    });
+  }
+
+  test('a phantom adhoc-* step resolves the same under enforce — no bead, no judge', async () => {
+    const fx = fixture([]); // no bead at all — the delegate --detach shape
+    try {
+      withRouter(fx, 'enforce', ORCA_TYPED);
+      const { fetch, calls } = fakeFetch(typedReply('sweep', 0.99));
+      await spawn(fx, { molStep: 'adhoc-deadbeef' }, { fetch });
+      assert.equal(calls.length, 0);
+      const entry = readAgentRegistry(fx.main)['adhoc-deadbeef']!;
+      assert.equal(entry.class, 'default');
+      assert.equal(entry.provider, 'alt');
+      assert.equal(routeRows(fx).length, 0);
+      await agents(['down', 'adhoc-deadbeef']);
     } finally {
       fx.restore();
     }

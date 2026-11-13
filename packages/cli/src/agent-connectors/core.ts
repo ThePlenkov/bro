@@ -722,7 +722,18 @@ export async function resolveSpawnRoute(
  *  `shadow` accepts prose — it journals, picks nothing. The pick
  *  answers *which lane*: enforce re-resolves on the picked class so
  *  ITS chain head and onWall rule apply — the table still owns the
- *  chain. JudgeUnavailable is "no verdict" — warn and stand. */
+ *  chain. JudgeUnavailable is "no verdict" — warn and stand.
+ *
+ *  Nothing to judge — the same gate applyFleetMatrix carries: a step
+ *  with no title/description (a phantom adhoc-* molStep minted by
+ *  delegate --detach / agents run, a bead-less serve POST, a text-less
+ *  bead) never reaches the judge — no decide call, no journal row —
+ *  and the resolved class stands under BOTH modes (spec bro-ejdn3).
+ *  Enforce does not hold here the way the matrix holds: the class
+ *  router is a re-classifier over an always-resolved lane, and every
+ *  non-pick outcome (dimmed, off-table, judge-down) already returns
+ *  that lane — bro-v0pvd.1.1 names it "spawn-static, the class
+ *  router's enforce-unanswered posture". */
 export async function applyFleetRouter(
   dir: string,
   env: AgentConnectorEnv,
@@ -737,7 +748,8 @@ export async function applyFleetRouter(
     router.mode === 'off' ||
     routed === undefined ||
     info === undefined ||
-    info.label !== undefined
+    info.label !== undefined ||
+    ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
   ) {
     return routed;
   }
