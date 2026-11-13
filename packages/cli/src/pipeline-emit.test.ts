@@ -21,10 +21,11 @@ import type {
   SessionRow,
 } from '@broject/core';
 import { type EvidenceBundle, pipelineDir, type StageCall } from '@broject/pipeline';
-import type {
-  SendSessionMessageOpts,
-  SendSessionMessageResult,
-  SentDelivery,
+import {
+  type SendSessionMessageOpts,
+  type SendSessionMessageResult,
+  sendSessionMessage,
+  type SentDelivery,
 } from './commands/session-msg.ts';
 import { initRepo, insideAsync } from './commands/testrepo.ts';
 import { pipelineEmit, type PipelineEmitDeps } from './pipeline-emit.ts';
@@ -226,6 +227,32 @@ describe('pipelineEmit — routing', () => {
       assert.equal(send.calls.length, 0);
     });
   });
+
+  test('an ambiguous sid prefix stays agent-addressed — the A2A leg retries, never broadcast', async () => {
+    const { root, main } = initRepo('bro-emit-ambig-');
+    await insideAsync(main, root, async () => {
+      const { d, events, warn } = deps(main, {
+        ledger: ledgerStub([sessionRow({ sid: 'abcd-1' }), sessionRow({ sid: 'abcd-2' })]),
+      });
+      // the real sendSessionMessage resolves the same ambiguity —
+      // count invocations to prove the undelivered emit retries
+      let sends = 0;
+      d.sendMessage = async (opts: SendSessionMessageOpts) => {
+        sends += 1;
+        return sendSessionMessage(opts);
+      };
+      const emit = pipelineEmit(d);
+      const b = bundle();
+      await emit(call('abcd'), b);
+      await emit(call('abcd'), b);
+      assert.equal(sends, 2, 'an ambiguous agent target must retry, not dedupe');
+      assert.equal(events.calls.length, 0, 'ambiguity must NOT fall through to the broadcast leg');
+      assert.ok(
+        warn.msgs.some(m => m.includes('ambiguous')),
+        'the ambiguity warning must surface'
+      );
+    });
+  });
 });
 
 describe('pipelineEmit — idempotency', () => {
@@ -305,6 +332,50 @@ describe('pipelineEmit — idempotency', () => {
       await emit(call('fixer-7'), b);
       await emit(call('fixer-7'), b);
       assert.equal(send.calls.length, 2, 'undelivered agent emits must not dedupe');
+    });
+  });
+
+  test('a record-only publish to an ended session is not delivery — retries', async () => {
+    const { root, main } = initRepo('bro-emit-ended-');
+    await insideAsync(main, root, async () => {
+      const events = eventsStub(true);
+      const { d, warn } = deps(main, {
+        ledger: ledgerStub([sessionRow({ host: 'devin', sid: 'end1', state: 'ended' })]),
+        events: events.facade,
+      });
+      // the real sendSessionMessage: an ended row gets a 'host:sid'
+      // record the mailbox drain can never match — published, but
+      // nobody received the bundle
+      d.sendMessage = undefined;
+      const emit = pipelineEmit(d);
+      const b = bundle();
+      await emit(call('devin:end1'), b);
+      await emit(call('devin:end1'), b);
+      assert.equal(events.calls.length, 2, 'no sentinel — each wake republishes the record');
+      assert.ok(
+        warn.msgs.some(m => m.includes('ended')),
+        'the ended-session caveat warns'
+      );
+    });
+  });
+
+  test('a published record with no live channel (inbox write failed) is not delivery — retries', async () => {
+    const { root, main } = initRepo('bro-emit-inboxfail-');
+    await insideAsync(main, root, async () => {
+      // sendSessionMessage's shape when the inbox append fails but the
+      // events publish lands: channel 'mailbox', `to` the session KEY —
+      // an address addressedTo can never match
+      const send = sendStub([
+        { to: 'claude:w1', label: 'claude:w1', channel: 'mailbox', published: true },
+      ]);
+      const { d } = deps(main, {
+        sendMessage: send.fn as PipelineEmitDeps['sendMessage'],
+      });
+      const emit = pipelineEmit(d);
+      const b = bundle();
+      await emit(call('claude:w1'), b);
+      await emit(call('claude:w1'), b);
+      assert.equal(send.calls.length, 2, 'record-only delivery must not dedupe');
     });
   });
 

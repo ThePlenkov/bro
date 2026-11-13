@@ -242,7 +242,13 @@ function isAgentCustomer(
   }
   if (rows !== undefined) {
     const res = resolveMsgTarget(rows, customer);
-    if (res.deliveries.some(d => d.session !== undefined)) {
+    // An ambiguous prefix still names session rows — it is
+    // agent-addressed, not a user label. Falling through would
+    // broadcast the bundle to every live session; the A2A leg reports
+    // the ambiguity and leaves the sentinel unwritten so the next
+    // wake retries (spec: evidence must not leak to sessions the
+    // customer did not name).
+    if (res.error !== undefined || res.deliveries.some(d => d.session !== undefined)) {
       return true;
     }
   }
@@ -284,7 +290,16 @@ async function deliverAgent(customer: string, ctx: EmitCtx): Promise<boolean> {
   if (res.error !== undefined) {
     ctx.warn(`pipeline-emit: ${res.error} — bundle not delivered`);
   }
-  return res.deliveries.some(d => d.inboxPath !== undefined || d.published);
+  // A publish counts as delivery only when its `to` is an address the
+  // mailbox drain can match — agentId/sessionId/orchestrator
+  // (addressedTo never matches a session key). sendSessionMessage
+  // addresses inbox-capable and ended rows by '<host>:<sid>', so when
+  // the inbox write fails — or the session already ended — the publish
+  // is a ledger/bus record only: nobody received the bundle, the
+  // sentinel must stay unwritten, and the next wake retries.
+  return res.deliveries.some(
+    d => d.inboxPath !== undefined || (d.published && !SESSION_KEY_RE.test(d.to))
+  );
 }
 
 /** The user leg — one broadcast `notify`/`ask` event through the
