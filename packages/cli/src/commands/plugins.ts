@@ -209,6 +209,7 @@ function kiloArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'src', 'kilo.ts'),
     ap === null ? null : join(ap, 'dist', 'kilo.js'),
     pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'kilo', 'bro', 'bro.ts'),
     root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
   ]);
 }
@@ -289,6 +290,7 @@ function piArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'dist', 'pi.js'),
     ap === null ? null : join(ap, 'src', 'pi.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'pi', 'bro', 'bro.ts'),
   ]);
 }
 
@@ -301,6 +303,7 @@ function ompArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'dist', 'omp.js'),
     ap === null ? null : join(ap, 'src', 'omp.ts'),
     pkg === null ? null : join(pkg, 'dist', 'omp.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'omp', 'bro', 'bro.ts'),
   ]);
 }
 
