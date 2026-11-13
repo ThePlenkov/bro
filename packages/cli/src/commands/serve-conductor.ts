@@ -1999,6 +1999,13 @@ interface TurnEnv {
   /** key → when its session's slot claim was taken — the cap counts
    *  an open only after that claim outlives SESSION_SLOT_TTL_MS */
   pendingOpens: Map<string, number>;
+  /** Requests past the queue gate, held from `acpTurn`'s synchronous
+   *  reserve to its `finally` — the maxQueue count includes the
+   *  `assertSessionCap` await window a map-based tally missed. */
+  inflight: Set<object>;
+  /** One-shot opens in flight — they hold a provider session but no
+   *  conversation slot, so the session cap tallies them separately. */
+  oneShotOpens: Set<object>;
   key: string | undefined;
   /** request's stop settings — hashed into the conversation proofs so
    *  changed markers never replay a reply cut under different ones */
@@ -2092,12 +2099,13 @@ const BUDGET_CAP_RETRY_SEC = 5;
 /** The token-bucket charge — refuses BEFORE the spend it prices.
  *  `cost` is in the lane's own units (turnCost/spawnCost); the ledger
  *  key carries the request's model pin so per-model budgets stay
- *  honest. */
-function budgetTake(env: TurnEnv, cost: number): void {
+ *  honest. Returns whether a debit landed — the refund path must
+ *  only hand back what was actually taken. */
+function budgetTake(env: TurnEnv, cost: number): boolean {
   const b = env.budget;
-  if (b?.gate === undefined || cost <= 0) return;
+  if (b?.gate === undefined || cost <= 0) return false;
   const take = laneGateTake(b.lane, env.requestModel ?? '(default)', b.gate, { cost });
-  if (take.ok) return;
+  if (take.ok) return true;
   throw new LaneBudgetError(
     'rate',
     take.retryAfterSec,
@@ -2105,24 +2113,24 @@ function budgetTake(env: TurnEnv, cost: number): void {
   );
 }
 
-/** Hand a spawn charge back — the open it priced never happened
- *  (the retain threw before a session existed). */
-function budgetRefundSpawn(env: TurnEnv): void {
+/** Hand a charge back — the work it priced never reached the provider
+ *  (the open threw before `session/new` was accepted, spec bro-ezboq).
+ *  `cost` is the amount originally taken; a gate-less lane refunds
+ *  nothing because nothing was ever charged. */
+function budgetRefund(env: TurnEnv, cost: number): void {
   const b = env.budget;
-  if (b?.gate === undefined) return;
-  laneGateTake(b.lane, env.requestModel ?? '(default)', b.gate, { refund: true });
+  if (b?.gate === undefined || cost <= 0) return;
+  laneGateTake(b.lane, env.requestModel ?? '(default)', b.gate, { refund: true, cost });
 }
 
-/** The per-lane in-flight turn cap — busy conversations plus opens in
- *  flight. One-shot prompts mid-flight are not in the map: the cap is
- *  a soft bound on what the lane can see, documented in the spec. */
+/** The per-lane in-flight turn cap — every request past the gate holds
+ *  a slot from `acpTurn`'s synchronous reserve until its `finally`, so
+ *  the count includes the `assertSessionCap` await window where a
+ *  second request used to slip through uncounted (review #1066). */
 function assertQueue(env: TurnEnv): void {
   const max = env.budget?.limits.maxQueue;
   if (max === undefined) return;
-  let inflight = env.pendingOpens.size;
-  for (const s of env.sessions.values()) {
-    if (s.busy) inflight++;
-  }
+  const inflight = env.inflight.size;
   if (inflight >= max) {
     throw new LaneBudgetError(
       'queue',
@@ -2140,7 +2148,8 @@ function assertQueue(env: TurnEnv): void {
 function assertLaneSessions(env: TurnEnv, selfCounted = false): void {
   const max = env.budget?.limits.maxSessions;
   if (max === undefined) return;
-  const held = env.sessions.size + env.pendingOpens.size + (selfCounted ? 0 : 1);
+  const held =
+    env.sessions.size + env.pendingOpens.size + env.oneShotOpens.size + (selfCounted ? 0 : 1);
   if (held > max) {
     throw new LaneBudgetError(
       'sessions',
@@ -2426,7 +2435,9 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   // session (retained or one-shot), so the open charge lands before
   // the cap claim: a budget refusal takes no session-cap slot. The
   // retained path refunds it if the open itself throws.
-  budgetTake(env, env.budget?.limits.spawnCost ?? 1);
+  const spawnCost = env.budget?.limits.spawnCost ?? 1;
+  const turnCost = env.budget?.limits.turnCost ?? 1;
+  const spawnCharged = budgetTake(env, spawnCost);
   // the cap before a session is opened — both paths open one
   // each request opens its own session — the claim is per request, not
   // per backend (one shared claim would let every request reuse it)
@@ -2435,22 +2446,27 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
     releaseCap = await assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`);
   } catch (err) {
     // the cap refused before any open — the spawn charge goes back
-    budgetRefundSpawn(env);
+    if (spawnCharged) budgetRefund(env, spawnCost);
     throw err;
   }
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
-    // flight — one-shot over the same link, nothing stored
+    // flight — one-shot over the same link, nothing stored. The open
+    // holds a provider session no conversation key will name, so the
+    // lane session cap tallies it through oneShotOpens.
+    const shot = {};
+    env.oneShotOpens.add(shot);
     try {
-      assertLaneSessions(env);
+      assertLaneSessions(env, true);
       return await oneShotTurn(env, prompt, inputTokens);
     } catch (err) {
       // a budget refusal inside the one-shot happened before the pool
       // call opened anything — the spawn charge goes back (a provider
       // failure inside acpPooledTurn keeps it: the open was attempted)
-      if (err instanceof LaneBudgetError) budgetRefundSpawn(env);
+      if (err instanceof LaneBudgetError && spawnCharged) budgetRefund(env, spawnCost);
       throw err;
     } finally {
+      env.oneShotOpens.delete(shot);
       // the one-shot session is disposed when the turn settles — the
       // slot it held goes back to the cap (spec bro-b961a)
       releaseCap();
@@ -2463,10 +2479,17 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   // knows when the reservation covering this open expires
   env.pendingOpens.set(key, Date.now());
   let live: AcpRetainedSession | undefined;
+  // spend accounting (spec bro-ezboq): the turn charge lands BEFORE
+  // the retain so a first turn the bucket cannot afford refuses with
+  // zero provider spend; `opened` marks session/new accepted — past
+  // it the open was paid even when the retain itself throws
+  let opened = false;
+  let turnCharged = false;
   try {
     // the per-lane session cap counts THIS open — pendingOpens was
     // marked above, so held sessions + in-flight opens is exact here
     assertLaneSessions(env, true);
+    turnCharged = budgetTake(env, turnCost);
     live = await acpSessionRetain(env.peer, env.cfg.entry, env.opts, env.deadline, {
       by: env.by,
       requestModel: env.requestModel,
@@ -2474,10 +2497,10 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       // the churn accounting + the silence bound (spec bro-b961a)
       guard: guardCtx(env),
       stallMs: env.cfg.acpStallMs ?? 300_000,
+      onSessionOpened: () => {
+        opened = true;
+      },
     });
-    // the retained session's first turn pays turnCost on top of the
-    // spawn charge taken above
-    budgetTake(env, env.budget?.limits.turnCost ?? 1);
     const reply = await live.prompt(prompt, env.deadline, {
       signal: env.signal,
       by: env.by,
@@ -2507,10 +2530,16 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
     // still holds the session; drop it before surfacing
     if (live !== undefined) {
       disposeQuiet(live);
+      // the prompt was attempted — both charges stand: the turn ran
+    } else if (opened) {
+      // session/new was accepted and the pin/setup died after — the
+      // open was paid, the prompt never ran: keep the spawn charge,
+      // hand the turn charge back
+      if (turnCharged) budgetRefund(env, turnCost);
     } else {
-      // no session ever opened (lane-session refusal or a retain
-      // failure) — the spawn charge goes back to the bucket
-      budgetRefundSpawn(env);
+      // nothing reached the provider — every charge goes back
+      if (spawnCharged) budgetRefund(env, spawnCost);
+      if (turnCharged) budgetRefund(env, turnCost);
     }
     // the session is gone — the slot it held goes back to the cap
     // (spec bro-b961a): a claim that outlives its session eats the
@@ -2589,10 +2618,17 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
   // the peer is busy for the turn's duration — the idle release waits
   // for it (spec bro-7ira8): a peer that is answering is not idle
   env.pool.busy();
+  // the queue slot reserves SYNCHRONOUSLY with the check — no await
+  // sits between them, so a second request can never observe the lane
+  // below cap while this one is still inside assertSessionCap
+  const slot = {};
+  let reserved = false;
   try {
     // the lane's in-flight turn cap (spec bro-ezboq) — refuses before
     // any session work when the lane is saturated
     assertQueue(env);
+    env.inflight.add(slot);
+    reserved = true;
     sweepSessions(env.sessions, Date.now());
     // probe traffic rides the lane's dedicated session — the
     // conversation proofs below are for continuing conversations,
@@ -2631,6 +2667,7 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
     }
     return await freshTurn(env, candBusy);
   } finally {
+    if (reserved) env.inflight.delete(slot);
     env.pool.idle();
   }
 }
@@ -2673,6 +2710,12 @@ interface ProviderLane {
   pool: AcpLinkPool;
   sessions: Map<string, ConvSession>;
   pendingOpens: Map<string, number>;
+  /** Requests past the queue gate — the maxQueue count (spec
+   *  bro-ezboq). */
+  inflight: Set<object>;
+  /** One-shot opens in flight — sessions the cap must count that no
+   *  conversation key will ever name (spec bro-ezboq). */
+  oneShotOpens: Set<object>;
   /** The lane's dead-loop guard (spec bro-b961a) — one per lane, so a
    *  conversation's churn is counted against its own provider. */
   guard: AcpDeadLoopGuard;
@@ -3043,6 +3086,8 @@ function laneTurnEnv(
     opts: lane.opts,
     sessions: lane.sessions,
     pendingOpens: lane.pendingOpens,
+    inflight: lane.inflight,
+    oneShotOpens: lane.oneShotOpens,
     key: d.key,
     stopKey: d.stopKey,
     parent: d.parent,
@@ -5421,6 +5466,8 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // same-key request must not open a twin (the loser would leak
       // unmapped)
       pendingOpens: new Map<string, number>(),
+      inflight: new Set<object>(),
+      oneShotOpens: new Set<object>(),
       guard,
       cooldown,
     });

@@ -1104,12 +1104,15 @@ function serveLaneLimits(raw: unknown): ServeLaneLimits | undefined {
   if (maxSessions !== undefined) out.maxSessions = maxSessions;
   const maxQueue = posInt(o.maxQueue);
   if (maxQueue !== undefined) out.maxQueue = maxQueue;
-  // a bucket that can never afford one open is a config error, not a
-  // pace (the rateGate rule, spec bro-y3jvd): capacity is burst ?? rph
+  // a bucket that can never afford its work is a config error, not a
+  // pace (the rateGate rule, spec bro-y3jvd): capacity is burst ?? rph,
+  // and it must cover BOTH the open and a single turn — a gate that
+  // refuses every prompt is as dead as one that refuses every spawn
+  const capacity = out.burst ?? out.requestsPerHour;
   if (
     out.requestsPerHour !== undefined &&
     out.spawnCost !== undefined &&
-    (out.burst ?? out.requestsPerHour) < out.spawnCost
+    (capacity < out.spawnCost || (out.turnCost !== undefined && capacity < out.turnCost))
   ) {
     return undefined;
   }
