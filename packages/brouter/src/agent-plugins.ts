@@ -25,6 +25,13 @@ interface LaneFlags {
   timeoutMs?: number;
 }
 
+/** The `--timeout` value as a deadline budget — a whole positive
+ *  number inside Node's timer range: a float or NaN makes every
+ *  comparison against the deadline false (the call never times
+ *  out), and setTimeout clamps a delay above 2^31-1 to 1 ms (the
+ *  budget expires instantly instead of bounding the call). */
+const isTimeoutMs = (ms: number): boolean => Number.isInteger(ms) && ms > 0 && ms <= 2_147_483_647;
+
 /** The lane flags — the provider, the model, the budget. */
 function laneFlags(argv: string[]): LaneFlags {
   const flags: LaneFlags = {};
@@ -38,13 +45,8 @@ function laneFlags(argv: string[]): LaneFlags {
   }
   const timeout = flag(argv, '--timeout');
   if (timeout !== undefined) {
-    // the budget is a deadline: a float or a NaN makes every comparison
-    // against it false, and the call never times out. The ceiling is
-    // Node's timer limit — setTimeout clamps a delay above 2^31-1 to
-    // 1 ms, so a bigger budget would expire instantly instead of
-    // bounding the call.
     const ms = Number(timeout);
-    if (!Number.isInteger(ms) || ms <= 0 || ms > 2_147_483_647) {
+    if (!isTimeoutMs(ms)) {
       console.error('error: --timeout must be a whole number of milliseconds ≤ 2147483647');
       process.exit(2);
     }
