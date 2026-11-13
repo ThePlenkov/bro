@@ -23,13 +23,14 @@ import {
   readArmed,
   readCodexInstructions,
   armDetail,
+  claimNudgeLines,
   otherLiveWork,
   recordGuardEvents,
   stopGateOutcome,
   takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
-import { procStat, type GateContribution } from '@broject/core';
+import { procStat, type ClaimRow, type GateContribution } from '@broject/core';
 import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts';
 
 function foreignLock(lock: string): ChildProcess {
@@ -685,6 +686,51 @@ describe('otherLiveWork', () => {
     const found = otherLiveWork(dir, 'self', Date.now(), { pid: process.pid, start: st.start });
     assert.equal(found.length, 1);
     assert.equal(found[0]!.detail, 'bro-theirs');
+  });
+});
+
+describe('claimNudgeLines — the claims leg of the parallel-work nudge (bro-izpyk.10)', () => {
+  const row = (over: Partial<ClaimRow> = {}): ClaimRow => ({
+    resource: 'worktree:/repo/main',
+    host: 'devin',
+    sid: 'sess-foreign1',
+    project: null,
+    exclusive: false,
+    leaseUntil: Date.now() + 60_000,
+    claimedAt: Date.now(),
+    ttlMs: 60_000,
+    ...over,
+  });
+  const self = { host: 'devin', sid: 'sess-self', owner: null };
+
+  test('foreign work claims nudge; worktree URIs collapse to basename', () => {
+    const lines = claimNudgeLines(
+      [row({ resource: 'worktree:/repo/main' }), row({ resource: 'branch:bro-x', sid: 's2' })],
+      self
+    );
+    assert.deepEqual(lines, [
+      'session sess-for claims worktree main',
+      'session s2 claims branch:bro-x',
+    ]);
+  });
+
+  test('own session, own agent tree, and role claims self-exclude', () => {
+    const owner = { pid: process.pid, start: procStat(process.pid)?.start ?? '' };
+    const lines = claimNudgeLines(
+      [
+        row({ sid: 'sess-self' }), // own session
+        row({ sid: 'rotated', pid: process.pid, pidStart: owner.start }), // own tree, rotated sid
+        row({ resource: 'role:orchestrator@proj', sid: 'orch-1' }), // orchestration, not work
+        row({ sid: 'sess-other' }), // genuinely foreign — survives
+      ],
+      { host: 'devin', sid: 'sess-self', owner }
+    );
+    assert.deepEqual(lines, ['session sess-oth claims worktree main']);
+  });
+
+  test('sessions the marker leg already printed dedup on the short sid', () => {
+    const lines = claimNudgeLines([row({ sid: 'sess-abcdef' })], self, new Set(['sess-abc']));
+    assert.deepEqual(lines, []);
   });
 });
 

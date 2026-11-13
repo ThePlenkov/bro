@@ -55,9 +55,11 @@ import {
   printUsage,
   readAgentRegistry,
   reviewHost,
+  sessionProject,
   stackSection,
   worktreePathFor,
   type AgentRegistryEntry,
+  type ClaimRow,
   type Connector,
   type ReviewFacade,
   type TaskRow,
@@ -958,6 +960,22 @@ function litterFacades(root: string): {
   return { tasks, rev };
 }
 
+/** The litter keep-plane's claims leg (bro-izpyk.10) — this project's
+ *  live ledger claims, prefetched once for the sweep. Undefined on any
+ *  failure: the marker/registry/plane verdicts still run — a dead
+ *  claims store must not make the sweep trust dead sessions LESS, it
+ *  just loses the union leg. */
+async function litterClaims(root: string): Promise<ClaimRow[] | undefined> {
+  try {
+    const project = sessionProject(root);
+    return await facade('claims', { dir: root }, { prefer: loadConfig(root).connectors }).list(
+      project === undefined ? {} : { project }
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 /** The sweep's human report — released/repaired/reaped/deleted/kept
  *  lines, errors to stderr, and the count summary. */
 function printLitterReport(rep: LitterReap, dry: boolean): void {
@@ -987,7 +1005,7 @@ function printLitterReport(rep: LitterReap, dry: boolean): void {
   );
 }
 
-function cmdPrune(argv: string[]): void {
+async function cmdPrune(argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(), {
     boolFlags: new Set(['--loop', '--dry-run']),
     strict: true,
@@ -1011,6 +1029,9 @@ function cmdPrune(argv: string[]): void {
   if (tasks === undefined) {
     return;
   }
+  // the session-claims keep leg (bro-izpyk.10) — prefetched beside the
+  // facades; a failed read just runs the sweep marker-only
+  const sessionClaims = await litterClaims(main.path);
   // core loadConfig (see litterFacades) — the parked-cache knobs ride
   // the loop section
   const loop = loadConfig(main.path, { loop: loopSection }).loop as LoopConfig | undefined;
@@ -1023,6 +1044,7 @@ function cmdPrune(argv: string[]): void {
       dryRun: dry,
       parkedKeep: loop?.parkedKeep,
       parkedTtlDays: loop?.parkedTtlDays,
+      sessionClaims,
     }),
     dry
   );
@@ -1213,6 +1235,11 @@ export interface LitterReapOpts {
    *  daemon tick: never block the event loop, next sweep reaps);
    *  undefined = the interactive same-pass bound */
   nxKillWaitMs?: number;
+  /** This project's live ledger claims, prefetched by the caller
+   *  (bro-izpyk.10) — the `sessionOwner` keep-plane unions them with
+   *  the .work/.task marker details. Undefined/absent = marker-only,
+   *  the pre-migration read. */
+  sessionClaims?: ClaimRow[];
   dryRun?: boolean;
   now?: number;
 }
@@ -1292,6 +1319,10 @@ interface LitterCtx {
     agentsHome: string | null;
     /** live .work/.task marker details — a session claiming the bead */
     sessionDetails: string[];
+    /** live ledger claims on this project — the marker leg's
+     *  cross-session twin (bro-izpyk.10); `bro work prune` prefetches
+     *  `claims.list({project})` once, a failed read just costs the leg */
+    sessionClaims: ClaimRow[];
     /** live act-wait markers — a gate-stack member's claim survives its
      *  worker's exit: the loop (or a rearmed wait) still services it.
      *  `bead`/`workdir` are the match keys (bro-ho09d) */
@@ -1781,6 +1812,13 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
   if (worktreeClaim(w.path, ctx.opts.now) !== undefined) {
     return 'claimed';
   }
+  // the ledger twin of that in-tree claim file (bro-izpyk.10): a live
+  // `worktree:`/`branch:` lease on this tree or its branch is the same
+  // keep, machine-wide — it survives the session rotating off the box
+  const ledgerClaim = sessionClaimOn(ctx.claims.sessionClaims, c);
+  if (ledgerClaim !== undefined) {
+    return `session ${ledgerClaim.sid.slice(0, 8)} claims ${ledgerClaim.resource}`;
+  }
   // the same cleanliness bar removeMergedWorktree enforces, read ahead
   // so kept candidates report a reason
   const st = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', w.path, 'status', '--porcelain']);
@@ -1934,6 +1972,41 @@ function registryOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): strin
   return undefined;
 }
 
+/** A live ledger claim naming this candidate — the marker/arm-detail
+ *  legs' machine-wide twin (bro-izpyk.10). `worktree:` binds by path
+ *  first, then by its recorded detail like a marker line; `branch:`
+ *  binds by name/detail the same way. `ids` lets a `.task`-style claim
+ *  carry the full bead id (same widening sessionOwner's marker leg
+ *  gets). */
+function sessionClaimOn(
+  rows: ClaimRow[],
+  c: LitterCandidate,
+  ids: string[] = []
+): ClaimRow | undefined {
+  return rows.find(row => {
+    const r = row.resource;
+    if (r.startsWith('worktree:')) {
+      const path = r.slice('worktree:'.length);
+      if (c.w !== undefined && resolve(path) === resolve(c.w.path)) {
+        return true;
+      }
+      const probe = row.detail || basename(path);
+      return (
+        detailMatches(probe, { branch: c.branch, slug: c.slug, worktree: c.w?.path }) ||
+        ids.includes(probe)
+      );
+    }
+    if (r.startsWith('branch:')) {
+      return detailMatches(row.detail || r.slice('branch:'.length), {
+        branch: c.branch,
+        slug: c.slug,
+        worktree: c.w?.path,
+      });
+    }
+    return false;
+  });
+}
+
 /** session markers — `bd --claim` arms .task, `bro work enter` arms .work */
 function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
   // a .task marker carries the full bead id (`bd update <bead> --claim`)
@@ -1946,7 +2019,16 @@ function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
     d =>
       detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path }) || ids.includes(d)
   );
-  return detail === undefined ? undefined : `session armed ${detail}`;
+  if (detail !== undefined) {
+    return `session armed ${detail}`;
+  }
+  // ledger claims — the marker leg's cross-session twin (bro-izpyk.10):
+  // a live `worktree:`/`branch:` lease naming this candidate is the
+  // same keep-reason, machine-wide
+  const claim = sessionClaimOn(ctx.claims.sessionClaims, c, ids);
+  return claim === undefined
+    ? undefined
+    : `session ${claim.sid.slice(0, 8)} claims ${claim.resource}`;
 }
 
 /** live watch markers — a landed member's claim rides its act wait
@@ -2333,6 +2415,7 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
       agentsHome: regPath === null ? null : join(dirname(regPath), 'agents'),
       sessionDetails:
         hooks === null ? [] : liveWorkDetails(hooks, ['.work', '.task'], opts.now ?? Date.now()),
+      sessionClaims: opts.sessionClaims ?? [],
       watches: listWatches(opts.root),
     },
   };
@@ -2384,7 +2467,7 @@ function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
   }
 }
 
-export function runWorkCommand(argv: string[]): void {
+export function runWorkCommand(argv: string[]): void | Promise<void> {
   const [sub, ...rest] = argv;
   if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
     usage(0);

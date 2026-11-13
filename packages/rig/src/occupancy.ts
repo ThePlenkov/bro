@@ -18,6 +18,7 @@ import {
   gitTry,
   readAgentRegistry,
   type AgentInfo,
+  type ClaimRow,
 } from '@broject/core';
 import { listWatches, watchMarkerKind, type ListedWatch } from '@broject/act';
 import {
@@ -51,6 +52,12 @@ export interface OccupancyCtx {
   worktree?: string;
   /** Live session-marker detail lines with their activity stamps. */
   workDetails: WorkEntry[];
+  /** Live ledger claims snapshot — the cross-session twin of
+   *  `workDetails` (bro-izpyk.10): callers that can afford the async
+   *  `claims.list` prefetch pass rows in; sync-only callers (inside an
+   *  already-held occupancy lock) pass none and the rung simply reads
+   *  marker-only — no regression, claims are additive truth. */
+  claims?: ClaimRow[];
   /** Injectable /proc scan — tests pass a stub. */
   scanProc?: (worktree: string) => ProcHit[];
   /** Injectable worktree-claim probe — tests pass a stub. */
@@ -192,6 +199,67 @@ function markerProof(opts: OccupancyCtx): OccProof | undefined {
     : { detail: `session armed work on ${detail.detail}`, activeAtMs: detail.mtimeMs };
 }
 
+/** Does a live ledger claim hold this candidate's work? The session-
+ *  marker rung's cross-session twin (bro-izpyk.10): `worktree:` claims
+ *  match the exact tree or the armed detail (`bro work enter <slug>`
+ *  records the slug), `branch:`/`pr:` match by name/number. `task:*`
+ *  is never enumerated by the facade (bd is its truth) and `role:`/
+ *  `path:` are not work occupancy — they never reach this probe. */
+function claimMatches(
+  row: ClaimRow,
+  ctx: { branch: string; slug: string; worktree?: string; pr?: number }
+): boolean {
+  const { branch, slug, worktree, pr } = ctx;
+  const { resource, detail } = row;
+  if (resource.startsWith('worktree:')) {
+    const path = resource.slice('worktree:'.length);
+    if (worktree !== undefined && resolve(path) === resolve(worktree)) {
+      return true;
+    }
+    return detailMatches(detail || basename(path), { branch, slug, worktree });
+  }
+  if (resource.startsWith('branch:')) {
+    return detailMatches(detail || resource.slice('branch:'.length), {
+      branch,
+      slug,
+      worktree,
+    });
+  }
+  if (resource.startsWith('pr:')) {
+    const n = Number(resource.slice('pr:'.length));
+    return pr !== undefined && Number.isInteger(n) && n === pr;
+  }
+  return false;
+}
+
+/** The claim's last proven activity — `leaseUntil − ttlMs` is the last
+ *  heartbeat renewal (the ingest renews leases, so the pair encodes
+ *  "seen alive then"), falling back to `claimedAt` for no-TTL rows. */
+function claimActiveAtMs(row: ClaimRow): number {
+  if (row.leaseUntil !== null && row.ttlMs !== null && row.ttlMs !== undefined) {
+    return row.leaseUntil - row.ttlMs;
+  }
+  return row.claimedAt;
+}
+
+/** claim-rung proofs — the ledger's answer to "a live session holds
+ *  this work" where no marker survived or none was ever read. */
+function* claimProofs(opts: OccupancyCtx): Generator<OccProof> {
+  if (opts.claims === undefined) {
+    return;
+  }
+  const slug = branchSlug(opts.branch);
+  for (const row of opts.claims) {
+    if (!claimMatches(row, { branch: opts.branch, slug, worktree: opts.worktree, pr: opts.pr })) {
+      continue;
+    }
+    yield {
+      detail: `session ${row.sid.slice(0, 8)} claims ${row.resource}`,
+      activeAtMs: claimActiveAtMs(row),
+    };
+  }
+}
+
 /** /proc-plane proof — a live process is proof of life at scan time,
  *  not of work: the worktree's own churn (index/HEAD/dir mtimes) is
  *  the silence bound, a process parked in an untouched tree is a
@@ -214,8 +282,8 @@ function procProof(opts: OccupancyCtx, now: number): OccProof | undefined {
 /** The occupancy ladder as lazy proofs — one source for occupied()'s
  *  first-match verdict and the merge path's freshness check. Yields in
  *  the established order (fixer → supervisor → worktree → markers →
- *  /proc); a plane's stat costs only once the ladder reaches it, so a
- *  first-proof read keeps occupied()'s short-circuit. */
+ *  claims → /proc); a plane's stat costs only once the ladder reaches
+ *  it, so a first-proof read keeps occupied()'s short-circuit. */
 export function* occupancyProofs(
   opts: OccupancyCtx,
   now: number = Date.now()
@@ -234,6 +302,7 @@ export function* occupancyProofs(
   if (detail !== undefined) {
     yield detail;
   }
+  yield* claimProofs(opts);
   const proc = procProof(opts, now);
   if (proc !== undefined) {
     yield proc;
@@ -329,10 +398,19 @@ export function registryAgents(dir: string): AgentInfo[] {
 export interface FreshOccupancy {
   agents: AgentInfo[];
   workDetails: WorkEntry[];
+  /** The caller's prefetched claims snapshot, passed through — claims
+   *  are written outside the occupancy locks, so the pre-lock read is
+   *  as fresh inside the hold as a re-read and costs no async there
+   *  (bro-izpyk.10). */
+  claims: ClaimRow[];
   watches: ListedWatch[];
 }
 
-export function freshOccupancy(dir: string, known: AgentInfo[]): FreshOccupancy {
+export function freshOccupancy(
+  dir: string,
+  known: AgentInfo[],
+  claims: ClaimRow[] = []
+): FreshOccupancy {
   const byStep = new Map(known.map(a => [a.molStep, a]));
   let fresh: AgentInfo[];
   try {
@@ -354,6 +432,7 @@ export function freshOccupancy(dir: string, known: AgentInfo[]): FreshOccupancy 
   return {
     agents,
     workDetails: hooks === null ? [] : liveWorkEntries(hooks),
+    claims,
     // listWatches is a cheap local read — a supervisor that stamped its
     // heartbeat while the lock was being waited on is caught here
     watches: listWatches(dir),
@@ -406,7 +485,8 @@ export function retireOrphanedWorktree(
   wt: string,
   branch: string,
   fixerBeadId: string | undefined,
-  known: AgentInfo[]
+  known: AgentInfo[],
+  claims: ClaimRow[] = []
 ): string | undefined {
   let release: () => void;
   try {
@@ -417,13 +497,14 @@ export function retireOrphanedWorktree(
     return `occupancy re-check failed — ${errText(err)}`;
   }
   try {
-    const fresh = freshOccupancy(dir, known);
+    const fresh = freshOccupancy(dir, known, claims);
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixerBeadId,
       branch,
       worktree: wt,
       workDetails: fresh.workDetails,
+      claims: fresh.claims,
       scanProc: agentProcessesIn,
       pr,
       watches: fresh.watches,

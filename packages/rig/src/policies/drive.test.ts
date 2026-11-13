@@ -14,6 +14,7 @@ import type { PrActState } from '@broject/act';
 import type {
   AgentInfo,
   CheckInfo,
+  ClaimRow,
   PrMeta,
   ReviewFacade,
   ReviewThread,
@@ -817,5 +818,56 @@ describe('drivePolicy.pass — the enumeration+service sweep', () => {
     const verdicts = w.jsonRows.map(r => (r as { verdict?: string }).verdict);
     assert.deepEqual(verdicts, ['probe-failed', 'merged']);
     assert.deepEqual(w.merges, [9]);
+  });
+
+  // the claims rung (bro-izpyk.10): one list per pass, snapshot-fed to
+  // every occupancy read; a live claim on the PR's tree is the same
+  // veto a fresh marker is
+  const claimRow = (over: Partial<ClaimRow> = {}): ClaimRow => ({
+    resource: 'worktree:/repo/main',
+    host: 'devin',
+    sid: 'sess-keeper',
+    project: null,
+    exclusive: false,
+    leaseUntil: Date.now() + 60_000,
+    claimedAt: Date.now() - 5_000,
+    ttlMs: 60_000,
+    ...over,
+  });
+
+  test('a live ledger claim on the PR tree green-occupies — fetched once per pass', async () => {
+    const w = world();
+    const wt = join(w.root, 'wt-x');
+    mkdirSync(wt);
+    let calls = 0;
+    w.ctx.deps.claims = async () => {
+      calls += 1;
+      return [claimRow({ resource: `worktree:${wt}` })];
+    };
+    w.candidates = { branches: ['work/x'], complete: true };
+    w.prsByBranch = { 'work/x': [7] };
+    w.worktreeList = [{ branch: 'work/x', path: wt }];
+    w.metaQueue = [openMeta()]; // green — the claim is the only veto
+    await drivePolicy.pass(w.ctx);
+    assert.equal(calls, 1, 'the pass must list claims exactly once');
+    const verdicts = w.jsonRows.map(r => (r as { verdict?: string }).verdict);
+    assert.deepEqual(verdicts, ['green-occupied']);
+    assert.deepEqual(w.merges, []);
+  });
+
+  test('a throwing claims list degrades to the marker plane — the pass still merges', async () => {
+    const w = world();
+    w.ctx.deps.claims = async () => {
+      throw new Error('ledger gone');
+    };
+    w.candidates = { branches: ['work/x'], complete: true };
+    w.prsByBranch = { 'work/x': [7] };
+    // probe → OPEN; merge re-probe → MERGED (the merge-unverified tail
+    // repeats the last entry, so the queue needs the settled row)
+    w.metaQueue = [openMeta(), settledMeta()];
+    await drivePolicy.pass(w.ctx);
+    const verdicts = w.jsonRows.map(r => (r as { verdict?: string }).verdict);
+    assert.deepEqual(verdicts, ['merged']);
+    assert.deepEqual(w.merges, [7]);
   });
 });

@@ -20,6 +20,7 @@ import {
   SESSION_SLOT_TTL_MS,
   type AgentInfo,
   type AgentRegistryEntry,
+  type ClaimRow,
   type TaskRow,
   type TaskStore,
 } from '@broject/core';
@@ -358,8 +359,115 @@ describe('occupied / greenOccupancy — durable-state verdicts', () => {
       const fresh = freshOccupancy(main, []);
       assert.equal(fresh.agents.length, 2);
       assert.ok(Array.isArray(fresh.watches));
+      assert.deepEqual(fresh.claims, []);
     } finally {
       rmSync(join(main, '..'), { recursive: true, force: true });
+    }
+  });
+});
+
+// --- claims rung — the ledger-claims occupancy leg (bro-izpyk.10) ------------
+
+const claimRow = (over: Partial<ClaimRow> = {}): ClaimRow => ({
+  resource: 'worktree:/repo/main',
+  host: 'devin',
+  sid: 'sess-abcd1234',
+  project: null,
+  exclusive: false,
+  leaseUntil: Date.now() + 60_000,
+  claimedAt: Date.now() - 5_000,
+  ttlMs: 60_000,
+  ...over,
+});
+
+describe('occupied / greenOccupancy — claims rung (bro-izpyk.10)', () => {
+  test('no claims → marker-only read (pre-migration behaviour)', () => {
+    assert.equal(occupied(occCtx({ branch: 'work/bro-x', claims: undefined })), undefined);
+    assert.equal(occupied(occCtx({ branch: 'work/bro-x', claims: [] })), undefined);
+  });
+
+  test('a live worktree:<path> claim on the candidate tree occupies', () => {
+    const { root, main } = initRepo('rig-occclaim-');
+    try {
+      const wt = join(root, 'pr-wt');
+      git(['-C', main, 'worktree', 'add', wt, '-b', 'work/pr3'], root);
+      const ctx = occCtx({
+        branch: 'work/pr3',
+        worktree: wt,
+        claims: [claimRow({ resource: `worktree:${wt}` })],
+      });
+      assert.match(occupied(ctx) ?? '', /session sess-abc claims worktree:/);
+      // fresh by the heartbeat-renewal stamp (leaseUntil − ttlMs)
+      const g = greenOccupancy(ctx, 60_000);
+      assert.match(g.fresh ?? '', /claims worktree:/);
+      assert.ok((g.silentMs ?? 0) <= 60_000);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('armed detail matches by slug/branch; unrelated claims stay silent', () => {
+    const ctx = occCtx({
+      branch: 'work/bro-x',
+      claims: [
+        claimRow({ resource: 'worktree:/repo/main', detail: 'bro-x' }),
+        claimRow({ resource: 'worktree:/repo/main', detail: 'bro-y', sid: 'sess-other' }),
+        claimRow({ resource: 'role:orchestrator@proj', sid: 'sess-role' }),
+        claimRow({ resource: 'task:bro-x', sid: 'sess-task' }),
+      ],
+    });
+    assert.equal(occupied(ctx), 'session sess-abc claims worktree:/repo/main');
+  });
+
+  test('a stale renewal still occupies but reports stale — the TTL adopts silence', () => {
+    const stale = claimRow({
+      detail: 'bro-x',
+      // last renewal an hour ago (leaseUntil − ttlMs), TTL still
+      // unexpired — liveness is the facade's job; occupancy reads stamps
+      leaseUntil: Date.now() - 3_599_000,
+      claimedAt: Date.now() - 3_700_000,
+      ttlMs: 1_000,
+    });
+    const g = greenOccupancy(occCtx({ branch: 'work/bro-x', claims: [stale] }), 60_000);
+    assert.equal(g.fresh, undefined);
+    assert.match(g.stale ?? '', /claims worktree:/);
+  });
+
+  test('pr:<n> claims match the pass PR; branch:<name> matches by name', () => {
+    const ctx = occCtx({
+      branch: 'work/bro-x',
+      pr: 42,
+      claims: [claimRow({ resource: 'pr:42' })],
+    });
+    assert.match(occupied(ctx) ?? '', /claims pr:42/);
+    const byBranch = occCtx({
+      branch: 'work/bro-x',
+      claims: [claimRow({ resource: 'branch:bro-x' })],
+    });
+    assert.match(occupied(byBranch) ?? '', /claims branch:bro-x/);
+  });
+
+  test('retireOrphanedWorktree keeps a claim-held tree', () => {
+    const { root, main } = initRepo('rig-retclaim-');
+    try {
+      git(['checkout', '-qb', 'work/pr11'], main);
+      git(['checkout', '-q', 'main'], main);
+      const ensured = ensureFixerWorktree(main, 'work/pr11');
+      assert.ok(ensured.path !== undefined);
+      // no marker on disk — the ledger claim alone is the owner proof
+      const occ = retireOrphanedWorktree(
+        main,
+        11,
+        ensured.path!,
+        'work/pr11',
+        undefined,
+        [],
+        [claimRow({ resource: `worktree:${ensured.path}` })]
+      );
+      assert.match(occ ?? '', /claims worktree:/);
+      assert.ok(existsSync(ensured.path!));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

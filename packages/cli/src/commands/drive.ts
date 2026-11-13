@@ -77,6 +77,7 @@ import {
   busSocketPath,
   busSubscribe,
   checkBeads,
+  type ClaimFacade,
   ensureAuth,
   facade,
   facadeName,
@@ -86,6 +87,7 @@ import {
   localLeaseStore,
   projectId,
   reviewHost,
+  sessionProject,
   type BusSubscription,
   type IgnoreCheckRule,
   type ReviewFacade,
@@ -380,6 +382,11 @@ interface Ctx {
   loop: LoopConfig;
   env: AgentConnectorEnv;
   store: TaskStore;
+  /** The claims facade + this repo's project id — `deps.claims`'s
+   *  backing pair (bro-izpyk.10); undefined facade = the ledger is
+   *  absent and occupancy reads marker-only. */
+  claims?: ClaimFacade;
+  project?: string;
   /** The pass's gathered world — rebuilt by the policy's `pass` each
    *  sweep; `freshDrivePass()` seeds the pre-pass empty shape. */
   work: DrivePass;
@@ -1034,6 +1041,16 @@ function driveDeps(ctx: Ctx): DriveDeps {
       return wt.code === 0 ? parseWorktreePorcelain(wt.out) : null;
     },
     collectAgents: () => collectAgents(ctx.mainRoot),
+    // the occupancy rung's claims leg (bro-izpyk.10) — one list per
+    // pass; a failed read degrades to marker-only, never a failed pass
+    ...(ctx.claims === undefined
+      ? {}
+      : {
+          claims: () =>
+            ctx
+              .claims!.list(ctx.project === undefined ? {} : { project: ctx.project })
+              .catch(() => []),
+        }),
     judgeBudget: () => ({
       remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun,
     }),
@@ -1084,6 +1101,16 @@ async function runDrive(
     loop: (broCfg as Record<string, unknown>).loop as LoopConfig,
     env: loadAgentEnv(mainPath),
     store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
+    // claims is best-effort like the occupancy read it feeds — a repo
+    // without the ledger connector just runs the marker-only ladder
+    claims: ((): ClaimFacade | undefined => {
+      try {
+        return facade('claims', { dir: mainPath }, { prefer: broCfg.connectors });
+      } catch {
+        return undefined;
+      }
+    })(),
+    project: sessionProject(mainPath),
     work: freshDrivePass(),
     // the policy's IO surface attaches next — its closures read the
     // finished ctx (say's json route, env, connector, the queue)

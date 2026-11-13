@@ -44,7 +44,8 @@ reader, not per artifact:
 | `liveWorkEntries`/`liveWorkDetails` (rig `proc-owner`) | sync primitive | **stays — as a union leg** | Remains the marker-side read the occupancy ladder and litter sweep consume; not replaced, joined. |
 | occupancy ladder marker rung — `occupied`/`greenOccupancy` (`rig/occupancy.ts`) | sync verdicts over prefetched inputs | **migrates — union** | `OccupancyCtx` already consumes caller-gathered snapshots (`workDetails`, `watches`). It gains `claims?: ClaimRow[]` — rows a caller that *can* go async prefetched via `claims.list({project})`. A live `worktree:<path>`/`branch:`/`pr:` claim matching the candidate is the same "session owns this work" verdict a `.work` marker gives — machine-wide, heartbeat-renewed (`leaseUntil − ttlMs` reads as last proven activity, the `activeAtMs` the merge TTL needs). |
 | `freshOccupancy` / `retireOrphanedWorktree` (in-lock refresh) | sync inside `acquireOccupancyLocks` | **migrates — via prefetch passthrough** | The lock-held section cannot go async (the registry lock is a file lock; an sqlite open inside it widens the contention window for no consistency win — hook-written claims never wait on the occupancy lock anyway). `freshOccupancy`/`retireOrphanedWorktree` gain an optional prefetched `claims` param; callers thread the pass snapshot. |
-| `sessionOwner` (litter keep-plane, `commands/work.ts`) | sync verdict over prefetched ctx | **migrates — union** | `LitterReapOpts.sessionClaims` — `bro work prune` (the sweep's only entry; drive's child spawns the same command) prefetches `claims.list({project})` once. A live claim naming the tree/bead is the same keep-reason a `.work`/`.task` marker gives. |
+| `sessionOwner` (litter keep-plane for in-progress beads, `commands/work.ts`) | sync verdict over prefetched ctx | **migrates — union** | `LitterReapOpts.sessionClaims` — `bro work prune` (the sweep's only entry; drive's child spawns the same command) prefetches `claims.list({project})` once. A live claim naming the tree/bead is the same keep-reason a `.work`/`.task` marker gives. |
+| `litterTreeVerdict` (litter keep-plane for closed-bead trees) | sync under the occupancy lock | **migrates — union** | The closed-bead keep ladder never consulted session markers — its `worktreeClaim` rung reads the in-tree `<gitdir>/bro/work` stamp. A live `worktree:`/`branch:` ledger claim is that stamp's machine-wide twin, so the claims rung sits right after it (same `sessionClaimOn` matcher `sessionOwner` uses; snapshot-fed, no extra IO inside the lock). |
 | `markersExternalActivity` spawn guard (`session-planes/markers.ts`) | sync inside the spawn critical section | **stays** | `ExternalActivityPlane.externalActivity` is synchronous by contract inside the registry-lock spawn section — no async seam exists to read claims through. Worse, its verdict is *ownership classification*: live owner pid + `/proc/<pid>/environ` badges (`BRO_AGENT_ID`, `BRO_HOOKS=0`). Claim rows carry `pid`/`pidStart` but not the badge, so claims alone cannot decide "foreign vs bro-owned" — the plane's whole question. |
 | `worktreeClaim`/`worktreeClaimInfo` (`<gitdir>/bro/work` in-tree stamp) | sync, under `claim.lock`+registry lock | **stays** | A different artifact than session markers: stamped by `claimWorktree` for drivers/operator `work enter`/spawn transitions — callers that often hold **no SessionKey** (a sessionless terminal can't hold a session lease). Its atomicity-under-occupancy-lock is the point; ledger claims write outside that lock and could never offer it. |
 | `fleetOccupancy`/`fleetOccupancyFor`/`entryOccupies`, `registryAgents`, `liveSessionKeysByKind`, `lane.ts` budget/wall lanes, `litterOccupants`, `registryOwner` | sync | **stays on agents.json** | Spawned-agent *slot* accounting: backend liveness (tmux session names, docker containers, native `.handle` pids, `.exit` death files), `molStep`, `spawnedAt`, `runId`, `exitStatus`, `cause`/`resetAt`. None of it is a session lease — a claim row can't express "the tmux session named x is gone". The spec's "occupancy entries become claims" arrives with the spawned-agent→ledger-session write side (`spawned_by` rows exist; claims stamped at spawn are a later F-slice — see Non-goals). |
@@ -85,9 +86,11 @@ sessions would silently vanish from every verdict otherwise).
    `[]` (degraded leg, pass unaffected).
 
 4. **`cli/commands/work.ts`** — `LitterReapOpts.sessionClaims?: ClaimRow[]`
-   → `ctx.claims.sessionClaims`; `sessionOwner` unions claim matches
-   (`detail`/`worktree:`-resource/`bead-id` detail). `cmdPrune` becomes
-   async (`plugin.run` already `await`s) and prefetches best-effort.
+   → `ctx.claims.sessionClaims`; shared `sessionClaimOn` matcher feeds
+   both keep-planes: `sessionOwner` (in-progress claim-release guard)
+   and `litterTreeVerdict` beside the in-tree `worktreeClaim` rung
+   (closed-bead keep). `cmdPrune` becomes async (`plugin.run` already
+   `await`s) and prefetches best-effort.
 
 5. **`cli/commands/hooks.ts`** — `parallelLines` gains a third leg:
    `claims.list({project})` filtered to live foreign holders — own
@@ -128,9 +131,10 @@ provider-specific logic lands in the shared path.
 - `packages/cli/src/commands/work.ts` — `LitterReapOpts.sessionClaims`,
   `sessionOwner` union, async `cmdPrune`.
 - `packages/cli/src/commands/hooks.ts` — `parallelLines` claims leg.
-- Tests: `rig/fleet.test.ts` (claim proofs), `rig` drive-policy claims
-  threading, `cli/commands/hooks.test.ts` (nudge leg), `cli/commands/
-  work.test.ts` (`sessionOwner` union).
+- Tests: `rig/fleet.test.ts` (claim proofs + retire), `rig` drive-policy
+  claims threading, `cli/commands/hooks.test.ts` (nudge leg),
+  `cli/commands/work.e2e.test.ts` (claims keep rung through the real
+  `work prune --loop` spawn).
 
 ## Verification
 
