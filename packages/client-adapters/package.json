@@ -1,0 +1,51 @@
+{
+  "name": "@broject/client-adapters",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "client-adapters": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@broject/brouter": "^0.3.0",
+    "@broject/command": "^0.3.0",
+    "@broject/core": "^0.3.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/client-adapters"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "client-adapters — render the router's served catalog in each thin client's own vocabulary (the model block its settings file carries)",
+  "keywords": [
+    "router",
+    "client",
+    "adapter",
+    "settings",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
+}

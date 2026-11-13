@@ -8,9 +8,8 @@
  * second implementation.
  */
 import { flag } from '@broject/core';
-import { readRouterEndpoint } from './gateway.ts';
+import { readRouterEndpoint, type RouterEndpoint } from './gateway.ts';
 import { routerUrl } from './router-url.ts';
-import type { RouterEndpoint } from './adapter.ts';
 
 /** What a host may inject — the POLICY the router's commands read. */
 export interface RouterPolicy {

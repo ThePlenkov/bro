@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Client Adapters"
+  short_description: "Render the router's served catalog as a thin client's model block"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $client-adapters to write a client's model block from the served catalog."
+policy:
+  allow_implicit_invocation: true

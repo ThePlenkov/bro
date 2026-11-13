@@ -38,7 +38,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "brouter — the model router: the served catalog, the client adapters that render it in each client's own vocabulary, and the protocol clients",
+  "description": "brouter — the model router: the served catalog, the route table and decision model, the outcome ledger, and the protocol clients (thin-client adapters are @broject/client-adapters)",
   "keywords": [
     "router",
     "models",

@@ -212,6 +212,13 @@ test('a malformed --timeout is a usage error — the deadline would never fire',
   assert.match(out.stderr, /--timeout must be a whole number of milliseconds/);
 });
 
+test('a --timeout above the timer ceiling is a usage error — setTimeout would clamp it to 1 ms', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const out = run(['ask', 'ping', '--timeout', '9999999999']);
+  assert.equal(out.code, 2);
+  assert.match(out.stderr, /--timeout must be a whole number of milliseconds/);
+});
+
 test('the explain surface speaks JSON when asked', t => {
   if (!existsSync(CLI)) return t.skip();
   const out = run([
