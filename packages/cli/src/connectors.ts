@@ -25,6 +25,7 @@ import { loopConnector } from './commands/loop-pulse.ts';
 import { watchConnector } from './commands/watch-pulse.ts';
 import { sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
+import { claimConflictConnector } from './commands/claim-conflicts.ts';
 import { herdrConnector } from './commands/herdr-connector.ts';
 import { SPEC_CONNECTORS } from './spec-connectors.ts';
 import { specConnector } from '@broject/spec';
@@ -65,6 +66,9 @@ registerConnector(debtConnector);
 registerConnector(sddConnector);
 // the host-wide session cap — refuses a session start at the cap
 registerConnector(sessionCapConnector);
+// fleet claims — the pre-tool conflict verdict (warn, or block on
+// `claims.conflicts` opt-in); active modes only, observe gets the inbox
+registerConnector(claimConflictConnector);
 registerConnector(notifyConnector);
 // pane report-back — env-gated inside the connector; outside herdr
 // every probe is a no-op (spec bro-84zrj)

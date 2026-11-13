@@ -849,6 +849,35 @@ export const modesSection: ConfigSection<{ default?: Mode }> = raw => {
 
 modesSection.jsonSchema = js.obj({ default: { enum: MODES } });
 
+/** The claims-plane conflict policies (specs/bro-izpyk.8.md): how a
+ *  session-mode-active tool call answers a standing claim conflict on a
+ *  resource it touches. `warn` is the spec default — the conflict lands
+ *  as additionalContext and the call runs; `block` is the project
+ *  opt-in ("blocks only when the project config opts in"); `off` skips
+ *  the claims read entirely. */
+export const CLAIM_CONFLICT_POLICIES = ['warn', 'block', 'off'] as const;
+export type ClaimConflictPolicy = (typeof CLAIM_CONFLICT_POLICIES)[number];
+
+export function isClaimConflictPolicy(v: unknown): v is ClaimConflictPolicy {
+  return typeof v === 'string' && (CLAIM_CONFLICT_POLICIES as readonly string[]).includes(v);
+}
+
+/** bro.config.json `claims` section — the claims plane's project policy.
+ *  `conflicts` picks the pre-tool verdict severity; absent means `warn`
+ *  (the spec default — a project that never configures it still gets the
+ *  conflict context, never a veto it did not ask for). */
+export const claimsSection: ConfigSection<{ conflicts: ClaimConflictPolicy }> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { conflicts?: unknown };
+  if (obj.conflicts !== undefined && !isClaimConflictPolicy(obj.conflicts)) {
+    console.error(
+      `bro.config: claims.conflicts must be one of ${CLAIM_CONFLICT_POLICIES.map(m => `"${m}"`).join('|')} — got ${JSON.stringify(obj.conflicts)}`
+    );
+  }
+  return { conflicts: isClaimConflictPolicy(obj.conflicts) ? obj.conflicts : 'warn' };
+};
+
+claimsSection.jsonSchema = js.obj({ conflicts: { enum: [...CLAIM_CONFLICT_POLICIES] } });
+
 /** The exposed providers — the ROUTES the gateway answers to. Two
  *  spellings: an array of entry names (route ≡ entry, today's form) or a
  *  map of route → entry name (the public name is chosen; the entry keeps
@@ -1610,6 +1639,7 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   brouter: brouterSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
   modes: modesSection as ConfigSection<unknown>,
+  claims: claimsSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
   spawn: spawnSection as ConfigSection<unknown>,
@@ -1727,6 +1757,11 @@ export interface BroConfig {
    *  names the mode sessions without a mode file resolve to; absent
    *  means `observe` and no mode file is ever materialized. */
   modes: { default?: Mode };
+  /** Claims-plane project policy (specs/bro-izpyk.8.md) — `conflicts`
+   *  picks the pre-tool verdict on a standing claim conflict: `warn`
+   *  (default — context, the call runs), `block` (the spec's opt-in
+   *  veto), `off` (no claims read on the pre-tool path). */
+  claims: { conflicts: ClaimConflictPolicy };
   /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
    *  on every backend's spawn — counts live registry agents across all
    *  backends; 0 means uncapped. Default 3. `profiles` holds the named
@@ -1850,6 +1885,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
   modes: {},
+  claims: { conflicts: 'warn' },
   fleet: {
     maxConcurrent: 3,
     profiles: {},
@@ -2110,6 +2146,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   debt: 'policy',
   sdd: 'policy',
   modes: 'policy',
+  claims: 'policy',
   guard: 'policy',
   sweep: 'policy',
   stack: 'policy',
