@@ -100,8 +100,16 @@ negotiation; future layered-install hosts inherit it.
 - Ownership fixture: `.devin/hooks.v1.json` repo shows the plugin
   copy deferring exactly the registered events.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx, S3 stop gate, S7 fail-open (hook chain),
+  S8 dep-degraded, S9 skills, S10 native correlation (project-
+  local hook ownership). S2/S4/S5/S6 pending — the hook chain's
+  per-event coverage is narrower than the manifest hosts';
+  declared, not assumed.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: assets inventory, hook-ownership rule
   promoted to contract, PostCompaction/field-outcome noted.
+- 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); narrower per-event coverage declared pending driver.

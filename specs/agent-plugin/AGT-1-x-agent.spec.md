@@ -176,6 +176,12 @@ already named.
 - **R5** — Honest gaps are contract; silent absence is a defect.
 - **R6** — Degenerate contract: no hook surface → skills + CLI
   only, advisory, explicitly declared.
+- **R7** — The scenario catalog below is the conformance contract:
+  every child spec's Verify maps the S-IDs its host must pass;
+  inapplicable scenarios are declared, never silently omitted.
+- **R8** — A scenario passes only on its stated acceptance
+  criterion, verified against journals (aimock request log,
+  FakeBro/ScriptedCli invocation log) — never on host output alone.
 
 ## Verify
 
@@ -184,6 +190,32 @@ already named.
 - `integrations.md` matrix == `HOOK_MATRIX`.
 - Per-child Verify names live evidence (commands/tools/UX exercised).
 - New-host dry run against the checklist before contract is stable.
+
+## Test scenarios
+
+Canonical catalog — `packages/agent-e2e` implements these against
+real host binaries. Mock planes: **LLM** = aimock HTTP server
+(OpenAI/Anthropic/Responses wires, SSE, journal at
+`/__aimock/journal`); **bro** = FakeBro scripted `bro hooks`
+responder or the real CLI; **deps** = ScriptedCli PATH shims
+(`bd`, `gh`, `dolt`, …). A scenario is *applicable* to a host only
+where its native surface can express the trigger.
+
+| ID | Scenario | Trigger | Acceptance criterion |
+|----|----------|---------|----------------------|
+| S1 | session-start context | session/turn start | hook's `additionalContext` appears verbatim in the first model request body (aimock journal) |
+| S2 | pre-tool guard | model calls a tool | veto (`decision:block`/deny/empty per host) reaches the model as the tool result; the tool never executes; journal shows exactly one guard probe |
+| S3 | stop gate | clean turn end | first stop probe blocks once → host reprompts → second probe (with `stop_hook_active`) passes → turn ends; failed/interrupted turns never gate |
+| S4 | `/bro` dispatch | user runs `/bro <args>` | host executes `bro <args>` (quote-aware split) and surfaces output per its semantics — transcript injection or next-prompt; bare `/bro` defaults to `status` |
+| S5 | compaction rehydrate | context compaction | post-compaction hook re-primes; the next model request carries fresh context (aimock journal delta) |
+| S6 | multi-turn | N prompts, one session | hooks fire per turn in declared order; journals show the expected event sequence with no cross-turn leakage |
+| S7 | fail-open | CLI missing / nonzero exit / malformed JSON / timeout | host completes the turn unharmed; journal records the attempt; no crash, no silent swallow of host-native behavior |
+| S8 | service-degraded | downstream dep fails (bd/dolt/gh via ScriptedCli) | hook responds within contract — degraded context allowed, host never blocked by dep failure; dep journal shows the call |
+| S9 | skills delivery | plugin install | plugin skills register exactly once; dedup vs `~/.agents/skills/` holds; no shadowing of native skills |
+| S10 | native correlation | plugin + native commands coexist | plugin assets extend, never shadow — `/loop`, `/goal`, native slash commands and tools keep native behavior (AGT-1 §Native correlation) |
+
+Hosts declare applicability in their child spec's Verify; the
+e2e suite tags each test with its S-ID so coverage is auditable.
 
 ## Changelog
 
@@ -197,3 +229,7 @@ already named.
   `adapter-core/core.ts`; opencode + kilo migrated off their
   verbatim-copy helper blocks (kilo gains the full CLI ladder incl.
   npx, opencode's pinned `command` is now probed like every tier).
+- 2026-11-12 — v4: Test scenarios catalog (S1–S10) — canonical
+  conformance contract with per-scenario acceptance criteria
+  verified against journals; mock planes named (aimock LLM,
+  FakeBro, ScriptedCli deps). R7/R8 bind children to the catalog.

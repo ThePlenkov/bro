@@ -114,6 +114,16 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   context, board widget, `bro_*` tools callable, `/bro` output,
   attention toasts; `POST /api/rpc/bro/board` returns board JSON.
 
+- **Scenario map** (AGT-1 §Test scenarios): implemented e2e —
+  S1 session-start ctx, S2 pre-tool veto, S3 stop gate (serve
+  mode, v2 `session.execution.*` taxonomy) in
+  `fakebro.e2e.test.ts` + `opencode.e2e.test.ts` (S-coverage:
+  run-turn, ≥8 direct `bro_*` tools). Declared applicable —
+  S4 `/bro`+`/act` dispatch, S5 compaction rehydrate,
+  S6 multi-turn, S7 fail-open, S9 skills dedup, S10 native
+  correlation. Pending — S8 dep-degraded (ScriptedCli wiring
+  into real-bro runs).
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
@@ -144,3 +154,4 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   gains FakeBro (scripted `bro hooks` responder + journal) and the
   serve-mode driver; the stop-gate scenario now runs live against
   `opencode serve`.
+- 2026-11-12 — v6: Verify gains the AGT-1 scenario map — S1/S2/S3 implemented e2e today; S8 pending ScriptedCli wiring.

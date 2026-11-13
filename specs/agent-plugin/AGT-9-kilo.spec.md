@@ -89,6 +89,13 @@ binding dedups so hydration injects once.
 - Live: `bro` tool callable with subcommand args, transform
   injection visible, idle notify fires, no stop block attempted.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx, S4 `bro` tool dispatch (write-capable
+  `sub`+`args` — the only write tool in the family), S7
+  fail-open, S9 skills, S10 native correlation. Not applicable —
+  S3 stop gate (`stopRefusal:'none'` — notify-only by design,
+  declared gap), S2 pending driver. Pending — S5/S6/S8.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
@@ -103,3 +110,4 @@ binding dedups so hydration injects once.
   takes the first control line like every adapter (was last-line);
   the dead `BRO_HOOK_INPUT` env is gone; tool runs share
   `RUN_TIMEOUT_MS`.
+- 2026-11-12 — v4: Verify gains the AGT-1 scenario map; S3 declared not-applicable (notify-only stop).

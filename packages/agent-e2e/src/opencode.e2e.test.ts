@@ -9,7 +9,7 @@ import { startMock } from './mock.ts';
 import { makeEnv, which } from './env.ts';
 import { installOpencodePlugin, runOpencode, writeOpencodeConfig } from './hosts/opencode.ts';
 
-test('opencode run completes a turn against the mock LLM', {
+test('run-turn: opencode run completes a turn against the mock LLM (S-coverage: tools+journal)', {
   skip: which('opencode') === null && 'opencode binary not on PATH',
 }, async () => {
   await using mock = await startMock();

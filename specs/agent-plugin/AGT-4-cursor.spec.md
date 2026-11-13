@@ -106,8 +106,17 @@ resolve inside the checkout).
 - Live: first-prompt rehydration (cloud path), `bro` shell auto-
   approve, gated stop → exactly one follow-up.
 
+- **Scenario map** (AGT-1 §Test scenarios): applicable — S1
+  session-start ctx, S2 pre-tool deny (empty-reply-is-deny
+  semantics), S3 stop gate (reprompt bounded by `loop_limit:1` —
+  the scenario asserts exactly one reprompt, never a loop), S7
+  fail-open, S8 dep-degraded, S9 skills, S10 native correlation.
+  Not applicable — S4 `/bro` (no command surface), S5/S6 pending
+  driver verification.
+
 ## Changelog
 
 - 2026-11-12 — v1 draft.
 - 2026-11-12 — v2 rewrite: assets inventory, mandatory-answer rule
   promoted to contract-level, cloud fallback named.
+- 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); S3 asserts loop_limit:1 single reprompt.

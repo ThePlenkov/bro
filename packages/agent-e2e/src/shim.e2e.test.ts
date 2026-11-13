@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { makeEnv, run } from './env.ts';
 import { ScriptedCli } from './mocks/shim.ts';
 
-test('scripted bd answers ready/show and journals argv', async () => {
+test('S8 substrate: scripted bd answers ready/show and journals argv', async () => {
   const e = makeEnv();
   const bd = new ScriptedCli('bd', {
     rules: [
