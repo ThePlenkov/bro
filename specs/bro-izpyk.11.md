@@ -71,7 +71,7 @@ the test seam for claim-free collects.
 
 - Table gains **CLAIMS** and **RESUME** columns after BEAD:
 
-  - `CLAIMS` — sorted URIs joined `, `. `worktree:` values are
+  - `CLAIMS` — sorted URIs joined ", ". `worktree:` values are
     `~`-collapsed through the same `displayWorktree` the WORKTREE
     column uses (display-only; --json carries the full URI).
     `role:*`/`branch:*`/`pr:*`/`path:*` render verbatim.
