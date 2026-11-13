@@ -11,7 +11,7 @@
  * is a plugin whose complexity nobody can name.
  */
 import { type CommandPlugin, definePlugin } from '@broject/command';
-import { explainSlicesOrExit, flag, positionals, renderExplanation } from '@broject/core';
+import { explainSlicesOrExit, flag, flagZone, positionals, renderExplanation } from '@broject/core';
 import { runAcpFacade } from './acp.ts';
 import { runAsk } from './ask.ts';
 import { BOOL_FLAGS, VALUE_FLAGS } from './policy.ts';
@@ -39,10 +39,13 @@ function laneFlags(argv: string[]): LaneFlags {
   const timeout = flag(argv, '--timeout');
   if (timeout !== undefined) {
     // the budget is a deadline: a float or a NaN makes every comparison
-    // against it false, and the call never times out
+    // against it false, and the call never times out. The ceiling is
+    // Node's timer limit — setTimeout clamps a delay above 2^31-1 to
+    // 1 ms, so a bigger budget would expire instantly instead of
+    // bounding the call.
     const ms = Number(timeout);
-    if (!Number.isInteger(ms) || ms <= 0) {
-      console.error('error: --timeout must be a whole number of milliseconds');
+    if (!Number.isInteger(ms) || ms <= 0 || ms > 2_147_483_647) {
+      console.error('error: --timeout must be a whole number of milliseconds ≤ 2147483647');
       process.exit(2);
     }
     flags.timeoutMs = ms;
@@ -62,6 +65,9 @@ function askPlugin(): CommandPlugin {
         console.error('error: brouter ask needs a question');
         process.exit(2);
       }
+      // flags live before `--` — a question asking about --json or
+      // --no-cache must not also trip the switch (`ask -- --json`)
+      const zone = flagZone(argv);
       const dir = process.cwd();
       const routes = routeTablePath(dir, argv);
       const formula = formulaPath(dir, argv);
@@ -73,11 +79,11 @@ function askPlugin(): CommandPlugin {
         ...(formula === undefined ? {} : { formula }),
         // --no-cache bypasses the decision cache for this ask
         // (bro-0ykhg.3) — entries stay, only the consult is skipped
-        ...(argv.includes('--no-cache') ? { noCache: true } : {}),
+        ...(zone.includes('--no-cache') ? { noCache: true } : {}),
         ...(slices === undefined ? {} : { slices }),
       };
       const outcome = await runAsk(request, dir);
-      if (argv.includes('--json')) {
+      if (zone.includes('--json')) {
         console.log(JSON.stringify(outcome, null, 2));
         return;
       }

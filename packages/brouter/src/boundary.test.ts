@@ -38,7 +38,12 @@ test('no brouter source imports the client adapters', () => {
   // an import/export specifier naming the package — prose mentions in
   // doc comments are not edges
   const specifier = /(?:from|import|require)\s*\(?\s*['"][^'"]*client-adapters/;
-  const offenders = sources(SRC)
+  const files = sources(SRC);
+  // the check is only as strong as its file list — the suite runs on
+  // sources (tsx --test src/**), so an empty scan would mean the test
+  // is anchored somewhere with no .ts files and proves nothing
+  assert.ok(files.length > 0, 'the boundary scan must see brouter sources');
+  const offenders = files
     .filter(path => specifier.test(readFileSync(path, 'utf8')))
     .map(path => path.slice(SRC.length));
   assert.deepEqual(offenders, []);
