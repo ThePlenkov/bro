@@ -69,14 +69,11 @@ export function claimConflictPolicy(dir: string): ClaimConflictPolicy {
 // at any depth. Copied, not imported: core cannot reach @broject/learn
 // and the hook path carries no glob dep of its own.
 
-const GLOB_TOKEN = /\*\*\/|\*\*|\*|\?|[^*?]+/g;
-
-/** Bound on path-claim glob complexity. The translated regex runs
- *  synchronously on the pre-tool path, where nothing can interrupt a
- *  pathological pattern (many unbounded `*` segments around literals
- *  backtrack through the whole hook timeout — Codacy CWE-1333).
- *  `bro claim path` rejects out-of-bounds globs at admission; the
- *  matcher refuses them too, since rows can arrive from anywhere. */
+/** Sanity bounds on path-claim globs — the matcher below is
+ *  linear-time, so this is not the safety mechanism; it keeps absurd
+ *  inputs (a megabyte glob) honest and gives `bro claim path` a clear
+ *  rejection at admission. Matcher and admission check the SAME
+ *  string, so the gates can never disagree. */
 export const MAX_CLAIM_GLOB_LENGTH = 200;
 export const MAX_CLAIM_GLOB_WILDCARDS = 24;
 
@@ -96,33 +93,112 @@ export function claimGlobWithinBounds(glob: string): boolean {
   return true;
 }
 
-function globToRe(glob: string): RegExp {
-  const re = glob.replace(GLOB_TOKEN, tok => {
-    switch (tok) {
-      case '**/':
-        return '(?:.*/)?';
-      case '**':
-        return '.*';
-      case '*':
-        return '[^/]*';
-      case '?':
-        return '[^/]';
-      default:
-        return tok.replace(/[^a-zA-Z0-9]/g, c => `\\${c}`);
+/** Linear-time glob match — a Thompson NFA over the token stream,
+ *  O(tokens × path), no regex and no backtracking: the pre-tool path
+ *  runs it synchronously where nothing can interrupt a pathological
+ *  pattern (Codacy CWE-1333 / ReDoS).
+ *
+ * Tokens: `*` any run of non-slash, `**` any run incl slash, `?`
+ * exactly one non-slash, literals exact. `**`-slash is "zero or more
+ * dirs" — an optional group compiled as a `skip` epsilon token so the
+ * group can only be skipped BEFORE it consumes anything (a regex
+ * optional-group evaluates `?` at group entry, not mid-star). */
+type GlobTok =
+  | { k: 'lit'; c: string }
+  | { k: 'seg' } // `*`  — zero+ chars, none `/`
+  | { k: 'any' } // `**` — zero+ chars incl `/`
+  | { k: 'one' } // `?`  — exactly one non-`/` char
+  | { k: 'skip'; skipTo: number }; // epsilon: next token, or skipTo
+
+function globTokens(glob: string): GlobTok[] {
+  const t: GlobTok[] = [];
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        if (glob[i + 2] === '/') {
+          t.push({ k: 'skip', skipTo: t.length + 3 }, { k: 'any' }, { k: 'lit', c: '/' });
+          i += 2;
+        } else {
+          t.push({ k: 'any' });
+          i += 1;
+        }
+      } else {
+        t.push({ k: 'seg' });
+      }
+    } else if (c === '?') {
+      t.push({ k: 'one' });
+    } else {
+      t.push({ k: 'lit', c: c! });
     }
-  });
-  return new RegExp(`^${re}$`);
+  }
+  return t;
+}
+
+function globMatch(glob: string, path: string): boolean {
+  const t = globTokens(glob);
+  const n = t.length;
+  // ε-closure: skip tokens fan out to {i+1, skipTo}, star tokens add
+  // i+1 (their zero-width match); lit/one have no epsilon edges.
+  const closure = (seed: Iterable<number>): Set<number> => {
+    const out = new Set<number>();
+    const stack = [...seed];
+    while (stack.length > 0) {
+      const i = stack.pop()!;
+      if (out.has(i)) {
+        continue;
+      }
+      out.add(i);
+      if (i >= n) {
+        continue;
+      }
+      const tok = t[i]!;
+      if (tok.k === 'skip') {
+        stack.push(i + 1, tok.skipTo);
+      } else if (tok.k === 'seg' || tok.k === 'any') {
+        stack.push(i + 1);
+      }
+    }
+    return out;
+  };
+  let cur = closure([0]);
+  for (let pi = 0; pi < path.length; pi++) {
+    const ch = path[pi]; // code units — same alphabet the tokenizer used
+    const next = new Set<number>();
+    for (const i of cur) {
+      if (i >= n) {
+        continue;
+      }
+      const tok = t[i]!;
+      const hit =
+        tok.k === 'lit'
+          ? tok.c === ch
+          : tok.k === 'one' || tok.k === 'seg'
+            ? ch !== '/'
+            : tok.k === 'any';
+      if (hit) {
+        // a star that consumed keeps its state — the closure re-adds
+        // i+1, so "match some then continue" and "match zero" coexist
+        next.add(tok.k === 'seg' || tok.k === 'any' ? i : i + 1);
+      }
+    }
+    if (next.size === 0) {
+      return false;
+    }
+    cur = closure(next);
+  }
+  return cur.has(n);
 }
 
 function matchClaimPath(path: string, pattern: string): boolean {
-  const glob = pattern.endsWith('/') ? `**/${pattern}**` : pattern;
-  if (!claimGlobWithinBounds(glob)) {
-    // a claim too complex to evaluate safely never reaches the regex —
-    // it cannot produce a verdict (the hook stays fail-open)
+  if (!claimGlobWithinBounds(pattern)) {
+    // the same bound `bro claim path` enforces at admission — a row
+    // too complex to evaluate cannot produce a verdict (fail-open)
     return false;
   }
+  const glob = pattern.endsWith('/') ? `**/${pattern}**` : pattern;
   const target = glob.includes('/') ? path : path.slice(path.lastIndexOf('/') + 1);
-  return globToRe(glob).test(target);
+  return globMatch(glob, target);
 }
 
 // --- touched resources ---------------------------------------------------------

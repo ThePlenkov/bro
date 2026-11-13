@@ -1,9 +1,16 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { realpathSync } from 'node:fs';
 import {
   inboxPath,
   ledgerFacade,
@@ -272,7 +279,7 @@ describe('claimConflictVerdicts', () => {
     assert.equal(v.length, 1);
   });
 
-  test('out-of-bounds path globs never reach the regex', async () => {
+  test('out-of-bounds path globs never reach the matcher', async () => {
     // pathological wildcard fan-out — admission rejects the same shape,
     // but a row from any other source must not stall the hook either
     const blowup = `path:${'*a'.repeat(30)}*b`;
@@ -283,6 +290,64 @@ describe('claimConflictVerdicts', () => {
       { policy: 'block', claims: fakeClaims(rows), cwd: dir, project: 'P1' }
     );
     assert.deepEqual(v, []);
+  });
+
+  test('a dense in-bounds wildcard glob evaluates in linear time', async () => {
+    // '*a'×12+'b' = 13 wildcards — the classic super-linear shape a
+    // backtracking regex chokes on; the NFA matcher stays O(tok×path)
+    const dense = `path:${'*a'.repeat(12)}b`;
+    const rows = [claimRow({ resource: dense })];
+    const v = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'a'.repeat(200)) }, 'Edit'),
+      { policy: 'block', claims: fakeClaims(rows), cwd: dir, project: 'P1' }
+    );
+    assert.deepEqual(v, []); // no 'b' — no match, but no hang either
+  });
+
+  test('glob dialect: ? stays in-segment, **/ is zero-or-more dirs', async () => {
+    const hit = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'src', 'fix.ts') }, 'Edit'),
+      {
+        policy: 'warn',
+        claims: fakeClaims([claimRow({ resource: 'path:src/?ix.ts' })]),
+        cwd: dir,
+        project: 'P1',
+      }
+    );
+    assert.equal(hit.length, 1);
+    const miss = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'src', 'd', 'fix.ts') }, 'Edit'),
+      {
+        policy: 'warn',
+        claims: fakeClaims([claimRow({ resource: 'path:src/?ix.ts' })]),
+        cwd: dir,
+        project: 'P1',
+      }
+    );
+    assert.deepEqual(miss, []);
+    // `**/x` matches `x` at any depth — the relative frame exercises
+    // the zero-dir skip, the absolute one the dir-consuming branch
+    const top = await claimConflictVerdicts(ctx(dir), toolCall({ file_path: 'leaf.ts' }, 'Edit'), {
+      policy: 'warn',
+      claims: fakeClaims([claimRow({ resource: 'path:**/leaf.ts' })]),
+      cwd: dir,
+      project: 'P1',
+    });
+    assert.equal(top.length, 1);
+    const deep = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'a', 'b', 'leaf.ts') }, 'Edit'),
+      {
+        policy: 'warn',
+        claims: fakeClaims([claimRow({ resource: 'path:**/leaf.ts' })]),
+        cwd: dir,
+        project: 'P1',
+      }
+    );
+    assert.equal(deep.length, 1);
   });
 
   test('a null-project path claim still counts', async () => {
