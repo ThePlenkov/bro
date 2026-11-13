@@ -258,15 +258,14 @@ interface ParsedBody {
   present: Set<SpecField>;
 }
 
-/** One parseBody pass's mutable state — the section sinks plus the
- *  fence marker currently open (null outside a fence). */
+/** One parseBody pass's mutable state — the section sinks (fence
+ *  state lives in walkBody, the shared walk). */
 interface ParseState {
   bodyLines: Line[];
   /** the sink the next line lands in — bodyLines or a section's. */
   cur: Line[];
   present: Set<SpecField>;
   content: Map<SpecField, Line[]>;
-  fence: FenceMark | null;
 }
 
 /** Heading → the managed field it opens. Own-key gated: a prototype
@@ -303,44 +302,44 @@ function closesOn(f: FenceMark, open: FenceMark): boolean {
   return f.len >= open.len;
 }
 
-/** A line inside an open fence — literal text; only its closer
- *  reopens the live stream. */
-function fencedLine(raw: string, f: FenceMark | null, open: FenceMark, st: ParseState): void {
-  st.cur.push({ t: raw, fenced: true });
-  if (f !== null && closesOn(f, open)) st.fence = null;
-}
-
-/** The line that opens a fence — it is itself fenced content. */
-function openFence(raw: string, f: FenceMark, st: ParseState): void {
-  st.fence = f;
-  st.cur.push({ t: raw, fenced: true });
-}
-
-/** A live (unfenced) line — either section content or the heading
- *  that retargets the sink. */
-function liveLine(raw: string, st: ParseState): void {
-  const h = headingOf(raw);
-  if (h === null) {
-    st.cur.push({ t: raw, fenced: false });
-    return;
+/** THE fence/heading walk over a body — the ONE state machine both
+ *  the parser and the annotate dedup consume, so a change to fence
+ *  rules, indent handling, or heading legality can never drift the
+ *  two section models apart. Fence state runs ahead of heading
+ *  detection: inside ```/~~~ no heading opens and no bullet counts.
+ *  The visitor gets every line exactly once, classified:
+ *    fenced  — a fence opener, content, or closer (all opaque text)
+ *    heading — a live ATX heading (what it opens is the consumer's
+ *              semantics, not the walk's)
+ *    line    — any other live line */
+function walkBody(
+  body: string,
+  v: {
+    fenced: (raw: string) => void;
+    heading: (h: Heading, raw: string) => void;
+    line: (raw: string) => void;
   }
-  openSection(h, raw, st);
-}
-
-/** One body line through the fence/heading state machine — fence
- *  state runs ahead of heading detection: inside ```/~~~ no heading
- *  opens and no bullet counts. */
-function feedLine(raw: string, st: ParseState): void {
-  const f = fenceOf(raw);
-  if (st.fence !== null) {
-    fencedLine(raw, f, st.fence, st);
-    return;
+): void {
+  let fence: FenceMark | null = null;
+  for (const raw of body.split(/\r?\n/)) {
+    const f = fenceOf(raw);
+    if (fence !== null) {
+      v.fenced(raw);
+      if (f !== null && closesOn(f, fence)) fence = null;
+      continue;
+    }
+    if (f !== null) {
+      v.fenced(raw);
+      fence = f;
+      continue;
+    }
+    const h = headingOf(raw);
+    if (h === null) {
+      v.line(raw);
+    } else {
+      v.heading(h, raw);
+    }
   }
-  if (f !== null) {
-    openFence(raw, f, st);
-    return;
-  }
-  liveLine(raw, st);
 }
 
 /** Item sections — bullets when present, non-empty lines else. */
@@ -380,11 +379,12 @@ function parseBody(description: string): ParsedBody {
     cur: bodyLines,
     present: new Set(),
     content: new Map(),
-    fence: null,
   };
-  for (const raw of description.split(/\r?\n/)) {
-    feedLine(raw, st);
-  }
+  walkBody(description, {
+    fenced: raw => st.cur.push({ t: raw, fenced: true }),
+    heading: (h, raw) => openSection(h, raw, st),
+    line: raw => st.cur.push({ t: raw, fenced: false }),
+  });
   return { fields: fieldsOf(st.content, st.bodyLines), present: st.present };
 }
 
@@ -466,37 +466,27 @@ interface SectionSpan {
   lines: string[];
 }
 
-/** Every live level-2 section's content — one fence/heading walk over
- *  the same machinery the parser uses, so the dedup sees exactly the
- *  sections the spec read does: a `## X` inside ```/~~~ is an example,
- *  never a section; fence lines inside a section are literal content;
- *  ANY live heading (any level) closes the open span — a `###`
- *  subsection ends `## Questions`' content the same way it ends a
- *  managed section's. */
+/** Every live level-2 section's content — the SAME walkBody pass the
+ *  parser runs, so the dedup sees exactly the sections the spec read
+ *  does (one state machine, never two to drift): a `## X` inside
+ *  ```/~~~ is an example, never a section; fence lines inside a
+ *  section are literal content; ANY live heading (any level) closes
+ *  the open span — a `###` subsection ends `## Questions`' content
+ *  the same way it ends a managed section's. Unlike the parser the
+ *  span records EVERY live level-2 heading — a duplicate `##` still
+ *  marks its own artifact section even when first-wins keeps it out
+ *  of the spec projection. */
 function sectionSpans(body: string): SectionSpan[] {
   const spans: SectionSpan[] = [];
-  let fence: FenceMark | null = null;
   let cur: SectionSpan | null = null;
-  for (const raw of body.split(/\r?\n/)) {
-    const f = fenceOf(raw);
-    if (fence !== null) {
-      if (cur !== null) cur.lines.push(raw);
-      if (f !== null && closesOn(f, fence)) fence = null;
-      continue;
-    }
-    if (f !== null) {
-      if (cur !== null) cur.lines.push(raw);
-      fence = f;
-      continue;
-    }
-    const h = headingOf(raw);
-    if (h !== null) {
+  walkBody(body, {
+    fenced: raw => cur?.lines.push(raw),
+    heading: (h, _raw) => {
       cur = h.level === 2 ? { name: h.name, lines: [] } : null;
       if (cur !== null) spans.push(cur);
-      continue;
-    }
-    if (cur !== null) cur.lines.push(raw);
-  }
+    },
+    line: raw => cur?.lines.push(raw),
+  });
   return spans;
 }
 

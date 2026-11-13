@@ -462,11 +462,12 @@ function drainOutcome(
  *  fail-closed `answer-malformed` alert. Well-formed `answer`
  *  records land on the item under `## Answers` before `consume`
  *  stamps the drain point: a crash between the two re-feeds the rows
- *  on the next wake — the annotate is append-shaped, so a re-drain
- *  of the same records dedups inside taskSpec (content-identical →
- *  no second section) and differing records still add a fresh
- *  section, never a clobber (the marker's whole job is making the
- *  NORMAL wake exactly-once). Malformed records are
+ *  on the next wake. The write itself stays additive — a re-drain
+ *  never clobbers earlier sections — and the dedup is taskSpec's own
+ *  content compare, not a property of the append: an identical
+ *  re-annotated artifact skips (no second section) while differing
+ *  records still add a fresh section (the marker's whole job is
+ *  making the NORMAL wake exactly-once). Malformed records are
  *  consumed too — consumed does not mean landed; it means "was
  *  offered once" — so the same bad row can't re-alert every wake. */
 async function landAnswers(
