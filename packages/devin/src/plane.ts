@@ -11,7 +11,7 @@
  *  session-planes module owns the mutex/reservation/quota mechanics,
  *  this file owns ONLY how devin marks and counts its sessions. */
 import { existsSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, uptime } from 'node:os';
 import { join } from 'node:path';
 import {
   ownedEnviron,
@@ -162,14 +162,90 @@ function controllingTty(pid: number, procDir: string): number | undefined {
   return Number.isInteger(tty) ? tty : undefined;
 }
 
+/** One jiffie of /proc starttime in ms — USER_HZ is 100 on every
+ *  mainstream kernel, and the lock bound's slew tolerance absorbs any
+ *  odd clock-tick rate anyway. */
+const JIFFY_MS = 10;
+
+/** How far past the lock's last change a named pid may start and still
+ *  be the process the lock meant. A lock can only name a pid that
+ *  exists, so `procStart <= lastWrite` is the identity invariant — but
+ *  a `devin --resume`'s lock/child race and an early-boot RTC step were
+ *  observed at ~2s on this host (2026-11-13: two live sessions whose
+ *  acp pids started 1.2–1.8s after their lock's mtime — the
+ *  jiffies→epoch conversion anchors on os.uptime(), so a stepped RTC
+ *  shows up here verbatim). A recycled pid — the phantom the quota
+ *  chokes on — arrives minutes to whole boot cycles late, never
+ *  seconds. */
+const LOCK_PID_SKEW_MS = 60_000;
+
+/** The pid's /proc starttime (field 22, jiffies since boot) → epoch ms.
+ *  Undefined when the stat is unreadable or malformed: the same
+ *  fail-open contract as the cmdline read — an unverifiable pid stays
+ *  counted, never a false "stale". */
+function procStartMs(pid: number, procDir: string): number | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(join(procDir, String(pid), 'stat'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  // the comm is parenthesised and may hold spaces — parse after the
+  // LAST ')' like controllingTty does; starttime is field 22 → rest[19]
+  const rest = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+  const jiffies = Number(rest[19]);
+  if (!Number.isFinite(jiffies) || jiffies <= 0) {
+    return undefined;
+  }
+  return Date.now() - uptime() * 1000 + jiffies * JIFFY_MS;
+}
+
+/** The lock's last-change bound — the earliest stamp the pid content
+ *  could have been written at: min(mtime, ctime). A `chmod` refreshes
+ *  ctime without touching the write bound; a copied-in file keeps its
+ *  real mtime. Undefined when the stat fails — the file raced away or
+ *  cannot be read, and an unverifiable bound must not invent staleness. */
+function lockWriteBoundMs(path: string): number | undefined {
+  try {
+    const st = statSync(path);
+    return Math.min(st.mtimeMs, st.ctimeMs);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Is this lock a live devin session? A lock names a pid; the pid
- *  must be alive AND still be the devin cli (a recycled number is a
- *  stale lock). */
-function lockIsLiveSession(pid: number | undefined, procDir: string): pid is number {
+ *  must be alive, still be the devin cli — AND still be the process the
+ *  lock was written for. The cmdline check can't see two phantoms: a
+ *  pid recycled into ANOTHER devin-named process (serve's `devin acp` /
+ *  `devin rm` churn recycles dead session pids into devin argv[0]s —
+ *  bro-q0v0e), and a foreign uid's unreadable cmdline that fails open.
+ *  The write bound sees both: the pid a lock names existed at write
+ *  time, so a /proc starttime that postdates the lock's last change by
+ *  more than the slew tolerance is a stranger wearing the number —
+ *  /proc stat stays world-readable where cmdline is not. */
+function lockIsLiveSession(
+  pid: number | undefined,
+  lockPath: string,
+  procDir: string
+): pid is number {
   if (pid === undefined) {
     return false;
   }
-  return pidAlive(pid) && isDevinProcess(pid, procDir);
+  if (!pidAlive(pid) || !isDevinProcess(pid, procDir)) {
+    return false;
+  }
+  const bound = lockWriteBoundMs(lockPath);
+  if (bound === undefined) {
+    // raced delete or unreadable — unverifiable stays counted, the
+    // same fail-closed contract the cmdline read holds
+    return true;
+  }
+  const start = procStartMs(pid, procDir);
+  if (start === undefined) {
+    return true;
+  }
+  return start <= bound + LOCK_PID_SKEW_MS;
 }
 
 /** Live devin locks across the dirs — pid → every lock naming it,
@@ -184,7 +260,7 @@ function liveDevinLocks(dirs: string[], procDir = '/proc'): Map<number, string[]
   for (const dir of dirs) {
     for (const name of lockNames(dir)) {
       const pid = lockPid(dir, name);
-      if (!lockIsLiveSession(pid, procDir)) {
+      if (!lockIsLiveSession(pid, join(dir, name), procDir)) {
         continue;
       }
       const session = name.slice(0, -'.lock'.length);
