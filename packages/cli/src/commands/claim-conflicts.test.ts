@@ -1,8 +1,9 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
 import {
   inboxPath,
   ledgerFacade,
@@ -213,6 +214,77 @@ describe('claimConflictVerdicts', () => {
     assert.deepEqual(v, []);
   });
 
+  test('a project-scoped row cannot veto a session with no project', async () => {
+    // our project unresolvable → we are provably not in the row's
+    // project (sessionProject derives the id deterministically per dir);
+    // accepting the row would let a foreign project's claim block us
+    const rows = [claimRow({ resource: 'path:src/**', project: 'OTHER' })];
+    const v = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'src', 'a.ts') }, 'Edit'),
+      { policy: 'block', claims: fakeClaims(rows), cwd: dir, project: null }
+    );
+    assert.deepEqual(v, []);
+  });
+
+  test('a null-project row still counts when our project is unresolved', async () => {
+    const rows = [claimRow({ resource: 'path:src/**', project: null })];
+    const v = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'src', 'a.ts') }, 'Edit'),
+      { policy: 'warn', claims: fakeClaims(rows), cwd: dir, project: null }
+    );
+    assert.equal(v.length, 1);
+  });
+
+  test('tool paths resolve against the tool cwd before going repo-relative', async () => {
+    // ctx.dir = repo root, session cwd = <root>/sub: `../src/a.ts` from
+    // the tool means <root>/src/a.ts — the dir-relative frame must see it
+    const sub = join(dir, 'sub');
+    mkdirSync(sub, { recursive: true });
+    const rows = [claimRow({ resource: 'path:src/**' })];
+    const v = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: '../src/a.ts' }, 'Edit'),
+      { policy: 'warn', claims: fakeClaims(rows), cwd: sub, project: 'P1' }
+    );
+    assert.equal(v.length, 1);
+  });
+
+  test('a tool path through a symlinked parent lands on the claimed tree', async () => {
+    // /alias → <dir>/claimed-wt: a write to <alias>/new.ts (uncreated)
+    // still conflicts with worktree:<claimed-wt> — the longest existing
+    // parent resolves, the nonexistent tail re-appends lexically
+    const claimed = join(dir, 'claimed-wt');
+    mkdirSync(claimed, { recursive: true });
+    const alias = join(dir, 'alias-link');
+    try {
+      symlinkSync(claimed, alias);
+    } catch {
+      return; // filesystems without symlink support — nothing to verify
+    }
+    const rows = [claimRow({ resource: `worktree:${realpathSync(claimed)}` })];
+    const v = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(alias, 'new.ts') }, 'Edit'),
+      { policy: 'warn', claims: fakeClaims(rows), cwd: join(dir, 'outside'), project: 'P1' }
+    );
+    assert.equal(v.length, 1);
+  });
+
+  test('out-of-bounds path globs never reach the regex', async () => {
+    // pathological wildcard fan-out — admission rejects the same shape,
+    // but a row from any other source must not stall the hook either
+    const blowup = `path:${'*a'.repeat(30)}*b`;
+    const rows = [claimRow({ resource: blowup })];
+    const v = await claimConflictVerdicts(
+      ctx(dir),
+      toolCall({ file_path: join(dir, 'a.ts') }, 'Edit'),
+      { policy: 'block', claims: fakeClaims(rows), cwd: dir, project: 'P1' }
+    );
+    assert.deepEqual(v, []);
+  });
+
   test('a null-project path claim still counts', async () => {
     const rows = [claimRow({ resource: 'path:src/**', project: null })];
     const v = await claimConflictVerdicts(
@@ -286,6 +358,10 @@ describe('claimConflictVerdicts', () => {
   test('the connector is active in every mode except observe', () => {
     const modes = claimConflictConnector.activeIn?.preTool ?? [];
     assert.deepEqual([...modes].sort(), ['code', 'orchestrate', 'plan', 'review']);
+  });
+
+  test('the connector name does not squat the claims facade namespace', () => {
+    assert.equal(claimConflictConnector.name, 'claim-conflicts');
   });
 });
 

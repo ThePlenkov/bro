@@ -2069,9 +2069,13 @@ async function emitPromptContext(input: HookInput): Promise<void> {
  *  sqlite, and a lost write costs one claim row, not a gate. */
 let hookClaims: import('@broject/core').ClaimFacade | undefined;
 
-function claimWorktreeArm(sessionId: string, detail: string): void {
+function claimWorktreeArm(
+  sessionId: string,
+  detail: string,
+  env: NodeJS.ProcessEnv = process.env
+): void {
   try {
-    const host = hookHost ?? hookHostOf(process.env);
+    const host = hookHost ?? hookHostOf(env);
     if (host === '' || host === 'unknown') {
       return;
     }
@@ -2098,7 +2102,7 @@ function claimWorktreeArm(sessionId: string, detail: string): void {
         }
         const c = res.conflict;
         const holder = c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`;
-        appendSessionInbox(process.env, host, sessionId, {
+        appendSessionInbox(env, host, sessionId, {
           ts: Date.now(),
           from: 'bro',
           kind: 'info',

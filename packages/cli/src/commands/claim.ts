@@ -42,7 +42,12 @@ import {
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { agentOwner } from '@broject/rig';
-import { noteRefusedClaim } from './claim-conflicts.ts';
+import {
+  claimGlobWithinBounds,
+  MAX_CLAIM_GLOB_LENGTH,
+  MAX_CLAIM_GLOB_WILDCARDS,
+  noteRefusedClaim,
+} from './claim-conflicts.ts';
 
 const USAGE = `usage: bro claim <resource> [--ttl <sec>] [--exclusive|--shared] [--session <sid>] [--host <h>] [--json]
        bro claim release <resource> [--session <sid>] [--host <h>] [--json]
@@ -225,6 +230,11 @@ function expandBareResource(a: string, dir: string): string {
 export function expandResourceArg(arg: string, dir: string): string {
   const a = arg.trim();
   if (/^[a-z][a-z0-9-]*:\S+/i.test(a)) {
+    // URI form skips the shorthand validators — `path:` still needs its
+    // glob bound checked (the admission gate is per-scheme, not per-syntax)
+    if (a.startsWith('path:')) {
+      assertClaimGlobBounded(a.slice('path:'.length));
+    }
     return a;
   }
   return expandBareResource(a, dir);
@@ -262,10 +272,24 @@ function prResourceUri(value: string): string {
   return `pr:${value}`;
 }
 
+/** A `path:` glob must stay evaluatable on the synchronous pre-tool
+ *  path — reject shapes whose translated regex could backtrack through
+ *  the hook timeout (the matcher refuses the same bound defensively). */
+function assertClaimGlobBounded(glob: string): void {
+  if (!claimGlobWithinBounds(glob)) {
+    throw new CommandError(
+      `error: path glob is too complex to evaluate safely ` +
+        `(max ${MAX_CLAIM_GLOB_LENGTH} chars / ${MAX_CLAIM_GLOB_WILDCARDS} wildcards)`,
+      EXIT.usage
+    );
+  }
+}
+
 function pathResourceUri(value: string): string {
   if (value === '') {
     throw new CommandError('error: path needs a glob — `bro claim path <glob>`', EXIT.usage);
   }
+  assertClaimGlobBounded(value);
   return `path:${value}`;
 }
 

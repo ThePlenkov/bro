@@ -25,7 +25,7 @@
  * armed it).
  */
 import { realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   facade,
   gitTry,
@@ -71,6 +71,31 @@ export function claimConflictPolicy(dir: string): ClaimConflictPolicy {
 
 const GLOB_TOKEN = /\*\*\/|\*\*|\*|\?|[^*?]+/g;
 
+/** Bound on path-claim glob complexity. The translated regex runs
+ *  synchronously on the pre-tool path, where nothing can interrupt a
+ *  pathological pattern (many unbounded `*` segments around literals
+ *  backtrack through the whole hook timeout — Codacy CWE-1333).
+ *  `bro claim path` rejects out-of-bounds globs at admission; the
+ *  matcher refuses them too, since rows can arrive from anywhere. */
+export const MAX_CLAIM_GLOB_LENGTH = 200;
+export const MAX_CLAIM_GLOB_WILDCARDS = 24;
+
+export function claimGlobWithinBounds(glob: string): boolean {
+  if (glob.length > MAX_CLAIM_GLOB_LENGTH) {
+    return false;
+  }
+  let wild = 0;
+  for (const ch of glob) {
+    if (ch === '*' || ch === '?') {
+      wild++;
+      if (wild > MAX_CLAIM_GLOB_WILDCARDS) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 function globToRe(glob: string): RegExp {
   const re = glob.replace(GLOB_TOKEN, tok => {
     switch (tok) {
@@ -91,6 +116,11 @@ function globToRe(glob: string): RegExp {
 
 function matchClaimPath(path: string, pattern: string): boolean {
   const glob = pattern.endsWith('/') ? `**/${pattern}**` : pattern;
+  if (!claimGlobWithinBounds(glob)) {
+    // a claim too complex to evaluate safely never reaches the regex —
+    // it cannot produce a verdict (the hook stays fail-open)
+    return false;
+  }
   const target = glob.includes('/') ? path : path.slice(path.lastIndexOf('/') + 1);
   return globToRe(glob).test(target);
 }
@@ -121,14 +151,30 @@ function toolPaths(input: Record<string, unknown>): string[] {
 }
 
 /** realpath when the path resolves (claims and the cwd may disagree on
- *  symlinks), the lexical absolute form otherwise — a claimed worktree
- *  that was removed still matches by spelling. */
+ *  symlinks), the longest existing ancestor realpath'd + the unresolved
+ *  tail re-appended lexically otherwise — a not-yet-created file under
+ *  a symlinked dir still lands on its real tree. Only a path with no
+ *  resolvable ancestor keeps the spelling it came in with (a claimed
+ *  worktree that was removed still matches by spelling). */
 function normPath(p: string, cwd: string): string {
   const abs = isAbsolute(p) ? p : resolve(cwd, p);
   try {
     return realpathSync(abs);
   } catch {
-    return abs;
+    const tail: string[] = [basename(abs)];
+    let dir = dirname(abs);
+    for (;;) {
+      try {
+        return resolve(realpathSync(dir), ...tail);
+      } catch {
+        const parent = dirname(dir);
+        if (parent === dir) {
+          return abs;
+        }
+        tail.unshift(basename(dir));
+        dir = parent;
+      }
+    }
   }
 }
 
@@ -139,9 +185,13 @@ function insideOrEqual(inner: string, root: string): boolean {
 
 /** A row's project compatibility — a claim whose claimant could not
  *  prove a project (null) still counts: an unresolvable project id must
- *  not hide a conflict. */
+ *  not hide a conflict. The reverse is not symmetric — sessionProject
+ *  derives the id deterministically from the dir, so a null on OUR side
+ *  means this session is provably not in the row's project; accepting
+ *  a project-scoped row there would let a foreign project's claim veto
+ *  (block policy) work it never scoped. */
 function projectCompatible(row: ClaimRow, project: string | null): boolean {
-  return row.project === null || project === null || row.project === project;
+  return row.project === null || row.project === project;
 }
 
 /** Same-session test — a claim is never a conflict with its own holder.
@@ -241,11 +291,17 @@ function touchedClaims(
         continue;
       }
       const glob = uri.slice(PATH_PREFIX.length);
+      // three frames: raw, cwd-relative, repo-relative (claimants write
+      // globs in either anchor). A tool path outside the anchor resolves
+      // to `../…`, which no in-tree glob matches — claims cannot reach
+      // outside their own tree, exactly as intended. The repo frame
+      // resolves the tool path against the tool's own cwd first —
+      // `file_path: ../src/a.ts` from <repo>/sub means <repo>/src/a.ts.
       touched = paths.some(
         p =>
           matchClaimPath(p, glob) ||
           matchClaimPath(relative(cwdReal, normPath(p, cwdReal)), glob) ||
-          matchClaimPath(relative(ctx.dir, normPath(p, ctx.dir)), glob)
+          matchClaimPath(relative(ctx.dir, normPath(p, cwdReal)), glob)
       );
     } else if (uri.startsWith(BRANCH_PREFIX)) {
       if (!projectCompatible(row, project)) {
@@ -340,9 +396,13 @@ export async function claimConflictVerdicts(
 /** The connector — `preTool` in every ACTIVE mode; observe is excluded
  *  (its conflict channel is the inbox note, and a passive session never
  *  pays the claims read). The spec names `code`; the other active modes
- *  run tools and the arm bridge identically. */
+ *  run tools and the arm bridge identically. Named `claim-conflicts`,
+ *  not `claims` — the connector name must not squat the facade's
+ *  namespace: it provides hooks, not `claims()`, so a
+ *  `connectors.claims: "claims"` pin would fail to resolve it anyway
+ *  and a future claims provider could never take the name. */
 export const claimConflictConnector: Connector = {
-  name: 'claims',
+  name: 'claim-conflicts',
   hooks: () => ({
     preTool: (ctx, input) => claimConflictVerdicts(ctx, input),
   }),

@@ -75,6 +75,21 @@ test('expandResourceWords maps shorthands and passes URIs through', () => {
   assert.throws(() => expandResourceWords(['brnch'], dir));
 });
 
+test('expandResourceWords rejects globs too complex for the hook matcher', () => {
+  const dir = root;
+  const blowup = '*a'.repeat(30) + '*b'; // > MAX_CLAIM_GLOB_WILDCARDS wildcards
+  assert.throws(() => expandResourceWords(['path', blowup], dir), /too complex to evaluate safely/);
+  // the URI pass-through is the same admission gate, not a bypass
+  assert.throws(
+    () => expandResourceWords([`path:${blowup}`], dir),
+    /too complex to evaluate safely/
+  );
+  const toolong = 'x'.repeat(201); // > MAX_CLAIM_GLOB_LENGTH
+  assert.throws(() => expandResourceWords(['path', toolong], dir), /too complex/);
+  // a normal glob still passes
+  assert.equal(expandResourceWords(['path', 'src/**/*.ts'], dir), 'path:src/**/*.ts');
+});
+
 test('runClaimCommand claims and releases through the facade', async () => {
   const claims = fakeClaims();
   const env = { BRO_SESSION_ID: 'sid-1', CLAUDE_PLUGIN_ROOT: '/p' } as NodeJS.ProcessEnv;
