@@ -6,7 +6,12 @@ import { acpOpen, acpPooledTurn, type ProviderWireOpts } from '@broject/provider
 import { type AgentConnectorEnv } from '../agent-connectors.ts';
 import { SpawnInputError } from './agents.ts';
 import { delegatePrompt } from './delegate-prompt.ts';
-import { acpEntry, refuseWalled, waitProviderName } from './delegate-provider.ts';
+import {
+  acpEntry,
+  delegateWallCheck,
+  refuseWalled,
+  waitProviderName,
+} from './delegate-provider.ts';
 import {
   DEFAULT_TIMEOUT_SEC,
   MAX_TIMEOUT_SEC,
@@ -29,9 +34,12 @@ function waitDeadline(timeoutSec: number | undefined): number {
 
 /** --wait — one pooled ACP turn. Provider walls refuse first: a
  *  delegate turn is automated spend, not the interactive lane. The
- *  peer is per-request (no pool to keep warm across CLI invocations)
- *  and always closes — the 'exit' hook covers a mid-turn kill so the
- *  acp child can never orphan. */
+ *  early gate saves the spawn cost; the SAME verdict rides into the
+ *  turn admission (`guard.cooldown`) so a wall landed during acpOpen
+ *  still refuses before the session spends (spec bro-acjzf). The peer
+ *  is per-request (no pool to keep warm across CLI invocations) and
+ *  always closes — the 'exit' hook covers a mid-turn kill so the acp
+ *  child can never orphan. */
 export async function delegateWait(
   dir: string,
   env: AgentConnectorEnv,
@@ -56,6 +64,10 @@ export async function delegateWait(
       requestModel: sel.req.model,
       signal: opts.acp?.signal,
       onUpdate: opts.acp?.onUpdate,
+      // the wall verdict's admission leg — re-read inside
+      // acpSessionOpen immediately before session/new (bro-acjzf); the
+      // refusal costs no session and surfaces as AcpCooldownError
+      guard: { scope: `delegate:${name}`, cooldown: delegateWallCheck(dir, name) },
     });
     return waitResult(name, sel, r);
   } finally {

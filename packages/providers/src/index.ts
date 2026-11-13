@@ -32,6 +32,7 @@ export { AcpCooldownError } from './acp-cooldown.ts';
 export type {
   AcpArmedWall,
   AcpCooldownOptions,
+  AcpWallCheck,
   AcpWallRefusal,
   AcpWallSignal,
 } from './acp-cooldown.ts';

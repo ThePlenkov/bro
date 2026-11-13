@@ -185,7 +185,10 @@ function checkModeFields(req: DelegateRequest): void {
 
 /** The delegate contract — both CLI and the agents plane's
  *  exec('delegate') run it. Throws SpawnInputError on bad input,
- *  SpawnError on refusal/config/availability — callers render. */
+ *  SpawnError on refusal/config/availability — plus the provider
+ *  layer's own classes a turn already surfaces unwrapped
+ *  (JudgeUnavailable on a failed peer, AcpCooldownError on a late
+ *  wall refusal, spec bro-acjzf). Callers render; the plane maps. */
 export async function delegate(
   dir: string,
   env: AgentConnectorEnv,

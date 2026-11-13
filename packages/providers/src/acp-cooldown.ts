@@ -30,6 +30,16 @@ export interface AcpWallRefusal {
   retryAfterSec: number;
 }
 
+/** What the session-admission seam (`acpSessionOpen`) needs of a wall
+ *  check: the refusal verdict at open time — spoken BEFORE the session
+ *  spends, so a wall landed during peer bring-up still refuses and
+ *  costs nothing. `AcpLaneCooldown` implements it; a foreign wall
+ *  source (the fleet's registry/ledger walls, spec bro-acjzf) backs
+ *  the same seam without owning the lane's arming machinery. */
+export interface AcpWallCheck {
+  refusal(now?: number): AcpWallRefusal | undefined;
+}
+
 /** A wall a failure NAMED — the classifier's answer. It carries the
  * arming policy on top of the refusal shape. */
 export interface AcpWallSignal extends AcpWallRefusal {

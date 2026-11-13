@@ -17,6 +17,7 @@ import {
   type PlaneDescriptor,
   type Worker,
 } from '@broject/core';
+import { AcpCooldownError } from '@broject/providers';
 import { realpathSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { loadAgentEnv } from '../agent-connectors.ts';
@@ -106,7 +107,7 @@ const isInputErr = (err: unknown): boolean =>
   err instanceof SpawnInputError || (err instanceof SpawnError && err.kind === 'input');
 
 const isUnavailableErr = (err: unknown): boolean =>
-  err instanceof SpawnError || err instanceof JudgeUnavailable;
+  err instanceof SpawnError || err instanceof JudgeUnavailable || err instanceof AcpCooldownError;
 
 /** The exec boundary reads files with the server's privileges — a
  *  promptFile must resolve inside the project dir or it is an exfil
@@ -139,8 +140,13 @@ function promptFileUnder(dir: string, req: DelegateRequest): void {
 /** delegate()'s error vocabulary → the plane's: caller input is a
  *  client bug (PlaneVerbError → REST 400), a refusal or unreachable
  *  backend — including an ACP peer that never answered — is
- *  PlaneUnavailable (→ 503). Never a bare 500. */
-function execOrPlaneError(err: unknown): never {
+ *  PlaneUnavailable (→ 503). Never a bare 500. AcpCooldownError is the
+ *  admission seam's refusal (spec bro-i6811): a wall that lands between
+ *  the early refuseWalled gate and session/new arrives unwrapped
+ *  (bro-acjzf) — it is the SAME verdict the gate's SpawnError('cap')
+ *  carries, so it maps to the same 503. Exported for the vocabulary
+ *  pin in agents.test.ts. */
+export function execOrPlaneError(err: unknown): never {
   const msg = err instanceof Error ? err.message : String(err);
   if (isInputErr(err)) {
     throw new PlaneVerbError('agents', DELEGATE, msg);
