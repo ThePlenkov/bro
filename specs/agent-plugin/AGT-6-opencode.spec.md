@@ -121,8 +121,10 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   run-turn, ≥8 direct `bro_*` tools). Declared applicable —
   S4 `/bro`+`/act` dispatch, S5 compaction rehydrate,
   S6 multi-turn, S7 fail-open, S9 skills dedup, S10 native
-  correlation. Pending — S8 dep-degraded (ScriptedCli wiring
-  into real-bro runs).
+  correlation. S8 dep-degraded covered at the bro layer —
+  `deps.e2e.test.ts` runs real `bro hooks post-tool` against a
+  failing ScriptedCli `bd`: fail-open holds, dep journal records
+  the `kv list` probe.
 
 ## Changelog
 
@@ -155,3 +157,6 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   serve-mode driver; the stop-gate scenario now runs live against
   `opencode serve`.
 - 2026-11-12 — v6: Verify gains the AGT-1 scenario map — S1/S2/S3 implemented e2e today; S8 pending ScriptedCli wiring.
+- 2026-11-12 — v7: S8 lands at the bro layer — `deps.e2e.test.ts`
+  proves real `bro hooks` stays fail-open against a dead `bd`
+  shim and journals the dep probe.
