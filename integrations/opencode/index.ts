@@ -147,15 +147,42 @@ async function resolveCommand(opts = {}) {
   return null;
 }
 /**
+ * The env an in-process adapter stamps on its `bro hooks` spawn so the
+ * CLI's adapter emit path can journal the session into the hook spool
+ * (specs/bro-izpyk.9.md): `BRO_HOOK_HOST` is the ledger host name (and
+ * the launch marker — presence means "direct adapter call, no run.sh"),
+ * `BRO_HOOK_PROOT` this module's own directory (the installed plugin
+ * root), `BRO_HOOK_ADAPTER` the adapter version parsed off the npx pin.
+ * A CLI that predates the marker ignores the env — rollout is safe in
+ * both directions.
+ */
+function hookEmitEnv(kind, opts = {}) {
+  const env = {
+    BRO_HOOK_HOST: kind,
+    BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
+  };
+  const at = opts.npxPin?.lastIndexOf('@') ?? -1;
+  if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
+  return env;
+}
+/**
  * Run one `bro hooks <event>` with the payload on stdin; resolve null on
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
+ * `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
  */
-async function callHook(command, event, payload, cwd, timeoutMs) {
+async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
   const { promise, resolve } = Promise.withResolvers();
   let child;
   try {
     child = spawn(command.cmd, [...command.args, 'hooks', event], {
       cwd,
+      env:
+        extraEnv === void 0
+          ? void 0
+          : {
+              ...process.env,
+              ...extraEnv,
+            },
       stdio: ['pipe', 'pipe', 'ignore'],
       windowsHide: true,
       detached: process.platform !== 'win32',
@@ -648,6 +675,12 @@ function parseBoard(out) {
  *  lists this file in VERSIONED_SOURCES, so the pin is rewritten to
  *  plugin.json's version on every gen/release run. */
 const NPX_SPECS = ['@broject/bro@0.3.0', '@broject/bro'];
+/** Env stamped on every `bro hooks` spawn so the CLI's adapter emit
+ *  path journals this session into the hook spool — the in-process
+ *  adapters bypass run.sh, which owns the shell-side writer
+ *  (specs/bro-izpyk.9.md). A CLI that predates the marker ignores
+ *  the env, so old↔new mixes degrade to the pre-emit status quo. */
+const HOOK_ENV = hookEmitEnv('opencode', { npxPin: NPX_SPECS[0] });
 function asRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
@@ -682,7 +715,7 @@ function makeCore(input) {
       notify('debug', `bro probe skipped (no cli) for event=${event}`);
       return null;
     }
-    const result = await callHook(resolved, event, payload, directory, timeoutMs);
+    const result = await callHook(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
     if (result === null) notify('debug', `bro probe returned null for event=${event}`);
     return result;
   };
