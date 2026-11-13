@@ -56,6 +56,7 @@ import {
   type BrouterModels,
   CLASS_LABEL_PREFIX,
   type ClaimCapability,
+  type ClaimRow,
   commandCliName,
   type ExitCode,
   type ExplainSlice,
@@ -164,6 +165,7 @@ import { isOrchestratorSession } from './watch-pulse.ts';
 import {
   defaultBranchName,
   type LitterReap,
+  litterClaims,
   parseWorktreePorcelain,
   readStackEdges,
   reapLoopLitter,
@@ -2288,8 +2290,14 @@ function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
 
 /** The close-out litter sweep — reap the provably-done leftovers before
  *  the audit names what survived. A sweep failure is a warning line,
- *  never a crash. */
-function sweepLoopLitter(ctx: Ctx, parkedClaims: ReadonlySet<string>): LitterReap | undefined {
+ *  never a crash. `sessionClaims` is the prefetched claims leg — the
+ *  same union `work prune --loop` threads (bro-izpyk.10); undefined
+ *  runs the keep-planes marker-only. */
+function sweepLoopLitter(
+  ctx: Ctx,
+  parkedClaims: ReadonlySet<string>,
+  sessionClaims?: ClaimRow[]
+): LitterReap | undefined {
   try {
     return reapLoopLitter({
       root: ctx.root,
@@ -2299,6 +2307,7 @@ function sweepLoopLitter(ctx: Ctx, parkedClaims: ReadonlySet<string>): LitterRea
       parkedKeep: ctx.cfg.parkedKeep,
       parkedTtlDays: ctx.cfg.parkedTtlDays,
       keepClaims: parkedClaims,
+      sessionClaims,
     });
   } catch (err) {
     say(
@@ -2378,8 +2387,13 @@ export function syncAfterAudit(
  *  tail that survived in the run summary — open loop PRs, kept
  *  worktrees/branches, claimed beads, and cleanup failures collected
  *  during the run. Finished with `bro sync` so artifacts and bead state
- *  travel. Never throws — an audit failure is reported, not raised. */
-function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>): void {
+ *  travel. Never throws — an audit failure is reported, not raised.
+ *  Async for the sweep's claims prefetch (bro-izpyk.10); callers await. */
+async function endAudit(
+  ctx: Ctx,
+  seen: Set<string>,
+  parkedClaims: ReadonlySet<string>
+): Promise<void> {
   ctx.stage = 'audit';
   // the sweep's git helpers and runSyncCommand narrate via console.log —
   // under --json that corrupts the event stream, so route the whole
@@ -2389,9 +2403,13 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
     console.log = console.error;
   }
   try {
+    // the claims leg `work prune --loop` threads — the closeout runs
+    // the same sweep in-process, so it prefetches the same union leg;
+    // a failed read runs marker-only (litterClaims swallows its own)
+    const sessionClaims = await litterClaims(ctx.root);
     // reap before the report — a landed bead's leftover tree is not a
     // tail; the audit describes what survived the sweep
-    const reap = sweepLoopLitter(ctx, parkedClaims);
+    const reap = sweepLoopLitter(ctx, parkedClaims, sessionClaims);
     const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]

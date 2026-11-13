@@ -33,6 +33,7 @@ import { basename, resolve } from 'node:path';
 import {
   type AgentInfo,
   type AgentRegistryEntry,
+  type ClaimRow,
   emitLifecycle,
   gitTry,
   type IgnoreCheckRule,
@@ -176,6 +177,12 @@ export interface DriveDeps {
   worktrees: () => { branch?: string; path: string }[] | null;
   /** The fleet's agent snapshot across connectors — byStep + degraded. */
   collectAgents: () => Promise<{ byStep: Map<string, AgentInfo>; degraded: string[] }>;
+  /** Prefetch this project's live ledger claims for the occupancy
+   *  rung (bro-izpyk.10) — gathered once per pass, then threaded into
+   *  every `occupied`/`freshOccupancy` call so the sync, in-lock
+   *  verdicts see the pre-lock snapshot. Absent → marker-only, the
+   *  pre-migration read. */
+  claims?: () => Promise<ClaimRow[]>;
   /** The shadow judge's per-run decide() budget — fresh each pass. */
   judgeBudget: () => { remaining: number };
   /** The devin lane's telemetry emit — advisory, never stalls. */
@@ -244,6 +251,10 @@ export interface DrivePass {
   worktreeByBranch: Map<string, string>;
   agents: AgentInfo[];
   workDetails: WorkEntry[];
+  /** Live ledger claims on this project — the occupancy rung's
+   *  cross-session truth (bro-izpyk.10), gathered beside workDetails
+   *  once per pass. */
+  claims: ClaimRow[];
   /** Watch-marker snapshot for the supervision plane — a `loop`
    *  heartbeat or `act wait` landing mid-pass is re-read under the
    *  occupancy locks (freshOccupancy), never trusted stale. */
@@ -266,6 +277,7 @@ export function freshDrivePass(): DrivePass {
     worktreeByBranch: new Map(),
     agents: [],
     workDetails: [],
+    claims: [],
     watches: [],
     judgeBudget: { remaining: 0 },
     heads: new Map(),
@@ -609,6 +621,21 @@ function fixerVerdictRefusal(ctx: DriveCtx, beadId: string): string | undefined 
   return `rig next → ${rig.verdict}${rig.detail === undefined ? '' : ` — ${rig.detail}`}`;
 }
 
+/** A post-await claims re-read for one decision — the pass snapshot
+ *  (ctx.work.claims) predates the awaited probes since, so a ledger-only
+ *  claim landing in that window is invisible to a verdict that reuses
+ *  it. The in-lock refresh can't go async — this read lands right
+ *  before it, narrowing the stale window to the lock wait itself (the
+ *  residual the spec accepts: claims write outside the occupancy
+ *  locks). A missing dep or a failed read falls back to the pass
+ *  snapshot — never `[]`, which would misreport an unreadable claims
+ *  plane as an empty one (bro-izpyk.10, PR #1056 review). */
+async function claimsRefresh(ctx: DriveCtx): Promise<ClaimRow[]> {
+  return ctx.deps.claims === undefined
+    ? ctx.work.claims
+    : await ctx.deps.claims().catch(() => ctx.work.claims);
+}
+
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
  *  read right before the spawn (the gap since the pass-level check
  *  covered the worktree create + state refetch, long enough for another
@@ -620,6 +647,10 @@ function fixerVerdictRefusal(ctx: DriveCtx, beadId: string): string | undefined 
 async function spawnFixerAgent(ctx: DriveCtx, pr: number, s: FixerSpawn): Promise<PrVerdict> {
   const link = ctx.deps.rev.prLink(ctx.repo, pr);
   const known = ctx.work.agents;
+  // ledger claims write outside the occupancy locks — re-read after the
+  // awaits upstream (thread refetch, meta/check probes, annotation) so a
+  // claim landing in that window still vetoes the spawn
+  const claims = await claimsRefresh(ctx);
   let release: () => void;
   try {
     release = acquireOccupancyLocks(ctx.mainRoot, s.wt);
@@ -632,13 +663,14 @@ async function spawnFixerAgent(ctx: DriveCtx, pr: number, s: FixerSpawn): Promis
     };
   }
   try {
-    const fresh = freshOccupancy(ctx.mainRoot, known);
+    const fresh = freshOccupancy(ctx.mainRoot, known, claims);
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: s.fixer?.id,
       branch: s.branch,
       worktree: s.wt,
       workDetails: fresh.workDetails,
+      claims: fresh.claims,
       scanProc: agentProcessesIn,
       pr,
       watches: fresh.watches,
@@ -781,13 +813,14 @@ async function spawnFixer(
       // during the lock wait is seen before the branch refresh; a pre-lock
       // snapshot would approve a checkout a live session just took
       guard: dir => {
-        const fresh = freshOccupancy(ctx.mainRoot, known);
+        const fresh = freshOccupancy(ctx.mainRoot, known, ctx.work.claims);
         return occupied({
           agents: fresh.agents,
           fixerBead: fixer?.id,
           branch: state.headRef,
           worktree: dir,
           workDetails: fresh.workDetails,
+          claims: fresh.claims,
           scanProc: agentProcessesIn,
           pr,
           watches: fresh.watches,
@@ -815,8 +848,19 @@ async function spawnFixer(
       // refresh + check + remove all run inside retireOrphanedWorktree under
       // both occupancy locks: a claimant writes its registry entry +
       // .work marker under the same locks, so a claim lands before the
-      // check or after the remove — never between
-      const retire = retireOrphanedWorktree(ctx.mainRoot, pr, wt, state.headRef, fixer?.id, known);
+      // check or after the remove — never between. Ledger claims write
+      // outside those locks, so the claims leg re-reads here — a claim
+      // written during the refetch await is otherwise invisible to the
+      // pass snapshot (bro-izpyk.10)
+      const retire = retireOrphanedWorktree(
+        ctx.mainRoot,
+        pr,
+        wt,
+        state.headRef,
+        fixer?.id,
+        known,
+        await claimsRefresh(ctx)
+      );
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire };
       }
@@ -896,7 +940,17 @@ async function spawnRebaseFixer(
     if (lane.created !== true) {
       return;
     }
-    retireOrphanedWorktree(ctx.mainRoot, pr, wt, state.headRef, fixer?.id, ctx.work.agents);
+    retireOrphanedWorktree(
+      ctx.mainRoot,
+      pr,
+      wt,
+      state.headRef,
+      fixer?.id,
+      ctx.work.agents,
+      // the same post-await re-read spawnFixer runs — a ledger claim
+      // landing during the fetch/probe window above vetoes the removal
+      await claimsRefresh(ctx)
+    );
   };
   // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are
   // as old as the last fetch anybody in the repo ran, and the drive lane
@@ -1030,13 +1084,14 @@ function fixerLane(
     // same in-lock snapshot rule as spawnFixer — the guard runs under the
     // occupancy locks, so freshOccupancy must be sampled there, not before
     guard: dir => {
-      const fresh = freshOccupancy(ctx.mainRoot, ctx.work.agents);
+      const fresh = freshOccupancy(ctx.mainRoot, ctx.work.agents, ctx.work.claims);
       return occupied({
         agents: fresh.agents,
         fixerBead: fixer?.id,
         branch,
         worktree: dir,
         workDetails: fresh.workDetails,
+        claims: fresh.claims,
         scanProc: agentProcessesIn,
         pr,
         watches: fresh.watches,
@@ -1671,6 +1726,7 @@ async function drivePr(ctx: DriveCtx, pr: number): Promise<PrVerdict> {
     branch: state.headRef,
     worktree,
     workDetails: ctx.work.workDetails,
+    claims: ctx.work.claims,
     scanProc: agentProcessesIn,
     pr,
     watches: ctx.work.watches,
@@ -1895,6 +1951,9 @@ async function pass(ctx: DriveCtx): Promise<void> {
     worktreeByBranch: worktreeMap(ctx),
     agents: [...byStep.values()],
     workDetails: hooks === null ? [] : liveWorkEntries(hooks),
+    // the claims rung's pre-lock snapshot — one list per pass; a failed
+    // read degrades to marker-only occupancy, never a failed pass
+    claims: ctx.deps.claims === undefined ? [] : await ctx.deps.claims().catch(() => []),
     watches: listWatches(ctx.mainRoot),
     judgeBudget: ctx.deps.judgeBudget(),
     heads: new Map<number, string>(),

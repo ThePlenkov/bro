@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { pidAlive, procStat } from '@broject/core';
+import { claimsFacade, pidAlive, procStat, sessionProject } from '@broject/core';
 import {
   FAKE_BEAD,
   bead,
@@ -29,6 +29,7 @@ import {
   installFakeBd,
   installFakeHost,
   runCli,
+  tmpDir,
   writeBeads,
   writeHostState,
 } from './testrepo.ts';
@@ -296,6 +297,31 @@ describe('bro work e2e — prune --loop', () => {
       assert.equal(existsSync(wt), false);
       assert.equal(git(['branch', '--list', 'loop/fx-z'], main).trim(), '');
     });
+  });
+
+  test('a live ledger worktree claim keeps closed-bead litter — the claims rung (bro-izpyk.10)', async () => {
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-claim', status: 'closed' },
+    ]);
+    const wt = litter(root, main, 'fx-claim');
+    // pin the state home so the seeded claim and the spawned CLI read
+    // the same ledger db (e2eEnv mints a fresh one per call otherwise)
+    const stateHome = tmpDir('bro-e2e-claims-');
+    const env = { ...envOf(binDir, db), XDG_STATE_HOME: stateHome };
+    const project = sessionProject(main);
+    const res = await claimsFacade({
+      env: { ...process.env, XDG_STATE_HOME: stateHome },
+    }).claim(
+      `worktree:${wt}`,
+      { host: 'devin', sid: 'sess-keeper' },
+      project === undefined ? {} : { project }
+    );
+    assert.equal(res.ok, true, 'claim seed failed');
+    const r = runCli(['work', 'prune', '--loop'], { cwd: main, env });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /kept .*fx-claim \(session sess-kee claims worktree:/);
+    assert.equal(existsSync(wt), true);
   });
 
   test('keeps open-bead, dirty, and locked litter — with the reason named', () => {

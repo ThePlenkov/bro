@@ -77,6 +77,8 @@ import {
   busSocketPath,
   busSubscribe,
   checkBeads,
+  type ClaimFacade,
+  type ClaimRow,
   ensureAuth,
   facade,
   facadeName,
@@ -86,6 +88,7 @@ import {
   localLeaseStore,
   projectId,
   reviewHost,
+  sessionProject,
   type BusSubscription,
   type IgnoreCheckRule,
   type ReviewFacade,
@@ -380,6 +383,11 @@ interface Ctx {
   loop: LoopConfig;
   env: AgentConnectorEnv;
   store: TaskStore;
+  /** The claims facade + this repo's project id — `deps.claims`'s
+   *  backing pair (bro-izpyk.10); undefined facade = the ledger is
+   *  absent and occupancy reads marker-only. */
+  claims?: ClaimFacade;
+  project?: string;
   /** The pass's gathered world — rebuilt by the policy's `pass` each
    *  sweep; `freshDrivePass()` seeds the pre-pass empty shape. */
   work: DrivePass;
@@ -531,8 +539,18 @@ function lanePauseTick(ctx: Ctx): void {
 async function litterSweep(ctx: Ctx): Promise<void> {
   const entry = SELF_ENTRY;
   if (entry === null) {
-    // imported by a test harness — no CLI argv to respawn; run in-pass
-    sayLitterSweep(ctx, litterSweepTick(ctx));
+    // imported by a test harness — no CLI argv to respawn; run in-pass.
+    // The child path's claims leg comes via `work prune --loop`; the
+    // in-pass tick prefetches the same union leg from the ctx's own
+    // facade — marker-only on an absent ledger OR a failed read, the
+    // same `undefined` litterClaims returns (bro-izpyk.10)
+    const claims =
+      ctx.claims === undefined
+        ? undefined
+        : await ctx.claims
+            .list(ctx.project === undefined ? {} : { project: ctx.project })
+            .catch(() => undefined);
+    sayLitterSweep(ctx, litterSweepTick(ctx, claims));
     return;
   }
   await new Promise<void>(resolvePromise => {
@@ -573,7 +591,7 @@ async function litterSweep(ctx: Ctx): Promise<void> {
  *  "occupied" on every /proc plane until the sweep kills them. Only
  *  reached when SELF_ENTRY is unset (test harness) — the supervisor
  *  path sweeps in a child so the scans never touch the event loop. */
-function litterSweepTick(ctx: Ctx): LitterReap {
+function litterSweepTick(ctx: Ctx, sessionClaims?: ClaimRow[]): LitterReap {
   // the sweep's git helpers narrate via console.log — under --json
   // route them to stderr like the loop audit does, or the verdict
   // stream corrupts
@@ -596,6 +614,7 @@ function litterSweepTick(ctx: Ctx): LitterReap {
       // sweep, which is exactly what the cadence exists for). --once is
       // a foreground pass — the default bound reaps in-pass.
       nxKillWaitMs: ctx.everySec === undefined ? undefined : 0,
+      sessionClaims,
     });
   } finally {
     console.log = log;
@@ -1034,6 +1053,16 @@ function driveDeps(ctx: Ctx): DriveDeps {
       return wt.code === 0 ? parseWorktreePorcelain(wt.out) : null;
     },
     collectAgents: () => collectAgents(ctx.mainRoot),
+    // the occupancy rung's claims leg (bro-izpyk.10) — one list per
+    // pass; a failed read degrades to marker-only, never a failed pass
+    ...(ctx.claims === undefined
+      ? {}
+      : {
+          claims: () =>
+            ctx
+              .claims!.list(ctx.project === undefined ? {} : { project: ctx.project })
+              .catch(() => []),
+        }),
     judgeBudget: () => ({
       remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun,
     }),
@@ -1084,6 +1113,16 @@ async function runDrive(
     loop: (broCfg as Record<string, unknown>).loop as LoopConfig,
     env: loadAgentEnv(mainPath),
     store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
+    // claims is best-effort like the occupancy read it feeds — a repo
+    // without the ledger connector just runs the marker-only ladder
+    claims: ((): ClaimFacade | undefined => {
+      try {
+        return facade('claims', { dir: mainPath }, { prefer: broCfg.connectors });
+      } catch {
+        return undefined;
+      }
+    })(),
+    project: sessionProject(mainPath),
     work: freshDrivePass(),
     // the policy's IO surface attaches next — its closures read the
     // finished ctx (say's json route, env, connector, the queue)

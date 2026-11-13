@@ -253,8 +253,10 @@ export interface LoopDeps {
   /** Open fleet PRs (work/loop/stack/fix heads) — null when the host
    *  can't list (fail-closed ceiling input). */
   openFleetPrs: () => FleetPrRow[] | null;
-  /** The end-of-run audit — tails, litter, claims, summary. */
-  finishAudit: () => void;
+  /** The end-of-run audit — tails, litter, claims, summary. May go
+   *  async (the litter sweep's claims prefetch, bro-izpyk.10); the
+   *  run awaits it so the audit's output lands inside the run. */
+  finishAudit: () => void | Promise<void>;
 }
 
 /** The policy's own state — everything the FSM mutates that is not an
@@ -3683,7 +3685,7 @@ async function runQueue(ctx: LoopCtx): Promise<void> {
   } finally {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
-    ctx.deps.finishAudit();
+    await ctx.deps.finishAudit();
   }
 }
 

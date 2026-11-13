@@ -69,7 +69,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
   acquireFileLock,
@@ -98,6 +98,8 @@ import {
   writeModeFile,
   GUARD_EVENTS,
   MODE_SNAPSHOT_EVENTS,
+  type ClaimFacade,
+  type ClaimRow,
   type ConnectorCtx,
   type GateContribution,
   type GuardEvent,
@@ -940,17 +942,78 @@ function callIdOf(input: HookInput): string | undefined {
   return typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined;
 }
 
-function liveSessionLines(dir: string, selfId: string): string[] {
-  return otherLiveWork(dir, selfId).map(w => {
-    const on = w.detail ? ` on ${w.detail}` : '';
-    return `session ${w.session.slice(0, 8)} armed work${on} (${formatAge(w.ageMs)})`;
-  });
+/** The claims leg's resource label — `worktree:` URIs collapse to the
+ *  basename for the nudge line; everything else renders verbatim. */
+function claimResourceLabel(resource: string): string {
+  return resource.startsWith('worktree:')
+    ? `worktree ${basename(resource.slice('worktree:'.length))}`
+    : resource;
+}
+
+/** Live claims → parallel-work nudge lines (bro-izpyk.10). Pure —
+ *  `self` is the asking session's key plus its agent-tree owner so own
+ *  session (host+sid) and own tree under a rotated sid (pid+start,
+ *  the bro-7022c rule the marker leg encodes) self-exclude; `role:`
+ *  claims are orchestration, not work; `skipShortSids` dedups against
+ *  sessions the marker leg already printed (the marker line carries
+ *  the detail + age a claim lacks). */
+export function claimNudgeLines(
+  rows: ClaimRow[],
+  self: { host: string; sid: string; owner: { pid: number; start: string } | null },
+  skipShortSids?: ReadonlySet<string>
+): string[] {
+  return rows
+    .filter(
+      row =>
+        !row.resource.startsWith('role:') &&
+        !(row.host === self.host && row.sid === self.sid) &&
+        !(
+          self.owner !== null &&
+          row.pid === self.owner.pid &&
+          (row.pidStart ?? '') === self.owner.start
+        ) &&
+        skipShortSids?.has(row.sid.slice(0, 8)) !== true
+    )
+    .map(row => `session ${row.sid.slice(0, 8)} claims ${claimResourceLabel(row.resource)}`);
+}
+
+/** Foreign sessions' live claims on this project — the ledger twin of
+ *  the .work marker nudge (bro-izpyk.10): machine-wide, heartbeat-
+ *  renewed, liveness-swept. Empty when the session can't self-exclude
+ *  (no session id or unproven host — own claims must never nudge back),
+ *  when the project can't be resolved — an unscoped list is machine-
+ *  wide and would nudge OTHER projects' claims as work in this repo —
+ *  and on any read failure: the marker leg still answers. `deps` is
+ *  the test seam — production callers leave it to the module
+ *  singletons (hookHost, the hookClaims facade, hookProjectIdFor). */
+export async function otherLiveClaims(
+  dir: string,
+  sessionId: string,
+  deps?: { claims?: ClaimFacade; host?: string; project?: string | null }
+): Promise<ClaimRow[]> {
+  try {
+    const host = deps?.host ?? hookHost;
+    if (sessionId === '' || host === undefined) {
+      return [];
+    }
+    if (host === '' || host === 'unknown') {
+      return [];
+    }
+    const claims = deps?.claims ?? (hookClaims ??= claimsFacade());
+    const project = deps?.project === undefined ? hookProjectIdFor(dir) : deps.project;
+    if (project === null) {
+      return [];
+    }
+    return await claims.list({ project });
+  } catch {
+    return [];
+  }
 }
 
 /** Parallel-session nudge at session start: another live session armed
- *  work here, or a connector reports live work (claimed beads, sibling
- *  worktrees, held slots) — passive context naming what's occupied,
- *  never a block. */
+ *  work here — session markers and ledger claims (bro-izpyk.10) — or a
+ *  connector reports live work (claimed beads, sibling worktrees, held
+ *  slots): passive context naming what's occupied, never a block. */
 async function parallelLines(
   dir: string,
   sessionId: string,
@@ -958,18 +1021,32 @@ async function parallelLines(
 ): Promise<ProbeResult> {
   try {
     const stateDir = hooksStateDir(dir);
-    const [local, work] = await Promise.all([
+    const [local, claims, work] = await Promise.all([
       Promise.resolve().then(() => {
-        if (!stateDir) return [];
+        if (!stateDir) return [] as ReturnType<typeof otherLiveWork>;
         try {
-          return liveSessionLines(stateDir, sessionId);
+          return otherLiveWork(stateDir, sessionId);
         } catch {
-          return [];
+          return [] as ReturnType<typeof otherLiveWork>;
         }
       }),
+      otherLiveClaims(dir, sessionId),
       parallelWorkProbe(hookCtx(dir, sessionId), onProbe),
     ]);
-    const parts = [...local, ...work.lines];
+    // a session whose marker already landed gets the marker line — it
+    // carries the detail + age the claim lacks; dedup on the short sid
+    // both legs print
+    const marked = new Set(local.map(w => w.session.slice(0, 8)));
+    const parts = [
+      ...local.map(w => {
+        const on = w.detail ? ` on ${w.detail}` : '';
+        return `session ${w.session.slice(0, 8)} armed work${on} (${formatAge(w.ageMs)})`;
+      }),
+      ...(hookHost === undefined
+        ? []
+        : claimNudgeLines(claims, { host: hookHost, sid: sessionId, owner: agentOwner() }, marked)),
+      ...work.lines,
+    ];
     if (parts.length === 0) {
       return { lines: [], settled: work.settled };
     }
