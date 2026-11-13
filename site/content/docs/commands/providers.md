@@ -83,7 +83,7 @@ vendoring a fallback.
 ## Add presets
 
 `bro providers add <preset> [--name <name>] [--global] [--force]`
-writes an `acp` provider entry for verified presets (kilo, claude-code, codex, gemini-cli, goose, opencode, devin).
+writes a provider entry for verified presets — `acp` entries (kilo, claude-code, claude-acp, codex, gemini-cli, goose, opencode, devin) and the `cli` preset `claude` (`claude -p --dangerously-skip-permissions --output-format stream-json --verbose < {promptFile}` — a fleet worker line; `claude-acp` rides the `claude-code-acp` adapter binary instead).
 The default target is `bro.config.json` (project config); `--global` targets `$XDG_CONFIG_HOME/bro/config.json` (global operator config). Without `--global`, refuses if `bro.config.ts` shadows. With `--global`, refuses if `config.ts` shadows. Use `--force` to overwrite.
 
 `bro providers test <name>`
