@@ -317,7 +317,9 @@ async function claimsBySession(
     }
   }
   for (const held of bySession.values()) {
-    held.sort((a, b) => a.localeCompare(b));
+    // code-unit compare, not localeCompare — ICU collations differ
+    // across hosts and the spec requires deterministic rendering
+    held.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
   return bySession;
 }
@@ -420,10 +422,10 @@ export function sessionTableLines(rows: SessionViewRow[], now: number): string[]
     ['mode', 'MODE'],
     ['agent', 'AGENT'],
     ['bead', 'BEAD'],
-    ['worktree', 'WORKTREE'],
-    ['branch', 'BRANCH'],
     ['claims', 'CLAIMS'],
     ['resume', 'RESUME'],
+    ['worktree', 'WORKTREE'],
+    ['branch', 'BRANCH'],
     ['startedAge', 'STARTED'],
     ['seen', 'SEEN'],
   ];

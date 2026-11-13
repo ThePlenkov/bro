@@ -1,9 +1,9 @@
 ---
 title: "bro sessions"
-description: "Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree, claims, resume [--json]"
+description: "Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, claims, resume, worktree [--json]"
 ---
 
-**`bro sessions`** — Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree, claims, resume [--json]
+**`bro sessions`** — Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, claims, resume, worktree [--json]
 
 | | |
 | --- | --- |

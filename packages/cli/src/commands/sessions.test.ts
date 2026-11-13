@@ -173,6 +173,8 @@ describe('bro sessions', () => {
         'MODE',
         'AGENT',
         'BEAD',
+        'CLAIMS',
+        'RESUME',
         'WORKTREE',
         'BRANCH',
         'STARTED',
@@ -180,6 +182,12 @@ describe('bro sessions', () => {
       ]) {
         assert.ok(header!.includes(col), `missing column ${col}`);
       }
+      // spec §3: CLAIMS and RESUME sit immediately after BEAD
+      const order = ['BEAD', 'CLAIMS', 'RESUME', 'WORKTREE'].map(c => header!.indexOf(c));
+      assert.ok(
+        order.every((p, i) => i === 0 || p > order[i - 1]!),
+        `column order ${order}`
+      );
       assert.ok(row!.includes('claude'));
       assert.ok(row!.includes('abcdef123456'));
       assert.ok(row!.includes('agent-7'));
@@ -412,8 +420,8 @@ describe('bro sessions', () => {
       assert.ok(holder!.includes(`worktree:~/proj`));
       assert.ok(holder!.includes('role:orchestrator@abc123'));
       assert.ok(!holder!.includes('/elsewhere'), 'a foreign session claim must not bleed over');
-      // CLAIMS is the 9th column (index 8) — 2+ spaces separate cells
-      assert.equal(empty!.split(/\s{2,}/)[8], '—');
+      // CLAIMS is the 7th column (index 6) — 2+ spaces separate cells
+      assert.equal(empty!.split(/\s{2,}/)[6], '—');
     } finally {
       f.cleanup();
     }
@@ -425,7 +433,9 @@ describe('bro sessions', () => {
       await f.ledger.append([sess({ host: 'claude', sid: 's1', lastSeen: T0 })]);
       const claims = claimsFixture([
         crow({ resource: 'pr:41', host: 'claude', sid: 's1' }),
-        crow({ resource: 'task:bro-x.1', host: 'claude', sid: 's1' }),
+        // task:* never reaches the claims table — bd owns it (spec
+        // §Non-goals), so the fixture holds a role claim instead
+        crow({ resource: 'role:fixer@abc123', host: 'claude', sid: 's1' }),
       ]);
       const out = await capture(() =>
         runSessionsCommand(['--json'], {
@@ -439,7 +449,7 @@ describe('bro sessions', () => {
       const payload = JSON.parse(out.out.join('\n')) as {
         sessions: Array<{ sid: string; claims: string[] }>;
       };
-      assert.deepEqual(payload.sessions[0]!.claims, ['pr:41', 'task:bro-x.1']);
+      assert.deepEqual(payload.sessions[0]!.claims, ['pr:41', 'role:fixer@abc123']);
     } finally {
       f.cleanup();
     }
@@ -492,9 +502,9 @@ describe('bro sessions', () => {
       assert.equal(bySid.get('s-ghost')!.resumeArgv, null);
       const [header, claude, ghost] = sessionTableLines(views.rows, T0);
       assert.ok(header!.includes('RESUME'));
-      // RESUME is the 10th column (index 9)
-      assert.equal(claude!.split(/\s{2,}/)[9], 'yes');
-      assert.equal(ghost!.split(/\s{2,}/)[9], '—');
+      // RESUME is the 8th column (index 7)
+      assert.equal(claude!.split(/\s{2,}/)[7], 'yes');
+      assert.equal(ghost!.split(/\s{2,}/)[7], '—');
       const out = await capture(() =>
         runSessionsCommand(['--json'], {
           ledger: f.ledger,

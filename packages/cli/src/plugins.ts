@@ -386,7 +386,7 @@ export const PLUGINS: BroPlugin[] = [
     name: 'sessions',
     group: 'fleet',
     summary:
-      'Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, worktree, claims, resume [--json]',
+      'Agent sessions on this machine — the session-ledger view: host, sid, state, mode, agent, bead, claims, resume, worktree [--json]',
     run: argv => runSessionsCommand(argv),
     contract: {
       flags: {
