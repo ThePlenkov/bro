@@ -1788,6 +1788,39 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "requestsPerHour": {
+                "type": "number",
+                "minimum": 0
+              },
+              "burst": {
+                "type": "number",
+                "minimum": 0
+              },
+              "spawnCost": {
+                "type": "number",
+                "minimum": 0
+              },
+              "turnCost": {
+                "type": "number",
+                "minimum": 0
+              },
+              "maxSessions": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxQueue": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

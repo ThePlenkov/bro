@@ -37,6 +37,8 @@ import {
   statProbe,
   writeCacheFile,
 } from './hook-cache.ts';
+import { isMode, MODES, type Mode } from './ledger.ts';
+import { type FleetMatrix, fleetMatrix } from './matrix.ts';
 import {
   API_WIRES,
   type FleetProfile,
@@ -55,8 +57,6 @@ import {
   ON_WALL,
   type RoutingTable,
 } from './routing.ts';
-import { fleetMatrix, type FleetMatrix } from './matrix.ts';
-import { isMode, MODES, type Mode } from './ledger.ts';
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const;
 export type StoreBackend = (typeof STORE_BACKENDS)[number];
@@ -1058,6 +1058,66 @@ function serveClients(raw: unknown): ServeClients | undefined {
  *  window that reaches a timer is clamped to it. */
 export const MAX_TIMER_MS = 2_147_483_647;
 
+/** `serve.limits.<entry>` — one lane's quota budget (spec bro-ezboq).
+ *  Every axis arms independently: the token bucket needs BOTH
+ *  `requestsPerHour` and `spawnCost` (the LaneRateGate rule — a
+ *  bucket that cannot afford one open is not a budget), the
+ *  concurrency caps need only their own key. */
+export interface ServeLaneLimits {
+  /** Bucket refill — ACP spend units per hour. */
+  requestsPerHour?: number;
+  /** Bucket capacity — defaults to requestsPerHour. */
+  burst?: number;
+  /** Tokens per session/new — the open+discovery burn. */
+  spawnCost?: number;
+  /** Tokens per ACP prompt turn — defaults to 1. One prompt is not
+   *  one provider request internally; the operator prices the
+   *  multiplier honestly. */
+  turnCost?: number;
+  /** Per-lane concurrent session cap — sessions held + opens in
+   *  flight. The account-wide kind cap (agents.<kind>.maxSessions)
+   *  still applies on top. */
+  maxSessions?: number;
+  /** Per-lane in-flight turn cap — turns running + opens in flight. */
+  maxQueue?: number;
+}
+
+function serveLaneLimits(raw: unknown): ServeLaneLimits | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const pos = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+  const posInt = (v: unknown): number | undefined => {
+    const n = pos(v);
+    return n !== undefined && Number.isInteger(n) ? n : undefined;
+  };
+  const out: ServeLaneLimits = {};
+  const rph = pos(o.requestsPerHour);
+  if (rph !== undefined) out.requestsPerHour = rph;
+  const burst = pos(o.burst);
+  if (burst !== undefined) out.burst = burst;
+  const spawnCost = pos(o.spawnCost);
+  if (spawnCost !== undefined) out.spawnCost = spawnCost;
+  const turnCost = pos(o.turnCost);
+  if (turnCost !== undefined) out.turnCost = turnCost;
+  const maxSessions = posInt(o.maxSessions);
+  if (maxSessions !== undefined) out.maxSessions = maxSessions;
+  const maxQueue = posInt(o.maxQueue);
+  if (maxQueue !== undefined) out.maxQueue = maxQueue;
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
+function serveLimits(raw: unknown): Record<string, ServeLaneLimits> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, ServeLaneLimits> = {};
+  for (const [entry, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (entry === '__proto__') continue;
+    const limits = serveLaneLimits(v);
+    if (limits !== undefined) out[entry] = limits;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;
@@ -1082,6 +1142,9 @@ export const serveSection: ConfigSection<{
    *  gateway). Repo-scoped serve ignores it: the repo root IS the
    *  workspace. */
   acpCwd?: string;
+  /** Per-entry quota budgets (spec bro-ezboq) — the lane's rate gate
+   *  and concurrency caps, keyed by the lane's entry name. */
+  limits?: Record<string, ServeLaneLimits>;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -1097,6 +1160,7 @@ export const serveSection: ConfigSection<{
     acpStallMs?: unknown;
     acpCooldownMs?: unknown;
     acpCwd?: unknown;
+    limits?: unknown;
   };
   const out: {
     backend?: string;
@@ -1112,6 +1176,7 @@ export const serveSection: ConfigSection<{
     acpStallMs?: number;
     acpCooldownMs?: number;
     acpCwd?: string;
+    limits?: Record<string, ServeLaneLimits>;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1156,6 +1221,10 @@ export const serveSection: ConfigSection<{
   // wins
   const acpCwd = trimmedField(obj.acpCwd);
   if (acpCwd !== undefined) out.acpCwd = acpCwd;
+  // the per-entry quota budgets (spec bro-ezboq) — unknown keys drop,
+  // malformed entries drop, an empty map reads as unset
+  const limits = serveLimits(obj.limits);
+  if (limits !== undefined) out.limits = limits;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1194,6 +1263,18 @@ serveSection.jsonSchema = js.obj({
   acpCooldownMs: js.int(0),
   // the session workspace pin (spec bro-sx4hr) — a path string
   acpCwd: js.str,
+  // the per-entry quota budgets (spec bro-ezboq) — entry name → lane
+  // limits; every axis optional, the loader drops malformed values
+  limits: js.map(
+    js.obj({
+      requestsPerHour: js.num(0),
+      burst: js.num(0),
+      spawnCost: js.num(0),
+      turnCost: js.num(0),
+      maxSessions: js.int(1),
+      maxQueue: js.int(1),
+    })
+  ),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1805,6 +1886,9 @@ export interface BroConfig {
      *  own (the host gateway). Repo-scoped serve ignores it: the repo
      *  root IS the workspace. */
     acpCwd?: string;
+    /** The per-entry quota budgets (spec bro-ezboq) — `serve.limits`
+     *  keyed by lane entry name. */
+    limits?: Record<string, ServeLaneLimits>;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */

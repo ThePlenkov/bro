@@ -1,9 +1,9 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { laneGateLevel, laneGateTake, type LaneRateGate } from './lane-gate.ts';
+import { after, describe, test } from 'node:test';
+import { type LaneRateGate, laneGateLevel, laneGateTake } from './lane-gate.ts';
 import { parseProviderEntry } from './providers.ts';
 import { scrubEnv } from './testkit.ts';
 
@@ -36,6 +36,19 @@ describe('lane gate — the token bucket', () => {
       assert.equal(r.tokens, 180);
       const level = laneGateLevel('devin', '(default)', cfg(), { now: 1000, dir });
       assert.deepEqual(level, { tokens: 180, capacity: 240 });
+    });
+  });
+
+  test('the cost override charges the passed amount, not spawnCost', () => {
+    withDir(dir => {
+      const c = cfg(); // spawnCost 60, capacity 240
+      const r = laneGateTake('serve:x', '(default)', c, { now: 1000, dir, cost: 10 });
+      assert.ok(r.ok);
+      assert.equal(r.tokens, 230);
+      // absent cost ⇒ the spawn semantic stands
+      const r2 = laneGateTake('serve:x', '(default)', c, { now: 1000, dir });
+      assert.ok(r2.ok);
+      assert.equal(r2.tokens, 170);
     });
   });
 
