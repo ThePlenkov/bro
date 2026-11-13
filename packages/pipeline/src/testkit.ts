@@ -218,8 +218,9 @@ const guardAnnotate = (heading: string, lines: readonly string[]): void => {
  *  recording the call. Enforces the contract's loud failures an
  *  engine must hit — missing item, empty/multi-line heading, empty
  *  lines, artifact segments that open structure — but not the
- *  managed-section dup guard (an intake artifact never targets a
- *  managed name). */
+ *  managed-section dup guard or the content dedup (an intake
+ *  artifact never targets a managed name, and the spy records every
+ *  call regardless). */
 export const specStore = (rows: TaskRow[]): SpecStoreSpy => {
   const bodies = new Map(rows.map(r => [r.id, r.description ?? '']));
   const titles = new Map(rows.map(r => [r.id, r.title ?? `task ${r.id}`]));
