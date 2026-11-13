@@ -700,6 +700,8 @@ function createBroDriver(host, api) {
 			properties: {},
 			additionalProperties: false
 		},
+		loadMode: "essential",
+		approval: "read",
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
@@ -890,9 +892,54 @@ function binding(pi) {
 		}
 	}) };
 }
+/** JSON-schema → zod for the parameter shapes the shared driver
+*  declares. Unknown/unsupported nodes degrade to `z.any()` — a loose
+*  schema still validates, a wrong guess would reject real params. */
+function schemaToZod(schema, z) {
+	if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return z.any();
+	if (typeof schema.safeParse === "function") return schema;
+	const s = schema;
+	if (Array.isArray(s.enum) && s.enum.every((v) => typeof v === "string")) return z.enum(s.enum);
+	switch (s.type) {
+		case "string": return z.string();
+		case "number":
+		case "integer": return z.number();
+		case "boolean": return z.boolean();
+		case "array": return z.array(schemaToZod(s.items, z));
+		case "object": {
+			const props = s.properties !== null && typeof s.properties === "object" ? s.properties : {};
+			const required = new Set(Array.isArray(s.required) ? s.required : []);
+			const shape = {};
+			for (const [key, sub] of Object.entries(props)) {
+				const built = schemaToZod(sub, z);
+				shape[key] = required.has(key) ? built : built?.optional?.() ?? built;
+			}
+			return z.object(shape);
+		}
+		default: return z.any();
+	}
+}
+/** omp's registerTool wants a schema-builder product for `parameters`
+*  (zod/arktype/typebox — raw JSON schema is dropped silently, which is
+*  how bro_status went missing from the model's tool list) and reads
+*  omp-native `loadMode`/`approval` policy fields the shared hints
+*  carry. Everything else passes through verbatim. */
+function adaptApiForOmp(pi) {
+	const z = pi.zod;
+	if (z === void 0) return pi;
+	return new Proxy(pi, { get(target, prop, receiver) {
+		if (prop === "registerTool") return (tool) => target.registerTool({
+			...tool,
+			parameters: schemaToZod(tool.parameters, z)
+		});
+		const value = Reflect.get(target, prop, receiver);
+		return typeof value === "function" ? value.bind(target) : value;
+	} });
+}
 /** The extension entry point — omp calls this with its API. */
 function broExtension(pi) {
-	const driver = createBroDriver(binding(pi), pi);
+	const api = adaptApiForOmp(pi);
+	const driver = createBroDriver(binding(api), api);
 	/** The mode bridges — bro's durable state handed to omp's native Plan,
 	*  Goal and Vibe modes. See omp-modes.ts for why bro adds state
 	*  rather than a second implementation of each mode. */

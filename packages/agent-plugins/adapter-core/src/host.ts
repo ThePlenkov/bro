@@ -257,6 +257,12 @@ export interface BroHostApi<Ctx = unknown> {
     label: string;
     description: string;
     parameters: Record<string, unknown>;
+    /** Host-policy hints, passed through verbatim — hosts that don't
+     *  know them ignore the fields. omp reads `loadMode` ('essential'
+     *  keeps the tool top-level; 'discoverable' hides it under xdev)
+     *  and `approval` ('read'|'write'|'exec'). */
+    loadMode?: string;
+    approval?: string;
     execute(
       toolCallId: string,
       params: unknown,
@@ -651,6 +657,8 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     description:
       'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
+    loadMode: 'essential',
+    approval: 'read',
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const result = await run(['status', '--json'], host.cwd(ctx));
       return {
