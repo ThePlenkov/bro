@@ -389,6 +389,90 @@ describe('brouter bench replay', () => {
       assert.equal(m.answered, 0);
       assert.equal(m.failed, 6);
       assert.equal(m.agreement, null);
+      // every sent call's spend is unreported — 'unknown', never a
+      // lowball zero (the 6th decision hit the abort streak and never
+      // reached the provider)
+      assert.equal(m.costUsdPer1k, 'unknown');
+      assert.equal(m.cost.unknownCalls, 5);
+    } finally {
+      close();
+    }
+  });
+
+  test('a transient decide() failure is per-call — the contender still reports its verdict', async () => {
+    const { s, close, path } = await store('flaky');
+    try {
+      const ctx = 'ctx:flaky';
+      const d1 = await journal(s, { contextId: ctx, route: 'ui' });
+      const d2 = await journal(s, { contextId: ctx, route: 'ui' });
+      const d3 = await journal(s, { contextId: ctx, route: 'ui' });
+      await outcome(s, d1, { result: 'merged', rounds: 1 });
+      await outcome(s, d2, { result: 'merged', rounds: 1 });
+      await outcome(s, d3, { result: 'merged', rounds: 1 });
+      const report = await runBenchReplay({
+        dir: scratch,
+        db: s.db,
+        storePath: path,
+        contextId: ctx,
+        judges: ['fake-provider'],
+        providers: FAKE_PROVIDERS,
+        judge: JUDGE_CFG,
+        makeJudge: async () =>
+          fakeJudge(
+            [
+              new Error('flake'),
+              choice('ui', { usage: { costUsd: 0.001 } }),
+              choice('ui', { usage: { costUsd: 0.001 } }),
+            ],
+            []
+          ),
+        invoke: 'always',
+        now: T0 + 120_000,
+      });
+      const m = contender(report, 'fake-provider')!;
+      // one transient failure must not poison the contender — status
+      // stays ok, the failed count carries the bad call, and the
+      // surviving answers still land the agreement verdict
+      assert.equal(m.status, 'ok');
+      assert.equal(m.answered, 2);
+      assert.equal(m.failed, 1);
+      assert.deepEqual(m.agreement, { labelled: 2, agreed: 2 });
+      // the failed call's spend is unreported — 'unknown', not zero
+      assert.equal(m.costUsdPer1k, 'unknown');
+      assert.equal(m.cost.knownCalls, 2);
+      assert.equal(m.cost.unknownCalls, 1);
+    } finally {
+      close();
+    }
+  });
+
+  test('a contender that cannot bind is failed at the contender level — and spent nothing', async () => {
+    const { s, close, path } = await store('unbindable');
+    try {
+      const ctx = 'ctx:unbindable';
+      await journal(s, { contextId: ctx, route: 'ui' });
+      await journal(s, { contextId: ctx, route: 'ui' });
+      const report = await runBenchReplay({
+        dir: scratch,
+        db: s.db,
+        storePath: path,
+        contextId: ctx,
+        judges: ['fake-provider'],
+        providers: FAKE_PROVIDERS,
+        judge: JUDGE_CFG,
+        makeJudge: async () => {
+          throw new Error('missing FAKE_KEY');
+        },
+        invoke: 'always',
+        now: T0 + 120_000,
+      });
+      const m = contender(report, 'fake-provider')!;
+      assert.equal(m.status, 'failed');
+      assert.match(m.error ?? '', /missing FAKE_KEY/);
+      assert.equal(m.answered, 0);
+      assert.equal(m.failed, 2);
+      // the bind never reached the provider — nothing was spent
+      assert.equal(m.costUsdPer1k, 0);
     } finally {
       close();
     }

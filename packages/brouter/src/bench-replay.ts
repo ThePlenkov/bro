@@ -136,7 +136,14 @@ export type ContenderAnswer =
       costUsd?: number;
     }
   | { status: 'skipped'; reason: string }
-  | { status: 'failed'; error: string };
+  | {
+      status: 'failed';
+      error: string;
+      /** the request reached the provider before failing — spend was
+       *  possibly incurred but never reported, so the call counts as
+       *  unknown-cost (a bind failure or an abort skip made no call) */
+      callMade?: boolean;
+    };
 
 /** The per-decision input every contender sees — identical for all of
  *  them, so denominators stay comparable. */
@@ -467,18 +474,23 @@ function modelContender(deps: {
           : { task: decision.taskText, rubric: decision.rubric };
       const started = performance.now();
       let res: DecideResult;
+      let bound = false;
       try {
-        res = await (await bind()).decide(state, questions);
+        const judge = await bind();
+        bound = true;
+        res = await judge.decide(state, questions);
       } catch (err) {
         streak += 1;
         const error = err instanceof Error ? err.message : String(err);
-        // a bind failure is the contender's own defect — it rides
-        // bindError so the metrics row reports 'failed', not 0%
-        contender.bindError ??= error;
+        // a BIND failure is the contender's own defect — it rides
+        // bindError so the metrics row reports 'failed', not 0%. A
+        // decide() failure is per-call: the failed count carries it
+        // and a later success still lands the contender's verdict
+        if (!bound) contender.bindError ??= error;
         if (streak >= MODEL_ABORT_STREAK) {
           aborted = `${streak} consecutive decide() failures — last: ${error}`;
         }
-        return { status: 'failed', error };
+        return { status: 'failed', error, ...(bound ? { callMade: true } : {}) };
       }
       streak = 0;
       const latencyMs = performance.now() - started;
@@ -599,7 +611,8 @@ export interface ContenderMetrics {
   agreement: { labelled: number; agreed: number } | null;
   latencyMs: { n: number; p50: number; p95: number; mean: number } | null;
   /** measured spend — costUsdPer1k stays 'unknown' while any made
-   *  call reported no cost (unknown is never zero) */
+   *  call reported no cost — answered without usage or failed after
+   *  reaching the provider (unknown is never zero) */
   cost: { totalUsd: number; knownCalls: number; unknownCalls: number };
   costUsdPer1k: number | 'unknown';
   /** answered picks by route — the disagreement evidence */
@@ -690,6 +703,12 @@ function tallyContender(
     }
     if (answer.status === 'failed') {
       metrics.failed += 1;
+      if (contender.kind === 'model' && answer.callMade === true) {
+        // a request that may have been sent carries unreported spend —
+        // the cost metric stays 'unknown' rather than a lowball
+        metrics.cost.unknownCalls += 1;
+        costKnown = false;
+      }
       if ('latencyMs' in answer && typeof answer.latencyMs === 'number') {
         latencies.push(answer.latencyMs);
       }
@@ -750,15 +769,17 @@ function tallyContender(
   // cost per 1k decisions — the denominator is every decision the
   // contender was EVALUATED on (answered + skipped + failed): a skip
   // costs nothing and belongs in the amortized figure. Builtins are
-  // free by construction; a model is 'unknown' while any made call
-  // reported no cost.
+  // free by construction; a model is 'unknown' while any made call —
+  // answered or failed in flight — reported no cost.
   const evaluated = metrics.answered + metrics.skipped + metrics.failed;
   if (contender.kind === 'builtin') {
     metrics.costUsdPer1k = 0;
   } else if (evaluated > 0 && madeCalls > 0 && costKnown) {
     metrics.costUsdPer1k = (metrics.cost.totalUsd / evaluated) * 1000;
-  } else if (evaluated > 0 && madeCalls === 0) {
-    metrics.costUsdPer1k = 0; // every decision skipped — nothing spent
+  } else if (evaluated > 0 && madeCalls === 0 && costKnown) {
+    // every evaluated decision skipped or failed before reaching the
+    // provider — nothing was spent
+    metrics.costUsdPer1k = 0;
   } else {
     metrics.costUsdPer1k = 'unknown';
   }
