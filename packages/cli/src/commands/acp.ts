@@ -1,18 +1,26 @@
 /**
  * `bro acp proxy -- <agent cmd>` — the cascading ACP edge (specs
- * bro-rs8sp.md, bro-bhyo1.md). bro sits on the ACP wire: the client
- * (Zed, JetBrains, Neovim, `devin acp`, `kilo acp`) talks ACP to this
- * process's stdin/stdout; bro spawns the downstream agent from the
- * argv tail and forwards everything verbatim — except the session's
- * first `session/prompt`, which carries the hook seam's session-start
- * + prompt-submit context as one prepended text block.
+ * bro-rs8sp.md, bro-bhyo1.md, bro-u2eps.md). bro sits on the ACP wire:
+ * the client (Zed, JetBrains, Neovim, `devin acp`, `kilo acp`) talks ACP
+ * to this process's stdin/stdout; bro spawns the downstream agent from
+ * the argv tail and forwards everything verbatim — except the session's
+ * first `session/prompt` (which carries the hook seam's session-start +
+ * prompt-submit context as one prepended text block), the tool-call
+ * updates that feed the in-process arming/guard pass, and the turn-end
+ * responses the stop gate can hold for exactly one re-prompt.
  *
  * The seam is the same code `bro hooks` runs — collectSessionContext /
- * collectPromptContext as library calls keyed on `session/new`'s cwd,
- * never a subprocess and never the proxy's own cwd.
+ * collectPromptContext / collectToolCallGuards / collectStopGate as
+ * library calls keyed on `session/new`'s cwd, never a subprocess and
+ * never the proxy's own cwd.
  */
 import { CommandError, EXIT, passthroughExitCode } from '@broject/core';
-import { collectPromptContext, collectSessionContext } from './hooks.ts';
+import {
+  collectPromptContext,
+  collectSessionContext,
+  collectStopGate,
+  collectToolCallGuards,
+} from './hooks.ts';
 
 const USAGE = 'usage: bro acp proxy -- <agent cmd…>';
 
@@ -52,6 +60,19 @@ export async function runAcpCommand(argv: string[]): Promise<void> {
       promptContext: async (cwd, sessionId, prompt) => {
         const r = await collectPromptContext(cwd, sessionId, prompt);
         return r.lines.length === 0 ? undefined : r.lines.join('\n');
+      },
+      // the tool-call and stop-gate legs (spec bro-u2eps): the same
+      // arming + guard + gate evaluation `bro hooks` runs, in-process —
+      // the proxy pays no per-call subprocess. `call` arrives as the
+      // proxy's own AcpProxyToolCall shape; AcpToolCall is the same
+      // structure declared on this side of the module edge.
+      toolCall: async (cwd, sessionId, call) => {
+        const r = await collectToolCallGuards(cwd, sessionId, call);
+        return r.lines.length === 0 ? undefined : r.lines;
+      },
+      stopGate: async (cwd, sessionId) => {
+        const r = await collectStopGate(cwd, sessionId);
+        return r.block === undefined && r.hints.length === 0 ? undefined : r;
       },
     },
   });

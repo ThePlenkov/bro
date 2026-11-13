@@ -44,11 +44,21 @@ context or nothing (fail-open, same as the hook).
   prompt only. A `session/cancel` landing while the seam collects
   answers the held prompt `stopReason:'cancelled'` — the wire never
   shows a prompt after its cancel.
-- `session/update` chunks never pay probe cost — the seam maps to
-  wire-level events, not deltas.
-- Permission policy (`bro-9qopj`), tool-call guards and the stop gate
-  (`bro-u2eps`), and agent mode (`bro-tegz2`) are separate beads —
-  permission requests forward verbatim today.
+- `tool_call` updates run the post-tool hook in-process too (spec
+  bro-u2eps): the session-marker arming and post-tool guard defs
+  `bro hooks` runs per tool call — no run.sh subprocess per call.
+  Guard `say` lines and gate hints buffer onto the next crossed
+  `session/prompt` as prepended text — never a fabricated wire
+  message.
+- The turn end is the stop gate: a `session/prompt` response held by
+  an armed blocking contribution gets exactly ONE follow-up prompt
+  carrying the gate's message, and the gate turn's own end passes
+  unconditionally — gates, not loops.
+- `BRO_HOOKS=0` makes the proxy a pure transport — no arming, no
+  guards, no gate (the spawned agent already runs with it, which is
+  why the child env pins it).
+- Permission policy (`bro-9qopj`) and agent mode (`bro-tegz2`) are
+  separate beads — permission requests forward verbatim today.
 
 ## Telemetry
 
