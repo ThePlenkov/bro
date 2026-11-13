@@ -10,12 +10,15 @@
  *  This is vendor knowledge living at the plugin layer — core's
  *  session-planes module owns the mutex/reservation/quota mechanics,
  *  this file owns ONLY how devin marks and counts its sessions. */
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync } from 'node:fs';
 import { homedir, uptime } from 'node:os';
 import { join } from 'node:path';
 import {
   ownedEnviron,
   pidAlive,
+  psRegroupPaths,
+  psTokenize,
   registerExternalPlane,
   registerSessionPlane,
   sessionSlotsDir,
@@ -93,6 +96,88 @@ function devinSessionDirs(
   return dirs;
 }
 
+/** The injectable ps probe — `ps -p <pid> -o lstart=,command=`'s
+ *  stdout, or undefined when ps itself cannot answer (a failed spawn,
+ *  a nonzero exit — a live pid ps fails to match is indistinguishable
+ *  from a ps that cannot run at all, so failure is NEVER 'gone'; only
+ *  a clean run answering no row proves absence). Same test-injection
+ *  convention procDir carries: a caller with a scripted ps is never
+ *  counted against the real one. spec bro-74y7n. */
+export type PsPidProbe = (pid: number) => string | undefined;
+
+/** The identity row a ps answer splits into — `present:false` means a
+ *  clean run named no such pid (gone); `argv0` is the argv[0] basename
+ *  (the exact identity /proc/<pid>/cmdline carries — `comm` would
+ *  answer the RESOLVED binary's name, which a symlink, a multicall
+ *  copy, or a process that renames its own comm — node's
+ *  `node-MainThread` — all spell differently) and `startMs` the start
+ *  epoch the write-bound pin compares, each undefined when the row
+ *  could not yield it. */
+interface PsIdentity {
+  present: boolean;
+  argv0?: string;
+  startMs?: number;
+}
+
+/** One `lstart=,command=` answer → the identity row. lstart is 4
+ *  tokens (no year) or 5 (with year) — the first Date.parse-able
+ *  prefix wins; the rest is the space-joined argv vector, regrouped
+ *  (a spaced argv[0] path arrives pre-split — psRegroupPaths re-glues
+ *  the fragments an existsSync boundary proves, the same convention
+ *  doctor's darwin argv read runs) and argv[0] basenamed. A row with
+ *  no parseable lstart prefix splits to nothing — its argv boundary
+ *  cannot be trusted either, so both facts stay unverifiable. */
+function psIdentity(out: string): PsIdentity {
+  const line =
+    out
+      .split('\n')
+      .map(l => l.trim())
+      .find(l => l !== '') ?? '';
+  if (line === '') {
+    return { present: false };
+  }
+  const parts = line.split(/\s+/);
+  for (const len of [5, 4]) {
+    if (parts.length <= len) {
+      continue;
+    }
+    const startMs = Date.parse(parts.slice(0, len).join(' '));
+    if (Number.isNaN(startMs)) {
+      continue;
+    }
+    const argv = psRegroupPaths(psTokenize(parts.slice(len).join(' ')));
+    const argv0 = argv[0];
+    return {
+      present: true,
+      startMs,
+      argv0: argv0 === undefined ? undefined : argv0.slice(argv0.lastIndexOf('/') + 1),
+    };
+  }
+  return { present: true };
+}
+
+/** The real ps probe — `ps -p <pid> -o lstart=,command=` (`command`
+ *  is the POSIX spelling; `args`/`args=` aliases print the same).
+ *  LC_ALL/LC_TIME pin lstart's month spelling so Date.parse reads it
+ *  on any locale; TZ stays unpinned so lstart renders in the same
+ *  zone Date.parse interprets. */
+function psPidRow(pid: number): string | undefined {
+  try {
+    return execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', String(pid), '-o', 'lstart=,command='],
+      {
+        encoding: 'utf8',
+        timeout: 1000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' },
+      }
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 /** Is this pid still a devin session? The lock file carries a pid and
  *  nothing else, so a pid that was RECYCLED (the devin session died,
  *  the number now belongs to something else) reads as a live session —
@@ -109,8 +194,26 @@ function devinSessionDirs(
  *
  *  An unreadable /proc entry cannot clear a lock (the count fails
  *  closed — a quota that cannot be established is not walked past), so
- *  it counts as live. */
-function isDevinProcess(pid: number, procDir = '/proc'): boolean {
+ *  it counts as live. A host without procDir answers the same question
+ *  over `ps` (spec bro-74y7n) — `command=` carries the same argv[0]
+ *  the cmdline read basenames. */
+function isDevinProcess(pid: number, procDir = '/proc', ps: PsPidProbe = psPidRow): boolean {
+  if (!existsSync(procDir)) {
+    // a host without /proc answers over ps — same verdicts the cmdline
+    // read holds: a probe that cannot answer disproves nothing (the
+    // count fails closed), a clean run naming no such pid proves the
+    // lock stale, and a live pid answering a foreign argv[0] is a
+    // recycled number
+    const out = ps(pid);
+    if (out === undefined) {
+      return true;
+    }
+    const row = psIdentity(out);
+    if (!row.present) {
+      return false;
+    }
+    return row.argv0 === undefined ? true : row.argv0 === 'devin';
+  }
   let cmdline: string;
   try {
     cmdline = readFileSync(join(procDir, String(pid), 'cmdline'), 'utf8');
@@ -182,8 +285,17 @@ const LOCK_PID_SKEW_MS = 60_000;
 /** The pid's /proc starttime (field 22, jiffies since boot) → epoch ms.
  *  Undefined when the stat is unreadable or malformed: the same
  *  fail-open contract as the cmdline read — an unverifiable pid stays
- *  counted, never a false "stale". */
-function procStartMs(pid: number, procDir: string): number | undefined {
+ *  counted, never a false "stale". A host without procDir answers the
+ *  same fact from ps's lstart (spec bro-74y7n). */
+function procStartMs(pid: number, procDir: string, ps: PsPidProbe = psPidRow): number | undefined {
+  if (!existsSync(procDir)) {
+    const out = ps(pid);
+    if (out === undefined) {
+      return undefined;
+    }
+    const row = psIdentity(out);
+    return row.present ? row.startMs : undefined;
+  }
   let raw: string;
   try {
     raw = readFileSync(join(procDir, String(pid), 'stat'), 'utf8');
@@ -227,12 +339,13 @@ function lockWriteBoundMs(path: string): number | undefined {
 function lockIsLiveSession(
   pid: number | undefined,
   lockPath: string,
-  procDir: string
+  procDir: string,
+  ps: PsPidProbe
 ): pid is number {
   if (pid === undefined) {
     return false;
   }
-  if (!pidAlive(pid) || !isDevinProcess(pid, procDir)) {
+  if (!pidAlive(pid) || !isDevinProcess(pid, procDir, ps)) {
     return false;
   }
   const bound = lockWriteBoundMs(lockPath);
@@ -241,7 +354,7 @@ function lockIsLiveSession(
     // same fail-closed contract the cmdline read holds
     return true;
   }
-  const start = procStartMs(pid, procDir);
+  const start = procStartMs(pid, procDir, ps);
   if (start === undefined) {
     return true;
   }
@@ -255,12 +368,16 @@ function lockIsLiveSession(
  *  that dir contributes nothing; any OTHER read failure throws
  *  SpawnError('unavailable') — an unverifiable count fails closed,
  *  never silently admits. */
-function liveDevinLocks(dirs: string[], procDir = '/proc'): Map<number, string[]> {
+function liveDevinLocks(
+  dirs: string[],
+  procDir = '/proc',
+  ps: PsPidProbe = psPidRow
+): Map<number, string[]> {
   const live = new Map<number, string[]>();
   for (const dir of dirs) {
     for (const name of lockNames(dir)) {
       const pid = lockPid(dir, name);
-      if (!lockIsLiveSession(pid, join(dir, name), procDir)) {
+      if (!lockIsLiveSession(pid, join(dir, name), procDir, ps)) {
         continue;
       }
       const session = name.slice(0, -'.lock'.length);
@@ -278,8 +395,12 @@ function liveDevinLocks(dirs: string[], procDir = '/proc'): Map<number, string[]
 
 /** Live devin session pids across the dirs — deduplicated (a resumed
  *  session leaves a second lock for the same process). */
-function liveDevinLockPids(dirs: string[], procDir = '/proc'): Set<number> {
-  return new Set(liveDevinLocks(dirs, procDir).keys());
+function liveDevinLockPids(
+  dirs: string[],
+  procDir = '/proc',
+  ps: PsPidProbe = psPidRow
+): Set<number> {
+  return new Set(liveDevinLocks(dirs, procDir, ps).keys());
 }
 
 /** A reservation file is `<key>-<8hex>.slot`; for bro spawns the key
@@ -335,9 +456,15 @@ function sweepLandedSlots(resDir: string, live: Set<number>, procDir = '/proc'):
  *  read failure throws SpawnError('unavailable') — an unverifiable
  *  count fails closed, never silently admits. `slotsDir` sweeps
  *  reservations whose spawn already landed so they aren't counted
- *  twice by an admission. */
-export function countDevinSessions(dirs: string[], slotsDir?: string, procDir = '/proc'): number {
-  const live = liveDevinLockPids(dirs, procDir);
+ *  twice by an admission. `psProbe` injects the no-/proc identity
+ *  probe for tests — a present procDir never calls it. */
+export function countDevinSessions(
+  dirs: string[],
+  slotsDir?: string,
+  procDir = '/proc',
+  psProbe: PsPidProbe = psPidRow
+): number {
+  const live = liveDevinLockPids(dirs, procDir, psProbe);
   if (slotsDir !== undefined) {
     sweepLandedSlots(slotsDir, live, procDir);
   }
@@ -457,13 +584,14 @@ export function countDevinBatchWorkers(
   dirs: string[],
   isBatch?: (pid: number) => boolean,
   procDir = '/proc',
-  slotsDir?: string
+  slotsDir?: string,
+  psProbe: PsPidProbe = psPidRow
 ): number {
   // the default predicate reads the SAME procDir the scan uses — a
   // caller with a scripted /proc tree must not be counted against the
   // real one
   const predicate = isBatch ?? ((pid: number) => devinPidIsBatch(pid, procDir));
-  const live = liveDevinLockPids(dirs, procDir);
+  const live = liveDevinLockPids(dirs, procDir, psProbe);
   if (isBatch === undefined && live.size > 0 && !existsSync(procDir)) {
     // a host without /proc cannot tell the fleet's workers from the
     // operator's — an armed maxBatchWorkers must refuse there like an
@@ -531,9 +659,10 @@ export function countDevinWorkers(
   dirs: string[],
   isWorker: (pid: number) => boolean = devinPidIsWorker,
   slotsDir?: string,
-  procDir = '/proc'
+  procDir = '/proc',
+  psProbe: PsPidProbe = psPidRow
 ): number {
-  const live = liveDevinLockPids(dirs, procDir);
+  const live = liveDevinLockPids(dirs, procDir, psProbe);
   const predicate = workerPredicate(isWorker, procDir);
   assertWorkerCountVerifiable(isWorker, live.size, procDir);
   if (slotsDir !== undefined) {
@@ -768,9 +897,13 @@ export function devinPidLog(pid: number, logsDir: string): string | undefined {
  *  worker/agentId ride the /proc classifier — unreadable state means
  *  "not verifiably a worker", same undercount contract as
  *  devinPidIsWorker. `procDir` injectable for tests. */
-export function listDevinSessions(dirs: string[], procDir = '/proc'): DiscoveredSession[] {
+export function listDevinSessions(
+  dirs: string[],
+  procDir = '/proc',
+  psProbe: PsPidProbe = psPidRow
+): DiscoveredSession[] {
   const out: DiscoveredSession[] = [];
-  for (const [pid, names] of liveDevinLocks(dirs, procDir)) {
+  for (const [pid, names] of liveDevinLocks(dirs, procDir, psProbe)) {
     out.push(sessionRow(pid, names[0] ?? '', procDir));
   }
   return out;
