@@ -295,7 +295,11 @@ export function appendHookSpoolRows(
   }
   try {
     mkdirSync(dirname(path), { recursive: true });
-    // one append for the batch — O_APPEND keeps a ≤4KB write atomic
+    // one write(2) for the whole batch — O_APPEND makes each call's
+    // offset+data one kernel step, so concurrent writers append rather
+    // than overwrite; POSIX gives no interleave guarantee for regular
+    // files, but a torn row is exactly what parseSpoolLine drops —
+    // a rare lost row, never a corrupted file
     appendFileSync(path, rows.map(formatSpoolRow).join(''));
     return true;
   } catch {

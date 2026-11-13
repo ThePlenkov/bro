@@ -7,7 +7,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseSpoolLine, type SpoolRow } from '@broject/core';
+import {
+  clearSessionPlanes,
+  parseSpoolLine,
+  registerSessionPlane,
+  sessionPlanes,
+  SpawnError,
+  type SessionPlane,
+  type SpoolRow,
+} from '@broject/core';
 import { adapterEmitBegin } from './hook-emit.ts';
 
 const withDir = (fn: (dir: string) => void): void => {
@@ -156,6 +164,60 @@ test('disabled spool and BRO_HOOKS=0 machine trees write nothing', () =>
       HOME: dir,
     }).end('fastpath');
     assert.equal(rows(spool).at(1)?.outcome, 'fastpath');
+  }));
+
+test('the end rc mirrors the outcome — failures write nonzero like run.sh', () =>
+  withDir(dir => {
+    const spool = join(dir, 'hooks.spool');
+    const env = { BRO_HOOK_SPOOL: spool, BRO_HOOK_HOST: 'omp', HOME: dir };
+    adapterEmitBegin('e1', {}, '', env).end('error');
+    adapterEmitBegin('e2', {}, '', env).end('fastpath');
+    adapterEmitBegin('e3', {}, '', env).end();
+    const pair = rows(spool);
+    // start/end alternation — rc lives on the end rows
+    assert.equal(pair.at(1)?.outcome, 'error');
+    assert.equal(pair.at(1)?.rc, 1);
+    assert.equal(pair.at(3)?.outcome, 'fastpath');
+    assert.equal(pair.at(3)?.rc, 0);
+    assert.equal(pair.at(5)?.outcome, 'ok');
+    assert.equal(pair.at(5)?.rc, 0);
+    // three begins in the same process-second still mint distinct pair
+    // ids — the dedup key can never merge two launches
+    const ids = [pair.at(0)?.id, pair.at(2)?.id, pair.at(4)?.id];
+    assert.equal(new Set(ids).size, 3);
+  }));
+
+test('a throwing plane hook cannot break the host — begin fails open', () =>
+  withDir(dir => {
+    const saved = sessionPlanes();
+    clearSessionPlanes();
+    registerSessionPlane({
+      kind: 'zev',
+      detectsCli: () => false,
+      countLive() {
+        throw new SpawnError('unavailable', 'unavailable');
+      },
+      detectHook() {
+        throw new Error('hostile plane — a emit bug must not kill the hook');
+      },
+    } satisfies SessionPlane);
+    try {
+      const spool = join(dir, 'hooks.spool');
+      const emit = adapterEmitBegin('post-tool', { session_id: 's' }, 's', {
+        BRO_HOOK_SPOOL: spool,
+        BRO_HOOK_HOST: 'zev',
+        HOME: dir,
+      });
+      // begin returned a handle instead of throwing; it is the noop —
+      // no start row, and end() must not throw either
+      emit.end();
+      assert.equal(existsSync(spool), false);
+    } finally {
+      clearSessionPlanes();
+      for (const plane of saved) {
+        registerSessionPlane(plane);
+      }
+    }
   }));
 
 test('launcher mirrors run.sh precedence', () =>

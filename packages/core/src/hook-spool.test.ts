@@ -134,12 +134,14 @@ test('hookSpoolFiles drains the rotated file before the live one', () => {
 // in-process adapters' `bro hooks` path uses — run.sh's contract, so the
 // round-trip through parseSpoolLine IS the assertion.
 
+// synthetic host slugs — core tests exercise the wire contract, the
+// real adapter names belong to the CLI/plugin layer
 const V2_START: SpoolRow = {
   version: 2,
   ts: 1700000000,
   phase: 'start',
   id: 'p-1',
-  host: 'opencode',
+  host: 'xhost',
   sid: 'sess-9',
   event: 'session-start',
   pid: 4242,
@@ -165,7 +167,7 @@ test('formatSpoolRow emits absent v2 enrichments as empty fields', () => {
       ts: 1,
       phase: 'start',
       id: 'i',
-      host: 'kilo',
+      host: 'yhost',
       event: 'post-tool',
       cwd: '/r',
     }).trimEnd()
@@ -175,7 +177,7 @@ test('formatSpoolRow emits absent v2 enrichments as empty fields', () => {
     ts: 1,
     phase: 'start',
     id: 'i',
-    host: 'kilo',
+    host: 'yhost',
     event: 'post-tool',
     cwd: '/r',
     // every enrichment slot parsed to undefined — not a column shift

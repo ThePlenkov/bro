@@ -66,6 +66,12 @@ function spoolLauncher(env: NodeJS.ProcessEnv): string {
 const emptyUndef = (v: string | undefined): string | undefined =>
   v === undefined || v === '' ? undefined : v;
 
+/** Pair-id sequence — the id is `pid-t0-seq`, run.sh's `$$-$BRO_HOOK_T0`
+ *  plus a per-process ordinal: two begins inside one process-second
+ *  (a test, a future multi-event caller) still mint distinct pairs, and
+ *  the ledger's id-keyed dedup can never merge them. */
+let emitSeq = 0;
+
 /** Open a launch when this `bro hooks` invocation is an in-process
  *  adapter's direct call — i.e. a registered plane's `detectHook`
  *  matches the env. The start row is written eagerly; the returned
@@ -73,60 +79,84 @@ const emptyUndef = (v: string | undefined): string | undefined =>
  *  No-op handle when: no plane claims the launch, spooling is disabled,
  *  or `BRO_HOOKS=0` would have exited run.sh before journaling
  *  (everything but `permission`). */
+
 export function adapterEmitBegin(
   event: string,
   raw: unknown,
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env
 ): HookEmit {
-  if (env.BRO_HOOKS === '0' && event !== 'permission') {
+  // the whole begin is fail-open — a throwing plane hook, an
+  // unresolvable home, a deleted cwd: emit is telemetry riding the
+  // hook's hot path, so its bugs must never break the host's event
+  try {
+    if (env.BRO_HOOKS === '0' && event !== 'permission') {
+      return NOOP_EMIT;
+    }
+    const plane = sessionPlanes().find(p => p.detectHook?.(env) === true);
+    if (plane === undefined) {
+      return NOOP_EMIT;
+    }
+    if (resolveHookSpoolPath(env) === null) {
+      return NOOP_EMIT;
+    }
+    // the plane's normalizeHook is the host's own claim of identity; the
+    // canonical input.session_id is the fallback — every adapter sends it
+    const norm = plane.normalizeHook?.(raw) ?? normalizeHookPayload(raw);
+    const t0 = Math.floor(Date.now() / 1000);
+    const base = {
+      version: 2 as const,
+      id: `${process.pid}-${t0}-${emitSeq++}`,
+      host: plane.kind,
+      sid: norm.sid ?? (sessionId === '' ? undefined : sessionId),
+      event,
+      pid: process.pid,
+      ppid: process.ppid,
+      agent: emptyUndef(env.BRO_AGENT_ID),
+      adapter: emptyUndef(env.BRO_HOOK_ADAPTER),
+      pluginRoot: emptyUndef(env.BRO_HOOK_PROOT),
+      launcher: spoolLauncher(env),
+      cwd: process.cwd(),
+    };
+    appendHookSpoolRows([{ ...base, ts: t0, phase: 'start' }], env);
+    let outcome: SpoolOutcome = 'ok';
+    let ended = false;
+    return {
+      mark(o) {
+        outcome = o;
+      },
+      end(o) {
+        if (ended) {
+          return;
+        }
+        ended = true;
+        const resolvedOutcome = o ?? outcome;
+        const row: SpoolRow = {
+          ...base,
+          ts: Math.floor(Date.now() / 1000),
+          phase: 'end',
+          // run.sh writes the child's real exit rc — `hook_spool_end
+          // "$_rc" nonzero` vs `0 fastpath`/`0 no-cli`. The Node writer
+          // has no exit code, so the outcome maps: the non-failure
+          // paths take 0, every failure takes 1 — an `error` end with
+          // rc 0 would contradict the pair's own outcome field
+          rc:
+            resolvedOutcome === 'ok' ||
+            resolvedOutcome === 'fastpath' ||
+            resolvedOutcome === 'no-cli'
+              ? 0
+              : 1,
+          outcome: resolvedOutcome,
+        };
+        try {
+          appendHookSpoolRows([row], env);
+        } catch {
+          // append is already fail-open — the belt keeps a future
+          // row-build regression from ever breaking the hook too
+        }
+      },
+    };
+  } catch {
     return NOOP_EMIT;
   }
-  const plane = sessionPlanes().find(p => p.detectHook?.(env) === true);
-  if (plane === undefined) {
-    return NOOP_EMIT;
-  }
-  if (resolveHookSpoolPath(env) === null) {
-    return NOOP_EMIT;
-  }
-  // the plane's normalizeHook is the host's own claim of identity; the
-  // canonical input.session_id is the fallback — every adapter sends it
-  const norm = plane.normalizeHook?.(raw) ?? normalizeHookPayload(raw);
-  const t0 = Math.floor(Date.now() / 1000);
-  const base = {
-    version: 2 as const,
-    id: `${process.pid}-${t0}`,
-    host: plane.kind,
-    sid: norm.sid ?? (sessionId === '' ? undefined : sessionId),
-    event,
-    pid: process.pid,
-    ppid: process.ppid,
-    agent: emptyUndef(env.BRO_AGENT_ID),
-    adapter: emptyUndef(env.BRO_HOOK_ADAPTER),
-    pluginRoot: emptyUndef(env.BRO_HOOK_PROOT),
-    launcher: spoolLauncher(env),
-    cwd: process.cwd(),
-  };
-  appendHookSpoolRows([{ ...base, ts: t0, phase: 'start' }], env);
-  let outcome: SpoolOutcome = 'ok';
-  let ended = false;
-  return {
-    mark(o) {
-      outcome = o;
-    },
-    end(o) {
-      if (ended) {
-        return;
-      }
-      ended = true;
-      const row: SpoolRow = {
-        ...base,
-        ts: Math.floor(Date.now() / 1000),
-        phase: 'end',
-        rc: 0,
-        outcome: o ?? outcome,
-      };
-      appendHookSpoolRows([row], env);
-    },
-  };
 }
