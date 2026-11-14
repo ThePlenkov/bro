@@ -193,6 +193,19 @@ describe('plugins install/uninstall/list', () => {
     assert.equal(readFileSync(join(f.globalDir, 'rpc.ts'), 'utf8'), shippedRpc);
     // the TUI half's own `./rpc.ts` import resolves inside the directory
     assert.match(shippedTui, /from\s+['"]\.\/rpc\.ts['"]/);
+    // the embedded skills tree materializes beside the modules — the
+    // plugin's collectBroSkills reads `<bundle>/skills/` first, so an
+    // installed copy registers bro's skills instead of stumbling onto a
+    // foreign skills/ dir (bro-tswwr)
+    const shippedSkill = readFileSync(join(repoRoot, 'skills', 'sdd', 'SKILL.md'), 'utf8');
+    assert.equal(
+      readFileSync(join(f.globalDir, 'skills', 'sdd', 'SKILL.md'), 'utf8'),
+      shippedSkill
+    );
+    assert.equal(
+      readFileSync(join(f.localDir, 'skills', 'act', 'SKILL.md'), 'utf8'),
+      readFileSync(join(repoRoot, 'skills', 'act', 'SKILL.md'), 'utf8')
+    );
 
     const again = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(

@@ -172,3 +172,13 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
 - 2026-11-14 — v9: S4f command family verified e2e — opencode owns
   `/goal` natively → `bro:goal`; `/wtf` bare. Same BRO_COMMANDS
   table as the pi/omp lineage (`bro-command.e2e.test.ts`).
+- 2026-11-14 — v10: live-dogfood fix (bro-tswwr) — `bro plugins
+  install opencode` now materializes the embedded skills tree into
+  the bundle (`skills/<name>/<file>` from `dist/generated/
+  skills-data.json`, live repo tree as pre-build fallback), so
+  `collectBroSkills`' `./skills` root resolves for installed copies
+  instead of falling through to a foreign `skills/` ancestor.
+  `collectBroSkills` additionally sentinel-gates auto-discovered
+  roots on `sdd/SKILL.md` — an explicit `skillsDir` stays
+  authoritative. Verified live: `/api/skill` on `opencode serve`
+  2.3.0 went 112→160 entries with the full bro tree registered.

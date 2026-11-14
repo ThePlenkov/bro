@@ -37,6 +37,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type BroPlugin, CommandError, EXIT, gitTry, hasHelpFlag, printUsage } from '@broject/core';
+import { collectEmbedded, type EmbeddedData } from '../embedded.ts';
 import { positionals } from './args.ts';
 
 export type PluginScope = 'global' | 'local';
@@ -64,10 +65,15 @@ interface Registration {
 /** One file of a bundle surface — where it comes from and the name it
  *  takes inside the bundle's directory. */
 interface SurfaceFile {
-  /** the source path, or null when the artifact cannot be resolved */
+  /** the source path, or null when the artifact cannot be resolved or
+   *  the bytes arrive inline via `content` */
   artifact: string | null;
   /** the file name inside the bundle directory */
   name: string;
+  /** inline bytes for snapshot members — the embedded skills tree
+   *  ships as one JSON asset, so its files have no per-file source
+   *  path to point `artifact` at */
+  content?: string;
 }
 
 /** An installable unit. `file` is one module; `bundle` is a directory of
@@ -165,11 +171,51 @@ function opencodeArtifact(cwd: string, src: string, shipped: string): string | n
   ]);
 }
 
+/** bro's skill tree as bundle members — `skills/<name>/<file>` inline
+ *  from the embedded snapshot. The plugin's collectBroSkills reads
+ *  `<bundle>/skills/` first, so materializing here is what makes the
+ *  registry surface work for installed copies (spec AGT-6: skills
+ *  registered from plugin dir). Resolution order: the shipped
+ *  `dist/generated/skills-data.json` snapshot (present in every built
+ *  CLI — dev and tarball alike), then the live repo tree for
+ *  pre-build checkouts. Never the TARGET repo's skills/ — those are
+ *  the operator's, not bro's. */
+function broSkillFiles(): SurfaceFile[] {
+  const cli = packageRoot();
+  let files: Record<string, string> | null = null;
+  const artifact = cli === null ? null : join(cli, 'dist', 'generated', 'skills-data.json');
+  if (artifact !== null && existsSync(artifact)) {
+    try {
+      files = (JSON.parse(readFileSync(artifact, 'utf8')) as EmbeddedData).SKILL_FILES;
+    } catch {
+      files = null;
+    }
+  }
+  if (files === null && cli !== null) {
+    const repo = join(cli, '..', '..');
+    try {
+      if (existsSync(join(repo, 'skills'))) {
+        files = collectEmbedded(repo).SKILL_FILES;
+      }
+    } catch {
+      files = null;
+    }
+  }
+  if (files === null) {
+    return [];
+  }
+  const skillMap = files;
+  return Object.keys(skillMap)
+    .sort()
+    .map(rel => ({ name: `skills/${rel}`, artifact: null, content: skillMap[rel] }));
+}
+
 /** The opencode v2 catalog plugin — one directory, three modules:
  *  `index.ts` is the server entrypoint (opencode's plugin loader reads
  *  the directory's index), `tui.tsx` the terminal half, `rpc.ts` the
  *  contract both halves share. The server's `./rpc.ts` import resolves
- *  inside the installed directory. */
+ *  inside the installed directory. `skills/` rides along so the
+ *  plugin's skill registry has its tree beside the modules. */
 function opencodeBundle(cwd: string, env: NodeJS.ProcessEnv): Surface {
   const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config');
   const localDir = join(gitRoot(cwd) ?? cwd, '.opencode');
@@ -179,6 +225,7 @@ function opencodeBundle(cwd: string, env: NodeJS.ProcessEnv): Surface {
       { name: 'index.ts', artifact: opencodeArtifact(cwd, 'opencode.ts', 'index.ts') },
       { name: 'tui.tsx', artifact: opencodeArtifact(cwd, 'tui.tsx', 'tui.tsx') },
       { name: 'rpc.ts', artifact: opencodeArtifact(cwd, 'rpc.ts', 'rpc.ts') },
+      ...broSkillFiles(),
     ],
     dirs: {
       global: join(configDir, 'opencode', 'plugins', 'bro'),
@@ -353,6 +400,12 @@ export function isBroAdapter(text: string): boolean {
  *  resolved (nothing to compare against). */
 function surfaceBytes(artifact: string | null): string | null {
   return artifact === null ? null : readFileSync(artifact, 'utf8');
+}
+
+/** A bundle member's bytes — inline `content` wins (snapshot files),
+ *  else the artifact path is read. */
+function surfaceContent(f: SurfaceFile): string | null {
+  return f.content ?? surfaceBytes(f.artifact);
 }
 
 function stateAt(surface: Surface, scope: PluginScope, reg: Registration | null): InstallState {
@@ -552,7 +605,7 @@ function installBundle(
   opts: MutateOpts
 ): Outcome {
   const contents = files
-    .map(f => ({ name: f.name, content: surfaceBytes(f.artifact) }))
+    .map(f => ({ name: f.name, content: surfaceContent(f) }))
     .filter((c): c is { name: string; content: string } => c.content !== null);
   if (contents.length === 0) {
     throw new CommandError(
@@ -714,7 +767,7 @@ function uninstallBundle(
       continue;
     }
     const prior = readFileSync(path, 'utf8');
-    const clean = surfaceBytes(f.artifact);
+    const clean = surfaceContent(f);
     const ours = clean === null ? isBroAdapter(prior) : prior === clean;
     if (!opts.force && !ours) {
       return {
@@ -735,6 +788,23 @@ function uninstallBundle(
     const path = join(dir, f.name);
     if (existsSync(path)) {
       rmSync(path);
+    }
+  }
+  // nested bundle members (skills/<name>/…) leave empty dirs behind —
+  // rmdir deepest-first so a foreign file keeps its directory alive
+  const dirs = new Set<string>();
+  for (const f of files) {
+    let rel = dirname(f.name);
+    while (rel !== '.' && rel !== '') {
+      dirs.add(rel);
+      rel = dirname(rel);
+    }
+  }
+  for (const rel of [...dirs].sort((a, b) => b.length - a.length)) {
+    try {
+      rmdirSync(join(dir, rel));
+    } catch {
+      // not empty — something of the user's lives here, leave it
     }
   }
   try {
