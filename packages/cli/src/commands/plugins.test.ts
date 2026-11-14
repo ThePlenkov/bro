@@ -583,13 +583,36 @@ describe('plugins install/uninstall/list — kilo', () => {
 
   test('--dry-run writes nothing', () => {
     const f = kiloFixture();
+    // bare install collapses to one scope — kilo loads project+global
+    // plugin copies without dedupe (verified on 7.8.27, bro-b7mae)
     const out = installClient('kilo', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
       out.map(o => o.action),
-      ['would-install', 'would-install']
+      ['would-install']
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     assert.ok(!existsSync(f.globalPath));
     assert.ok(!existsSync(f.localPath));
+  });
+
+  test('kilo bare install lands global only; explicit --local still works', () => {
+    const f = kiloFixture();
+    const out = installClient('kilo', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assert.ok(existsSync(f.globalPath));
+    assert.ok(!existsSync(f.localPath));
+
+    const f2 = kiloFixture();
+    const local = installClient('kilo', ['local'], f2.opts);
+    assert.deepEqual(
+      local.map(o => o.action),
+      ['installed']
+    );
+    assert.ok(existsSync(f2.localPath));
+    assert.ok(!existsSync(f2.globalPath));
   });
 });
 
