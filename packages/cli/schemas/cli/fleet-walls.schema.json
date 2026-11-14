@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/fleet-walls.schema.json",
+  "title": "bro fleet walls --json",
+  "description": "FleetWallRow[] — registry-derived provider walls + ledger-recorded host walls (fleetWallRowsFor, packages/cli/src/agent-connectors/core.ts). source names the plane the row came from.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["account", "cause", "source"],
+    "properties": {
+      "account": { "type": "string" },
+      "cause": { "enum": ["rate_limited", "quota"] },
+      "source": { "enum": ["registry", "ledger"] },
+      "until": { "type": "string" },
+      "bound": {
+        "type": "boolean",
+        "description": "true when `until` is a locally-derived bound (TTL/cooldown), not a provider-reported reset."
+      },
+      "resetAt": { "type": "string" },
+      "provider": { "type": "string" },
+      "rig": { "type": "string" },
+      "step": { "type": "string" },
+      "observedAt": { "type": "string" }
+    }
+  }
+}
