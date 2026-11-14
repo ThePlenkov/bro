@@ -26,11 +26,13 @@
         "what": {
           "type": "string",
           "minLength": 1,
+          "pattern": "\\S",
           "description": "What went wrong, one line"
         },
         "why": {
           "type": "string",
           "minLength": 1,
+          "pattern": "\\S",
           "description": "Root cause, not the symptom"
         },
         "scope": {
@@ -43,7 +45,7 @@
         },
         "evidence": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "description": "Shas, PR urls, bead ids — bd provenance"
         }
       }
@@ -55,7 +57,7 @@
         "additionalProperties": false,
         "required": ["title", "sink"],
         "properties": {
-          "title": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "sink": {
             "enum": [
               "backlog",

@@ -26,7 +26,7 @@
         "additionalProperties": false,
         "required": ["thread_id", "status"],
         "properties": {
-          "thread_id": { "type": "string", "minLength": 1 },
+          "thread_id": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "status": {
             "enum": ["open", "claimed", "done", "wontfix", "duplicate"]
           },

@@ -47,8 +47,19 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() 
  *  way, and the gate only ever errs toward rejection. */
 function skipToken(doc: string, i: number): number {
   if (doc.startsWith('"""', i)) {
-    const end = doc.indexOf('"""', i + 3);
-    return end === -1 ? doc.length : end + 3;
+    // block string — \""" inside is an escaped triple-quote (content),
+    // not the terminator; only an unescaped """ closes the block
+    let j = i + 3;
+    for (;;) {
+      const end = doc.indexOf('"""', j);
+      if (end === -1) {
+        return doc.length;
+      }
+      if (doc[end - 1] !== '\\') {
+        return end + 3;
+      }
+      j = end + 3;
+    }
   }
   const ch = doc[i]!;
   if (ch === '"') {
@@ -67,7 +78,8 @@ function skipToken(doc: string, i: number): number {
 
 /** Strip GraphQL comments (# …) and string literals ("…" plus the
  *  """…""" block form) so the keyword scan sees only operations and
- *  field names. Handles backslash escapes inside short strings. */
+ *  field names. Handles \" escapes inside short strings and the \"""
+ *  escape inside block strings. */
 export function stripCommentsAndStrings(doc: string): string {
   let out = '';
   let i = 0;

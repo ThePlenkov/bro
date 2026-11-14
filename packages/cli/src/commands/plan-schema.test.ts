@@ -38,8 +38,9 @@ interface PlanSchemaDoc {
 
 interface InvalidFixture {
   doc: Record<string, unknown>;
-  /** field name the rejection must point at — checked inside the schema
-   *  error JSON and inside the parser's error message. */
+  /** field name the rejection must point at — checked as a structured
+   *  Ajv error pointer (instancePath segment / params property name)
+   *  and inside the parser's error message. */
   field: string;
 }
 
@@ -75,6 +76,10 @@ const FIXTURES: Record<string, KindFixtures> = {
       { doc: { kind: 'act' }, field: 'threads' },
       { doc: { kind: 'act', threads: [] }, field: 'threads' },
       {
+        doc: { kind: 'act', threads: [{ thread_id: ' ', action: 'resolve' }] },
+        field: 'thread_id',
+      },
+      {
         doc: { kind: 'act', bogus: 1, threads: [{ thread_id: 't', action: 'resolve' }] },
         field: 'bogus',
       },
@@ -104,6 +109,17 @@ const FIXTURES: Record<string, KindFixtures> = {
         doc: { kind: 'convoy', molecules: [{ formula: 'x', title: 'mixes both arms' }] },
         field: 'title',
       },
+      {
+        doc: { kind: 'convoy', molecules: [{ formula: ' ' }] },
+        field: 'formula',
+      },
+      {
+        doc: {
+          kind: 'convoy',
+          molecules: [{ title: 't', steps: [{ id: 'a', title: 'x', needs: [' '] }] }],
+        },
+        field: 'needs',
+      },
       { doc: { kind: 'convoy', molecules: [] }, field: 'molecules' },
       { doc: { kind: 'convoy', gates: 'bogus', molecules: [{ formula: 'x' }] }, field: 'gates' },
     ],
@@ -132,11 +148,13 @@ const FIXTURES: Record<string, KindFixtures> = {
         kind: 'drill',
         version: 1,
         title: 'why',
-        steps: [{ title: 'a' }, { title: 'b', under: 0, priority: 2, ephemeral: true }],
+        // priority 0 is a valid Beads P0 — both layers must accept it
+        steps: [{ title: 'a' }, { title: 'b', under: 0, priority: 0, ephemeral: true }],
       },
     ],
     invalid: [
       { doc: { kind: 'drill' }, field: 'title' },
+      { doc: { kind: 'drill', title: ' ', steps: [] }, field: 'title' },
       { doc: { kind: 'drill', title: 't', steps: [{ title: 'a', under: 'x' }] }, field: 'under' },
     ],
   },
@@ -164,6 +182,13 @@ const FIXTURES: Record<string, KindFixtures> = {
   query: {
     valid: [
       { kind: 'query', steps: [{ id: 's', graphql: '{ a }' }] },
+      // an escaped \""" inside a GraphQL block string is content, not the
+      // terminator — `mutation` past it is still string payload the
+      // read-only gate must not see
+      {
+        kind: 'query',
+        steps: [{ id: 's', graphql: 'query { f(s: """a \\""" mutation b""") }' }],
+      },
       {
         $schema: 'https://unpkg.com/@broject/bro/schemas/plans/query.schema.json',
         kind: 'query',
@@ -251,6 +276,23 @@ function schemaErrors(validate: ValidateFunction, doc: unknown): ErrorObject[] {
   return validate(doc) ? [] : [...(validate.errors ?? [])];
 }
 
+/** True when an Ajv error actually points at `field` — a segment of
+ *  instancePath, or a params slot naming the offending/missing
+ *  property. A substring scan over the serialized error blob can match
+ *  inside an unrelated schemaPath or message, passing a drift gate
+ *  without the rejection landing on the right field. */
+function errorPointsAt(err: ErrorObject, field: string): boolean {
+  if (err.instancePath.split('/').includes(field)) {
+    return true;
+  }
+  const params = err.params as Record<string, unknown>;
+  return (
+    params.missingProperty === field ||
+    params.additionalProperty === field ||
+    params.propertyName === field
+  );
+}
+
 function parseOk(plugin: BroPlugin, doc: unknown): boolean {
   try {
     plugin.planSchema!(doc, 'fixture');
@@ -328,14 +370,23 @@ describe('plan schemas — coverage', () => {
         const errors = schemaErrors(validate, doc);
         assert.ok(errors.length > 0, `${plugin.name}: schema accepted ${JSON.stringify(doc)}`);
         assert.ok(
-          JSON.stringify(errors).includes(field),
+          errors.some(err => errorPointsAt(err, field)),
           `${plugin.name}: schema rejection does not point at "${field}" — ` +
             JSON.stringify(errors.slice(0, 3))
         );
-        assert.throws(
-          () => plugin.planSchema!(doc, 'fixture'),
-          new RegExp(field.replace(/[$]/g, '\\$')),
-          `${plugin.name}: parser rejection must name "${field}"`
+        let thrown: unknown;
+        try {
+          plugin.planSchema!(doc, 'fixture');
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(
+          thrown instanceof Error,
+          `${plugin.name}: parser accepted ${JSON.stringify(doc)}`
+        );
+        assert.ok(
+          thrown.message.includes(field),
+          `${plugin.name}: parser rejection must name "${field}" — got "${thrown.message}"`
         );
       }
     });

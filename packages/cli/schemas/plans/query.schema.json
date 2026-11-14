@@ -33,16 +33,19 @@
           "id": {
             "type": "string",
             "minLength": 1,
+            "pattern": "\\S",
             "description": "The output key — must be unique across steps (validator-checked)"
           },
           "provider": {
             "type": "string",
             "minLength": 1,
+            "pattern": "\\S",
             "description": "Data-plane connector name (github, gitlab, atlassian, …) — never a providers[] model-plane entry"
           },
           "graphql": {
             "type": "string",
             "minLength": 1,
+            "pattern": "\\S",
             "description": "The raw GraphQL document — v1 is read-only; mutation/subscription are rejected by the validator"
           },
           "vars": {

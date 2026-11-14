@@ -71,12 +71,12 @@ The machine-readable plan schema ships at
 
 ## Commands
 
-| Command                         | What it does                                                                                     |
-| ------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `bro plan query <plan.toml>`    | validate + run; merged JSON on stdout, exit 1 on any step failure                                |
-| `bro plan run <plan.toml>`      | same execution via the `kind` router                                                             |
-| `bro plan validate <plan.toml>` | schema + read-only gate only                                                                     |
-| `bro plan describe query`       | the kind's shipped JSON Schema (`schemas/plans/query.schema.json`) — `--json` for the raw schema |
+| Command                         | What it does                                                                                                           |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `bro plan query <plan.toml>`    | validate + run; merged JSON on stdout, exit 1 on any step failure                                                      |
+| `bro plan run <plan.toml>`      | same execution via the `kind` router                                                                                   |
+| `bro plan validate <plan.toml>` | schema + read-only gate only                                                                                           |
+| `bro plan describe query`       | the kind's shipped JSON Schema (`schemas/plans/query.schema.json`) — `--json` for a `{kind, version, schema}` envelope |
 
 ## Config
 

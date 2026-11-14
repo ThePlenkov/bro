@@ -47,7 +47,9 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
 
-const isPosInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0;
+/** bd priority — 0 (highest) through 4, same band convoy plans accept. */
+const isPriority = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 4;
 
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
 
@@ -71,8 +73,8 @@ function checkStep(raw: Record<string, unknown>, where: string, errors: string[]
   if (raw.ephemeral !== undefined && typeof raw.ephemeral !== 'boolean') {
     errors.push(`${where}: ephemeral must be a boolean`);
   }
-  if (raw.priority !== undefined && !isPosInt(raw.priority)) {
-    errors.push(`${where}: priority must be a positive integer`);
+  if (raw.priority !== undefined && !isPriority(raw.priority)) {
+    errors.push(`${where}: priority must be an integer 0-4`);
   }
 }
 
@@ -91,7 +93,7 @@ function parseStep(raw: unknown, i: number, errors: string[]): DrillStep | undef
     under: typeof raw.under === 'number' ? raw.under : undefined,
     ephemeral: raw.ephemeral === true ? true : undefined,
     description: typeof raw.description === 'string' ? raw.description : undefined,
-    priority: isPosInt(raw.priority) ? raw.priority : undefined,
+    priority: isPriority(raw.priority) ? raw.priority : undefined,
     type: typeof raw.type === 'string' ? raw.type : undefined,
   };
 }

@@ -36,6 +36,7 @@
               "formula": {
                 "type": "string",
                 "minLength": 1,
+                "pattern": "\\S",
                 "description": "Registered formula/proto name"
               },
               "vars": {
@@ -52,7 +53,7 @@
             "additionalProperties": false,
             "required": ["title", "steps"],
             "properties": {
-              "title": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
               "description": { "type": "string" },
               "gates": { "enum": ["allow", "forbid"] },
               "steps": {
@@ -66,16 +67,17 @@
                     "id": {
                       "type": "string",
                       "minLength": 1,
+                      "pattern": "\\S",
                       "description": "Sibling key referenced by needs[] — not the bead id"
                     },
-                    "title": { "type": "string", "minLength": 1 },
+                    "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
                     "type": {
                       "type": "string",
                       "description": "agent | human | any bd type — \"human\" declares a gate"
                     },
                     "needs": {
                       "type": "array",
-                      "items": { "type": "string", "minLength": 1 },
+                      "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
                       "description": "Ids of sibling steps that must finish first — a DAG (validator-checked)"
                     },
                     "description": { "type": "string" },

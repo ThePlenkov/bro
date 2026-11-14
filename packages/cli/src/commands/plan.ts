@@ -60,6 +60,12 @@ export function resolvePlanDoc(
  *  Missing means the kind has no published schema (an external kind —
  *  externals cannot ship files into this package). */
 function planSchemaFile(kind: string): string | undefined {
+  // `kind` lands in a filesystem path below — the argv boundary already
+  // restricts it to a declared plan kind; keep the join safe anyway so a
+  // path-shaped string can never reach readFileSync (CWE-22).
+  if (!/^[a-z][a-z0-9_-]*$/.test(kind)) {
+    return undefined;
+  }
   let dir = fileURLToPath(import.meta.url);
   for (let i = 0; i < 8; i += 1) {
     dir = dirname(dir);
@@ -143,7 +149,16 @@ export function runPlanCommand(argv: string[], plugins: readonly BroPlugin[]): v
       console.error('error: bro plan describe takes exactly one kind — `bro plan describe <kind>`');
       process.exit(2);
     }
-    describeKind(positional[0] as string, plugins, rest.includes('--json'));
+    // `kind` leaves argv into a filesystem path inside describeKind —
+    // validate it against the declared plan-kind set BEFORE the join;
+    // an unknown name is a loud error, never a silent disk probe.
+    const kind = positional[0] as string;
+    if (!planKinds(plugins).includes(kind)) {
+      throw new Error(
+        `plan describe: kind "${kind}" is unknown — known plan kinds: ${planKinds(plugins).join(', ')}`
+      );
+    }
+    describeKind(kind, plugins, rest.includes('--json'));
     return;
   }
   usage();

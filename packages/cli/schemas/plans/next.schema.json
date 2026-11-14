@@ -44,7 +44,7 @@
         "types": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 },
+          "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "description": "issue_type allowlist — epics and molecule steps stay excluded regardless"
         },
         "max_priority": {
@@ -56,12 +56,13 @@
         "match": {
           "type": "string",
           "minLength": 1,
+          "pattern": "\\S",
           "description": "Case-insensitive regex over the title — must compile (validator-checked)"
         },
         "labels": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 },
+          "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "description": "Any-of label scope — a bead must carry at least one"
         }
       }

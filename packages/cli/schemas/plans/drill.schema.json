@@ -21,6 +21,7 @@
     "title": {
       "type": "string",
       "minLength": 1,
+      "pattern": "\\S",
       "description": "The root frame title"
     },
     "steps": {
@@ -30,7 +31,7 @@
         "additionalProperties": false,
         "required": ["title"],
         "properties": {
-          "title": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "under": {
             "type": "integer",
             "minimum": 0,
@@ -38,7 +39,12 @@
           },
           "ephemeral": { "type": "boolean" },
           "description": { "type": "string" },
-          "priority": { "type": "integer", "minimum": 1 },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+            "description": "bd priority 0–4 — 0 is the highest"
+          },
           "type": { "type": "string" }
         }
       }
