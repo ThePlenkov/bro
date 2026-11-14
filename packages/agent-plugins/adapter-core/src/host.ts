@@ -35,37 +35,30 @@
  * local flag), and the driver passes that back to bro so bro's own
  * one-shot rule decides.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import {
-  HOOK_TIMEOUT_MS,
-  REHYDRATION_TIMEOUT_MS,
+  type BoardStatus,
+  BRO_COMMANDS,
   boardLines,
   broEnabled,
+  type Command,
   callHook,
   contextOf,
+  createCommandResolver,
+  HOOK_TIMEOUT_MS,
+  type HookControl,
   hookEmitEnv,
-  resolveCommand,
+  REHYDRATION_TIMEOUT_MS,
+  RESOLVE_RETRY_MS,
+  RUN_TIMEOUT_MS,
   statusCrumb,
   statusJson,
-  type BoardStatus,
-  type Command,
-  type HookControl,
 } from './core.ts';
+
+export { RESOLVE_RETRY_MS, RUN_TIMEOUT_MS };
 
 /** The board's widget key — one slot, owned by bro. */
 export const BOARD_KEY = 'bro';
-
-/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
- *  board refresh are interactive reads, and a wedged dolt lock can
- *  stall them forever. The kill takes the detached process group
- *  down, so a dolt child dies with its parent. */
-export const RUN_TIMEOUT_MS = 60_000;
-
-/** How long a failed CLI resolution stays cached before a retry —
- *  PATH, a local install or npx can appear mid-session, but
- *  re-probing the npx rung on every keystroke would be worse than
- *  the outage. */
-export const RESOLVE_RETRY_MS = 60_000;
 
 /** The context shape this API lineage shares.
  *
@@ -112,6 +105,10 @@ export interface BroHostShape<Ctx extends BroContext> {
   notify(ctx: Ctx, text: string, level: 'info' | 'warning' | 'error'): void;
   /** Optional argument completion for /bro. */
   argumentCompletions?(prefix: string): Array<{ label: string; value: string }> | null;
+  /** Slash commands the host already owns natively — a bro family
+   *  alias never shadows them; collisions register as `bro:<name>`
+   *  instead (AGT-1 §command family). */
+  nativeCommands?: readonly string[];
   /** Build the result that refuses to stop, with the reason. */
   refuseStop(reason: string): unknown;
   /** Whether the stop event says the host already refused once. */
@@ -179,6 +176,7 @@ export function sharedBinding<Ctx extends BroContext>(
       return { content };
     },
     npxPin: host.npxPin,
+    nativeCommands: host.nativeCommands,
     hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin }),
   };
 }
@@ -228,6 +226,10 @@ export interface BroHostBinding<Ctx = unknown> {
   stopAborted?(event: unknown): boolean;
   /** The prompt behind a turn. */
   promptOf(event: unknown): string;
+  /** Slash commands the host already owns natively — a bro family
+   *  alias never shadows them; collisions register as `bro:<name>`
+   *  instead (AGT-1 §command family). */
+  nativeCommands?: readonly string[];
   /** Build the result that injects a hidden context message. */
   inject(text: string): unknown;
   /** Build the result that appends text to a tool result. */
@@ -264,6 +266,12 @@ export interface BroHostApi<Ctx = unknown> {
     label: string;
     description: string;
     parameters: Record<string, unknown>;
+    /** Host-policy hints, passed through verbatim — hosts that don't
+     *  know them ignore the fields. omp reads `loadMode` ('essential'
+     *  keeps the tool top-level; 'discoverable' hides it under xdev)
+     *  and `approval` ('read'|'write'|'exec'). */
+    loadMode?: string;
+    approval?: string;
     execute(
       toolCallId: string,
       params: unknown,
@@ -334,29 +342,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
    *  flag dies with its session instead of leaking into the next). */
   let gatedSession: string | undefined;
 
-  /** Resolve the CLI once. Probing costs a spawn even where bro is
-   *  inert, so it stays lazy. A *failed* resolution is not permanent:
-   *  PATH, a local install or npx can appear mid-session, so a null
-   *  answer expires after RESOLVE_RETRY_MS instead of poisoning the
-   *  whole extension instance. */
-  let resolved: Promise<Command | null> | undefined;
-  let resolvedFailedAt: number | undefined;
-  const command = (): Promise<Command | null> => {
-    if (
-      resolved !== undefined &&
-      (resolvedFailedAt === undefined || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)
-    ) {
-      return resolved;
-    }
-    resolvedFailedAt = undefined;
-    resolved = resolveCommand({ npxPin: host.npxPin }).then(cmd => {
-      if (cmd === null) {
-        resolvedFailedAt = Date.now();
-      }
-      return cmd;
-    });
-    return resolved;
-  };
+  /** Resolve the CLI once — the shared lazy+retrying resolver. Probing
+   *  costs a spawn even where bro is inert, so it stays lazy; a failed
+   *  resolution expires instead of poisoning the extension instance. */
+  const command = createCommandResolver({ npxPin: host.npxPin });
 
   /** Probe one bro hook. Fail-open: every failure is "no opinion". */
   const probe = async (
@@ -642,6 +631,22 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   const run = async (args: string[], cwd: string): Promise<BroRunResult> =>
     runBro(await command(), args, cwd);
 
+  /** `/bro <args>` and every family alias share one dispatch: split,
+   *  run, surface. Bare family names never reach here — they always
+   *  carry their verb. */
+  const dispatchArgs = async (argv: string[], ctx: Ctx): Promise<void> => {
+    const result = await run(argv, host.cwd(ctx));
+    const text = (result.stdout || result.stderr).trim();
+    if (result.code !== 0) {
+      host.notify(ctx, `bro ${argv.join(' ')}: exit ${result.code}`, 'error');
+      return;
+    }
+    api.sendMessage(
+      { customType: 'bro-output', content: `$ bro ${argv.join(' ')}\n${text}`, display: true },
+      { triggerTurn: false }
+    );
+  };
+
   /** The shared surfaces. `/bro` is a thin passthrough — `bro
    *  act|next|fleet|drill` reachable without leaving the editor — and
    *  `bro_status` hands the model the same board JSON the widget
@@ -658,18 +663,31 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
         host.notify(ctx, 'bro: board refreshed', 'info');
         return;
       }
-      const result = await run(trimmed.split(/\s+/), host.cwd(ctx));
-      const text = (result.stdout || result.stderr).trim();
-      if (result.code !== 0) {
-        host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, 'error');
-        return;
-      }
-      api.sendMessage(
-        { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
-        { triggerTurn: false }
-      );
+      await dispatchArgs(trimmed.split(/\s+/), ctx);
     },
   });
+
+  /* Command family — the curated verbs as first-class slash commands.
+   * A host-native command of the same name always wins: the alias then
+   * registers under `bro:<name>` instead of shadowing it. */
+  const natives = new Set(host.nativeCommands ?? []);
+  for (const c of BRO_COMMANDS) {
+    const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+    api.registerCommand(name, {
+      description: c.description,
+      getArgumentCompletions: host.argumentCompletions,
+      async handler(args: string, ctx: Ctx) {
+        const argv = [
+          c.verb,
+          ...args
+            .trim()
+            .split(/\s+/)
+            .filter(a => a !== ''),
+        ];
+        await dispatchArgs(argv, ctx);
+      },
+    });
+  }
 
   api.registerTool({
     name: 'bro_status',
@@ -677,6 +695,8 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     description:
       'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
+    loadMode: 'essential',
+    approval: 'read',
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const result = await run(['status', '--json'], host.cwd(ctx));
       return {

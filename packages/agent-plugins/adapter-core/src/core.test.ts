@@ -17,10 +17,16 @@ import {
   broEnabled,
   clip,
   contextOf,
+  jsRuntime,
   parseControl,
   statusCrumb,
   type BoardStatus,
 } from './core.ts';
+
+test('jsRuntime: never resolves to process.execPath, names a JS runtime', () => {
+  assert.notEqual(jsRuntime(), process.execPath);
+  assert.match(jsRuntime(), /^(node|node\.exe)$/);
+});
 
 test('parseControl: the first parseable JSON line wins', () => {
   const control = parseControl('not json\n{"decision":"block","reason":"x"}\n{"other":1}\n');

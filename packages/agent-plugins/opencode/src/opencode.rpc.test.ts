@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import plugin, { collectBroSkills, skillRoots } from './opencode.ts';
+import plugin, { collectBroSkills, isBroSkillsRoot, skillRoots } from './opencode.ts';
 import { Bro } from './rpc.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'bro-oc-rpc-'));
@@ -237,6 +237,18 @@ describe('bro skills', () => {
     assert.equal(skills[0].name, 'act');
     assert.equal(skills[0].description, 'PR review gate');
     assert.match(skills[0].content, /Body\./);
+  });
+
+  test('isBroSkillsRoot accepts only trees carrying the sentinel skill', () => {
+    const ours = join(dir, 'ours-skills');
+    mkdirSync(join(ours, 'sdd'), { recursive: true });
+    writeFileSync(join(ours, 'sdd', 'SKILL.md'), '---\nname: sdd\n---\n');
+    const foreign = join(dir, 'foreign-skills');
+    mkdirSync(join(foreign, 'other'), { recursive: true });
+    writeFileSync(join(foreign, 'other', 'SKILL.md'), '---\nname: other\n---\n');
+    assert.equal(isBroSkillsRoot(ours), true);
+    assert.equal(isBroSkillsRoot(foreign), false);
+    assert.equal(isBroSkillsRoot(join(dir, 'missing')), false);
   });
 
   test('a missing tree yields no skills instead of throwing', async () => {

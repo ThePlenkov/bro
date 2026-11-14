@@ -24,7 +24,7 @@ one self-contained module (node builtins only) by
 ## Install
 
 ```sh
-bro plugins install pi            # both scopes
+bro plugins install pi            # one scope — pi can't dedupe project+global copies
 bro plugins install pi --global   # ~/.pi/agent/extensions/bro.ts
 bro plugins install pi --local    # <repo>/.pi/extensions/bro.ts
 ```

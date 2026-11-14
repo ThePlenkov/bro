@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+
 import { describe, test } from 'node:test';
-import { pathToFileURL } from 'node:url';
-import { tmpDir } from './testrepo.ts';
 import {
   installClient,
   isBroAdapter,
+  type MutateOpts,
   pluginRows,
   runPluginsCommand,
   scopesOf,
   uninstallClient,
-  type MutateOpts,
 } from './plugins.ts';
+import { tmpDir } from './testrepo.ts';
 
 /** tmp cwd (non-repo → local target lands under it) + tmp XDG home. */
 function fixture(): {
@@ -173,38 +174,68 @@ describe('isBroAdapter', () => {
 });
 
 describe('plugins install/uninstall/list', () => {
-  test('install materializes the v2 catalog plugin in both scopes; a second run reports current', () => {
+  test('install materializes the v2 catalog plugin; a second run reports current', () => {
     const f = fixture();
+    // bare install collapses to one scope — opencode 2.3.0 loads plugin
+    // modules from both scopes without dedupe, identical id `bro`
+    // double-registers hooks/tools/commands/RPC (bro-b7mae, verified
+    // with `opencode run` probe plugins)
     const out = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
-      [`installed:${f.globalDir}`, `installed:${f.localDir}`]
+      [`installed:${f.globalDir}`]
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     // the catalog plugin is ONE directory of three modules — the server
-    // entrypoint, the TUI half and the contract they share
-    const shipped = readFileSync(
-      join(repoRoot, 'packages/agent-plugins/opencode/src/opencode.ts'),
-      'utf8'
-    );
-    const shippedTui = readFileSync(
-      join(repoRoot, 'packages/agent-plugins/opencode/src/tui.tsx'),
-      'utf8'
-    );
-    const shippedRpc = readFileSync(
-      join(repoRoot, 'packages/agent-plugins/opencode/src/rpc.ts'),
-      'utf8'
-    );
+    // entrypoint, the TUI half and the contract they share. Install
+    // ships the bundled catalog bytes, not the adapter sources: the
+    // sources import workspace packages a host runtime cannot resolve.
+    const shipped = readFileSync(join(repoRoot, 'plugins/opencode/bro/index.ts'), 'utf8');
+    const shippedTui = readFileSync(join(repoRoot, 'plugins/opencode/bro/tui.tsx'), 'utf8');
+    const shippedRpc = readFileSync(join(repoRoot, 'plugins/opencode/bro/rpc.ts'), 'utf8');
     assert.equal(readFileSync(join(f.globalDir, 'index.ts'), 'utf8'), shipped);
     assert.equal(readFileSync(join(f.globalDir, 'tui.tsx'), 'utf8'), shippedTui);
     assert.equal(readFileSync(join(f.globalDir, 'rpc.ts'), 'utf8'), shippedRpc);
-    // the server's own `./rpc.ts` import resolves inside the directory
-    assert.match(shipped, /from\s+['"]\.\/rpc\.ts['"]/);
+    // the TUI half's own `./rpc.ts` import resolves inside the directory
+    assert.match(shippedTui, /from\s+['"]\.\/rpc\.ts['"]/);
+    // the embedded skills tree materializes beside the modules — the
+    // plugin's collectBroSkills reads `<bundle>/skills/` first, so an
+    // installed copy registers bro's skills instead of stumbling onto a
+    // foreign skills/ dir (bro-tswwr)
+    const shippedSkill = readFileSync(join(repoRoot, 'skills', 'sdd', 'SKILL.md'), 'utf8');
+    assert.equal(
+      readFileSync(join(f.globalDir, 'skills', 'sdd', 'SKILL.md'), 'utf8'),
+      shippedSkill
+    );
+    assert.equal(
+      readFileSync(join(f.globalDir, 'skills', 'act', 'SKILL.md'), 'utf8'),
+      readFileSync(join(repoRoot, 'skills', 'act', 'SKILL.md'), 'utf8')
+    );
+    assert.ok(!existsSync(f.localDir));
 
     const again = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
-      ['current', 'current']
+      ['current']
     );
+  });
+
+  test('opencode install converges a dual-scope state — the loser is removed', () => {
+    const f = fixture();
+    // seed BOTH scopes the way an old installer left them — installClient
+    // itself converges now, so the second copy is planted by hand
+    installClient('opencode', ['global'], f.opts);
+    cpSync(f.globalDir, f.localDir, { recursive: true });
+    assert.ok(existsSync(join(f.globalDir, 'index.ts')));
+    assert.ok(existsSync(join(f.localDir, 'index.ts')));
+
+    const out = installClient('opencode', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.scope}`),
+      ['current:global', 'removed:local']
+    );
+    assert.ok(existsSync(join(f.globalDir, 'index.ts')));
+    assert.ok(!existsSync(f.localDir));
   });
 
   /** sentinel-bearing but differing content — a stale/edited adapter */
@@ -217,20 +248,24 @@ describe('plugins install/uninstall/list', () => {
     const agentDir = join(f.opts.env.XDG_CONFIG_HOME!, 'omp-agent');
     f.opts.env.PI_CODING_AGENT_DIR = agentDir;
 
+    // bare install collapses to global — omp loads project+global copies
+    // of the same extension without dedupe (bro-b7mae), same as pi
     const out = installClient('omp', ['global', 'local'], f.opts);
     const globalPath = join(agentDir, 'extensions', 'bro.ts');
     const localPath = join(f.cwd, '.omp', 'extensions', 'bro.ts');
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
-      [`installed:${globalPath}`, `installed:${localPath}`]
+      [`installed:${globalPath}`]
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     // the shipped adapter carries bro's ownership sentinel
     assert.ok(isBroAdapter(readFileSync(globalPath, 'utf8')));
+    assert.ok(!existsSync(localPath));
 
     const again = installClient('omp', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
-      ['current', 'current']
+      ['current']
     );
   });
 
@@ -255,13 +290,16 @@ describe('plugins install/uninstall/list', () => {
 
     const out = installClient('opencode', ['global'], f.opts);
     assert.equal(out[0]!.action, 'updated');
+    // convergence removed the losing scope's stale copy — the host
+    // must never be left holding two (bro-b7mae)
     assert.equal(
       pluginRows(f.cwd, f.opts.env)
         .filter(r => r.client === 'opencode')
         .map(r => `${r.scope}:${r.state}`)
         .join(','),
-      'global:installed,local:stale'
+      'global:installed,local:absent'
     );
+    assert.ok(!existsSync(join(f.localDir, 'index.ts')));
   });
 
   test('the v1-era loose modules are removed when the catalog plugin lands', () => {
@@ -282,13 +320,15 @@ describe('plugins install/uninstall/list', () => {
     );
 
     const out = installClient('opencode', ['global', 'local'], f.opts);
+    // bare install collapses to global (bro-b7mae) — the local scope's
+    // stale loose modules are still swept by convergence because
+    // opencode would keep loading them alongside the global plugin
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
       [
         `installed:${f.globalDir}`,
         `removed:${f.globalPath}`,
         `removed:${f.globalCliPath}`,
-        `installed:${f.localDir}`,
         `removed:${f.localPath}`,
         `removed:${f.localCliPath}`,
       ]
@@ -327,10 +367,12 @@ describe('plugins install/uninstall/list', () => {
 
   test('--dry-run writes nothing', () => {
     const f = fixture();
+    // bare install collapses to one scope (bro-b7mae) — dry-run reports
+    // the single would-install and still writes nothing
     const out = installClient('opencode', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
       out.map(o => o.action),
-      ['would-install', 'would-install']
+      ['would-install']
     );
     assert.ok(!existsSync(f.globalDir));
     assert.ok(!existsSync(f.localDir));
@@ -413,15 +455,17 @@ describe('plugins install/uninstall/list', () => {
 
   test('pi install lands in .pi/extensions/ and the agent dir', () => {
     const f = fixture();
+    // bare install collapses to global — pi cannot dedupe project+global
+    // copies of the same extension (bro-b7mae); the note says why
     const out = installClient('pi', ['global', 'local'], f.opts);
     assert.deepEqual(
       out.map(o => o.action),
-      ['installed', 'installed']
+      ['installed']
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     const piGlobal = join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts');
-    const piLocal = join(f.cwd, '.pi', 'extensions', 'bro.ts');
     assert.ok(existsSync(piGlobal));
-    assert.ok(existsSync(piLocal));
+    assert.ok(!existsSync(join(f.cwd, '.pi', 'extensions', 'bro.ts')));
     // the installed adapter is a self-contained bundle — pi's jiti loads
     // it with no node_modules to resolve against, and it must still be
     // recognizable as bro's own
@@ -432,18 +476,71 @@ describe('plugins install/uninstall/list', () => {
       []
     );
   });
+
+  test('pi explicit --local still installs the project copy', () => {
+    const f = fixture();
+    const out = installClient('pi', ['local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    const piLocal = join(f.cwd, '.pi', 'extensions', 'bro.ts');
+    assert.ok(existsSync(piLocal));
+    assert.ok(!existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
+  });
+
+  test('pi bare install refreshes an existing local copy instead of adding global', () => {
+    const f = fixture();
+    installClient('pi', ['local'], f.opts);
+    const out = installClient('pi', ['global', 'local'], f.opts);
+    // the scope that already holds bro wins — refreshing it beats
+    // creating the colliding twin the collapse exists to prevent
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.path}`),
+      [`current:${join(f.cwd, '.pi', 'extensions', 'bro.ts')}`]
+    );
+    assert.match(out[0]!.note ?? '', /only the local-scope copy/);
+    assert.ok(!existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
+  });
+
+  test('pi install converges an opposite-scope bro copy', () => {
+    const f = fixture();
+    // seed a project copy first, then install global-only — convergence
+    // removes the colliding local copy rather than leaving the host
+    // with two loaded extensions (bro-b7mae)
+    installClient('pi', ['local'], f.opts);
+    const out = installClient('pi', ['global'], f.opts);
+    assert.equal(out[0]!.action, 'installed');
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.scope}`),
+      ['installed:global', 'removed:local']
+    );
+    assert.ok(!existsSync(join(f.cwd, '.pi', 'extensions', 'bro.ts')));
+  });
+
+  test('omp bare install collapses to global like pi', () => {
+    const f = fixture();
+    const out = installClient('omp', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
+    // ompAgentDir honors PI_CODING_AGENT_DIR as an override — the fixture
+    // sets it, so the global target lands under the same sandboxed dir
+    assert.ok(existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
+  });
 });
 
-/** kilo adds a manifest step on global: a file:/// entry in
- *  <XDG>/kilo/kilo.json's plugin[] next to the materialized module. */
+/** kilo's file-plugin surface is the scanned `plugin/` directory —
+ *  <XDG>/kilo/plugin/bro.ts globally, .kilo/plugin/bro.ts locally.
+ *  kilo.json's `plugin` array does NOT honor file paths (verified
+ *  against kilo 7.8.x), so no manifest step exists. */
 function kiloFixture(): {
   cwd: string;
   opts: MutateOpts;
   globalPath: string;
   localPath: string;
-  manifestPath: string;
-  manifest(): Record<string, unknown>;
-  entry: string;
 } {
   const cwd = tmpDir('bro-plugins-kilo-cwd-');
   const xdg = tmpDir('bro-plugins-kilo-xdg-');
@@ -453,140 +550,105 @@ function kiloFixture(): {
     cwd,
     env: { ...process.env, XDG_CONFIG_HOME: xdg },
   };
-  const globalPath = join(xdg, 'kilo', 'bro', 'bro.ts');
-  const manifestPath = join(xdg, 'kilo', 'kilo.json');
   return {
     cwd,
     opts,
-    globalPath,
+    globalPath: join(xdg, 'kilo', 'plugin', 'bro.ts'),
     localPath: join(cwd, '.kilo', 'plugin', 'bro.ts'),
-    manifestPath,
-    manifest: () => JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>,
-    entry: pathToFileURL(globalPath).href,
   };
 }
 
 describe('plugins install/uninstall/list — kilo', () => {
-  test('global install materializes the module and registers file:/// in kilo.json', () => {
+  test('global install materializes the module into the scanned plugin dir', () => {
     const f = kiloFixture();
     const out = installClient('kilo', ['global'], f.opts);
     assert.equal(out[0]!.action, 'installed');
-    assert.match(out[0]!.note ?? '', /registered/);
-    // materialized content is the shipped adapter source verbatim
-    const shipped = readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8');
+    // materialized content is the bundled catalog adapter — the src
+    // tree imports @broject/adapter-core, unresolvable in kilo
+    const shipped = readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8');
     assert.equal(readFileSync(f.globalPath, 'utf8'), shipped);
-    // a fresh manifest is created with kilo's own $schema line
-    const m = f.manifest();
-    assert.deepEqual(m.plugin, [f.entry]);
-    assert.equal(m.$schema, 'https://app.kilo.ai/config.json');
+    // kilo.json is never touched — the plugin/ dir is the whole contract
+    assert.ok(
+      !existsSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo', 'kilo.json')),
+      'kilo.json must not be created for a file-plugin install'
+    );
   });
 
-  test('local install writes .kilo/plugin and touches no manifest', () => {
+  test('local install writes .kilo/plugin', () => {
     const f = kiloFixture();
     const out = installClient('kilo', ['local'], f.opts);
     assert.equal(out[0]!.action, 'installed');
     assert.equal(
       readFileSync(f.localPath, 'utf8'),
-      readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8')
+      readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8')
     );
-    assert.ok(!existsSync(f.manifestPath));
   });
 
-  test('re-install reports current once registered; dedupes the entry', () => {
+  test('re-install reports current', () => {
     const f = kiloFixture();
     installClient('kilo', ['global'], f.opts);
     const again = installClient('kilo', ['global'], f.opts);
     assert.equal(again[0]!.action, 'current');
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
   });
 
-  test('a current-but-unregistered file registers and reports updated', () => {
+  test('list reports an installed global module', () => {
     const f = kiloFixture();
     installClient('kilo', ['global'], f.opts);
-    writeFileSync(f.manifestPath, '{}\n'); // drop the registration
-    const out = installClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'updated');
-    assert.match(out[0]!.note ?? '', /registered/);
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
-  });
-
-  test('registration preserves existing kilo.json fields and entries', () => {
-    const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true });
-    writeFileSync(
-      f.manifestPath,
-      `${JSON.stringify({ plugin: ['file:///other/plugin.ts'], permission: { bash: 'allow' } }, null, 2)}\n`
-    );
-    installClient('kilo', ['global'], f.opts);
-    const m = f.manifest();
-    assert.deepEqual(m.plugin, ['file:///other/plugin.ts', f.entry]);
-    assert.deepEqual(m.permission, { bash: 'allow' });
-  });
-
-  test('rewriting kilo.json preserves a restrictive file mode', () => {
-    const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true });
-    writeFileSync(f.manifestPath, '{}\n');
-    chmodSync(f.manifestPath, 0o600);
-    installClient('kilo', ['global'], f.opts);
-    assert.equal(statSync(f.manifestPath).mode & 0o777, 0o600);
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
-  });
-
-  test('list reports an unregistered global module as stale', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    writeFileSync(f.manifestPath, '{}\n');
     const row = pluginRows(f.cwd, f.opts.env).find(
       r => r.client === 'kilo' && r.scope === 'global'
     );
-    assert.equal(row!.state, 'stale');
-    installClient('kilo', ['global'], f.opts);
-    assert.equal(
-      pluginRows(f.cwd, f.opts.env).find(r => r.client === 'kilo' && r.scope === 'global')!.state,
-      'installed'
-    );
+    assert.equal(row!.state, 'installed');
   });
 
-  test('uninstall removes the module and the kilo.json entry', () => {
+  test('uninstall removes the module', () => {
     const f = kiloFixture();
     installClient('kilo', ['global'], f.opts);
     const out = uninstallClient('kilo', ['global'], f.opts);
     assert.equal(out[0]!.action, 'removed');
     assert.ok(!existsSync(f.globalPath));
-    assert.deepEqual(f.manifest().plugin, []);
   });
 
-  test('uninstall cleans a dangling kilo.json entry when the file is absent', () => {
+  test('a foreign file holding the slot is refused without --force', () => {
     const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true });
-    writeFileSync(f.manifestPath, `${JSON.stringify({ plugin: [f.entry] })}\n`);
-    const out = uninstallClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'absent');
-    assert.match(out[0]!.note ?? '', /dangling/);
-    assert.deepEqual(f.manifest().plugin, []);
-  });
-
-  test('a refused file keeps its registration', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    // a hand edit makes the adapter "stale or edited" — refuses without --force
-    writeFileSync(f.globalPath, `// touched\n${readFileSync(f.globalPath, 'utf8')}`);
-    const out = uninstallClient('kilo', ['global'], f.opts);
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo', 'plugin'), { recursive: true });
+    writeFileSync(f.globalPath, '// someone else\n');
+    const out = installClient('kilo', ['global'], f.opts);
     assert.equal(out[0]!.action, 'refused');
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
+    assert.equal(readFileSync(f.globalPath, 'utf8'), '// someone else\n');
   });
 
-  test('--dry-run writes neither module nor manifest', () => {
+  test('--dry-run writes nothing', () => {
     const f = kiloFixture();
+    // bare install collapses to one scope — kilo loads project+global
+    // plugin copies without dedupe (verified on 7.8.27, bro-b7mae)
     const out = installClient('kilo', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
       out.map(o => o.action),
-      ['would-install', 'would-install']
+      ['would-install']
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     assert.ok(!existsSync(f.globalPath));
     assert.ok(!existsSync(f.localPath));
-    assert.ok(!existsSync(f.manifestPath));
+  });
+
+  test('kilo bare install lands global only; explicit --local still works', () => {
+    const f = kiloFixture();
+    const out = installClient('kilo', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assert.ok(existsSync(f.globalPath));
+    assert.ok(!existsSync(f.localPath));
+
+    const f2 = kiloFixture();
+    const local = installClient('kilo', ['local'], f2.opts);
+    assert.deepEqual(
+      local.map(o => o.action),
+      ['installed']
+    );
+    assert.ok(existsSync(f2.localPath));
+    assert.ok(!existsSync(f2.globalPath));
   });
 });
 

@@ -2,208 +2,40 @@
 /**
  * bro Kilo plugin — native adapter over the bro CLI.
  *
- * Registers bro's subcommands as Kilo tools, maps Kilo lifecycle events
+ * Registers bro's subcommands as a Kilo tool, maps Kilo lifecycle events
  * onto `bro hooks`, and auto-approves bro/bd shell calls. The plugin is
  * side-effect-free at import: it returns the Hooks object; the CLI entry
  * runs main() on import, so this module must never do that.
  *
- * Resolves the bro binary from the built dist reachable from this
- * checkout, then from `bro` on PATH.
+ * The CLI ladder, hook protocol, spawn-and-parse and timeout discipline
+ * are the shared adapter core — the same implementation pi, omp and
+ * opencode ship. This file carries only Kilo's own shape: the `bro`
+ * tool, the system.transform rehydration, the session.idle notify,
+ * and the permission.ask auto-approve.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { tool } from '@kilocode/plugin/tool';
 import type { Plugin } from '@kilocode/plugin';
+import {
+  HOOK_TIMEOUT_MS,
+  RUN_TIMEOUT_MS,
+  callHook,
+  contextOf,
+  createCommandResolver,
+  hookEmitEnv,
+  runCommand,
+} from '@broject/adapter-core/core';
 
-const HOOK_TIMEOUT_MS = 15_000;
-const RUN_TIMEOUT_MS = 120_000;
-const MAX_OUTPUT = 1 << 20;
+/** Last-resort npx fallback specs, pinned first then latest — gen-plugins
+ *  lists this file in VERSIONED_SOURCES, so the pin is rewritten to
+ *  plugin.json's version on every gen/release run. */
+const NPX_SPECS = ['@broject/bro@0.3.0', '@broject/bro'];
 
-function appendOutput(current: string, chunk: string): string {
-  const remaining = MAX_OUTPUT - current.length;
-  return remaining > 0 ? current + chunk.slice(0, remaining) : current;
-}
-
-/** Walk up from the plugin dir for a built CLI — adapter dirs live
- *  below the repo root, so a relative/malformed root can't wander off. */
-function findBroBin(): string | null {
-  const scriptRoot = dirname(fileURLToPath(import.meta.url));
-  let dir = scriptRoot;
-  for (;;) {
-    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js');
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      break;
-    }
-    dir = parent;
-  }
-  return null;
-}
-
-/** Resolve argv[0] for `bro` — the local build wins over PATH so hook
- *  behavior tracks the checkout; PATH is the fallback for installed
- *  builds. */
-function broArgs(event: string, extra: string[] = []): string[] {
-  const local = findBroBin();
-  if (local) {
-    return ['node', local, 'hooks', event, ...extra];
-  }
-  return ['bro', 'hooks', event, ...extra];
-}
-
-interface SpawnResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  error: string | null;
-}
-
-interface SpawnOptions {
-  cwd?: string;
-  env: NodeJS.ProcessEnv;
-  input?: string;
-  timeoutMs: number;
-}
-
-/** SIGKILL a timed-out child and its process group when available. */
-function killAfter(
-  child: ChildProcess,
-  ms: number,
-  onTimeout: () => void
-): ReturnType<typeof setTimeout> {
-  const timer = setTimeout(() => {
-    try {
-      if (child.pid !== undefined) {
-        process.kill(-child.pid, 'SIGKILL');
-      }
-    } catch {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // already gone
-      }
-    }
-    onTimeout();
-  }, ms);
-  timer.unref?.();
-  return timer;
-}
-
-function spawnCollect(
-  command: string,
-  args: string[],
-  options: SpawnOptions
-): Promise<SpawnResult> {
-  return new Promise(resolve => {
-    let child: ChildProcess;
-    try {
-      child = spawn(command, args, {
-        cwd: options.cwd,
-        env: options.env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-        detached: process.platform !== 'win32',
-      });
-    } catch (error) {
-      resolve({
-        code: null,
-        stdout: '',
-        stderr: '',
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-
-    let settled = false;
-    const settle = (result: SpawnResult): void => {
-      if (!settled) {
-        settled = true;
-        resolve(result);
-      }
-    };
-    let stdout = '';
-    let stderr = '';
-    const timer = killAfter(child, options.timeoutMs, () =>
-      settle({
-        code: null,
-        stdout,
-        stderr,
-        error: `timed out after ${options.timeoutMs}ms`,
-      })
-    );
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      stdout = appendOutput(stdout, chunk);
-    });
-    child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk: string) => {
-      stderr = appendOutput(stderr, chunk);
-    });
-    child.on('error', error => {
-      clearTimeout(timer);
-      settle({ code: null, stdout, stderr, error: error.message });
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      settle({ code, stdout, stderr, error: null });
-    });
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(options.input ?? '');
-  });
-}
-
-/** Run a bro hook, passing the event payload on stdin. Returns the parsed
- *  hook control JSON on stdout, or null on any failure (fail-open). */
-async function runBroHook(event: string, input: unknown): Promise<unknown> {
-  const argv = broArgs(event);
-  let payload: string | undefined;
-  try {
-    payload = JSON.stringify(input);
-  } catch {
-    return null;
-  }
-  const result = await spawnCollect(argv[0], argv.slice(1), {
-    input: payload,
-    env: {
-      ...process.env,
-      BRO_HOOK_INPUT: '1',
-      // the adapter emit markers — BRO_HOOK_HOST both marks this a
-      // direct in-process launch (no run.sh) and names the ledger host;
-      // PROOT is this module's own dir (specs/bro-izpyk.9.md). A CLI
-      // that predates the markers ignores the env.
-      BRO_HOOK_HOST: 'kilo',
-      BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
-    },
-    timeoutMs: HOOK_TIMEOUT_MS,
-  });
-  if (result.error !== null || result.code !== 0 || !result.stdout) {
-    return null;
-  }
-  // bro emits one JSON control object per line; take the last parseable one
-  for (const line of result.stdout.split('\n').reverse()) {
-    try {
-      return JSON.parse(line) as unknown;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-/** Extract the additionalContext a bro hook wants injected, if any. */
-function hookContext(out: unknown): string | null {
-  if (!out || typeof out !== 'object') {
-    return null;
-  }
-  const o = out as { hookSpecificOutput?: { additionalContext?: unknown } };
-  const ctx = o.hookSpecificOutput?.additionalContext;
-  return typeof ctx === 'string' && ctx.trim() !== '' ? ctx : null;
-}
+/** Env stamped on every `bro hooks` spawn so the CLI's adapter emit
+ *  path journals this session into the hook spool — the in-process
+ *  adapters bypass run.sh, which owns the shell-side writer
+ *  (specs/bro-izpyk.9.md). A CLI that predates the marker ignores
+ *  the env, so old↔new mixes degrade to the pre-emit status quo. */
+const HOOK_ENV = hookEmitEnv('kilo', { npxPin: NPX_SPECS[0] });
 
 /** Auto-approve only a plain bro/bd/npx-bro invocation — no shell
  *  metacharacters in args (a metachar just means the ask goes to the
@@ -214,21 +46,36 @@ const SAFE_CMD = [
 ];
 
 const BroPlugin: Plugin = async ({ directory, client }) => {
+  // resolved on first use — the PATH tier costs a spawn probe and kilo
+  // loads plugins even in repos where bro is inert. The shared resolver
+  // owns the ladder (pin → sibling → checkout → PATH → npx) and the
+  // retry-on-failure window every adapter uses.
+  const getCommand = createCommandResolver({ npxSpecs: NPX_SPECS });
+
+  /** Run one bro hook event; null on every failure mode (fail-open).
+   *  `bro hooks` itself no-ops in a repo that never opted in. */
+  const runBroHook = async (event: string, input: unknown) => {
+    const resolved = await getCommand();
+    return resolved === null
+      ? null
+      : callHook(resolved, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+  };
+
   // --- tools: bro subcommands the model can call directly -------------------
 
-  const run = (sub: string, args: string[]) => {
-    const local = findBroBin();
-    const argv = local ? ['node', local, sub, ...args] : ['bro', sub, ...args];
-    return spawnCollect(argv[0], argv.slice(1), {
+  const run = async (sub: string, args: string[]): Promise<string> => {
+    const resolved = await getCommand();
+    if (resolved === null) {
+      return 'error: no bro command resolved';
+    }
+    const result = await runCommand(resolved.cmd, [...resolved.args, sub, ...args], {
       cwd: directory,
-      env: { ...process.env },
       timeoutMs: RUN_TIMEOUT_MS,
-    }).then(result => {
-      if (result.error !== null) {
-        return `error: ${result.error}`;
-      }
-      return result.stdout + result.stderr;
     });
+    if (result.error !== null && result.code === null) {
+      return `error: ${result.error}`;
+    }
+    return result.stdout + result.stderr;
   };
 
   // session-start probes are idempotent but not free (they shell out to
@@ -241,9 +88,9 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   const hydrate = async (sessionKey: string): Promise<void> => {
     const token = ++hydrationToken;
     hydratedContexts.set(sessionKey, { token, context: null });
-    const out = await runBroHook('session-start', { session_id: sessionKey });
+    const control = await runBroHook('session-start', { session_id: sessionKey });
     if (Object.is(hydratedContexts.get(sessionKey)?.token, token)) {
-      hydratedContexts.set(sessionKey, { token, context: hookContext(out) });
+      hydratedContexts.set(sessionKey, { token, context: contextOf(control) || null });
     }
   };
   const contextForSession = (sessionKey: string): string | null => {
@@ -340,13 +187,13 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       if (event.type !== 'session.idle') {
         return;
       }
-      const out = await runBroHook('stop', { session_id: event.properties.sessionID });
-      if (out && typeof out === 'object' && (out as { decision?: string }).decision === 'block') {
+      const control = await runBroHook('stop', { session_id: event.properties.sessionID });
+      if (control?.decision === 'block') {
         await client.app.log({
           body: {
             service: 'bro',
             level: 'warn',
-            message: `bro stop gate blocked: ${(out as { reason?: string }).reason ?? 'unfinished work'}`,
+            message: `bro stop gate blocked: ${control.reason ?? 'unfinished work'}`,
           },
         });
       }

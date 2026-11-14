@@ -12,6 +12,63 @@ const HOOK_TIMEOUT_MS = 15e3;
 const REHYDRATION_TIMEOUT_MS = 45e3;
 /** Cap on a hook's stdout — a runaway child must not eat the heap. */
 const MAX_OUTPUT = 1 << 20;
+/** A hung CLI must not wedge an adapter: `/bro`, `bro_status` and the
+*  bro tool are interactive reads, and a wedged dolt lock can stall
+*  them forever. The kill takes the detached process group down. */
+const RUN_TIMEOUT_MS = 6e4;
+/** How long a failed CLI resolution stays cached before a retry —
+*  PATH, a local install or npx can appear mid-session, but
+*  re-probing the npx rung on every keystroke would be worse than
+*  the outage. */
+const RESOLVE_RETRY_MS = 6e4;
+/** The curated command family — first-class slash aliases for bro's
+*  workflow verbs. `verb` is the CLI argv head; `name` is the slash
+*  name, renamed to `bro:<name>` when the host owns it natively
+*  (AGT-1 §command family — a host-native command always wins).
+*  `/wtf` passes any args through untouched — the wtf routine owns
+*  multilingual frustration input itself. */
+const BRO_COMMANDS = [
+	{
+		name: "act",
+		verb: "act",
+		description: "bro act — PR review gate, threads, resolve"
+	},
+	{
+		name: "wtf",
+		verb: "wtf",
+		description: "bro wtf — frustration → retrospect capture, any language"
+	},
+	{
+		name: "retro",
+		verb: "retrospect",
+		description: "bro retrospect — learn + backlog review"
+	},
+	{
+		name: "learn",
+		verb: "learn",
+		description: "bro learn — lessons and backlog"
+	},
+	{
+		name: "drill",
+		verb: "drill",
+		description: "bro drill — deep research routine, scoped investigation"
+	},
+	{
+		name: "judge",
+		verb: "judge",
+		description: "bro judge — typed decision on session state"
+	},
+	{
+		name: "loop",
+		verb: "loop",
+		description: "bro loop — iterations with exit condition or formula"
+	},
+	{
+		name: "goal",
+		verb: "goal",
+		description: "bro goal — goal tracking, hooks remind every turn"
+	}
+];
 /**
 * `node` on PATH, not process.execPath — a host may ship as a compiled
 * binary whose execPath IS that binary, so running it with our own
@@ -100,9 +157,17 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	if (opts.command !== void 0 && opts.command !== "") {
-		const [cmd, ...args] = opts.command.split(/\s+/).filter((p) => p !== "");
+	const pinned = opts.command;
+	if (typeof pinned === "string" && pinned.trim() !== "") {
+		const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
 		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
+			cmd,
+			args
+		};
+	} else if (pinned !== void 0 && typeof pinned === "object" && pinned !== null) {
+		const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
+		const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
+		if (cmd !== "" && await exitsZero(cmd, [...args, "hooks"])) return {
 			cmd,
 			args
 		};
@@ -115,14 +180,22 @@ async function resolveCommand(opts = {}) {
 		cmd: "bro",
 		args: []
 	};
-	if (opts.npxPin !== void 0 && await exitsZero("npx", ["--version"])) return {
-		cmd: "npx",
-		args: [
+	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
+	if (specs.length > 0 && await exitsZero("npx", ["--version"])) {
+		for (const spec of specs) if (await exitsZero("npx", [
 			"-y",
 			"--prefer-offline",
-			opts.npxPin
-		]
-	};
+			spec,
+			"hooks"
+		])) return {
+			cmd: "npx",
+			args: [
+				"-y",
+				"--prefer-offline",
+				spec
+			]
+		};
+	}
 	return null;
 }
 /**
@@ -330,21 +403,30 @@ function boardLines(s) {
 function statusCrumb(s) {
 	return `bro ◐${s.beads?.inProgress?.length ?? 0} ⬢${(s.fleet?.agents ?? []).filter((a) => a.state === "running").length}`;
 }
+/**
+* The lazy, retrying CLI resolver every adapter shares: resolution
+* costs spawn probes, so it runs on first use and a *failed* answer
+* expires after RESOLVE_RETRY_MS instead of poisoning the instance —
+* PATH, a local install or npx can appear mid-session.
+*/
+function createCommandResolver(opts = {}) {
+	let resolved;
+	let failedAt;
+	return () => {
+		if (resolved !== void 0 && (failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS)) return resolved;
+		failedAt = void 0;
+		resolved = resolveCommand(opts).then((cmd) => {
+			if (cmd === null) failedAt = Date.now();
+			return cmd;
+		});
+		return resolved;
+	};
+}
 
 //#endregion
 //#region packages/agent-plugins/adapter-core/src/host.ts
 /** The board's widget key — one slot, owned by bro. */
 const BOARD_KEY = "bro";
-/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
-*  board refresh are interactive reads, and a wedged dolt lock can
-*  stall them forever. The kill takes the detached process group
-*  down, so a dolt child dies with its parent. */
-const RUN_TIMEOUT_MS = 6e4;
-/** How long a failed CLI resolution stays cached before a retry —
-*  PATH, a local install or npx can appear mid-session, but
-*  re-probing the npx rung on every keystroke would be worse than
-*  the outage. */
-const RESOLVE_RETRY_MS = 6e4;
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -412,6 +494,7 @@ function sharedBinding(host) {
 			return { content };
 		},
 		npxPin: host.npxPin,
+		nativeCommands: host.nativeCommands,
 		hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin })
 	};
 }
@@ -449,22 +532,10 @@ function createBroDriver(host, api) {
 	*  let through, and a NEW session starts with a fresh gate (the
 	*  flag dies with its session instead of leaking into the next). */
 	let gatedSession;
-	/** Resolve the CLI once. Probing costs a spawn even where bro is
-	*  inert, so it stays lazy. A *failed* resolution is not permanent:
-	*  PATH, a local install or npx can appear mid-session, so a null
-	*  answer expires after RESOLVE_RETRY_MS instead of poisoning the
-	*  whole extension instance. */
-	let resolved;
-	let resolvedFailedAt;
-	const command = () => {
-		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)) return resolved;
-		resolvedFailedAt = void 0;
-		resolved = resolveCommand({ npxPin: host.npxPin }).then((cmd) => {
-			if (cmd === null) resolvedFailedAt = Date.now();
-			return cmd;
-		});
-		return resolved;
-	};
+	/** Resolve the CLI once — the shared lazy+retrying resolver. Probing
+	*  costs a spawn even where bro is inert, so it stays lazy; a failed
+	*  resolution expires instead of poisoning the extension instance. */
+	const command = createCommandResolver({ npxPin: host.npxPin });
 	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
 	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
 		if (!broEnabled(cwd)) return null;
@@ -642,6 +713,22 @@ function createBroDriver(host, api) {
 	});
 	/** Run a bro subcommand — resolve the CLI first, then hand off. */
 	const run = async (args, cwd) => runBro(await command(), args, cwd);
+	/** `/bro <args>` and every family alias share one dispatch: split,
+	*  run, surface. Bare family names never reach here — they always
+	*  carry their verb. */
+	const dispatchArgs = async (argv, ctx) => {
+		const result = await run(argv, host.cwd(ctx));
+		const text = (result.stdout || result.stderr).trim();
+		if (result.code !== 0) {
+			host.notify(ctx, `bro ${argv.join(" ")}: exit ${result.code}`, "error");
+			return;
+		}
+		api.sendMessage({
+			customType: "bro-output",
+			content: `$ bro ${argv.join(" ")}\n${text}`,
+			display: true
+		}, { triggerTurn: false });
+	};
 	/** The shared surfaces. `/bro` is a thin passthrough — `bro
 	*  act|next|fleet|drill` reachable without leaving the editor — and
 	*  `bro_status` hands the model the same board JSON the widget
@@ -656,19 +743,20 @@ function createBroDriver(host, api) {
 				host.notify(ctx, "bro: board refreshed", "info");
 				return;
 			}
-			const result = await run(trimmed.split(/\s+/), host.cwd(ctx));
-			const text = (result.stdout || result.stderr).trim();
-			if (result.code !== 0) {
-				host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, "error");
-				return;
-			}
-			api.sendMessage({
-				customType: "bro-output",
-				content: `$ bro ${trimmed}\n${text}`,
-				display: true
-			}, { triggerTurn: false });
+			await dispatchArgs(trimmed.split(/\s+/), ctx);
 		}
 	});
+	const natives = new Set(host.nativeCommands ?? []);
+	for (const c of BRO_COMMANDS) {
+		const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+		api.registerCommand(name, {
+			description: c.description,
+			getArgumentCompletions: host.argumentCompletions,
+			async handler(args, ctx) {
+				await dispatchArgs([c.verb, ...args.trim().split(/\s+/).filter((a) => a !== "")], ctx);
+			}
+		});
+	}
 	api.registerTool({
 		name: "bro_status",
 		label: "bro status",
@@ -678,6 +766,8 @@ function createBroDriver(host, api) {
 			properties: {},
 			additionalProperties: false
 		},
+		loadMode: "essential",
+		approval: "read",
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
@@ -786,6 +876,34 @@ function binding(pi) {
 		...sharedBinding({
 			kind: "pi",
 			npxPin: NPX_PIN,
+			nativeCommands: [
+				"settings",
+				"model",
+				"thinking",
+				"scoped-models",
+				"login",
+				"logout",
+				"llama",
+				"new",
+				"resume",
+				"name",
+				"session",
+				"tree",
+				"fork",
+				"clone",
+				"compact",
+				"import",
+				"copy",
+				"export",
+				"share",
+				"bug",
+				"trust",
+				"mcp",
+				"reload",
+				"hotkeys",
+				"changelog",
+				"quit"
+			],
 			stop: "agent_before_settle",
 			on(event, handler) {
 				pi.on(event, handler);

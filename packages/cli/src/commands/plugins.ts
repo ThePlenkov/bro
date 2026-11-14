@@ -35,8 +35,9 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitTry, hasHelpFlag, printUsage, CommandError, EXIT, type BroPlugin } from '@broject/core';
+import { fileURLToPath } from 'node:url';
+import { type BroPlugin, CommandError, EXIT, gitTry, hasHelpFlag, printUsage } from '@broject/core';
+import { collectEmbedded, type EmbeddedData } from '../embedded.ts';
 import { positionals } from './args.ts';
 
 export type PluginScope = 'global' | 'local';
@@ -51,8 +52,8 @@ export interface PluginRow {
   path: string;
 }
 
-/** A manifest step beyond the module file — kilo's global install also
- *  needs a file:/// entry in kilo.json's `plugin` array. */
+/** A manifest step beyond the module file — a client whose plugin
+ *  surface needs a config entry in addition to the materialized file. */
 interface Registration {
   /** Reading this parses the manifest — a malformed one exits before
    *  any file is written. */
@@ -64,10 +65,15 @@ interface Registration {
 /** One file of a bundle surface — where it comes from and the name it
  *  takes inside the bundle's directory. */
 interface SurfaceFile {
-  /** the source path, or null when the artifact cannot be resolved */
+  /** the source path, or null when the artifact cannot be resolved or
+   *  the bytes arrive inline via `content` */
   artifact: string | null;
   /** the file name inside the bundle directory */
   name: string;
+  /** inline bytes for snapshot members — the embedded skills tree
+   *  ships as one JSON asset, so its files have no per-file source
+   *  path to point `artifact` at */
+  content?: string;
 }
 
 /** An installable unit. `file` is one module; `bundle` is a directory of
@@ -89,6 +95,13 @@ interface ClientSpec {
    *  current layout lands. */
   legacy?(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string[]>;
   registration?(scope: PluginScope, path: string, env: NodeJS.ProcessEnv): Registration | null;
+  /** Hosts that load project and global copies of the same extension
+   *  without dedupe — a dual install conflicts on tool/command names
+   *  (bro-b7mae). When both scopes are requested the install collapses
+   *  to global (it covers the repo too) and this note explains why;
+   *  an explicit single scope still installs, with a warning when the
+   *  other scope already holds a bro copy. */
+  singleScope?: string;
 }
 
 /** The bro package root — this module sits at src/commands/ in a
@@ -145,32 +158,71 @@ function firstExisting(candidates: Array<string | null>): string | null {
   return null;
 }
 
-/** Artifact sources in preference order: the TS source (checkout), then the
- *  repo-distributed adapter a bro clone carries under plugins/, then the
- *  copy that rides the tarball. The names differ — the checkout keeps
- *  the server as `opencode.ts`, the installed catalog plugin serves it
- *  as the directory's `index.ts`.
- *
- *  The tarball copy is the one that works OUTSIDE a checkout: an
- *  installed bro has no `packages/agent-plugins/` tree and no repo
- *  clone, and the adapter packages are not published on their own — so
- *  without it `bro plugins install opencode` had nothing to write. */
+/** Artifact sources in preference order: the repo-distributed catalog
+ *  bundle (self-contained — adapter-core inlined, only the host SDK
+ *  stays external), then the copy that rides the tarball, then the
+ *  built adapter, and the raw TS source last — it imports workspace
+ *  packages (`@broject/adapter-core`) a host runtime cannot resolve
+ *  once the file lands outside this checkout. The names differ — the
+ *  checkout keeps the server as `opencode.ts`, the installed catalog
+ *  plugin serves it as the directory's `index.ts`. */
 function opencodeArtifact(cwd: string, src: string, shipped: string): string | null {
   const ap = agentPluginPackageRoot('opencode');
   const root = gitRoot(cwd);
   const cli = packageRoot();
   return firstExisting([
-    ap === null ? null : join(ap, 'src', src),
     root === null ? null : join(root, 'plugins', 'opencode', 'bro', shipped),
     cli === null ? null : join(cli, 'dist', 'plugins', 'opencode', 'bro', shipped),
+    ap === null ? null : join(ap, 'dist', shipped.replace(/\.(ts|tsx)$/, '.js')),
+    ap === null ? null : join(ap, 'src', src),
   ]);
+}
+
+/** bro's skill tree as bundle members — `skills/<name>/<file>` inline
+ *  from the embedded snapshot. The plugin's collectBroSkills reads
+ *  `<bundle>/skills/` first, so materializing here is what makes the
+ *  registry surface work for installed copies (spec AGT-6: skills
+ *  registered from plugin dir). Resolution order: the shipped
+ *  `dist/generated/skills-data.json` snapshot (present in every built
+ *  CLI — dev and tarball alike), then the live repo tree for
+ *  pre-build checkouts. Never the TARGET repo's skills/ — those are
+ *  the operator's, not bro's. */
+function broSkillFiles(): SurfaceFile[] {
+  const cli = packageRoot();
+  let files: Record<string, string> | null = null;
+  const artifact = cli === null ? null : join(cli, 'dist', 'generated', 'skills-data.json');
+  if (artifact !== null && existsSync(artifact)) {
+    try {
+      files = (JSON.parse(readFileSync(artifact, 'utf8')) as EmbeddedData).SKILL_FILES;
+    } catch {
+      files = null;
+    }
+  }
+  if (files === null && cli !== null) {
+    const repo = join(cli, '..', '..');
+    try {
+      if (existsSync(join(repo, 'skills'))) {
+        files = collectEmbedded(repo).SKILL_FILES;
+      }
+    } catch {
+      files = null;
+    }
+  }
+  if (files === null) {
+    return [];
+  }
+  const skillMap = files;
+  return Object.keys(skillMap)
+    .sort()
+    .map(rel => ({ name: `skills/${rel}`, artifact: null, content: skillMap[rel] }));
 }
 
 /** The opencode v2 catalog plugin — one directory, three modules:
  *  `index.ts` is the server entrypoint (opencode's plugin loader reads
  *  the directory's index), `tui.tsx` the terminal half, `rpc.ts` the
  *  contract both halves share. The server's `./rpc.ts` import resolves
- *  inside the installed directory. */
+ *  inside the installed directory. `skills/` rides along so the
+ *  plugin's skill registry has its tree beside the modules. */
 function opencodeBundle(cwd: string, env: NodeJS.ProcessEnv): Surface {
   const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config');
   const localDir = join(gitRoot(cwd) ?? cwd, '.opencode');
@@ -180,6 +232,7 @@ function opencodeBundle(cwd: string, env: NodeJS.ProcessEnv): Surface {
       { name: 'index.ts', artifact: opencodeArtifact(cwd, 'opencode.ts', 'index.ts') },
       { name: 'tui.tsx', artifact: opencodeArtifact(cwd, 'tui.tsx', 'tui.tsx') },
       { name: 'rpc.ts', artifact: opencodeArtifact(cwd, 'rpc.ts', 'rpc.ts') },
+      ...broSkillFiles(),
     ],
     dirs: {
       global: join(configDir, 'opencode', 'plugins', 'bro'),
@@ -206,78 +259,15 @@ function kiloArtifact(cwd: string): string | null {
   const pkg = packageRoot();
   const root = gitRoot(cwd);
   return firstExisting([
-    ap === null ? null : join(ap, 'src', 'kilo.ts'),
-    ap === null ? null : join(ap, 'dist', 'kilo.js'),
-    pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
     root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'kilo', 'bro', 'bro.ts'),
+    ap === null ? null : join(ap, 'dist', 'kilo.js'),
+    ap === null ? null : join(ap, 'src', 'kilo.ts'),
   ]);
 }
 
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo');
-}
-
-function kiloManifestPath(env: NodeJS.ProcessEnv): string {
-  return join(kiloConfigDir(env), 'kilo.json');
-}
-
-/** kilo.json is strict JSON — kilo.jsonc exists too but kilo merges both
- *  files, so writing only kilo.json is always correct and a comment-
- *  bearing file we can't parse is left for the user, never rewritten. */
-function readKiloManifest(env: NodeJS.ProcessEnv): Record<string, unknown> {
-  const path = kiloManifestPath(env);
-  if (!existsSync(path)) {
-    return {};
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    throw new CommandError(
-      `plugins: ${path} is not plain JSON — edit the "plugin" array by hand`,
-      EXIT.error
-    );
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new CommandError(`plugins: ${path} must be a JSON object — edit it by hand`, EXIT.error);
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
-  const manifestPath = kiloManifestPath(env);
-  const entry = pathToFileURL(path).href;
-  const pluginList = (m: Record<string, unknown>): unknown[] =>
-    Array.isArray(m.plugin) ? m.plugin : [];
-  const writeManifest = (m: Record<string, unknown>): void => {
-    atomicWrite(manifestPath, `${JSON.stringify(m, null, 2)}\n`);
-  };
-  return {
-    get registered() {
-      return pluginList(readKiloManifest(env)).includes(entry);
-    },
-    register(): void {
-      const fresh = !existsSync(manifestPath);
-      const m = readKiloManifest(env);
-      const list = pluginList(m);
-      if (list.includes(entry)) {
-        return;
-      }
-      const body = fresh ? { $schema: 'https://app.kilo.ai/config.json', ...m } : m;
-      writeManifest({ ...body, plugin: [...list, entry] });
-    },
-    unregister(): void {
-      if (!existsSync(manifestPath)) {
-        return;
-      }
-      const m = readKiloManifest(env);
-      const list = pluginList(m);
-      if (!list.includes(entry)) {
-        return;
-      }
-      writeManifest({ ...m, plugin: list.filter(e => e !== entry) });
-    },
-  };
 }
 
 function piArtifact(cwd: string): string | null {
@@ -289,6 +279,7 @@ function piArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'dist', 'pi.js'),
     ap === null ? null : join(ap, 'src', 'pi.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'pi', 'bro', 'bro.ts'),
   ]);
 }
 
@@ -301,6 +292,7 @@ function ompArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'dist', 'omp.js'),
     ap === null ? null : join(ap, 'src', 'omp.ts'),
     pkg === null ? null : join(pkg, 'dist', 'omp.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'omp', 'bro', 'bro.ts'),
   ]);
 }
 
@@ -325,6 +317,13 @@ const CLIENTS: Record<string, ClientSpec> = {
     // the v2 catalog plugin — a directory of three modules
     surfaces: (cwd, env) => [opencodeBundle(cwd, env)],
     legacy: (cwd, env) => opencodeLegacy(cwd, env),
+    // verified on opencode 2.3.0: `opencode run` executes plugin
+    // modules from BOTH ~/.config/opencode/plugins/ and
+    // <repo>/.opencode/plugins/ — identical id `bro` loads twice, so
+    // hooks/tools/commands/RPC would all double-register (bro-b7mae)
+    singleScope:
+      'opencode loads project and global plugin copies without dedupe — ' +
+      'hooks, tools and commands would double-register (bro-b7mae)',
   },
   kilo: {
     surfaces: (cwd, env) => [
@@ -332,12 +331,20 @@ const CLIENTS: Record<string, ClientSpec> = {
         kind: 'file',
         artifact: kiloArtifact(cwd),
         targets: {
-          global: join(kiloConfigDir(env), 'bro', 'bro.ts'),
+          // kilo scans <config>/plugin/*.ts — a kilo.json `plugin`
+          // array entry is NOT honored for file paths (verified against
+          // kilo 7.8.x: file:// and plain-path entries both load nothing)
+          global: join(kiloConfigDir(env), 'plugin', 'bro.ts'),
           local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
         },
       },
     ],
-    registration: (scope, path, env) => (scope === 'global' ? kiloRegistration(path, env) : null),
+    // verified on kilo 7.8.27: `kilo run` executes BOTH the config-dir
+    // and the project plugin files — the same no-dedupe collision class
+    // as pi/omp (probe plugins logged GLOBAL+LOCAL on one load)
+    singleScope:
+      'kilo loads project and global copies of the same plugin without ' +
+      'dedupe — tool names conflict (bro-b7mae)',
   },
   pi: {
     // pi discovers <cwd>/.pi/extensions/ locally and
@@ -357,6 +364,9 @@ const CLIENTS: Record<string, ClientSpec> = {
         },
       },
     ],
+    singleScope:
+      'pi loads project and global copies of the same extension without ' +
+      'dedupe — tool names conflict (bro-b7mae)',
   },
   omp: {
     // omp discovers <cwd>/.omp/extensions/ locally and
@@ -373,6 +383,9 @@ const CLIENTS: Record<string, ClientSpec> = {
         },
       },
     ],
+    singleScope:
+      'omp loads project and global copies of the same extension without ' +
+      'dedupe — tool names conflict (bro-b7mae)',
   },
 };
 
@@ -413,6 +426,12 @@ export function isBroAdapter(text: string): boolean {
  *  resolved (nothing to compare against). */
 function surfaceBytes(artifact: string | null): string | null {
   return artifact === null ? null : readFileSync(artifact, 'utf8');
+}
+
+/** A bundle member's bytes — inline `content` wins (snapshot files),
+ *  else the artifact path is read. */
+function surfaceContent(f: SurfaceFile): string | null {
+  return f.content ?? surfaceBytes(f.artifact);
 }
 
 function stateAt(surface: Surface, scope: PluginScope, reg: Registration | null): InstallState {
@@ -465,8 +484,8 @@ export function pluginRows(
 
 /** `write tmp; rename` — a torn write must never leave a half module.
  *  The tmp file gets umask defaults, so a restrictive existing mode is
- *  copied over before the rename: a 0600 kilo.json carrying permission
- *  rules must not silently widen to 0644. */
+ *  copied over before the rename: a restrictive-mode config file must
+ *  not silently widen to umask defaults. */
 function atomicWrite(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
@@ -520,8 +539,19 @@ function knownClient(name: string): ClientSpec {
 export function installClient(name: string, scopes: PluginScope[], opts: MutateOpts): Outcome[] {
   const client = knownClient(name);
   const surfaces = client.surfaces(opts.cwd, opts.env);
+  // singleScope clients cannot hold both copies — the host loads them
+  // and the duplicate registrations collide. A bare `install` converges
+  // to ONE scope: whichever already holds a bro copy (refreshing the
+  // user's existing choice beats silently adding the other), global
+  // when neither or both do. An explicit scope flag is still honored.
+  const wantsBoth = scopes.includes('global') && scopes.includes('local');
+  const effective =
+    client.singleScope !== undefined && wantsBoth
+      ? ([preferredSingleScope(surfaces)] as PluginScope[])
+      : scopes;
+  const collapsed = effective !== scopes;
   const outcomes: Outcome[] = [];
-  for (const scope of scopes) {
+  for (const scope of effective) {
     for (const [idx, surface] of surfaces.entries()) {
       const owner = idx === 0 ? client : { ...client, registration: undefined };
       outcomes.push(
@@ -539,7 +569,173 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
       }
     }
   }
+  if (client.singleScope !== undefined) {
+    const notes: string[] = [];
+    if (collapsed) {
+      const scope = effective[0];
+      notes.push(
+        `${client.singleScope}; only the ${scope}-scope copy was installed ` +
+          '— pass an explicit scope flag to choose the other one instead'
+      );
+    }
+    // converge — the host must never hold bro copies in both scopes.
+    // Remove ours outside the installed set (sentinel-checked; a
+    // foreign file at the path is never touched), including stale
+    // legacy-layout modules the host would still load.
+    for (const scope of ['global', 'local'] as PluginScope[]) {
+      if (effective.includes(scope)) {
+        continue;
+      }
+      for (const surface of surfaces) {
+        const outcome = convergeScopeCopy(name, scope, surface, opts);
+        if (outcome !== null) {
+          outcomes.push(outcome);
+        }
+      }
+      for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
+        const outcome = legacyOutcome(name, scope, legacy, opts);
+        if (outcome !== null) {
+          outcomes.push(outcome);
+        }
+      }
+    }
+    const conflict = crossScopeBroCopy(surfaces, effective);
+    if (conflict !== null) {
+      notes.push(conflict);
+    }
+    const first = outcomes[0];
+    if (notes.length > 0 && first !== undefined) {
+      first.note =
+        first.note === undefined ? notes.join('; ') : `${first.note}; ${notes.join('; ')}`;
+    }
+  }
   return outcomes;
+}
+
+/** Remove a bro copy sitting in a scope the install did not choose —
+ *  singleScope hosts load both scopes, so leaving it would collide.
+ *  Sentinel-gated like every other removal: only a verified bro
+ *  adapter (or our own bundle dir) is touched. */
+function convergeScopeCopy(
+  name: string,
+  scope: PluginScope,
+  surface: Surface,
+  opts: MutateOpts
+): Outcome | null {
+  const note = 'single-scope convergence (bro-b7mae)';
+  if (surface.kind === 'file') {
+    const target = surface.targets[scope];
+    if (!existsSync(target)) {
+      return null;
+    }
+    try {
+      if (!isBroAdapter(readFileSync(target, 'utf8'))) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    if (opts.dryRun) {
+      return { client: name, scope, action: 'would-remove', path: target, note };
+    }
+    rmSync(target);
+    return { client: name, scope, action: 'removed', path: target, note };
+  }
+  const dir = surface.dirs[scope];
+  if (!existsSync(join(dir, 'index.ts'))) {
+    return null;
+  }
+  try {
+    if (!isBroAdapter(readFileSync(join(dir, 'index.ts'), 'utf8'))) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  if (opts.dryRun) {
+    return { client: name, scope, action: 'would-remove', path: dir, note };
+  }
+  for (const f of surface.files) {
+    const path = join(dir, f.name);
+    if (existsSync(path)) {
+      rmSync(path);
+    }
+  }
+  // nested bundle members (skills/<name>/…) leave empty dirs behind —
+  // rmdir deepest-first so a foreign file keeps its directory alive
+  const dirs = new Set<string>();
+  for (const f of surface.files) {
+    let rel = dirname(f.name);
+    while (rel !== '.' && rel !== '') {
+      dirs.add(rel);
+      rel = dirname(rel);
+    }
+  }
+  for (const rel of [...dirs].sort((a, b) => b.length - a.length)) {
+    try {
+      rmdirSync(join(dir, rel));
+    } catch {
+      // not empty — something of the user's lives here, leave it
+    }
+  }
+  try {
+    rmdirSync(dir);
+  } catch {
+    // not empty — something of the user's lives here, leave the directory
+  }
+  return { client: name, scope, action: 'removed', path: dir, note };
+}
+
+/** Which scope a collapsed singleScope install lands in: the scope
+ *  that already holds a bro copy wins (a bare install refreshes the
+ *  user's existing choice instead of adding the colliding twin);
+ *  global is the default when neither — or both — do. */
+function preferredSingleScope(surfaces: Surface[]): PluginScope {
+  const holders = (['global', 'local'] as PluginScope[]).filter(scope =>
+    surfaces.some(surface => scopeHasBroCopy(surface, scope))
+  );
+  const only = holders.length === 1 ? holders[0] : undefined;
+  return only ?? 'global';
+}
+
+function scopeHasBroCopy(surface: Surface, scope: PluginScope): boolean {
+  const target =
+    surface.kind === 'file' ? surface.targets[scope] : join(surface.dirs[scope], 'index.ts');
+  if (!existsSync(target)) {
+    return false;
+  }
+  try {
+    return isBroAdapter(readFileSync(target, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** A bro copy already sitting in the scope opposite the ones just
+ *  installed — the host will load both and the duplicate registrations
+ *  collide, so the install warns rather than discovering it live. */
+function crossScopeBroCopy(surfaces: Surface[], scopes: PluginScope[]): string | null {
+  for (const surface of surfaces) {
+    for (const scope of scopes) {
+      const other = scope === 'global' ? 'local' : 'global';
+      const target =
+        surface.kind === 'file' ? surface.targets[other] : join(surface.dirs[other], 'index.ts');
+      if (!existsSync(target)) {
+        continue;
+      }
+      try {
+        if (isBroAdapter(readFileSync(target, 'utf8'))) {
+          return (
+            `a ${other}-scope copy exists at ${target} — the host loads both ` +
+            'scopes and the duplicate tool/command names conflict; remove one'
+          );
+        }
+      } catch {
+        // unreadable — not ours to judge
+      }
+    }
+  }
+  return null;
 }
 
 function installOne(
@@ -597,7 +793,7 @@ function installOne(
     scope,
     action: prior === null ? 'installed' : 'updated',
     path,
-    note: needsRegistration ? 'registered in kilo.json' : undefined,
+    note: needsRegistration ? 'registered in host config' : undefined,
   };
 }
 
@@ -612,7 +808,7 @@ function installBundle(
   opts: MutateOpts
 ): Outcome {
   const contents = files
-    .map(f => ({ name: f.name, content: surfaceBytes(f.artifact) }))
+    .map(f => ({ name: f.name, content: surfaceContent(f) }))
     .filter((c): c is { name: string; content: string } => c.content !== null);
   if (contents.length === 0) {
     throw new CommandError(
@@ -751,7 +947,7 @@ function uninstallOne(
     scope,
     action: 'removed',
     path,
-    note: wasRegistered ? 'removed kilo.json entry' : undefined,
+    note: wasRegistered ? 'removed host config entry' : undefined,
   };
 }
 
@@ -774,7 +970,7 @@ function uninstallBundle(
       continue;
     }
     const prior = readFileSync(path, 'utf8');
-    const clean = surfaceBytes(f.artifact);
+    const clean = surfaceContent(f);
     const ours = clean === null ? isBroAdapter(prior) : prior === clean;
     if (!opts.force && !ours) {
       return {
@@ -795,6 +991,23 @@ function uninstallBundle(
     const path = join(dir, f.name);
     if (existsSync(path)) {
       rmSync(path);
+    }
+  }
+  // nested bundle members (skills/<name>/…) leave empty dirs behind —
+  // rmdir deepest-first so a foreign file keeps its directory alive
+  const dirs = new Set<string>();
+  for (const f of files) {
+    let rel = dirname(f.name);
+    while (rel !== '.' && rel !== '') {
+      dirs.add(rel);
+      rel = dirname(rel);
+    }
+  }
+  for (const rel of [...dirs].sort((a, b) => b.length - a.length)) {
+    try {
+      rmdirSync(join(dir, rel));
+    } catch {
+      // not empty — something of the user's lives here, leave it
     }
   }
   try {
@@ -824,7 +1037,7 @@ function absentOutcome(
     action: 'absent',
     path,
     note: wasRegistered
-      ? `${dryRun ? 'would remove' : 'removed'} dangling kilo.json entry`
+      ? `${dryRun ? 'would remove' : 'removed'} dangling host config entry`
       : undefined,
   };
 }
