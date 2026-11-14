@@ -653,6 +653,11 @@ function schemaRefs(dump: ContractDump): string[] {
     if (row.contract !== undefined) {
       walk(row.contract);
     }
+    // plan-input schemas (spec bro-hp0su) live on the row, not under
+    // contract — the same dangling-ref gate covers them
+    if (row.planSchema !== undefined) {
+      refs.push(row.planSchema);
+    }
   }
   return refs.sort();
 }
@@ -706,5 +711,22 @@ describe('json schema refs', () => {
       GROUPS
     );
     assert.deepEqual(missingSchemaRefs(escape, PKG_DIR), ['../../etc/passwd']);
+  });
+
+  test('every plan-accepting live plugin derives a resolvable planSchema ref', () => {
+    const dump = buildDump(PLUGINS, GROUP_META);
+    const planRows = Object.values(dump.commands).filter(r => r.plan);
+    assert.ok(planRows.length > 0);
+    for (const row of planRows) {
+      assert.equal(
+        row.planSchema,
+        `schemas/plans/${row.name}.schema.json`,
+        `${row.name} accepts plans — the convention must produce a ref`
+      );
+      assert.ok(
+        existsSync(resolve(PKG_DIR, row.planSchema!)),
+        `${row.name}: ${row.planSchema} does not exist — every plan kind ships a schema`
+      );
+    }
   });
 });

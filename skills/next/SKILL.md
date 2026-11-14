@@ -1,4 +1,5 @@
 ---
+
 name: next
 description: "Use when the user says 'work the backlog', 'clean the queue', invokes /next, or sets a /goal over open beads — the autonomous backlog loop. Thin wrapper over the bro CLI: `bro flow next` is the scheduler as code — it claims the top ready bead and emits the work order. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
@@ -58,7 +59,8 @@ other-labeled work stays untouched), `claim = false` for a dry run,
 `bro flow next --global`) to schedule from the user-level store. Batching
 is for parallel execution (one claimed bead per worktree/agent); a
 claimed gate still means a human decides — the plan was the go-ahead,
-not the verdict.
+not the verdict. The authoring schema is `schemas/plans/next.schema.json`
+— `bro plan describe next` prints it (the example as a TOML template).
 
 ## Policy
 

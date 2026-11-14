@@ -3,60 +3,60 @@
  * prevents recurrence — and writes a TOML plan; `bro retrospect record`
  * validates it and fans it out into beads deterministically.
  */
-import { parse } from 'smol-toml'
-import { checkPlanVersion } from '@broject/core'
-import { ACTION_SINKS, RETRO_SCOPES } from './types.ts'
-import type { ActionSink, RetroAction, RetroPlan, RetroScope } from './types.ts'
+import { parse } from 'smol-toml';
+import { checkPlanVersion, PLAN_ENVELOPE_KEYS } from '@broject/core';
+import { ACTION_SINKS, RETRO_SCOPES } from './types.ts';
+import type { ActionSink, RetroAction, RetroPlan, RetroScope } from './types.ts';
 
-const RETRO_KEYS = new Set(['what', 'why', 'scope', 'wtf', 'evidence'])
-const ACTION_KEYS = new Set(['title', 'sink', 'scope', 'detail'])
+const RETRO_KEYS = new Set(['what', 'why', 'scope', 'wtf', 'evidence']);
+const ACTION_KEYS = new Set(['title', 'sink', 'scope', 'detail']);
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
-const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
 
 function scope(raw: unknown, where: string, errors: string[]): RetroScope | undefined {
   if (raw === undefined) {
-    return undefined
+    return undefined;
   }
   if (typeof raw !== 'string' || !(RETRO_SCOPES as readonly string[]).includes(raw)) {
-    errors.push(`${where}: scope must be one of ${RETRO_SCOPES.join('|')}`)
-    return undefined
+    errors.push(`${where}: scope must be one of ${RETRO_SCOPES.join('|')}`);
+    return undefined;
   }
-  return raw as RetroScope
+  return raw as RetroScope;
 }
 
 function parseAction(raw: unknown, i: number, errors: string[]): RetroAction | undefined {
-  const where = `actions[${i}]`
+  const where = `actions[${i}]`;
   if (!isRecord(raw)) {
-    errors.push(`${where}: must be a table`)
-    return undefined
+    errors.push(`${where}: must be a table`);
+    return undefined;
   }
   for (const key of Object.keys(raw)) {
     if (!ACTION_KEYS.has(key)) {
-      errors.push(`${where}: unknown key "${key}"`)
+      errors.push(`${where}: unknown key "${key}"`);
     }
   }
   if (!nonEmpty(raw.title)) {
-    errors.push(`${where}: title is required`)
+    errors.push(`${where}: title is required`);
   }
   if (!nonEmpty(raw.sink) || !(ACTION_SINKS as readonly string[]).includes(raw.sink)) {
-    errors.push(`${where}: sink must be one of ${ACTION_SINKS.join('|')}`)
+    errors.push(`${where}: sink must be one of ${ACTION_SINKS.join('|')}`);
   }
   if (raw.detail !== undefined && typeof raw.detail !== 'string') {
-    errors.push(`${where}: detail must be a string`)
+    errors.push(`${where}: detail must be a string`);
   }
-  const actionScope = scope(raw.scope, where, errors)
+  const actionScope = scope(raw.scope, where, errors);
   if (!nonEmpty(raw.title) || !nonEmpty(raw.sink)) {
-    return undefined
+    return undefined;
   }
   return {
     title: raw.title.trim(),
     sink: raw.sink as ActionSink,
     scope: actionScope,
     detail: typeof raw.detail === 'string' ? raw.detail : undefined,
-  }
+  };
 }
 
 function parseRetroSection(
@@ -65,26 +65,26 @@ function parseRetroSection(
 ): Omit<RetroPlan, 'actions'> {
   for (const key of Object.keys(retro)) {
     if (!RETRO_KEYS.has(key)) {
-      errors.push(`retro: unknown key "${key}"`)
+      errors.push(`retro: unknown key "${key}"`);
     }
   }
   if (!nonEmpty(retro.what)) {
-    errors.push('retro: what is required — what went wrong')
+    errors.push('retro: what is required — what went wrong');
   }
   if (!nonEmpty(retro.why)) {
-    errors.push('retro: why is required — the root cause')
+    errors.push('retro: why is required — the root cause');
   }
-  const retroScope = scope(retro.scope, 'retro', errors) ?? 'project'
+  const retroScope = scope(retro.scope, 'retro', errors) ?? 'project';
   // an empty wtf is the schema template's placeholder — absent, not invalid
   if (retro.wtf !== undefined && typeof retro.wtf !== 'string') {
-    errors.push('retro: wtf must be a bead id')
+    errors.push('retro: wtf must be a bead id');
   }
-  let evidence: string[] = []
+  let evidence: string[] = [];
   if (retro.evidence !== undefined) {
     if (!Array.isArray(retro.evidence) || !retro.evidence.every(nonEmpty)) {
-      errors.push('retro: evidence must be a list of refs (sha, PR url, bead id)')
+      errors.push('retro: evidence must be a list of refs (sha, PR url, bead id)');
     } else {
-      evidence = retro.evidence.map((e) => e.trim())
+      evidence = retro.evidence.map(e => e.trim());
     }
   }
   return {
@@ -94,77 +94,79 @@ function parseRetroSection(
     scope: retroScope,
     wtf: nonEmpty(retro.wtf) ? retro.wtf.trim() : undefined,
     evidence,
-  }
+  };
 }
 
 function parseActions(rawActions: unknown, errors: string[]): RetroAction[] {
   if (rawActions === undefined) {
-    return []
+    return [];
   }
   if (!Array.isArray(rawActions)) {
-    errors.push('actions: must be an array of tables ([[actions]])')
-    return []
+    errors.push('actions: must be an array of tables ([[actions]])');
+    return [];
   }
-  const actions: RetroAction[] = []
+  const actions: RetroAction[] = [];
   rawActions.forEach((raw, i) => {
-    const action = parseAction(raw, i, errors)
+    const action = parseAction(raw, i, errors);
     if (action) {
-      actions.push(action)
+      actions.push(action);
     }
-  })
-  return actions
+  });
+  return actions;
 }
 
 /** The `kind` value a retro plan must carry when it has one — lets
  * `bro run <file>` route the plan to this plugin. */
-export const PLAN_KIND = 'retrospect'
+export const PLAN_KIND = 'retrospect';
 
 /** The schema version this parser speaks — `version = N` in a plan
  *  pins it; a pin above this is rejected, not misparsed. */
-export const PLAN_VERSION = 1
+export const PLAN_VERSION = 1;
 
 /** Validate an already-parsed plan document — the plugin planSchema.
  *  Throws one error listing every problem — the agent fixes the file
  *  once instead of iterating on single failures. */
 export function parsePlanDoc(doc: unknown, source = 'plan'): RetroPlan {
-  const errors: string[] = []
+  const errors: string[] = [];
   if (isRecord(doc)) {
     // a misspelled `actions`/`retro` key must not silently drop work
     for (const key of Object.keys(doc)) {
-      if (key !== 'retro' && key !== 'actions' && key !== 'kind' && key !== 'version') {
-        errors.push(`unknown top-level key "${key}"`)
+      if (key !== 'retro' && key !== 'actions' && !PLAN_ENVELOPE_KEYS.has(key)) {
+        errors.push(`unknown top-level key "${key}"`);
       }
     }
     // `bro run` writes/reads the envelope; a hand-run plan that claims a
     // different kind was routed wrong — say so instead of misparsing
     if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
-      errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
+      errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`);
     }
-    checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
+    checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors);
   }
-  const retro = isRecord(doc) ? doc.retro : undefined
+  const retro = isRecord(doc) ? doc.retro : undefined;
   if (!isRecord(retro)) {
-    throw new Error(`${source}: [retro] table is required`)
+    throw new Error(`${source}: [retro] table is required`);
   }
-  const section = parseRetroSection(retro, errors)
-  const actions = parseActions(isRecord(doc) ? doc.actions : undefined, errors)
+  const section = parseRetroSection(retro, errors);
+  const actions = parseActions(isRecord(doc) ? doc.actions : undefined, errors);
 
   if (errors.length > 0) {
-    const details = errors.map((e) => `  - ${e}`).join('\n')
-    throw new Error(`${source}:\n${details}`)
+    const details = errors.map(e => `  - ${e}`).join('\n');
+    throw new Error(`${source}:\n${details}`);
   }
-  return { ...section, actions }
+  return { ...section, actions };
 }
 
 /** Parse + validate a plan file's TOML text. */
 export function parsePlan(text: string, source = 'plan'): RetroPlan {
-  let doc: unknown
+  let doc: unknown;
   try {
-    doc = parse(text)
+    doc = parse(text);
   } catch (err) {
-    throw new Error(`${source}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`)
+    throw new Error(
+      `${source}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`
+    );
   }
-  return parsePlanDoc(doc, source)
+  return parsePlanDoc(doc, source);
 }
 
 /** The commented template `bro retrospect schema` prints — keeps the schema
@@ -176,6 +178,7 @@ export const PLAN_SCHEMA = `# retrospection plan — written by the agent, execu
 
 kind = "retrospect"  # plan envelope — \`bro run\` routes on it
 version = 1          # optional schema pin — \`bro plan\` lists what this bro understands
+# "$schema" = "https://unpkg.com/@broject/bro/schemas/plans/retrospect.schema.json"  # optional — editor/validation pin
 
 [retro]
 what = ""            # required — what went wrong, one line
@@ -200,4 +203,4 @@ evidence = []        # optional — shas, PR urls, bead ids → bd provenance
 # sink = "backlog"
 # scope = "project"    # optional — overrides retro.scope for this action
 # detail = ""          # optional — body of the follow-up bead
-`
+`;

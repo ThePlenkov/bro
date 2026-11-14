@@ -1,4 +1,5 @@
 ---
+
 name: query
 description: "Use when writing or running a `kind = \"query\"` plan — cross-provider GraphQL fan-out over bro connectors (github/gitlab/atlassian), one merged JSON answer. Thin wrapper over `bro plan query` — mechanics live in the CLI (spec: specs/bro-14h8.1.md)."
 ---
@@ -17,13 +18,13 @@ completion order. `bro plan query <file>` is the same pipeline in one step;
 
 - `provider` names a **connector** (the data plane: `github`,
   `gitlab`, `atlassian`, …) — never a `providers[]` entry; that
-  registry is the *model* plane. Absent → `connectors.queries` pin →
+  registry is the _model_ plane. Absent → `connectors.queries` pin →
   auto-detect.
 - **Read-only.** `mutation`/`subscription` documents are rejected at
   validate time — v1 has no write path, and the keyword sniff
   over-rejects by design (a field literally named `mutation` can't be
   expressed; that's the safe direction).
-- **No secrets in plans.** `env` is a *literal* overlay — a token value
+- **No secrets in plans.** `env` is a _literal_ overlay — a token value
   written there is committed as text. Auth always comes from the
   spawned CLI's own login (`gh auth`, `glab auth`, `atlassian auth`) or
   the operator's inherited `process.env`. Execution-shaping vars
@@ -43,6 +44,7 @@ completion order. `bro plan query <file>` is the same pipeline in one step;
 ## Plan shape
 
 ```toml
+# "$schema" = "https://unpkg.com/@broject/bro/schemas/plans/query.schema.json"
 kind = "query"
 version = 1
 concurrency = 4        # optional; config default is query.concurrency
@@ -62,13 +64,19 @@ owner = "theplenkov"
 name = "bro"
 ```
 
+The machine-readable plan schema ships at
+`schemas/plans/query.schema.json` — `bro plan describe query` prints it
+(the example as a TOML template); a file may pin it via the commented
+`"$schema"` key above.
+
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro plan query <plan.toml>` | validate + run; merged JSON on stdout, exit 1 on any step failure |
-| `bro plan run <plan.toml>` | same execution via the `kind` router |
-| `bro plan validate <plan.toml>` | schema + read-only gate only |
+| Command                         | What it does                                                                                                           |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `bro plan query <plan.toml>`    | validate + run; merged JSON on stdout, exit 1 on any step failure                                                      |
+| `bro plan run <plan.toml>`      | same execution via the `kind` router                                                                                   |
+| `bro plan validate <plan.toml>` | schema + read-only gate only                                                                                           |
+| `bro plan describe query`       | the kind's shipped JSON Schema (`schemas/plans/query.schema.json`) — `--json` for a `{kind, version, schema}` envelope |
 
 ## Config
 

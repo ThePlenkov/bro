@@ -83,6 +83,7 @@
       "configKey": "debt",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/debt.schema.json",
       "contract": {
         "subs": {
           "status": {
@@ -144,6 +145,7 @@
       "configKey": "act",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/act.schema.json",
       "contract": {
         "subs": {
           "status": {
@@ -184,6 +186,7 @@
       "skill": "convoy",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/convoy.schema.json",
       "external": false
     },
     "next": {
@@ -196,6 +199,7 @@
       "skill": "next",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/next.schema.json",
       "contract": {
         "flags": {
           "--list": "emit the work order without claiming",
@@ -739,6 +743,7 @@
       "configKey": "drill",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/drill.schema.json",
       "external": false
     },
     "unwind": {
@@ -773,6 +778,7 @@
       "skill": "wtf",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/retrospect.schema.json",
       "external": false
     },
     "wtf": {
@@ -1194,6 +1200,7 @@
       "configKey": "query",
       "plan": true,
       "planVersion": 1,
+      "planSchema": "schemas/plans/query.schema.json",
       "external": false
     },
     "mesh": {
@@ -1256,7 +1263,7 @@
     "plan": {
       "name": "plan",
       "group": "plan",
-      "summary": "Plan contract: list kinds + schema versions, validate a file",
+      "summary": "Plan contract — kinds, schema versions, shipped JSON Schemas: list|validate|describe",
       "spellings": ["plan"],
       "aliases": [],
       "hidden": false,

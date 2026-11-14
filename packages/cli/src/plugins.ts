@@ -1165,7 +1165,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'plan',
     group: 'plan',
-    summary: 'Plan contract: list kinds + schema versions, validate a file',
+    summary: 'Plan contract — kinds, schema versions, shipped JSON Schemas: list|validate|describe',
     run: argv => runPlanCommand(argv, PLUGINS),
   }),
   definePlugin({
