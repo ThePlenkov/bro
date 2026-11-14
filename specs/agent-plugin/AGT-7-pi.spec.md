@@ -30,8 +30,10 @@ unwired state.
 `plugins/pi/bro/bro.ts` generated from
 `packages/agent-plugins/pi/src/pi.ts` (adapter-core folded by
 bundle-adapter — node builtins only). Pi loads raw `.ts` via jiti —
-no build, no node_modules. Install: `bro plugins install pi` →
-`~/.pi/agent/extensions/bro.ts` or `.pi/extensions/bro.ts`; ad hoc
+no build, no node_modules. Install: `bro plugins install pi` → one
+scope only (bro-b7mae — pi can't dedupe project+global copies, so a
+bare install collapses to the scope already holding bro, global by
+default, and convergence removes the loser); ad hoc
 `pi --extension <path>`.
 
 ### Event mapping (HOOK_MATRIX `pi` row)

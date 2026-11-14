@@ -13,9 +13,13 @@ The `bro_status` tool exposes the same board JSON as a model-callable read.
 
 ## Local TS loading
 
-`bro plugins install pi` materializes the generated bundle to
-`<repo>/.pi/extensions/bro.ts` (local) or `~/.pi/agent/extensions/bro.ts`
-(global). `piArtifact()` prefers the repo's `packages/cli/src/adapter/pi.ts`
+`bro plugins install pi` materializes the generated bundle to ONE
+scope — `~/.pi/agent/extensions/bro.ts` (global) by default, or
+`<repo>/.pi/extensions/bro.ts` (local) when that scope already holds
+the copy or `--local` is passed. Pi loads project and global copies
+without dedupe (bro-b7mae), so `ClientSpec.singleScope` collapses a
+bare install and convergence removes the losing scope's copy.
+`piArtifact()` prefers the repo's `packages/cli/src/adapter/pi.ts`
 when running inside a git checkout, so local edits are live without a
 rebuild. Pi loads the file with jiti (raw TS, no compile, no node_modules).
 
