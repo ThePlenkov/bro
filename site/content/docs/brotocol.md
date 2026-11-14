@@ -52,13 +52,13 @@ pure reads never mutate.
 `specProtocol` is the specialization `bro spec` will implement over
 [the facade](/docs/commands/spec). It configures:
 
-| Convention | Value                                               |
-| ---------- | --------------------------------------------------- |
-| Doc glob   | `*.spec.md` — the spec marker                       |
-| Dir index  | `<dirname>.spec.md`; legacy: `spec.md`, `README.md` |
-| Id field   | `id` — `KEY-N` shape                                |
-| Lifecycle  | `draft → active → deprecated → removed`             |
-| Templates  | `brotocol/spec@1` shipped in `templates/`           |
+| Convention | Value                                                                 |
+| ---------- | --------------------------------------------------------------------- |
+| Doc glob   | `*.spec.md` — the spec marker                                         |
+| Dir index  | `<dirname>.spec.md`; legacy: `spec.md`, `README.md`                   |
+| Id field   | `id` — `KEY-N` shape                                                  |
+| Lifecycle  | `draft → active → deprecated → removed`                               |
+| Templates  | `brotocol/spec@2` shipped in `templates/` (v1 kept for existing docs) |
 
 `lintSpec` adds the spec invariants on top of generic `lint`: id
 shape, lifecycle values, declared `template:`.

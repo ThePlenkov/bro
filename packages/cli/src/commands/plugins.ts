@@ -35,8 +35,8 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitTry, hasHelpFlag, printUsage, CommandError, EXIT, type BroPlugin } from '@broject/core';
+import { fileURLToPath } from 'node:url';
+import { type BroPlugin, CommandError, EXIT, gitTry, hasHelpFlag, printUsage } from '@broject/core';
 import { positionals } from './args.ts';
 
 export type PluginScope = 'global' | 'local';
@@ -51,8 +51,8 @@ export interface PluginRow {
   path: string;
 }
 
-/** A manifest step beyond the module file — kilo's global install also
- *  needs a file:/// entry in kilo.json's `plugin` array. */
+/** A manifest step beyond the module file — a client whose plugin
+ *  surface needs a config entry in addition to the materialized file. */
 interface Registration {
   /** Reading this parses the manifest — a malformed one exits before
    *  any file is written. */
@@ -145,24 +145,23 @@ function firstExisting(candidates: Array<string | null>): string | null {
   return null;
 }
 
-/** Artifact sources in preference order: the TS source (checkout), then the
- *  repo-distributed adapter a bro clone carries under plugins/, then the
- *  copy that rides the tarball. The names differ — the checkout keeps
- *  the server as `opencode.ts`, the installed catalog plugin serves it
- *  as the directory's `index.ts`.
- *
- *  The tarball copy is the one that works OUTSIDE a checkout: an
- *  installed bro has no `packages/agent-plugins/` tree and no repo
- *  clone, and the adapter packages are not published on their own — so
- *  without it `bro plugins install opencode` had nothing to write. */
+/** Artifact sources in preference order: the repo-distributed catalog
+ *  bundle (self-contained — adapter-core inlined, only the host SDK
+ *  stays external), then the copy that rides the tarball, then the
+ *  built adapter, and the raw TS source last — it imports workspace
+ *  packages (`@broject/adapter-core`) a host runtime cannot resolve
+ *  once the file lands outside this checkout. The names differ — the
+ *  checkout keeps the server as `opencode.ts`, the installed catalog
+ *  plugin serves it as the directory's `index.ts`. */
 function opencodeArtifact(cwd: string, src: string, shipped: string): string | null {
   const ap = agentPluginPackageRoot('opencode');
   const root = gitRoot(cwd);
   const cli = packageRoot();
   return firstExisting([
-    ap === null ? null : join(ap, 'src', src),
     root === null ? null : join(root, 'plugins', 'opencode', 'bro', shipped),
     cli === null ? null : join(cli, 'dist', 'plugins', 'opencode', 'bro', shipped),
+    ap === null ? null : join(ap, 'dist', shipped.replace(/\.(ts|tsx)$/, '.js')),
+    ap === null ? null : join(ap, 'src', src),
   ]);
 }
 
@@ -206,78 +205,15 @@ function kiloArtifact(cwd: string): string | null {
   const pkg = packageRoot();
   const root = gitRoot(cwd);
   return firstExisting([
-    ap === null ? null : join(ap, 'src', 'kilo.ts'),
-    ap === null ? null : join(ap, 'dist', 'kilo.js'),
-    pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
     root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'kilo', 'bro', 'bro.ts'),
+    ap === null ? null : join(ap, 'dist', 'kilo.js'),
+    ap === null ? null : join(ap, 'src', 'kilo.ts'),
   ]);
 }
 
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo');
-}
-
-function kiloManifestPath(env: NodeJS.ProcessEnv): string {
-  return join(kiloConfigDir(env), 'kilo.json');
-}
-
-/** kilo.json is strict JSON — kilo.jsonc exists too but kilo merges both
- *  files, so writing only kilo.json is always correct and a comment-
- *  bearing file we can't parse is left for the user, never rewritten. */
-function readKiloManifest(env: NodeJS.ProcessEnv): Record<string, unknown> {
-  const path = kiloManifestPath(env);
-  if (!existsSync(path)) {
-    return {};
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    throw new CommandError(
-      `plugins: ${path} is not plain JSON — edit the "plugin" array by hand`,
-      EXIT.error
-    );
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new CommandError(`plugins: ${path} must be a JSON object — edit it by hand`, EXIT.error);
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
-  const manifestPath = kiloManifestPath(env);
-  const entry = pathToFileURL(path).href;
-  const pluginList = (m: Record<string, unknown>): unknown[] =>
-    Array.isArray(m.plugin) ? m.plugin : [];
-  const writeManifest = (m: Record<string, unknown>): void => {
-    atomicWrite(manifestPath, `${JSON.stringify(m, null, 2)}\n`);
-  };
-  return {
-    get registered() {
-      return pluginList(readKiloManifest(env)).includes(entry);
-    },
-    register(): void {
-      const fresh = !existsSync(manifestPath);
-      const m = readKiloManifest(env);
-      const list = pluginList(m);
-      if (list.includes(entry)) {
-        return;
-      }
-      const body = fresh ? { $schema: 'https://app.kilo.ai/config.json', ...m } : m;
-      writeManifest({ ...body, plugin: [...list, entry] });
-    },
-    unregister(): void {
-      if (!existsSync(manifestPath)) {
-        return;
-      }
-      const m = readKiloManifest(env);
-      const list = pluginList(m);
-      if (!list.includes(entry)) {
-        return;
-      }
-      writeManifest({ ...m, plugin: list.filter(e => e !== entry) });
-    },
-  };
 }
 
 function piArtifact(cwd: string): string | null {
@@ -289,6 +225,7 @@ function piArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'dist', 'pi.js'),
     ap === null ? null : join(ap, 'src', 'pi.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'pi', 'bro', 'bro.ts'),
   ]);
 }
 
@@ -301,6 +238,7 @@ function ompArtifact(cwd: string): string | null {
     ap === null ? null : join(ap, 'dist', 'omp.js'),
     ap === null ? null : join(ap, 'src', 'omp.ts'),
     pkg === null ? null : join(pkg, 'dist', 'omp.js'),
+    pkg === null ? null : join(pkg, 'dist', 'plugins', 'omp', 'bro', 'bro.ts'),
   ]);
 }
 
@@ -332,12 +270,14 @@ const CLIENTS: Record<string, ClientSpec> = {
         kind: 'file',
         artifact: kiloArtifact(cwd),
         targets: {
-          global: join(kiloConfigDir(env), 'bro', 'bro.ts'),
+          // kilo scans <config>/plugin/*.ts — a kilo.json `plugin`
+          // array entry is NOT honored for file paths (verified against
+          // kilo 7.8.x: file:// and plain-path entries both load nothing)
+          global: join(kiloConfigDir(env), 'plugin', 'bro.ts'),
           local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
         },
       },
     ],
-    registration: (scope, path, env) => (scope === 'global' ? kiloRegistration(path, env) : null),
   },
   pi: {
     // pi discovers <cwd>/.pi/extensions/ locally and
@@ -465,8 +405,8 @@ export function pluginRows(
 
 /** `write tmp; rename` — a torn write must never leave a half module.
  *  The tmp file gets umask defaults, so a restrictive existing mode is
- *  copied over before the rename: a 0600 kilo.json carrying permission
- *  rules must not silently widen to 0644. */
+ *  copied over before the rename: a restrictive-mode config file must
+ *  not silently widen to umask defaults. */
 function atomicWrite(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
@@ -597,7 +537,7 @@ function installOne(
     scope,
     action: prior === null ? 'installed' : 'updated',
     path,
-    note: needsRegistration ? 'registered in kilo.json' : undefined,
+    note: needsRegistration ? 'registered in host config' : undefined,
   };
 }
 
@@ -751,7 +691,7 @@ function uninstallOne(
     scope,
     action: 'removed',
     path,
-    note: wasRegistered ? 'removed kilo.json entry' : undefined,
+    note: wasRegistered ? 'removed host config entry' : undefined,
   };
 }
 
@@ -824,7 +764,7 @@ function absentOutcome(
     action: 'absent',
     path,
     note: wasRegistered
-      ? `${dryRun ? 'would remove' : 'removed'} dangling kilo.json entry`
+      ? `${dryRun ? 'would remove' : 'removed'} dangling host config entry`
       : undefined,
   };
 }

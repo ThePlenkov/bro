@@ -12,6 +12,15 @@ const HOOK_TIMEOUT_MS = 15e3;
 const REHYDRATION_TIMEOUT_MS = 45e3;
 /** Cap on a hook's stdout — a runaway child must not eat the heap. */
 const MAX_OUTPUT = 1 << 20;
+/** A hung CLI must not wedge an adapter: `/bro`, `bro_status` and the
+*  bro tool are interactive reads, and a wedged dolt lock can stall
+*  them forever. The kill takes the detached process group down. */
+const RUN_TIMEOUT_MS = 6e4;
+/** How long a failed CLI resolution stays cached before a retry —
+*  PATH, a local install or npx can appear mid-session, but
+*  re-probing the npx rung on every keystroke would be worse than
+*  the outage. */
+const RESOLVE_RETRY_MS = 6e4;
 /**
 * `node` on PATH, not process.execPath — a host may ship as a compiled
 * binary whose execPath IS that binary, so running it with our own
@@ -100,9 +109,17 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	if (opts.command !== void 0 && opts.command !== "") {
-		const [cmd, ...args] = opts.command.split(/\s+/).filter((p) => p !== "");
+	const pinned = opts.command;
+	if (typeof pinned === "string" && pinned.trim() !== "") {
+		const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
 		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
+			cmd,
+			args
+		};
+	} else if (pinned !== void 0 && typeof pinned === "object" && pinned !== null) {
+		const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
+		const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
+		if (cmd !== "" && await exitsZero(cmd, [...args, "hooks"])) return {
 			cmd,
 			args
 		};
@@ -115,14 +132,22 @@ async function resolveCommand(opts = {}) {
 		cmd: "bro",
 		args: []
 	};
-	if (opts.npxPin !== void 0 && await exitsZero("npx", ["--version"])) return {
-		cmd: "npx",
-		args: [
+	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
+	if (specs.length > 0 && await exitsZero("npx", ["--version"])) {
+		for (const spec of specs) if (await exitsZero("npx", [
 			"-y",
 			"--prefer-offline",
-			opts.npxPin
-		]
-	};
+			spec,
+			"hooks"
+		])) return {
+			cmd: "npx",
+			args: [
+				"-y",
+				"--prefer-offline",
+				spec
+			]
+		};
+	}
 	return null;
 }
 /**
@@ -330,21 +355,30 @@ function boardLines(s) {
 function statusCrumb(s) {
 	return `bro ◐${s.beads?.inProgress?.length ?? 0} ⬢${(s.fleet?.agents ?? []).filter((a) => a.state === "running").length}`;
 }
+/**
+* The lazy, retrying CLI resolver every adapter shares: resolution
+* costs spawn probes, so it runs on first use and a *failed* answer
+* expires after RESOLVE_RETRY_MS instead of poisoning the instance —
+* PATH, a local install or npx can appear mid-session.
+*/
+function createCommandResolver(opts = {}) {
+	let resolved;
+	let failedAt;
+	return () => {
+		if (resolved !== void 0 && (failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS)) return resolved;
+		failedAt = void 0;
+		resolved = resolveCommand(opts).then((cmd) => {
+			if (cmd === null) failedAt = Date.now();
+			return cmd;
+		});
+		return resolved;
+	};
+}
 
 //#endregion
 //#region packages/agent-plugins/adapter-core/src/host.ts
 /** The board's widget key — one slot, owned by bro. */
 const BOARD_KEY = "bro";
-/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
-*  board refresh are interactive reads, and a wedged dolt lock can
-*  stall them forever. The kill takes the detached process group
-*  down, so a dolt child dies with its parent. */
-const RUN_TIMEOUT_MS = 6e4;
-/** How long a failed CLI resolution stays cached before a retry —
-*  PATH, a local install or npx can appear mid-session, but
-*  re-probing the npx rung on every keystroke would be worse than
-*  the outage. */
-const RESOLVE_RETRY_MS = 6e4;
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -449,22 +483,10 @@ function createBroDriver(host, api) {
 	*  let through, and a NEW session starts with a fresh gate (the
 	*  flag dies with its session instead of leaking into the next). */
 	let gatedSession;
-	/** Resolve the CLI once. Probing costs a spawn even where bro is
-	*  inert, so it stays lazy. A *failed* resolution is not permanent:
-	*  PATH, a local install or npx can appear mid-session, so a null
-	*  answer expires after RESOLVE_RETRY_MS instead of poisoning the
-	*  whole extension instance. */
-	let resolved;
-	let resolvedFailedAt;
-	const command = () => {
-		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)) return resolved;
-		resolvedFailedAt = void 0;
-		resolved = resolveCommand({ npxPin: host.npxPin }).then((cmd) => {
-			if (cmd === null) resolvedFailedAt = Date.now();
-			return cmd;
-		});
-		return resolved;
-	};
+	/** Resolve the CLI once — the shared lazy+retrying resolver. Probing
+	*  costs a spawn even where bro is inert, so it stays lazy; a failed
+	*  resolution expires instead of poisoning the extension instance. */
+	const command = createCommandResolver({ npxPin: host.npxPin });
 	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
 	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
 		if (!broEnabled(cwd)) return null;
@@ -678,6 +700,8 @@ function createBroDriver(host, api) {
 			properties: {},
 			additionalProperties: false
 		},
+		loadMode: "essential",
+		approval: "read",
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
@@ -868,9 +892,54 @@ function binding(pi) {
 		}
 	}) };
 }
+/** JSON-schema → zod for the parameter shapes the shared driver
+*  declares. Unknown/unsupported nodes degrade to `z.any()` — a loose
+*  schema still validates, a wrong guess would reject real params. */
+function schemaToZod(schema, z) {
+	if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return z.any();
+	if (typeof schema.safeParse === "function") return schema;
+	const s = schema;
+	if (Array.isArray(s.enum) && s.enum.every((v) => typeof v === "string")) return z.enum(s.enum);
+	switch (s.type) {
+		case "string": return z.string();
+		case "number":
+		case "integer": return z.number();
+		case "boolean": return z.boolean();
+		case "array": return z.array(schemaToZod(s.items, z));
+		case "object": {
+			const props = s.properties !== null && typeof s.properties === "object" ? s.properties : {};
+			const required = new Set(Array.isArray(s.required) ? s.required : []);
+			const shape = {};
+			for (const [key, sub] of Object.entries(props)) {
+				const built = schemaToZod(sub, z);
+				shape[key] = required.has(key) ? built : built?.optional?.() ?? built;
+			}
+			return z.object(shape);
+		}
+		default: return z.any();
+	}
+}
+/** omp's registerTool wants a schema-builder product for `parameters`
+*  (zod/arktype/typebox — raw JSON schema is dropped silently, which is
+*  how bro_status went missing from the model's tool list) and reads
+*  omp-native `loadMode`/`approval` policy fields the shared hints
+*  carry. Everything else passes through verbatim. */
+function adaptApiForOmp(pi) {
+	const z = pi.zod;
+	if (z === void 0) return pi;
+	return new Proxy(pi, { get(target, prop, receiver) {
+		if (prop === "registerTool") return (tool) => target.registerTool({
+			...tool,
+			parameters: schemaToZod(tool.parameters, z)
+		});
+		const value = Reflect.get(target, prop, receiver);
+		return typeof value === "function" ? value.bind(target) : value;
+	} });
+}
 /** The extension entry point — omp calls this with its API. */
 function broExtension(pi) {
-	const driver = createBroDriver(binding(pi), pi);
+	const api = adaptApiForOmp(pi);
+	const driver = createBroDriver(binding(api), api);
 	/** The mode bridges — bro's durable state handed to omp's native Plan,
 	*  Goal and Vibe modes. See omp-modes.ts for why bro adds state
 	*  rather than a second implementation of each mode. */

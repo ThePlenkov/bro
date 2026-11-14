@@ -87,13 +87,13 @@ test('tree merges protocol docs over the legacy index, no dangling parents', () 
   assert.ok(nodes.every(n => n.path !== undefined && !n.path.startsWith('/')));
 });
 
-test('scaffold renders brotocol/spec@1 through brose create', () => {
+test('scaffold renders brotocol/spec@2 through brose create', () => {
   const dir = fixture();
   const s = store(dir);
   const path = s.scaffold!('bro-new1', { title: 'A new spec' });
   assert.ok(path.endsWith(join('specs', 'bro-new1.spec.md')), path);
   const text = readFileSync(path, 'utf8');
-  assert.match(text, /template: brotocol\/spec@1/);
+  assert.match(text, /template: brotocol\/spec@2/);
   assert.match(text, /id: bro-new1/);
   assert.match(text, /status: draft/);
   assert.equal(s.hasSpec('bro-new1'), true);

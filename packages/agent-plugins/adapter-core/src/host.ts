@@ -39,10 +39,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import {
   HOOK_TIMEOUT_MS,
   REHYDRATION_TIMEOUT_MS,
+  RESOLVE_RETRY_MS,
+  RUN_TIMEOUT_MS,
   boardLines,
   broEnabled,
   callHook,
   contextOf,
+  createCommandResolver,
   hookEmitEnv,
   resolveCommand,
   statusCrumb,
@@ -52,20 +55,10 @@ import {
   type HookControl,
 } from './core.ts';
 
+export { RESOLVE_RETRY_MS, RUN_TIMEOUT_MS };
+
 /** The board's widget key — one slot, owned by bro. */
 export const BOARD_KEY = 'bro';
-
-/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
- *  board refresh are interactive reads, and a wedged dolt lock can
- *  stall them forever. The kill takes the detached process group
- *  down, so a dolt child dies with its parent. */
-export const RUN_TIMEOUT_MS = 60_000;
-
-/** How long a failed CLI resolution stays cached before a retry —
- *  PATH, a local install or npx can appear mid-session, but
- *  re-probing the npx rung on every keystroke would be worse than
- *  the outage. */
-export const RESOLVE_RETRY_MS = 60_000;
 
 /** The context shape this API lineage shares.
  *
@@ -264,6 +257,12 @@ export interface BroHostApi<Ctx = unknown> {
     label: string;
     description: string;
     parameters: Record<string, unknown>;
+    /** Host-policy hints, passed through verbatim — hosts that don't
+     *  know them ignore the fields. omp reads `loadMode` ('essential'
+     *  keeps the tool top-level; 'discoverable' hides it under xdev)
+     *  and `approval` ('read'|'write'|'exec'). */
+    loadMode?: string;
+    approval?: string;
     execute(
       toolCallId: string,
       params: unknown,
@@ -334,29 +333,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
    *  flag dies with its session instead of leaking into the next). */
   let gatedSession: string | undefined;
 
-  /** Resolve the CLI once. Probing costs a spawn even where bro is
-   *  inert, so it stays lazy. A *failed* resolution is not permanent:
-   *  PATH, a local install or npx can appear mid-session, so a null
-   *  answer expires after RESOLVE_RETRY_MS instead of poisoning the
-   *  whole extension instance. */
-  let resolved: Promise<Command | null> | undefined;
-  let resolvedFailedAt: number | undefined;
-  const command = (): Promise<Command | null> => {
-    if (
-      resolved !== undefined &&
-      (resolvedFailedAt === undefined || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)
-    ) {
-      return resolved;
-    }
-    resolvedFailedAt = undefined;
-    resolved = resolveCommand({ npxPin: host.npxPin }).then(cmd => {
-      if (cmd === null) {
-        resolvedFailedAt = Date.now();
-      }
-      return cmd;
-    });
-    return resolved;
-  };
+  /** Resolve the CLI once — the shared lazy+retrying resolver. Probing
+   *  costs a spawn even where bro is inert, so it stays lazy; a failed
+   *  resolution expires instead of poisoning the extension instance. */
+  const command = createCommandResolver({ npxPin: host.npxPin });
 
   /** Probe one bro hook. Fail-open: every failure is "no opinion". */
   const probe = async (
@@ -677,6 +657,8 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     description:
       'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
+    loadMode: 'essential',
+    approval: 'read',
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const result = await run(['status', '--json'], host.cwd(ctx));
       return {

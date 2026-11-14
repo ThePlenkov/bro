@@ -18,13 +18,25 @@ const ADAPTER_CORE = join(ROOT, 'packages/agent-plugins/adapter-core/src');
 const SENTINEL =
   '// bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove';
 
+export interface BundleAdapterOptions {
+  /** Import specifiers the host provides at runtime — left as imports in
+   *  the bundle instead of being folded in (e.g. `@kilocode/plugin`,
+   *  `@opencode/plugin`). String prefixes match the specifier and any
+   *  subpath. */
+  external?: readonly (string | RegExp)[];
+}
+
 /** Bundle one adapter module into a single standalone ESM string. */
-export async function bundleAdapter(entry: string): Promise<string> {
+export async function bundleAdapter(
+  entry: string,
+  options: BundleAdapterOptions = {}
+): Promise<string> {
   const outDir = mkdtempSync(join(tmpdir(), 'bro-adapter-'));
   try {
     const bundle = await rolldown({
       input: { bro: resolve(entry) },
       platform: 'node',
+      external: options.external,
       resolve: {
         alias: {
           '@broject/adapter-core/host': join(ADAPTER_CORE, 'host.ts'),

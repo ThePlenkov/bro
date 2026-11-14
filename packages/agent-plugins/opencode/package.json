@@ -25,6 +25,9 @@
     "typecheck": "tsc --noEmit",
     "build": "tsdown"
   },
+  "dependencies": {
+    "@broject/adapter-core": "^0.3.0"
+  },
   "devDependencies": {
     "@opencode/plugin": "^2.1.4",
     "@opentui/core": "^0.7.0",

@@ -1,5 +1,5 @@
 ---
-template: brotocol/spec@1
+template: brotocol/spec@2
 id: BRO-2
 title: Policy specs — agent docs join the spec tree; sdd skill rewrite
 status: draft
@@ -119,7 +119,7 @@ spec text is amended in the same diff.
 ## Verify
 
 - `brose validate` clean on `BRO-1-brotocol.spec.md` and this spec
-  against `brotocol/spec@1`.
+  against `brotocol/spec@2`.
 - `bro spec tree` shows `BRO-2-policy-specs` nested under
   `BRO-1-brotocol` (real connector already reads `*.spec.md` dir
   specs); `bro spec check bro-bntld.2|.3` → `link`.
@@ -128,3 +128,9 @@ spec text is amended in the same diff.
 - Hand lint: each identity block's `core:` resolves to real spec ids.
 - CI: `check:plugins`/`check:embedded` green after adapter regen;
   markdownlint clean on edited docs.
+
+## Changelog
+
+- 2026-11-12 — Migrated `template:` to `brotocol/spec@2` and adopted
+  the mandatory Changelog section (AGT-1's spec-format ruling);
+  content unchanged.

@@ -6,8 +6,10 @@ plugin** — opencode loads a plugin as a DIRECTORY, and it raises the TUI
 half only for a package that also has a server, so the three modules here
 belong together:
 
-`index.ts` — the server half, a verbatim copy of
-`packages/agent-plugins/opencode/src/opencode.ts`. A `Plugin.define({ id,
+`index.ts` — the server half, a bundle of
+`packages/agent-plugins/opencode/src/opencode.ts` with the shared
+adapter core folded in (same build as the pi/omp extensions). A
+`Plugin.define({ id,
 setup })` default export: the context/compaction/prompt session hooks, the
 tool guard + result enrichment, the permission evaluate hook, the shell env,
 the bro tool namespace (`bro_status`, `bro_convoy_status`, `bro_act_status`,

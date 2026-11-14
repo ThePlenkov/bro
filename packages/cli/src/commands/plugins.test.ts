@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+
 import { describe, test } from 'node:test';
-import { pathToFileURL } from 'node:url';
-import { tmpDir } from './testrepo.ts';
 import {
   installClient,
   isBroAdapter,
+  type MutateOpts,
   pluginRows,
   runPluginsCommand,
   scopesOf,
   uninstallClient,
-  type MutateOpts,
 } from './plugins.ts';
+import { tmpDir } from './testrepo.ts';
 
 /** tmp cwd (non-repo → local target lands under it) + tmp XDG home. */
 function fixture(): {
@@ -181,24 +182,17 @@ describe('plugins install/uninstall/list', () => {
       [`installed:${f.globalDir}`, `installed:${f.localDir}`]
     );
     // the catalog plugin is ONE directory of three modules — the server
-    // entrypoint, the TUI half and the contract they share
-    const shipped = readFileSync(
-      join(repoRoot, 'packages/agent-plugins/opencode/src/opencode.ts'),
-      'utf8'
-    );
-    const shippedTui = readFileSync(
-      join(repoRoot, 'packages/agent-plugins/opencode/src/tui.tsx'),
-      'utf8'
-    );
-    const shippedRpc = readFileSync(
-      join(repoRoot, 'packages/agent-plugins/opencode/src/rpc.ts'),
-      'utf8'
-    );
+    // entrypoint, the TUI half and the contract they share. Install
+    // ships the bundled catalog bytes, not the adapter sources: the
+    // sources import workspace packages a host runtime cannot resolve.
+    const shipped = readFileSync(join(repoRoot, 'plugins/opencode/bro/index.ts'), 'utf8');
+    const shippedTui = readFileSync(join(repoRoot, 'plugins/opencode/bro/tui.tsx'), 'utf8');
+    const shippedRpc = readFileSync(join(repoRoot, 'plugins/opencode/bro/rpc.ts'), 'utf8');
     assert.equal(readFileSync(join(f.globalDir, 'index.ts'), 'utf8'), shipped);
     assert.equal(readFileSync(join(f.globalDir, 'tui.tsx'), 'utf8'), shippedTui);
     assert.equal(readFileSync(join(f.globalDir, 'rpc.ts'), 'utf8'), shippedRpc);
-    // the server's own `./rpc.ts` import resolves inside the directory
-    assert.match(shipped, /from\s+['"]\.\/rpc\.ts['"]/);
+    // the TUI half's own `./rpc.ts` import resolves inside the directory
+    assert.match(shippedTui, /from\s+['"]\.\/rpc\.ts['"]/);
 
     const again = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
@@ -434,16 +428,15 @@ describe('plugins install/uninstall/list', () => {
   });
 });
 
-/** kilo adds a manifest step on global: a file:/// entry in
- *  <XDG>/kilo/kilo.json's plugin[] next to the materialized module. */
+/** kilo's file-plugin surface is the scanned `plugin/` directory —
+ *  <XDG>/kilo/plugin/bro.ts globally, .kilo/plugin/bro.ts locally.
+ *  kilo.json's `plugin` array does NOT honor file paths (verified
+ *  against kilo 7.8.x), so no manifest step exists. */
 function kiloFixture(): {
   cwd: string;
   opts: MutateOpts;
   globalPath: string;
   localPath: string;
-  manifestPath: string;
-  manifest(): Record<string, unknown>;
-  entry: string;
 } {
   const cwd = tmpDir('bro-plugins-kilo-cwd-');
   const xdg = tmpDir('bro-plugins-kilo-xdg-');
@@ -453,131 +446,74 @@ function kiloFixture(): {
     cwd,
     env: { ...process.env, XDG_CONFIG_HOME: xdg },
   };
-  const globalPath = join(xdg, 'kilo', 'bro', 'bro.ts');
-  const manifestPath = join(xdg, 'kilo', 'kilo.json');
   return {
     cwd,
     opts,
-    globalPath,
+    globalPath: join(xdg, 'kilo', 'plugin', 'bro.ts'),
     localPath: join(cwd, '.kilo', 'plugin', 'bro.ts'),
-    manifestPath,
-    manifest: () => JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>,
-    entry: pathToFileURL(globalPath).href,
   };
 }
 
 describe('plugins install/uninstall/list — kilo', () => {
-  test('global install materializes the module and registers file:/// in kilo.json', () => {
+  test('global install materializes the module into the scanned plugin dir', () => {
     const f = kiloFixture();
     const out = installClient('kilo', ['global'], f.opts);
     assert.equal(out[0]!.action, 'installed');
-    assert.match(out[0]!.note ?? '', /registered/);
-    // materialized content is the shipped adapter source verbatim
-    const shipped = readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8');
+    // materialized content is the bundled catalog adapter — the src
+    // tree imports @broject/adapter-core, unresolvable in kilo
+    const shipped = readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8');
     assert.equal(readFileSync(f.globalPath, 'utf8'), shipped);
-    // a fresh manifest is created with kilo's own $schema line
-    const m = f.manifest();
-    assert.deepEqual(m.plugin, [f.entry]);
-    assert.equal(m.$schema, 'https://app.kilo.ai/config.json');
+    // kilo.json is never touched — the plugin/ dir is the whole contract
+    assert.ok(
+      !existsSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo', 'kilo.json')),
+      'kilo.json must not be created for a file-plugin install'
+    );
   });
 
-  test('local install writes .kilo/plugin and touches no manifest', () => {
+  test('local install writes .kilo/plugin', () => {
     const f = kiloFixture();
     const out = installClient('kilo', ['local'], f.opts);
     assert.equal(out[0]!.action, 'installed');
     assert.equal(
       readFileSync(f.localPath, 'utf8'),
-      readFileSync(join(repoRoot, 'packages/agent-plugins/kilo/src/kilo.ts'), 'utf8')
+      readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8')
     );
-    assert.ok(!existsSync(f.manifestPath));
   });
 
-  test('re-install reports current once registered; dedupes the entry', () => {
+  test('re-install reports current', () => {
     const f = kiloFixture();
     installClient('kilo', ['global'], f.opts);
     const again = installClient('kilo', ['global'], f.opts);
     assert.equal(again[0]!.action, 'current');
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
   });
 
-  test('a current-but-unregistered file registers and reports updated', () => {
+  test('list reports an installed global module', () => {
     const f = kiloFixture();
     installClient('kilo', ['global'], f.opts);
-    writeFileSync(f.manifestPath, '{}\n'); // drop the registration
-    const out = installClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'updated');
-    assert.match(out[0]!.note ?? '', /registered/);
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
-  });
-
-  test('registration preserves existing kilo.json fields and entries', () => {
-    const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true });
-    writeFileSync(
-      f.manifestPath,
-      `${JSON.stringify({ plugin: ['file:///other/plugin.ts'], permission: { bash: 'allow' } }, null, 2)}\n`
-    );
-    installClient('kilo', ['global'], f.opts);
-    const m = f.manifest();
-    assert.deepEqual(m.plugin, ['file:///other/plugin.ts', f.entry]);
-    assert.deepEqual(m.permission, { bash: 'allow' });
-  });
-
-  test('rewriting kilo.json preserves a restrictive file mode', () => {
-    const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true });
-    writeFileSync(f.manifestPath, '{}\n');
-    chmodSync(f.manifestPath, 0o600);
-    installClient('kilo', ['global'], f.opts);
-    assert.equal(statSync(f.manifestPath).mode & 0o777, 0o600);
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
-  });
-
-  test('list reports an unregistered global module as stale', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    writeFileSync(f.manifestPath, '{}\n');
     const row = pluginRows(f.cwd, f.opts.env).find(
       r => r.client === 'kilo' && r.scope === 'global'
     );
-    assert.equal(row!.state, 'stale');
-    installClient('kilo', ['global'], f.opts);
-    assert.equal(
-      pluginRows(f.cwd, f.opts.env).find(r => r.client === 'kilo' && r.scope === 'global')!.state,
-      'installed'
-    );
+    assert.equal(row!.state, 'installed');
   });
 
-  test('uninstall removes the module and the kilo.json entry', () => {
+  test('uninstall removes the module', () => {
     const f = kiloFixture();
     installClient('kilo', ['global'], f.opts);
     const out = uninstallClient('kilo', ['global'], f.opts);
     assert.equal(out[0]!.action, 'removed');
     assert.ok(!existsSync(f.globalPath));
-    assert.deepEqual(f.manifest().plugin, []);
   });
 
-  test('uninstall cleans a dangling kilo.json entry when the file is absent', () => {
+  test('a foreign file holding the slot is refused without --force', () => {
     const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true });
-    writeFileSync(f.manifestPath, `${JSON.stringify({ plugin: [f.entry] })}\n`);
-    const out = uninstallClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'absent');
-    assert.match(out[0]!.note ?? '', /dangling/);
-    assert.deepEqual(f.manifest().plugin, []);
-  });
-
-  test('a refused file keeps its registration', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    // a hand edit makes the adapter "stale or edited" — refuses without --force
-    writeFileSync(f.globalPath, `// touched\n${readFileSync(f.globalPath, 'utf8')}`);
-    const out = uninstallClient('kilo', ['global'], f.opts);
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo', 'plugin'), { recursive: true });
+    writeFileSync(f.globalPath, '// someone else\n');
+    const out = installClient('kilo', ['global'], f.opts);
     assert.equal(out[0]!.action, 'refused');
-    assert.deepEqual(f.manifest().plugin, [f.entry]);
+    assert.equal(readFileSync(f.globalPath, 'utf8'), '// someone else\n');
   });
 
-  test('--dry-run writes neither module nor manifest', () => {
+  test('--dry-run writes nothing', () => {
     const f = kiloFixture();
     const out = installClient('kilo', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
@@ -586,7 +522,6 @@ describe('plugins install/uninstall/list — kilo', () => {
     );
     assert.ok(!existsSync(f.globalPath));
     assert.ok(!existsSync(f.localPath));
-    assert.ok(!existsSync(f.manifestPath));
   });
 });
 
