@@ -84,6 +84,13 @@ the host registry rather than a parallel list.
 `bro plugins install opencode [--global|--local]` → catalog dir in
 `$XDG_CONFIG_HOME/opencode/plugins/bro/` or `.opencode/plugins/bro/`.
 CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
+**Single-scope contract (bro-b7mae):** verified on opencode 2.3.0
+that `opencode run` executes plugin modules from BOTH scopes —
+identical `id:"bro"` loads twice and would double-register
+hooks/tools/commands/RPC — so `ClientSpec.singleScope` collapses a
+bare install to the scope already holding bro (global default) and
+convergence REMOVES the losing scope's bro copy (sentinel-checked,
+legacy loose modules included); explicit scope flags honored.
 
 ## Requirements
 
@@ -182,3 +189,10 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   roots on `sdd/SKILL.md` — an explicit `skillsDir` stays
   authoritative. Verified live: `/api/skill` on `opencode serve`
   2.3.0 went 112→160 entries with the full bro tree registered.
+- 2026-11-14 — v11: single-scope install contract (bro-b7mae) —
+  dual plugin-dir load verified empirically on opencode 2.3.0
+  (`opencode run` executed probe plugins from both scopes, same
+  `id:"bro"` twice); `ClientSpec.singleScope` now covers all four
+  plugin hosts — bare install collapses to the scope already
+  holding bro, and convergence removes the losing copy (including
+  v1-era loose modules) instead of only warning.

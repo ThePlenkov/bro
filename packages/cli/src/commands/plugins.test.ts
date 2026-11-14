@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -174,13 +174,18 @@ describe('isBroAdapter', () => {
 });
 
 describe('plugins install/uninstall/list', () => {
-  test('install materializes the v2 catalog plugin in both scopes; a second run reports current', () => {
+  test('install materializes the v2 catalog plugin; a second run reports current', () => {
     const f = fixture();
+    // bare install collapses to one scope — opencode 2.3.0 loads plugin
+    // modules from both scopes without dedupe, identical id `bro`
+    // double-registers hooks/tools/commands/RPC (bro-b7mae, verified
+    // with `opencode run` probe plugins)
     const out = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
-      [`installed:${f.globalDir}`, `installed:${f.localDir}`]
+      [`installed:${f.globalDir}`]
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     // the catalog plugin is ONE directory of three modules — the server
     // entrypoint, the TUI half and the contract they share. Install
     // ships the bundled catalog bytes, not the adapter sources: the
@@ -203,15 +208,34 @@ describe('plugins install/uninstall/list', () => {
       shippedSkill
     );
     assert.equal(
-      readFileSync(join(f.localDir, 'skills', 'act', 'SKILL.md'), 'utf8'),
+      readFileSync(join(f.globalDir, 'skills', 'act', 'SKILL.md'), 'utf8'),
       readFileSync(join(repoRoot, 'skills', 'act', 'SKILL.md'), 'utf8')
     );
+    assert.ok(!existsSync(f.localDir));
 
     const again = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
-      ['current', 'current']
+      ['current']
     );
+  });
+
+  test('opencode install converges a dual-scope state — the loser is removed', () => {
+    const f = fixture();
+    // seed BOTH scopes the way an old installer left them — installClient
+    // itself converges now, so the second copy is planted by hand
+    installClient('opencode', ['global'], f.opts);
+    cpSync(f.globalDir, f.localDir, { recursive: true });
+    assert.ok(existsSync(join(f.globalDir, 'index.ts')));
+    assert.ok(existsSync(join(f.localDir, 'index.ts')));
+
+    const out = installClient('opencode', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.scope}`),
+      ['current:global', 'removed:local']
+    );
+    assert.ok(existsSync(join(f.globalDir, 'index.ts')));
+    assert.ok(!existsSync(f.localDir));
   });
 
   /** sentinel-bearing but differing content — a stale/edited adapter */
@@ -266,13 +290,16 @@ describe('plugins install/uninstall/list', () => {
 
     const out = installClient('opencode', ['global'], f.opts);
     assert.equal(out[0]!.action, 'updated');
+    // convergence removed the losing scope's stale copy — the host
+    // must never be left holding two (bro-b7mae)
     assert.equal(
       pluginRows(f.cwd, f.opts.env)
         .filter(r => r.client === 'opencode')
         .map(r => `${r.scope}:${r.state}`)
         .join(','),
-      'global:installed,local:stale'
+      'global:installed,local:absent'
     );
+    assert.ok(!existsSync(join(f.localDir, 'index.ts')));
   });
 
   test('the v1-era loose modules are removed when the catalog plugin lands', () => {
@@ -293,13 +320,15 @@ describe('plugins install/uninstall/list', () => {
     );
 
     const out = installClient('opencode', ['global', 'local'], f.opts);
+    // bare install collapses to global (bro-b7mae) — the local scope's
+    // stale loose modules are still swept by convergence because
+    // opencode would keep loading them alongside the global plugin
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
       [
         `installed:${f.globalDir}`,
         `removed:${f.globalPath}`,
         `removed:${f.globalCliPath}`,
-        `installed:${f.localDir}`,
         `removed:${f.localPath}`,
         `removed:${f.localCliPath}`,
       ]
@@ -338,10 +367,12 @@ describe('plugins install/uninstall/list', () => {
 
   test('--dry-run writes nothing', () => {
     const f = fixture();
+    // bare install collapses to one scope (bro-b7mae) — dry-run reports
+    // the single would-install and still writes nothing
     const out = installClient('opencode', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
       out.map(o => o.action),
-      ['would-install', 'would-install']
+      ['would-install']
     );
     assert.ok(!existsSync(f.globalDir));
     assert.ok(!existsSync(f.localDir));
@@ -472,14 +503,19 @@ describe('plugins install/uninstall/list', () => {
     assert.ok(!existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
   });
 
-  test('pi install warns when the other scope already holds a bro copy', () => {
+  test('pi install converges an opposite-scope bro copy', () => {
     const f = fixture();
-    // seed a project copy first, then install global-only — the host
-    // would load both and collide, so the outcome carries the warning
+    // seed a project copy first, then install global-only — convergence
+    // removes the colliding local copy rather than leaving the host
+    // with two loaded extensions (bro-b7mae)
     installClient('pi', ['local'], f.opts);
     const out = installClient('pi', ['global'], f.opts);
     assert.equal(out[0]!.action, 'installed');
-    assert.match(out[0]!.note ?? '', /local-scope copy exists/);
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.scope}`),
+      ['installed:global', 'removed:local']
+    );
+    assert.ok(!existsSync(join(f.cwd, '.pi', 'extensions', 'bro.ts')));
   });
 
   test('omp bare install collapses to global like pi', () => {
