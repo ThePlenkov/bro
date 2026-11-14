@@ -245,6 +245,73 @@ describe('runGoalCommand', () => {
       );
     });
   });
+
+  // bro-5fg2h — everything after `--` is verbatim condition text: no
+  // flag parsing, no truncation, no verb dispatch (spec specs/bro-5fg2h.md)
+  describe('-- separator', () => {
+    test('goal -- --help sets the literal condition, not status/usage', () => {
+      inRepo(() => {
+        const out = capture(() => runGoalCommand(['--session', 's1', '--', '--help']));
+        assert.match(out, /goal set/);
+        assert.equal(readGoal(process.cwd(), 's1')?.condition, '--help');
+      });
+    });
+
+    test('flag-looking tail text stays literal', () => {
+      inRepo(() => {
+        capture(() => runGoalCommand(['--session', 's1', '--', '-x', 'flag-ish', 'text']));
+        assert.equal(readGoal(process.cwd(), 's1')?.condition, '-x flag-ish text');
+      });
+    });
+
+    test('empty tail shows status — no condition was given', () => {
+      inRepo(() => {
+        assert.match(
+          capture(() => runGoalCommand(['--'])),
+          /no goal set/
+        );
+      });
+    });
+
+    test('a second -- inside the tail is text, the first separates', () => {
+      inRepo(() => {
+        capture(() => runGoalCommand(['--session', 's1', '--', 'a', '--', 'b']));
+        assert.equal(readGoal(process.cwd(), 's1')?.condition, 'a -- b');
+      });
+    });
+
+    test('= and quote-bearing tail text round-trips verbatim', () => {
+      inRepo(() => {
+        capture(() => runGoalCommand(['--session', 's1', '--', 'k=v', 'say "hi"']));
+        assert.equal(readGoal(process.cwd(), 's1')?.condition, 'k=v say "hi"');
+      });
+    });
+
+    test('tail suppresses verb dispatch — goal -- clear sets the word', () => {
+      inRepo(() => {
+        capture(() => runGoalCommand(['--session', 's1', '--', 'clear']));
+        const g = readGoal(process.cwd(), 's1');
+        assert.equal(g?.condition, 'clear');
+        assert.equal(g?.status, 'active');
+      });
+    });
+
+    test('options before -- still apply to the verbatim tail', () => {
+      inRepo(() => {
+        capture(() => runGoalCommand(['--turns', '3', '--session', 's1', '--', '--help']));
+        const g = readGoal(process.cwd(), 's1');
+        assert.equal(g?.condition, '--help');
+        assert.equal(g?.maxTurns, 3);
+      });
+    });
+
+    test('head positional joins the tail in the condition', () => {
+      inRepo(() => {
+        capture(() => runGoalCommand(['--session', 's1', 'ship', '--', '--help']));
+        assert.equal(readGoal(process.cwd(), 's1')?.condition, 'ship --help');
+      });
+    });
+  });
 });
 
 describe('goalStatusLine', () => {
