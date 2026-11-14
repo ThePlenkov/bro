@@ -26,6 +26,10 @@ const READ_KEY_FIELDS = ['file_path', 'path', 'pattern', 'query', 'glob', 'url']
 /** Verify-shaped commands — the test/build runs the guard budgets. */
 const VERIFY_CMD_RE =
   /(?:^|[;&|]\s*)(?:npm\s+(?:run\s+)?(?:test|build|typecheck|check)\b|npx\s+tsc\b|(?:vitest|jest|pytest|py\.test|go\s+test|cargo\s+test|tsx\s+--test|node\s+--test)\b)/;
+/** Leading env assignments (`FOO=bar cmd`, `env FOO=bar cmd`) must not
+ *  smuggle a verify past the gate — the prefix never reaches the hook's
+ *  own env, so honoring it would teach a bypass that does not exist. */
+const ENV_PREFIX_RE = /^(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s+)*/;
 
 function enabled(): boolean {
   return process.env.BRO_WASTE_GUARD !== '0';
@@ -135,7 +139,7 @@ export function wasteGuardBlock(
   const session = safeSession(sessionId);
 
   // verify-gate — a test/build command on an unchanged tree
-  const cmd = commandOf(input);
+  const cmd = commandOf(input).replace(ENV_PREFIX_RE, '');
   if (cmd !== '' && VERIFY_CMD_RE.test(cmd)) {
     const fp = treeFingerprint(dir);
     if (fp === null) {

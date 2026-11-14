@@ -82,6 +82,27 @@ describe('wasteGuardBlock — verify-gate', () => {
       assert.equal(wasteGuardBlock(dir, s, 'bash', bash), undefined);
     });
   });
+
+  test('env-prefixed verify cannot smuggle past the gate', () => {
+    withRepo(dir => {
+      const s = 'sess-envprefix';
+      assert.equal(wasteGuardBlock(dir, s, 'bash', { command: 'npm test' }), undefined);
+      // the arena bypass attempt: a leading assignment must not hide
+      // the verify-shaped tail from the gate
+      assert.match(
+        wasteGuardBlock(dir, s, 'bash', {
+          command: 'BRO_WASTE_GUARD=0 npm test',
+        }) ?? '',
+        /tree unchanged/
+      );
+      assert.match(
+        wasteGuardBlock(dir, s, 'bash', {
+          command: 'env CI=1 npm run build',
+        }) ?? '',
+        /tree unchanged/
+      );
+    });
+  });
 });
 
 describe('wasteGuardBlock — fail-open', () => {
