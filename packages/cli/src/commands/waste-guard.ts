@@ -122,7 +122,9 @@ function commandOf(input: Record<string, unknown>): string {
 }
 
 /** The block reason for a wasteful call, or undefined to let it run.
- *  `dir` is the hook's project root; `sessionId` scopes the markers. */
+ *  `dir` is the hook's project root; `sessionId` scopes the markers.
+ *  Each guard owns its own veto — the dispatcher only resolves the
+ *  shared marker scope and asks them in priority order. */
 export function wasteGuardBlock(
   dir: string,
   sessionId: string,
@@ -137,35 +139,54 @@ export function wasteGuardBlock(
     return undefined;
   }
   const session = safeSession(sessionId);
+  return verifyGateBlock(dir, sd, session, input) ?? dupReadBlock(sd, session, tool, input);
+}
 
-  // verify-gate — a test/build command on an unchanged tree
+/** verify-gate — a test/build command re-run on an unchanged tree: same
+ *  fingerprint ⇒ same outcome, so the re-run is waste. */
+function verifyGateBlock(
+  dir: string,
+  sd: string,
+  session: string,
+  input: Record<string, unknown>
+): string | undefined {
   const cmd = commandOf(input).replace(ENV_PREFIX_RE, '');
-  if (cmd !== '' && VERIFY_CMD_RE.test(cmd)) {
-    const fp = treeFingerprint(dir);
-    if (fp === null) {
-      return undefined;
-    }
-    const aspect = 'waste-tree';
-    const p = join(sd, `${session}.${aspect}`);
-    try {
-      if (existsSync(p) && readFileSync(p, 'utf8').trim() === fp) {
-        return 'waste-guard: tree unchanged since the last verify — edit first or pass BRO_WASTE_GUARD=0';
-      }
-    } catch {
-      // unreadable marker → treat as first run
-    }
-    touch(sd, session, aspect, fp);
+  if (cmd === '' || !VERIFY_CMD_RE.test(cmd)) {
     return undefined;
   }
-
-  // dup-read — identical inspection call already ran this session
-  if (READ_TOOL_RE.test(tool) && readIdentity(input) !== undefined) {
-    const aspect = `waste-dup-${callHash(tool, input)}`;
-    if (markerExists(sd, session, aspect)) {
-      return `waste-guard: identical ${tool} call already ran this session — reuse the earlier result`;
-    }
-    touch(sd, session, aspect);
+  const fp = treeFingerprint(dir);
+  if (fp === null) {
+    return undefined;
   }
+  const aspect = 'waste-tree';
+  const p = join(sd, `${session}.${aspect}`);
+  try {
+    if (existsSync(p) && readFileSync(p, 'utf8').trim() === fp) {
+      return 'waste-guard: tree unchanged since the last verify — edit first or pass BRO_WASTE_GUARD=0';
+    }
+  } catch {
+    // unreadable marker → treat as first run
+  }
+  touch(sd, session, aspect, fp);
+  return undefined;
+}
+
+/** dup-read — an identical inspection call already ran this session; the
+ *  repeated call returns identical output, so it is pure waste. */
+function dupReadBlock(
+  sd: string,
+  session: string,
+  tool: string,
+  input: Record<string, unknown>
+): string | undefined {
+  if (!READ_TOOL_RE.test(tool) || readIdentity(input) === undefined) {
+    return undefined;
+  }
+  const aspect = `waste-dup-${callHash(tool, input)}`;
+  if (markerExists(sd, session, aspect)) {
+    return `waste-guard: identical ${tool} call already ran this session — reuse the earlier result`;
+  }
+  touch(sd, session, aspect);
   return undefined;
 }
 
@@ -175,17 +196,22 @@ export function wasteGuardPrefix(sessionId: string): string {
 }
 
 /** Test seam — list a session's waste marker aspects (dup hashes +
- *  tree slot), for assertions and future pruning. */
+ *  tree slot), for assertions and future pruning. Marker files are
+ *  named `${session}.${aspect}` and the aspect itself starts with
+ *  `waste-`, so the return value keeps that prefix (`waste-tree`,
+ *  `waste-dup-<hash>`). */
 export function wasteGuardAspects(dir: string, sessionId: string): string[] {
   const sd = stateDir(dir);
   if (sd === null) {
     return [];
   }
-  const prefix = wasteGuardPrefix(sessionId);
+  const session = safeSession(sessionId);
+  // strip the `${session}.` owner prefix — what remains IS the aspect
+  const sessionPrefix = `${session}.`;
   try {
     return readdirSync(sd)
-      .filter(f => f.startsWith(prefix))
-      .map(f => f.slice(prefix.length - 'waste-'.length))
+      .filter(f => f.startsWith(wasteGuardPrefix(sessionId)))
+      .map(f => f.slice(sessionPrefix.length))
       .sort();
   } catch {
     return [];

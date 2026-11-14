@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { wasteGuardBlock } from './waste-guard.ts';
+import { wasteGuardAspects, wasteGuardBlock } from './waste-guard.ts';
 
 const git = (dir: string, args: string[]): void => {
   const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
@@ -101,6 +101,23 @@ describe('wasteGuardBlock — verify-gate', () => {
         }) ?? '',
         /tree unchanged/
       );
+    });
+  });
+});
+
+describe('wasteGuardAspects — marker listing seam', () => {
+  test('returns full aspect names keeping the waste- prefix', () => {
+    withRepo(dir => {
+      const s = 'sess-aspects';
+      wasteGuardBlock(dir, s, 'bash', { command: 'npm test' });
+      wasteGuardBlock(dir, s, 'read', READ);
+      const aspects = wasteGuardAspects(dir, s);
+      assert.deepEqual(
+        aspects.map(a => a.replace(/^waste-dup-[0-9a-f]{24}$/, 'waste-dup-<hash>')),
+        ['waste-dup-<hash>', 'waste-tree']
+      );
+      // another session's markers do not bleed in
+      assert.deepEqual(wasteGuardAspects(dir, 'sess-other'), []);
     });
   });
 });

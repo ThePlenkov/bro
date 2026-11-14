@@ -2714,6 +2714,24 @@ async function emitStopGateBody(
   }
 }
 
+/** A pre-tool veto — codex answers in its hookSpecificOutput envelope,
+ *  every other client takes the flat decision block. Shared by the
+ *  waste-guard and connector verdict paths so emitPreTool keeps one
+ *  branch per veto source. */
+function emitPreToolDeny(reason: string): void {
+  if (codexClient) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: reason,
+      },
+    });
+  } else {
+    emit({ decision: 'block', reason });
+  }
+}
+
 /** Connector pre-tool verdicts — the guard plane. The first `block`
  *  vetoes the call (`decision: block` — the opencode V2 adapter throws
  *  on it); `input` overrides merge in connector order and the adapter
@@ -2728,17 +2746,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   // bro-rw8z3); fail-open inside, so a state-dir failure never stalls
   const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, tool, toolInput);
   if (wasteBlock !== undefined) {
-    if (codexClient) {
-      emit({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: wasteBlock,
-        },
-      });
-    } else {
-      emit({ decision: 'block', reason: wasteBlock });
-    }
+    emitPreToolDeny(wasteBlock);
     return;
   }
   const verdicts = await preToolVerdicts(
@@ -2748,17 +2756,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   );
   const block = verdicts.find(v => v.block !== undefined)?.block;
   if (block !== undefined) {
-    if (codexClient) {
-      emit({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: block,
-        },
-      });
-    } else {
-      emit({ decision: 'block', reason: block });
-    }
+    emitPreToolDeny(block);
     return;
   }
   const merged: Record<string, unknown> = {};
