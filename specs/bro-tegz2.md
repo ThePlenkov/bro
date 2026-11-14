@@ -6,8 +6,14 @@ scope:
   - packages/providers/src/index.ts
   - packages/cli/src/commands/acp.ts
   - packages/cli/src/commands/acp-agent.ts
+  - packages/cli/src/commands/acp-agent.test.ts
   - packages/cli/src/commands/acp.test.ts
   - packages/cli/src/plugins.ts
+  - contract/cli.json
+  - scripts/gen-command-docs.ts
+  - site/content/docs/commands/acp.md
+  - site/content/docs/commands/meta.json
+  - site/content/docs/reference/acp.md
   - skills/acp/SKILL.md
 ---
 
@@ -48,7 +54,7 @@ stdio" feature request belongs to brouter, never to `bro acp`.
 
 ### CLI surface
 
-```
+```text
 bro acp                             agent mode — ACP server over stdio
 bro acp --provider <name>           pin providers.<name> (type acp only)
 bro acp --class <name>              fleet.routing.<class> instead of 'default'
@@ -74,7 +80,9 @@ exit-2 usage case is superseded (usage stays for `bro acp <bogus>`).
    entry.
 3. else (no routing declared) → the first `type:'acp'` entry in
    config order — the same fallback `brouter ask`/`brouter acp`
-   use; none configured → a config error saying so.
+   use; none configured → a config error saying so. A `--class`
+   request that reaches this leg names a lane that doesn't exist —
+   a config error naming the class, never a silent re-route.
 
 Chain-head `model`/entry `model` are NOT pinned in v1 — the pump
 forwards `session/new` verbatim, and pinning needs a proxy-originated
@@ -148,8 +156,22 @@ The advertised set is `buildDump(PLUGINS, GROUP_META)` — the live
 registry document `bro contract dump --json` emits — filtered to
 `hidden === false` minus a serving/loop blocklist: `acp`,
 `acp-worker`, `herdr`, `mcp`, `serve`, `daemon`, `watch`, `watchdog`,
-`loop` (protocol servers whose stdio IS a wire, and turns that cannot
-end — a slash command is a turn, bounded by `SLASH_TIMEOUT_MS`).
+`loop`, `wait` (protocol servers whose stdio IS a wire, and turns
+that cannot end — a slash command is a turn, bounded by
+`SLASH_TIMEOUT_MS`; `wait`'s default 45-minute budget already dwarfs
+it). Name-level blocking is not enough — argv shapes that cannot end
+refuse in-band at invocation: `convoy wait`, `mesh wait`,
+`drive --every`, `fleet --live|--every`. The advertised set is the
+SERVER's contract — plugins resolve per-repo, so a session in a repo
+with different `plugins:` config sees a divergent set both ways (an
+advertised name the child's registry lacks fails in-band as bro's own
+usage error; a repo-local command isn't advertised and falls through
+downstream). Per-session dumps are a deliberate follow-up.
+
+The announced list composes with the downstream's own announcements —
+an `available_commands_update` is the session's CURRENT list, not a
+delta, so each side's announce merges over the other (local names
+shadow on collision, matching the local-turn dispatch precedence).
 
 Each command becomes
 `{name, description: summary, input: {hint}}` — the hint names the
@@ -159,14 +181,20 @@ contract's declared subs (`status|threads|…`) or `args`.
 `^/<name>(\s+args)?` with `name` in the advertised set runs
 `bro <name> <args>`: a real subprocess (`process.execPath` + the
 resolved `process.argv[1]`), `cwd` = the session's `session/new.cwd`
-(never the server's own), env = `acpChildEnv()`. stdout streams
-upstream as `agent_message_chunk` updates; a non-zero exit appends
-the code + a stderr tail as a final chunk; the response is always
-`{stopReason:'end_turn'}` — the command's failure is turn content,
-not a wire error. A `/name` NOT in the advertised set falls through —
-the prompt forwards downstream, so the agent's own slash vocabulary
-composes with bro's. `session/cancel` SIGTERMs the child and answers
-`cancelled`; `SLASH_TIMEOUT_MS` (5 min) bounds a stuck run.
+(never the server's own — a cwd-less session refuses in-band rather
+than run inside the wrong project), env = `acpChildEnv()`, stdin
+closed (`stdio 'ignore'` — a command that reads stdin to EOF must not
+wait on a pipe nobody writes). stdout streams upstream as
+`agent_message_chunk` updates; a non-zero exit OR a signal death
+appends the code/signal + a stderr tail as a final chunk; the
+response is always `{stopReason:'end_turn'}` — the command's failure
+is turn content, not a wire error. A `/name` NOT in the advertised
+set falls through — the prompt forwards downstream, so the agent's
+own slash vocabulary composes with bro's. `session/cancel` SIGTERMs
+the child and answers `cancelled` (a cancel that landed while the
+turn queued still kills it); `SLASH_TIMEOUT_MS` (5 min) bounds a
+stuck run, and a client/downstream close mid-turn aborts it with the
+wire.
 
 ### Seam — same as proxy mode
 

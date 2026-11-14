@@ -12,7 +12,12 @@ import assert from 'node:assert/strict';
 process.env.BRO_TELEMETRY = '0';
 
 import { client, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
-import type { AnyMessage, InitializeRequest, Stream } from '@agentclientprotocol/sdk';
+import type {
+  AnyMessage,
+  InitializeRequest,
+  SessionUpdate,
+  Stream,
+} from '@agentclientprotocol/sdk';
 import type { ProviderEntry, RoutingTable } from '@broject/core';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import {
@@ -21,6 +26,9 @@ import {
   matchSlash,
   resolveAcpAgentProvider,
   runAcpAgent,
+  runSlash,
+  slashPrompt,
+  slashTurnBlocked,
   SLASH_BLOCKLIST,
 } from './acp-agent.ts';
 import type { ContractCommandRow, ContractDump } from './contract-dump.ts';
@@ -96,6 +104,19 @@ describe('bro acp — provider selection (fleet.routing class → chain head)', 
     assert.throws(() => resolveAcpAgentProvider({ a: API() }, undefined, {}), /no acp provider/);
     assert.throws(() => resolveAcpAgentProvider({}, undefined, {}), /no acp provider/);
   });
+
+  test('--class with no routing table is a config error, not a silent first-acp pick', () => {
+    const providers = { a: ACP(), b: ACP() };
+    assert.throws(
+      () => resolveAcpAgentProvider(providers, undefined, { class: 'work' }),
+      /--class work — no fleet\.routing table/
+    );
+    // an empty table is undeclared — same rule
+    assert.throws(
+      () => resolveAcpAgentProvider(providers, {}, { class: 'work' }),
+      /no fleet\.routing table/
+    );
+  });
 });
 
 function dump(...rows: Partial<ContractCommandRow>[]): ContractDump {
@@ -142,12 +163,148 @@ describe('bro acp — the advertised slash set', () => {
       'mcp',
       'serve',
       'daemon',
+      'wait',
       'watch',
       'watchdog',
       'loop',
     ]) {
       assert.equal(SLASH_BLOCKLIST.has(name), true, `${name} must be blocklisted`);
     }
+  });
+});
+
+describe('bro acp — slashTurnBlocked (argv shapes that cannot end)', () => {
+  test('sub-level waits and repaint loops refuse; bounded shapes pass', () => {
+    assert.equal(slashTurnBlocked('convoy', ['wait', 'mol-1']), 'convoy wait');
+    assert.equal(slashTurnBlocked('mesh', ['wait', 'external:x:1']), 'mesh wait');
+    assert.equal(slashTurnBlocked('drive', ['--every', '60']), 'drive --every');
+    assert.equal(slashTurnBlocked('drive', ['--every=60']), 'drive --every=60');
+    assert.equal(slashTurnBlocked('fleet', ['--live']), 'fleet --live');
+    assert.equal(slashTurnBlocked('fleet', ['--every', '10']), 'fleet --every');
+    // bounded siblings stay runnable
+    assert.equal(slashTurnBlocked('convoy', ['status']), undefined);
+    assert.equal(slashTurnBlocked('convoy', []), undefined);
+    assert.equal(slashTurnBlocked('mesh', ['peers']), undefined);
+    assert.equal(slashTurnBlocked('drive', []), undefined);
+    assert.equal(slashTurnBlocked('drive', ['--once']), undefined);
+    assert.equal(slashTurnBlocked('fleet', ['--json']), undefined);
+    assert.equal(slashTurnBlocked('act', ['wait']), undefined);
+  });
+});
+
+describe('bro acp — the local-turn handler (slashPrompt)', () => {
+  const ACT = [{ name: 'act', description: 'Open-PR loop', input: { hint: 'status|threads' } }];
+  const CONVOY = [{ name: 'convoy', description: 'mol queues', input: { hint: 'run|wait' } }];
+
+  function turn(text: string, cwd: string | undefined, emitted: string[]) {
+    return {
+      sessionId: 's-1',
+      cwd,
+      text,
+      emit: (u: SessionUpdate) => {
+        const content = (u as { content?: { text?: string } }).content;
+        emitted.push(content?.text ?? '');
+      },
+      signal: new AbortController().signal,
+    };
+  }
+
+  test('a blocked argv shape refuses in-band — the child never spawns', async () => {
+    const spawned: string[][] = [];
+    const handler = slashPrompt(CONVOY, {
+      cliArgv: argv => {
+        spawned.push(argv);
+        return argv;
+      },
+    });
+    const emitted: string[] = [];
+    const res = await handler(turn('/convoy wait mol-1', '/tmp/repo', emitted));
+    assert.equal(res?.stopReason, 'end_turn');
+    assert.deepEqual(spawned, []);
+    assert.ok(
+      emitted.some(t => t.includes('unbounded wait/loop')),
+      `expected an in-band refusal, got: ${emitted.join()}`
+    );
+  });
+
+  test('a cwd-less session refuses in-band rather than run in the wrong repo', async () => {
+    const spawned: string[][] = [];
+    const handler = slashPrompt(ACT, {
+      cliArgv: argv => {
+        spawned.push(argv);
+        return argv;
+      },
+    });
+    const emitted: string[] = [];
+    const res = await handler(turn('/act status', undefined, emitted));
+    assert.equal(res?.stopReason, 'end_turn');
+    assert.deepEqual(spawned, []);
+    assert.ok(
+      emitted.some(t => t.includes('no working directory')),
+      `expected an in-band refusal, got: ${emitted.join()}`
+    );
+  });
+
+  test('an unadvertised /name falls through — undefined forwards downstream', async () => {
+    const handler = slashPrompt(ACT, {});
+    const res = await handler(turn('/ghost sub', '/tmp/repo', []));
+    assert.equal(res, undefined);
+    assert.equal(await handler(turn('plain text', '/tmp/repo', [])), undefined);
+  });
+});
+
+describe('bro acp — runSlash', () => {
+  test('an already-aborted signal still kills the child immediately', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const texts: string[] = [];
+    const t0 = Date.now();
+    await runSlash(
+      [process.execPath, '-e', 'setInterval(() => {}, 1e9)'],
+      process.cwd(),
+      30_000, // a stuck child would hold the turn this long without the kill
+      ctrl.signal,
+      t => texts.push(t)
+    );
+    assert.ok(Date.now() - t0 < 15_000, 'a cancel that already landed must still kill the child');
+    assert.ok(
+      texts.some(t => t.includes('SIGTERM')),
+      texts.join()
+    );
+  });
+
+  test("the child's stdin is closed — a command reading stdin to EOF does not hang", async () => {
+    const texts: string[] = [];
+    await runSlash(
+      [
+        process.execPath,
+        '-e',
+        'let n=0;process.stdin.on("data",d=>{n+=d.length});process.stdin.on("end",()=>process.stdout.write("EOF>"+n))',
+      ],
+      process.cwd(),
+      20_000,
+      new AbortController().signal,
+      t => texts.push(t)
+    );
+    assert.ok(
+      texts.some(t => t.includes('EOF>0')),
+      texts.join()
+    );
+  });
+
+  test('a signal death outside the cancel/timeout paths reports in-band', async () => {
+    const texts: string[] = [];
+    await runSlash(
+      [process.execPath, '-e', 'process.kill(process.pid, "SIGKILL")'],
+      process.cwd(),
+      20_000,
+      new AbortController().signal,
+      t => texts.push(t)
+    );
+    assert.ok(
+      texts.some(t => t.includes('killed by SIGKILL')),
+      texts.join()
+    );
   });
 });
 
@@ -194,7 +351,8 @@ describe('bro acp — agent mode e2e (specs/bro-tegz2.md §acceptance)', () => {
     }
   }
 
-  test('a fake client lists bro slash commands, runs /act status locally, and a free-form prompt forwards downstream', async () => {
+  /** client → `bro acp` (runAcpAgent, in-process streams) → fake agent. */
+  function e2eRig() {
     const fake = fakeAcpAgent({ replyText: 'AGENT-SAYS-HI' });
     const [clientSide, proxyUp] = streamPair();
     const [proxyDown, agentSide] = streamPair();
@@ -221,20 +379,45 @@ describe('bro acp — agent mode e2e (specs/bro-tegz2.md §acceptance)', () => {
         log: () => {},
       }
     );
-    try {
-      const init = (await conn.agent.request('initialize', INIT)) as {
-        agentInfo?: { name?: string };
-      };
-      // bro IS the agent — the downstream's name is not what the client sees
-      assert.equal(init.agentInfo?.name, 'bro');
+    /** teardown — client EOF settles the pump, then the agent side. */
+    const finish = async (): Promise<number> => {
+      conn.close();
+      await clientSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      const code = await done;
+      agentConn.close();
+      await agentSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      return code;
+    };
+    return { fake, conn, updates, finish };
+  }
 
-      const { sessionId } = (await conn.agent.request('session/new', {
-        cwd: process.cwd(),
-        mcpServers: [],
-      })) as { sessionId: string };
-      // the slash list announced as an available_commands_update
-      await until(() => updates.some(u => updateKind(u) === 'available_commands_update'));
-      const announced = updates.find(u => updateKind(u) === 'available_commands_update') as {
+  /** initialize + session/new — asserts bro's identity and returns
+   *  the stamped session once its command announce landed. */
+  async function openE2eSession(r: ReturnType<typeof e2eRig>): Promise<string> {
+    const init = (await r.conn.agent.request('initialize', INIT)) as {
+      agentInfo?: { name?: string };
+    };
+    // bro IS the agent — the downstream's name is not what the client sees
+    assert.equal(init.agentInfo?.name, 'bro');
+    const { sessionId } = (await r.conn.agent.request('session/new', {
+      cwd: process.cwd(),
+      mcpServers: [],
+    })) as { sessionId: string };
+    await until(() => r.updates.some(u => updateKind(u) === 'available_commands_update'));
+    return sessionId;
+  }
+
+  test('a fake client lists bro slash commands and runs /act status locally — the downstream never sees it', async () => {
+    const r = e2eRig();
+    try {
+      const sessionId = await openE2eSession(r);
+      const announced = r.updates.find(u => updateKind(u) === 'available_commands_update') as {
         update: { availableCommands: { name: string }[] };
       };
       assert.deepEqual(
@@ -243,43 +426,40 @@ describe('bro acp — agent mode e2e (specs/bro-tegz2.md §acceptance)', () => {
       );
 
       // /act status runs on bro's side — the downstream never sees it
-      const res = (await conn.agent.request('session/prompt', {
+      const res = (await r.conn.agent.request('session/prompt', {
         sessionId,
         prompt: [{ type: 'text', text: '/act status' }],
       })) as { stopReason: string };
       assert.equal(res.stopReason, 'end_turn');
-      assert.deepEqual(fake.prompts, []);
+      assert.deepEqual(r.fake.prompts, []);
       await until(() =>
-        updates.some(
+        r.updates.some(
           u => updateKind(u) === 'agent_message_chunk' && chunkText(u)?.includes('SLASH>act status')
         )
       );
+    } finally {
+      assert.equal(await r.finish(), 0);
+    }
+  });
 
-      // a free-form prompt forwards — the agent's reply streams back
-      const res2 = (await conn.agent.request('session/prompt', {
+  test('a free-form prompt forwards downstream and the agent reply streams back verbatim', async () => {
+    const r = e2eRig();
+    try {
+      const sessionId = await openE2eSession(r);
+      const res = (await r.conn.agent.request('session/prompt', {
         sessionId,
         prompt: [{ type: 'text', text: 'hello agent' }],
       })) as { stopReason: string };
-      assert.equal(res2.stopReason, 'end_turn');
-      assert.deepEqual(fake.prompts, ['hello agent']);
+      assert.equal(res.stopReason, 'end_turn');
+      assert.deepEqual(r.fake.prompts, ['hello agent']);
       assert.equal(
-        updates.some(
+        r.updates.some(
           u => updateKind(u) === 'agent_message_chunk' && chunkText(u) === 'AGENT-SAYS-HI'
         ),
         true
       );
     } finally {
-      conn.close();
-      await clientSide.writable
-        .getWriter()
-        .close()
-        .catch(() => {});
-      assert.equal(await done, 0);
-      agentConn.close();
-      await agentSide.writable
-        .getWriter()
-        .close()
-        .catch(() => {});
+      assert.equal(await r.finish(), 0);
     }
   });
 });

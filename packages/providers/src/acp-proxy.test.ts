@@ -1618,4 +1618,233 @@ describe('acpProxy — agent overlay (bro-tegz2)', () => {
       assert.equal(await close(r), 0);
     }
   });
+
+  test('a handler that throws undefined still answers -32603 — never a declined-prompt fallthrough', async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: async () => {
+        throw undefined;
+      },
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      await assert.rejects(
+        r.acp.request('session/prompt', {
+          sessionId,
+          prompt: [{ type: 'text', text: '/x' }],
+        }),
+        (e: unknown) => e instanceof RequestError && e.code === -32603
+      );
+      // a crashed handler is a wire error — the prompt never crossed
+      assert.deepEqual(r.fake.prompts, []);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a client close mid-local-turn fires the abort — the turn dies with the wire', async () => {
+    let aborted = false;
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        }),
+    });
+    const sessionId = await openSession(r.acp);
+    const p = r.acp.request('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/watch' }],
+    });
+    void p.catch(() => {}); // the client is about to die — its request never resolves
+    await new Promise(r2 => setTimeout(r2, 50));
+    await hangupClient(r);
+    assert.equal(await r.proxyDone, 0);
+    assert.equal(aborted, true);
+    await hangupAgent(r);
+  });
+
+  test('a downstream close mid-local-turn fires the abort too', async () => {
+    let aborted = false;
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        }),
+    });
+    const sessionId = await openSession(r.acp);
+    const p = r.acp.request('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/watch' }],
+    });
+    void p.catch(() => {});
+    await new Promise(r2 => setTimeout(r2, 50));
+    await hangupAgent(r);
+    assert.equal(await r.proxyDone, 1);
+    assert.equal(aborted, true);
+    await hangupClient(r);
+  });
+
+  test("the downstream's command list merges with the overlay's — local names shadow", async () => {
+    const DOWN_COMMANDS = [
+      { name: 'zed-cmd', description: 'downstream command', input: { hint: 'args' } },
+      { name: 'act', description: 'downstream shadow of a local name', input: { hint: 'x' } },
+    ];
+    const r = rig(
+      {
+        replyText: 'ok',
+        // the agent announces its own surface mid-turn — the update
+        // carries a stamped session, so the merge path applies
+        updates: [
+          {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: DOWN_COMMANDS,
+          },
+          { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } },
+        ],
+      },
+      undefined,
+      () => {},
+      { commands: COMMANDS }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      // the stamp announce is the local list (nothing cached yet)
+      await until(() => cmdsUpdate(r.updates).length === 1);
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+      // the downstream's announce re-publishes merged, not verbatim
+      await until(() => cmdsUpdate(r.updates).length === 2);
+      const last = cmdsUpdate(r.updates).at(-1) as {
+        update: { availableCommands: { name: string; description: string }[] };
+      };
+      assert.deepEqual(
+        last.update.availableCommands.map(c => c.name),
+        ['act', 'next', 'zed-cmd']
+      );
+      // local dispatch precedence — bro's 'act' shadows the downstream's
+      assert.equal(
+        last.update.availableCommands.find(c => c.name === 'act')?.description,
+        'Open-PR loop'
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a cancelled request id reused by a new prompt keeps ownership — the stale turn cannot answer or emit for it', async () => {
+    // raw client — request-id reuse is a wire-level shape the typed
+    // client() app cannot produce (it owns its id space)
+    const fake = fakeAcpAgent({ replyText: 'DOWNSTREAM-B' });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const agentConn = fake.app.connect(agentSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      agent: {
+        prompt: turn => {
+          if (!turn.text.startsWith('/local')) {
+            return Promise.resolve(undefined);
+          }
+          return new Promise<{ stopReason: string } | undefined>(resolve => {
+            turn.signal.addEventListener(
+              'abort',
+              () => {
+                // resolve LATE — after a new request may own the id
+                setTimeout(() => {
+                  turn.emit({
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'A-LATE' },
+                  });
+                  resolve({ stopReason: 'end_turn' });
+                }, 120);
+              },
+              { once: true }
+            );
+          });
+        },
+      },
+      log: () => {},
+    });
+    const w = clientSide.writable.getWriter();
+    const rd = clientSide.readable.getReader();
+    const responses: { id?: unknown; result?: unknown; error?: unknown }[] = [];
+    const updates: { update?: { content?: { text?: string } } }[] = [];
+    const reader = (async () => {
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) return;
+        const m = value as { id?: unknown; method?: string; params?: { update?: unknown } };
+        if (m.method === 'session/update') {
+          updates.push(m.params as (typeof updates)[number]);
+        } else if (m.id !== undefined) {
+          responses.push(m);
+        }
+      }
+    })();
+    const send = (m: Record<string, unknown>) => w.write(m as AnyMessage);
+    try {
+      await send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: INIT_PARAMS });
+      await until(() => responses.some(r => r.id === 1));
+      await send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { cwd: '/tmp/x', mcpServers: [] },
+      });
+      await until(() => responses.some(r => r.id === 2));
+      // request A: id 9 runs a local turn that only its abort releases
+      await send({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: '/local a' }] },
+      });
+      await new Promise(r2 => setTimeout(r2, 50));
+      await send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess-1' } });
+      await until(() => responses.some(r => r.id === 9));
+      assert.equal(
+        (responses.find(r => r.id === 9)?.result as { stopReason?: string })?.stopReason,
+        'cancelled'
+      );
+      // request B reuses id 9 while A's local turn still unwinds
+      await send({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hello b' }] },
+      });
+      await until(() => responses.filter(r => r.id === 9).length === 2);
+      await new Promise(r2 => setTimeout(r2, 80));
+      // B's prompt crossed and got the downstream's own answer
+      assert.deepEqual(fake.prompts, ['hello b']);
+      // A's post-cancel emit never reached the wire under B's id
+      assert.equal(
+        updates.some(u => u.update?.content?.text === 'A-LATE'),
+        false
+      );
+    } finally {
+      await w.close().catch(() => {});
+      agentConn.close();
+      await agentSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      await reader;
+      await proxyDone;
+    }
+  });
 });

@@ -173,6 +173,11 @@ interface ProxySession {
    *  prompt or the gate re-prompt) as prepended text blocks: the one
    *  seam the wire already has for advisory text. */
   advisory: string[];
+  /** The downstream's last-announced slash-command list — cached so
+   *  the overlay's own surface composes with it instead of replacing
+   *  it: an available_commands_update is the session's CURRENT list,
+   *  not a delta (spec bro-tegz2). */
+  downstreamCommands: AvailableCommand[];
   /** undefined when the session has no cwd — the plane resolves inside
    *  the session repo or doesn't exist. */
   plane: AgentTurnPlane | undefined;
@@ -497,6 +502,11 @@ export async function acpProxy(
     ses: ProxySession;
   }): Promise<void> => {
     const { m, id, params, sessionId, ses } = held;
+    // the pending entry THIS queued write owns — a cancel discharges
+    // it and frees the id for reuse; everything this write lands on
+    // the wire afterwards (emits, answers, the held marker) must
+    // compare against the captured entry, not just the id's presence
+    const own = pending.get(id);
     try {
       if (!crossable(id)) {
         return;
@@ -510,13 +520,13 @@ export async function acpProxy(
       // it produces no downstream response to hold.
       const overlay = opts.agent?.prompt;
       if (overlay !== undefined) {
-        const req = pending.get(id);
         const ctrl = new AbortController();
-        if (req !== undefined) {
-          req.abort = () => ctrl.abort();
+        if (own !== undefined) {
+          own.abort = () => ctrl.abort();
         }
         let result: { stopReason: string } | undefined;
-        let failed: unknown;
+        let threw = false;
+        let failure: unknown;
         try {
           result = await overlay({
             sessionId,
@@ -524,9 +534,10 @@ export async function acpProxy(
             text: promptText(params),
             emit: update => {
               // guarded by the pending entry — a cancel that landed
-              // mid-turn already answered and discharged it, so a late
-              // emit must not reach the wire
-              if (pending.has(id) && !upDead.fired) {
+              // mid-turn already answered and discharged it, and a
+              // request that reused the id is a different turn: a late
+              // emit must not reach either wire
+              if (pending.get(id) === own && !upDead.fired) {
                 writeUp({
                   jsonrpc: '2.0',
                   method: 'session/update',
@@ -537,31 +548,37 @@ export async function acpProxy(
             signal: ctrl.signal,
           });
         } catch (e) {
-          failed = e;
+          // a `throw undefined` is still a crashed handler — a boolean
+          // flag, not the thrown value, decides the error path
+          threw = true;
+          failure = e;
         } finally {
-          if (req !== undefined) {
-            req.abort = undefined;
+          if (own !== undefined) {
+            own.abort = undefined;
           }
         }
-        if (failed !== undefined) {
+        if (threw) {
           // a crashed handler is a -32603 upstream — never a fake
-          // success; a cancel that already answered wins the race
-          if (pending.delete(id)) {
-            req?.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
+          // success; a cancel that already answered wins the race, and
+          // a reused id belongs to its new request
+          if (own !== undefined && pending.get(id) === own) {
+            pending.delete(id);
+            own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
             writeUp({
               jsonrpc: '2.0',
               id,
               error: {
                 code: -32603,
-                message: `acp agent: local turn failed — ${failed instanceof Error ? failed.message : String(failed)}`,
+                message: `acp agent: local turn failed — ${failure instanceof Error ? failure.message : String(failure)}`,
               },
             } as AnyMessage);
           }
           return;
         }
         if (result !== undefined) {
-          if (pending.delete(id)) {
-            req?.prompt?.span.end({
+          if (own !== undefined && pending.get(id) === own) {
+            pending.delete(id);
+            own.prompt?.span.end({
               'acp.proxy.local': true,
               'acp.stop_reason': result.stopReason,
             });
@@ -589,7 +606,11 @@ export async function acpProxy(
       ses.plane?.start();
       writeDown(injected.m);
     } finally {
-      ses.held.delete(id);
+      // drop the held marker only while the id still names THIS
+      // request — a reused id's marker belongs to the newer request
+      if (pending.get(id) === own) {
+        ses.held.delete(id);
+      }
     }
   };
 
@@ -772,6 +793,27 @@ export async function acpProxy(
     });
   };
 
+  /** Compose the overlay's surface with the downstream's last-announced
+   *  list — a local name shadows a same-named downstream command,
+   *  matching the precedence the local-turn handler gives it (a /name
+   *  bro serves never reaches the agent). */
+  const mergedCommands = (ses: ProxySession): AvailableCommand[] => {
+    const local = opts.agent?.commands ?? [];
+    const names = new Set(local.map(c => c.name));
+    return [...local, ...ses.downstreamCommands.filter(c => !names.has(c.name))];
+  };
+
+  /** One upstream available_commands_update announcing the merged list. */
+  const commandsUpdate = (sessionId: string, commands: AvailableCommand[]): AnyMessage =>
+    ({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId,
+        update: { sessionUpdate: 'available_commands_update', availableCommands: commands },
+      },
+    }) as AnyMessage;
+
   /** a2c notification — verbatim; session/update feeds the turn plane
    *  and the tool-call hook seam (in-process arming + guard eval —
    *  never a subprocess). */
@@ -783,6 +825,21 @@ export async function acpProxy(
       const ses = sessionId === undefined ? undefined : sessions.get(sessionId);
       if (ses !== undefined && sessionId !== undefined && isRecord(update)) {
         feedToolCall(update, ses, sessionId);
+        // agent mode: an available_commands_update is the session's
+        // CURRENT command list, not a delta — forwarding the
+        // downstream's verbatim would drop bro's surface exactly like
+        // bro's own announce dropped its. Cache it and publish the
+        // merge instead (spec bro-tegz2).
+        if (
+          opts.agent?.commands !== undefined &&
+          update['sessionUpdate'] === 'available_commands_update'
+        ) {
+          ses.downstreamCommands = Array.isArray(update['availableCommands'])
+            ? (update['availableCommands'] as AvailableCommand[])
+            : [];
+          writeUp(commandsUpdate(sessionId, mergedCommands(ses)));
+          return;
+        }
       }
     }
     writeUp(m);
@@ -811,6 +868,7 @@ export async function acpProxy(
       held: new Set(),
       writeQ: Promise.resolve(),
       advisory: [],
+      downstreamCommands: [],
       plane:
         cwd === undefined
           ? undefined
@@ -1040,19 +1098,14 @@ export async function acpProxy(
     // agent mode: a newly stamped session announces bro's command
     // surface — ONE available_commands_update written AFTER the open
     // response crossed (the client must know the session before its
-    // commands arrive), never before and never twice per session id
+    // commands arrive), never before and never twice per session id.
+    // The announced list is the merge — a downstream announce that
+    // landed first composes rather than being clobbered.
     if (stamped !== undefined && opts.agent?.commands !== undefined) {
-      writeUp({
-        jsonrpc: '2.0',
-        method: 'session/update',
-        params: {
-          sessionId: stamped,
-          update: {
-            sessionUpdate: 'available_commands_update',
-            availableCommands: opts.agent.commands,
-          },
-        },
-      } as AnyMessage);
+      const ses = sessions.get(stamped);
+      if (ses !== undefined) {
+        writeUp(commandsUpdate(stamped, mergedCommands(ses)));
+      }
     }
   };
 
@@ -1111,6 +1164,14 @@ export async function acpProxy(
     downDead.promise.then(() => 'down' as const),
     upDead.promise.then(() => 'up' as const),
   ]);
+
+  // the wire is closing — a local turn still in flight dies with the
+  // proxy: the abort hook only fires from abortHeld (session/cancel),
+  // so a client or downstream close mid-turn would leave the slash
+  // child running until its own timeout, holding the CLI open
+  for (const req of pending.values()) {
+    req.abort?.();
+  }
 
   // downstream dead → every request still in flight fails visibly on
   // the upstream wire; a dead agent never silently eats a prompt

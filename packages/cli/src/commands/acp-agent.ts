@@ -16,8 +16,6 @@
  */
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import type { Readable, Writable } from 'node:stream';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AvailableCommand, Stream } from '@agentclientprotocol/sdk';
 import {
   CommandError,
@@ -72,15 +70,7 @@ const VALUE_FLAGS = new Set(['--provider', '--class']);
  *  the subcommand typos meant). `--provider` and `--class` are mutually
  *  exclusive — a pin and a lane can't both answer "which provider". */
 export function acpAgentFlags(argv: string[]): AcpAgentSel {
-  let pos: string[];
-  try {
-    pos = positionals(argv, VALUE_FLAGS, { strict: true });
-  } catch (e) {
-    if (e instanceof CommandError) {
-      usage(e.message);
-    }
-    throw e;
-  }
+  const pos = strictPositionals(argv);
   if (pos.length > 0) {
     usage(`error: unknown subcommand '${pos[0]}'`);
   }
@@ -93,6 +83,19 @@ export function acpAgentFlags(argv: string[]): AcpAgentSel {
     ...(provider === undefined ? {} : { provider }),
     ...(cls === undefined ? {} : { class: cls }),
   };
+}
+
+/** Strict positionals — a CommandError out of the parser is a usage
+ *  error carrying this command's own usage text. */
+function strictPositionals(argv: string[]): string[] {
+  try {
+    return positionals(argv, VALUE_FLAGS, { strict: true });
+  } catch (e) {
+    if (e instanceof CommandError) {
+      usage(e.message);
+    }
+    throw e;
+  }
 }
 
 // ── provider selection — fleet.routing class → chain head ─────────────────
@@ -109,7 +112,9 @@ export interface AcpAgentProvider {
 /** `--provider` pin → the class chain head → the first acp entry. The
  *  head must SPEAK acp — `resolveStepClass` already guarantees a spawn
  *  surface (`cli` entries pass it), so a non-acp head is a config
- *  error naming class + entry, never a silent re-route. */
+ *  error naming class + entry, never a silent re-route. The same rule
+ *  for `--class` itself: a named lane with no routing table is a
+ *  config error, not a quiet fallthrough to whatever comes first. */
 export function resolveAcpAgentProvider(
   providers: Record<string, ProviderEntry>,
   routing: RoutingTable | undefined,
@@ -123,14 +128,15 @@ export function resolveAcpAgentProvider(
     return { name: sel.provider, entry, via: '--provider' };
   }
   if (routing !== undefined && Object.keys(routing).length > 0) {
-    const resolved = resolveStepClass(routing, providers, { class: sel.class });
-    const entry = getProvider(providers, resolved.provider);
-    if (entry.type !== 'acp') {
-      die(
-        `fleet.routing.${resolved.class}.chain[0] → providers.${resolved.provider} is a ${entry.type} entry — bro acp needs an acp one`
-      );
-    }
-    return { name: resolved.provider, entry, via: `fleet.routing.${resolved.class}` };
+    return pickRoutedProvider(providers, routing, sel.class);
+  }
+  // a named lane with no routing table is a config error — silently
+  // falling to the first acp entry would run a provider the operator
+  // never routed to
+  if (sel.class !== undefined) {
+    die(
+      `--class ${sel.class} — no fleet.routing table configured; declare fleet.routing.${sel.class}.chain or drop --class`
+    );
   }
   const first = Object.entries(providers).find(([, e]) => e.type === 'acp');
   if (first === undefined) {
@@ -143,12 +149,32 @@ export function resolveAcpAgentProvider(
   };
 }
 
+/** The routing leg — `resolveStepClass` already guarantees a spawn
+ *  surface (a `cli` head passes it), so a non-acp head is a config
+ *  error naming class + entry, never a silent re-route. */
+function pickRoutedProvider(
+  providers: Record<string, ProviderEntry>,
+  routing: RoutingTable,
+  cls: string | undefined
+): AcpAgentProvider {
+  const resolved = resolveStepClass(routing, providers, { class: cls });
+  const entry = getProvider(providers, resolved.provider);
+  if (entry.type !== 'acp') {
+    die(
+      `fleet.routing.${resolved.class}.chain[0] → providers.${resolved.provider} is a ${entry.type} entry — bro acp needs an acp one`
+    );
+  }
+  return { name: resolved.provider, entry, via: `fleet.routing.${resolved.class}` };
+}
+
 // ── the advertised slash set ───────────────────────────────────────────────
 
 /** Commands that can never be a session turn: protocol servers whose
  *  stdio IS a wire (acp/mcp/serve/herdr/acp-worker), and turns that
- *  cannot end (daemon/watch/watchdog/loop). Hidden commands never
- *  advertise either — they are machine-facing by definition. */
+ *  cannot end — daemons, watchers, and waiters whose normal runtime
+ *  dwarfs SLASH_TIMEOUT_MS (daemon/watch/watchdog/loop/wait). Hidden
+ *  commands never advertise either — they are machine-facing by
+ *  definition. */
 export const SLASH_BLOCKLIST: ReadonlySet<string> = new Set([
   'acp',
   'acp-worker',
@@ -157,9 +183,41 @@ export const SLASH_BLOCKLIST: ReadonlySet<string> = new Set([
   'loop',
   'mcp',
   'serve',
+  'wait',
   'watch',
   'watchdog',
 ]);
+
+/** Argv-level blocks on otherwise-advertised commands — the command
+ *  has bounded subs worth a turn, but these shapes are unbounded
+ *  waiters or repaint loops that would hold the turn (and the
+ *  session's writeQ) until SLASH_TIMEOUT_MS: `convoy wait`/`mesh wait`
+ *  are poll loops, `drive --every` re-arms supervision cadences,
+ *  `fleet --live`/`--every` is a TTY repaint. Checked at invocation —
+ *  the name stays advertised for its bounded subs. */
+const SLASH_SUB_BLOCKLIST: Readonly<Record<string, ReadonlySet<string>>> = {
+  convoy: new Set(['wait']),
+  mesh: new Set(['wait']),
+};
+const SLASH_FLAG_BLOCKLIST: Readonly<Record<string, ReadonlySet<string>>> = {
+  drive: new Set(['--every']),
+  fleet: new Set(['--every', '--live']),
+};
+
+/** Why this argv can never be a session turn — a `/name sub` or
+ *  `/name --flag` that is an unbounded waiter/loop. Returns the
+ *  blocked shape for the in-band refusal, undefined when runnable. */
+export function slashTurnBlocked(name: string, args: string[]): string | undefined {
+  if (args[0] !== undefined && SLASH_SUB_BLOCKLIST[name]?.has(args[0]) === true) {
+    return `${name} ${args[0]}`;
+  }
+  const flags = SLASH_FLAG_BLOCKLIST[name];
+  if (flags === undefined) {
+    return undefined;
+  }
+  const hit = args.find(a => flags.has(a) || flags.has(a.split('=')[0] ?? ''));
+  return hit === undefined ? undefined : `${name} ${hit}`;
+}
 
 /** The contract document → the wire's availableCommands: every
  *  non-hidden, non-serving command, hint = declared subs or 'args'. */
@@ -200,11 +258,11 @@ function defaultCliArgv(argv: string[]): string[] {
 }
 
 /** Spawn `bro <argv>` inside the session repo, streaming stdout as
- *  agent_message_chunk updates. A non-zero exit, an exec failure, or
- *  the timeout reports in-band as the turn's own text — the command's
- *  failure is turn content, never a wire error. `signal` (the cancel)
- *  SIGTERMs the child. */
-async function runSlash(
+ *  agent_message_chunk updates. A non-zero exit, a signal death, an
+ *  exec failure, or the timeout reports in-band as the turn's own
+ *  text — the command's failure is turn content, never a wire error.
+ *  `signal` (the cancel) SIGTERMs the child. Exported for tests. */
+export async function runSlash(
   argv: string[],
   cwd: string,
   timeoutMs: number,
@@ -219,7 +277,16 @@ async function runSlash(
   await new Promise<void>(resolve => {
     let stderr = '';
     let timedOut = false;
-    const child = spawn(bin, argv.slice(1), { cwd, env: acpChildEnv() });
+    let reported = false;
+    const cmd = `\`bro ${argv.slice(1).join(' ')}\``;
+    const child = spawn(bin, argv.slice(1), {
+      cwd,
+      env: acpChildEnv(),
+      // stdin is 'ignore', not a pipe the parent never ends — a
+      // command that reads stdin to EOF (`exec`, `resume`) would
+      // wait forever on a write end nobody owns
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
@@ -230,25 +297,37 @@ async function runSlash(
       signal.removeEventListener('abort', onAbort);
     };
     signal.addEventListener('abort', onAbort, { once: true });
+    // a cancel that landed while the turn queued in the session's
+    // writeQ already consumed the abort event — the listener never
+    // re-fires for it, so kill the child explicitly
+    if (signal.aborted) {
+      onAbort();
+    }
     child.stdout.on('data', (d: Buffer) => chunk(d.toString()));
     child.stderr.on('data', (d: Buffer) => {
       stderr = (stderr + d.toString()).slice(-2048);
     });
     child.on('error', e => {
       cleanup();
-      chunk(`\`bro ${argv.slice(1).join(' ')}\` — cannot exec ${bin}: ${e.message}`);
+      reported = true;
+      chunk(`${cmd} — cannot exec ${bin}: ${e.message}`);
       resolve();
     });
-    child.on('close', code => {
+    child.on('close', (code, sig) => {
       cleanup();
+      if (reported) {
+        return; // the exec failure already wrote the verdict
+      }
       if (timedOut) {
         chunk(`\n\n— slash command timed out after ${Math.round(timeoutMs / 1000)}s`);
       }
-      if (code !== 0 && code !== null) {
+      // code === null is a signal death — outside the timeout/cancel
+      // paths (an external kill, OOM) the turn must still SAY the
+      // command died rather than read as a clean run
+      if (code !== 0) {
         const tail = stderr.trim();
-        chunk(
-          `\n\n— \`bro ${argv.slice(1).join(' ')}\` exited ${code}${tail === '' ? '' : `: ${tail}`}`
-        );
+        const how = code === null ? `killed by ${sig ?? 'signal'}` : `exited ${code}`;
+        chunk(`\n\n— ${cmd} ${how}${tail === '' ? '' : `: ${tail}`}`);
       }
       resolve();
     });
@@ -259,8 +338,8 @@ async function runSlash(
  *  advertised set runs `bro <name> <args>` on bro's side; anything
  *  else — plain text, an unknown slash — returns undefined and the
  *  prompt crosses downstream (the agent's own slash vocabulary
- *  composes with bro's). */
-function slashPrompt(
+ *  composes with bro's). Exported for tests. */
+export function slashPrompt(
   commands: AvailableCommand[],
   deps: AcpAgentDeps
 ): NonNullable<AcpAgentOverlay['prompt']> {
@@ -282,15 +361,25 @@ function slashPrompt(
       chunk(`bro ${m.name}: ${e instanceof Error ? e.message : String(e)}`);
       return { stopReason: 'end_turn' };
     }
-    // the session's cwd — never the server's own: a client that opened
-    // its session in another repo gets THAT repo's `bro`, or nothing
-    await runSlash(
-      cliArgv([m.name, ...args]),
-      turn.cwd ?? process.cwd(),
-      timeoutMs,
-      turn.signal,
-      chunk
-    );
+    // a name-level pass is not enough — sub/flag shapes that can
+    // never end inside a turn refuse in-band (the bounded siblings
+    // stay reachable)
+    const blocked = slashTurnBlocked(m.name, args);
+    if (blocked !== undefined) {
+      chunk(`bro acp: \`bro ${blocked}\` is an unbounded wait/loop — it cannot be a session turn`);
+      return { stopReason: 'end_turn' };
+    }
+    // the session's cwd — never the server's own: a session opened
+    // without one (load/resume/fork carry no cwd to stamp) has no
+    // repo to run in — refuse in-band rather than claim work inside
+    // the wrong project
+    if (turn.cwd === undefined) {
+      chunk(
+        'bro acp: this session carries no working directory (session/new.cwd) — slash commands need a session opened in a repo'
+      );
+      return { stopReason: 'end_turn' };
+    }
+    await runSlash(cliArgv([m.name, ...args]), turn.cwd, timeoutMs, turn.signal, chunk);
     return { stopReason: 'end_turn' };
   };
 }
@@ -348,7 +437,15 @@ export function acpHookSeam(): AcpProxySeam {
 
 /** The registry document `bro contract dump --json` emits — lazily
  *  imported so this module never pays the registry's init cost on the
- *  proxy path (and plugins.ts's own acp registration stays acyclic). */
+ *  proxy path (and plugins.ts's own acp registration stays acyclic).
+ *  It reflects the plugins loaded for the SERVER's cwd while slash
+ *  children load their own plugins from the session cwd — a session
+ *  opened in a repo with different `plugins:` config sees a set that
+ *  diverges both ways (an advertised name the child's registry lacks
+ *  fails in-band as bro's own usage error; a repo-local command the
+ *  server never loaded isn't advertised and falls through downstream).
+ *  Per-session contract dumps are a deliberate follow-up — the static
+ *  set is the documented v1 boundary. */
 async function contractDump(): Promise<ContractDump> {
   const { PLUGINS, GROUP_META } = await import('../plugins.ts');
   return buildDump(PLUGINS, GROUP_META);
