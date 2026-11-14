@@ -3463,7 +3463,7 @@ describe('the provider lane cap (spec bro-x601l)', () => {
    *  provider_cap cause token the wire's park classifier reads. The
    *  semantic check is the structured kind; `endsWith` pins the exact
    *  suffix, never a substring guess. */
-  const providerCapRefusal = (e: unknown): boolean =>
+  const providerCapRefusal = (e: unknown): e is SpawnError =>
     e instanceof SpawnError && e.kind === 'cap' && e.message.endsWith('— cause: provider_cap');
 
   test('fleet.providerCaps reaches ConductorConfig — the global layer only', () => {

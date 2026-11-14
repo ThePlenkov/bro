@@ -941,7 +941,7 @@ function connectorContract(b: BackendCase): void {
 
   if (b.name === 'native') {
     test('a provider cap claims each started kind once — starts shared with the spawned command are never double-counted (spec bro-x601l)', async () => {
-      const f = fx([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
       const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
       const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
       const prior = sessionPlanes();
