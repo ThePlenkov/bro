@@ -30,7 +30,7 @@
  * exit, or bad output degrades to no context / no gate / no re-prompt.
  * Nothing here throws into opencode. Spawns are async (server event loop).
  */
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -693,6 +693,22 @@ function parseSkill(markdown: string): { name?: string; description?: string } |
   };
 }
 
+/** Auto-discovered skills roots must look like BRO's tree before they
+ *  are registered — the ancestor walk-up can land on a foreign `skills/`
+ *  dir (e.g. opencode's own `~/.config/opencode/skills`), and registering
+ *  somebody else's skills under bro's name is worse than registering
+ *  none. `sdd` is bro's canonical skill — every shipped tree carries it.
+ *  An explicit `skillsDir` is the operator's choice and skips the check. */
+const BRO_SKILLS_SENTINEL = 'sdd';
+
+export function isBroSkillsRoot(root: string): boolean {
+  try {
+    return statSync(join(root, BRO_SKILLS_SENTINEL, 'SKILL.md')).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** The directories that may hold bro's skills, most specific first:
  *  an explicit option, the materialized sibling `skills/`, the npm
  *  package's `skills/`, then the checkout's `skills/`.
@@ -1134,7 +1150,13 @@ export async function collectBroSkills(options: PluginOptions | undefined): Prom
   const { readdirSync, readFileSync, statSync } = await import('node:fs');
   const out: BroSkill[] = [];
   const seen = new Set<string>();
+  const explicit = typeof options?.skillsDir === 'string' && options.skillsDir.trim() !== '';
   for (const root of skillRoots(options)) {
+    // auto-discovered roots must carry bro's sentinel skill — without
+    // it the walk-up found a foreign skills/ dir, not ours
+    if (!explicit && !isBroSkillsRoot(root)) {
+      continue;
+    }
     let entries: string[];
     try {
       if (!existsSync(root)) {
