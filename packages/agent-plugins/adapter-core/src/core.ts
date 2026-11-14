@@ -31,7 +31,7 @@
  *     takes the host's session down with it, and bro's policy is
  *     advisory everywhere except the stop gate.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,6 +81,51 @@ export const RUN_TIMEOUT_MS = 60_000;
  *  re-probing the npx rung on every keystroke would be worse than
  *  the outage. */
 export const RESOLVE_RETRY_MS = 60_000;
+
+/** The curated command family — first-class slash aliases for bro's
+ *  workflow verbs. `verb` is the CLI argv head; `name` is the slash
+ *  name, renamed to `bro:<name>` when the host owns it natively
+ *  (AGT-1 §command family — a host-native command always wins).
+ *  `/wtf` passes any args through untouched — the wtf routine owns
+ *  multilingual frustration input itself. */
+export const BRO_COMMANDS: ReadonlyArray<{
+  name: string;
+  verb: string;
+  description: string;
+}> = [
+  { name: 'act', verb: 'act', description: 'bro act — PR review gate, threads, resolve' },
+  {
+    name: 'wtf',
+    verb: 'wtf',
+    description: 'bro wtf — frustration → retrospect capture, any language',
+  },
+  {
+    name: 'retro',
+    verb: 'retrospect',
+    description: 'bro retrospect — learn + backlog review',
+  },
+  { name: 'learn', verb: 'learn', description: 'bro learn — lessons and backlog' },
+  {
+    name: 'drill',
+    verb: 'drill',
+    description: 'bro drill — deep research routine, scoped investigation',
+  },
+  {
+    name: 'judge',
+    verb: 'judge',
+    description: 'bro judge — typed decision on session state',
+  },
+  {
+    name: 'loop',
+    verb: 'loop',
+    description: 'bro loop — iterations with exit condition or formula',
+  },
+  {
+    name: 'goal',
+    verb: 'goal',
+    description: 'bro goal — goal tracking, hooks remind every turn',
+  },
+];
 
 /**
  * `node` on PATH, not process.execPath — a host may ship as a compiled

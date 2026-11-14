@@ -35,24 +35,24 @@
  * local flag), and the driver passes that back to bro so bro's own
  * one-shot rule decides.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import {
-  HOOK_TIMEOUT_MS,
-  REHYDRATION_TIMEOUT_MS,
-  RESOLVE_RETRY_MS,
-  RUN_TIMEOUT_MS,
+  type BoardStatus,
+  BRO_COMMANDS,
   boardLines,
   broEnabled,
+  type Command,
   callHook,
   contextOf,
   createCommandResolver,
+  HOOK_TIMEOUT_MS,
+  type HookControl,
   hookEmitEnv,
-  resolveCommand,
+  REHYDRATION_TIMEOUT_MS,
+  RESOLVE_RETRY_MS,
+  RUN_TIMEOUT_MS,
   statusCrumb,
   statusJson,
-  type BoardStatus,
-  type Command,
-  type HookControl,
 } from './core.ts';
 
 export { RESOLVE_RETRY_MS, RUN_TIMEOUT_MS };
@@ -105,6 +105,10 @@ export interface BroHostShape<Ctx extends BroContext> {
   notify(ctx: Ctx, text: string, level: 'info' | 'warning' | 'error'): void;
   /** Optional argument completion for /bro. */
   argumentCompletions?(prefix: string): Array<{ label: string; value: string }> | null;
+  /** Slash commands the host already owns natively — a bro family
+   *  alias never shadows them; collisions register as `bro:<name>`
+   *  instead (AGT-1 §command family). */
+  nativeCommands?: readonly string[];
   /** Build the result that refuses to stop, with the reason. */
   refuseStop(reason: string): unknown;
   /** Whether the stop event says the host already refused once. */
@@ -172,6 +176,7 @@ export function sharedBinding<Ctx extends BroContext>(
       return { content };
     },
     npxPin: host.npxPin,
+    nativeCommands: host.nativeCommands,
     hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin }),
   };
 }
@@ -221,6 +226,10 @@ export interface BroHostBinding<Ctx = unknown> {
   stopAborted?(event: unknown): boolean;
   /** The prompt behind a turn. */
   promptOf(event: unknown): string;
+  /** Slash commands the host already owns natively — a bro family
+   *  alias never shadows them; collisions register as `bro:<name>`
+   *  instead (AGT-1 §command family). */
+  nativeCommands?: readonly string[];
   /** Build the result that injects a hidden context message. */
   inject(text: string): unknown;
   /** Build the result that appends text to a tool result. */
@@ -622,6 +631,22 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   const run = async (args: string[], cwd: string): Promise<BroRunResult> =>
     runBro(await command(), args, cwd);
 
+  /** `/bro <args>` and every family alias share one dispatch: split,
+   *  run, surface. Bare family names never reach here — they always
+   *  carry their verb. */
+  const dispatchArgs = async (argv: string[], ctx: Ctx): Promise<void> => {
+    const result = await run(argv, host.cwd(ctx));
+    const text = (result.stdout || result.stderr).trim();
+    if (result.code !== 0) {
+      host.notify(ctx, `bro ${argv.join(' ')}: exit ${result.code}`, 'error');
+      return;
+    }
+    api.sendMessage(
+      { customType: 'bro-output', content: `$ bro ${argv.join(' ')}\n${text}`, display: true },
+      { triggerTurn: false }
+    );
+  };
+
   /** The shared surfaces. `/bro` is a thin passthrough — `bro
    *  act|next|fleet|drill` reachable without leaving the editor — and
    *  `bro_status` hands the model the same board JSON the widget
@@ -638,18 +663,31 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
         host.notify(ctx, 'bro: board refreshed', 'info');
         return;
       }
-      const result = await run(trimmed.split(/\s+/), host.cwd(ctx));
-      const text = (result.stdout || result.stderr).trim();
-      if (result.code !== 0) {
-        host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, 'error');
-        return;
-      }
-      api.sendMessage(
-        { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
-        { triggerTurn: false }
-      );
+      await dispatchArgs(trimmed.split(/\s+/), ctx);
     },
   });
+
+  /* Command family — the curated verbs as first-class slash commands.
+   * A host-native command of the same name always wins: the alias then
+   * registers under `bro:<name>` instead of shadowing it. */
+  const natives = new Set(host.nativeCommands ?? []);
+  for (const c of BRO_COMMANDS) {
+    const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+    api.registerCommand(name, {
+      description: c.description,
+      getArgumentCompletions: host.argumentCompletions,
+      async handler(args: string, ctx: Ctx) {
+        const argv = [
+          c.verb,
+          ...args
+            .trim()
+            .split(/\s+/)
+            .filter(a => a !== ''),
+        ];
+        await dispatchArgs(argv, ctx);
+      },
+    });
+  }
 
   api.registerTool({
     name: 'bro_status',

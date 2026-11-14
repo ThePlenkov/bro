@@ -49,13 +49,13 @@
  */
 import {
   BOARD_KEY,
+  type BroHostBinding,
   createBroDriver,
   sharedBinding,
-  type BroHostBinding,
 } from '@broject/adapter-core/host';
-import { installModeBridges, type BoardSnapshot } from './omp-modes.ts';
 import type { OmpApi, OmpContext } from './omp-api.ts';
 import { installOmpSupervision, OMP_SUPERVISION_HOST } from './omp-supervision.ts';
+import { type BoardSnapshot, installModeBridges } from './omp-modes.ts';
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
@@ -73,6 +73,12 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
     ...sharedBinding<OmpContext>({
       kind: 'omp',
       npxPin: NPX_PIN,
+      // omp owns `/goal` (goal mode lifecycle) and `/loop` (count/
+      // duration/--while/--until iteration) natively — verified against
+      // the 18.x binary's usage strings. The bro aliases for those two
+      // register as `bro:goal`/`bro:loop`; the rest of the family gets
+      // bare names (no native `/act|wtf|retro|learn|drill|judge` found).
+      nativeCommands: ['goal', 'loop'],
       stop: 'session_stop',
       on(event, handler) {
         pi.on(event, handler);
