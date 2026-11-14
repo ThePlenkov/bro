@@ -181,6 +181,32 @@ connection shape (`api`: `baseUrl` + `apiKeyEnv`/`apiKeyCommand` +
 | `maxDecisionsPerRun`            | `50`    | Fresh `decide()` calls per invocation                                                               |
 | `baseUrl` / `apiKeyEnv` / `llm` | unset   | Legacy single-backend shape — synthesized into anonymous `api` providers with a deprecation warning |
 
+### `serve`
+
+The `bro serve`/`bro provider serve` host's own knobs. Two planes read it:
+the acp conductor (`backend`/`providers`) and the `/v1/*` byte proxy
+(`upstream`/`apiKeyEnv`) — config owns the URL and the credential's
+_env-name_; env stays the override + secret channel.
+
+| Key                               | Default                     | What                                                                                                                                                                                          |
+| --------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend`                         | unset                       | Named `acp` provider entry the conductor wires — `BRO_PROVIDER_BACKEND` wins over config                                                                                                      |
+| `providers`                       | unset                       | Other acp entries the gateway routes to by model name — array of entry names or route→entry map                                                                                               |
+| `upstream`                        | `https://api.anthropic.com` | Messages-API base the byte proxy forwards to — `BRO_PROVIDER_UPSTREAM` overrides                                                                                                              |
+| `apiKeyEnv`                       | unset                       | NAMES the env var holding the real upstream credential (SCREAMING_SNAKE) — `BRO_PROVIDER_API_KEY`/`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` override it. The key itself never sits in config |
+| `fastModel`                       | unset                       | Upstream model id the conductor fast lane rewrites `body.model` to — `BRO_PROVIDER_FAST_MODEL` overrides                                                                                      |
+| `fastLane`                        | `true`                      | `false` returns every `/v1/messages` call to the session lane — `BRO_PROVIDER_FAST_LANE=off\|0\|false` also disables                                                                          |
+| `idleReleaseMs`                   | `300000`                    | Idle window before a pooled acp session releases — `0` disables                                                                                                                               |
+| `client`                          | unset                       | `{ "<name>": { settingsPath, command } }` — where `bro router client` writes the model block and which binary launch execs                                                                    |
+| `acpCwd`                          | unset                       | Workspace pin for acp sessions when the listener has no repo root (host gateway) — `BRO_PROVIDER_ACP_CWD` overrides                                                                           |
+| `acpMaxOpens` / `acpMaxAbandoned` | `8` / `32`                  | Dead-loop budgets — sessions opened without a completed turn, per conversation and per peer (`BRO_PROVIDER_ACP_MAX_OPENS`/`_MAX_ABANDONED` win)                                               |
+| `acpStallMs`                      | `300000`                    | Silence bound per acp turn — `0` disables the watchdog                                                                                                                                        |
+| `acpCooldownMs`                   | `60000`                     | Provider-wall cooldown — how long a lane stays closed after the account refused; `0` disables                                                                                                 |
+
+`bro provider serve` reads this section at the **global** layer only —
+a repo's committed config never redirects the machine-wide listener's
+upstream. Repo-scoped `bro serve` reads the full merge.
+
 ### `guard`
 
 | Key           | Default | What                                                                                           |
