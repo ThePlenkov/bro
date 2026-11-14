@@ -356,12 +356,24 @@ describe('bro acp — runSlash', () => {
       const pid = Number(readFileSync(pidFile, 'utf8').trim());
       assert.ok(pid > 0, `expected a grandchild pid, got ${readFileSync(pidFile, 'utf8')}`);
       // group-killed already — ESRCH (or EPERM-free throw) proves the
-      // descendant is gone, not just the sh that forked it
+      // descendant is gone, not just the sh that forked it.
+      //
+      // The kill is ASYNCHRONOUS: the descendant can still answer
+      // kill(0) for a moment after the group signal (dying, not yet
+      // reaped). Poll briefly — the question is whether the descendant
+      // is gone, not whether it was gone the instant the shell exited.
+      // (This test was red on main under load — the check was a
+      // single-shot race, not a defect in the group kill.)
       let alive = true;
-      try {
-        process.kill(pid, 0);
-      } catch {
-        alive = false;
+      const deadline = Date.now() + 5_000;
+      while (alive && Date.now() < deadline) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          alive = false;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 25));
       }
       assert.equal(alive, false, `grandchild pid ${pid} survived the group kill`);
     } finally {
