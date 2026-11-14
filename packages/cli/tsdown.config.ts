@@ -80,5 +80,37 @@ export default defineConfig({
         }
       },
     },
+    {
+      // kilo/pi/omp ship the same way: `bro plugins install <client>`
+      // resolves <pkg>/dist/plugins/<client>/bro/bro.ts when no
+      // checkout or agent-plugins tree is around (plugins.ts
+      // kiloArtifact/piArtifact/ompArtifact). Emit the whole bro/
+      // dir so sibling modules (omp's modes/permission hook) travel too.
+      name: 'bro-file-adapters',
+      generateBundle() {
+        for (const client of ['kilo', 'pi', 'omp']) {
+          const dir = `${root}/plugins/${client}/bro`;
+          if (!existsSync(dir)) {
+            continue;
+          }
+          const walk = (d: string): string[] =>
+            readdirSync(d, { withFileTypes: true }).flatMap(e =>
+              e.isSymbolicLink()
+                ? []
+                : e.isDirectory()
+                  ? walk(`${d}/${e.name}`)
+                  : [`${d}/${e.name}`]
+            );
+          for (const source of walk(dir)) {
+            const rel = source.slice(root.length + 1);
+            this.emitFile({
+              type: 'asset',
+              fileName: rel,
+              source: readFileSync(source),
+            });
+          }
+        }
+      },
+    },
   ],
 });
