@@ -34,9 +34,9 @@ import {
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
+  type ProviderCapLane,
   type ReservationLane,
   type SessionPlane,
-  type SessionQuota,
 } from './session-planes.ts';
 
 /** One kind's budget, as the policy sees it. */
@@ -179,13 +179,17 @@ export function releaseSessionStart(paths: string[]): void {
 }
 
 /** The dir a kind's in-flight starts are claimed in — the same files
- *  the admission counts, so every call site shares ONE budget. */
+ *  the admission counts, so every call site shares ONE budget. The
+ *  `agents.<kind>.reservationsDir` override reads whether or not a
+ *  quota lane is armed — the dir is bro's own bookkeeping (spec
+ *  bro-x601l: a provider cap can arm a census a quota never armed). */
 export function sessionReservationsDir(
   kind: string,
   agents: Record<string, Record<string, unknown>> | undefined
 ): string {
-  const quota = sessionQuotaConfig(agents, kind);
-  return sessionSlotsDir(kind, quota?.reservationsDir);
+  const bag = agents?.[kind];
+  const raw = bag?.['reservationsDir'];
+  return sessionSlotsDir(kind, typeof raw === 'string' && raw.trim() !== '' ? raw : undefined);
 }
 
 /** Claim the slots a start is about to take.
@@ -207,11 +211,14 @@ export function reserveSessionStart(claim: {
    *  fleet's claims, so an interactive start never eats the fleet's
    *  share. */
   lane?: ReservationLane;
+  /** The dir override — the caller's own census dir (a provider cap's
+   *  caller-scoped override). Defaults to the kind's reservations dir. */
+  dir?: string;
 }): { paths: string[]; fresh: boolean } {
   if (claim.count <= 0) {
     return { paths: [], fresh: false };
   }
-  const dir = sessionReservationsDir(claim.kind, claim.agents);
+  const dir = claim.dir ?? sessionReservationsDir(claim.kind, claim.agents);
   const lane = claim.lane ?? 'interactive';
   /** The slots THIS call wrote — the only ones it may ever release.
    *  A path that already existed belongs to an earlier event of the
@@ -267,12 +274,12 @@ export interface SessionStartAdmission {
 export function admitSessionStart(
   args: SessionStartAdmissionArgs
 ): SessionStartAdmission | undefined {
-  const quota = admissionQuota(args);
-  if (quota === undefined) {
+  const gate = admissionGate(args);
+  if (gate === undefined) {
     return undefined;
   }
   return withFileLock(
-    sessionAdmissionLock(args.plane.kind, quota.reservationsDir),
+    sessionAdmissionLock(args.plane.kind, gate.resDir),
     () => admissionSection(args),
     { label: `${args.plane.kind} session cap admission`, waitMs: args.waitMs }
   );
@@ -286,12 +293,12 @@ export function admitSessionStart(
 export async function admitSessionStartAsync(
   args: SessionStartAdmissionArgs
 ): Promise<SessionStartAdmission | undefined> {
-  const quota = admissionQuota(args);
-  if (quota === undefined) {
+  const gate = admissionGate(args);
+  if (gate === undefined) {
     return undefined;
   }
   const release = await acquireFileLockYielding(
-    sessionAdmissionLock(args.plane.kind, quota.reservationsDir),
+    sessionAdmissionLock(args.plane.kind, gate.resDir),
     { label: `${args.plane.kind} session cap admission`, waitMs: args.waitMs }
   );
   try {
@@ -318,45 +325,190 @@ export interface SessionStartAdmissionArgs {
    *  conductor's retained conversations riding one shared peer —
    *  counted with the host's inside the lock. */
   extraLive?: number;
+  /** the provider's lane cap — `fleet.providerCaps.<provider>` (spec
+   *  bro-x601l): judged on this kind's census inside the same section,
+   *  the outer gate ahead of the kind quota's own lanes. */
+  providerCap?: ProviderCapLane;
   /** lock wait bound — a hook passes a small one (never stalls). */
   waitMs?: number;
 }
 
 /** The pre-lock eligibility check both admission forms share — the
- *  plane must claim the command and a cap must be armed. */
-function admissionQuota(args: SessionStartAdmissionArgs): SessionQuota | undefined {
+ *  plane must claim the command and a cap must be armed: a kind quota
+ *  OR a provider cap (a provider cap alone serializes too — spec
+ *  bro-x601l). Returns the reservations-dir override the mutex key
+ *  resolves against. */
+function admissionGate(args: SessionStartAdmissionArgs): { resDir?: string } | undefined {
   const plane = args.plane;
   if (plane.startsSessions === undefined || plane.startsSessions(args.command) <= 0) {
     return undefined;
   }
-  return sessionQuotaConfig(args.agents, plane.kind);
+  const quota = sessionQuotaConfig(args.agents, plane.kind);
+  if (quota === undefined && args.providerCap === undefined) {
+    return undefined;
+  }
+  return { resDir: args.providerCap?.reservationsDir ?? quota?.reservationsDir };
+}
+
+/** The provider-cap refusal line — undefined when the lane fits. The
+ *  wording names the provider entry, the numbers, the knob, and the
+ *  `provider_cap` cause token every wait/park classifier looks for. */
+export function providerCapRefusal(
+  lane: ProviderCapLane,
+  live: number,
+  starts: number
+): string | undefined {
+  if (lane.cap <= 0 || starts <= 0 || live + starts <= lane.cap) {
+    return undefined;
+  }
+  return (
+    `provider '${lane.provider}' lane cap reached — ${live} live + ${starts} starting ` +
+    `> ${lane.cap} (fleet.providerCaps.${lane.provider} in the global bro config) ` +
+    `— cause: provider_cap`
+  );
 }
 
 /** The locked section: re-count inside the mutex (every earlier claim
- *  is already in it), claim, then judge. */
+ *  is already in it), claim, then judge — the provider cap first (the
+ *  outer account gate), then the kind quota's own lanes. */
 function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmission | undefined {
   const plane = args.plane;
   const view = capViewFor(plane, args.command, args.agents, args.workerEnv);
-  if (view === undefined) {
+  const providerCap = args.providerCap;
+  if (view === undefined && providerCap === undefined) {
     return undefined;
   }
+  const starts = view?.starts ?? plane.startsSessions?.(args.command) ?? 0;
+  // the census dir — the providerCap's caller-scoped override when the
+  // caller names one (a conductor's test seam), else the kind's own
+  const resDir =
+    providerCap?.reservationsDir !== undefined
+      ? sessionSlotsDir(plane.kind, providerCap.reservationsDir)
+      : sessionReservationsDir(plane.kind, args.agents);
+  // the census the provider cap judges — the kind's live count plus
+  // every claim held in the dir the claim lands in (the same figure
+  // the quota view carries when the dirs coincide)
+  const census =
+    providerCap?.reservationsDir === undefined && view !== undefined
+      ? view.live
+      : plane.countLive(args.agents?.[plane.kind] ?? {}, args.workerEnv) +
+        countSessionReservations(resDir);
   // claim first — a repeat event's slot is already inside the
   // count, so its start is judged once (starts: 0), never twice
   const claim = reserveSessionStart({
-    kind: view.kind,
+    kind: plane.kind,
     agents: args.agents,
     key: args.key,
-    count: view.starts,
+    count: starts,
     lane: args.lane,
+    dir: resDir,
   });
-  const refusal = sessionCapRefusal({
-    ...view,
-    live: view.live + (args.extraLive ?? 0),
-    starts: claim.fresh ? view.starts : 0,
-  });
+  const claimedStarts = claim.fresh ? starts : 0;
+  const extra = args.extraLive ?? 0;
+  const refusal =
+    (providerCap === undefined
+      ? undefined
+      : providerCapRefusal(providerCap, census + extra, claimedStarts)) ??
+    (view === undefined
+      ? undefined
+      : sessionCapRefusal({ ...view, live: view.live + extra, starts: claimedStarts }));
   if (refusal !== undefined) {
     releaseSessionStart(claim.paths);
     return { paths: [], fresh: claim.fresh, refusal };
   }
   return { paths: claim.paths, fresh: claim.fresh };
+}
+
+/** The sanitized slots-dir kind a provider-namespaced census lives
+ *  under — a providers entry key can carry characters a dir path
+ *  cannot, so the namespace is `provider-<key>` with unsafe chars
+ *  folded to '-'. */
+export function providerSlotsKind(provider: string): string {
+  return `provider-${provider.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+}
+
+/** The provider-namespaced census dir — the claims every surface's
+ *  session opens on this provider entry hold, host-shared like the
+ *  kind dirs. */
+export function providerSlotsDir(provider: string, resDir?: string): string {
+  return sessionSlotsDir(providerSlotsKind(provider), resDir);
+}
+
+/** The opts `admitProviderSlot`/`admitProviderSlotAsync` share. */
+export interface ProviderSlotOpts {
+  /** the claim key — a spawn's agentId, a request's per-call id. */
+  key: string;
+  lane?: ReservationLane;
+  /** lock wait bound. */
+  waitMs?: number;
+}
+
+/** The provider cap's locked section — census inside the mutex, claim,
+ *  then judge. `countLanes` runs INSIDE the lock: the caller's own
+ *  census (the spawn path's locked registry walk) is the numerator the
+ *  reservations add to. */
+function providerSlotSection(
+  lane: ProviderCapLane,
+  countLanes: () => number,
+  opts: ProviderSlotOpts
+): SessionStartAdmission {
+  const dir = providerSlotsDir(lane.provider, lane.reservationsDir);
+  const live = countLanes() + countSessionReservations(dir);
+  const claim = reserveSessionStart({
+    kind: providerSlotsKind(lane.provider),
+    agents: undefined,
+    key: opts.key,
+    count: 1,
+    lane: opts.lane,
+    dir,
+  });
+  const refusal = providerCapRefusal(lane, live, claim.fresh ? 1 : 0);
+  if (refusal !== undefined) {
+    releaseSessionStart(claim.paths);
+    return { paths: [], fresh: claim.fresh, refusal };
+  }
+  return { paths: claim.paths, fresh: claim.fresh };
+}
+
+/** The provider cap admission for a provider NO session plane counts
+ *  (spec bro-x601l): serialized on the provider-namespaced mutex, the
+ *  census the caller proves plus every claim held. The caller owns the
+ *  census — `countLanes` must count the lanes this cap cannot see
+ *  through claims (registry occupants at the spawn path; `() => 0`
+ *  when claims cover everything, like a conductor's retained
+ *  sessions). Returns undefined when the cap is not armed (cap <= 0). */
+export function admitProviderSlot(
+  lane: ProviderCapLane,
+  countLanes: () => number,
+  opts: ProviderSlotOpts
+): SessionStartAdmission | undefined {
+  if (lane.cap <= 0) {
+    return undefined;
+  }
+  return withFileLock(
+    sessionAdmissionLock(providerSlotsKind(lane.provider), lane.reservationsDir),
+    () => providerSlotSection(lane, countLanes, opts),
+    { label: `${lane.provider} provider cap admission`, waitMs: opts.waitMs }
+  );
+}
+
+/** `admitProviderSlot`'s event-loop twin — the yielding lock wait the
+ *  conductor's request path needs. */
+export async function admitProviderSlotAsync(
+  lane: ProviderCapLane,
+  countLanes: () => number,
+  opts: ProviderSlotOpts
+): Promise<SessionStartAdmission | undefined> {
+  if (lane.cap <= 0) {
+    return undefined;
+  }
+  const release = await acquireFileLockYielding(
+    sessionAdmissionLock(providerSlotsKind(lane.provider), lane.reservationsDir),
+    { label: `${lane.provider} provider cap admission`, waitMs: opts.waitMs }
+  );
+  try {
+    return providerSlotSection(lane, countLanes, opts);
+  } finally {
+    release();
+  }
 }

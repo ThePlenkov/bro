@@ -292,6 +292,11 @@ interface Fixture {
   db: string;
   env: AgentConnectorEnv;
   prevPath: string;
+  /** XDG_DATA_HOME before the fixture overwrote it — restored, never
+   *  deleted: the session-slot ledgers live under it, and one host dir
+   *  shared across tests is cross-test census pollution (spec
+   *  bro-x601l's provider caps count it machine-wide). */
+  prevXdgDataHome?: string;
   /** TMUX_FAKE_HOME before the fixture overwrote it — restored, never
    *  deleted, so a pre-set runner env survives the test. */
   prevTmuxFakeHome?: string;
@@ -343,6 +348,10 @@ function fixture(
     agents['docker'] = { command, image: 'img:test' };
   }
   const prevPath = process.env.PATH ?? '';
+  // the session-slot census dir — per-fixture so held claims never
+  // leak between tests (or into the operator's own slots dir)
+  const prevXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(root, 'xdg');
   const prevFakeBdDb = process.env.FAKE_BD_DB;
   const prevBeadsActor = process.env.BEADS_ACTOR;
   // ambient repo/store pins (GIT_DIR, BEADS_DIR, BRO_*) would redirect
@@ -368,6 +377,7 @@ function fixture(
     db,
     env: { agents, connectors: {}, spawn: { externalBlock: false, externalIdleSec: 480 } },
     prevPath,
+    prevXdgDataHome,
     prevTmuxFakeHome,
     prevDockerFakeHome,
     prevFakeBdDb,
@@ -399,6 +409,11 @@ function cleanup(fx: Fixture): void {
     // no readable registry — nothing spawned
   }
   process.env.PATH = fx.prevPath;
+  if (fx.prevXdgDataHome === undefined) {
+    delete process.env.XDG_DATA_HOME;
+  } else {
+    process.env.XDG_DATA_HOME = fx.prevXdgDataHome;
+  }
   if (fx.prevTmuxFakeHome === undefined) {
     delete process.env.TMUX_FAKE_HOME;
   } else {
@@ -812,6 +827,111 @@ function connectorContract(b: BackendCase): void {
       await c.stop(info.id);
     } finally {
       rmSync(lockDir, { recursive: true, force: true });
+      cleanup(f);
+    }
+  });
+
+  test('fleet.providerCaps refuses a spawn at the provider lane ceiling — registry census (spec bro-x601l)', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    // 'local' is a cli provider whose command no session plane counts —
+    // the provider census falls back to the registry's live occupants
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        [b.name]: { ...f.env.agents[b.name], provider: 'local' },
+      },
+      providers: { local: { type: 'cli' as const, command: 'node {promptFile}' } },
+      fleet: { maxConcurrent: 0, providerCaps: { local: 1 } },
+    };
+    try {
+      const c = b.make({ dir: f.main }, env);
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(first.state, 'running');
+      // the running worker holds the provider's one lane — the next
+      // spawn refuses 'cap' (a park, never an error-burn) and names
+      // provider_cap as the cause
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          /provider 'local' lane cap reached.*fleet\.providerCaps\.local.*provider_cap/.test(
+            err.message
+          )
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
+      await c.stop(first.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test("fleet.providerCaps counts the provider's kind census — a plane-covered entry (spec bro-x601l)", async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'));
+    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'));
+    const procDir = devinProc();
+    // one live devin lane on the host — 'devacp' rides the devin CLI,
+    // so its provider cap counts the devin census: session, worker,
+    // acp peer — the plane sees them all
+    writeFileSync(join(lockDir, 'other.lock'), String(process.pid));
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        [b.name]: { ...f.env.agents[b.name], provider: 'devacp' },
+        devin: { lockDir, procDir, reservationsDir },
+      },
+      providers: { devacp: { type: 'acp' as const, command: 'devin acp' } },
+      fleet: { maxConcurrent: 0, providerCaps: { devacp: 1 } },
+    };
+    try {
+      const c = b.make({ dir: f.main }, env);
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          /provider 'devacp' lane cap reached — 1\/1 live lanes.*provider_cap/.test(err.message)
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true });
+      rmSync(reservationsDir, { recursive: true, force: true });
+      rmSync(procDir, { recursive: true, force: true });
+      cleanup(f);
+    }
+  });
+
+  test('a provider cap below the ceiling admits and its slot joins the census', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    // cap 2 on a plane-less provider: the landed worker's registry row
+    // counts 1, so a second spawn fits — a third would not
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        [b.name]: { ...f.env.agents[b.name], provider: 'local' },
+      },
+      providers: { local: { type: 'cli' as const, command: 'node {promptFile}' } },
+      fleet: { maxConcurrent: 0, providerCaps: { local: 2 } },
+    };
+    try {
+      const c = b.make({ dir: f.main }, env);
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)'));
+      assert.equal(first.state, 'running');
+      assert.equal(second.state, 'running');
+      await c.stop(first.id);
+      await c.stop(second.id);
+    } finally {
       cleanup(f);
     }
   });

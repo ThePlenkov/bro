@@ -58,7 +58,14 @@ import type {
   AcpRetainedSession,
   ProviderWireOpts,
 } from '@broject/providers';
-import { acpLinkPool, disposeQuiet, type ConductorConfig } from './serve-conductor.ts';
+import { LockTimeout, SpawnError } from '@broject/core';
+import {
+  acpLinkPool,
+  admitLaneCap,
+  admitLaneCapUnlocked,
+  disposeQuiet,
+  type ConductorConfig,
+} from './serve-conductor.ts';
 import { peerAttrs } from './peer.ts';
 
 /** A session one downstream connection owns — the retained upstream
@@ -77,6 +84,9 @@ interface BrokeredSession {
   /** The sweep's TTL + LRU cursor — touched on every hit so an idle
    *  session ages out but a working one doesn't. */
   lastSeen: number;
+  /** The provider-cap claims this session holds (spec bro-x601l) —
+   *  the lane's slot goes back when the session dies. */
+  releaseCap?: () => void;
 }
 
 /** Per-connection state — minted inside `buildAgent` so it is exactly
@@ -147,6 +157,11 @@ const DEAD_LOOP = -32003;
  *  retry-after the message names and comes back. */
 const COOLDOWN = -32004;
 
+/** The provider lane cap's refusal (spec bro-x601l) — the account's
+ *  session budget is full: a cap/quit verdict the client waits out and
+ *  retries, the same park class as the cooldown's. */
+const PROVIDER_CAP = -32005;
+
 /** A brokered turn is session-scoped — thinking, tool calls, subagents
  *  routinely run past the per-request `timeoutMs` the conductor gives
  *  one Messages-API call. The floor keeps a wedged agent from parking
@@ -179,6 +194,12 @@ function asWireError(err: unknown): never {
       // the refusal is the lane's own answer — the account is under a
       // wall, and no session was opened to hear it
       throw new RequestError(COOLDOWN, e.message);
+    }
+    if (e instanceof SpawnError && e.kind === 'cap') {
+      // the provider lane cap / session quota's own answer — a park,
+      // never a broker failure: the client retries on the schedule
+      // the refusal names
+      throw new RequestError(PROVIDER_CAP, e.message);
     }
   }
   throw new RequestError(-32603, err instanceof Error ? err.message : String(err));
@@ -334,6 +355,7 @@ export function acpTransport(
     }
     sessions.delete(sid);
     sess.conn.sessions.delete(sid);
+    sess.releaseCap?.();
     disposeQuiet(sess.retained);
   };
 
@@ -405,6 +427,7 @@ export function acpTransport(
     for (const [sid, sess] of sessions) {
       sessions.delete(sid);
       sess.conn.sessions.delete(sid);
+      sess.releaseCap?.();
       disposeQuiet(sess.retained);
     }
     // the peer's churn died with it — the respawned child is a fresh
@@ -472,6 +495,7 @@ export function acpTransport(
     const prev = sessions.get(sid);
     if (prev === undefined) return;
     prev.conn.sessions.delete(sid);
+    prev.releaseCap?.();
     disposeQuiet(prev.retained);
   };
 
@@ -497,21 +521,39 @@ export function acpTransport(
       if (cooling !== undefined) {
         throw cooling;
       }
+      // the lane caps (spec bro-x601l + the kind quota) — the account's
+      // budget judges before the session opens: a refusal is the same
+      // park class as the cooldown's, and the claims ride the
+      // brokered session's lifecycle
+      let releaseCap: () => void;
+      try {
+        releaseCap = await admitLaneCap(cfg, `acp-${randomUUID()}`);
+      } catch (err) {
+        if (!(err instanceof LockTimeout)) {
+          throw err;
+        }
+        // the admission mutex outlived the wait — the same contention
+        // degrade the conductor runs: un-locked check+claim, never a
+        // silent bypass of an armed cap
+        releaseCap = admitLaneCapUnlocked(cfg, `acp-${randomUUID()}`);
+      }
       const peer = await pool.link();
-      const retained = await acpSessionRetain(
-        peer,
-        cfg.entry,
-        wireOpts,
-        Date.now() + cfg.timeoutMs,
-        {
+      let retained: AcpRetainedSession;
+      try {
+        retained = await acpSessionRetain(peer, cfg.entry, wireOpts, Date.now() + cfg.timeoutMs, {
           by,
           sessionRequest: params as NewSessionRequest,
           // the churn accounting (spec bro-b961a) — the session is
           // charged to the connection that opened it
           guard: { guard, scope: st.scope, peer: by, cooldown },
           stallMs: cfg.acpStallMs ?? 300_000,
-        }
-      );
+        });
+      } catch (err) {
+        // a session that never opened holds no lane — the claims go
+        // back before the error rides the wire
+        releaseCap();
+        throw err;
+      }
       // upstream reissues ids across a link death+respawn — a
       // colliding set must not leak the displaced handle (and the
       // old owner must not later close the NEW session under the
@@ -524,6 +566,7 @@ export function acpTransport(
         conn: st,
         busy: false,
         lastSeen: Date.now(),
+        releaseCap,
       };
       sessions.set(retained.sessionId, brokered);
       st.sessions.add(retained.sessionId);

@@ -27,7 +27,9 @@ import { join, resolve } from 'node:path';
 import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
 import {
+  admitProviderSlotAsync,
   admitSessionStartAsync,
+  countSessionReservations,
   estimateTokens,
   gitCommonDir,
   isIntegerIndexKey,
@@ -35,10 +37,16 @@ import {
   LockTimeout,
   MAX_TIMER_MS,
   planesStartingSessions,
+  providerCapRefusal,
+  providerSlotsDir,
+  providerSlotsKind,
   releaseSessionStart,
   reserveSessionStart,
+  sessionCapRefusal,
   sessionCapViews,
+  sessionReservationsDir,
   SpawnError,
+  type ProviderCapLane,
   type SessionStartAdmission,
 } from '@broject/core';
 import type {
@@ -68,7 +76,6 @@ import {
   otelSpan,
   toolPayload,
 } from '@broject/providers';
-import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
 import { peerAttrs } from './peer.ts';
 import { type CatalogModel, catalogModels } from './providers.ts';
 import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
@@ -134,6 +141,11 @@ export interface ConductorConfig {
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+  /** `fleet.providerCaps` — the account-wide lane caps (spec
+   *  bro-x601l), keyed by providers entry name. The conductor judges
+   *  its own lane's cap before a session opens, on the census the
+   *  entry's command resolves. Read once at startup like `agents`. */
+  providerCaps?: Record<string, number>;
   /** The dead-loop budgets (spec bro-b961a) — sessions opened and not
    *  completed, per conversation (maxOpens) and per peer
    *  (maxAbandoned). Absent = the defaults. */
@@ -485,6 +497,9 @@ export function conductorConfig(
     acpCooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
     idleReleaseMs: idleWindow(env, cfg.serve?.idleReleaseMs ?? 300_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
+    // the account-wide lane caps (spec bro-x601l) — global config only,
+    // the same map the spawn facade reads
+    providerCaps: cfg.fleet?.providerCaps,
     // the wall cooldown (spec bro-i6811) — ONE instance for the whole
     // conductor: the default lane and the brokered transport ride the
     // same account, so a wall that closed one must close the other.
@@ -1901,8 +1916,10 @@ function openaiTooLarge(req: IncomingMessage, res: ServerResponse): void {
 
 const AVAIL = /unavailable|timeout|timed out/i;
 /** Quota walls are their own wire class — the client retries on a
- *  schedule, never on a 5xx hunch. */
-const RATE = /rate.?limit|too many|quota|429/i;
+ *  schedule, never on a 5xx hunch. `provider_cap` is the same class:
+ *  a lane cap refusal parks the caller, it is never a server fault
+ *  (spec bro-x601l). */
+const RATE = /rate.?limit|too many|quota|provider_cap|429/i;
 
 /** text-char + image-wire token estimate — an image's true cost is
  *  dimension-based, not size-based; base64-length/4 is the rough wire
@@ -2137,55 +2154,101 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
  *  Fails CLOSED: a cap that cannot be established is not walked past.
  *  The refusal names the cap, and the conductor's failure mapping
  *  answers it with 429 (the message carries "quota"). */
-async function assertSessionCap(env: TurnEnv, claimKey: string): Promise<() => void> {
-  const command = env.cfg.entry.command;
+/** The lane's provider cap — `fleet.providerCaps.<backend>` armed on
+ *  the lane's own entry key (spec bro-x601l). The census is the
+ *  provider command's own: a plane-covered command counts the kind
+ *  census; a plane-less one counts the provider-namespaced claim
+ *  ledger every surface shares. */
+function laneProviderCap(cfg: ConductorConfig): ProviderCapLane | undefined {
+  const cap = cfg.providerCaps?.[cfg.backend];
+  if (typeof cap !== 'number' || !Number.isInteger(cap) || cap <= 0) {
+    return undefined;
+  }
+  return { provider: cfg.backend, cap };
+}
+
+/** The lane's full session admission — every capped plane the entry's
+ *  command claims PLUS the provider lane cap (spec bro-x601l), under
+ *  the same host-wide mutexes the spawn's admission takes. Shared by
+ *  the conductor's request path and the brokered `/api/v1/acp`
+ *  transport: a session opened on either surface draws on ONE budget.
+ *
+ *  Throws `SpawnError('cap')` on a refusal (the park class — the wire
+ *  maps it to 429), `SpawnError` of other kinds when the count cannot
+ *  be established, `LockTimeout` UNtranslated (the caller owns the
+ *  degrade), and the claim's own fs error. */
+export async function admitLaneCap(cfg: ConductorConfig, claimKey: string): Promise<() => void> {
+  const command = cfg.entry.command;
+  const providerCap = laneProviderCap(cfg);
   // the serialized check+claim — under the kind's OWN admission mutex,
   // the same lock the spawn's admission takes, so a request burst and
   // a fleet spawn share ONE budget. The wait is the yielding form —
   // the sync admission's Atomics.wait would park the conductor's one
   // event loop for the whole contention, stalling every request,
   // timer, and stream behind it.
-  // EVERY capped plane claiming the command is judged: a refusal on a
-  // later plane still refuses the request, and the claims earlier
-  // planes already took are released — a refused request opens
-  // nothing, so it may hold no slot (the guard's sessionCapVerdict
-  // takes the same shape).
   const admissions: SessionStartAdmission[] = [];
   let refusal: string | undefined;
-  try {
-    for (const plane of planesStartingSessions(command)) {
-      const admission = await admitSessionStartAsync({
-        plane,
-        command,
-        agents: env.cfg.agents,
-        key: claimKey,
-        // the retained conversations the plane cannot see — they ride
-        // one shared peer — count with the host's inside the lock
-        extraLive: env.sessions.size,
-        waitMs: CAP_LOCK_WAIT_MS,
-      });
-      if (admission === undefined) {
-        continue;
-      }
+  const planes = planesStartingSessions(command);
+  for (const plane of planes) {
+    const admission = await admitSessionStartAsync({
+      plane,
+      command,
+      agents: cfg.agents,
+      key: claimKey,
+      providerCap,
+      waitMs: CAP_LOCK_WAIT_MS,
+    });
+    if (admission === undefined) {
+      continue;
+    }
+    if (admission.refusal !== undefined) {
+      refusal = admission.refusal;
+      break;
+    }
+    admissions.push(admission);
+  }
+  // a provider NO plane counts still gates (spec bro-x601l): the claim
+  // ledger is its whole census — the lane's held claims are already
+  // inside it, so the caller's own count adds nothing
+  if (refusal === undefined && planes.length === 0 && providerCap !== undefined) {
+    const admission = await admitProviderSlotAsync(providerCap, () => 0, {
+      key: claimKey,
+      waitMs: CAP_LOCK_WAIT_MS,
+    });
+    if (admission !== undefined) {
       if (admission.refusal !== undefined) {
         refusal = admission.refusal;
-        break;
+      } else {
+        admissions.push(admission);
       }
-      admissions.push(admission);
     }
-  } catch (err) {
+  }
+  if (refusal !== undefined) {
     releaseSessionStart(admissions.flatMap(a => a.paths));
+    throw new SpawnError(refusal, 'cap');
+  }
+  return claimRelease(admissions.flatMap(a => a.paths));
+}
+
+async function assertSessionCap(env: TurnEnv, claimKey: string): Promise<() => void> {
+  try {
+    return await admitLaneCap(env.cfg, claimKey);
+  } catch (err) {
     if (err instanceof LockTimeout) {
       // the mutex outlived the wait — contention is not a reason to
       // refuse a request; the un-locked check+claim still enforces
-      return assertSessionCapUnlocked(env, claimKey);
+      return admitLaneCapUnlocked(env.cfg, claimKey);
     }
     if (err instanceof SpawnError) {
+      if (err.kind === 'cap') {
+        // the refusal itself — the wire's 429 class
+        throw new Error(err.message);
+      }
       // the count could not be established — fail closed, with the
       // reason the operator needs (a quota that cannot be verified is
       // not walked past)
       throw new Error(
-        `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+        `bro conductor: the session cap could not be established (count unavailable) — ${err.message}`
       );
     }
     // a slot the ACP surface cannot claim refuses the request too — a
@@ -2195,11 +2258,6 @@ async function assertSessionCap(env: TurnEnv, claimKey: string): Promise<() => v
       `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
     );
   }
-  if (refusal !== undefined) {
-    releaseSessionStart(admissions.flatMap(a => a.paths));
-    throw new Error(refusal);
-  }
-  return claimRelease(admissions.flatMap(a => a.paths));
 }
 
 /** The claim's release — the slot this request holds, given back when
@@ -2224,11 +2282,12 @@ function claimRelease(paths: string[]): () => void {
 const CAP_LOCK_WAIT_MS = 5_000;
 
 /** The un-locked check+claim — the path the conductor ran before the
- *  admission mutex serialized it, kept as the contention fallback. */
-function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): () => void {
+ *  admission mutex serialized it, kept as the contention fallback on
+ *  every caller of `admitLaneCap`. */
+export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): () => void {
   let views;
   try {
-    views = sessionCapViews(env.cfg.entry.command, env.cfg.agents);
+    views = sessionCapViews(cfg.entry.command, cfg.agents);
   } catch (err) {
     // the count could not be established — fail closed, with the reason
     // the operator needs (a quota that cannot be verified is not walked
@@ -2237,28 +2296,87 @@ function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): () => void {
       `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
     );
   }
+  const providerCap = laneProviderCap(cfg);
   const view = views[0];
-  // in-flight opens still inside their claim's TTL are already counted
-  // — their reservation sits in view.live; only an open that outlived
-  // its claim is added here (fresh claims double-count, #926 review)
-  const refusal = conductorSessionRefusal(
-    view,
-    env.sessions.size,
-    pendingOpensBeyondClaim(env.pendingOpens),
-    view?.starts ?? 1
-  );
+  // the provider cap's census — the same arithmetic the locked section
+  // runs (spec bro-x601l): every claiming plane's own count plus the
+  // claims held in its dir; a command no plane claims counts the
+  // provider-namespaced ledger alone
+  const providerLive = (() => {
+    if (providerCap === undefined) {
+      return 0;
+    }
+    const planes = planesStartingSessions(cfg.entry.command);
+    if (planes.length === 0) {
+      return countSessionReservations(
+        providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
+      );
+    }
+    return planes.reduce(
+      (sum, plane) =>
+        sum +
+        plane.countLive(cfg.agents[plane.kind] ?? {}) +
+        countSessionReservations(sessionReservationsDir(plane.kind, cfg.agents)),
+      0
+    );
+  })();
+  // the kind quota's own verdict — view.live already carries every
+  // held claim: a retained conversation's stale claim counts while
+  // this process lives (spec bro-x601l), so sessions.size and the
+  // pending opens' marks must NOT be added again the way TTL-only
+  // claims required
+  const refusal =
+    (providerCap === undefined
+      ? undefined
+      : providerCapRefusal(providerCap, providerLive, view?.starts ?? 1)) ??
+    (view === undefined ? undefined : sessionCapRefusal(view));
   if (refusal !== undefined) {
-    throw new Error(refusal);
+    // the same refusal class the locked section throws — the wire
+    // reads 'cap' as the park verdict either path takes
+    throw new SpawnError(refusal, 'cap');
   }
   if (view !== undefined) {
     try {
       const { paths } = reserveSessionStart({
         kind: view.kind,
-        agents: env.cfg.agents,
+        agents: cfg.agents,
         key: claimKey,
         count: view.starts,
       });
       return claimRelease(paths);
+    } catch (err) {
+      throw new Error(
+        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+      );
+    }
+  }
+  // no kind view at all — a provider cap alone still claims, where the
+  // locked admission claims it: each claiming plane's kind dir, or the
+  // provider-namespaced ledger when no plane claims (spec bro-x601l)
+  if (providerCap !== undefined) {
+    const planes = planesStartingSessions(cfg.entry.command);
+    try {
+      if (planes.length === 0) {
+        const { paths } = reserveSessionStart({
+          kind: providerSlotsKind(providerCap.provider),
+          agents: undefined,
+          key: claimKey,
+          count: 1,
+          dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
+        });
+        return claimRelease(paths);
+      }
+      const held: string[] = [];
+      for (const plane of planes) {
+        const { paths } = reserveSessionStart({
+          kind: plane.kind,
+          agents: cfg.agents,
+          key: claimKey,
+          count: plane.startsSessions?.(cfg.entry.command) ?? 1,
+        });
+        held.push(...paths);
+      }
+      return claimRelease(held);
     } catch (err) {
       throw new Error(
         `bro conductor: the session slot could not be claimed — ${(err as Error).message}`

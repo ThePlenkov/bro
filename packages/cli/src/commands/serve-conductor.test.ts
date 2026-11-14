@@ -2,7 +2,7 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -15,10 +15,24 @@ import {
 } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { AcpLaneCooldown, otelJournal, type AcpTerminals } from '@broject/providers';
-import { conductorConfig, conductorProxy, parseReply, sweepSessions } from './serve-conductor.ts';
+import {
+  admitLaneCap,
+  admitLaneCapUnlocked,
+  conductorConfig,
+  conductorProxy,
+  parseReply,
+  sweepSessions,
+} from './serve-conductor.ts';
 import type { ConductorConfig, ConvSession } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
-import { scrubEnv } from '@broject/core';
+import {
+  clearSessionPlanes,
+  commandCliName,
+  registerSessionPlane,
+  scrubEnv,
+  sessionPlanes,
+  SpawnError,
+} from '@broject/core';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -3421,4 +3435,145 @@ describe('conductor fast lane (bro-6asnu)', () => {
       await close();
     }
   });
+});
+
+// bro-x601l — `fleet.providerCaps`: the account-wide lane cap the
+// conductor shares with every other session-opening surface. The
+// provider namespaced claim ledger lives under XDG_DATA_HOME, so every
+// test isolates it — a held claim must never leak into the host's real
+// census.
+describe('the provider lane cap (spec bro-x601l)', () => {
+  const withXdg = async (fn: () => Promise<void>): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-provcap-xdg-'));
+    const prev = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = dir;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('fleet.providerCaps reaches ConductorConfig — the global layer only', () => {
+    const xdg = mkdtempSync(join(tmpdir(), 'bro-provcap-cfg-'));
+    const prev = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      mkdirSync(join(xdg, 'bro'), { recursive: true });
+      writeFileSync(
+        join(xdg, 'bro', 'config.json'),
+        JSON.stringify({ fleet: { providerCaps: { 'dv-acp': 4 } } })
+      );
+      const cfg = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+      });
+      assert.equal(cfg?.providerCaps?.['dv-acp'], 4);
+    } finally {
+      if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prev;
+      rmSync(xdg, { recursive: true, force: true });
+    }
+  });
+
+  test('a capped lane parks the next open; the release frees it', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const release = await admitLaneCap(cfg, 'req-1');
+      // the held claim fills the lane — the next open refuses 'cap'
+      // with the account cause, a park verdict, never a burned attempt
+      await assert.rejects(
+        admitLaneCap(cfg, 'req-2'),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /provider 'dv-acp' lane cap reached.*fleet\.providerCaps\.dv-acp.*provider_cap/.test(
+            e.message
+          )
+      );
+      release();
+      // the freed claim admits again — no TTL wait, no stale count
+      const second = await admitLaneCap(cfg, 'req-3');
+      second();
+    }));
+
+  test('the contention fallback sees the same claims — locked and unlocked share one budget', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const release = await admitLaneCap(cfg, 'req-1');
+      assert.throws(
+        () => admitLaneCapUnlocked(cfg, 'req-2'),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
+      // and the fallback's own claim fills the lane for the locked path
+      release();
+      const unlockedRelease = admitLaneCapUnlocked(cfg, 'req-3');
+      await assert.rejects(
+        admitLaneCap(cfg, 'req-4'),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
+      unlockedRelease();
+    }));
+
+  test('a plane-covered provider command counts the kind census', () =>
+    withXdg(async () => {
+      // a scripted plane claiming the entry's command — the provider
+      // cap then judges on ITS host census, not the namespaced ledger
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 1,
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+        // the plane's one live lane already fills the cap — the open
+        // refuses before any claim
+        await assert.rejects(
+          admitLaneCap(cfg, 'req-1'),
+          (e: unknown) =>
+            e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+        );
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
+  test('a capped lane answers 429 — a retained session holds the lane', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+      const { url, close } = await listen(
+        deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+      );
+      try {
+        const post = (key: string) =>
+          fetch(`${url}/v1/messages`, {
+            method: 'POST',
+            headers: { ...auth, 'content-type': 'application/json', 'x-bro-session': key },
+            body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+          });
+        // conversation A lands and RETAINS — its claim is the census
+        // row the cap counts (pid governance: the conductor's own
+        // held slot, not a second bookkeeping layer)
+        const a = await post('a');
+        assert.equal(a.status, 200);
+        assert.equal(fake.sessions.length, 1);
+        // conversation B needs a second lane — the account is full,
+        // so the wire answers the park class: 429 + retry-after +
+        // the provider_cap cause
+        const b = await post('b');
+        assert.equal(b.status, 429);
+        assert.ok(Number(b.headers.get('retry-after')) > 0);
+        assert.match(await b.text(), /provider_cap/);
+        assert.equal(fake.sessions.length, 1, 'the refused open opened nothing');
+      } finally {
+        await close();
+      }
+    }));
 });

@@ -8,11 +8,12 @@
  *  the serialized admit. Vendor names never reach this file — planes
  *  register themselves, callers ask the registry. */
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
 import { LockTimeout, withFileLock } from './filelock.ts';
+import { pidAlive } from './proc.ts';
 import {
   DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
   laneBudgetAdmit,
@@ -394,11 +395,44 @@ function reservationInLane(name: string, lane: ReservationLane | undefined): boo
   return lane === 'batch' ? batch : !batch;
 }
 
+/** The claim's self-description — a `.slot` file is JSON
+ *  `{at, pid}`: the write time plus the CLAIMING process's pid. The
+ *  pid is what lets a claim outlive the TTL (spec bro-x601l): a
+ *  retained session — a conductor's held acp conversation, a pooled
+ *  `devin acp` peer — keeps its lane while its holder lives, and a
+ *  crashed holder's claim reaps instead of wedging the cap forever.
+ *  Claims written before this change are bare timestamps; they keep
+ *  the TTL-only semantics they were written under. */
+interface SessionSlotMeta {
+  at?: unknown;
+  pid?: unknown;
+}
+
+/** The holder pid a claim recorded — undefined for old-format files
+ *  (a bare timestamp) and for content that was never JSON. */
+function slotHolderPid(path: string): number | undefined {
+  let parsed: SessionSlotMeta;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as SessionSlotMeta;
+  } catch {
+    return undefined;
+  }
+  const pid = parsed.pid;
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
 /** Fresh reservations — files younger than the TTL count as claimed
- *  slots; stale files are reaped in passing. A missing dir is zero
+ *  slots; stale files are reaped in passing UNLESS their recorded
+ *  holder is still alive: a live holder means the lane it claimed is
+ *  still held, so the claim counts until the holder dies (spec
+ *  bro-x601l — pid-governed staleness). A missing dir is zero
  *  reservations; other read failures throw 'unavailable' — an
  *  unverifiable count fails closed, never silently admits. */
-export function countSessionReservations(resDir: string, lane?: ReservationLane): number {
+export function countSessionReservations(
+  resDir: string,
+  lane?: ReservationLane,
+  opts?: { pidAlive?: (pid: number) => boolean }
+): number {
   let names: string[];
   try {
     names = readdirSync(resDir);
@@ -412,6 +446,7 @@ export function countSessionReservations(resDir: string, lane?: ReservationLane)
     );
   }
   const now = Date.now();
+  const alive = opts?.pidAlive ?? pidAlive;
   let fresh = 0;
   for (const name of names) {
     if (!name.endsWith('.slot') || !reservationInLane(name, lane)) {
@@ -421,9 +456,14 @@ export function countSessionReservations(resDir: string, lane?: ReservationLane)
     try {
       if (now - statSync(path).mtimeMs < SESSION_SLOT_TTL_MS) {
         fresh++;
-      } else {
-        rmSync(path, { force: true });
+        continue;
       }
+      const holder = slotHolderPid(path);
+      if (holder !== undefined && alive(holder)) {
+        fresh++;
+        continue;
+      }
+      rmSync(path, { force: true });
     } catch {
       // stat raced a reap — ignore
     }
@@ -433,8 +473,15 @@ export function countSessionReservations(resDir: string, lane?: ReservationLane)
 
 /** Claim a host-wide slot — `wx` exclusive create plus a random suffix,
  *  so a same-named spawn from another repo never overwrites a live
- *  claim. Returns the reservation path for release on failure. */
-export function reserveSessionSlot(resDir: string, key: string, lane: ReservationLane): string {
+ *  claim. Returns the reservation path for release on failure. The
+ *  content records the claiming pid (`holderPid`, this process by
+ *  default) so a stale claim counts while its holder lives. */
+export function reserveSessionSlot(
+  resDir: string,
+  key: string,
+  lane: ReservationLane,
+  holderPid?: number
+): string {
   mkdirSync(resDir, { recursive: true });
   // the lane rides the file name, and it is EXPLICIT: the batch cap
   // counts only the fleet's reservations, so an in-flight interactive
@@ -442,8 +489,36 @@ export function reserveSessionSlot(resDir: string, key: string, lane: Reservatio
   // (a caller that forgot) would undercount the fleet
   const tag = lane === 'batch' ? '.batch' : '';
   const path = join(resDir, `${key}-${randomBytes(4).toString('hex')}${tag}.slot`);
-  writeFileSync(path, String(Date.now()), { flag: 'wx' });
+  writeFileSync(path, slotContent(holderPid ?? process.pid), { flag: 'wx' });
   return path;
+}
+
+/** The claim's on-disk content — the write time plus the holder pid. */
+function slotContent(holderPid: number): string {
+  return JSON.stringify({ at: Date.now(), pid: holderPid });
+}
+
+/** Rebind a claim to the process actually holding its lane — the claim
+ *  is written by the SPAWNING process before the worker exists; once
+ *  the child's pid lands, the claim follows the child, so a lane
+ *  counts exactly as long as its session runs (spec bro-x601l). `r+`
+ *  refuses to recreate a claim the census already swept — a gone
+ *  claim stays gone. */
+export function retagSessionSlot(path: string, holderPid: number): void {
+  try {
+    writeFileSync(path, slotContent(holderPid), { flag: 'r+' });
+  } catch {
+    // a claim the census reaped or a race swept is nothing to retag
+  }
+}
+
+/** Every claim this spawn holds, rebound to the landed child's pid. */
+export function retagSessionSlots(paths: readonly (string | undefined)[], holderPid: number): void {
+  for (const path of paths) {
+    if (path !== undefined) {
+      retagSessionSlot(path, holderPid);
+    }
+  }
 }
 
 /** Drop a reservation — spawn-failure cleanup; on success the file is
@@ -462,13 +537,14 @@ export function releaseSessionSlot(path: string): void {
 export function reserveSessionSlotOnce(
   resDir: string,
   key: string,
-  lane: ReservationLane
+  lane: ReservationLane,
+  holderPid?: number
 ): { path: string; fresh: boolean } {
   mkdirSync(resDir, { recursive: true });
   const tag = lane === 'batch' ? '.batch' : '';
   const path = join(resDir, `${key}${tag}.slot`);
   try {
-    writeFileSync(path, String(Date.now()), { flag: 'wx' });
+    writeFileSync(path, slotContent(holderPid ?? process.pid), { flag: 'wx' });
     return { path, fresh: true };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -496,6 +572,17 @@ export function isBatchSpawn(env: Record<string, string> | undefined): boolean {
   return marker !== undefined && marker !== '';
 }
 
+/** One provider's lane cap — `fleet.providerCaps.<provider>` armed in
+ *  the GLOBAL config layer (spec bro-x601l). `provider` is the
+ *  `providers.<name>` entry key — a config value, never a vendor fact.
+ *  `reservationsDir` is the caller-scoped override for the census dir
+ *  (a test seam; the host-shared default is the rule). */
+export interface ProviderCapLane {
+  provider: string;
+  cap: number;
+  reservationsDir?: string;
+}
+
 /** The lane checks inside the admission mutex. The plane counts run
  *  BEFORE the reservation tally: a plane that can see its own session
  *  marks retires a landed spawn's still-fresh `.slot` inside its own
@@ -509,15 +596,20 @@ export function isBatchSpawn(env: Record<string, string> | undefined): boolean {
 function checkSessionLanes(
   plane: SessionPlane,
   bag: Record<string, unknown>,
-  quota: SessionQuota,
+  quota: SessionQuota | undefined,
   resDir: string,
   opts: SessionLaneOpts
 ): void {
   const refused = opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : '';
-  const maxWorkers = quota.maxWorkers ?? 0;
-  const maxBatchWorkers = quota.maxBatchWorkers ?? 0;
+  const providerCap = opts.providerCap;
+  const maxWorkers = quota?.maxWorkers ?? 0;
+  const maxBatchWorkers = quota?.maxBatchWorkers ?? 0;
+  const maxSessions = quota?.maxSessions ?? 0;
   const batch = isBatchSpawn(opts.workerEnv);
-  const sessions = quota.maxSessions > 0 ? plane.countLive(bag, opts.workerEnv) : 0;
+  // the provider cap counts the same census the session lane does —
+  // the plane's host-wide sweep plus the claims held
+  const sessions =
+    maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0;
   // The plane counts run BEFORE the reservation tally: a plane that
   // retires a landed spawn's still-fresh `.slot` inside its own count
   // must have that sweep VISIBLE to the tally, or a landed worker
@@ -535,9 +627,24 @@ function checkSessionLanes(
   // the fleet's share counts the fleet's reservations only — an
   // interactive spawn in flight must not eat the batch lane's cap
   const batchReservations = countSessionReservations(resDir, 'batch');
-  if (quota.maxSessions > 0 && sessions + reservations >= quota.maxSessions) {
+  // the provider cap is the OUTER gate — a lane of the ACCOUNT, wider
+  // than any kind lane, judged first so its refusal names the real
+  // constraint (spec bro-x601l)
+  if (providerCap !== undefined && providerCap.cap > 0) {
+    const live = sessions + reservations;
+    if (live >= providerCap.cap) {
+      throw new SpawnError(
+        `provider '${providerCap.provider}' lane cap reached — ${live}/${providerCap.cap} live lanes ` +
+          `(fleet.providerCaps.${providerCap.provider} in the global bro config) ` +
+          `— cause: provider_cap` +
+          refused,
+        'cap'
+      );
+    }
+  }
+  if (maxSessions > 0 && sessions + reservations >= maxSessions) {
     throw new SpawnError(
-      `${plane.kind} session quota reached — ${sessions + reservations}/${quota.maxSessions} live sessions ` +
+      `${plane.kind} session quota reached — ${sessions + reservations}/${maxSessions} live sessions ` +
         `(agents.${plane.kind}.maxSessions in bro.config)` +
         refused,
       'cap'
@@ -563,7 +670,8 @@ function checkSessionLanes(
  *  key (its agentId) so a budget segment names the same worker the
  *  registry does. `scope`/`liveKeys` opt the budget's dead-worker
  *  prune in: the caller's repo is the liveness truth for its own
- *  segments. `budgetDir` isolates the ledger in tests. */
+ *  segments. `budgetDir` isolates the ledger in tests. `providerCap`
+ *  arms the account-wide provider lane gate on the same census. */
 interface SessionLaneOpts {
   key: string;
   molStep?: string;
@@ -572,6 +680,7 @@ interface SessionLaneOpts {
   liveKeys?: ReadonlySet<string>;
   now?: number;
   budgetDir?: string;
+  providerCap?: ProviderCapLane;
 }
 
 /** The work budget (spec bro-tdndq) — the fleet's running-time
@@ -583,11 +692,11 @@ interface SessionLaneOpts {
  *  and escalating its reset. */
 function checkWorkBudget(
   plane: SessionPlane,
-  quota: SessionQuota,
+  quota: SessionQuota | undefined,
   opts: SessionLaneOpts,
   refused: string
 ): void {
-  if (quota.workBudgetMinutes === undefined || !isBatchSpawn(opts.workerEnv)) {
+  if (quota?.workBudgetMinutes === undefined || !isBatchSpawn(opts.workerEnv)) {
     return;
   }
   const cfg = {
@@ -714,15 +823,22 @@ export function admitSessionSlot(
 ): string | undefined {
   const bag = agents?.[plane.kind] ?? {};
   const quota = sessionQuotaConfig(agents, plane.kind);
-  if (quota === undefined) {
+  const providerCap = opts.providerCap;
+  if (quota === undefined && providerCap === undefined) {
     return undefined;
   }
-  const resDir = sessionSlotsDir(plane.kind, quota.reservationsDir);
+  // the census dir: the kind's own slots dir — `agents.<kind>.
+  // reservationsDir` overrides (even a quota-free bag names it), and a
+  // caller-scoped providerCap override wins last (the test seam). The
+  // mutex lands in the same dir by construction.
+  const resDirOverride =
+    providerCap?.reservationsDir ?? quota?.reservationsDir ?? bagReservationsDir(bag);
+  const resDir = sessionSlotsDir(plane.kind, resDirOverride);
   try {
     return withFileLock(
-      sessionAdmissionLock(plane.kind, quota.reservationsDir),
+      sessionAdmissionLock(plane.kind, resDirOverride),
       () => {
-        if (quota.invalid === true) {
+        if (quota?.invalid === true) {
           // a present-but-unparsable cap is a config bug — refuse
           // loudly rather than spawn past a quota the operator armed
           throw new SpawnError(
@@ -749,4 +865,12 @@ export function admitSessionSlot(
     }
     throw err;
   }
+}
+
+/** The `agents.<kind>.reservationsDir` override a quota-free bag still
+ *  names — the reservation dir is bro's own bookkeeping, so the knob
+ *  reads whether or not a lane is armed. */
+function bagReservationsDir(bag: Record<string, unknown>): string | undefined {
+  const raw = bag['reservationsDir'];
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : undefined;
 }

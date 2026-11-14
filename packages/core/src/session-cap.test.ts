@@ -22,6 +22,7 @@ import {
   type SessionPlane,
 } from './session-planes.ts';
 import {
+  admitProviderSlot,
   admitSessionStart,
   planeStartingSessions,
   sessionCapRefusal,
@@ -434,5 +435,121 @@ describe('admitSessionStart', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('provider cap admission (spec bro-x601l)', () => {
+  test('admitSessionStart judges the provider cap on the kind census', () => {
+    withSlots(dir => {
+      const plane = testPlane('alpha', { live: 2 });
+      withPlane(plane, () => {
+        const refused = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: {},
+          key: 'call-1',
+          providerCap: { provider: 'prov', cap: 2, reservationsDir: dir },
+        });
+        assert.ok(refused !== undefined);
+        assert.match(
+          refused.refusal ?? '',
+          /provider 'prov' lane cap reached — 2 live \+ 1 starting > 2.*fleet\.providerCaps\.prov.*provider_cap/
+        );
+        // a refused start holds no slot
+        assert.equal(countSessionReservations(dir), 0);
+      });
+    });
+  });
+
+  test('providerCap alone arms the admission — no kind quota needed', () => {
+    withSlots(dir => {
+      const plane = testPlane('alpha', { live: 0 });
+      withPlane(plane, () => {
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: {},
+          key: 'call-1',
+          providerCap: { provider: 'prov', cap: 1, reservationsDir: dir },
+        });
+        assert.equal(admitted?.refusal, undefined);
+        // the claim landed in the KIND's dir — the census every other
+        // provider-cap admission on this kind reads
+        assert.equal(countSessionReservations(dir), 1);
+        // the held claim fills the provider cap — the next start refuses
+        const refused = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: {},
+          key: 'call-2',
+          providerCap: { provider: 'prov', cap: 1, reservationsDir: dir },
+        });
+        assert.match(refused?.refusal ?? '', /provider_cap/);
+      });
+    });
+  });
+
+  test('the provider verdict rides the same admit as the kind quota — one claim', () => {
+    withSlots(dir => {
+      const plane = testPlane('alpha', { live: 0 });
+      withPlane(plane, () => {
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { maxSessions: 9, reservationsDir: dir } },
+          key: 'call-1',
+          providerCap: { provider: 'prov', cap: 4, reservationsDir: dir },
+        });
+        assert.equal(admitted?.refusal, undefined);
+        // ONE claim covers both caps — not one per cap
+        assert.equal(countSessionReservations(dir), 1);
+        assert.equal(admitted?.paths.length, 1);
+      });
+    });
+  });
+
+  test('admitProviderSlot — the caller census runs inside the provider mutex', () => {
+    withSlots(dir => {
+      const refused = admitProviderSlot(
+        { provider: 'prov', cap: 2, reservationsDir: dir },
+        () => 2,
+        { key: 'spawn-1' }
+      );
+      assert.ok(refused !== undefined);
+      assert.match(
+        refused.refusal ?? '',
+        /provider 'prov' lane cap reached — 2 live \+ 1 starting > 2.*provider_cap/
+      );
+      assert.equal(refused.paths.length, 0);
+      assert.equal(countSessionReservations(dir), 0);
+    });
+  });
+
+  test('admitProviderSlot claims serialize — the next admit sees the slot', () => {
+    withSlots(dir => {
+      const lane = { provider: 'prov', cap: 1, reservationsDir: dir };
+      const first = admitProviderSlot(lane, () => 0, { key: 'a' });
+      assert.equal(first?.refusal, undefined);
+      assert.equal(countSessionReservations(dir), 1);
+      const second = admitProviderSlot(lane, () => 0, { key: 'b' });
+      assert.match(second?.refusal ?? '', /provider_cap/);
+    });
+  });
+
+  test('admitProviderSlot — the lane name survives provider keys with odd characters', () => {
+    withSlots(dir => {
+      // a provider key carrying path-unsafe chars lands sanitized, never
+      // escaping the slots dir
+      const adm = admitProviderSlot(
+        { provider: 'weird/prov:name', cap: 1, reservationsDir: dir },
+        () => 0,
+        { key: 'a' }
+      );
+      assert.equal(adm?.refusal, undefined);
+      assert.equal(countSessionReservations(dir), 1);
+      for (const p of adm?.paths ?? []) {
+        assert.ok(p.startsWith(dir), `claim escaped the slots dir: ${p}`);
+      }
+    });
   });
 });

@@ -673,6 +673,8 @@ export {
   releaseSessionSlot,
   reserveSessionSlot,
   reserveSessionSlotOnce,
+  retagSessionSlot,
+  retagSessionSlots,
   SESSION_SLOT_TTL_MS,
   sessionAdmissionLock,
   sessionPlane,
@@ -684,6 +686,7 @@ export {
 export type {
   CanonicalHookEvent,
   DiscoveredSession,
+  ProviderCapLane,
   ReservationLane,
   SessionPlane,
   SessionQuota,
@@ -700,10 +703,15 @@ export type {
   ExternalProbeCtx,
 } from './external-planes.ts';
 export {
+  admitProviderSlot,
+  admitProviderSlotAsync,
   admitSessionStart,
   admitSessionStartAsync,
   planeStartingSessions,
   planesStartingSessions,
+  providerCapRefusal,
+  providerSlotsDir,
+  providerSlotsKind,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -712,6 +720,7 @@ export {
   sessionReservationsDir,
 } from './session-cap.ts';
 export type {
+  ProviderSlotOpts,
   SessionCapView,
   SessionStartAdmission,
   SessionStartAdmissionArgs,

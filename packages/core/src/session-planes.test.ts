@@ -1,7 +1,15 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
@@ -156,7 +164,10 @@ describe('session slot reservations', () => {
       const stale = join(dir, f);
       const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000);
       utimesSync(stale, past, past);
-      assert.equal(countSessionReservations(dir), 0);
+      // a stale claim reaps when its holder is gone — a live holder's
+      // still counts (pid governance, spec bro-x601l); the pidAlive
+      // seam stands in for the dead process
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 0);
       assert.equal(readdirSync(dir).length, 0); // reaped, not just skipped
     });
   });
@@ -179,6 +190,60 @@ describe('session slot reservations', () => {
       } finally {
         rmSync(join(dir, 'admission.mutex'), { force: true });
       }
+    });
+  });
+});
+
+describe('pid-governed claims (spec bro-x601l)', () => {
+  const stale = (path: string): void => {
+    const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000);
+    utimesSync(path, past, past);
+  };
+
+  test('a claim records its holder pid', () => {
+    withDir(dir => {
+      const slot = reserveSessionSlot(dir, 'native-aa', 'interactive');
+      const meta = JSON.parse(readFileSync(slot, 'utf8')) as { at: number; pid: number };
+      assert.equal(meta.pid, process.pid);
+      assert.ok(meta.at > 0);
+    });
+  });
+
+  test('a stale claim whose holder is still alive counts — retained sessions stay visible', () => {
+    withDir(dir => {
+      // the claim this test writes names THIS process as holder — a
+      // conductor holding a session past the TTL reads exactly like it
+      const slot = reserveSessionSlot(dir, 'held-1', 'interactive');
+      stale(slot);
+      assert.equal(countSessionReservations(dir), 1);
+      // a live holder's claim is never reaped
+      assert.equal(readdirSync(dir).length, 1);
+    });
+  });
+
+  test('a stale claim whose holder died is reaped — a crashed holder never wedges the cap', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'gone.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
+      stale(join(dir, 'gone.slot'));
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 0);
+      assert.equal(readdirSync(dir).length, 0);
+    });
+  });
+
+  test('a stale claim with no recorded holder keeps the TTL-only reap — old-format files', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'old.slot'), String(Date.now()));
+      stale(join(dir, 'old.slot'));
+      // pidAlive says "alive", but the file never recorded a holder —
+      // nothing to govern by, so the TTL rules
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => true }), 0);
+    });
+  });
+
+  test('a fresh claim counts whatever the holder state is', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'f.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 1);
     });
   });
 });
@@ -434,6 +499,94 @@ describe('admitSessionSlot', () => {
         (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
       );
       assert.equal(countSessionReservations(resv), 0);
+    });
+  });
+
+  test('a provider cap alone arms the admission — a kind-quota-free gate (spec bro-x601l)', () => {
+    withDir(resv => {
+      // no agents.<kind> lane at all — fleet.providerCaps still
+      // serializes the admit, counts, and claims
+      const claimed = admitSessionSlot(
+        plane,
+        {},
+        {
+          key: 'native-aa',
+          providerCap: { provider: 'prov', cap: 2, reservationsDir: resv },
+        }
+      );
+      assert.ok(claimed !== undefined);
+      assert.equal(countSessionReservations(resv), 1);
+    });
+  });
+
+  test('the provider census counts live sessions and held claims', () => {
+    withDir(resv => {
+      reserveSessionSlot(resv, 'held-one', 'interactive');
+      // 2 live (the plane's sweep) + 1 held claim = 3/3 — full
+      assert.throws(
+        () =>
+          admitSessionSlot(
+            testPlane('testkind', 2),
+            {},
+            {
+              key: 'native-bb',
+              molStep: 'fx-9',
+              providerCap: { provider: 'prov', cap: 3, reservationsDir: resv },
+            }
+          ),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /provider 'prov' lane cap reached — 3\/3 live lanes.*fleet\.providerCaps\.prov.*provider_cap.*fx-9/.test(
+            e.message
+          )
+      );
+      // the refused admit claimed nothing — the budget holds the prior slot only
+      assert.equal(countSessionReservations(resv), 1);
+    });
+  });
+
+  test('below the provider cap the admit claims a slot the next admit sees', () => {
+    withDir(resv => {
+      const lane = { provider: 'prov', cap: 2, reservationsDir: resv };
+      // a cap of 2 admits two lanes — the second claim must land
+      admitSessionSlot(testPlane('testkind', 0), {}, { key: 'native-aa', providerCap: lane });
+      admitSessionSlot(testPlane('testkind', 0), {}, { key: 'native-bb', providerCap: lane });
+      assert.equal(countSessionReservations(resv), 2);
+      // the third admit sees both held claims — the census is full
+      assert.throws(
+        () =>
+          admitSessionSlot(
+            testPlane('testkind', 0),
+            {},
+            {
+              key: 'native-cc',
+              providerCap: lane,
+            }
+          ),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
+      // the refused admit claimed nothing — two slots is the census
+      assert.equal(countSessionReservations(resv), 2);
+    });
+  });
+
+  test('the provider verdict precedes the kind lanes — the outer gate', () => {
+    withDir(resv => {
+      // maxSessions=10 would admit on its own; the provider cap refuses
+      // first — the account-wide gate is judged before the kind lanes
+      const agents = { testkind: { maxSessions: 10, reservationsDir: resv } };
+      reserveSessionSlot(resv, 'held', 'interactive');
+      assert.throws(
+        () =>
+          admitSessionSlot(testPlane('testkind', 1), agents, {
+            key: 'native-x',
+            providerCap: { provider: 'prov', cap: 2, reservationsDir: resv },
+          }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
     });
   });
 
