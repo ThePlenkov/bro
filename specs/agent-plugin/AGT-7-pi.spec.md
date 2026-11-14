@@ -75,7 +75,13 @@ bridges (omp owns that pattern).
 
 `bro plugins install pi [--global|--local]`; CLI ladder: local
 dist → `bro` PATH → `npx -y --prefer-offline @broject/bro@<pin>`.
-All calls async + fail-open.
+All calls async + fail-open. **Single-scope contract (bro-b7mae):**
+pi loads project and global copies of the same extension without
+dedupe — tool names collide — so a bare install (both scopes)
+collapses to ONE scope: whichever already holds a bro copy wins,
+global when neither or both do. An explicit `--global`/`--local`
+still installs that scope and warns when the opposite scope already
+holds a copy.
 
 ## Requirements
 
@@ -118,3 +124,9 @@ All calls async + fail-open.
   backlog` and `/wtf <multilingual args>` dispatch bare names to
   identical `bro <verb> [args]` argv (`bro-command.e2e.test.ts`);
   pi owns none of the eight family names natively.
+- 2026-11-14 — v6: install contract gains the single-scope rule
+  (bro-b7mae) — `ClientSpec.singleScope` collapses a bare dual-scope
+  install to the scope already holding bro (global default), warns
+  on an opposite-scope copy, and honors explicit scope flags;
+  `plugins.test.ts` covers collapse, refresh-in-place, and the
+  cross-scope warning.
