@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/debt.schema.json",
+  "title": "bro plan — debt",
+  "description": "Structural contract for a `kind = \"debt\"` TOML plan — the parsed document `parseDebtPlan` (packages/debt/src/plan.ts) consumes. Cross-field rules stay in that validator: thread_id values must be unique.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "verdicts"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/debt.schema.json"
+    },
+    "kind": { "const": "debt" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed DEBT_PLAN_VERSION (latest: 1)"
+    },
+    "verdicts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["thread_id", "status"],
+        "properties": {
+          "thread_id": { "type": "string", "minLength": 1 },
+          "status": {
+            "enum": ["open", "claimed", "done", "wontfix", "duplicate"]
+          },
+          "notes": { "type": "string" },
+          "fix_pr": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The PR that landed the fix"
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "debt",
+      "version": 1,
+      "verdicts": [
+        {
+          "thread_id": "PRRT_kwDOAbCdEf",
+          "status": "done",
+          "fix_pr": 123,
+          "notes": "landed in the fix round"
+        },
+        {
+          "thread_id": "PRRT_kwDOGhIjKl",
+          "status": "wontfix",
+          "notes": "style-only churn"
+        }
+      ]
+    }
+  ]
+}

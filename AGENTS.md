@@ -85,7 +85,11 @@ Developing bro itself: see CONTRIBUTING.md.
   misplaced sections.
 - **Unified plans** — commands that take structured input (act, plan,
   backlog, retro, drill, …) accept a plan payload validated against a
-  per-command plan schema; CLI flags alone are not the contract.
+  per-command plan schema; CLI flags alone are not the contract. Every
+  plan kind ships its authoring schema at
+  `packages/cli/schemas/plans/<kind>.schema.json` — `bro plan describe
+  <kind>` prints it (the embedded example as a TOML template), and a
+  plan file may pin it via `"$schema"`.
 - **Verify like CI** — before claiming "tests pass", run the exact
   command CI runs (`npm test` → `tsx --test`), not a hand-picked
   runner; harness differences are real bugs' favorite hiding place.

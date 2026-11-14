@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/drill.schema.json",
+  "title": "bro plan — drill",
+  "description": "Structural contract for a `kind = \"drill\"` TOML plan — the parsed document `parseDrillPlan` (packages/drill/src/plan.ts) consumes. Cross-field rules stay in that validator: a step's `under` must index a previously parsed step.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "title"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/drill.schema.json"
+    },
+    "kind": { "const": "drill" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed DRILL_PLAN_VERSION (latest: 1)"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The root frame title"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1 },
+          "under": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Index into steps — nests under that step; default is the root frame"
+          },
+          "ephemeral": { "type": "boolean" },
+          "description": { "type": "string" },
+          "priority": { "type": "integer", "minimum": 1 },
+          "type": { "type": "string" }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "drill",
+      "version": 1,
+      "title": "why does the cache miss",
+      "steps": [
+        { "title": "check the parser" },
+        { "title": "narrow the repro", "under": 0, "ephemeral": true }
+      ]
+    }
+  ]
+}

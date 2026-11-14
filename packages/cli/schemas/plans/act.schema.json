@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/act.schema.json",
+  "title": "bro plan — act",
+  "description": "Structural contract for a `kind = \"act\"` TOML plan — the parsed document `parseActPlan` (packages/act/src/plan.ts) consumes. Cross-field rules stay in that validator: action = \"reply\" requires comment, action = \"defer\" requires title, thread_id values must be unique.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "threads"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/act.schema.json"
+    },
+    "kind": { "const": "act" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed ACT_PLAN_VERSION (latest: 1)"
+    },
+    "pr": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional PR number — context for defer beads"
+    },
+    "threads": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["thread_id", "action"],
+        "properties": {
+          "thread_id": { "type": "string", "minLength": 1 },
+          "action": { "enum": ["resolve", "reply", "defer"] },
+          "comment": {
+            "type": "string",
+            "description": "Required by the validator when action = \"reply\""
+          },
+          "title": {
+            "type": "string",
+            "description": "Required by the validator when action = \"defer\" — becomes the debt bead title"
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "act",
+      "version": 1,
+      "pr": 66,
+      "threads": [
+        { "thread_id": "PRRT_kwDOAbCdEf", "action": "resolve" },
+        {
+          "thread_id": "PRRT_kwDOGhIjKl",
+          "action": "reply",
+          "comment": "fixed differently — see abc1234"
+        },
+        {
+          "thread_id": "PRRT_kwDOMnOpQr",
+          "action": "defer",
+          "title": "track the n+1 follow-up"
+        }
+      ]
+    }
+  ]
+}

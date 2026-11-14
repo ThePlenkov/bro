@@ -16,77 +16,75 @@
  *   under = 0                             # child of steps[0]
  *   ephemeral = true
  */
-import { checkPlanVersion } from '@broject/core'
+import { checkPlanVersion, PLAN_ENVELOPE_KEYS } from '@broject/core';
 
 export interface DrillStep {
-  title: string
+  title: string;
   /** index into `steps` — nested under that step; default = root */
-  under?: number
-  ephemeral?: boolean
-  description?: string
-  priority?: number
-  type?: string
+  under?: number;
+  ephemeral?: boolean;
+  description?: string;
+  priority?: number;
+  type?: string;
 }
 
 export interface DrillPlan {
-  title: string
-  steps: DrillStep[]
+  title: string;
+  steps: DrillStep[];
 }
 
 /** The `kind` value a drill plan must carry — `bro run` routes on it. */
-export const PLAN_KIND = 'drill'
+export const PLAN_KIND = 'drill';
 
 /** The schema version this parser speaks — `version = N` in a plan
  *  pins it; a pin above this is rejected, not misparsed. */
-export const PLAN_VERSION = 1
+export const PLAN_VERSION = 1;
 
-const STEP_KEYS = new Set(['title', 'under', 'ephemeral', 'description', 'priority', 'type'])
+const STEP_KEYS = new Set(['title', 'under', 'ephemeral', 'description', 'priority', 'type']);
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
-const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
 
-const isPosInt = (v: unknown): v is number =>
-  typeof v === 'number' && Number.isInteger(v) && v > 0
+const isPosInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0;
 
-const isInt = (v: unknown): v is number =>
-  typeof v === 'number' && Number.isInteger(v) && v >= 0
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
 
 function checkStep(raw: Record<string, unknown>, where: string, errors: string[]): void {
   for (const key of Object.keys(raw)) {
     if (!STEP_KEYS.has(key)) {
-      errors.push(`${where}: unknown key "${key}"`)
+      errors.push(`${where}: unknown key "${key}"`);
     }
   }
   if (!nonEmpty(raw.title)) {
-    errors.push(`${where}: title is required`)
+    errors.push(`${where}: title is required`);
   }
   if (raw.under !== undefined && !isInt(raw.under)) {
-    errors.push(`${where}: under must be a non-negative step index`)
+    errors.push(`${where}: under must be a non-negative step index`);
   }
   for (const f of ['description', 'type'] as const) {
     if (raw[f] !== undefined && typeof raw[f] !== 'string') {
-      errors.push(`${where}: ${f} must be a string`)
+      errors.push(`${where}: ${f} must be a string`);
     }
   }
   if (raw.ephemeral !== undefined && typeof raw.ephemeral !== 'boolean') {
-    errors.push(`${where}: ephemeral must be a boolean`)
+    errors.push(`${where}: ephemeral must be a boolean`);
   }
   if (raw.priority !== undefined && !isPosInt(raw.priority)) {
-    errors.push(`${where}: priority must be a positive integer`)
+    errors.push(`${where}: priority must be a positive integer`);
   }
 }
 
 function parseStep(raw: unknown, i: number, errors: string[]): DrillStep | undefined {
-  const where = `steps[${i}]`
+  const where = `steps[${i}]`;
   if (!isRecord(raw)) {
-    errors.push(`${where}: must be a table`)
-    return undefined
+    errors.push(`${where}: must be a table`);
+    return undefined;
   }
-  checkStep(raw, where, errors)
+  checkStep(raw, where, errors);
   if (!nonEmpty(raw.title)) {
-    return undefined
+    return undefined;
   }
   return {
     title: raw.title.trim(),
@@ -95,47 +93,47 @@ function parseStep(raw: unknown, i: number, errors: string[]): DrillStep | undef
     description: typeof raw.description === 'string' ? raw.description : undefined,
     priority: isPosInt(raw.priority) ? raw.priority : undefined,
     type: typeof raw.type === 'string' ? raw.type : undefined,
-  }
+  };
 }
 
 /** Validate an already-parsed plan document — the plugin planSchema.
  *  Throws one error listing every problem. */
 export function parseDrillPlan(doc: unknown, source = 'plan'): DrillPlan {
-  const errors: string[] = []
+  const errors: string[] = [];
   if (!isRecord(doc)) {
-    throw new Error(`${source}: expected a TOML table`)
+    throw new Error(`${source}: expected a TOML table`);
   }
   for (const key of Object.keys(doc)) {
-    if (key !== 'steps' && key !== 'kind' && key !== 'version' && key !== 'title') {
-      errors.push(`unknown top-level key "${key}"`)
+    if (key !== 'steps' && key !== 'title' && !PLAN_ENVELOPE_KEYS.has(key)) {
+      errors.push(`unknown top-level key "${key}"`);
     }
   }
   if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
-    errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
+    errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`);
   }
-  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
+  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors);
   if (!nonEmpty(doc.title)) {
-    errors.push('title: the root frame title is required')
+    errors.push('title: the root frame title is required');
   }
-  const steps: DrillStep[] = []
+  const steps: DrillStep[] = [];
   if (doc.steps !== undefined && !Array.isArray(doc.steps)) {
-    errors.push('steps: must be an array of tables ([[steps]])')
+    errors.push('steps: must be an array of tables ([[steps]])');
   } else if (Array.isArray(doc.steps)) {
     doc.steps.forEach((raw, i) => {
-      const s = parseStep(raw, i, errors)
+      const s = parseStep(raw, i, errors);
       if (!s) {
-        return
+        return;
       }
       // under indexes the parsed steps array — steps.length, not the raw
       // index i, so a step that failed validation can't be referenced
       if (s.under !== undefined && s.under >= steps.length) {
-        errors.push(`steps[${i}]: under must index a previous step`)
+        errors.push(`steps[${i}]: under must index a previous step`);
       }
-      steps.push(s)
-    })
+      steps.push(s);
+    });
   }
   if (errors.length > 0) {
-    throw new Error(`${source}:\n  ${errors.join('\n  ')}`)
+    throw new Error(`${source}:\n  ${errors.join('\n  ')}`);
   }
-  return { title: (doc.title as string).trim(), steps }
+  return { title: (doc.title as string).trim(), steps };
 }

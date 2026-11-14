@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/next.schema.json",
+  "title": "bro plan — next",
+  "description": "Structural contract for a `kind = \"next\"` TOML plan — the parsed document `parseNextPlan` (packages/cli/src/commands/next-plan.ts) consumes. Cross-field rules stay in that validator: filters.match must compile as a regex.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/next.schema.json"
+    },
+    "kind": { "const": "next" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed NEXT_PLAN_VERSION (latest: 1)"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Beads to claim — default 1"
+    },
+    "order": { "enum": ["priority", "oldest", "newest"] },
+    "claim": {
+      "type": "boolean",
+      "description": "false = selection only — nothing is claimed"
+    },
+    "gates": {
+      "enum": ["forbid", "allow"],
+      "description": "forbid (default) keeps HUMAN GATE beads out of the claimable queue"
+    },
+    "scope": {
+      "enum": ["project", "all", "global"],
+      "description": "project (default) claims only under this checkout's issue_prefix"
+    },
+    "json": { "type": "boolean" },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "types": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "issue_type allowlist — epics and molecule steps stay excluded regardless"
+        },
+        "max_priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "description": "Claim only P0..Pn"
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Case-insensitive regex over the title — must compile (validator-checked)"
+        },
+        "labels": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Any-of label scope — a bead must carry at least one"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "next",
+      "version": 1,
+      "limit": 3,
+      "order": "priority",
+      "claim": false,
+      "gates": "allow",
+      "scope": "all",
+      "json": true,
+      "filters": {
+        "types": ["task", "bug"],
+        "max_priority": 2,
+        "match": "schema|plan",
+        "labels": ["roadmap"]
+      }
+    }
+  ]
+}
