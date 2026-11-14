@@ -34,7 +34,7 @@ install omp` or `omp plugin install`. **Single-scope contract
 (bro-b7mae):** omp loads project and global copies of the same
 extension without dedupe — same rule as AGT-7: a bare install
 collapses to the scope already holding bro (global default);
-explicit scope flags honored with a cross-scope warning.
+explicit scope flags honored; convergence removes the losing scope's bro copy.
 
 ### Event mapping (HOOK_MATRIX `omp` row)
 
