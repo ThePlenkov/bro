@@ -191,13 +191,15 @@ response is always `{stopReason:'end_turn'}` — the command's failure
 is turn content, not a wire error. A `/name` NOT in the advertised
 set falls through — the prompt forwards downstream, so the agent's
 own slash vocabulary composes with bro's. `session/cancel` SIGTERMs
-the child and answers `cancelled` (a cancel that landed while the
-turn queued still kills it); `SLASH_TIMEOUT_MS` (5 min) bounds a
-stuck run, a SIGTERM-ignoring child gets SIGKILL after
-`KILL_GRACE_MS` (1.5 s), and a client/downstream close mid-turn
-aborts it with the wire. Chunked stdout decodes through a
-StringDecoder — a multibyte sequence split across pipe reads never
-streams replacement chars.
+the child's whole process group and answers `cancelled` (a cancel
+that landed while the turn queued still kills it); `SLASH_TIMEOUT_MS`
+(5 min) bounds a stuck run, a SIGTERM-ignoring child gets a group
+SIGKILL after `KILL_GRACE_MS` (1.5 s), and a client/downstream close
+mid-turn aborts it with the wire — a prompt still QUEUED behind a
+dying turn never starts (the wire-closed gate precedes the abort
+sweep). Chunked stdout decodes through a StringDecoder — a
+multibyte sequence split across pipe reads never streams
+replacement chars.
 
 ### Seam — same as proxy mode
 

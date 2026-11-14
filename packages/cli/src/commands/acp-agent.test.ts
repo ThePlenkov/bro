@@ -6,6 +6,9 @@
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // node --test runs each file in its own process — keep the telemetry
 // endpoint off so spans never POST to a real collector mid-test
@@ -331,6 +334,39 @@ describe('bro acp — runSlash', () => {
       texts.some(t => t.includes('killed by SIGKILL')),
       texts.join()
     );
+  });
+
+  test('cancel kills the whole process group — a shell descendant dies too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-slashpg-'));
+    try {
+      const pidFile = join(dir, 'grandchild.pid');
+      const ctrl = new AbortController();
+      const run = runSlash(
+        // a `bro exec`-shaped tree: sh spawns a descendant that
+        // outlives nothing but shares the pipes — a direct-child
+        // SIGTERM would leave it running
+        ['/bin/sh', '-c', `sleep 300 & echo $! > '${pidFile}'; sleep 300`],
+        process.cwd(),
+        60_000,
+        ctrl.signal,
+        () => {}
+      );
+      setTimeout(() => ctrl.abort(), 150);
+      await run;
+      const pid = Number(readFileSync(pidFile, 'utf8').trim());
+      assert.ok(pid > 0, `expected a grandchild pid, got ${readFileSync(pidFile, 'utf8')}`);
+      // group-killed already — ESRCH (or EPERM-free throw) proves the
+      // descendant is gone, not just the sh that forked it
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      assert.equal(alive, false, `grandchild pid ${pid} survived the group kill`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 
   test('a multibyte sequence split across stdout chunks decodes whole — no U+FFFD', async () => {

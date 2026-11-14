@@ -288,11 +288,27 @@ export async function runSlash(
     const child = spawn(bin, argv.slice(1), {
       cwd,
       env: acpChildEnv(),
+      // own process group — a `bro` child shells out (`exec` → sh -c
+      // → descendants) and a signal to the direct child alone never
+      // reaches them; a detached group also stops receiving signals
+      // aimed at the agent's own group, which is exactly right here
+      detached: process.platform !== 'win32',
       // stdin is 'ignore', not a pipe the parent never ends — a
       // command that reads stdin to EOF (`exec`, `resume`) would
       // wait forever on a write end nobody owns
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const killRun = (sig: 'SIGTERM' | 'SIGKILL') => {
+      if (process.platform === 'win32' || child.pid === undefined) {
+        child.kill(sig);
+        return;
+      }
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        // the group already exited
+      }
+    };
     // stdout/stderr cross chunk boundaries — a multibyte sequence
     // split between two 'data' events decodes through a StringDecoder
     // (the same accumulator acp-terminal.ts uses); a per-chunk
@@ -306,12 +322,12 @@ export async function runSlash(
         return;
       }
       killing = true;
-      child.kill('SIGTERM');
+      killRun('SIGTERM');
       // a child that traps SIGTERM or keeps its stdout pipe open
       // would hold 'close' — and every prompt queued behind it in
       // the session writeQ — until the timeout cap; escalate after
       // a short grace
-      killTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS);
+      killTimer = setTimeout(() => killRun('SIGKILL'), KILL_GRACE_MS);
     };
     const timer = setTimeout(() => {
       timedOut = true;

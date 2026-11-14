@@ -1872,6 +1872,88 @@ describe('acpProxy — agent overlay (bro-tegz2)', () => {
       await proxyDone;
     }
   });
+
+  test('a prompt queued behind a local turn never starts after the client died', async () => {
+    // raw client — B's prompt sits in the session writeQ while A's
+    // local turn is still in flight; upstream EOF must gate B's
+    // handler, not just abort A's (wireDone, not aborts alone)
+    const calls: string[] = [];
+    const fake = fakeAcpAgent({ replyText: 'DOWN' });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const agentConn = fake.app.connect(agentSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      agent: {
+        prompt: turn => {
+          calls.push(turn.text);
+          if (!turn.text.startsWith('/local')) {
+            return Promise.resolve(undefined);
+          }
+          // A parks until the wire's teardown abort releases it —
+          // the same late-resolve shape the ownership test uses
+          return new Promise<{ stopReason: string } | undefined>(resolve => {
+            turn.signal.addEventListener(
+              'abort',
+              () => setTimeout(() => resolve({ stopReason: 'end_turn' }), 80),
+              { once: true }
+            );
+          });
+        },
+      },
+      log: () => {},
+    });
+    const w = clientSide.writable.getWriter();
+    const rd = clientSide.readable.getReader();
+    const responses: { id?: unknown }[] = [];
+    const reader = (async () => {
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) return;
+        const m = value as { id?: unknown };
+        if (m.id !== undefined) responses.push(m);
+      }
+    })();
+    const send = (m: Record<string, unknown>) => w.write(m as AnyMessage);
+    try {
+      await send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: INIT_PARAMS });
+      await until(() => responses.some(r => r.id === 1));
+      await send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { cwd: '/tmp/x', mcpServers: [] },
+      });
+      await until(() => responses.some(r => r.id === 2));
+      // A runs locally and parks; B queues behind it in the writeQ
+      await send({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: '/local a' }] },
+      });
+      await until(() => calls.length === 1);
+      await send({
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: '/local b' }] },
+      });
+      await new Promise(r2 => setTimeout(r2, 40));
+      // the client dies mid-A — wireDone must stop B's handler from
+      // ever spawning when the writeQ reaches it
+      await w.close().catch(() => {});
+      await new Promise(r2 => setTimeout(r2, 200));
+      assert.deepEqual(calls, ['/local a']);
+    } finally {
+      agentConn.close();
+      await agentSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      await reader;
+      await proxyDone;
+    }
+  });
 });
 describe('acpProxy — permission policy seam (bro-9qopj)', () => {
   const ALLOW_REJECT: PermissionOption[] = [

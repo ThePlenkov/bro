@@ -390,6 +390,13 @@ export async function acpProxy(
     upWriter.write(m).then(undefined, () => upDead.fire());
   };
 
+  /** Set the moment a pump's EOF/death wins the verdict — BEFORE the
+   *  teardown sweep aborts in-flight turns. A prompt still queued in
+   *  a session writeQ has no abort armed yet, and on an upstream
+   *  close nothing discharges its pending entry: without this flag a
+   *  queued slash command would spawn AFTER the client died. */
+  let wireDone = false;
+
   /** Answer an upstream request ourselves — only the held-prompt
    *  cancel path uses this; the proxy never synthesizes success. */
   const answerUpstream = (id: JsonRpcId, result: unknown): void => {
@@ -553,19 +560,28 @@ export async function acpProxy(
       },
       { parent: target.ses.span?.ctx }
     );
-    pending.set(id, {
+    const entry: PendingRequest = {
       method: 'session/prompt',
       prompt: { sessionId: target.sessionId, span: turn },
-    });
+    };
+    pending.set(id, entry);
     target.ses.held.add(id);
-    target.ses.writeQ = target.ses.writeQ.then(() => crossPrompt({ m, id, ...target }));
+    // the entry is captured AT ENQUEUE — if a cancel discharges the
+    // id and a new request reuses it before this queued write runs,
+    // `pending.get(id)` inside crossPrompt would return the NEW
+    // request's entry and every identity check would pass for the
+    // stale turn
+    target.ses.writeQ = target.ses.writeQ.then(() => crossPrompt({ m, id, own: entry, ...target }));
   };
 
   /** Still writable? pending discharged → the cancel path already
    *  answered this prompt upstream; downstream dead → nothing crosses
-   *  anyway. The two check points bracket the seam collection — the
-   *  abortable window. */
-  const crossable = (id: JsonRpcId): boolean => pending.has(id) && !downDead.fired;
+   *  anyway; the wire closed → queued work never starts. Identity,
+   *  not presence: a reused id belongs to the newer request. The two
+   *  check points bracket the seam collection — the abortable
+   *  window. */
+  const crossable = (id: JsonRpcId, own: PendingRequest): boolean =>
+    pending.get(id) === own && !downDead.fired && !wireDone;
 
   /** The held write, run inside the session's writeQ: "first prompt" =
    *  first to actually CROSS, decided here under the serialized queue —
@@ -574,18 +590,14 @@ export async function acpProxy(
   const crossPrompt = async (held: {
     m: AnyMessage;
     id: JsonRpcId;
+    own: PendingRequest;
     params: Record<string, unknown>;
     sessionId: string;
     ses: ProxySession;
   }): Promise<void> => {
-    const { m, id, params, sessionId, ses } = held;
-    // the pending entry THIS queued write owns — a cancel discharges
-    // it and frees the id for reuse; everything this write lands on
-    // the wire afterwards (emits, answers, the held marker) must
-    // compare against the captured entry, not just the id's presence
-    const own = pending.get(id);
+    const { m, id, own, params, sessionId, ses } = held;
     try {
-      if (!crossable(id)) {
+      if (!crossable(id, own)) {
         return;
       }
       // agent mode (spec bro-tegz2): the overlay's local turn handler
@@ -598,9 +610,7 @@ export async function acpProxy(
       const overlay = opts.agent?.prompt;
       if (overlay !== undefined) {
         const ctrl = new AbortController();
-        if (own !== undefined) {
-          own.abort = () => ctrl.abort();
-        }
+        own.abort = () => ctrl.abort();
         let result: { stopReason: string } | undefined;
         let threw = false;
         let failure: unknown;
@@ -630,15 +640,17 @@ export async function acpProxy(
           threw = true;
           failure = e;
         } finally {
-          if (own !== undefined) {
-            own.abort = undefined;
-          }
+          own.abort = undefined;
         }
         if (threw) {
           // a crashed handler is a -32603 upstream — never a fake
           // success; a cancel that already answered wins the race, and
           // a reused id belongs to its new request
-          if (own !== undefined && pending.get(id) === own) {
+          if (pending.get(id) === own) {
+            // the held marker this request owns goes with its
+            // discharge — dropping pending first would orphan it
+            // (every later cancel would walk a dead id forever)
+            ses.held.delete(id);
             pending.delete(id);
             own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
             writeUp({
@@ -653,7 +665,8 @@ export async function acpProxy(
           return;
         }
         if (result !== undefined) {
-          if (own !== undefined && pending.get(id) === own) {
+          if (pending.get(id) === own) {
+            ses.held.delete(id);
             pending.delete(id);
             own.prompt?.span.end({
               'acp.proxy.local': true,
@@ -665,17 +678,16 @@ export async function acpProxy(
         }
         // the overlay declined — the verbatim path resumes; the await
         // was a cancel window, so re-check before the seam collection
-        if (!crossable(id)) {
+        if (!crossable(id, own)) {
           return;
         }
       }
       const first = !ses.seenPrompt;
       const injected = await injectPrompt(m, params, sessionId, ses);
-      if (!crossable(id)) {
+      if (!crossable(id, own)) {
         return;
       }
-      const p = pending.get(id);
-      if (p?.prompt !== undefined) p.prompt.first = first;
+      if (own.prompt !== undefined) own.prompt.first = first;
       ses.seenPrompt = true;
       // a settled collection that crosses closes the slot; an
       // unsettled one stays owed — the next prompt retries
@@ -1548,7 +1560,11 @@ export async function acpProxy(
   // the wire is closing — a local turn still in flight dies with the
   // proxy: the abort hook only fires from abortHeld (session/cancel),
   // so a client or downstream close mid-turn would leave the slash
-  // child running until its own timeout, holding the CLI open
+  // child running until its own timeout, holding the CLI open. The
+  // flag lands FIRST: a prompt still queued in a session writeQ has
+  // no abort armed yet, and without it crossPrompt would start that
+  // queued slash command after the client already died.
+  wireDone = true;
   for (const req of pending.values()) {
     req.abort?.();
   }
