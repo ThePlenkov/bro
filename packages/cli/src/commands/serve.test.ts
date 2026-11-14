@@ -1094,12 +1094,29 @@ describe('serve handler over a real socket', () => {
     // past the backlog cap as one JSON frame — a follower that reads
     // must still get it all, sliced through the drain loop
     const BIG = `${'x'.repeat(1_500_000)}\r\nend\n`;
+    // surrogate-pair slicing cases (bro-5wv4b) — a 65 536-code-unit
+    // slice must not split an astral char: every emitted frame has to
+    // be well-formed on its own AND the frames reassemble byte-exact
+    const SURR = new Map<string, string>([
+      // the pair straddles the 65 536 slice boundary
+      ['term-surrogate', `${'x'.repeat(65_535)}😀tail\n`],
+      // consecutive astral chars — the second pair straddles, the
+      // backed-off slice must still deliver the first one whole
+      ['term-pairs', `${'y'.repeat(65_533)}😀🙂tail\n`],
+      // the pair completes exactly at the boundary — no adjustment
+      ['term-edge', `${'z'.repeat(65_534)}😀`],
+      // astral char at offset 0 of a snapshot under one slice
+      ['term-lead', '😀lead\n'],
+    ]);
     const fakeReg = {
       snapshot: (id: string) => {
         if (id === 'term-done')
           return { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } };
         if (id === 'term-big')
           return { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } };
+        const surrOut = SURR.get(id);
+        if (surrOut !== undefined)
+          return { output: surrOut, truncated: false, exitStatus: { exitCode: 3, signal: null } };
         if (id === 'term-gap')
           // exited but not closed — the pipe still owes its last bytes
           return { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } };
@@ -1122,6 +1139,17 @@ describe('serve handler over a real socket', () => {
         if (id === 'term-big')
           return {
             snapshot: { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } },
+            completed: true,
+            stop: () => {},
+          };
+        const surrOut = SURR.get(id);
+        if (surrOut !== undefined)
+          return {
+            snapshot: {
+              output: surrOut,
+              truncated: false,
+              exitStatus: { exitCode: 3, signal: null },
+            },
             completed: true,
             stop: () => {},
           };
@@ -1289,6 +1317,37 @@ describe('serve handler over a real socket', () => {
       }
       assert.equal(rebuilt, BIG, 'sliced data frames reassemble byte-exact');
       assert.match(bigExit, /exitCode":7/);
+
+      // bro-5wv4b — a slice boundary must never split a surrogate pair:
+      // each frame is checked well-formed on its own (the per-frame
+      // encoding failure from the review thread), then the stream must
+      // still reassemble byte-exact
+      for (const [id, want] of SURR) {
+        const surr = await fetch(`${base}/api/v1/terminals/${id}/output?follow`, {
+          headers: auth,
+        });
+        assert.equal(surr.status, 200);
+        const surrText = await surr.text();
+        let surrRebuilt = '';
+        for (const frame of surrText.split('\n\n')) {
+          if (frame.startsWith('event:')) continue;
+          const dm = /^data: (.*)$/m.exec(frame);
+          if (dm === null) continue;
+          const decoded = JSON.parse(dm[1]!) as string;
+          for (let k = 0; k < decoded.length; k++) {
+            const c = decoded.charCodeAt(k);
+            if (c >= 0xd800 && c <= 0xdbff) {
+              const n = decoded.charCodeAt(k + 1);
+              assert.ok(n >= 0xdc00 && n <= 0xdfff, `${id}: frame carries a lone high surrogate`);
+              k++;
+            } else {
+              assert.ok(c < 0xdc00 || c > 0xdfff, `${id}: frame carries a lone low surrogate`);
+            }
+          }
+          surrRebuilt += decoded;
+        }
+        assert.equal(surrRebuilt, want, `${id}: frames reassemble byte-exact`);
+      }
 
       // a snapshot with exitStatus but pending 'close' keeps streaming —
       // ending on exitStatus alone would drop bytes still on the pipe
