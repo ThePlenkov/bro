@@ -106,6 +106,7 @@ import {
   type GuardEvent,
   type Mode,
   type ModeSnapshotEvent,
+  type PreToolVerdict,
   type ProbeReporter,
   type ProbeResult,
   type ProbeTiming,
@@ -2196,58 +2197,64 @@ export interface AcpPermissionCall {
   input?: unknown;
 }
 
-/** The PermissionRequest hook as a library call for `bro acp proxy`
- *  (spec bro-9qopj) — emitPermission's policy minus the hook envelope,
- *  plus the connector preTool sweep the hook host would have run
- *  alongside it. Verdict order is the real pipeline's own — PreToolUse
- *  precedes PermissionRequest on every host that fires both, so
- *  connector `preTool` blocks veto first; then emitPermission's own
- *  checks run in their own order: the session cap's refusal denies
- *  (the devin-shape veto point IS this request — spec bro-bww9v), and
- *  a self-tool command (bro/bd/npx @broject/bro — isSelfToolCommand's
+/** The seam's verdict on one ask, in the hook pipeline's own order:
+ *  connector `preTool` block vetoes first (the PreToolUse event
+ *  precedes PermissionRequest on every host that fires both — a
+ *  wedged connector fails open inside preToolVerdicts the same as in
+ *  emitPreTool); the session cap's refusal denies second (the
+ *  devin-shape veto point IS this request — spec bro-bww9v); a
+ *  self-tool command (bro/bd/npx @broject/bro — isSelfToolCommand's
  *  chained/piped exclusions included) auto-approves. `warn` verdicts
- *  are advisory — they return as `hints`, the proxy's next-prompt
- *  buffer, exactly the additionalContext tier the hook emits; `input`
- *  rewrites have no wire path (the call's rawInput already announced)
- *  and degrade silently, same as the seam's contract. Everything
- *  unopposed lands `ask` — the proxy forwards
- *  the ask to its client verbatim, which is the hook's own fall-
- *  through: silence means the human decides. Fails open the same way:
- *  a non-bro dir, an empty session id, a cap that cannot be computed,
- *  a wedged connector — every one is `ask`, never a corrupt wire. */
-export async function collectPermission(
+ *  come back as hints — everything unopposed lands `ask`: silence
+ *  means the human decides. */
+async function permissionVerdict(
   dir: string,
   sessionId: string,
-  call: AcpPermissionCall
+  call: AcpPermissionCall,
+  cmd: string,
+  input: Record<string, unknown>
 ): Promise<{ verdict: 'allow' | 'deny' | 'ask'; reason?: string; hints?: string[] }> {
-  const ask = (hints?: string[]): { verdict: 'ask'; hints?: string[] } =>
-    hints !== undefined && hints.length > 0 ? { verdict: 'ask', hints } : { verdict: 'ask' };
-  if (!broEnabled(dir) || sessionId === '') {
-    return ask();
-  }
-  const input = (call.input ?? {}) as Record<string, unknown>;
-  const cmd = typeof input.command === 'string' ? input.command : '';
-  // the hook pipeline's own order: the PreToolUse event precedes
-  // PermissionRequest on every host that fires both — the connector
-  // guard plane's veto lands first here too, and a wedged connector
-  // fails open inside preToolVerdicts the same as in emitPreTool
   const verdicts = await preToolVerdicts(
     hookCtx(dir, sessionId, call.toolCallId),
     call.name ?? call.title ?? '',
     input
   );
-  const block = verdicts.find(v => v.block !== undefined)?.block;
-  if (block !== undefined) {
-    return { verdict: 'deny', reason: block };
-  }
-  const capRefusal = sessionCapRefusalForHook(cmd, dir, sessionId, undefined, call.toolCallId);
-  if (capRefusal !== undefined) {
-    return { verdict: 'deny', reason: capRefusal };
+  const deny =
+    verdicts.find(v => v.block !== undefined)?.block ??
+    sessionCapRefusalForHook(cmd, dir, sessionId, undefined, call.toolCallId);
+  if (deny !== undefined) {
+    return { verdict: 'deny', reason: deny };
   }
   if (isSelfToolCommand(cmd)) {
     return { verdict: 'allow' };
   }
-  return ask(verdicts.flatMap(v => (v.warn === undefined ? [] : [v.warn])));
+  const hints = verdicts.flatMap(v => (v.warn === undefined ? [] : [v.warn]));
+  return hints.length > 0 ? { verdict: 'ask', hints } : { verdict: 'ask' };
+}
+
+/** The PermissionRequest hook as a library call for `bro acp proxy`
+ *  (spec bro-9qopj) — emitPermission's policy minus the hook envelope,
+ *  plus the connector preTool sweep the hook host would have run
+ *  alongside it. `input` rewrites have no wire path (the call's
+ *  rawInput already announced) and degrade silently, same as the
+ *  seam's contract; `warn` verdicts return as `hints`, the proxy's
+ *  next-prompt buffer — exactly the additionalContext tier the hook
+ *  emits. Fails open the same way: a non-bro dir, an empty session
+ *  id, a cap that cannot be computed, a wedged connector — every one
+ *  is `ask`, never a corrupt wire. */
+export async function collectPermission(
+  dir: string,
+  sessionId: string,
+  call: AcpPermissionCall
+): Promise<{ verdict: 'allow' | 'deny' | 'ask'; reason?: string; hints?: string[] }> {
+  // fails open the same way as the hook: a non-bro dir or an empty
+  // session id is `ask`, never a corrupt wire
+  if (!broEnabled(dir) || sessionId === '') {
+    return { verdict: 'ask' };
+  }
+  const input = (call.input ?? {}) as Record<string, unknown>;
+  const cmd = typeof input.command === 'string' ? input.command : '';
+  return permissionVerdict(dir, sessionId, call, cmd, input);
 }
 
 /** The stop gate as a library call for `bro acp proxy` (spec bro-u2eps

@@ -281,6 +281,11 @@ const isResponse = (m: AnyMessage): boolean =>
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 
+/** A thrown value's log text — a seam/hook can reject with ANYTHING
+ *  (null, a bare string, a non-Error object); reading `e.message`
+ *  inside the catch throws a second error on a nullish reject. */
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 const paramsOf = (m: AnyMessage): Record<string, unknown> | undefined => {
   const p = wire(m).params;
   return isRecord(p) ? p : undefined;
@@ -590,7 +595,7 @@ export async function acpProxy(
   const releaseSession = (sessionId: string, ses: ProxySession): void => {
     abortHeld(ses, sessionId);
     abortGateHeld(sessionId);
-    abortHeldAsks(sessionId);
+    abortHeldAsks(sessionId, 'session closed while the policy evaluated');
     sessions.delete(sessionId);
     ses.span?.end({ 'acp.proxy.close': true });
     void ses.plane?.drain().then(undefined, () => {});
@@ -615,7 +620,10 @@ export async function acpProxy(
     // eval (or the gate turn's late response) lands on an empty slot.
     // Held permission asks settle downstream the same way — the wire
     // never shows an ask after its cancel either
-    const aborted = abortHeld(ses, sessionId) + abortGateHeld(sessionId) + abortHeldAsks(sessionId);
+    const aborted =
+      abortHeld(ses, sessionId) +
+      abortGateHeld(sessionId) +
+      abortHeldAsks(sessionId, 'session cancelled while the policy evaluated');
     if (aborted === 0) {
       return true;
     }
@@ -716,9 +724,7 @@ export async function acpProxy(
           ses.advisory.push(...lines);
         }
       } catch (e) {
-        log(
-          `acp proxy: tool_call hook eval failed (session ${sessionId}) — ${(e as Error).message}`
-        );
+        log(`acp proxy: tool_call hook eval failed (session ${sessionId}) — ${errText(e)}`);
       }
     });
   };
@@ -911,20 +917,40 @@ export async function acpProxy(
       try {
         outcome = await fn(cwd, sessionId, call);
       } catch (e) {
-        log(`acp proxy: permission eval failed (session ${sessionId}) — ${(e as Error).message}`);
+        log(`acp proxy: permission eval failed (session ${sessionId}) — ${errText(e)}`);
       }
       settlePermission(m, id, ses, sessionId, outcome);
-    })();
+    })().catch((e: unknown) => {
+      // a settle crash must not escape as an unhandled rejection —
+      // and a still-held ask must not strand the agent on its
+      // question: the seam's own fail-open posture, the ask crosses
+      // verbatim (an entry already discharged has nothing to settle)
+      try {
+        log(`acp proxy: permission settle failed (session ${sessionId}) — ${errText(e)}`);
+        const req = pendingA2C.get(id);
+        if (req?.permission?.held === true) {
+          req.permission.held = false;
+          writeUp(m);
+        }
+      } catch {
+        /* the writer is gone — the teardown sweep answers what it can */
+      }
+    });
   };
 
   /** Answer every held permission ask of the session downstream
    *  `cancelled` — a cancel/close settles the ask where it stands:
    *  held asks never crossed, so the wire never shows an ask after
    *  its cancel. Forwarded asks keep their pending entry — the
-   *  client's own answer is owed the relay. Returns the count. */
-  const abortHeldAsks = (sessionId: string): number => {
+   *  client's own answer is owed the relay. `reason` is the caller's
+   *  why: a session/cancel and a clean session/close settle the same
+   *  held ask with different semantics, and the journal row should
+   *  say which it was. The loop iterates a snapshot — the body
+   *  deletes from the table it walks (the `[...pending]` discipline
+   *  the downstream sweep already uses). Returns the count. */
+  const abortHeldAsks = (sessionId: string, reason: string): number => {
     let aborted = 0;
-    for (const [id, req] of pendingA2C) {
+    for (const [id, req] of [...pendingA2C]) {
       if (req.sessionId !== sessionId || req.permission?.held !== true) {
         continue;
       }
@@ -935,7 +961,7 @@ export async function acpProxy(
         toolCallId: req.permission.toolCallId,
         decidedBy: 'proxy',
         verdict: 'cancelled',
-        reason: 'session cancelled while the policy evaluated',
+        reason,
       });
       answerPermission(id, { outcome: 'cancelled' });
     }
@@ -1120,7 +1146,7 @@ export async function acpProxy(
       try {
         outcome = await gate(cwd, sessionId);
       } catch (e) {
-        log(`acp proxy: stop gate eval failed (session ${sessionId}) — ${(e as Error).message}`);
+        log(`acp proxy: stop gate eval failed (session ${sessionId}) — ${errText(e)}`);
       }
       // a cancel raced the eval — its 'cancelled' already landed
       if (!pending.has(clientId) || downDead.fired) {
@@ -1279,7 +1305,7 @@ export async function acpProxy(
       try {
         route(m);
       } catch (e) {
-        log(`acp proxy: dropped ${tag} ${wire(m).method ?? 'message'}: ${(e as Error).message}`);
+        log(`acp proxy: dropped ${tag} ${wire(m).method ?? 'message'}: ${errText(e)}`);
       }
     }
   };
@@ -1342,7 +1368,7 @@ export async function acpProxy(
   // Permission asks get the wire's honest outcome — cancelled;
   // anything else gets the same internal error a dead peer earns.
   if (verdict === 'up') {
-    for (const [id, req] of pendingA2C) {
+    for (const [id, req] of [...pendingA2C]) {
       pendingA2C.delete(id);
       if (req.permission !== undefined) {
         notePermission(req.sessionId === undefined ? undefined : sessions.get(req.sessionId), {
@@ -1352,11 +1378,11 @@ export async function acpProxy(
           verdict: 'cancelled',
           reason: 'upstream client closed',
         });
-        writeDown({
-          jsonrpc: '2.0',
-          id,
-          result: { outcome: { outcome: 'cancelled' } },
-        } as AnyMessage);
+        // the same denyPermission/cancelled shape answerPermission
+        // writes everywhere else — result.outcome is the ACP
+        // RequestPermissionOutcome union, its own `outcome`
+        // discriminant is the second nesting level
+        answerPermission(id, { outcome: 'cancelled' });
       } else {
         writeDown({
           jsonrpc: '2.0',

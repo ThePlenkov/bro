@@ -1887,4 +1887,93 @@ describe('acpProxy — permission policy seam (bro-9qopj)', () => {
       agentConn.close();
     }
   });
+
+  test('an eval rejecting with null still fails open — the catch logs, the ask crosses', async () => {
+    const logs: string[] = [];
+    const r = rig(
+      { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+      // a hook can reject with ANYTHING — a nullish rejection must not
+      // throw a second error inside the catch (e.message on null)
+      { permission: () => Promise.reject(null) },
+      l => logs.push(l)
+    );
+    try {
+      await openSession(r.acp);
+      await r.acp.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      // fail-open like a throwing eval: the ask crossed, the human
+      // answered, and the crash-free log line carries 'null'
+      assert.equal(r.permAsks.length, 1);
+      assert.deepEqual(r.fake.permissionOutcome, {
+        outcome: 'selected',
+        optionId: 'allow-once',
+      });
+      await new Promise(r2 => setTimeout(r2, 30));
+      assert.equal(
+        logs.some(l => l.includes('permission eval failed') && l.includes('null')),
+        true
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('session/close settles EVERY held ask cancelled — and the journal says closed, not cancelled', async () => {
+    const dir = repo();
+    try {
+      const r = rig(
+        {
+          replyText: 'ok',
+          // two permission asks in flight at once — the abort walk
+          // must settle all of them, not just the first
+          probeClient: async (client, sid) => {
+            const ask = (tc: string) =>
+              client.request('session/request_permission', {
+                sessionId: sid,
+                toolCall: { toolCallId: tc, title: `call ${tc}` },
+                options: [{ optionId: 'allow-once', kind: 'allow_once', name: 'allow' }],
+              }) as Promise<{ outcome: unknown }>;
+            const [a, b] = await Promise.all([ask('tc-a'), ask('tc-b')]);
+            return [a.outcome, b.outcome];
+          },
+        },
+        // the eval never resolves — both asks stay held until the
+        // close settles them
+        { permission: async () => new Promise<never>(() => {}) }
+      );
+      try {
+        await openSession(r.acp, dir);
+        const promptP = r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        // let both asks land + park on the held eval
+        await new Promise(r2 => setTimeout(r2, 80));
+        await r.acp.request('session/close', { sessionId: 'sess-1' });
+        await new Promise(r2 => setTimeout(r2, 50));
+        // every held entry settled — none skipped mid-iteration, none
+        // crossed upstream
+        assert.deepEqual(r.fake.probeResult, [{ outcome: 'cancelled' }, { outcome: 'cancelled' }]);
+        assert.equal(r.permAsks.length, 0);
+        const rows = permissionRows(dir);
+        assert.equal(rows.length, 2);
+        assert.equal(
+          rows.every(row => row.verdict === 'cancelled'),
+          true
+        );
+        // a clean close is not a cancel — the journal says which it was
+        assert.equal(
+          rows.every(row => row.reason === 'session closed while the policy evaluated'),
+          true
+        );
+        await promptP;
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
 });
