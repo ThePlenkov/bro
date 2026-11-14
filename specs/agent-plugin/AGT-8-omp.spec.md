@@ -30,7 +30,11 @@ the one host where stop refusal is `'block'` — real enforcement.
 `plugins/omp/bro/` materialized by bundle-adapter from
 `packages/agent-plugins/omp/src/omp.ts` (+ `modes.ts`, `pre/`,
 `permission.ts`). Same raw-`.ts`-via-jiti loading as pi; `bro plugins
-install omp` or `omp plugin install`.
+install omp` or `omp plugin install`. **Single-scope contract
+(bro-b7mae):** omp loads project and global copies of the same
+extension without dedupe — same rule as AGT-7: a bare install
+collapses to the scope already holding bro (global default);
+explicit scope flags honored with a cross-scope warning.
 
 ### Event mapping (HOOK_MATRIX `omp` row)
 
@@ -119,3 +123,7 @@ one.
   `/goal` + `/loop` natively, so those aliases register as
   `bro:goal`/`bro:loop` and still reach identical argv; `/drill`
   keeps its bare name (`bro-command.e2e.test.ts`).
+- 2026-11-14 — v6: install contract gains the single-scope rule
+  (bro-b7mae) — same `ClientSpec.singleScope` collapse as AGT-7;
+  omp shares pi's loose-extension loading shape so the collision
+  class is identical.
