@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -16,6 +17,8 @@ import {
   classifyArmCommands,
   classifyExecCommand,
   classifySkillMutation,
+  collectStopGate,
+  collectToolCallGuards,
   hookDeadlineMs,
   isSelfToolCommand,
   journalCommand,
@@ -31,7 +34,15 @@ import {
   takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
-import { procStat, type ClaimFacade, type ClaimRow, type GateContribution } from '@broject/core';
+import {
+  procStat,
+  registerConnector,
+  unregisterConnector,
+  type ClaimFacade,
+  type ClaimRow,
+  type Connector,
+  type GateContribution,
+} from '@broject/core';
 import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts';
 
 function foreignLock(lock: string): ChildProcess {
@@ -874,5 +885,146 @@ describe('hookDeadlineMs (bro-36sx7.13)', () => {
     assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '3000000000' }), 6000);
     assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '6e9' }), 6000);
     assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '1e10' }), 6000);
+  });
+});
+
+describe('acp proxy seam collectors (bro-u2eps)', () => {
+  /** These run with cwd deliberately NOT the session repo — the proxy's
+   *  whole contract is that markers, traces, guards, and gates resolve
+   *  inside the session's own dir, never the caller's. */
+  test('collectToolCallGuards arms markers + fires post-tool guards inside the session dir', async () => {
+    const { root, main } = initRepo('bro-acp-seam-', m => {
+      writeFileSync(
+        join(m, 'bro.config.json'),
+        JSON.stringify({
+          guard: {
+            defs: [
+              {
+                name: 'push-nudge',
+                when: { on: ['post-tool'], match: { commands: ['gh pr'] } },
+                say: 'remember the review gate',
+              },
+            ],
+          },
+        })
+      );
+    });
+    const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+    try {
+      // the announce arms immediately — a call whose completion never
+      // lands still marks the session (the hook's over-approximation)
+      const start = await collectToolCallGuards(main, 's1', {
+        phase: 'start',
+        toolCallId: 'tc-1',
+        name: 'Bash',
+        status: 'in_progress',
+        input: { command: 'gh pr view 42' },
+      });
+      assert.ok(readArmed('s1', main).has('act'));
+      assert.deepEqual(start.lines, []);
+      // the terminal update is the post-tool analog — the guard sweep
+      // sees the journaled command in this session's trace tail
+      const end = await collectToolCallGuards(main, 's1', {
+        phase: 'end',
+        toolCallId: 'tc-1',
+        name: 'Bash',
+        status: 'completed',
+        input: { command: 'gh pr view 42' },
+      });
+      assert.ok(end.lines.some(l => l.includes('bro guard push-nudge: remember the review gate')));
+      const trace = join(common, 'bro', 'hooks', 'trace', 's1.jsonl');
+      assert.match(readFileSync(trace, 'utf8'), /"command":"gh pr view 42"/);
+      // the fired set spent the guard's budget — the same one-shot the
+      // hook event enforces applies to the seam
+      const again = await collectToolCallGuards(main, 's1', {
+        phase: 'end',
+        toolCallId: 'tc-2',
+        name: 'Bash',
+        status: 'completed',
+        input: { command: 'gh pr view 99' },
+      });
+      assert.ok(!again.lines.some(l => l.includes('push-nudge')));
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('collectToolCallGuards on a proven failure journals but arms nothing', async () => {
+    const { root, main } = initRepo('bro-acp-seam-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      // a failed exec reports the outcome — the hook arms on every
+      // outcome EXCEPT a proven failure, the seam keeps the rule
+      const r = await collectToolCallGuards(main, 's9', {
+        phase: 'end',
+        toolCallId: 'tc-1',
+        name: 'Bash',
+        status: 'failed',
+        input: { command: 'gh pr merge 42' },
+      });
+      assert.deepEqual(r.lines, []);
+      assert.ok(!readArmed('s9', main).has('act'));
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('collectStopGate blocks once on an armed aspect, then demotes — gates, not loops', async () => {
+    const { root, main } = initRepo('bro-acp-seam-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      const conn: Connector = {
+        name: 'u2eps-fake-gate',
+        hooks: () => ({
+          stopGate: () => [{ aspect: 'act', block: 'finish the review threads' }],
+        }),
+      };
+      registerConnector(conn);
+      try {
+        armSession('s1', 'act', '', main);
+        const first = await collectStopGate(main, 's1');
+        assert.equal(first.block, 'finish the review threads');
+        // the aspect's one-shot is spent — the same contribution can
+        // only hint now: the second end-of-turn passes unconditionally
+        const second = await collectStopGate(main, 's1');
+        assert.equal(second.block, undefined);
+        assert.ok(second.hints.some(h => h.includes('finish the review threads')));
+        // an unchanged hint set never repeats — an idle turn-end must
+        // not re-wake the agent into a loop
+        const third = await collectStopGate(main, 's1');
+        assert.equal(third.block, undefined);
+        assert.ok(!third.hints.some(h => h.includes('finish the review threads')));
+      } finally {
+        unregisterConnector('u2eps-fake-gate');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('collectStopGate on an unarmed session never blocks — ambient state is passive', async () => {
+    const { root, main } = initRepo('bro-acp-seam-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      registerConnector({
+        name: 'u2eps-fake-gate',
+        hooks: () => ({
+          stopGate: () => [{ aspect: 'act', block: 'finish the review threads' }],
+        }),
+      });
+      try {
+        // no marker — a contribution's block only binds sessions that
+        // armed the aspect; ambient state is nobody's obligation
+        const r = await collectStopGate(main, 's-unarmed');
+        assert.equal(r.block, undefined);
+      } finally {
+        unregisterConnector('u2eps-fake-gate');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 });
