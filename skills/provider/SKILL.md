@@ -1,4 +1,5 @@
 ---
+
 name: provider
 description: "Use when Claude Code should run ON bro — `bro provider serve` is the host-level Messages-API listener (ANTHROPIC_BASE_URL target), `bro provider ensure` self-starts it, and `bro provider url|token|env` are the one-time wiring helpers. Thin wrapper over the bro CLI — mechanics live in the CLI."
 ---
@@ -32,19 +33,20 @@ Two planes produce an endpoint:
 The `/v1` plane itself is whichever plane is configured: a `serve.backend`
 /`providers.<name>` acp conductor (read from the **global** config layer —
 the spawning repo's config never leaks into a machine-level service) or
-the env-key byte-proxy to `BRO_PROVIDER_UPSTREAM` (default
-api.anthropic.com) with `BRO_PROVIDER_API_KEY`.
+the env-key byte-proxy to `serve.upstream`/`BRO_PROVIDER_UPSTREAM` (default
+api.anthropic.com) with `BRO_PROVIDER_API_KEY` (or the var
+`serve.apiKeyEnv` names).
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro provider serve [--port N]` | Foreground host listener on 127.0.0.1 (default 4545). Refuses while another listener is live in the same provider state directory and when nothing is configured to serve (no `serve.backend`/`providers.*` in global config, no upstream key in env). Rarely invoked by hand — `ensure` spawns it. |
-| `bro provider ensure [--port N]` | Resolve-or-spawn the host listener, print the session token — **the apiKeyHelper**. Probe → detached spawn → poll → token on stdout; failures exit 1 on stderr. |
-| `bro provider url` | Print the endpoint `ANTHROPIC_BASE_URL` should point at |
-| `bro provider token` | Print the session token — self-heals through the ensure path on a dead listener, same helper contract |
-| `bro provider env` | Print `export ANTHROPIC_BASE_URL=…` + `export ANTHROPIC_AUTH_TOKEN=…` — `eval "$(bro provider env)"`-able; a comment carries the settings.json block |
-| `bro provider env --json` | Print the `~/.claude/settings.json` block verbatim — `{"env":{"ANTHROPIC_BASE_URL":…},"apiKeyHelper":"bro provider ensure"}` |
+| Command                          | What it does                                                                                                                                                                                                                                                                                        |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro provider serve [--port N]`  | Foreground host listener on 127.0.0.1 (default 4545). Refuses while another listener is live in the same provider state directory and when nothing is configured to serve (no `serve.backend`/`providers.*` in global config, no upstream key in env). Rarely invoked by hand — `ensure` spawns it. |
+| `bro provider ensure [--port N]` | Resolve-or-spawn the host listener, print the session token — **the apiKeyHelper**. Probe → detached spawn → poll → token on stdout; failures exit 1 on stderr.                                                                                                                                     |
+| `bro provider url`               | Print the endpoint `ANTHROPIC_BASE_URL` should point at                                                                                                                                                                                                                                             |
+| `bro provider token`             | Print the session token — self-heals through the ensure path on a dead listener, same helper contract                                                                                                                                                                                               |
+| `bro provider env`               | Print `export ANTHROPIC_BASE_URL=…` + `export ANTHROPIC_AUTH_TOKEN=…` — `eval "$(bro provider env)"`-able; a comment carries the settings.json block                                                                                                                                                |
+| `bro provider env --json`        | Print the `~/.claude/settings.json` block verbatim — `{"env":{"ANTHROPIC_BASE_URL":…},"apiKeyHelper":"bro provider ensure"}`                                                                                                                                                                        |
 
 ## Resolution — cwd-aware
 
