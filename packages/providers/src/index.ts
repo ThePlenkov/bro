@@ -10,6 +10,7 @@
 export {
   acpCall,
   acpChat,
+  acpChildEnv,
   acpClient,
   acpConverse,
   acpModels,
@@ -18,6 +19,7 @@ export {
   acpSessionRetain,
   acpWorkerArgv,
   promptText,
+  shellWords,
   isSystemoneFamily,
 } from './acp.ts';
 export type { AcpPeer, AcpRetainedSession, AcpUsage, PooledTurnOpts } from './acp.ts';
@@ -67,6 +69,8 @@ export type {
 } from '@broject/acp-session';
 export { acpProxy, runAcpProxy } from './acp-proxy.ts';
 export type {
+  AcpAgentOverlay,
+  AcpAgentTurn,
   AcpProxyOptions,
   AcpProxyPermissionCall,
   AcpProxyPermissionVerdict,

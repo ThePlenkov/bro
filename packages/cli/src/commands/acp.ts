@@ -1,40 +1,49 @@
 /**
- * `bro acp proxy -- <agent cmd>` — the cascading ACP edge (specs
- * bro-rs8sp.md, bro-bhyo1.md, bro-u2eps.md, bro-9qopj.md). bro sits on
- * the ACP wire: the client (Zed, JetBrains, Neovim, `devin acp`,
- * `kilo acp`) talks ACP to this process's stdin/stdout; bro spawns the
- * downstream agent from the argv tail and forwards everything verbatim
- * — except the session's first `session/prompt` (which carries the
- * hook seam's session-start + prompt-submit context as one prepended
- * text block), the tool-call updates that feed the in-process
- * arming/guard pass, the turn-end responses the stop gate can hold
- * for exactly one re-prompt, and the `session/request_permission`
- * asks the permission policy answers or relays.
+ * `bro acp` — bro on the ACP wire (specs bro-rs8sp.md, bro-bhyo1.md,
+ * bro-u2eps.md, bro-9qopj.md, bro-tegz2.md). Two surfaces, one pump:
+ *
+ * - `bro acp` (agent mode) — bro IS the agent: the CLI contract
+ *   advertised as slash commands, free-form prompts forwarded to the
+ *   configured provider (fleet.routing class → chain head). See
+ *   acp-agent.ts.
+ * - `bro acp proxy -- <agent cmd>` — the cascading edge: the client
+ *   names the successor in argv; bro forwards everything verbatim
+ *   except the session's first `session/prompt` (which carries the
+ *   hook seam's session-start + prompt-submit context as one
+ *   prepended text block), the tool-call updates that feed the
+ *   in-process arming/guard pass, the turn-end responses the stop
+ *   gate can hold for exactly one re-prompt, and the
+ *   `session/request_permission` asks the permission policy answers
+ *   or relays.
  *
  * The seam is the same code `bro hooks` runs — collectSessionContext /
  * collectPromptContext / collectToolCallGuards / collectStopGate /
  * collectPermission as library calls keyed on `session/new`'s cwd,
- * never a subprocess and never the proxy's own cwd.
+ * never a subprocess and never the proxy's own cwd. `acpHookSeam()`
+ * in acp-agent.ts wires it for both surfaces.
  */
 import { CommandError, EXIT, passthroughExitCode } from '@broject/core';
-import {
-  collectPermission,
-  collectPromptContext,
-  collectSessionContext,
-  collectStopGate,
-  collectToolCallGuards,
-} from './hooks.ts';
+import { acpAgentFlags, acpHookSeam, runAcpAgent } from './acp-agent.ts';
 
-const USAGE = 'usage: bro acp proxy -- <agent cmd…>';
+const USAGE = `usage:
+  bro acp [--provider <name> | --class <name>]
+  bro acp proxy -- <agent cmd…>`;
 
 function usage(line: string): never {
-  throw new CommandError(`${line}\n${USAGE}`, EXIT.usage);
+  throw new CommandError(`${line}\n${USAGE}`, EXIT.usage, USAGE);
 }
 
 export async function runAcpCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv;
   if (sub !== 'proxy') {
-    usage(`error: unknown subcommand '${sub ?? ''}'`);
+    // agent mode — bare `bro acp` is the ACP server (the `* acp`
+    // convention); flag parsing owns the usage errors from here
+    const sel = acpAgentFlags(argv);
+    const code = await runAcpAgent(sel);
+    if (code !== 0) {
+      throw new CommandError('', passthroughExitCode(code));
+    }
+    return;
   }
   const sep = rest.indexOf('--');
   // `--` is mandatory — the tail is the successor's argv, tokenized
@@ -48,43 +57,7 @@ export async function runAcpCommand(argv: string[]): Promise<void> {
     usage('error: empty agent command after `--`');
   }
   const { runAcpProxy } = await import('@broject/providers');
-  const code = await runAcpProxy(command, {
-    seam: {
-      sessionContext: async (cwd, sessionId) => {
-        const r = await collectSessionContext(cwd, sessionId);
-        // `settled` must cross the seam — an unsettled probe set is
-        // incomplete context: the proxy retries it on the next prompt
-        // rather than presenting partial output as the session start
-        return {
-          text: r.lines.length === 0 ? undefined : r.lines.join('\n'),
-          settled: r.settled,
-        };
-      },
-      promptContext: async (cwd, sessionId, prompt) => {
-        const r = await collectPromptContext(cwd, sessionId, prompt);
-        return r.lines.length === 0 ? undefined : r.lines.join('\n');
-      },
-      // the tool-call and stop-gate legs (spec bro-u2eps): the same
-      // arming + guard + gate evaluation `bro hooks` runs, in-process —
-      // the proxy pays no per-call subprocess. `call` arrives as the
-      // proxy's own AcpProxyToolCall shape; AcpToolCall is the same
-      // structure declared on this side of the module edge.
-      toolCall: async (cwd, sessionId, call) => {
-        const r = await collectToolCallGuards(cwd, sessionId, call);
-        return r.lines.length === 0 ? undefined : r.lines;
-      },
-      stopGate: async (cwd, sessionId) => {
-        const r = await collectStopGate(cwd, sessionId);
-        return r.block === undefined && r.hints.length === 0 ? undefined : r;
-      },
-      // the permission leg (spec bro-9qopj): the PermissionRequest
-      // hook's policy as a library call — allow/deny answer downstream
-      // on the spot, ask forwards to the client. `call` arrives as the
-      // proxy's AcpProxyPermissionCall shape; AcpPermissionCall is the
-      // same structure declared on this side of the module edge.
-      permission: async (cwd, sessionId, call) => collectPermission(cwd, sessionId, call),
-    },
-  });
+  const code = await runAcpProxy(command, { seam: acpHookSeam() });
   if (code !== 0) {
     throw new CommandError('', passthroughExitCode(code));
   }

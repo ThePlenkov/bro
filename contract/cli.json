@@ -984,19 +984,28 @@
     "acp": {
       "name": "acp",
       "group": "fleet",
-      "summary": "ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro-bhyo1)",
+      "summary": "ACP edge — bare `bro acp` is bro-as-agent (slash commands + routed provider); `proxy -- <agent cmd>` the cascade edge",
       "spellings": ["acp", "fleet acp"],
       "aliases": [],
       "hidden": false,
       "skill": "acp",
       "plan": false,
       "contract": {
+        "flags": {
+          "--provider <name>": "providers.<name> pin (acp entries only — exclusive with --class)",
+          "--class <name>": "fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)"
+        },
+        "exits": {
+          "0": "client closed the wire — clean session end",
+          "1": "downstream agent died first, or a config error (provider kind, dead lane)",
+          "2": "usage — unknown subcommand/flag, --provider + --class together"
+        },
         "subs": {
           "proxy": {
             "exits": {
               "0": "client closed the wire — clean session end",
               "1": "downstream agent died first — abnormal end",
-              "2": "usage — missing subcommand, missing `--`, or empty agent argv"
+              "2": "usage — missing `--`, or empty agent argv"
             }
           }
         }

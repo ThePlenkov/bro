@@ -32,6 +32,7 @@ import type {
 import { gitCommonDir, testGit } from '@broject/core';
 import {
   acpProxy,
+  type AcpAgentOverlay,
   type AcpProxyPermissionCall,
   type AcpProxySeam,
   type AcpProxyToolCall,
@@ -75,12 +76,14 @@ interface Rig {
 
 /** client → proxy → fake agent — all in-process. `fakeOpts` carries
  *  the same option bag fakeAcpAgent takes (replyText, askPermission,
- *  failPrompt, …). `clientAnswer` scripts the client's permission
- *  response — default: select the first offered option. */
+ *  failPrompt, …); `clientAnswer` scripts the client's permission
+ *  response — default: select the first offered option; `agent` is
+ *  the bro-tegz2 overlay (slash commands, bro's initialize identity). */
 function rig(
   fakeOpts: Parameters<typeof fakeAcpAgent>[0],
   seam?: AcpProxySeam,
   log: (line: string) => void = () => {},
+  agent?: AcpAgentOverlay,
   clientAnswer?: (params: { options: Array<{ optionId: string }> }) => unknown
 ): Rig {
   const fake = fakeAcpAgent(fakeOpts);
@@ -100,7 +103,7 @@ function rig(
       updates.push(ctx.params);
     })
     .connect(clientSide);
-  const proxyDone = acpProxy(proxyUp, proxyDown, { seam, log });
+  const proxyDone = acpProxy(proxyUp, proxyDown, { seam, log, agent });
   return {
     fake,
     conn,
@@ -1398,6 +1401,560 @@ describe('acpProxy — tool_call guards + turn-end stop gate (bro-u2eps)', () =>
   });
 });
 
+describe('acpProxy — agent overlay (bro-tegz2)', () => {
+  const COMMANDS = [
+    { name: 'act', description: 'Open-PR loop', input: { hint: 'status|threads' } },
+    { name: 'next', description: 'claim the top bead', input: { hint: 'args' } },
+  ];
+
+  /** The available_commands_update notifications the client leg saw. */
+  const cmdsUpdate = (updates: unknown[]) =>
+    updates.filter(
+      u =>
+        (u as { update?: { sessionUpdate?: string } }).update?.sessionUpdate ===
+        'available_commands_update'
+    );
+
+  /** The agent_message_chunk texts the client leg saw, in order. */
+  const chunks = (updates: unknown[]) =>
+    updates
+      .map(u => (u as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update)
+      .filter(u => u?.sessionUpdate === 'agent_message_chunk')
+      .map(u => u?.content?.text);
+
+  /** The announce rides the same stream right after the open response —
+   *  poll for it rather than racing its write. */
+  async function until(cond: () => boolean, ms = 3000): Promise<void> {
+    const t0 = Date.now();
+    while (!cond()) {
+      if (Date.now() - t0 > ms) {
+        throw new Error('until: timed out');
+      }
+      await new Promise(r => setTimeout(r, 10));
+    }
+  }
+
+  test('a stamped session announces the overlay commands once — right after its open response', async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, { commands: COMMANDS });
+    try {
+      const sessionId = await openSession(r.acp);
+      await until(() => cmdsUpdate(r.updates).length === 1);
+      const u = cmdsUpdate(r.updates)[0] as {
+        sessionId: string;
+        update: { availableCommands: unknown[] };
+      };
+      assert.equal(u.sessionId, sessionId);
+      assert.deepEqual(u.update.availableCommands, COMMANDS);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('each stamped session announces — a second session gets its own available_commands_update', async () => {
+    const r = rig({ replyText: 'ok', uniqueSessions: true }, undefined, () => {}, {
+      commands: COMMANDS,
+    });
+    try {
+      const s1 = await openSession(r.acp);
+      const s2 = await openSession(r.acp);
+      assert.notEqual(s1, s2);
+      await until(() => cmdsUpdate(r.updates).length === 2);
+      assert.deepEqual(
+        cmdsUpdate(r.updates).map(u => (u as { sessionId: string }).sessionId),
+        [s1, s2]
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('no overlay → no announcement (verbatim stays verbatim)', async () => {
+    const r = rig({ replyText: 'ok' });
+    try {
+      await openSession(r.acp);
+      await new Promise(r2 => setTimeout(r2, 60));
+      assert.equal(cmdsUpdate(r.updates).length, 0);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a handled prompt answers upstream with streamed updates — the downstream never sees it', async () => {
+    const seen: string[] = [];
+    const r = rig({ replyText: 'DOWNSTREAM' }, undefined, () => {}, {
+      prompt: async turn => {
+        seen.push(turn.text);
+        turn.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'LOCAL-1 ' },
+        });
+        turn.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'LOCAL-2' },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      const res = await r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: '/act status' }],
+      });
+      assert.equal(res.stopReason, 'end_turn');
+      assert.deepEqual(seen, ['/act status']);
+      assert.deepEqual(r.fake.prompts, []);
+      assert.deepEqual(chunks(r.updates), ['LOCAL-1 ', 'LOCAL-2']);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('an unhandled prompt falls through to verbatim forwarding — seam injection included', async () => {
+    const r = rig(
+      { replyText: 'ok' },
+      { sessionContext: async () => ({ text: 'CTX', settled: true }) },
+      () => {},
+      { prompt: async () => undefined }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      const res = await r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'hello agent' }],
+      });
+      assert.equal(res.stopReason, 'end_turn');
+      assert.equal(r.fake.prompts.length, 1);
+      // the session-start context still injected — the first block is CTX
+      const first = r.fake.blocks[0]![0]!;
+      assert.equal(first.type === 'text' ? first.text : '', 'CTX');
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a locally handled prompt does not consume the first-prompt injection slot', async () => {
+    const r = rig(
+      { replyText: 'ok' },
+      { sessionContext: async () => ({ text: 'CTX', settled: true }) },
+      () => {},
+      {
+        prompt: async turn => (turn.text.startsWith('/') ? { stopReason: 'end_turn' } : undefined),
+      }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: '/act status' }],
+      });
+      assert.deepEqual(r.fake.prompts, []);
+      // the FIRST crossed prompt still carries the session context —
+      // a local turn never claimed the slot
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'real question' }],
+      });
+      assert.equal(r.fake.prompts.length, 1);
+      const first = r.fake.blocks[0]![0]!;
+      assert.equal(first.type === 'text' ? first.text : '', 'CTX');
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('session/cancel mid-local-turn answers cancelled, fires the abort signal, and never crosses', async () => {
+    let aborted = false;
+    let emitsAfter = 0;
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              // a late emit after the cancel must not reach the wire
+              turn.emit({
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'LATE' },
+              });
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        }),
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      const p = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: '/watch' }],
+      });
+      await new Promise(r2 => setTimeout(r2, 50));
+      await r.acp.notify('session/cancel', { sessionId });
+      assert.equal((await p).stopReason, 'cancelled');
+      assert.equal(aborted, true);
+      await new Promise(r2 => setTimeout(r2, 30));
+      assert.deepEqual(r.fake.prompts, []);
+      // no crossed work → the cancel never crossed downstream, and the
+      // late 'LATE' emit never reached the client
+      assert.deepEqual(r.fake.cancels, []);
+      emitsAfter = chunks(r.updates).filter(t => t === 'LATE').length;
+      assert.equal(emitsAfter, 0);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a thrown handler answers -32603 — never a synthesized success', async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: async () => {
+        throw new Error('slash runner exploded');
+      },
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      await assert.rejects(
+        r.acp.request('session/prompt', {
+          sessionId,
+          prompt: [{ type: 'text', text: '/x' }],
+        }),
+        (e: unknown) =>
+          e instanceof RequestError && e.code === -32603 && /slash runner exploded/.test(e.message)
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test("initialize reports the overlay's agentInfo — the downstream's survives under _meta.bro.downstreamAgent", async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      agentInfo: { name: 'bro', version: '9.9.9', title: 'bro agent mode' },
+    });
+    try {
+      const init = (await r.acp.request('initialize', INIT_PARAMS)) as {
+        agentInfo?: { name?: string; version?: string; title?: string };
+        _meta?: { bro?: { downstreamAgent?: { name?: string } } };
+      };
+      assert.equal(init.agentInfo?.name, 'bro');
+      assert.equal(init.agentInfo?.version, '9.9.9');
+      assert.equal(init._meta?.bro?.downstreamAgent?.name, 'fake-acp');
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a handler that throws undefined still answers -32603 — never a declined-prompt fallthrough', async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: async () => {
+        throw undefined;
+      },
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      await assert.rejects(
+        r.acp.request('session/prompt', {
+          sessionId,
+          prompt: [{ type: 'text', text: '/x' }],
+        }),
+        (e: unknown) => e instanceof RequestError && e.code === -32603
+      );
+      // a crashed handler is a wire error — the prompt never crossed
+      assert.deepEqual(r.fake.prompts, []);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a client close mid-local-turn fires the abort — the turn dies with the wire', async () => {
+    let aborted = false;
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        }),
+    });
+    const sessionId = await openSession(r.acp);
+    const p = r.acp.request('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/watch' }],
+    });
+    void p.catch(() => {}); // the client is about to die — its request never resolves
+    await new Promise(r2 => setTimeout(r2, 50));
+    await hangupClient(r);
+    assert.equal(await r.proxyDone, 0);
+    assert.equal(aborted, true);
+    await hangupAgent(r);
+  });
+
+  test('a downstream close mid-local-turn fires the abort too', async () => {
+    let aborted = false;
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        }),
+    });
+    const sessionId = await openSession(r.acp);
+    const p = r.acp.request('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: '/watch' }],
+    });
+    void p.catch(() => {});
+    await new Promise(r2 => setTimeout(r2, 50));
+    await hangupAgent(r);
+    assert.equal(await r.proxyDone, 1);
+    assert.equal(aborted, true);
+    await hangupClient(r);
+  });
+
+  test("the downstream's command list merges with the overlay's — local names shadow", async () => {
+    const DOWN_COMMANDS = [
+      { name: 'zed-cmd', description: 'downstream command', input: { hint: 'args' } },
+      { name: 'act', description: 'downstream shadow of a local name', input: { hint: 'x' } },
+    ];
+    const r = rig(
+      {
+        replyText: 'ok',
+        // the agent announces its own surface mid-turn — the update
+        // carries a stamped session, so the merge path applies
+        updates: [
+          {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: DOWN_COMMANDS,
+          },
+          { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } },
+        ],
+      },
+      undefined,
+      () => {},
+      { commands: COMMANDS }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      // the stamp announce is the local list (nothing cached yet)
+      await until(() => cmdsUpdate(r.updates).length === 1);
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+      // the downstream's announce re-publishes merged, not verbatim
+      await until(() => cmdsUpdate(r.updates).length === 2);
+      const last = cmdsUpdate(r.updates).at(-1) as {
+        update: { availableCommands: { name: string; description: string }[] };
+      };
+      assert.deepEqual(
+        last.update.availableCommands.map(c => c.name),
+        ['act', 'next', 'zed-cmd']
+      );
+      // local dispatch precedence — bro's 'act' shadows the downstream's
+      assert.equal(
+        last.update.availableCommands.find(c => c.name === 'act')?.description,
+        'Open-PR loop'
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a cancelled request id reused by a new prompt keeps ownership — the stale turn cannot answer or emit for it', async () => {
+    // raw client — request-id reuse is a wire-level shape the typed
+    // client() app cannot produce (it owns its id space)
+    const fake = fakeAcpAgent({ replyText: 'DOWNSTREAM-B' });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const agentConn = fake.app.connect(agentSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      agent: {
+        prompt: turn => {
+          if (!turn.text.startsWith('/local')) {
+            return Promise.resolve(undefined);
+          }
+          return new Promise<{ stopReason: string } | undefined>(resolve => {
+            turn.signal.addEventListener(
+              'abort',
+              () => {
+                // resolve LATE — after a new request may own the id
+                setTimeout(() => {
+                  turn.emit({
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'A-LATE' },
+                  });
+                  resolve({ stopReason: 'end_turn' });
+                }, 120);
+              },
+              { once: true }
+            );
+          });
+        },
+      },
+      log: () => {},
+    });
+    const w = clientSide.writable.getWriter();
+    const rd = clientSide.readable.getReader();
+    const responses: { id?: unknown; result?: unknown; error?: unknown }[] = [];
+    const updates: { update?: { content?: { text?: string } } }[] = [];
+    const reader = (async () => {
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) return;
+        const m = value as { id?: unknown; method?: string; params?: { update?: unknown } };
+        if (m.method === 'session/update') {
+          updates.push(m.params as (typeof updates)[number]);
+        } else if (m.id !== undefined) {
+          responses.push(m);
+        }
+      }
+    })();
+    const send = (m: Record<string, unknown>) => w.write(m as AnyMessage);
+    try {
+      await send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: INIT_PARAMS });
+      await until(() => responses.some(r => r.id === 1));
+      await send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { cwd: '/tmp/x', mcpServers: [] },
+      });
+      await until(() => responses.some(r => r.id === 2));
+      // request A: id 9 runs a local turn that only its abort releases
+      await send({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: '/local a' }] },
+      });
+      await new Promise(r2 => setTimeout(r2, 50));
+      await send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'sess-1' } });
+      await until(() => responses.some(r => r.id === 9));
+      assert.equal(
+        (responses.find(r => r.id === 9)?.result as { stopReason?: string })?.stopReason,
+        'cancelled'
+      );
+      // request B reuses id 9 while A's local turn still unwinds
+      await send({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hello b' }] },
+      });
+      await until(() => responses.filter(r => r.id === 9).length === 2);
+      await new Promise(r2 => setTimeout(r2, 80));
+      // B's prompt crossed and got the downstream's own answer
+      assert.deepEqual(fake.prompts, ['hello b']);
+      // A's post-cancel emit never reached the wire under B's id
+      assert.equal(
+        updates.some(u => u.update?.content?.text === 'A-LATE'),
+        false
+      );
+    } finally {
+      await w.close().catch(() => {});
+      agentConn.close();
+      await agentSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      await reader;
+      await proxyDone;
+    }
+  });
+
+  test('a prompt queued behind a local turn never starts after the client died', async () => {
+    // raw client — B's prompt sits in the session writeQ while A's
+    // local turn is still in flight; upstream EOF must gate B's
+    // handler, not just abort A's (wireDone, not aborts alone)
+    const calls: string[] = [];
+    const fake = fakeAcpAgent({ replyText: 'DOWN' });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const agentConn = fake.app.connect(agentSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      agent: {
+        prompt: turn => {
+          calls.push(turn.text);
+          if (!turn.text.startsWith('/local')) {
+            return Promise.resolve(undefined);
+          }
+          // A parks until the wire's teardown abort releases it —
+          // the same late-resolve shape the ownership test uses
+          return new Promise<{ stopReason: string } | undefined>(resolve => {
+            turn.signal.addEventListener(
+              'abort',
+              () => setTimeout(() => resolve({ stopReason: 'end_turn' }), 80),
+              { once: true }
+            );
+          });
+        },
+      },
+      log: () => {},
+    });
+    const w = clientSide.writable.getWriter();
+    const rd = clientSide.readable.getReader();
+    const responses: { id?: unknown }[] = [];
+    const reader = (async () => {
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) return;
+        const m = value as { id?: unknown };
+        if (m.id !== undefined) responses.push(m);
+      }
+    })();
+    const send = (m: Record<string, unknown>) => w.write(m as AnyMessage);
+    try {
+      await send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: INIT_PARAMS });
+      await until(() => responses.some(r => r.id === 1));
+      await send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { cwd: '/tmp/x', mcpServers: [] },
+      });
+      await until(() => responses.some(r => r.id === 2));
+      // A runs locally and parks; B queues behind it in the writeQ
+      await send({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: '/local a' }] },
+      });
+      await until(() => calls.length === 1);
+      await send({
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: '/local b' }] },
+      });
+      await new Promise(r2 => setTimeout(r2, 40));
+      // the client dies mid-A — wireDone must stop B's handler from
+      // ever spawning when the writeQ reaches it
+      await w.close().catch(() => {});
+      await new Promise(r2 => setTimeout(r2, 200));
+      assert.deepEqual(calls, ['/local a']);
+    } finally {
+      agentConn.close();
+      await agentSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      await reader;
+      await proxyDone;
+    }
+  });
+});
 describe('acpProxy — permission policy seam (bro-9qopj)', () => {
   const ALLOW_REJECT: PermissionOption[] = [
     { optionId: 'allow-once', kind: 'allow_once', name: 'allow once' },
@@ -1679,6 +2236,7 @@ describe('acpProxy — permission policy seam (bro-9qopj)', () => {
         { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
         undefined,
         () => {},
+        undefined,
         () => ({ outcome: { outcome: 'cancelled' } })
       );
       try {

@@ -25,6 +25,7 @@ import { Readable, Writable } from 'node:stream';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type {
   AnyMessage,
+  AvailableCommand,
   ContentBlock,
   JsonRpcId,
   SessionUpdate,
@@ -126,8 +127,49 @@ export interface AcpProxySeam {
   ): Promise<AcpProxyPermissionVerdict | undefined>;
 }
 
+/** One local turn on bro's side of the wire (spec bro-tegz2) — a
+ *  slash command running inside the session's serialized writeQ.
+ *  `emit` streams session/update notifications upstream, guarded by
+ *  the prompt's pending entry: a cancelled turn emits nothing.
+ *  `signal` fires on session/cancel — the running command's cue to
+ *  die; the client has already been answered `cancelled` by then. */
+export interface AcpAgentTurn {
+  sessionId: string;
+  /** session/new's cwd — the local command's repo; never the proxy's. */
+  cwd: string | undefined;
+  /** The prompt's flattened text — the slash parse reads this. */
+  text: string;
+  emit(update: SessionUpdate): void;
+  signal: AbortSignal;
+}
+
+/** The agent-mode overlay (spec bro-tegz2): bro IS the agent — its
+ *  own identity on initialize, its command surface announced per
+ *  session, and a local-turn handler ahead of the verbatim path.
+ *  Everything else stays the pump's: free-form prompts forward
+ *  downstream with the seam; cancel/close/gate keep their meanings. */
+export interface AcpAgentOverlay {
+  /** bro's identity for the initialize answer — the downstream's
+   *  original agentInfo survives under _meta.bro.downstreamAgent.
+   *  Capabilities stay verbatim: the downstream negotiates what
+   *  prompts can do; bro never claims caps it won't serve. */
+  agentInfo?: { name: string; version?: string; title?: string };
+  /** Commands announced once per stamped session — one upstream
+   *  available_commands_update right after the open response crosses. */
+  commands?: AvailableCommand[];
+  /** The local turn handler — runs inside the session's writeQ before
+   *  the injection/forward path. A non-undefined return answers the
+   *  prompt request upstream and nothing crosses; `undefined` falls
+   *  through to today's verbatim + seam path. A throw answers a
+   *  -32603 error upstream — never a synthesized success. */
+  prompt?(turn: AcpAgentTurn): Promise<{ stopReason: string } | undefined>;
+}
+
 export interface AcpProxyOptions {
   seam?: AcpProxySeam;
+  /** Agent mode (spec bro-tegz2) — bro's own surface on top of the
+   *  verbatim pump: identity, command announcement, local turns. */
+  agent?: AcpAgentOverlay;
   /** Diagnostics — stdout is the wire, so the proxy only ever logs to
    *  stderr. Defaults to console.error. */
   log?: (line: string) => void;
@@ -170,6 +212,11 @@ interface ProxySession {
    *  prompt or the gate re-prompt) as prepended text blocks: the one
    *  seam the wire already has for advisory text. */
   advisory: string[];
+  /** The downstream's last-announced slash-command list — cached so
+   *  the overlay's own surface composes with it instead of replacing
+   *  it: an available_commands_update is the session's CURRENT list,
+   *  not a delta (spec bro-tegz2). */
+  downstreamCommands: AvailableCommand[];
   /** undefined when the session has no cwd — the plane resolves inside
    *  the session repo or doesn't exist. */
   plane: AgentTurnPlane | undefined;
@@ -206,6 +253,10 @@ interface PendingRequest {
    *  mid-gate-turn (a concurrent session/prompt is legal JSON-RPC but
    *  an agent that cannot interleave turns would drop or wedge it). */
   gateDone?: () => void;
+  /** Agent-mode bookkeeping — armed while the overlay's local turn
+   *  runs: session/cancel's abortHeld fires it so the running command
+   *  dies with its `cancelled` answer instead of finishing alone. */
+  abort?: () => void;
 }
 
 /** An agent→client request in flight — forwarded upstream verbatim or
@@ -338,6 +389,13 @@ export async function acpProxy(
   const writeUp = (m: AnyMessage): void => {
     upWriter.write(m).then(undefined, () => upDead.fire());
   };
+
+  /** Set the moment a pump's EOF/death wins the verdict — BEFORE the
+   *  teardown sweep aborts in-flight turns. A prompt still queued in
+   *  a session writeQ has no abort armed yet, and on an upstream
+   *  close nothing discharges its pending entry: without this flag a
+   *  queued slash command would spawn AFTER the client died. */
+  let wireDone = false;
 
   /** Answer an upstream request ourselves — only the held-prompt
    *  cancel path uses this; the proxy never synthesizes success. */
@@ -502,19 +560,28 @@ export async function acpProxy(
       },
       { parent: target.ses.span?.ctx }
     );
-    pending.set(id, {
+    const entry: PendingRequest = {
       method: 'session/prompt',
       prompt: { sessionId: target.sessionId, span: turn },
-    });
+    };
+    pending.set(id, entry);
     target.ses.held.add(id);
-    target.ses.writeQ = target.ses.writeQ.then(() => crossPrompt({ m, id, ...target }));
+    // the entry is captured AT ENQUEUE — if a cancel discharges the
+    // id and a new request reuses it before this queued write runs,
+    // `pending.get(id)` inside crossPrompt would return the NEW
+    // request's entry and every identity check would pass for the
+    // stale turn
+    target.ses.writeQ = target.ses.writeQ.then(() => crossPrompt({ m, id, own: entry, ...target }));
   };
 
   /** Still writable? pending discharged → the cancel path already
    *  answered this prompt upstream; downstream dead → nothing crosses
-   *  anyway. The two check points bracket the seam collection — the
-   *  abortable window. */
-  const crossable = (id: JsonRpcId): boolean => pending.has(id) && !downDead.fired;
+   *  anyway; the wire closed → queued work never starts. Identity,
+   *  not presence: a reused id belongs to the newer request. The two
+   *  check points bracket the seam collection — the abortable
+   *  window. */
+  const crossable = (id: JsonRpcId, own: PendingRequest): boolean =>
+    pending.get(id) === own && !downDead.fired && !wireDone;
 
   /** The held write, run inside the session's writeQ: "first prompt" =
    *  first to actually CROSS, decided here under the serialized queue —
@@ -523,22 +590,104 @@ export async function acpProxy(
   const crossPrompt = async (held: {
     m: AnyMessage;
     id: JsonRpcId;
+    own: PendingRequest;
     params: Record<string, unknown>;
     sessionId: string;
     ses: ProxySession;
   }): Promise<void> => {
-    const { m, id, params, sessionId, ses } = held;
+    const { m, id, own, params, sessionId, ses } = held;
     try {
-      if (!crossable(id)) {
+      if (!crossable(id, own)) {
         return;
+      }
+      // agent mode (spec bro-tegz2): the overlay's local turn handler
+      // gets the prompt before the injection/forward path — inside the
+      // session's writeQ, so local work serializes with crossed prompts
+      // exactly like a downstream turn. A non-undefined return answers
+      // upstream and nothing crosses; undefined falls through. A local
+      // turn never claims the first-prompt slot, never feeds the gate —
+      // it produces no downstream response to hold.
+      const overlay = opts.agent?.prompt;
+      if (overlay !== undefined) {
+        const ctrl = new AbortController();
+        own.abort = () => ctrl.abort();
+        let result: { stopReason: string } | undefined;
+        let threw = false;
+        let failure: unknown;
+        try {
+          result = await overlay({
+            sessionId,
+            cwd: ses.cwd,
+            text: promptText(params),
+            emit: update => {
+              // guarded by the pending entry — a cancel that landed
+              // mid-turn already answered and discharged it, and a
+              // request that reused the id is a different turn: a late
+              // emit must not reach either wire
+              if (pending.get(id) === own && !upDead.fired) {
+                writeUp({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: { sessionId, update },
+                } as AnyMessage);
+              }
+            },
+            signal: ctrl.signal,
+          });
+        } catch (e) {
+          // a `throw undefined` is still a crashed handler — a boolean
+          // flag, not the thrown value, decides the error path
+          threw = true;
+          failure = e;
+        } finally {
+          own.abort = undefined;
+        }
+        if (threw) {
+          // a crashed handler is a -32603 upstream — never a fake
+          // success; a cancel that already answered wins the race, and
+          // a reused id belongs to its new request
+          if (pending.get(id) === own) {
+            // the held marker this request owns goes with its
+            // discharge — dropping pending first would orphan it
+            // (every later cancel would walk a dead id forever)
+            ses.held.delete(id);
+            pending.delete(id);
+            own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
+            writeUp({
+              jsonrpc: '2.0',
+              id,
+              error: {
+                code: -32603,
+                message: `acp agent: local turn failed — ${failure instanceof Error ? failure.message : String(failure)}`,
+              },
+            } as AnyMessage);
+          }
+          return;
+        }
+        if (result !== undefined) {
+          if (pending.get(id) === own) {
+            ses.held.delete(id);
+            pending.delete(id);
+            own.prompt?.span.end({
+              'acp.proxy.local': true,
+              'acp.stop_reason': result.stopReason,
+            });
+            answerUpstream(id, result);
+          }
+          return;
+        }
+        // the overlay declined — the verbatim path resumes; the await
+        // was a cancel window, so re-check before the seam collection
+        if (!crossable(id, own)) {
+          return;
+        }
       }
       const first = !ses.seenPrompt;
       const injected = await injectPrompt(m, params, sessionId, ses);
-      if (!crossable(id)) {
+      if (!crossable(id, own)) {
         return;
       }
-      const p = pending.get(id);
-      if (p?.prompt !== undefined) p.prompt.first = first;
+      if (own.prompt !== undefined) own.prompt.first = first;
       ses.seenPrompt = true;
       // a settled collection that crosses closes the slot; an
       // unsettled one stays owed — the next prompt retries
@@ -546,7 +695,11 @@ export async function acpProxy(
       ses.plane?.start();
       writeDown(injected.m);
     } finally {
-      ses.held.delete(id);
+      // drop the held marker only while the id still names THIS
+      // request — a reused id's marker belongs to the newer request
+      if (pending.get(id) === own) {
+        ses.held.delete(id);
+      }
     }
   };
 
@@ -560,11 +713,15 @@ export async function acpProxy(
     // held is the session's own prompt-id set — iterating it touches
     // only this session's held writes, never a sibling session's
     for (const id of ses.held) {
-      const pr = pending.get(id)?.prompt;
+      const req = pending.get(id);
+      const pr = req?.prompt;
       if (pr === undefined || pr.sessionId !== sessionId) {
         continue;
       }
       pending.delete(id);
+      // agent mode: a local turn in flight dies with its answer — the
+      // SIGTERM lands before `cancelled` crosses
+      req?.abort?.();
       aborted++;
       pr.span.end({ 'acp.stop_reason': 'cancelled' });
       answerUpstream(id, { stopReason: 'cancelled' });
@@ -728,6 +885,27 @@ export async function acpProxy(
       }
     });
   };
+
+  /** Compose the overlay's surface with the downstream's last-announced
+   *  list — a local name shadows a same-named downstream command,
+   *  matching the precedence the local-turn handler gives it (a /name
+   *  bro serves never reaches the agent). */
+  const mergedCommands = (ses: ProxySession): AvailableCommand[] => {
+    const local = opts.agent?.commands ?? [];
+    const names = new Set(local.map(c => c.name));
+    return [...local, ...ses.downstreamCommands.filter(c => !names.has(c.name))];
+  };
+
+  /** One upstream available_commands_update announcing the merged list. */
+  const commandsUpdate = (sessionId: string, commands: AvailableCommand[]): AnyMessage =>
+    ({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId,
+        update: { sessionUpdate: 'available_commands_update', availableCommands: commands },
+      },
+    }) as AnyMessage;
 
   // --- permission policy at the protocol seam (spec bro-9qopj) -----------
 
@@ -1038,6 +1216,21 @@ export async function acpProxy(
       const ses = sessionId === undefined ? undefined : sessions.get(sessionId);
       if (ses !== undefined && sessionId !== undefined && isRecord(update)) {
         feedToolCall(update, ses, sessionId);
+        // agent mode: an available_commands_update is the session's
+        // CURRENT command list, not a delta — forwarding the
+        // downstream's verbatim would drop bro's surface exactly like
+        // bro's own announce dropped its. Cache it and publish the
+        // merge instead (spec bro-tegz2).
+        if (
+          opts.agent?.commands !== undefined &&
+          update['sessionUpdate'] === 'available_commands_update'
+        ) {
+          ses.downstreamCommands = Array.isArray(update['availableCommands'])
+            ? (update['availableCommands'] as AvailableCommand[])
+            : [];
+          writeUp(commandsUpdate(sessionId, mergedCommands(ses)));
+          return;
+        }
       }
     }
     writeUp(m);
@@ -1046,14 +1239,17 @@ export async function acpProxy(
   /** Stamp session state on a successful session-open response — the
    *  RESPONSE's sessionId wins: session/fork's params carry the SOURCE
    *  id, the fork's own id only exists in the result. load/resume
-   *  responses may omit it → the request param is the fallback. */
-  const stampSession = (bind: PendingRequest['bind'], result: unknown): void => {
+   *  responses may omit it → the request param is the fallback.
+   *  Returns the newly stamped session id — a repeat id (reused open,
+   *  a fork the client already opened) stamps nothing and returns
+   *  undefined. */
+  const stampSession = (bind: PendingRequest['bind'], result: unknown): string | undefined => {
     if (bind === undefined) {
-      return;
+      return undefined;
     }
     const sid = (isRecord(result) ? str(result['sessionId']) : undefined) ?? bind.sessionId;
     if (sid === undefined || sessions.has(sid)) {
-      return;
+      return undefined;
     }
     const cwd = bind.cwd;
     sessions.set(sid, {
@@ -1063,6 +1259,7 @@ export async function acpProxy(
       held: new Set(),
       writeQ: Promise.resolve(),
       advisory: [],
+      downstreamCommands: [],
       plane:
         cwd === undefined
           ? undefined
@@ -1074,6 +1271,7 @@ export async function acpProxy(
             }),
       span: otelSpan('acp.proxy.session', { 'acp.session': sid }),
     });
+    return sid;
   };
 
   /** Release the session a successful session/close named — a failed
@@ -1238,11 +1436,33 @@ export async function acpProxy(
       }
       return;
     }
+    // agent mode (spec bro-tegz2): initialize answers with bro's own
+    // identity — bro IS the agent here. The downstream's original
+    // agentInfo survives under _meta.bro.downstreamAgent; capabilities,
+    // auth methods, and the protocol version stay verbatim — the
+    // downstream negotiates what prompts can do.
+    const overlayInfo = opts.agent?.agentInfo;
+    if (overlayInfo !== undefined && req.method === 'initialize' && wire(m).error === undefined) {
+      const result = wire(m).result;
+      if (isRecord(result)) {
+        const meta = isRecord(result['_meta']) ? result['_meta'] : {};
+        const bro = isRecord(meta['bro']) ? meta['bro'] : {};
+        m = {
+          ...m,
+          result: {
+            ...result,
+            agentInfo: overlayInfo,
+            _meta: { ...meta, bro: { ...bro, downstreamAgent: result['agentInfo'] } },
+          },
+        } as AnyMessage;
+      }
+    }
+    let stamped: string | undefined;
     if (wire(m).error === undefined) {
       // an error response stamps nothing — a failed open must not
       // register a session the next attempt would collide with, and a
       // failed close never ran
-      stampSession(req.bind, wire(m).result);
+      stamped = stampSession(req.bind, wire(m).result);
       releaseOnClose(req.close);
     }
     const ses = req.prompt === undefined ? undefined : sessions.get(req.prompt.sessionId);
@@ -1266,6 +1486,18 @@ export async function acpProxy(
     }
     finishTurn(req, m);
     writeUp(m);
+    // agent mode: a newly stamped session announces bro's command
+    // surface — ONE available_commands_update written AFTER the open
+    // response crossed (the client must know the session before its
+    // commands arrive), never before and never twice per session id.
+    // The announced list is the merge — a downstream announce that
+    // landed first composes rather than being clobbered.
+    if (stamped !== undefined && opts.agent?.commands !== undefined) {
+      const ses = sessions.get(stamped);
+      if (ses !== undefined) {
+        writeUp(commandsUpdate(stamped, mergedCommands(ses)));
+      }
+    }
   };
 
   /** c2a routing — a malformed message is dropped, never answered:
@@ -1324,6 +1556,18 @@ export async function acpProxy(
     downDead.promise.then(() => 'down' as const),
     upDead.promise.then(() => 'up' as const),
   ]);
+
+  // the wire is closing — a local turn still in flight dies with the
+  // proxy: the abort hook only fires from abortHeld (session/cancel),
+  // so a client or downstream close mid-turn would leave the slash
+  // child running until its own timeout, holding the CLI open. The
+  // flag lands FIRST: a prompt still queued in a session writeQ has
+  // no abort armed yet, and without it crossPrompt would start that
+  // queued slash command after the client already died.
+  wireDone = true;
+  for (const req of pending.values()) {
+    req.abort?.();
+  }
 
   // downstream dead → every request still in flight fails visibly on
   // the upstream wire; a dead agent never silently eats a prompt
