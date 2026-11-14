@@ -1,7 +1,208 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/fleet-status.schema.json",
-  "title": "bro fleet status / status --json (board)",
+  "title": "bro status --json",
+  "description": "The compact live board — mirrors BroStatus in packages/cli/src/commands/status.ts. `act` is present only under --deep.",
   "type": "object",
-  "additionalProperties": true
+  "additionalProperties": false,
+  "required": [
+    "dir",
+    "branch",
+    "dirty",
+    "worktrees",
+    "beads",
+    "fleet",
+    "loop",
+    "drill",
+    "watch",
+    "build",
+    "sync"
+  ],
+  "properties": {
+    "dir": { "type": "string" },
+    "branch": { "type": "string" },
+    "dirty": { "type": "integer", "description": "Dirty-path count from git status --porcelain — untracked incl." },
+    "worktrees": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/StatusWorktree" }
+    },
+    "beads": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inProgress", "ready", "readyTotal"],
+      "properties": {
+        "inProgress": { "type": "array", "items": { "$ref": "#/$defs/BeadRow" } },
+        "ready": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/BeadRow" },
+          "description": "First READY_CAP ready beads — the board shows the top, not all."
+        },
+        "readyTotal": { "type": "integer" }
+      }
+    },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxConcurrent", "agents"],
+      "properties": {
+        "maxConcurrent": { "type": "integer", "description": "0 = uncapped." },
+        "agents": { "type": "array", "items": { "$ref": "#/$defs/StatusAgent" } }
+      }
+    },
+    "loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stallMin", "runs"],
+      "properties": {
+        "stallMin": { "type": "number", "description": "Advisory silence threshold, never a kill budget." },
+        "runs": { "type": "array", "items": { "$ref": "#/$defs/LoopRunView" } }
+      }
+    },
+    "drill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame"],
+      "properties": {
+        "frame": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["id", "title", "depth"],
+          "properties": {
+            "id": { "type": "string" },
+            "title": { "type": "string" },
+            "depth": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "watch": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["ts", "ageMs", "attention"],
+      "properties": {
+        "ts": { "type": "string" },
+        "ageMs": { "type": "number" },
+        "futureMs": { "type": "number" },
+        "writerSkewed": { "type": "boolean" },
+        "attention": { "type": "integer", "description": "Size of the snapshot's attention list." }
+      },
+      "description": "The durable heartbeat file's summary — null = never had a heartbeat."
+    },
+    "build": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["session", "via", "ts", "behind", "mine"],
+      "properties": {
+        "session": { "type": "string" },
+        "via": { "type": "string" },
+        "ts": { "type": "number" },
+        "behind": { "type": "boolean", "description": "stamp.head ≠ HEAD — the recorded write predates the checkout." },
+        "mine": { "type": ["boolean", "null"] }
+      },
+      "description": "Last stamped write to this worktree's shared outputs — null until a build/patch stamps one."
+    },
+    "sync": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["behind", "upstream"],
+      "properties": {
+        "behind": { "type": "integer" },
+        "upstream": { "type": "string" }
+      },
+      "description": "Positive upstream drift — null when current or untracked."
+    },
+    "act": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "pr",
+        "url",
+        "gate",
+        "openThreads",
+        "reopenedThreads",
+        "ciPending",
+        "ciFailing",
+        "reviewersPending",
+        "sastPending",
+        "blockers"
+      ],
+      "properties": {
+        "pr": { "type": "integer" },
+        "url": { "type": "string" },
+        "gate": { "type": "string" },
+        "openThreads": { "type": "integer" },
+        "reopenedThreads": { "type": "integer" },
+        "ciPending": { "type": "integer" },
+        "ciFailing": { "type": "integer" },
+        "reviewersPending": { "type": "integer" },
+        "sastPending": { "type": "integer" },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "ownership": { "enum": ["managed", "review", "human"] }
+      },
+      "description": "--deep only: the act gate for the current branch's open PR."
+    }
+  },
+  "$defs": {
+    "BeadRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "priority": { "type": "number" },
+        "issue_type": { "type": "string" },
+        "assignee": { "type": "string" },
+        "link": { "type": "string", "description": "Clickable PR/issue reference when the bead is linked to one." }
+      }
+    },
+    "StatusWorktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "branch": { "type": "string" },
+        "state": { "type": "string" },
+        "claim": { "type": "string" },
+        "main": { "type": "boolean" },
+        "here": { "type": "boolean" }
+      }
+    },
+    "StatusAgent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "backend", "state"],
+      "properties": {
+        "id": { "type": "string" },
+        "agentId": { "type": "string" },
+        "backend": { "type": "string" },
+        "step": { "type": "string" },
+        "state": { "type": "string" },
+        "cause": { "type": "string" },
+        "pid": { "type": "integer" },
+        "log": { "type": "string" },
+        "worktree": { "type": "string" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" }
+      }
+    },
+    "LoopRunView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["beadId", "slug", "pid", "state", "silentMs"],
+      "properties": {
+        "beadId": { "type": "string" },
+        "beadIds": { "type": "array", "items": { "type": "string" } },
+        "slug": { "type": "string" },
+        "pid": { "type": ["integer", "null"] },
+        "state": { "enum": ["running", "dead"] },
+        "startedAt": { "type": "string" },
+        "worktree": { "type": "string" },
+        "log": { "type": "string" },
+        "silentMs": { "type": ["number", "null"] }
+      }
+    }
+  }
 }

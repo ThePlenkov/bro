@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/fleet-leases.schema.json",
+  "title": "bro fleet leases --json",
+  "description": "Live Lease rows projected by runFleetLeasesCommand (packages/cli/src/commands/fleet.ts) — key/rig/host/pid/acquiredAt/expiresAt, agentId when the holder recorded one.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["key", "rig", "host", "pid", "acquiredAt", "expiresAt"],
+    "properties": {
+      "key": { "type": "string", "description": "Lease name — e.g. 'contract/schema'." },
+      "rig": { "type": "string", "description": "Holder rig slug." },
+      "host": { "type": "string" },
+      "pid": { "type": "integer" },
+      "agentId": { "type": "string" },
+      "acquiredAt": { "type": "string", "description": "ISO-8601." },
+      "expiresAt": { "type": "string", "description": "ISO-8601." }
+    }
+  }
+}

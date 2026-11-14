@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/skills-sync.schema.json",
+  "title": "bro skills sync --json",
+  "description": "{command: 'skills sync', data: {steps, rows, drift}} — mirrors cmdSync's emit in packages/cli/src/commands/skills.ts (drift is projected to {name, kind}).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "data"],
+  "properties": {
+    "command": { "const": "skills sync" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps", "rows", "drift"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "state"],
+            "properties": {
+              "label": { "type": "string" },
+              "state": { "enum": ["ok", "error", "skipped"] },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "source", "state"],
+            "properties": {
+              "name": { "type": "string" },
+              "source": { "type": "string" },
+              "state": {
+                "enum": ["ok", "linked", "present", "missing", "drifted", "extra", "pending", "error"]
+              },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "drift": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "kind"],
+            "properties": {
+              "name": { "type": "string" },
+              "kind": { "enum": ["missing", "drifted"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}
