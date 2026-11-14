@@ -97,7 +97,9 @@ one.
 - **Scenario map** (AGT-1 §Test scenarios): applicable — S1
   session-start ctx, S2 pre-tool guard, S3 stop gate (only host
   with native `decision:block` — the scenario asserts the block
-  surfaces natively, not via reprompt), S4 `/bro` dispatch,
+  surfaces natively, not via reprompt), S4 `/bro` dispatch
+  (verified e2e — RPC `prompt` → `success:true`, `bro <args>`
+  argv in FakeBro journal, `bro-command.e2e.test.ts`),
   S7 fail-open, S9 skills, S10 native correlation (mode bridges:
   Plan/Goal/Vibe/Prewalk/Advisor). Pending — S5/S6/S8 driver
   verification.
@@ -108,3 +110,6 @@ one.
 - 2026-11-12 — v2 rewrite: full asset inventory, mode-bridge
   correlation contract, native stop-block mechanics.
 - 2026-11-12 — v3: Verify gains the AGT-1 scenario map; S3 asserts native decision:block surfacing.
+- 2026-11-14 — v4: S4 `/bro` dispatch verified e2e — RPC `prompt`
+  leg of `bro-command.e2e.test.ts` asserts `success:true`, identical
+  `bro <args>` argv, session-start hook in the journal.

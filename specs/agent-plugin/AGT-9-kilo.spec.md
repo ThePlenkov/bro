@@ -29,7 +29,11 @@ tool-vs-command asymmetry, and the honest enforcement gap.
 
 `plugins/kilo/bro/bro.ts` from `packages/agent-plugins/kilo/src/kilo.ts`
 — `@kilocode/plugin` API, raw `.ts` load. Install:
-`bro plugins install kilo [--global|--local]` → kilo plugin dir.
+`bro plugins install kilo [--global|--local]` → kilo's scanned plugin
+dir: `~/.config/kilo/plugin/bro.ts` / `.kilo/plugin/bro.ts`. kilo.json's
+`plugin` array does **not** honor file paths (verified against kilo
+7.8.x — `file://` and plain-path entries both load nothing); npm-package
+entries are a different mechanism bro does not use.
 
 ### Event mapping (HOOK_MATRIX `kilo` row)
 
@@ -88,6 +92,9 @@ binding dedups so hydration injects once.
 - `host-matrix.test.ts` kilo row; adapter tests; `check:plugins`.
 - Live: `bro` tool callable with subcommand args, transform
   injection visible, idle notify fires, no stop block attempted.
+- e2e: `bro-command.e2e.test.ts` kilo leg — model tool_call
+  `{sub:'next', args:['--json']}` reaches FakeBro as
+  `command ['next','--json']` + session-start hooks (S4 verified).
 
 - **Scenario map** (AGT-1 §Test scenarios): applicable — S1
   session-start ctx, S4 `bro` tool dispatch (write-capable
@@ -111,3 +118,10 @@ binding dedups so hydration injects once.
   the dead `BRO_HOOK_INPUT` env is gone; tool runs share
   `RUN_TIMEOUT_MS`.
 - 2026-11-12 — v4: Verify gains the AGT-1 scenario map; S3 declared not-applicable (notify-only stop).
+- 2026-11-14 — v5: install surface corrected — global target moved
+  `kilo/bro.ts` + kilo.json `file://` registration → scanned
+  `plugin/bro.ts` (kilo ignores file paths in the `plugin` array;
+  e2e caught a silently-dead install). Artifact resolution now prefers
+  the self-contained `plugins/kilo/bro/bro.ts` bundle over adapter
+  src (unresolvable `@broject/adapter-core` import outside the
+  monorepo). S4 verified e2e via the `bro` tool matrix leg.

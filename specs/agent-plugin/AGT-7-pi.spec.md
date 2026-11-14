@@ -97,7 +97,9 @@ All calls async + fail-open.
 
 - **Scenario map** (AGT-1 §Test scenarios): applicable — S1
   session-start ctx, S3 stop gate (settle reprompt), S4 `/bro`
-  dispatch + `bro_status` tool, S7 fail-open, S9 skills, S10
+  dispatch + `bro_status` tool (verified e2e — RPC `prompt` →
+  `disposition:"handled"`, `bro <args>` argv in FakeBro journal,
+  `bro-command.e2e.test.ts`), S7 fail-open, S9 skills, S10
   native correlation. Not applicable — S2 pre-tool guard
   (`tool_call` event unwired — declared gap). Pending — S5/S6/
   S8 driver verification.
@@ -108,3 +110,6 @@ All calls async + fail-open.
 - 2026-11-12 — v2 rewrite: /bro dispatcher semantics, bro_status
   tool, widget lifecycle, settle-gate one-shot mechanics.
 - 2026-11-12 — v3: Verify gains the AGT-1 scenario map; S2 declared not-applicable (tool_call unwired).
+- 2026-11-14 — v4: S4 `/bro` dispatch verified e2e — RPC `prompt`
+  leg of `bro-command.e2e.test.ts` asserts `disposition:"handled"`,
+  identical `bro <args>` argv, session-start hook in the journal.
