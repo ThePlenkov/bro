@@ -285,6 +285,37 @@ export async function gitCommonDirAsync(dir: string, timeoutMs?: number): Promis
   return cacheResolvedCommon(call.key, dir, common);
 }
 
+/** The common dir bro's RUNTIME STATE resolves against — `gitCommonDir`
+ *  normally, so `<dir>/…` lands `<common>/bro/…` shared across linked
+ *  worktrees. `$BRO_STATE_DIR` pins a stand-in wholesale: the pin
+ *  (resolved absolute) plays the common dir's role for state and state
+ *  only — `gitCommonDir` itself is untouched, so real git-dir consumers
+ *  (worktree ops, ref locks) never see it. `'0'` answers "no repo":
+ *  every caller's no-repo branch doubles as "state off".
+ *
+ *  The pin exists for test harnesses and relocated rigs: a suite that
+ *  runs session/conductor code inside a checkout must never append to
+ *  that checkout's live `<common>/bro` — pin the root and every
+ *  converted surface (turn archives, proxy journals, the bus socket,
+ *  watches, act-state, the serve-turns journal) lands in the sandbox
+ *  (spec bro-eajeu). Read per call — no cache — so a test can pin and
+ *  unpin inside one process. */
+export function stateCommonDir(dir: string, timeoutMs?: number): string | null {
+  const pin = process.env.BRO_STATE_DIR;
+  if (pin === '0') return null;
+  if (pin !== undefined && pin !== '') return resolve(pin);
+  return gitCommonDir(dir, timeoutMs);
+}
+
+/** Async `stateCommonDir` — same env-pin semantics on the probe-path
+ *  twin (see `gitCommonDirAsync`). */
+export async function stateCommonDirAsync(dir: string, timeoutMs?: number): Promise<string | null> {
+  const pin = process.env.BRO_STATE_DIR;
+  if (pin === '0') return null;
+  if (pin !== undefined && pin !== '') return resolve(pin);
+  return gitCommonDirAsync(dir, timeoutMs);
+}
+
 /** This worktree's own git dir, absolute — `<repo>/.git` on the main
  *  checkout, `<common>/worktrees/<name>` on a linked one, so
  *  per-worktree state dies with `git worktree remove`. The `--git-dir`

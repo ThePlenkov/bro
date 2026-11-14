@@ -2,7 +2,7 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -18,7 +18,7 @@ import { AcpLaneCooldown, otelJournal, type AcpTerminals } from '@broject/provid
 import { conductorConfig, conductorProxy, parseReply, sweepSessions } from './serve-conductor.ts';
 import type { ConductorConfig, ConvSession } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
-import { scrubEnv } from '@broject/core';
+import { scrubEnv, testGit, testRepoInit } from '@broject/core';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -3419,6 +3419,55 @@ describe('conductor fast lane (bro-6asnu)', () => {
       await r.text(); // drain the stream so the server can close
     } finally {
       await close();
+    }
+  });
+});
+
+describe('BRO_STATE_DIR — the serve-turns journal redirects (bro-eajeu)', () => {
+  /** The reported leak: a conductor cfg.cwd inside a linked worktree
+   *  resolved the main checkout's .git, so `npm test` in a worktree
+   *  appended every conductor.* row to the live serve-turns journal.
+   *  Under the pin the same cwd journals into a sandbox and the real
+   *  common dir never grows a `bro/` tree. */
+  test('a worktree cwd journals under the pin — the real common stays untouched', async () => {
+    const main = mkdtempSync(join(tmpdir(), 'bro-journal-main-'));
+    testRepoInit(main);
+    const linkRoot = mkdtempSync(join(tmpdir(), 'bro-journal-link-'));
+    const linked = join(linkRoot, 'linked');
+    testGit(['-C', main, 'worktree', 'add', '-q', linked, '-b', 'work/journal']);
+    const pin = mkdtempSync(join(tmpdir(), 'bro-journal-pin-'));
+    mkdirSync(join(pin, 'bro'), { recursive: true });
+    const prev = process.env.BRO_STATE_DIR;
+    process.env.BRO_STATE_DIR = pin;
+    try {
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+      const { post, close } = await boot(fake, { ...CFG, cwd: linked });
+      try {
+        const r = await post({ messages: [{ role: 'user', content: 'x' }], stream: false });
+        assert.equal(r.status, 200);
+      } finally {
+        await close();
+      }
+      const journal = join(pin, 'bro', 'serve-turns.jsonl');
+      assert.ok(existsSync(journal), 'the journal lands under the pin');
+      const rows = readFileSync(journal, 'utf8')
+        .split('\n')
+        .filter(l => l !== '')
+        .map(l => JSON.parse(l) as { event: string });
+      assert.ok(
+        rows.some(row => row.event === 'conductor.turn'),
+        `expected a conductor.turn row, got: ${rows.map(row => row.event).join()}`
+      );
+      assert.equal(existsSync(join(main, '.git', 'bro')), false);
+    } finally {
+      if (prev === undefined) delete process.env.BRO_STATE_DIR;
+      else process.env.BRO_STATE_DIR = prev;
+      // the journal pin is module-global — drop it so later tests in
+      // this process do not append into the sandbox
+      otelJournal(undefined);
+      rmSync(main, { recursive: true, force: true });
+      rmSync(linkRoot, { recursive: true, force: true });
+      rmSync(pin, { recursive: true, force: true });
     }
   });
 });

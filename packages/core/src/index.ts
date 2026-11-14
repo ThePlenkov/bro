@@ -19,6 +19,8 @@ export {
   gitTryAsync,
   gitCommonDir,
   gitCommonDirAsync,
+  stateCommonDir,
+  stateCommonDirAsync,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitLogPathRecords,
   gitDriftRef,

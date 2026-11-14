@@ -29,7 +29,6 @@ import type { ProviderEntry } from '@broject/core';
 import {
   admitSessionStartAsync,
   estimateTokens,
-  gitCommonDir,
   isIntegerIndexKey,
   loadConfig,
   LockTimeout,
@@ -39,6 +38,7 @@ import {
   reserveSessionStart,
   sessionCapViews,
   SpawnError,
+  stateCommonDir,
   type SessionStartAdmission,
 } from '@broject/core';
 import type {
@@ -5135,7 +5135,7 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   // the store-side evidence trail — every conductor.* event lands as a
   // JSONL row next to serve.json so a dogfood analyst can read routing,
   // model pin and session reuse without an OTLP collector
-  const common = gitCommonDir(cfg.cwd);
+  const common = stateCommonDir(cfg.cwd);
   if (common !== null) otelJournal(join(common, 'bro', 'serve-turns.jsonl'));
   // one lane per served ENTRY — the default backend plus every exposed
   // one. Each lane owns its acp pool, its model pin and its

@@ -6,10 +6,12 @@ import { join } from 'node:path';
 import {
   busProbe,
   busSocketPath,
+  busSocketPathForCommon,
   gitCommonDir,
   scrubEnv,
   startBusBrokerAt,
   testGit,
+  testRepoInit,
   type BusBroker,
 } from '@broject/core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
@@ -433,6 +435,95 @@ describe('agentTurnPlane', () => {
       assert.equal(existsSync(join(common, 'bro', 'agents')), false);
     } finally {
       await broker.close();
+    }
+  });
+});
+
+describe('BRO_STATE_DIR — runtime state redirects wholesale (bro-eajeu)', () => {
+  /** The reported leak shape: a main repo plus its LINKED worktree —
+   *  `gitCommonDir(linked)` resolves `main/.git`, so a test driving a
+   *  session path with the linked cwd appends to the main checkout's
+   *  live `bro/` state. The pin stands the common dir in so a harness
+   *  keeps every byte in a sandbox. */
+  function worktree(): { main: string; linked: string } {
+    const main = mkdtempSync(join(tmpdir(), 'bro-state-main-'));
+    testRepoInit(main);
+    const linked = join(mkdtempSync(join(tmpdir(), 'bro-state-link-')), 'linked');
+    testGit(['-C', main, 'worktree', 'add', '-q', linked, '-b', 'work/state']);
+    return { main, linked };
+  }
+
+  function readJsonl(file: string): Array<Record<string, unknown>> {
+    return readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(l => l !== '')
+      .map(l => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  test('turn archives and the bus socket resolve the pin — the worktree common stays untouched', async () => {
+    const { main, linked } = worktree();
+    const pin = mkdtempSync(join(tmpdir(), 'bro-state-pin-'));
+    const prev = process.env.BRO_STATE_DIR;
+    process.env.BRO_STATE_DIR = pin;
+    try {
+      // proxy scope — the unbadged archive an acp proxy run writes
+      const plane = agentTurnPlane({
+        cwd: linked,
+        by: 'acp proxy',
+        sessionId: 'sess-1',
+        plane: 'proxy',
+      });
+      plane.start('do a thing');
+      plane.update(chunk);
+      plane.stop('end_turn');
+      await plane.drain();
+      const pfiles = readdirSync(join(pin, 'bro', 'proxy')).filter(f =>
+        f.startsWith('acp-sess-1-')
+      );
+      assert.equal(pfiles.length, 1, 'the proxy archive lands under the pin');
+      const rows = readJsonl(join(pin, 'bro', 'proxy', pfiles[0]!));
+      assert.equal(rows[0]!.kind, 'turn');
+      assert.equal(rows.at(-1)!.phase, 'stop');
+
+      // agents scope — a badged worker's out-of-band row
+      process.env.BRO_AGENT_ID = 'native-t9';
+      agentEventRecord(linked, 'sess-1', 'w', { kind: 'permission', verdict: 'denied' });
+      const arows = readJsonl(join(pin, 'bro', 'agents', 'native-t9.events.jsonl'));
+      assert.equal(arows.length, 1);
+      assert.equal(arows[0]!.kind, 'permission');
+
+      // the bus socket hashes the pin, not the worktree's real common
+      assert.equal(busSocketPath(linked), busSocketPathForCommon(pin));
+      assert.notEqual(busSocketPath(linked), busSocketPathForCommon(gitCommonDir(linked)!));
+
+      // the sentinel — nothing reached the "live" common dir
+      assert.equal(existsSync(join(main, '.git', 'bro')), false);
+    } finally {
+      if (prev === undefined) delete process.env.BRO_STATE_DIR;
+      else process.env.BRO_STATE_DIR = prev;
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('BRO_STATE_DIR=0 resolves "no repo" — archives and the socket go dark', () => {
+    const { main, linked } = worktree();
+    const prev = process.env.BRO_STATE_DIR;
+    process.env.BRO_STATE_DIR = '0';
+    try {
+      delete process.env.BRO_AGENT_ID;
+      const plane = agentTurnPlane({
+        cwd: linked,
+        by: 'acp proxy',
+        sessionId: 'sess-1',
+        plane: 'proxy',
+      });
+      plane.start('x');
+      plane.stop('end_turn');
+      assert.equal(busSocketPath(linked), null);
+      assert.equal(existsSync(join(main, '.git', 'bro')), false);
+    } finally {
+      if (prev === undefined) delete process.env.BRO_STATE_DIR;
+      else process.env.BRO_STATE_DIR = prev;
     }
   });
 });
