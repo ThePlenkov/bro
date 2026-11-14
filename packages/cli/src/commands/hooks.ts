@@ -2210,10 +2210,10 @@ export interface AcpPermissionCall {
 async function permissionVerdict(
   dir: string,
   sessionId: string,
-  call: AcpPermissionCall,
-  cmd: string,
-  input: Record<string, unknown>
+  call: AcpPermissionCall
 ): Promise<{ verdict: 'allow' | 'deny' | 'ask'; reason?: string; hints?: string[] }> {
+  const input = (call.input ?? {}) as Record<string, unknown>;
+  const cmd = typeof input.command === 'string' ? input.command : '';
   const verdicts = await preToolVerdicts(
     hookCtx(dir, sessionId, call.toolCallId),
     call.name ?? call.title ?? '',
@@ -2252,9 +2252,7 @@ export async function collectPermission(
   if (!broEnabled(dir) || sessionId === '') {
     return { verdict: 'ask' };
   }
-  const input = (call.input ?? {}) as Record<string, unknown>;
-  const cmd = typeof input.command === 'string' ? input.command : '';
-  return permissionVerdict(dir, sessionId, call, cmd, input);
+  return permissionVerdict(dir, sessionId, call);
 }
 
 /** The stop gate as a library call for `bro acp proxy` (spec bro-u2eps
