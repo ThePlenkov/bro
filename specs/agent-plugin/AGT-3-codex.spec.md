@@ -106,7 +106,12 @@ must fill.
   (`INSTRUCTIONS.md` ownership table). Not applicable — S4 `/bro`
   (no command surface). Codex uniquely exercises the permission
   approve cell — its scenario asserts the approve reaches the
-  host's permission prompt.
+  host's permission prompt. Hook dispatch verified e2e —
+  `manifest.e2e.test.ts` fires every hooks.json-declared event
+  (incl. permission + both compaction cells) through the shipped
+  run.sh; bare `PLUGIN_ROOT` host detection confirmed (a stray
+  `DEVIN_PROJECT_DIR` mislabels the session `devin` — caught by
+  the matrix).
 
 ## Changelog
 
@@ -114,3 +119,9 @@ must fill.
 - 2026-11-12 — v2 rewrite: assets inventory, INSTRUCTIONS.md
   ownership table promoted to contract, unobservable-outcome rule.
 - 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); permission-approve cell gets its own scenario assertion.
+- 2026-11-14 — v4: hook dispatch verified e2e — `manifest.e2e.test.ts`
+  fires every hooks.json-declared event (incl. permission + both
+  compaction cells) through the shipped run.sh; bare `PLUGIN_ROOT`
+  host detection confirmed — `DEVIN_PROJECT_DIR` in env mislabels the
+  session `devin` (mode-file miss → observe fast-path), caught by the
+  matrix.

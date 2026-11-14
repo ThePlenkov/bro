@@ -187,6 +187,11 @@ already named.
 
 - `bro spec tree` shows AGT-1 root of the family.
 - `host-matrix.test.ts` + `hooks.e2e.test.ts` green.
+- `packages/agent-e2e` matrix green: `bro-command.e2e.test.ts`
+  (S4 `/bro` argv identical on pi/omp/opencode/kilo) +
+  `manifest.e2e.test.ts` (every hooks.json-declared event reaches
+  `bro hooks <event>` on claude/codex/cursor/devin) + fakebro/deps
+  legs for S1/S2/S3/S8.
 - `integrations.md` matrix == `HOOK_MATRIX`.
 - Per-child Verify names live evidence (commands/tools/UX exercised).
 - New-host dry run against the checklist before contract is stable.
