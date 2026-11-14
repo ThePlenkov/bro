@@ -1,21 +1,24 @@
 /**
  * `bro acp proxy -- <agent cmd>` — the cascading ACP edge (specs
- * bro-rs8sp.md, bro-bhyo1.md, bro-u2eps.md). bro sits on the ACP wire:
- * the client (Zed, JetBrains, Neovim, `devin acp`, `kilo acp`) talks ACP
- * to this process's stdin/stdout; bro spawns the downstream agent from
- * the argv tail and forwards everything verbatim — except the session's
- * first `session/prompt` (which carries the hook seam's session-start +
- * prompt-submit context as one prepended text block), the tool-call
- * updates that feed the in-process arming/guard pass, and the turn-end
- * responses the stop gate can hold for exactly one re-prompt.
+ * bro-rs8sp.md, bro-bhyo1.md, bro-u2eps.md, bro-9qopj.md). bro sits on
+ * the ACP wire: the client (Zed, JetBrains, Neovim, `devin acp`,
+ * `kilo acp`) talks ACP to this process's stdin/stdout; bro spawns the
+ * downstream agent from the argv tail and forwards everything verbatim
+ * — except the session's first `session/prompt` (which carries the
+ * hook seam's session-start + prompt-submit context as one prepended
+ * text block), the tool-call updates that feed the in-process
+ * arming/guard pass, the turn-end responses the stop gate can hold
+ * for exactly one re-prompt, and the `session/request_permission`
+ * asks the permission policy answers or relays.
  *
  * The seam is the same code `bro hooks` runs — collectSessionContext /
- * collectPromptContext / collectToolCallGuards / collectStopGate as
- * library calls keyed on `session/new`'s cwd, never a subprocess and
- * never the proxy's own cwd.
+ * collectPromptContext / collectToolCallGuards / collectStopGate /
+ * collectPermission as library calls keyed on `session/new`'s cwd,
+ * never a subprocess and never the proxy's own cwd.
  */
 import { CommandError, EXIT, passthroughExitCode } from '@broject/core';
 import {
+  collectPermission,
   collectPromptContext,
   collectSessionContext,
   collectStopGate,
@@ -74,6 +77,12 @@ export async function runAcpCommand(argv: string[]): Promise<void> {
         const r = await collectStopGate(cwd, sessionId);
         return r.block === undefined && r.hints.length === 0 ? undefined : r;
       },
+      // the permission leg (spec bro-9qopj): the PermissionRequest
+      // hook's policy as a library call — allow/deny answer downstream
+      // on the spot, ask forwards to the client. `call` arrives as the
+      // proxy's AcpProxyPermissionCall shape; AcpPermissionCall is the
+      // same structure declared on this side of the module edge.
+      permission: async (cwd, sessionId, call) => collectPermission(cwd, sessionId, call),
     },
   });
   if (code !== 0) {

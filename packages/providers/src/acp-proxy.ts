@@ -1,11 +1,13 @@
 /**
  * `bro acp proxy -- <agent cmd>` — the cascading ACP edge (specs
- * bro-rs8sp.md §decision, bro-bhyo1.md, bro-u2eps.md). bro is the ACP
- * agent to the client on its own stdin/stdout and the ACP client to the
- * spawned downstream — verbatim forwarding by default, with the hook
- * seam injected into the session's first `session/prompt`, the
- * tool-call arming/guard pass on `session/update`, and the stop gate
- * holding a `session/prompt` response at turn end.
+ * bro-rs8sp.md §decision, bro-bhyo1.md, bro-u2eps.md, bro-9qopj.md).
+ * bro is the ACP agent to the client on its own stdin/stdout and the
+ * ACP client to the spawned downstream — verbatim forwarding by
+ * default, with the hook seam injected into the session's first
+ * `session/prompt`, the tool-call arming/guard pass on
+ * `session/update`, the stop gate holding a `session/prompt` response
+ * at turn end, and the permission policy deciding
+ * `session/request_permission` at the one seam every client shares.
  *
  * The transport is a message pump over the SDK's `Stream`/`ndJsonStream`
  * — deliberately NOT the typed `agent()`/`client()` apps: those parse
@@ -49,6 +51,33 @@ export interface AcpProxyToolCall {
   output?: unknown;
 }
 
+/** One agent→client `session/request_permission`, normalized like
+ *  AcpProxyToolCall — the proxy hands the wire's `toolCall` fields over
+ *  verbatim and the seam reads the hook-shaped parts out (`input` is
+ *  `rawInput`, the `tool_input` analog the classifier pulls `command`/
+ *  `file_path`/`files` out of — spec bro-9qopj). */
+export interface AcpProxyPermissionCall {
+  toolCallId: string;
+  name?: string;
+  title?: string;
+  kind?: string;
+  input?: unknown;
+}
+
+/** The seam's verdict on a permission ask — the PermissionRequest
+ *  hook's three outcomes mapped onto the wire (spec bro-rs8sp's
+ *  permission row): `allow`/`deny` answer downstream without the
+ *  client ever seeing the ask; `ask` (or an absent/throwing leg)
+ *  forwards it verbatim. `reason` journals the why — a deny's
+ *  block/cap-refusal text — and `hints` buffer onto the next crossed
+ *  prompt like toolCall's say lines (guard `warn` verdicts ride
+ *  there). */
+export interface AcpProxyPermissionVerdict {
+  verdict: 'allow' | 'deny' | 'ask';
+  reason?: string;
+  hints?: string[];
+}
+
 /** The hook seam, injected by the CLI (collectSessionContext /
  *  collectPromptContext / collectToolCallGuards / collectStopGate from
  *  commands/hooks.ts). Both return the context text or undefined — the
@@ -85,6 +114,16 @@ export interface AcpProxySeam {
     cwd: string,
     sessionId: string
   ): Promise<{ block?: string; hints?: string[] } | undefined>;
+  /** Permission policy — the in-process equivalent of the
+   *  PermissionRequest hook (spec bro-9qopj): evaluate once per
+   *  `session/request_permission`, return the verdict the proxy maps
+   *  onto the wire. Fail-open like every seam leg: absent, throwing,
+   *  or 'ask' forwards the ask to the client verbatim. */
+  permission?(
+    cwd: string,
+    sessionId: string,
+    call: AcpProxyPermissionCall
+  ): Promise<AcpProxyPermissionVerdict | undefined>;
 }
 
 export interface AcpProxyOptions {
@@ -169,6 +208,34 @@ interface PendingRequest {
   gateDone?: () => void;
 }
 
+/** An agent→client request in flight — forwarded upstream verbatim or
+ *  held for the permission-policy eval (spec bro-9qopj). The table
+ *  buys three things the verbatim pass couldn't do: the client's
+ *  response relays back down WITH its bookkeeping (a forwarded ask's
+ *  answer journals); a session cancel/close settles a still-held ask
+ *  locally (the wire never shows an ask after its cancel — the
+ *  held-prompt rule one level up); and a dead client answers every
+ *  outstanding ask downstream instead of leaving the agent stalled
+ *  on a question that can never resolve. */
+interface PendingA2C {
+  method: string;
+  sessionId?: string;
+  /** Permission-ask bookkeeping — present only on
+   *  `session/request_permission` entries. */
+  permission?: {
+    /** The tool call's journal label (title, else toolCallId). */
+    title?: string;
+    toolCallId?: string;
+    /** true while the policy eval holds the ask — a cancel/close
+     *  settles it locally; false once the ask crossed upstream and
+     *  the client's own answer is owed the relay. */
+    held: boolean;
+    /** The offered option set — a forwarded ask's selected optionId
+     *  maps back to its kind for the journal verdict. */
+    options: { optionId: string; kind?: string }[];
+  };
+}
+
 /** Latch — resolves once; the winner decides the proxy's verdict. */
 function latch(): { promise: Promise<void>; fire: () => void; fired: boolean } {
   let resolve!: () => void;
@@ -242,6 +309,11 @@ export async function acpProxy(
   const log = opts.log ?? ((line: string) => console.error(line));
   const sessions = new Map<string, ProxySession>();
   const pending = new Map<JsonRpcId, PendingRequest>();
+  /** a2c requests in flight — the second pending table (spec
+   *  bro-9qopj). Every agent→client request registers before it
+   *  crosses upstream; a permission ask registers BEFORE its eval so
+   *  a cancel/close/teardown racing the eval settles it. */
+  const pendingA2C = new Map<JsonRpcId, PendingA2C>();
   const downDead = latch();
   const upDead = latch();
   const downWriter = downstream.writable.getWriter();
@@ -518,6 +590,7 @@ export async function acpProxy(
   const releaseSession = (sessionId: string, ses: ProxySession): void => {
     abortHeld(ses, sessionId);
     abortGateHeld(sessionId);
+    abortHeldAsks(sessionId);
     sessions.delete(sessionId);
     ses.span?.end({ 'acp.proxy.close': true });
     void ses.plane?.drain().then(undefined, () => {});
@@ -539,8 +612,10 @@ export async function acpProxy(
     }
     // gate-held prompts answer upstream the same way held ones do —
     // a cancel settles the client's request 'cancelled' and the gate
-    // eval (or the gate turn's late response) lands on an empty slot
-    const aborted = abortHeld(ses, sessionId) + abortGateHeld(sessionId);
+    // eval (or the gate turn's late response) lands on an empty slot.
+    // Held permission asks settle downstream the same way — the wire
+    // never shows an ask after its cancel either
+    const aborted = abortHeld(ses, sessionId) + abortGateHeld(sessionId) + abortHeldAsks(sessionId);
     if (aborted === 0) {
       return true;
     }
@@ -646,6 +721,282 @@ export async function acpProxy(
         );
       }
     });
+  };
+
+  // --- permission policy at the protocol seam (spec bro-9qopj) -----------
+
+  const PERMISSION_METHOD = 'session/request_permission';
+
+  /** The offered option set, reduced to the two fields the seam needs
+   *  — optionId to answer, kind to pick and journal. */
+  const permissionOptionsOf = (params: Record<string, unknown> | undefined) => {
+    const raw = Array.isArray(params?.['options']) ? params['options'] : [];
+    const out: { optionId: string; kind?: string }[] = [];
+    for (const o of raw) {
+      if (isRecord(o)) {
+        const optionId = str(o['optionId']);
+        if (optionId !== undefined) {
+          out.push({ optionId, kind: str(o['kind']) });
+        }
+      }
+    }
+    return out;
+  };
+
+  /** The wire pick for a verdict's polarity (spec bro-rs8sp's selection
+   *  rule): the `*_once` variant wins whenever offered; `*_always`
+   *  only when it is the polarity's sole offered variant — refusing a
+   *  sole offered option fails an answerable request. */
+  const pickPermissionOption = (
+    options: { optionId: string; kind?: string }[],
+    polarity: 'allow' | 'reject'
+  ): string | undefined => {
+    const once = options.find(o => o.kind === `${polarity}_once`);
+    if (once !== undefined) {
+      return once.optionId;
+    }
+    const always = options.find(o => o.kind === `${polarity}_always`);
+    return always?.optionId;
+  };
+
+  /** The proxy's own answer to a permission ask — a normal
+   *  `selected`/`cancelled` outcome, indistinguishable from the
+   *  client's own answer. That is the point: every client gets the
+   *  policy, no client needs a hook dialect for it. */
+  const answerPermission = (id: JsonRpcId, outcome: unknown): void => {
+    writeDown({ jsonrpc: '2.0', id, result: { outcome } } as AnyMessage);
+  };
+
+  /** One journal row per ask — through the session's plane so an
+   *  unbadged proxy run still archives under `bro/proxy/` (a session
+   *  without a cwd has no plane and journals nothing — same posture
+   *  as the rest of the archive). */
+  const notePermission = (
+    ses: ProxySession | undefined,
+    row: {
+      title: string;
+      toolCallId?: string;
+      decidedBy: 'proxy' | 'client';
+      verdict: string;
+      optionId?: string;
+      reason?: string;
+    }
+  ): void => {
+    try {
+      ses?.plane?.note({ kind: 'permission', ...row });
+    } catch {
+      /* telemetry is advisory — a journaling crash never touches the wire */
+    }
+  };
+
+  /** Settle a held ask with the seam's verdict — the bro-rs8sp
+   *  permission row: allow → allow_once; deny → reject_once
+   *  (`cancelled` when no reject is offered); ask → forward verbatim.
+   *  The pending entry is re-read: a cancel/close/teardown racing the
+   *  eval already settled the ask, and the verdict lands on an empty
+   *  slot. */
+  const settlePermission = (
+    m: AnyMessage,
+    id: JsonRpcId,
+    ses: ProxySession,
+    sessionId: string,
+    outcome: AcpProxyPermissionVerdict | undefined
+  ): void => {
+    const req = pendingA2C.get(id);
+    if (req?.permission === undefined) {
+      return; // a cancel/close/teardown already answered it
+    }
+    if (outcome?.hints !== undefined) {
+      ses.advisory.push(...outcome.hints);
+    }
+    const verdict = outcome?.verdict ?? 'ask';
+    if (verdict === 'ask' || upDead.fired) {
+      // forward the ask verbatim — the client's own answer relays back
+      // through the pending entry (held flips: the ask crossed)
+      req.permission.held = false;
+      writeUp(m);
+      return;
+    }
+    pendingA2C.delete(id);
+    const perm = req.permission;
+    const title = perm.title ?? perm.toolCallId ?? 'permission request';
+    const allow = verdict === 'allow' ? pickPermissionOption(perm.options, 'allow') : undefined;
+    if (allow !== undefined) {
+      notePermission(ses, {
+        title,
+        toolCallId: perm.toolCallId,
+        decidedBy: 'proxy',
+        verdict: 'approved',
+        optionId: allow,
+        ...(outcome?.reason !== undefined ? { reason: outcome.reason } : {}),
+      });
+      answerPermission(id, { outcome: 'selected', optionId: allow });
+      return;
+    }
+    // deny — or an allow verdict the option set cannot honor: the
+    // acp-worker autoApprove rule says an agent offering no allow
+    // option still gets denied, never an invented approval
+    const reason =
+      outcome?.reason ??
+      (verdict === 'allow' ? 'policy allowed but no allow option was offered' : undefined);
+    const reject = pickPermissionOption(perm.options, 'reject');
+    if (reject !== undefined) {
+      notePermission(ses, {
+        title,
+        toolCallId: perm.toolCallId,
+        decidedBy: 'proxy',
+        verdict: 'denied',
+        optionId: reject,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      answerPermission(id, { outcome: 'selected', optionId: reject });
+    } else {
+      // no reject option offered — the denyPermission shape: the ask
+      // ends cancelled, never an invented reject
+      notePermission(ses, {
+        title,
+        toolCallId: perm.toolCallId,
+        decidedBy: 'proxy',
+        verdict: 'cancelled',
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      answerPermission(id, { outcome: 'cancelled' });
+    }
+  };
+
+  /** a2c session/request_permission — register held, then evaluate the
+   *  seam free-standing. The eval must NEVER queue on the session's
+   *  writeQ: an ask inside a gate turn would deadlock behind the
+   *  discharge it exists to unblock (the gate turn holds the writeQ
+   *  slot until its response lands; the response can't land until the
+   *  ask is answered). The entry registers synchronously so a
+   *  cancel/close/teardown racing the eval settles it — the
+   *  `crossable` discipline the held prompt uses, one level up. */
+  const onPermissionRequest = (m: AnyMessage, id: JsonRpcId): void => {
+    const params = paramsOf(m);
+    const sessionId = sessionIdOf(m);
+    const ses = sessionId === undefined ? undefined : sessions.get(sessionId);
+    const toolCall = isRecord(params?.['toolCall']) ? params['toolCall'] : undefined;
+    const perm = {
+      title: str(toolCall?.['title']) ?? str(toolCall?.['toolCallId']),
+      toolCallId: str(toolCall?.['toolCallId']),
+      held: true,
+      options: permissionOptionsOf(params),
+    };
+    pendingA2C.set(id, { method: PERMISSION_METHOD, sessionId, permission: perm });
+    const fn = opts.seam?.permission;
+    const cwd = ses?.cwd;
+    if (
+      hooksOff ||
+      fn === undefined ||
+      ses === undefined ||
+      cwd === undefined ||
+      sessionId === undefined
+    ) {
+      // no policy — the ask crosses verbatim; the pending entry still
+      // relays the client's answer into the journal
+      perm.held = false;
+      writeUp(m);
+      return;
+    }
+    const call: AcpProxyPermissionCall = {
+      toolCallId: perm.toolCallId ?? '',
+      name: str(toolCall?.['name']),
+      title: str(toolCall?.['title']),
+      kind: str(toolCall?.['kind']),
+      input: toolCall?.['rawInput'],
+    };
+    void (async () => {
+      let outcome: AcpProxyPermissionVerdict | undefined;
+      try {
+        outcome = await fn(cwd, sessionId, call);
+      } catch (e) {
+        log(`acp proxy: permission eval failed (session ${sessionId}) — ${(e as Error).message}`);
+      }
+      settlePermission(m, id, ses, sessionId, outcome);
+    })();
+  };
+
+  /** Answer every held permission ask of the session downstream
+   *  `cancelled` — a cancel/close settles the ask where it stands:
+   *  held asks never crossed, so the wire never shows an ask after
+   *  its cancel. Forwarded asks keep their pending entry — the
+   *  client's own answer is owed the relay. Returns the count. */
+  const abortHeldAsks = (sessionId: string): number => {
+    let aborted = 0;
+    for (const [id, req] of pendingA2C) {
+      if (req.sessionId !== sessionId || req.permission?.held !== true) {
+        continue;
+      }
+      pendingA2C.delete(id);
+      aborted++;
+      notePermission(sessions.get(sessionId), {
+        title: req.permission.title ?? req.permission.toolCallId ?? 'permission request',
+        toolCallId: req.permission.toolCallId,
+        decidedBy: 'proxy',
+        verdict: 'cancelled',
+        reason: 'session cancelled while the policy evaluated',
+      });
+      answerPermission(id, { outcome: 'cancelled' });
+    }
+    return aborted;
+  };
+
+  /** a2c request — verbatim forward plus the permission seam. Every
+   *  request registers: the response relay, the cancel settle, and
+   *  the dead-client sweep all read the table. */
+  const onAgentRequest = (m: AnyMessage): void => {
+    const method = wire(m).method as string;
+    const id = wire(m).id as JsonRpcId;
+    if (method === PERMISSION_METHOD) {
+      onPermissionRequest(m, id);
+      return;
+    }
+    pendingA2C.set(id, { method, sessionId: sessionIdOf(m) });
+    writeUp(m);
+  };
+
+  /** c2a response — discharge the a2c entry and relay verbatim. A
+   *  forwarded ask's answer lands its journal row here: the human's
+   *  verdict mapped back through the offered option kinds. */
+  const onClientResponse = (m: AnyMessage): void => {
+    const id = wire(m).id;
+    const req = id === undefined ? undefined : pendingA2C.get(id);
+    if (req === undefined || id === undefined) {
+      writeDownFor(undefined, m);
+      return;
+    }
+    pendingA2C.delete(id);
+    if (req.permission !== undefined) {
+      const ses = req.sessionId === undefined ? undefined : sessions.get(req.sessionId);
+      const result = wire(m).result;
+      const outcome = isRecord(result) ? result['outcome'] : undefined;
+      const perm = req.permission;
+      const title = perm.title ?? perm.toolCallId ?? 'permission request';
+      let verdict = 'cancelled';
+      let optionId: string | undefined;
+      if (wire(m).error !== undefined) {
+        verdict = 'error';
+      } else if (isRecord(outcome) && outcome['outcome'] === 'selected') {
+        optionId = str(outcome['optionId']);
+        const kind = perm.options.find(o => o.optionId === optionId)?.kind;
+        if (kind !== undefined && kind.startsWith('allow')) {
+          verdict = 'approved';
+        } else if (kind !== undefined && kind.startsWith('reject')) {
+          verdict = 'denied';
+        } else {
+          verdict = 'selected';
+        }
+      }
+      notePermission(ses, {
+        title,
+        toolCallId: perm.toolCallId,
+        decidedBy: 'client',
+        verdict,
+        ...(optionId !== undefined ? { optionId } : {}),
+      });
+    }
+    writeDownFor(undefined, m);
   };
 
   /** a2c notification — verbatim; session/update feeds the turn plane
@@ -897,19 +1248,20 @@ export async function acpProxy(
     } else if (isNotification(m)) {
       onClientNotification(m);
     } else if (isResponse(m)) {
-      writeDownFor(undefined, m);
+      onClientResponse(m);
     }
   };
 
-  /** a2c routing — everything crosses untouched; only the bookkeeping
-   *  that rides a response needs the pending table. */
+  /** a2c routing — requests register on the a2c pending table (the
+   *  permission seam may hold or answer them); responses discharge
+   *  the c2a table; notifications cross untouched. */
   const routeA2C = (m: AnyMessage): void => {
     if (isNotification(m)) {
       onAgentNotification(m);
     } else if (isResponse(m)) {
       onAgentResponse(m);
     } else if (isRequest(m)) {
-      writeUp(m);
+      onAgentRequest(m);
     }
   };
 
@@ -981,6 +1333,37 @@ export async function acpProxy(
         id,
         error: { code: -32603, message: 'acp proxy: downstream agent closed' },
       } as AnyMessage);
+    }
+  }
+
+  // upstream dead → every a2c request still in flight is answered
+  // downstream: a client that can never answer must not leave the
+  // agent stalled on its question (the mirror of the sweep above).
+  // Permission asks get the wire's honest outcome — cancelled;
+  // anything else gets the same internal error a dead peer earns.
+  if (verdict === 'up') {
+    for (const [id, req] of pendingA2C) {
+      pendingA2C.delete(id);
+      if (req.permission !== undefined) {
+        notePermission(req.sessionId === undefined ? undefined : sessions.get(req.sessionId), {
+          title: req.permission.title ?? req.permission.toolCallId ?? 'permission request',
+          toolCallId: req.permission.toolCallId,
+          decidedBy: 'proxy',
+          verdict: 'cancelled',
+          reason: 'upstream client closed',
+        });
+        writeDown({
+          jsonrpc: '2.0',
+          id,
+          result: { outcome: { outcome: 'cancelled' } },
+        } as AnyMessage);
+      } else {
+        writeDown({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32603, message: 'acp proxy: upstream client closed' },
+        } as AnyMessage);
+      }
     }
   }
 

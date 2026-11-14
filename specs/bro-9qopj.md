@@ -118,12 +118,14 @@ an UNBADGED proxy run journal under `bro/proxy/` where
 `agentEventRecord`'s agents-scope badge requirement would write
 nothing.
 
-Row shape: `{kind:'permission', title, toolCallId?, by, verdict,
-optionId?, reason?}` — `by:'proxy'` for seam-decided answers
-(`approved`/`denied`/`cancelled`), `by:'client'` for forwarded asks,
-with the client's selected optionId mapped back to a verdict through
-the offered option kinds (a `cancelled` outcome or an error answer
-journals as such).
+Row shape: `{kind:'permission', title, toolCallId?, decidedBy,
+verdict, optionId?, reason?}` — `decidedBy:'proxy'` for seam-decided
+answers (`approved`/`denied`/`cancelled`), `decidedBy:'client'` for
+forwarded asks, with the client's selected optionId mapped back to a
+verdict through the offered option kinds (a `cancelled` outcome or an
+error answer journals as such). `decidedBy`, not `by` — the row
+stamp's `by` already carries the recorder's provenance
+(`'acp proxy'`).
 
 ### The collector (CLI side)
 

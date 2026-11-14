@@ -8,6 +8,9 @@
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // node --test runs each file in its own process — blanking the
 // telemetry endpoint here keeps otelSpan ends from POSTing to the
@@ -22,10 +25,17 @@ import type {
   ClientConnection,
   ClientContext,
   JsonRpcId,
+  PermissionOption,
   SessionUpdate,
   Stream,
 } from '@agentclientprotocol/sdk';
-import { acpProxy, type AcpProxySeam, type AcpProxyToolCall } from './acp-proxy.ts';
+import { gitCommonDir, testGit } from '@broject/core';
+import {
+  acpProxy,
+  type AcpProxyPermissionCall,
+  type AcpProxySeam,
+  type AcpProxyToolCall,
+} from './acp-proxy.ts';
 import { fakeAcpAgent, type FakeAcpAgent } from './testkit.ts';
 
 /** In-process Stream pair — the object-message shape the pump and the
@@ -53,6 +63,9 @@ interface Rig {
   /** session/update notifications the client leg received — verbatim
    *  forwarding assertions read this, not just the agent's emit. */
   updates: unknown[];
+  /** session/request_permission asks that reached the CLIENT — a
+   *  proxy-decided ask never lands here. */
+  permAsks: unknown[];
   /** The process ends the test rig — closing a stream's WRITABLE is the
    *  stdin-EOF the real proxy sees (conn.close() only cancels its own
    *  receive reader; it leaves the outgoing side open). */
@@ -62,27 +75,43 @@ interface Rig {
 
 /** client → proxy → fake agent — all in-process. `fakeOpts` carries
  *  the same option bag fakeAcpAgent takes (replyText, askPermission,
- *  failPrompt, …). */
+ *  failPrompt, …). `clientAnswer` scripts the client's permission
+ *  response — default: select the first offered option. */
 function rig(
   fakeOpts: Parameters<typeof fakeAcpAgent>[0],
   seam?: AcpProxySeam,
-  log: (line: string) => void = () => {}
+  log: (line: string) => void = () => {},
+  clientAnswer?: (params: { options: Array<{ optionId: string }> }) => unknown
 ): Rig {
   const fake = fakeAcpAgent(fakeOpts);
   const updates: unknown[] = [];
+  const permAsks: unknown[] = [];
   const [clientSide, proxyUp] = streamPair();
   const [proxyDown, agentSide] = streamPair();
   const agentConn = fake.app.connect(agentSide);
   const conn = client({ name: 'test-client' })
-    .onRequest('session/request_permission', ctx => ({
-      outcome: { outcome: 'selected', optionId: ctx.params.options[0]!.optionId },
-    }))
+    .onRequest('session/request_permission', ctx => {
+      permAsks.push(ctx.params);
+      return (clientAnswer?.(ctx.params) ?? {
+        outcome: { outcome: 'selected', optionId: ctx.params.options[0]!.optionId },
+      }) as { outcome: { outcome: 'selected'; optionId: string } };
+    })
     .onNotification('session/update', ctx => {
       updates.push(ctx.params);
     })
     .connect(clientSide);
   const proxyDone = acpProxy(proxyUp, proxyDown, { seam, log });
-  return { fake, conn, agentConn, acp: conn.agent, proxyDone, updates, clientSide, agentSide };
+  return {
+    fake,
+    conn,
+    agentConn,
+    acp: conn.agent,
+    proxyDone,
+    updates,
+    permAsks,
+    clientSide,
+    agentSide,
+  };
 }
 
 /** Client hangup — EOF on the wire the proxy reads. */
@@ -1365,6 +1394,497 @@ describe('acpProxy — tool_call guards + turn-end stop gate (bro-u2eps)', () =>
       assert.equal(r.fake.prompts.length, 1);
     } finally {
       assert.equal(await close(r), 0);
+    }
+  });
+});
+
+describe('acpProxy — permission policy seam (bro-9qopj)', () => {
+  const ALLOW_REJECT: PermissionOption[] = [
+    { optionId: 'allow-once', kind: 'allow_once', name: 'allow once' },
+    { optionId: 'reject-once', kind: 'reject_once', name: 'reject once' },
+  ];
+
+  /** mkdtemp + git init — the events journal anchors on the repo's
+   *  common dir; the fake /tmp dirs the other suites use resolve no
+   *  archive at all. */
+  function repo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acpperm-'));
+    testGit(['init', '-q', dir]);
+    return dir;
+  }
+
+  /** Every journaled row under the repo's proxy archive dir
+   *  (`bro/proxy/acp-<sid>-p<pid>.events.jsonl` — one file per proxy
+   *  run; the tests read them all). */
+  function proxyJournal(dir: string): Array<Record<string, unknown>> {
+    const pdir = join(gitCommonDir(dir)!, 'bro', 'proxy');
+    if (!existsSync(pdir)) {
+      return [];
+    }
+    return readdirSync(pdir)
+      .flatMap(f => readFileSync(join(pdir, f), 'utf8').split('\n'))
+      .filter(l => l !== '')
+      .map(l => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  const permissionRows = (dir: string) => proxyJournal(dir).filter(r => r['kind'] === 'permission');
+
+  test('allow verdict answers downstream allow_once — the client never sees the ask, the decision journals', async () => {
+    const dir = repo();
+    try {
+      const calls: Array<AcpProxyPermissionCall & { cwd: string; sessionId: string }> = [];
+      const r = rig(
+        {
+          replyText: 'ok',
+          askPermission: {
+            options: ALLOW_REJECT,
+            toolCall: {
+              toolCallId: 'tc-9',
+              title: 'Bash: bd ready',
+              name: 'Bash',
+              kind: 'execute',
+              rawInput: { command: 'bd ready' },
+            },
+          },
+        },
+        {
+          permission: async (cwd, sessionId, call) => {
+            calls.push({ ...call, cwd, sessionId });
+            return { verdict: 'allow' };
+          },
+        }
+      );
+      try {
+        await openSession(r.acp, dir);
+        await r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        // the proxy's own answer reached the agent — the ask never
+        // crossed upstream
+        assert.deepEqual(r.fake.permissionOutcome, {
+          outcome: 'selected',
+          optionId: 'allow-once',
+        });
+        assert.equal(r.permAsks.length, 0);
+        // the seam saw the session's cwd and the wire's toolCall —
+        // rawInput normalized as the tool_input analog
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0]!.cwd, dir);
+        assert.equal(calls[0]!.sessionId, 'sess-1');
+        assert.equal(calls[0]!.toolCallId, 'tc-9');
+        assert.deepEqual(calls[0]!.input, { command: 'bd ready' });
+        const rows = permissionRows(dir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.decidedBy, 'proxy');
+        assert.equal(rows[0]!.verdict, 'approved');
+        assert.equal(rows[0]!.optionId, 'allow-once');
+        assert.equal(rows[0]!.toolCallId, 'tc-9');
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('deny verdict answers reject_once — cancelled when no reject is offered', async () => {
+    const dir = repo();
+    try {
+      const r = rig(
+        { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+        { permission: async () => ({ verdict: 'deny' as const, reason: 'guard: blocked' }) }
+      );
+      try {
+        await openSession(r.acp, dir);
+        await r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        assert.deepEqual(r.fake.permissionOutcome, {
+          outcome: 'selected',
+          optionId: 'reject-once',
+        });
+        assert.equal(r.permAsks.length, 0);
+        const rows = permissionRows(dir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.verdict, 'denied');
+        assert.equal(rows[0]!.reason, 'guard: blocked');
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+
+      // no reject option offered → the deny lands as a cancellation —
+      // the denyPermission/autoApprove shape, never an invented reject
+      const dir2 = repo();
+      const r2 = rig(
+        {
+          replyText: 'ok',
+          askPermission: {
+            options: [{ optionId: 'allow-once', kind: 'allow_once', name: 'allow' }],
+          },
+        },
+        { permission: async () => ({ verdict: 'deny' as const }) }
+      );
+      try {
+        await openSession(r2.acp, dir2);
+        await r2.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        assert.deepEqual(r2.fake.permissionOutcome, { outcome: 'cancelled' });
+        const rows2 = permissionRows(dir2);
+        assert.equal(rows2.length, 1);
+        assert.equal(rows2[0]!.verdict, 'cancelled');
+      } finally {
+        assert.equal(await close(r2), 0);
+        rmSync(dir2, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('option selection — allow_once preferred over allow_always; allow_always taken as the polarity\u2019s sole variant', async () => {
+    // both polarities offered in both variants → the *_once wins even
+    // when the *_always lists first
+    const r = rig(
+      {
+        replyText: 'ok',
+        askPermission: {
+          options: [
+            { optionId: 'allow-always', kind: 'allow_always', name: 'always allow' },
+            { optionId: 'allow-once', kind: 'allow_once', name: 'allow once' },
+          ],
+        },
+      },
+      { permission: async () => ({ verdict: 'allow' as const }) }
+    );
+    try {
+      await openSession(r.acp);
+      await r.acp.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      assert.deepEqual(r.fake.permissionOutcome, {
+        outcome: 'selected',
+        optionId: 'allow-once',
+      });
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+
+    // only allow_always on the allow side → selecting it beats failing
+    // an answerable request (the agent's own choice space)
+    const r2 = rig(
+      {
+        replyText: 'ok',
+        askPermission: {
+          options: [
+            { optionId: 'allow-always', kind: 'allow_always', name: 'always allow' },
+            { optionId: 'reject-once', kind: 'reject_once', name: 'reject' },
+          ],
+        },
+      },
+      { permission: async () => ({ verdict: 'allow' as const }) }
+    );
+    try {
+      await openSession(r2.acp);
+      await r2.acp.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      assert.deepEqual(r2.fake.permissionOutcome, {
+        outcome: 'selected',
+        optionId: 'allow-always',
+      });
+    } finally {
+      assert.equal(await close(r2), 0);
+    }
+  });
+
+  test('allow verdict with no allow option offered falls to deny — never an invented approval', async () => {
+    const dir = repo();
+    try {
+      const r = rig(
+        {
+          replyText: 'ok',
+          askPermission: {
+            options: [{ optionId: 'reject-once', kind: 'reject_once', name: 'reject' }],
+          },
+        },
+        { permission: async () => ({ verdict: 'allow' as const }) }
+      );
+      try {
+        await openSession(r.acp, dir);
+        await r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        // the acp-worker autoApprove rule: an agent offering no allow
+        // option still gets denied
+        assert.deepEqual(r.fake.permissionOutcome, {
+          outcome: 'selected',
+          optionId: 'reject-once',
+        });
+        const rows = permissionRows(dir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.verdict, 'denied');
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('ask verdict forwards verbatim — the client\u2019s own answer relays and journals by:client', async () => {
+    const dir = repo();
+    try {
+      const r = rig(
+        { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+        { permission: async () => ({ verdict: 'ask' as const }) }
+      );
+      try {
+        await openSession(r.acp, dir);
+        await r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        // the human answered — the default handler picks option[0]
+        assert.equal(r.permAsks.length, 1);
+        assert.deepEqual(r.fake.permissionOutcome, {
+          outcome: 'selected',
+          optionId: 'allow-once',
+        });
+        const rows = permissionRows(dir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.decidedBy, 'client');
+        assert.equal(rows[0]!.verdict, 'approved');
+        assert.equal(rows[0]!.optionId, 'allow-once');
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('no seam leg and a throwing eval both fail open — the ask crosses, the client answers', async () => {
+    const dir = repo();
+    try {
+      // no permission leg at all → pure passthrough (a cancelled
+      // client answer relays verbatim and journals cancelled)
+      const bare = rig(
+        { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+        undefined,
+        () => {},
+        () => ({ outcome: { outcome: 'cancelled' } })
+      );
+      try {
+        await openSession(bare.acp, dir);
+        await bare.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        assert.equal(bare.permAsks.length, 1);
+        assert.deepEqual(bare.fake.permissionOutcome, { outcome: 'cancelled' });
+        const rows = permissionRows(dir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.decidedBy, 'client');
+        assert.equal(rows[0]!.verdict, 'cancelled');
+      } finally {
+        assert.equal(await close(bare), 0);
+      }
+
+      // a throwing eval → the ask still crosses (fail-open, logged)
+      const logs: string[] = [];
+      const r = rig(
+        { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+        {
+          permission: async () => {
+            throw new Error('policy engine died');
+          },
+        },
+        l => logs.push(l)
+      );
+      try {
+        await openSession(r.acp);
+        await r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        assert.equal(r.permAsks.length, 1);
+        assert.deepEqual(r.fake.permissionOutcome, {
+          outcome: 'selected',
+          optionId: 'allow-once',
+        });
+        await new Promise(r2 => setTimeout(r2, 30));
+        assert.equal(
+          logs.some(l => l.includes('permission')),
+          true
+        );
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('BRO_HOOKS=0 makes the proxy a transport — the seam never runs, the ask crosses', async () => {
+    const prev = process.env.BRO_HOOKS;
+    process.env.BRO_HOOKS = '0';
+    try {
+      let evals = 0;
+      const r = rig(
+        { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+        {
+          permission: async () => {
+            evals++;
+            return { verdict: 'deny' as const };
+          },
+        }
+      );
+      try {
+        await openSession(r.acp);
+        await r.acp.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        });
+        assert.equal(evals, 0);
+        assert.equal(r.permAsks.length, 1);
+        assert.deepEqual(r.fake.permissionOutcome, {
+          outcome: 'selected',
+          optionId: 'allow-once',
+        });
+      } finally {
+        assert.equal(await close(r), 0);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.BRO_HOOKS;
+      else process.env.BRO_HOOKS = prev;
+    }
+  });
+
+  test('session/cancel during the eval settles the held ask cancelled — the ask never crosses upstream', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const evalEntered = new Promise<void>(r2 => {
+      entered = r2;
+    });
+    const evalGate = new Promise<void>(r2 => {
+      release = r2;
+    });
+    const r = rig(
+      { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+      {
+        permission: async () => {
+          entered();
+          await evalGate;
+          return { verdict: 'allow' as const };
+        },
+      }
+    );
+    try {
+      await openSession(r.acp);
+      const promptP = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      // the fake's ask is inside its prompt handler — wait for the
+      // eval to park, then cancel the session
+      await evalEntered;
+      await r.acp.notify('session/cancel', { sessionId: 'sess-1' });
+      release();
+      // the held ask answered downstream cancelled — it never reached
+      // the client (the wire never shows an ask after its cancel)
+      await new Promise(r2 => setTimeout(r2, 50));
+      assert.deepEqual(r.fake.permissionOutcome, { outcome: 'cancelled' });
+      assert.equal(r.permAsks.length, 0);
+      // the cancel itself still crossed — the in-flight prompt was
+      // its real target
+      assert.deepEqual(r.fake.cancels, ['sess-1']);
+      assert.equal((await promptP).stopReason, 'end_turn');
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('upstream death answers the held ask cancelled downstream — a dead client stalls nothing', async () => {
+    const r = rig(
+      { replyText: 'ok', askPermission: { options: ALLOW_REJECT } },
+      // the eval never resolves — the ask stays held until teardown
+      { permission: async () => new Promise<never>(() => {}) }
+    );
+    await openSession(r.acp);
+    const promptP = r.acp.request('session/prompt', {
+      sessionId: 'sess-1',
+      prompt: [{ type: 'text', text: 'go' }],
+    });
+    // let the ask land + the eval park
+    await new Promise(r2 => setTimeout(r2, 60));
+    await hangupClient(r);
+    assert.equal(await r.proxyDone, 0);
+    // the agent's ask resolved cancelled — the wire answers every
+    // request exactly once even when the asker is gone
+    await new Promise(r2 => setTimeout(r2, 50));
+    assert.deepEqual(r.fake.permissionOutcome, { outcome: 'cancelled' });
+    await hangupAgent(r);
+    await promptP.catch(() => {});
+  });
+
+  test('upstream death errors a non-permission a2c request downstream — the relay invariant holds for every method', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'ok',
+      // a hanging client-bound probe — the client registers a
+      // never-resolving fs handler so the request is still in flight
+      // when the upstream leg dies
+      probeClient: async (client, sid) => {
+        try {
+          return await client.request('fs/read_text_file', { sessionId: sid, path: '/x' });
+        } catch (e) {
+          return { code: e instanceof RequestError ? e.code : String(e) };
+        }
+      },
+    });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const agentConn = fake.app.connect(agentSide);
+    const conn = client({ name: 'test-client' })
+      .onRequest('fs/read_text_file', () => new Promise<never>(() => {}))
+      .connect(clientSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    try {
+      await conn.agent.request('initialize', INIT_PARAMS);
+      await conn.agent.request('session/new', { cwd: '/tmp/proxy-repo', mcpServers: [] });
+      const promptP = conn.agent.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      // let the probe land + park on the hanging handler
+      await new Promise(r2 => setTimeout(r2, 60));
+      conn.close();
+      await clientSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      assert.equal(await proxyDone, 0);
+      await new Promise(r2 => setTimeout(r2, 50));
+      // the proxy answered the request itself — a dead client leaves
+      // no agent waiting on a question that can never resolve
+      assert.deepEqual(fake.probeResult, {
+        code: -32603,
+      });
+      agentConn.close();
+      await agentSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      await promptP.catch(() => {});
+    } finally {
+      conn.close();
+      agentConn.close();
     }
   });
 });
