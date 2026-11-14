@@ -148,6 +148,128 @@ test('opencode: /bro <args> via session command API → bro argv + follow-up tur
   }
 });
 
+/** Command family (AGT-1 §command family) — the curated verbs are
+ *  first-class slash commands; a host-native name forces the `bro:`
+ *  namespace instead of shadowing. */
+
+function familyFakeBro(...argvs: string[][]): FakeBro {
+  const commands: Record<string, { stdout: string }> = {};
+  for (const argv of argvs) {
+    commands[argv.join(' ')] = { stdout: `ok ${argv.join(' ')}\n` };
+  }
+  return new FakeBro({ commands, defaultCommand: { stdout: 'ok\n' } });
+}
+
+function assertArgv(fb: FakeBro, argv: string[], label: string): void {
+  const hit = fb
+    .journal()
+    .some(en => en.kind === 'command' && JSON.stringify(en.argv) === JSON.stringify(argv));
+  assert.ok(
+    hit,
+    `${label}: FakeBro never saw \`bro ${argv.join(' ')}\` — journal: ${JSON.stringify(fb.journal())}`
+  );
+}
+
+test('pi: family commands dispatch bare names — /learn, /wtf multilingual (S4f)', {
+  skip: which('pi') === null && 'pi binary not on PATH',
+}, async () => {
+  await using mock = await startMock();
+  mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
+  const e = makeEnv();
+  writePiProviderConfig(e, `${mock.url}/v1`);
+  const inst = await installPiPlugin(e);
+  assert.equal(inst.code, 0, `plugins install pi failed: ${inst.stderr.slice(-400)}`);
+  const fb = familyFakeBro(['learn', 'backlog'], ['wtf', 'какого', 'черта']);
+  fb.install(e);
+
+  const r1 = await runRpcPrompt(e, 'pi', '/learn backlog');
+  assert.equal(
+    r1.disposition,
+    'handled',
+    `pi /learn not handled: ${JSON.stringify(r1.records.slice(-5))}`
+  );
+  const r2 = await runRpcPrompt(e, 'pi', '/wtf какого черта');
+  assert.equal(
+    r2.disposition,
+    'handled',
+    `pi /wtf not handled: ${JSON.stringify(r2.records.slice(-5))}`
+  );
+  assertArgv(fb, ['learn', 'backlog'], 'pi /learn');
+  assertArgv(fb, ['wtf', 'какого', 'черта'], 'pi /wtf');
+});
+
+test('omp: native /goal + /loop → bro:goal/bro:loop namespace, rest bare (S4f)', {
+  skip: which('omp') === null && 'omp binary not on PATH',
+}, async () => {
+  await using mock = await startMock();
+  mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
+  const e = makeEnv();
+  writeOmpProviderConfig(e, `${mock.url}/v1`);
+  const inst = await installOmpPlugin(e);
+  assert.equal(inst.code, 0, `plugins install omp failed: ${inst.stderr.slice(-400)}`);
+  const fb = familyFakeBro(['goal', 'ship', 'it'], ['drill', 'auth-flow']);
+  fb.install(e);
+
+  // native /loop and /goal belong to omp — the bro aliases must live
+  // under bro:<name> and still reach the same argv
+  const r1 = await runRpcPrompt(e, 'omp', '/bro:loop 3');
+  assert.equal(r1.success, true, `omp /bro:loop failed: ${JSON.stringify(r1.records.slice(-5))}`);
+  const r2 = await runRpcPrompt(e, 'omp', '/drill auth-flow');
+  assert.equal(r2.success, true, `omp /drill failed: ${JSON.stringify(r2.records.slice(-5))}`);
+  assertArgv(fb, ['loop', '3'], 'omp /bro:loop');
+  assertArgv(fb, ['drill', 'auth-flow'], 'omp /drill');
+});
+
+test('opencode: family commands via command API; /goal → bro:goal (native goal) (S4f)', {
+  skip: which('opencode') === null && 'opencode binary not on PATH',
+}, async () => {
+  await using mock = await startMock();
+  mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
+  const e = makeEnv();
+  installOpencodePlugin(e);
+  writeOpencodeConfig(e, mock.url);
+  const fb = familyFakeBro(['wtf'], ['goal', 'ship', 'it']);
+  fb.install(e);
+  const srv = await startOpencodeServer(e);
+  const AUTH = {
+    authorization: `Basic ${Buffer.from('opencode:e2e').toString('base64')}`,
+    'content-type': 'application/json',
+  };
+  try {
+    const sess = (await (
+      await fetch(`${srv.url}/api/session`, { method: 'POST', headers: AUTH, body: '{}' })
+    ).json()) as { id?: string; data?: { id?: string } };
+    const sessionID = sess.id ?? sess.data?.id;
+    assert.ok(sessionID, 'session.create returned no id');
+
+    for (const [name, text, argv] of [
+      ['wtf', '', ['wtf']],
+      ['bro:goal', 'ship it', ['goal', 'ship', 'it']],
+    ] as const) {
+      const res = await fetch(`${srv.url}/api/session/${sessionID}/command`, {
+        method: 'POST',
+        headers: AUTH,
+        body: JSON.stringify({ name, text }),
+      });
+      assert.ok(res.status === 200 || res.status === 204, `command ${name} returned ${res.status}`);
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        if (
+          fb
+            .journal()
+            .some(en => en.kind === 'command' && JSON.stringify(en.argv) === JSON.stringify(argv))
+        ) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, 400));
+      }
+      assertArgv(fb, [...argv], `opencode /${name}`);
+    }
+  } finally {
+    await srv.stop();
+  }
+});
+
 test('kilo: bro tool call dispatches sub+args to bro with matrix argv (S4)', {
   skip: which('kilo') === null && 'kilo binary not on PATH',
 }, async () => {

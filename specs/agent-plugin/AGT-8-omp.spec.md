@@ -100,7 +100,9 @@ one.
   surfaces natively, not via reprompt), S4 `/bro` dispatch
   (verified e2e — RPC `prompt` → `success:true`, `bro <args>`
   argv in FakeBro journal, `bro-command.e2e.test.ts`),
-  S7 fail-open, S9 skills, S10 native correlation (mode bridges:
+  S4f command family (`bro:goal`/`bro:loop` namespaced — omp owns
+  both natively; rest bare), S7 fail-open, S9 skills, S10 native
+  correlation (mode bridges:
   Plan/Goal/Vibe/Prewalk/Advisor). Pending — S5/S6/S8 driver
   verification.
 
@@ -113,3 +115,7 @@ one.
 - 2026-11-14 — v4: S4 `/bro` dispatch verified e2e — RPC `prompt`
   leg of `bro-command.e2e.test.ts` asserts `success:true`, identical
   `bro <args>` argv, session-start hook in the journal.
+- 2026-11-14 — v5: S4f command family verified e2e — omp owns
+  `/goal` + `/loop` natively, so those aliases register as
+  `bro:goal`/`bro:loop` and still reach identical argv; `/drill`
+  keeps its bare name (`bro-command.e2e.test.ts`).
