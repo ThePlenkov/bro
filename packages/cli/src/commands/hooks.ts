@@ -73,7 +73,6 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
   acquireFileLock,
-  appendSessionInbox,
   claimsFacade,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
@@ -106,7 +105,6 @@ import {
   type GuardEvent,
   type Mode,
   type ModeSnapshotEvent,
-  type PreToolVerdict,
   type ProbeReporter,
   type ProbeResult,
   type ProbeTiming,
@@ -125,7 +123,6 @@ import { GUARD_PROBES } from '../guard-probes.ts';
 // whose import evaluates the whole PLUGINS registry on every hook event
 // (review #9, specs/bro-36sx7.7.md)
 import { sessionCapRefusalForHook } from './session-cap.ts';
-import { wasteGuardBlock, wasteGuardRecord } from './waste-guard.ts';
 import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
@@ -134,6 +131,7 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
+import { deadLoopPostTool, deadLoopPreTool } from './deadloop.ts';
 import { adapterEmitBegin } from './hook-emit.ts';
 import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
 import { drainHookSpool } from '@broject/core';
@@ -551,17 +549,11 @@ function hooksStateDir(dir: string = process.cwd()): string | null {
 
 /** One marker file per aspect (<session>.<aspect>) — arming is a pure file
  * create with no read-modify-write, so concurrent post-tool hooks from
- * parallel tool calls cannot lose an aspect to a torn JSON rewrite. `dir`
- * is the session's repo root — hook events leave it at process.cwd(); the
- * acp proxy passes the session's `session/new` cwd (spec bro-u2eps). */
-function markerPath(
-  sessionId: string,
-  aspect: GateAspect,
-  dir: string = process.cwd()
-): string | null {
-  const stateDir = hooksStateDir(dir);
+ * parallel tool calls cannot lose an aspect to a torn JSON rewrite. */
+function markerPath(sessionId: string, aspect: GateAspect): string | null {
+  const dir = hooksStateDir();
   const safe = sessionId.replace(/[^\w.-]/g, '_');
-  return stateDir && safe ? join(stateDir, `${safe}.${aspect}`) : null;
+  return dir && safe ? join(dir, `${safe}.${aspect}`) : null;
 }
 
 /** Aspects this session armed, or empty when no marker exists. The
@@ -1132,18 +1124,10 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
 }
 
 /** Record that this session touched `aspect`. Best-effort; also prunes
- * markers older than a week so stale sessions don't accumulate. `dir` is
- * the repo the marker resolves in — hook events leave it at
- * process.cwd(), the acp proxy's in-process arming passes the session
- * cwd (spec bro-u2eps). */
-export function armSession(
-  sessionId: string,
-  aspect: GateAspect,
-  detail: string = '',
-  dir: string = process.cwd()
-): void {
+ * markers older than a week so stale sessions don't accumulate. */
+export function armSession(sessionId: string, aspect: GateAspect, detail: string = ''): void {
   try {
-    const path = markerPath(sessionId, aspect, dir);
+    const path = markerPath(sessionId, aspect);
     if (!path) {
       return;
     }
@@ -1201,20 +1185,19 @@ export function armSession(
 
 /** Hinted-skill markers live in a `hinted/` subdir of the hooks state
  *  dir — `readArmed` scans `<session>.*` files as gate aspects, so dedup
- *  state must not sit flat beside the arming markers. `dir` follows the
- *  same rule as markerPath: the session's repo root, not the caller's. */
-function hintedPath(sessionId: string, skill: string, dir: string = process.cwd()): string | null {
-  const stateDir = hooksStateDir(dir);
+ *  state must not sit flat beside the arming markers. */
+function hintedPath(sessionId: string, skill: string): string | null {
+  const dir = hooksStateDir();
   const safe = sessionId.replace(/[^\w.-]/g, '_');
-  return stateDir && safe ? join(stateDir, 'hinted', `${safe}.${skill}`) : null;
+  return dir && safe ? join(dir, 'hinted', `${safe}.${skill}`) : null;
 }
 
 /** Records this stop's gate hints and reports whether they differ from
  *  what the session was last told. An empty set is recorded too, so a
  *  hint that clears and later returns is shown again. Fail-open: an
  *  unreadable or unwritable marker reports a change. */
-function stopHintsChanged(sessionId: string, hints: string[], dir?: string): boolean {
-  const path = hintedPath(sessionId, 'stop-gate', dir);
+function stopHintsChanged(sessionId: string, hints: string[]): boolean {
+  const path = hintedPath(sessionId, 'stop-gate');
   if (!path) {
     return hints.length > 0;
   }
@@ -1269,9 +1252,9 @@ function stopHintsChanged(sessionId: string, hints: string[], dir?: string): boo
  *  an unstampable session (no hooks state dir): the gate keeps its
  *  block — a rig that cannot arm aspects never reaches the block branch
  *  anyway. */
-export function takeStopGateBlock(sessionId: string, aspect: string, dir?: string): boolean {
+export function takeStopGateBlock(sessionId: string, aspect: string): boolean {
   const safeAspect = aspect.replace(/[^\w.-]/g, '_') || 'gate';
-  const path = hintedPath(sessionId, `stop-gate-block.${safeAspect}`, dir);
+  const path = hintedPath(sessionId, `stop-gate-block.${safeAspect}`);
   if (!path) {
     return true;
   }
@@ -1321,8 +1304,8 @@ export function takeStopGateBlock(sessionId: string, aspect: string, dir?: strin
 /** True when this session was already pointed at the skill — a marker
  *  younger than MARKER_TTL_MS counts; older re-hints (a week-old session
  *  is a new session). */
-function skillHinted(sessionId: string, skill: string, dir?: string): boolean {
-  const path = hintedPath(sessionId, skill, dir);
+function skillHinted(sessionId: string, skill: string): boolean {
+  const path = hintedPath(sessionId, skill);
   if (!path) {
     return false;
   }
@@ -1333,9 +1316,9 @@ function skillHinted(sessionId: string, skill: string, dir?: string): boolean {
   }
 }
 
-function markSkillHinted(sessionId: string, skill: string, dir?: string): void {
+function markSkillHinted(sessionId: string, skill: string): void {
   try {
-    const path = hintedPath(sessionId, skill, dir);
+    const path = hintedPath(sessionId, skill);
     if (!path) {
       return;
     }
@@ -1423,13 +1406,9 @@ const TRACE_JOURNAL_KEEP_LINES = 500;
  *  lifecycle, but a weekly TTL doesn't need a per-event dir scan: a new
  *  journal is the once-per-session tick that sweeps residue. Best-effort
  *  like arming: a failed append must never stall the hook. */
-export function journalTrace(
-  input: HookInput,
-  sessionId: string,
-  dir: string = process.cwd()
-): void {
+export function journalTrace(input: HookInput, sessionId: string): void {
   try {
-    const path = traceFile(dir, sessionId);
+    const path = traceFile(process.cwd(), sessionId);
     if (!path) {
       return;
     }
@@ -2105,189 +2084,6 @@ export async function collectPromptContext(
   return { lines: [...promptLines, ...guards] };
 }
 
-/** The acp proxy's view of a tool call — the same shape
- *  `AcpProxyToolCall` carries in @broject/providers, declared here so
- *  this module keeps no import edge into providers: the proxy hands
- *  its session/update fields over verbatim and this collector reads
- *  the hook-shaped parts out (spec bro-u2eps). */
-export interface AcpToolCall {
-  /** 'start' is the `tool_call` announce, 'end' the terminal
-   *  `tool_call_update` (completed|failed). */
-  phase: 'start' | 'end';
-  toolCallId: string;
-  name?: string;
-  title?: string;
-  kind?: string;
-  status?: string;
-  /** `rawInput` verbatim — the classifier pulls `command` /
-   *  `file_path` / `files` out of it, exactly like a hook's
-   *  `tool_input`. */
-  input?: unknown;
-  output?: unknown;
-}
-
-/** The PostToolUse event as a library call for `bro acp proxy` (spec
- *  bro-u2eps §1) — emitPostTool's in-process half, no run.sh
- *  subprocess: the call journals into the session trace, its command
- *  arms the same aspects classifyArmCommands names, and a terminal
- *  update runs the post-tool guard sweep. The returned lines are the
- *  advisory text the hook would print as context — the proxy buffers
- *  them onto the next crossed prompt.
- *
- *  `call.phase` is the update stream's own distinction: 'start' is the
- *  announce — arming runs there with the hook's own
- *  unproven-outcome over-approximation (a call whose completion never
- *  arrives still arms, a missed arm loses the gate entirely); 'end'
- *  is the post-tool analog the guard sweep actually wants, because
- *  state-matching guards must see the repo AFTER the call. A proven
- *  failure (status 'failed') journals but arms nothing — the hook's
- *  same rule. Connector postTool probes stay hook-side: the seam's
- *  contract is arming + guards, not a mailbox delivery plane. */
-export async function collectToolCallGuards(
-  dir: string,
-  sessionId: string,
-  call: AcpToolCall
-): Promise<{ lines: string[] }> {
-  if (!broEnabled(dir) || sessionId === '') {
-    return { lines: [] };
-  }
-  journalTrace(
-    {
-      tool_name: call.name ?? call.title,
-      tool_use_id: call.toolCallId,
-      tool_input: call.input as HookInput['tool_input'],
-      tool_response: call.phase === 'end' ? { success: call.status !== 'failed' } : undefined,
-    },
-    sessionId,
-    dir
-  );
-  const input = (call.input ?? {}) as Record<string, unknown>;
-  const cmd = typeof input.command === 'string' ? input.command : '';
-  const lines: string[] = [];
-  if (!(call.phase === 'end' && call.status === 'failed')) {
-    lines.push(...armPostTool(cmd, sessionId, dir));
-  }
-  if (call.phase === 'end') {
-    if (call.status === 'completed') {
-      // world-state nudges are statements of fact — they read only
-      // where the call provably succeeded, same as the hook
-      lines.push(...execNudges(cmd));
-    }
-    // guards on post-tool: match sees the journaled trace tail (this
-    // landing included — journalTrace ran first), state sees live repo
-    lines.push(
-      ...(await guardLines(dir, 'post-tool', sessionId, async () => {
-        const tail = await sessionTail(dir, sessionId);
-        return { text: tail.raw, trace: await guardTrace(dir, tail.entries) };
-      }))
-    );
-  }
-  return { lines };
-}
-
-/** The acp proxy's view of a permission ask — the seam-side twin of
- *  `AcpProxyPermissionCall` in @broject/providers, declared here for
- *  the same reason `AcpToolCall` is: no import edge into providers
- *  (spec bro-9qopj). `input` is the call's `rawInput` verbatim — the
- *  `tool_input` analog every classifier below reads `command` out of. */
-export interface AcpPermissionCall {
-  toolCallId: string;
-  name?: string;
-  title?: string;
-  kind?: string;
-  input?: unknown;
-}
-
-/** The seam's verdict on one ask, in the hook pipeline's own order:
- *  connector `preTool` block vetoes first (the PreToolUse event
- *  precedes PermissionRequest on every host that fires both — a
- *  wedged connector fails open inside preToolVerdicts the same as in
- *  emitPreTool); the session cap's refusal denies second (the
- *  devin-shape veto point IS this request — spec bro-bww9v); a
- *  self-tool command (bro/bd/npx @broject/bro — isSelfToolCommand's
- *  chained/piped exclusions included) auto-approves. `warn` verdicts
- *  come back as hints — everything unopposed lands `ask`: silence
- *  means the human decides. */
-async function permissionVerdict(
-  dir: string,
-  sessionId: string,
-  call: AcpPermissionCall
-): Promise<{ verdict: 'allow' | 'deny' | 'ask'; reason?: string; hints?: string[] }> {
-  const input = (call.input ?? {}) as Record<string, unknown>;
-  const cmd = typeof input.command === 'string' ? input.command : '';
-  const verdicts = await preToolVerdicts(
-    hookCtx(dir, sessionId, call.toolCallId),
-    call.name ?? call.title ?? '',
-    input
-  );
-  const deny =
-    verdicts.find(v => v.block !== undefined)?.block ??
-    sessionCapRefusalForHook(cmd, dir, sessionId, undefined, call.toolCallId);
-  if (deny !== undefined) {
-    return { verdict: 'deny', reason: deny };
-  }
-  if (isSelfToolCommand(cmd)) {
-    return { verdict: 'allow' };
-  }
-  const hints = verdicts.flatMap(v => (v.warn === undefined ? [] : [v.warn]));
-  return hints.length > 0 ? { verdict: 'ask', hints } : { verdict: 'ask' };
-}
-
-/** The PermissionRequest hook as a library call for `bro acp proxy`
- *  (spec bro-9qopj) — emitPermission's policy minus the hook envelope,
- *  plus the connector preTool sweep the hook host would have run
- *  alongside it. `input` rewrites have no wire path (the call's
- *  rawInput already announced) and degrade silently, same as the
- *  seam's contract; `warn` verdicts return as `hints`, the proxy's
- *  next-prompt buffer — exactly the additionalContext tier the hook
- *  emits. Fails open the same way: a non-bro dir, an empty session
- *  id, a cap that cannot be computed, a wedged connector — every one
- *  is `ask`, never a corrupt wire. */
-export async function collectPermission(
-  dir: string,
-  sessionId: string,
-  call: AcpPermissionCall
-): Promise<{ verdict: 'allow' | 'deny' | 'ask'; reason?: string; hints?: string[] }> {
-  // fails open the same way as the hook: a non-bro dir or an empty
-  // session id is `ask`, never a corrupt wire
-  if (!broEnabled(dir) || sessionId === '') {
-    return { verdict: 'ask' };
-  }
-  return permissionVerdict(dir, sessionId, call);
-}
-
-/** The stop gate as a library call for `bro acp proxy` (spec bro-u2eps
- *  §2) — emitStopGateBody's contribution walk minus the hook envelope:
- *  the armed-marker policy, GATE_PRIORITY ordering, and the per-aspect
- *  one-shot all resolve inside `dir`, the session's repo root. The
- *  'stop' guard sweep and goal reminder stay hook-side — the seam's
- *  verdict is the gate's. `block` is the gate message the proxy
- *  re-prompts the agent with; `hints` are the dedup'd advisory set —
- *  an unchanged set returns empty so an idle turn-end never re-wakes
- *  the agent (the stopHintsChanged rule, same as the hook's). */
-export async function collectStopGate(
-  dir: string,
-  sessionId: string
-): Promise<{ block?: string; hints: string[] }> {
-  if (!broEnabled(dir) || sessionId === '') {
-    return { hints: [] };
-  }
-  const armed = readArmed(sessionId, dir);
-  const rank = (a: string): number => {
-    const i = GATE_PRIORITY.indexOf(a);
-    return i === -1 ? GATE_PRIORITY.length : i;
-  };
-  const contributions = await stopGateContributions(
-    hookCtx(dir, sessionId),
-    probeReporter('stop', 'stopGate')
-  ).then(rows => rows.sort((a, b) => rank(a.aspect) - rank(b.aspect)));
-  const outcome = stopGateOutcome(contributions, armed, sessionId, dir);
-  if (outcome.block !== undefined) {
-    return { block: outcome.block, hints: [] };
-  }
-  return { hints: stopHintsChanged(sessionId, outcome.hints, dir) ? outcome.hints : [] };
-}
-
 async function emitSessionContext(
   event: 'SessionStart' | 'PostCompaction' | 'PostCompact' | 'PreCompact',
   sessionId = '',
@@ -2351,19 +2147,15 @@ async function emitPromptContext(input: HookInput): Promise<void> {
  *  sqlite, and a lost write costs one claim row, not a gate. */
 let hookClaims: import('@broject/core').ClaimFacade | undefined;
 
-function claimWorktreeArm(
-  sessionId: string,
-  detail: string,
-  dir: string = process.cwd(),
-  env: NodeJS.ProcessEnv = process.env
-): void {
+function claimWorktreeArm(sessionId: string, detail: string): void {
   try {
-    const host = hookHost ?? hookHostOf(env);
+    const host = hookHost ?? hookHostOf(process.env);
     if (host === '' || host === 'unknown') {
       return;
     }
     hookClaims ??= claimsFacade();
     const owner = agentOwner();
+    const dir = process.cwd();
     void hookClaims
       .claim(
         `worktree:${dir}`,
@@ -2374,23 +2166,6 @@ function claimWorktreeArm(
           dir,
         }
       )
-      .then(res => {
-        // a refused arm claim was silently dropped before bro-izpyk.8 —
-        // the result resolves after this event's output, so the note
-        // rides the session inbox and drains on the NEXT hook (the
-        // pre-tool verdict separately re-derives the standing state).
-        if (res.ok) {
-          return;
-        }
-        const c = res.conflict;
-        const holder = c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`;
-        appendSessionInbox(env, host, sessionId, {
-          ts: Date.now(),
-          from: 'bro',
-          kind: 'info',
-          text: `claim conflict — worktree:${dir} is held by ${holder}; work arm is not leased`,
-        });
-      })
       .catch(() => {});
   } catch {
     // claims are best-effort — arming must never stall a session
@@ -2398,22 +2173,20 @@ function claimWorktreeArm(
 }
 
 /** Arm the session aspects a command implies, plus the once-per-session
- *  governing-skill citation for mutating bro subcommands (bro-d8s).
- *  `dir` is the session's repo root — hook events run in it, the acp
- *  proxy's in-process arming passes the session's cwd (spec bro-u2eps). */
-function armPostTool(cmd: string, sessionId: string, dir: string = process.cwd()): string[] {
+ *  governing-skill citation for mutating bro subcommands (bro-d8s). */
+function armPostTool(cmd: string, sessionId: string): string[] {
   const aspects = classifyArmCommands(cmd);
   if (sessionId) {
     for (const aspect of aspects) {
-      armSession(sessionId, aspect, armDetail(cmd, aspect), dir);
+      armSession(sessionId, aspect, armDetail(cmd, aspect));
     }
     if (aspects.includes('work')) {
-      claimWorktreeArm(sessionId, armDetail(cmd, 'work'), dir);
+      claimWorktreeArm(sessionId, armDetail(cmd, 'work'));
     }
   }
   const mutation = classifySkillMutation(cmd);
-  if (mutation && sessionId && !skillHinted(sessionId, mutation.skill, dir)) {
-    markSkillHinted(sessionId, mutation.skill, dir);
+  if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
+    markSkillHinted(sessionId, mutation.skill);
     return [
       `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
         `— read skills/${mutation.skill}/SKILL.md before continuing`,
@@ -2437,15 +2210,10 @@ function execNudges(cmd: string): string[] {
   }
 }
 
-function armingLinesForOutcome(
-  outcome: unknown,
-  cmd: string,
-  sessionId: string,
-  dir: string = process.cwd()
-): string[] {
+function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string): string[] {
   const lines: string[] = [];
   if (outcome !== false) {
-    lines.push(...armPostTool(cmd, sessionId, dir));
+    lines.push(...armPostTool(cmd, sessionId));
     // a `gh pr create` in a formula-attested session earns the detached
     // PR-body footer stamp (spec bro-7d5nb §traceability) — same
     // over-approximation as arming: hosts that can't observe the exit
@@ -2489,17 +2257,6 @@ async function emitPostToolObserve(
   }
 }
 
-/** The waste-guard's post-tool marker commit, boxed so the payload
- *  field reads (`??`/ternary decision points) live here instead of
- *  growing emitPostTool's branch count. */
-function wasteRecordFor(input: HookInput, sessionId: string, outcome: unknown): void {
-  wasteGuardRecord(process.cwd(), sessionId, {
-    tool: typeof input.tool_name === 'string' ? input.tool_name : '',
-    input: (input.tool_input ?? {}) as Record<string, unknown>,
-    outcome,
-  });
-}
-
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const lines: string[] = [];
@@ -2512,12 +2269,6 @@ async function emitPostTool(input: HookInput): Promise<void> {
   maybeSpawnTraceFlush(process.cwd());
   const outcome = input.tool_response?.success;
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
-  // waste-guard markers commit at post-tool, not pre-tool — a call
-  // denied by the guard, a connector veto, or a refused prompt never
-  // reaches this event, so a marker only stands for a call that
-  // actually ran (spec bro-rw8z3). Passive state like the trace
-  // journal, so it records in observe mode too.
-  wasteRecordFor(input, sessionId, outcome);
   // `bro mode <name>` binds to this session here — runs in EVERY mode,
   // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
   // A proven-failed call binds nothing (the mode was never applied);
@@ -2535,6 +2286,10 @@ async function emitPostTool(input: HookInput): Promise<void> {
     await emitPostToolObserve(input, sessionId, lines);
     return;
   }
+  // dead-loop gate, detection stage — the trace journal already holds
+  // this event; a trailing run of identical signatures arms the marker
+  // the pre-tool stage vetoes on. Advisory line only, never a block.
+  lines.push(...deadLoopPostTool(process.cwd(), sessionId, input));
   // arming is a "probe live state once" hint the stop gate re-verifies,
   // not a verdict — so it fires on every outcome except a proven
   // failure. A host that cannot observe outcomes (Codex PostToolUse
@@ -2632,8 +2387,7 @@ async function emitStopGate(input: HookInput): Promise<void> {
 export function stopGateOutcome(
   contributions: GateContribution[],
   armed: Set<string>,
-  sessionId: string,
-  dir?: string
+  sessionId: string
 ): { block?: string; hints: string[] } {
   const hints: string[] = [];
   const aspects: string[] = [];
@@ -2667,7 +2421,7 @@ export function stopGateOutcome(
       }
       continue;
     }
-    if (takeStopGateBlock(sessionId, aspect, dir)) {
+    if (takeStopGateBlock(sessionId, aspect)) {
       return { block: blockers.map(c => c.block!).join('\n'), hints };
     }
     for (const c of group) {
@@ -2711,7 +2465,7 @@ async function emitStopGateBody(
       return { text: tail.raw, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
-  const outcome = stopGateOutcome(contributions, armed, sessionId, dir);
+  const outcome = stopGateOutcome(contributions, armed, sessionId);
   if (outcome.block !== undefined) {
     emit({ decision: 'block', reason: outcome.block });
     return;
@@ -2719,33 +2473,12 @@ async function emitStopGateBody(
   const gateHints = outcome.hints;
   // any Stop context re-wakes the host as a new turn — repeating an
   // unchanged gate hint every stop turns an idle wait into a loop
-  const hints: string[] = [
-    ...goal,
-    ...(stopHintsChanged(sessionId, gateHints, dir) ? gateHints : []),
-  ];
+  const hints: string[] = [...goal, ...(stopHintsChanged(sessionId, gateHints) ? gateHints : [])];
   // stop guards are passive hints — additionalContext only; a guard is
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards);
   if (hints.length > 0) {
     context(eventName, hints.join('\n'));
-  }
-}
-
-/** A pre-tool veto — codex answers in its hookSpecificOutput envelope,
- *  every other client takes the flat decision block. Shared by the
- *  waste-guard and connector verdict paths so emitPreTool keeps one
- *  branch per veto source. */
-function emitPreToolDeny(reason: string): void {
-  if (codexClient) {
-    emit({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: reason,
-      },
-    });
-  } else {
-    emit({ decision: 'block', reason });
   }
 }
 
@@ -2757,25 +2490,44 @@ function emitPreToolDeny(reason: string): void {
 async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
-  const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
-  // the waste-guard runs before connector verdicts — a deterministic
-  // duplicate/unchanged-verify veto costs no model call (spec
-  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls.
-  // pre-tool only checks — the marker commit lands at post-tool, so a
-  // call vetoed here or below can never shadow its own retry
-  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput });
-  if (wasteBlock !== undefined) {
-    emitPreToolDeny(wasteBlock);
-    return;
+  // dead-loop gate, veto stage — runs before connector probes: a call
+  // matching a fresh loop marker is refused on signature alone, no
+  // probe spend. Observe mode stays passive like every active surface.
+  if (hookMode !== 'observe') {
+    const veto = deadLoopPreTool(process.cwd(), sessionId, input);
+    if (veto !== null) {
+      if (codexClient) {
+        emit({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: veto,
+          },
+        });
+      } else {
+        emit({ decision: 'block', reason: veto });
+      }
+      return;
+    }
   }
   const verdicts = await preToolVerdicts(
     hookCtx(process.cwd(), sessionId, callIdOf(input)),
     tool,
-    toolInput
+    (input.tool_input ?? {}) as Record<string, unknown>
   );
   const block = verdicts.find(v => v.block !== undefined)?.block;
   if (block !== undefined) {
-    emitPreToolDeny(block);
+    if (codexClient) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: block,
+        },
+      });
+    } else {
+      emit({ decision: 'block', reason: block });
+    }
     return;
   }
   const merged: Record<string, unknown> = {};
@@ -2784,14 +2536,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
       Object.assign(merged, v.input);
     }
   }
-  // `warn` verdicts (bro-izpyk.8 — the advisory tier) ride one emit with
-  // the input merge: additionalContext for the hosts that render it,
-  // permissionDecisionReason on codex (its schema's only string slot —
-  // an 'allow' with a reason IS the warn channel there).
-  const warns = verdicts.flatMap(v => (v.warn === undefined ? [] : [v.warn]));
-  const warnText = warns.join('\n');
-  const hasMerged = Object.keys(merged).length > 0;
-  if (warnText !== '' || hasMerged) {
+  if (Object.keys(merged).length > 0) {
     if (codexClient) {
       const base =
         typeof input.tool_input === 'object' && input.tool_input !== null ? input.tool_input : {};
@@ -2799,18 +2544,11 @@ async function emitPreTool(input: HookInput): Promise<void> {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'allow',
-          ...(warnText !== '' ? { permissionDecisionReason: warnText } : {}),
-          ...(hasMerged ? { updatedInput: { ...base, ...merged } } : {}),
+          updatedInput: { ...base, ...merged },
         },
       });
     } else {
-      emit({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          ...(warnText !== '' ? { additionalContext: warnText } : {}),
-          ...(hasMerged ? { tool_input: merged } : {}),
-        },
-      });
+      emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } });
     }
   }
 }
