@@ -125,6 +125,7 @@ import { GUARD_PROBES } from '../guard-probes.ts';
 // whose import evaluates the whole PLUGINS registry on every hook event
 // (review #9, specs/bro-36sx7.7.md)
 import { sessionCapRefusalForHook } from './session-cap.ts';
+import { wasteGuardBlock } from './waste-guard.ts';
 import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
@@ -2721,10 +2722,29 @@ async function emitStopGateBody(
 async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
+  const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+  // the waste-guard runs before connector verdicts — a deterministic
+  // duplicate/unchanged-verify veto costs no model call (spec
+  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls
+  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, tool, toolInput);
+  if (wasteBlock !== undefined) {
+    if (codexClient) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: wasteBlock,
+        },
+      });
+    } else {
+      emit({ decision: 'block', reason: wasteBlock });
+    }
+    return;
+  }
   const verdicts = await preToolVerdicts(
     hookCtx(process.cwd(), sessionId, callIdOf(input)),
     tool,
-    (input.tool_input ?? {}) as Record<string, unknown>
+    toolInput
   );
   const block = verdicts.find(v => v.block !== undefined)?.block;
   if (block !== undefined) {
