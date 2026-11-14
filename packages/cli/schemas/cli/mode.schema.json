@@ -2,43 +2,51 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/mode.schema.json",
   "title": "bro mode --json",
-  "description": "get → {session, warnings}; list → {modes, warnings}; render → {project, rendered, warnings}",
-  "type": "object",
-  "additionalProperties": true,
+  "description": "One of three verb documents — get/set/clear → {session,warnings}; list → {modes,warnings}; render → {project,rendered,warnings}. Mirrors modeJson/ModeListRow in packages/cli/src/commands/mode.ts.",
   "anyOf": [
-    {
+    { "$ref": "#/$defs/ModeSession" },
+    { "$ref": "#/$defs/ModeList" },
+    { "$ref": "#/$defs/ModeRender" }
+  ],
+  "$defs": {
+    "Mode": { "enum": ["observe", "plan", "code", "review", "orchestrate"] },
+    "ModeSession": {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["session", "warnings"],
       "properties": {
         "session": {
           "type": "object",
-          "additionalProperties": true,
-          "required": ["host", "sid", "mode", "source"],
+          "additionalProperties": false,
+          "required": ["host", "sid", "mode", "source", "file"],
           "properties": {
             "host": { "type": "string" },
             "sid": { "type": "string" },
-            "mode": { "type": "string", "enum": ["observe", "plan", "code", "review", "orchestrate"] },
-            "source": { "type": "string", "enum": ["file", "default", "observe"] },
+            "mode": { "$ref": "#/$defs/Mode" },
+            "source": { "type": "string" },
             "file": { "type": ["string", "null"] }
           }
         },
         "warnings": { "type": "array", "items": { "type": "string" } }
       }
     },
-    {
+    "ModeList": {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["modes", "warnings"],
       "properties": {
         "modes": {
           "type": "array",
           "items": {
             "type": "object",
-            "additionalProperties": true,
+            "additionalProperties": false,
             "required": ["host", "sid", "mode", "source", "seen"],
             "properties": {
               "host": { "type": "string" },
               "sid": { "type": "string" },
-              "mode": { "type": "string" },
-              "source": { "type": "string", "enum": ["file", "ledger"] },
-              "seen": { "type": "number", "description": "epoch ms" },
+              "mode": { "$ref": "#/$defs/Mode" },
+              "source": { "enum": ["file", "ledger"] },
+              "seen": { "type": "number", "description": "Epoch ms — file mtime or ledger lastSeen." },
               "file": { "type": "string" }
             }
           }
@@ -46,13 +54,15 @@
         "warnings": { "type": "array", "items": { "type": "string" } }
       }
     },
-    {
+    "ModeRender": {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["project", "rendered", "warnings"],
       "properties": {
-        "project": { "type": ["string", "null"], "description": "null when the project id cannot resolve" },
-        "rendered": { "type": "array", "items": { "type": "string" } },
+        "project": { "type": ["string", "null"] },
+        "rendered": { "type": "array", "items": { "$ref": "#/$defs/Mode" } },
         "warnings": { "type": "array", "items": { "type": "string" } }
       }
     }
-  ]
+  }
 }

@@ -115,6 +115,9 @@ export interface WatchPrGate {
   mergeable?: string;
   mergeState?: string;
   openThreads?: number;
+  /** threads bro resolved that came back open — the cycle-guard count;
+   *  emitted on every successful probe (0 = none) */
+  reopenedThreads?: number;
   ciPending?: number;
   ciFailing?: number;
   reviewersPending?: number;
