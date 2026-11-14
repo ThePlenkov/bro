@@ -106,6 +106,7 @@ export type {
   IgnoreCheckRule,
   ServeClientConfig,
   ServeClients,
+  ServeLaneLimits,
   SinkDef,
   SinkType,
 } from './config.ts';
