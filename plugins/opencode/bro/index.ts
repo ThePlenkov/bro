@@ -1,5 +1,5 @@
 // bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -1097,6 +1097,20 @@ function parseSkill(markdown) {
 		description: description.replace(/^["']|["']$/g, "")
 	};
 }
+/** Auto-discovered skills roots must look like BRO's tree before they
+*  are registered — the ancestor walk-up can land on a foreign `skills/`
+*  dir (e.g. opencode's own `~/.config/opencode/skills`), and registering
+*  somebody else's skills under bro's name is worse than registering
+*  none. `sdd` is bro's canonical skill — every shipped tree carries it.
+*  An explicit `skillsDir` is the operator's choice and skips the check. */
+const BRO_SKILLS_SENTINEL = "sdd";
+function isBroSkillsRoot(root) {
+	try {
+		return statSync(join(root, BRO_SKILLS_SENTINEL, "SKILL.md")).isFile();
+	} catch {
+		return false;
+	}
+}
 /** The directories that may hold bro's skills, most specific first:
 *  an explicit option, the materialized sibling `skills/`, the npm
 *  package's `skills/`, then the checkout's `skills/`.
@@ -1386,10 +1400,12 @@ async function BroSetup(ctx) {
 *  Every failure mode — a missing tree, an unreadable file, a file
 *  without frontmatter — drops that one skill, never the whole set. */
 async function collectBroSkills(options) {
-	const { readdirSync, readFileSync, statSync } = await import("node:fs");
+	const { readdirSync, readFileSync, statSync: statSync$1 } = await import("node:fs");
 	const out = [];
 	const seen = /* @__PURE__ */ new Set();
+	const explicit = typeof options?.skillsDir === "string" && options.skillsDir.trim() !== "";
 	for (const root of skillRoots(options)) {
+		if (!explicit && !isBroSkillsRoot(root)) continue;
 		let entries;
 		try {
 			if (!existsSync(root)) continue;
@@ -1401,7 +1417,7 @@ async function collectBroSkills(options) {
 			const path = join(root, entry, "SKILL.md");
 			let content;
 			try {
-				if (!statSync(path).isFile()) continue;
+				if (!statSync$1(path).isFile()) continue;
 				content = readFileSync(path, "utf8");
 			} catch {
 				continue;
@@ -1434,4 +1450,4 @@ const defined = Plugin.define({
 var opencode_default = defined;
 
 //#endregion
-export { BroSetup, collectBroSkills, opencode_default as default, skillRoots, toolSucceeded };
+export { BroSetup, collectBroSkills, opencode_default as default, isBroSkillsRoot, skillRoots, toolSucceeded };
