@@ -317,6 +317,13 @@ const CLIENTS: Record<string, ClientSpec> = {
     // the v2 catalog plugin — a directory of three modules
     surfaces: (cwd, env) => [opencodeBundle(cwd, env)],
     legacy: (cwd, env) => opencodeLegacy(cwd, env),
+    // verified on opencode 2.3.0: `opencode run` executes plugin
+    // modules from BOTH ~/.config/opencode/plugins/ and
+    // <repo>/.opencode/plugins/ — identical id `bro` loads twice, so
+    // hooks/tools/commands/RPC would all double-register (bro-b7mae)
+    singleScope:
+      'opencode loads project and global plugin copies without dedupe — ' +
+      'hooks, tools and commands would double-register (bro-b7mae)',
   },
   kilo: {
     surfaces: (cwd, env) => [
@@ -571,16 +578,112 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
           '— pass an explicit scope flag to choose the other one instead'
       );
     }
+    // converge — the host must never hold bro copies in both scopes.
+    // Remove ours outside the installed set (sentinel-checked; a
+    // foreign file at the path is never touched), including stale
+    // legacy-layout modules the host would still load.
+    for (const scope of ['global', 'local'] as PluginScope[]) {
+      if (effective.includes(scope)) {
+        continue;
+      }
+      for (const surface of surfaces) {
+        const outcome = convergeScopeCopy(name, scope, surface, opts);
+        if (outcome !== null) {
+          outcomes.push(outcome);
+        }
+      }
+      for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
+        const outcome = legacyOutcome(name, scope, legacy, opts);
+        if (outcome !== null) {
+          outcomes.push(outcome);
+        }
+      }
+    }
     const conflict = crossScopeBroCopy(surfaces, effective);
     if (conflict !== null) {
       notes.push(conflict);
     }
-    const last = outcomes.at(-1);
-    if (notes.length > 0 && last !== undefined) {
-      last.note = last.note === undefined ? notes.join('; ') : `${last.note}; ${notes.join('; ')}`;
+    const first = outcomes[0];
+    if (notes.length > 0 && first !== undefined) {
+      first.note =
+        first.note === undefined ? notes.join('; ') : `${first.note}; ${notes.join('; ')}`;
     }
   }
   return outcomes;
+}
+
+/** Remove a bro copy sitting in a scope the install did not choose —
+ *  singleScope hosts load both scopes, so leaving it would collide.
+ *  Sentinel-gated like every other removal: only a verified bro
+ *  adapter (or our own bundle dir) is touched. */
+function convergeScopeCopy(
+  name: string,
+  scope: PluginScope,
+  surface: Surface,
+  opts: MutateOpts
+): Outcome | null {
+  const note = 'single-scope convergence (bro-b7mae)';
+  if (surface.kind === 'file') {
+    const target = surface.targets[scope];
+    if (!existsSync(target)) {
+      return null;
+    }
+    try {
+      if (!isBroAdapter(readFileSync(target, 'utf8'))) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    if (opts.dryRun) {
+      return { client: name, scope, action: 'would-remove', path: target, note };
+    }
+    rmSync(target);
+    return { client: name, scope, action: 'removed', path: target, note };
+  }
+  const dir = surface.dirs[scope];
+  if (!existsSync(join(dir, 'index.ts'))) {
+    return null;
+  }
+  try {
+    if (!isBroAdapter(readFileSync(join(dir, 'index.ts'), 'utf8'))) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  if (opts.dryRun) {
+    return { client: name, scope, action: 'would-remove', path: dir, note };
+  }
+  for (const f of surface.files) {
+    const path = join(dir, f.name);
+    if (existsSync(path)) {
+      rmSync(path);
+    }
+  }
+  // nested bundle members (skills/<name>/…) leave empty dirs behind —
+  // rmdir deepest-first so a foreign file keeps its directory alive
+  const dirs = new Set<string>();
+  for (const f of surface.files) {
+    let rel = dirname(f.name);
+    while (rel !== '.' && rel !== '') {
+      dirs.add(rel);
+      rel = dirname(rel);
+    }
+  }
+  for (const rel of [...dirs].sort((a, b) => b.length - a.length)) {
+    try {
+      rmdirSync(join(dir, rel));
+    } catch {
+      // not empty — something of the user's lives here, leave it
+    }
+  }
+  try {
+    rmdirSync(dir);
+  } catch {
+    // not empty — something of the user's lives here, leave the directory
+  }
+  return { client: name, scope, action: 'removed', path: dir, note };
 }
 
 /** Which scope a collapsed singleScope install lands in: the scope

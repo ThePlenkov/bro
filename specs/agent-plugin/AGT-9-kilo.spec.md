@@ -38,7 +38,7 @@ contract (bro-b7mae):** verified on kilo 7.8.27 that `kilo run`
 executes BOTH the config-dir and project plugin files — same
 no-dedupe collision class as pi/omp — so a bare install collapses
 to the scope already holding bro (global default); explicit scope
-flags honored with a cross-scope warning.
+flags honored and convergence removes the losing copy.
 
 ### Event mapping (HOOK_MATRIX `kilo` row)
 
