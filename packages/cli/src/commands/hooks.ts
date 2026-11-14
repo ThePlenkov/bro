@@ -131,6 +131,7 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
+import { deadLoopPostTool, deadLoopPreTool } from './deadloop.ts';
 import { adapterEmitBegin } from './hook-emit.ts';
 import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
 import { drainHookSpool } from '@broject/core';
@@ -2285,6 +2286,10 @@ async function emitPostTool(input: HookInput): Promise<void> {
     await emitPostToolObserve(input, sessionId, lines);
     return;
   }
+  // dead-loop gate, detection stage — the trace journal already holds
+  // this event; a trailing run of identical signatures arms the marker
+  // the pre-tool stage vetoes on. Advisory line only, never a block.
+  lines.push(...deadLoopPostTool(process.cwd(), sessionId, input));
   // arming is a "probe live state once" hint the stop gate re-verifies,
   // not a verdict — so it fires on every outcome except a proven
   // failure. A host that cannot observe outcomes (Codex PostToolUse
@@ -2485,6 +2490,26 @@ async function emitStopGateBody(
 async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
+  // dead-loop gate, veto stage — runs before connector probes: a call
+  // matching a fresh loop marker is refused on signature alone, no
+  // probe spend. Observe mode stays passive like every active surface.
+  if (hookMode !== 'observe') {
+    const veto = deadLoopPreTool(process.cwd(), sessionId, input);
+    if (veto !== null) {
+      if (codexClient) {
+        emit({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: veto,
+          },
+        });
+      } else {
+        emit({ decision: 'block', reason: veto });
+      }
+      return;
+    }
+  }
   const verdicts = await preToolVerdicts(
     hookCtx(process.cwd(), sessionId, callIdOf(input)),
     tool,

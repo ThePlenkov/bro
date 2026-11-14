@@ -26,9 +26,9 @@ import {
   FAKE_BEAD,
   git,
   initRepo,
-  installFakeBd,
   inside,
   insideAsync,
+  installFakeBd,
   runCli,
 } from './testrepo.ts';
 
@@ -2878,6 +2878,84 @@ describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
       // argv[1] is probe2.js — not hooks-shaped, SELF_ENTRY is itself
       const r2 = spawnSync(process.execPath, [probe2], { encoding: 'utf8' });
       assert.equal(r2.stdout, probe2);
+    });
+  });
+});
+
+describe('hooks e2e — dead-loop gate', () => {
+  const post = (
+    f: Fixture,
+    session: string,
+    cmd: string,
+    ok = true
+  ): { code: number | null; stdout: string; stderr: string } =>
+    hook(f, 'post-tool', {
+      tool_name: 'Bash',
+      tool_input: { command: cmd },
+      tool_response: { success: ok },
+      session_id: session,
+    });
+  const pre = (
+    f: Fixture,
+    session: string,
+    cmd: string
+  ): { code: number | null; stdout: string; stderr: string } =>
+    hook(f, 'pre-tool', {
+      tool_name: 'Bash',
+      tool_input: { command: cmd },
+      session_id: session,
+    });
+
+  test('4 identical post-tools warn + arm; the next identical pre-tool is vetoed, others pass', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      for (let i = 0; i < 3; i++) {
+        const r = post(f, 'dl1', 'npm test');
+        assert.equal(r.code, 0);
+        assert.doesNotMatch(r.stdout, /dead loop/);
+      }
+      const fourth = post(f, 'dl1', 'npm test');
+      assert.equal(fourth.code, 0);
+      assert.match(fourth.stdout, /dead loop detected/);
+      assert.match(fourth.stdout, /npm test/);
+
+      const veto = pre(f, 'dl1', 'npm test');
+      assert.equal(veto.code, 0);
+      assert.match(veto.stdout, /"decision":"block"/);
+      assert.match(veto.stdout, /dead loop gate/);
+
+      // the gate is signature-scoped — a different call runs untouched
+      const other = pre(f, 'dl1', 'npm run build');
+      assert.equal(other.code, 0);
+      assert.doesNotMatch(other.stdout, /"decision":"block"/);
+      // and a different session is a different loop
+      const foreign = pre(f, 'dl2', 'npm test');
+      assert.doesNotMatch(foreign.stdout, /"decision":"block"/);
+    });
+  });
+
+  test('under the repeat threshold the gate stays silent', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      for (let i = 0; i < 3; i++) post(f, 'dl3', 'npm test');
+      const r = pre(f, 'dl3', 'npm test');
+      assert.equal(r.code, 0);
+      assert.doesNotMatch(r.stdout, /"decision":"block"/);
+      assert.equal(existsSync(join(f.markerDir, 'trace', 'dl3.deadloop.json')), false);
+    });
+  });
+
+  test('observe mode is passive — repeats journal but never arm or veto', () => {
+    // no modes.default → implicit observe (specs/bro-izpyk.2.md)
+    const { root, main } = initRepo('bro-deadloop-observe-');
+    const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+    const f: Fixture = { root, main, markerDir: join(common, 'bro', 'hooks') };
+    inside(main, root, () => {
+      for (let i = 0; i < 5; i++) post(f, 'dl4', 'npm test');
+      const r = pre(f, 'dl4', 'npm test');
+      assert.equal(r.code, 0);
+      assert.doesNotMatch(r.stdout, /"decision":"block"/);
+      assert.equal(existsSync(join(f.markerDir, 'trace', 'dl4.deadloop.json')), false);
     });
   });
 });
