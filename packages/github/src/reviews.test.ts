@@ -95,7 +95,7 @@ case "$1 $2" in
       endpoint=""
       for a in "$@"; do case "$a" in repos/*) endpoint="$a" ;; esac; done
       case "$endpoint" in
-      *pulls\\?*) printf '9\twork/x\n11\tloop/y\n' ;;
+      *pulls\\?*) printf '9\twork/x\n11\tloop/y\n13\twork/nb\\302\\240\n' ;;
       *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
       *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
           echo '[[{"annotation_level":"failure"}]]' ;;
@@ -208,6 +208,11 @@ describe('githubReview', { skip: WIN32 }, () => {
       assert.deepEqual(rows, [
         { pr: 9, headRef: 'work/x' },
         { pr: 11, headRef: 'loop/y' },
+        // a branch name may end in Unicode whitespace (git allows a
+        // trailing NBSP) — trimming the line would name a DIFFERENT
+        // branch than the PR carries, and the exact-match gate would
+        // miss the PR
+        { pr: 13, headRef: 'work/nb\u00a0' },
       ]);
       // the projection IS the contract — the full REST pull objects carry
       // every body, and one busy page of them crosses Node's spawnSync

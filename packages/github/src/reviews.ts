@@ -1970,14 +1970,21 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         ],
         dir
       );
-      return out
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line !== '')
-        .map(line => {
-          const [number, head] = line.split('\t');
-          return { pr: Number(number), headRef: head ?? '' };
-        });
+      return (
+        out
+          .split('\n')
+          // the emptiness check may trim; the LINE may not — a branch name
+          // may end in Unicode whitespace (git allows a trailing NBSP), and
+          // trimming it would name a DIFFERENT branch than the PR carries
+          .filter(line => line.trim() !== '')
+          .map(line => {
+            // only the line TERMINATOR's CR is noise — not the ref's own
+            // trailing whitespace
+            const clean = line.endsWith('\r') ? line.slice(0, -1) : line;
+            const [number, head] = clean.split('\t');
+            return { pr: Number(number), headRef: head ?? '' };
+          })
+      );
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text);
