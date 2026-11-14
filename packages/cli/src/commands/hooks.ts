@@ -125,7 +125,7 @@ import { GUARD_PROBES } from '../guard-probes.ts';
 // whose import evaluates the whole PLUGINS registry on every hook event
 // (review #9, specs/bro-36sx7.7.md)
 import { sessionCapRefusalForHook } from './session-cap.ts';
-import { wasteGuardBlock } from './waste-guard.ts';
+import { wasteGuardBlock, wasteGuardRecord } from './waste-guard.ts';
 import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
@@ -2501,6 +2501,18 @@ async function emitPostTool(input: HookInput): Promise<void> {
   maybeSpawnTraceFlush(process.cwd());
   const outcome = input.tool_response?.success;
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+  // waste-guard markers commit at post-tool, not pre-tool — a call
+  // denied by the guard, a connector veto, or a refused prompt never
+  // reaches this event, so a marker only stands for a call that
+  // actually ran (spec bro-rw8z3). Passive state like the trace
+  // journal, so it records in observe mode too.
+  wasteGuardRecord(
+    process.cwd(),
+    sessionId,
+    typeof input.tool_name === 'string' ? input.tool_name : '',
+    (input.tool_input ?? {}) as Record<string, unknown>,
+    outcome
+  );
   // `bro mode <name>` binds to this session here — runs in EVERY mode,
   // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
   // A proven-failed call binds nothing (the mode was never applied);
@@ -2743,7 +2755,9 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
   // the waste-guard runs before connector verdicts — a deterministic
   // duplicate/unchanged-verify veto costs no model call (spec
-  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls
+  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls.
+  // pre-tool only checks — the marker commit lands at post-tool, so a
+  // call vetoed here or below can never shadow its own retry
   const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, tool, toolInput);
   if (wasteBlock !== undefined) {
     emitPreToolDeny(wasteBlock);
