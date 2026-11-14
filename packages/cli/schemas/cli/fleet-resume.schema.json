@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/fleet-resume.schema.json",
+  "title": "bro fleet resume --json",
+  "description": "Post-restart recovery report — mirrors ResumeReport in packages/cli/src/commands/resume.ts (watch.link is a renderer function and never serializes).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dryRun", "sweep", "watch", "daemon", "daemons", "loop", "agents", "worktrees", "sessions"],
+  "properties": {
+    "dryRun": { "type": "boolean" },
+    "sweep": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["line", "didWork"],
+      "properties": {
+        "line": { "type": "string" },
+        "didWork": { "type": "boolean" }
+      }
+    },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rearmed", "settled", "kept"],
+      "properties": {
+        "rearmed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pr", "pid"],
+            "properties": {
+              "pr": { "type": "integer" },
+              "pid": { "type": "integer" }
+            }
+          }
+        },
+        "settled": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pr"],
+            "properties": {
+              "pr": { "type": "integer" },
+              "bead": { "type": "string" }
+            }
+          }
+        },
+        "kept": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pr", "reason"],
+            "properties": {
+              "pr": { "type": "integer" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "daemon": { "$ref": "#/$defs/DaemonLegResult" },
+    "daemons": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DaemonLegResult" }
+    },
+    "loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["holder", "deadRuns"],
+      "properties": {
+        "holder": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pid", "alive"],
+          "properties": {
+            "pid": { "type": ["integer", "null"], "description": "null = no holder (file absent or unlocked)." },
+            "alive": { "type": "boolean" }
+          }
+        },
+        "deadRuns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/LoopRunView" }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dead", "degraded"],
+      "properties": {
+        "dead": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "state"],
+            "properties": {
+              "id": { "type": "string" },
+              "state": { "type": "string" }
+            }
+          }
+        },
+        "degraded": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "worktrees": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "dirty"],
+        "properties": {
+          "path": { "type": "string" },
+          "branch": { "type": "string" },
+          "dirty": { "type": "integer" }
+        }
+      }
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interrupted", "warnings"],
+      "properties": {
+        "interrupted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "sid", "cwd", "lastSeen", "resumeArgv"],
+            "properties": {
+              "host": { "type": "string" },
+              "sid": { "type": "string" },
+              "cwd": { "type": ["string", "null"] },
+              "lastSeen": { "type": "number", "description": "epoch ms — the ledger's native unit" },
+              "resumeArgv": {
+                "type": ["array", "null"],
+                "items": { "type": "string" },
+                "description": "null = the host has no resume command bro knows — reported, never guessed."
+              }
+            }
+          }
+        },
+        "truncated": { "type": "integer", "description": "Interrupted sessions beyond the cap — absent when all fit." },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "$defs": {
+    "DaemonLegResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sup", "kind"],
+      "properties": {
+        "sup": { "enum": ["drive", "loop"] },
+        "kind": { "enum": ["live", "unarmed", "respawned", "would-respawn"] },
+        "pid": { "type": "integer" },
+        "everySec": { "type": "number" }
+      }
+    },
+    "LoopRunView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["beadId", "slug", "pid", "state", "silentMs"],
+      "properties": {
+        "beadId": { "type": "string" },
+        "beadIds": { "type": "array", "items": { "type": "string" } },
+        "slug": { "type": "string" },
+        "pid": { "type": ["integer", "null"] },
+        "state": { "enum": ["running", "dead"] },
+        "startedAt": { "type": "string" },
+        "worktree": { "type": "string" },
+        "log": { "type": "string" },
+        "silentMs": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

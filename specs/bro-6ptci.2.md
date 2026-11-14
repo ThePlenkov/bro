@@ -116,11 +116,18 @@ not.
 | `bro fleet leases --json` | `[{key,rig,host,pid,agentId?,acquiredAt,expiresAt}]` | `fleet-leases.schema.json` — top-level array, closed items |
 | `bro fleet resume --json` | `ResumeReport` minus `watch.link` | `fleet-resume.schema.json` — closed; required `dryRun,sweep,watch,daemon,daemons,loop,agents,worktrees,sessions` (sweep `object\|null`) |
 | `bro watch --json` | `WatchSnapshot` | `watch.schema.json` — closed; `ts,attention,mols,gates,fleet,loop,daemon` required; `molsError,activity,clock,janitor` optional; `WatchPrGate` closed w/ optionals; fleet closed w/ `walls?/prErrors?/wallsError?/error?` |
+| `bro fleet walls --json` | `FleetWallRow[]` | `fleet-walls.schema.json` — top-level array, closed items `{account,cause,source}` required + `until,bound,resetAt,provider,rig,step,observedAt` optionals |
 
 Contract changes for the new set: `skills.subs.sync.json` ref;
-`fleet.subs.leases` (new sub — flags+exits+json); `resume.contract`
-(new block — flags+exits+json); `watch.contract` (new block —
-flags+exits+json).
+`fleet.subs.leases` + `fleet.subs.walls` (new subs — flags+exits+json);
+`resume.contract` (new block — flags+exits+json); `watch.contract`
+(new block — flags+exits+json); `debt.subs.stats`/`debt.subs.trend`
+(§3). The existing stub schemas that shared this gap —
+`agents-status`, `claim`, `mode` — were fleshed out alongside
+`debt-next`/`fleet-status` (§2), and the already-detailed-but-open
+schemas (`sessions`, `fleet`, `fleet-hosts`, `skills-list`,
+`rig-status`) were tightened to `additionalProperties: false` where
+their emit is a fixed literal.
 
 **Excluded — documented, no schema:**
 

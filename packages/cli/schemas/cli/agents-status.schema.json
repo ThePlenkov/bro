@@ -2,84 +2,145 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/agents-status.schema.json",
   "title": "bro agents status --json",
+  "description": "The agent-supervisor board — mirrors the emit in runAgentsCommand/cmdStatus (agents.ts): FleetOccupancy + SessionQuotaView[] + LaneStatusRow[] + per-backend {name, capabilities, agents: AgentInfo[], degraded?}.",
   "type": "object",
-  "additionalProperties": true,
-  "oneOf": [
-    {
+  "additionalProperties": false,
+  "required": ["occupancy", "sessions", "lanes", "backends"],
+  "properties": {
+    "occupancy": {
       "type": "object",
-      "additionalProperties": true,
-      "required": [
-        "occupancy",
-        "sessions",
-        "backends"
-      ],
+      "additionalProperties": false,
+      "required": ["occupied", "maxConcurrent"],
       "properties": {
-        "occupancy": {},
-        "sessions": {},
-        "backends": {
-          "type": "array"
-        }
+        "occupied": { "type": "integer" },
+        "maxConcurrent": { "type": "integer", "description": "fleet.maxConcurrent — 0 = uncapped." }
       }
     },
-    {
-      "type": "object",
-      "additionalProperties": true,
-      "required": [
-        "id",
-        "molStep",
-        "backend",
-        "state"
-      ],
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "spawnedAt": {
-          "type": "string"
-        },
-        "runId": {
-          "type": "string"
-        },
-        "pid": {
-          "type": "number"
-        },
-        "molStep": {
-          "type": "string"
-        },
-        "backend": {
-          "type": "string"
-        },
-        "state": {
-          "type": "string"
-        },
-        "cause": {
-          "type": "string"
-        },
-        "resetAt": {
-          "type": "string"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "model": {
-          "type": "string"
-        },
-        "class": {
-          "type": "string"
-        },
-        "delegatedBy": {
-          "type": "string"
-        },
-        "worktree": {
-          "type": "string"
-        },
-        "log": {
-          "type": "string"
-        },
-        "stderrLog": {
-          "type": "string"
+    "sessions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SessionQuotaView" }
+    },
+    "lanes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/LaneStatusRow" }
+    },
+    "backends": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "capabilities", "agents"],
+        "properties": {
+          "name": { "type": "string" },
+          "capabilities": { "$ref": "#/$defs/AgentCapabilities" },
+          "agents": { "type": "array", "items": { "$ref": "#/$defs/AgentInfo" } },
+          "degraded": {
+            "type": "string",
+            "description": "The backend's list() degraded — the row set is partial, never silently empty."
+          }
         }
       }
     }
-  ]
+  },
+  "$defs": {
+    "SessionQuotaView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "lane", "live", "max"],
+      "properties": {
+        "kind": { "type": "string" },
+        "lane": { "enum": ["sessions", "workers"] },
+        "live": { "type": "integer", "description": "-1 when the count could not be verified." },
+        "max": { "type": "integer" },
+        "invalid": { "type": "boolean" },
+        "invalidKey": { "type": "string" }
+      }
+    },
+    "LaneStatusRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "paused"],
+      "properties": {
+        "provider": { "type": "string" },
+        "wall": { "$ref": "#/$defs/ProviderWall" },
+        "paused": { "type": "integer" },
+        "gate": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model", "tokens", "capacity"],
+            "properties": {
+              "model": { "type": "string" },
+              "tokens": { "type": "integer" },
+              "capacity": { "type": "integer" }
+            }
+          }
+        },
+        "budget": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "spentMin", "minutes", "windowMinutes"],
+            "properties": {
+              "kind": { "type": "string" },
+              "spentMin": { "type": "number" },
+              "minutes": { "type": "number" },
+              "windowMinutes": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "AgentCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supervisor"],
+      "properties": {
+        "attach": { "type": "boolean" },
+        "respawn": { "type": "boolean" },
+        "workers": { "type": "boolean" },
+        "supervisor": { "enum": ["none", "ondemand", "required"] }
+      }
+    },
+    "AgentInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "molStep", "backend", "state"],
+      "properties": {
+        "id": { "type": "string" },
+        "spawnedAt": { "type": "string" },
+        "runId": { "type": "string" },
+        "pid": { "type": "integer" },
+        "molStep": { "type": "string" },
+        "backend": { "type": "string" },
+        "state": { "enum": ["spawned", "running", "exited", "lost", "stopped", "blocked"] },
+        "cause": { "enum": ["ok", "crash", "rate_limited", "quota", "auth"] },
+        "resetAt": { "type": "string" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "class": { "type": "string" },
+        "matrix": { "type": "string" },
+        "delegatedBy": { "type": "string" },
+        "worktree": { "type": "string" },
+        "log": { "type": "string" },
+        "stderrLog": { "type": "string" },
+        "learnCheck": { "enum": ["ok", "miss", "skipped"] },
+        "learnEvidence": { "type": "string" }
+      }
+    },
+    "ProviderWall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "cause"],
+      "properties": {
+        "provider": { "type": "string" },
+        "account": { "type": "string" },
+        "cause": { "enum": ["rate_limited", "quota"] },
+        "until": { "type": "string" },
+        "bound": { "type": "boolean" }
+      }
+    }
+  }
 }

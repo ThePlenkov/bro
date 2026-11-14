@@ -2,42 +2,59 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/sessions.schema.json",
   "title": "bro sessions --json",
+  "description": "{sessions, warnings} — sessionJsonRow emits every key (nulls serialize), so the row is closed-world. Mirrors SessionViewRow in packages/cli/src/commands/sessions.ts.",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": ["sessions", "warnings"],
   "properties": {
     "sessions": {
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": true,
-        "required": ["host", "sid", "state", "mode", "lastSeen", "claims", "resumeArgv"],
+        "additionalProperties": false,
+        "required": [
+          "host",
+          "sid",
+          "project",
+          "cwd",
+          "branch",
+          "mode",
+          "state",
+          "pid",
+          "pidStart",
+          "started",
+          "lastSeen",
+          "spawnedBy",
+          "bead",
+          "claims",
+          "resumeArgv"
+        ],
         "properties": {
           "host": { "type": "string" },
           "sid": { "type": "string" },
           "project": { "type": ["string", "null"] },
           "cwd": { "type": ["string", "null"] },
           "branch": { "type": ["string", "null"] },
-          "mode": { "type": "string" },
+          "mode": { "enum": ["observe", "plan", "code", "review", "orchestrate"] },
           "state": {
-            "type": "string",
-            "description": "derived display state — live|idle|ended|interrupted"
+            "enum": ["live", "idle", "ended", "interrupted"],
+            "description": "Derived display state — see deriveSessionState."
           },
-          "pid": { "type": ["number", "null"] },
+          "pid": { "type": ["integer", "null"] },
           "pidStart": { "type": ["string", "null"] },
-          "started": { "type": ["number", "null"], "description": "epoch ms" },
-          "lastSeen": { "type": "number", "description": "epoch ms" },
+          "started": { "type": ["number", "null"], "description": "Epoch ms." },
+          "lastSeen": { "type": "number", "description": "Epoch ms." },
           "spawnedBy": { "type": ["string", "null"] },
-          "bead": { "type": ["string", "null"] },
+          "bead": { "type": ["string", "null"], "description": "Resolved molStep/bead for bro-spawned sessions." },
           "claims": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "resource URIs this session holds (ClaimFacade.list)"
+            "description": "Resource URIs this session holds (ClaimFacade.list)."
           },
           "resumeArgv": {
             "type": ["array", "null"],
             "items": { "type": "string" },
-            "description": "the host's resume argv — null when the host has no resume command"
+            "description": "The host's resume argv — null when the host has no resume command bro knows."
           }
         }
       }

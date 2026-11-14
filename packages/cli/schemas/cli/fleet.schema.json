@@ -2,17 +2,149 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/fleet.schema.json",
   "title": "bro fleet --json",
+  "description": "The mols × steps × agents × worktrees × PRs board — mirrors FleetPayload in packages/cli/src/commands/fleet.ts.",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": ["rows", "degraded", "conflicts", "prErrors", "occupancy", "budget", "walls"],
   "properties": {
-    "rows": { "type": "array" },
-    "degraded": { "type": "array" },
-    "conflicts": { "type": "array" },
-    "prErrors": { "type": "array" },
-    "occupancy": {},
-    "budget": {},
-    "walls": { "type": "array" },
-    "wallsError": { "type": ["string", "null"] }
+    "rows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/FleetRow" }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Backends whose list() degraded — never silently empty rows."
+    },
+    "conflicts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Two backends reporting the same step — the loser is reported, not silently overwritten."
+    },
+    "prErrors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "branch→PR lookups that failed — a quiet PR column must not read as 'no PRs exist'."
+    },
+    "occupancy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occupied", "maxConcurrent"],
+      "properties": {
+        "occupied": { "type": "integer" },
+        "maxConcurrent": { "type": "integer", "description": "fleet.maxConcurrent — 0 = uncapped." }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "limits",
+        "entries",
+        "live",
+        "blocked",
+        "maxConcurrent",
+        "spawnedLastHour",
+        "spawnedPerHour",
+        "resets",
+        "causes"
+      ],
+      "properties": {
+        "basis": { "const": "local-estimate" },
+        "limits": { "type": "array", "items": { "type": "string" } },
+        "entries": { "type": "integer" },
+        "live": { "type": "integer" },
+        "blocked": { "type": "integer" },
+        "maxConcurrent": { "type": "integer" },
+        "spawnedLastHour": { "type": "integer" },
+        "spawnedPerHour": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hour", "count"],
+            "properties": {
+              "hour": { "type": "string" },
+              "count": { "type": "integer" }
+            }
+          }
+        },
+        "resets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["step", "agent", "cause", "resetAt", "holding"],
+            "properties": {
+              "step": { "type": "string" },
+              "agent": { "type": "string" },
+              "cause": { "enum": ["ok", "crash", "rate_limited", "quota", "auth"] },
+              "resetAt": { "type": "string" },
+              "holding": { "type": "boolean" }
+            }
+          }
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["step", "agent", "backend", "cause"],
+            "properties": {
+              "step": { "type": "string" },
+              "agent": { "type": "string" },
+              "backend": { "type": "string" },
+              "cause": { "enum": ["ok", "crash", "rate_limited", "quota", "auth"] }
+            }
+          }
+        }
+      }
+    },
+    "walls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ProviderWall" }
+    },
+    "wallsError": {
+      "type": "string",
+      "description": "The wall derivation itself threw — additive data failed, never the rows."
+    }
+  },
+  "$defs": {
+    "FleetRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mol", "step", "title", "kind", "state", "agent"],
+      "properties": {
+        "mol": { "type": "string" },
+        "step": { "type": "string" },
+        "title": { "type": "string" },
+        "kind": { "type": "string" },
+        "state": { "type": "string" },
+        "agent": { "type": "string", "description": "Rendered agent cell — states, 'lost — respawn?', 'claimed — <a>', 'unknown', or '—'." },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "worktree": { "type": "string" },
+        "pr": { "type": "string", "description": "The rendered PR link." },
+        "prNum": { "type": "integer" },
+        "prNums": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Every open PR on the branch — prNum is [0] for display."
+        }
+      }
+    },
+    "ProviderWall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "cause"],
+      "properties": {
+        "provider": { "type": "string" },
+        "account": { "type": "string" },
+        "cause": { "enum": ["rate_limited", "quota"] },
+        "until": { "type": "string" },
+        "bound": { "type": "boolean" }
+      }
+    }
   }
 }

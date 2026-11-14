@@ -136,10 +136,17 @@ import './connectors.ts';
 const TELEMETRY_USAGE = 'bro telemetry [--session <id>] [--json]   Hook + command latency report';
 
 export const PLUGINS: BroPlugin[] = [
+  // Contract `json` refs are enforced two ways: contract.test.ts proves
+  // every ref resolves on disk; contract-schema.test.ts validates each
+  // schema against the emitter's real --json output (and fails on field
+  // drift). --json emitters deliberately NOT schema'd — action reports,
+  // acks, diagnostics, passthroughs, producer streams — are tabulated in
+  // specs/bro-6ptci.2.md §4 (e.g. otel/doctor/guard/check/pulse/delegate,
+  // act wait, convoy run, agents prune, pipeline, telemetry).
   definePlugin({
     name: 'debt',
     group: 'review',
-    summary: 'Review-debt pipeline: collect|status|prs|list|mark|sync|set',
+    summary: 'Review-debt pipeline: collect|status|stats|trend|prs|list|mark|set|sync|next|watch',
     run: runDebtCommand,
     skill: 'debt',
     configKey: 'debt',
@@ -160,6 +167,30 @@ export const PLUGINS: BroPlugin[] = [
             0: 'top open finding emitted',
             1: 'no open findings, or the claim CAS lost',
             2: 'usage',
+          },
+        },
+        stats: {
+          flags: {
+            '--json': 'StatBucket[] — totals × status per --by group',
+            '--by <f>': 'group field — author (default) | source | area',
+          },
+          json: 'schemas/cli/debt-stats.schema.json',
+          exits: {
+            0: 'stats printed',
+            2: 'usage — bad --by value',
+          },
+        },
+        trend: {
+          flags: {
+            '--json': 'TrendPoint[] — opened/closed/open per bucket × --by group',
+            '--by <f>': 'group field — default ungrouped (key "all")',
+            '--bucket <g>': 'week (default) | day',
+            '--since <date>': 'lower bound on the window',
+          },
+          json: 'schemas/cli/debt-trend.schema.json',
+          exits: {
+            0: 'trend printed',
+            2: 'usage — bad --by/--bucket/--since value',
           },
         },
       },
@@ -374,6 +405,29 @@ export const PLUGINS: BroPlugin[] = [
             2: 'usage',
           },
         },
+        leases: {
+          flags: {
+            '--json': 'live lease rows — key, holder rig/host/pid/agentId, acquiredAt, expiresAt',
+            'release <key>': 'force-release a held lease',
+          },
+          json: 'schemas/cli/fleet-leases.schema.json',
+          exits: {
+            0: 'leases printed',
+            2: 'usage',
+          },
+        },
+        walls: {
+          flags: {
+            '--json':
+              'FleetWallRow[] — registry-derived provider walls + ledger-recorded host walls',
+            'clear <account>|--all': 'clear the ledger-recorded walls',
+          },
+          json: 'schemas/cli/fleet-walls.schema.json',
+          exits: {
+            0: 'walls printed',
+            2: 'usage',
+          },
+        },
       },
       json: 'schemas/cli/fleet.schema.json',
       exits: {
@@ -575,6 +629,18 @@ export const PLUGINS: BroPlugin[] = [
       'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]',
     run: runWatchCommand,
     skill: 'watch',
+    contract: {
+      flags: {
+        '--json':
+          'the WatchSnapshot — ts, attention, mols, gates, fleet, loop, daemon (+ additive error/section keys)',
+        '--once': 'one tick, then exit',
+      },
+      json: 'schemas/cli/watch.schema.json',
+      exits: {
+        0: 'snapshot printed',
+        2: 'usage',
+      },
+    },
     configKey: 'watch',
     configSchema: watchSection,
   }),
@@ -603,6 +669,18 @@ export const PLUGINS: BroPlugin[] = [
       'Post-restart recovery — rearm dead watches, revive the daemon, audit survivors [--dry-run|--json]',
     run: runResumeCommand,
     skill: 'resume',
+    contract: {
+      flags: {
+        '--json':
+          'the ResumeReport — dryRun, sweep, watch, daemon(s), loop, agents, worktrees, sessions',
+        '--dry-run': 'report only — every leg read-only',
+      },
+      json: 'schemas/cli/fleet-resume.schema.json',
+      exits: {
+        0: 'recovery report printed',
+        2: 'usage',
+      },
+    },
   }),
   definePlugin({
     name: 'serve',
@@ -743,6 +821,7 @@ export const PLUGINS: BroPlugin[] = [
             '--root <dir>': 'run root — its bro.config and .agents/skills apply',
             '--json': 'per-source steps + reconcile rows + drift as JSON',
           },
+          json: 'schemas/cli/skills-sync.schema.json',
           exits: {
             0: 'all declared sources installed — lock verifies',
             1: 'a source failed, or drift reported after sync',

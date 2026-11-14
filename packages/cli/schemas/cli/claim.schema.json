@@ -2,80 +2,80 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/claim.schema.json",
   "title": "bro claim --json",
-  "description": "claim → {ok, resource, session, conflict}; release → {released, session}; list → {claims, warnings}",
-  "type": "object",
-  "additionalProperties": true,
+  "description": "One of three verb documents — claim → {ok,resource,session,conflict}; release → {released,session}; list → {claims,warnings}. Mirrors ClaimRow/SessionKey in packages/core/src/claims.ts.",
   "anyOf": [
-    {
-      "required": ["ok", "resource", "session"],
+    { "$ref": "#/$defs/ClaimVerdict" },
+    { "$ref": "#/$defs/ReleaseVerdict" },
+    { "$ref": "#/$defs/ClaimList" }
+  ],
+  "$defs": {
+    "SessionKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "sid"],
+      "properties": {
+        "host": { "type": "string" },
+        "sid": { "type": "string" }
+      }
+    },
+    "ClaimRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "host",
+        "sid",
+        "project",
+        "exclusive",
+        "leaseUntil",
+        "claimedAt"
+      ],
+      "properties": {
+        "resource": { "type": "string", "description": "The claimed URI — worktree:|branch:|task:|pr:|path:|role:" },
+        "host": { "type": "string" },
+        "sid": { "type": "string" },
+        "project": { "type": ["string", "null"] },
+        "exclusive": { "type": "boolean" },
+        "leaseUntil": { "type": ["number", "null"], "description": "Epoch ms; null = no expiry." },
+        "claimedAt": { "type": "number", "description": "Epoch ms." },
+        "pid": { "type": ["integer", "null"] },
+        "pidStart": { "type": ["string", "null"] },
+        "ttlMs": { "type": ["number", "null"] },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "ClaimVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "resource", "session", "conflict"],
       "properties": {
         "ok": { "type": "boolean" },
         "resource": { "type": "string" },
-        "session": {
-          "type": "object",
-          "additionalProperties": true,
-          "required": ["host", "sid"],
-          "properties": {
-            "host": { "type": "string" },
-            "sid": { "type": "string" }
-          }
-        },
+        "session": { "$ref": "#/$defs/SessionKey" },
         "conflict": {
           "type": ["object", "null"],
-          "additionalProperties": true,
-          "properties": {
-            "resource": { "type": "string" },
-            "host": { "type": "string" },
-            "sid": { "type": "string" },
-            "project": { "type": ["string", "null"] },
-            "exclusive": { "type": "boolean" },
-            "leaseUntil": { "type": ["number", "null"], "description": "epoch ms" },
-            "claimedAt": { "type": "number", "description": "epoch ms" }
-          }
+          "description": "The standing claim that blocked this one, when ok is false — null when the claim landed.",
+          "anyOf": [{ "$ref": "#/$defs/ClaimRow" }, { "type": "null" }]
         }
       }
     },
-    {
+    "ReleaseVerdict": {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["released", "session"],
       "properties": {
-        "released": { "type": "string" },
-        "session": {
-          "type": "object",
-          "additionalProperties": true,
-          "required": ["host", "sid"],
-          "properties": {
-            "host": { "type": "string" },
-            "sid": { "type": "string" }
-          }
-        }
+        "released": { "type": "string", "description": "The released resource URI." },
+        "session": { "$ref": "#/$defs/SessionKey" }
       }
     },
-    {
+    "ClaimList": {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["claims", "warnings"],
       "properties": {
-        "claims": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": true,
-            "required": ["resource", "host", "sid", "project", "exclusive", "leaseUntil", "claimedAt"],
-            "properties": {
-              "resource": { "type": "string" },
-              "host": { "type": "string" },
-              "sid": { "type": "string" },
-              "project": { "type": ["string", "null"] },
-              "exclusive": { "type": "boolean" },
-              "leaseUntil": { "type": ["number", "null"], "description": "epoch ms" },
-              "claimedAt": { "type": "number", "description": "epoch ms" },
-              "pid": { "type": ["number", "null"] },
-              "pidStart": { "type": ["string", "null"] },
-              "ttlMs": { "type": ["number", "null"] },
-              "detail": { "type": ["string", "null"] }
-            }
-          }
-        },
+        "claims": { "type": "array", "items": { "$ref": "#/$defs/ClaimRow" } },
         "warnings": { "type": "array", "items": { "type": "string" } }
       }
     }
-  ]
+  }
 }
