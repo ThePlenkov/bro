@@ -332,6 +332,12 @@ const CLIENTS: Record<string, ClientSpec> = {
         },
       },
     ],
+    // verified on kilo 7.8.27: `kilo run` executes BOTH the config-dir
+    // and the project plugin files — the same no-dedupe collision class
+    // as pi/omp (probe plugins logged GLOBAL+LOCAL on one load)
+    singleScope:
+      'kilo loads project and global copies of the same plugin without ' +
+      'dedupe — tool names conflict (bro-b7mae)',
   },
   pi: {
     // pi discovers <cwd>/.pi/extensions/ locally and
