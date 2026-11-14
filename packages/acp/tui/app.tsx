@@ -17,6 +17,7 @@
 
 import type {
   CliRenderer,
+  InputRenderable,
   MouseEvent,
   NativeResourceOwner,
   ScrollBoxRenderable,
@@ -25,6 +26,7 @@ import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer, useTerminalDimensions } from '@opentui/solid';
 import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
+import { type ComposerSubmitEvent, livePermissionLine, liveQueueLine } from './live.ts';
 import {
   acpCardRows,
   acpLine,
@@ -110,6 +112,44 @@ export interface Pane {
   /** The feed's scrollbox — tests poll its bar's visibility before
    *  sending mouse events at it. */
   scroller?: ScrollBoxRenderable;
+  /** The composer's input — the shell reads its value when the
+   *  human presses Enter, and clears it after a send. */
+  input?: InputRenderable;
+  /** Leave compose mode — the input blurs, the draft stays. */
+  blurComposer?: () => void;
+}
+
+/**
+ * The composer's strip — what makes the pane steerable (spec
+ * bro-t4uin).
+ *
+ * Three lines at most, all pinned above the header: the permission
+ * bar (only while an ask waits for a human), the input, and the
+ * queue's line. The queue is NOT optional: a human who typed during a
+ * turn must SEE their words waiting — a sent prompt that nobody read
+ * is the failure this whole surface exists to prevent.
+ */
+export interface ComposerProps {
+  /** the composer holds the focus (compose mode) */
+  composing: () => boolean;
+  /** the queued prompts, in order */
+  queue: () => { ordinal: number; text: string }[];
+  /** the permission ask waiting for a human */
+  permission: () =>
+    | {
+        requestId: number | string;
+        title: string;
+        options: { optionId: string; name: string; kind: string }[];
+      }
+    | undefined;
+  /** the input element — the shell reads `value` on submit */
+  onInput?: (el: InputRenderable) => void;
+  /** the draft was submitted (Enter) — the payload is the input's
+   *  own text (the input emits it), the event shape kept for the
+   *  renderer's own typing */
+  onSubmit: (payload: string | ComposerSubmitEvent) => void;
+  /** the placeholder — the hint when the composer is empty */
+  placeholder?: string;
 }
 
 /**
@@ -1238,6 +1278,48 @@ function FooterBar(props: { toast: () => string; meta: PaneMeta }) {
   );
 }
 
+/**
+ * The composer's strip — the permission bar, the input line and the
+ * queue's line. Pinned above the header, so it never scrolls away:
+ * the human must always see what their words are waiting for.
+ */
+function ComposerBar(props: ComposerProps) {
+  const ask = () => props.permission();
+  const queueLine = () => liveQueueLine(props.queue());
+  return (
+    <box flexDirection="column" width="100%" flexShrink={0} backgroundColor={theme.surface}>
+      <Show when={ask() !== undefined}>
+        <box flexDirection="row" width="100%" height={1} minHeight={1} flexShrink={0}>
+          <text fg={theme.warning} content={livePermissionLine(ask())} />
+        </box>
+      </Show>
+      <box flexDirection="row" width="100%" height={1} minHeight={1} flexShrink={0}>
+        <text
+          fg={props.composing() ? theme.peach : theme.muted}
+          content={props.composing() ? '› ' : '· '}
+        />
+        <input
+          ref={el => props.onInput?.(el)}
+          focused={props.composing()}
+          onSubmit={props.onSubmit}
+          placeholder={props.placeholder ?? 'press i to write a prompt…'}
+          flexGrow={1}
+          backgroundColor={theme.surface}
+          focusedBackgroundColor={theme.surface}
+          textColor={theme.text}
+          focusedTextColor={theme.text}
+          placeholderColor={theme.muted}
+        />
+      </box>
+      <Show when={queueLine() !== ''}>
+        <box flexDirection="row" width="100%" height={1} minHeight={1} flexShrink={0}>
+          <text fg={theme.info} content={queueLine()} />
+        </box>
+      </Show>
+    </box>
+  );
+}
+
 /** The whole pane — header bar, the sticky-bottom scrollback of
  *  session items, footer. */
 function Pane(props: {
@@ -1250,6 +1332,8 @@ function Pane(props: {
   onCopySelect?: (event: MouseEvent) => void;
   /** a row's `show more` button — pin-toggles that row's fold */
   onToggleRow?: (id: number) => void;
+  /** the composer's strip — unset keeps the pane read-only */
+  composer?: ComposerProps;
 }) {
   const renderer = useRenderer();
   const dims = useTerminalDimensions();
@@ -1382,6 +1466,9 @@ function Pane(props: {
       </Show>
       {/* identity + keys — pinned at the bottom, OUTSIDE the scrollbox,
        *  so they never move while the feed scrolls */}
+      <Show when={props.composer !== undefined}>
+        <ComposerBar {...(props.composer as ComposerProps)} />
+      </Show>
       <HeaderBar meta={props.store.state.meta} />
       <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>
@@ -1406,6 +1493,10 @@ export async function mountPane(opts: {
    *  shell (e.g. for a captured-stdout print). Unset keeps every row
    *  a scrollbox renderable — the production shape. */
   onRetire?: (items: Item[]) => void;
+  /** The composer's strip — unset keeps the pane read-only (the
+   *  herdr pane tails an archive; the standalone pane drives a live
+   *  session). */
+  composer?: ComposerProps;
 }): Promise<Pane> {
   // mouse ON — the opencode config: mouse reporting enables the
   // scrollbox's own wheel handler (momentum scroll), the scrollbar
@@ -1416,6 +1507,20 @@ export async function mountPane(opts: {
   const syntax = syntaxStyle(opts.renderer.nativeScene);
   const [toast, setToast] = createSignal('');
   let scroller: ScrollBoxRenderable | undefined;
+  let input: InputRenderable | undefined;
+  // the composer owns the input element — the pane captures it so
+  // the shell can read the draft and clear it after a send, and so
+  // the mode can blur it without reaching into the tree
+  const composer: ComposerProps | undefined =
+    opts.composer === undefined
+      ? undefined
+      : {
+          ...opts.composer,
+          onInput: el => {
+            input = el;
+            opts.composer?.onInput?.(el);
+          },
+        };
   await render(
     () => (
       <Pane
@@ -1440,6 +1545,7 @@ export async function mountPane(opts: {
           setTimeout(() => setToast(''), 1500);
         }}
         onToggleRow={id => pane.writer.toggleRow(id)}
+        composer={composer}
       />
     ),
     opts.renderer
@@ -1449,5 +1555,9 @@ export async function mountPane(opts: {
   pane.scrollPage = dir => scroller?.scrollBy?.(dir * Math.max(1, opts.renderer.height - 2));
   pane.scrollEdge = edge => scroller?.scrollTo?.(edge === 0 ? 0 : Infinity);
   pane.scrollToRow = id => scroller?.scrollChildIntoView?.(`row-${id}`, { align: 'nearest' });
+  // the composer's input — the shell reads `value` when the human
+  // presses Enter and clears it after the send
+  pane.input = input;
+  pane.blurComposer = () => input?.blur();
   return pane;
 }

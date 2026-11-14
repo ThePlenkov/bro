@@ -21,4 +21,17 @@ export interface ArchiveRow {
    *  flattened request text); older archives without one may carry an
    *  injected sibling `.prompt.md` row instead — same shape, `text`. */
   text?: string;
+  /** `kind: 'permission'` — the ask's tool call id, so the answer can
+   *  close the very record the ask opened. */
+  toolCallId?: string;
+  /** `kind: 'permission'` — the AGENT's own options for the ask. The
+   *  headless driver records none (it answers without a human); an
+   *  interactive client records them so a reader can see what was
+   *  on the table. */
+  options?: { optionId: string; name: string; kind: string }[];
+  /** `kind: 'permission'` — the answer's optionId, the agent's own id. */
+  optionId?: string;
+  /** `kind: 'permission'` — the answer's option kind (allow_once,
+   *  reject_once, …) — the label the card prints. */
+  optionKind?: string;
 }

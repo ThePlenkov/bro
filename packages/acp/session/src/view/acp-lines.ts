@@ -164,13 +164,22 @@ const permissionLine = (
   _find: (toolCallId: string) => unknown
 ): Segment[] => {
   const o = item.outcome;
+  // A record that carries the agent's OWN options was asked of a
+  // HUMAN — the line says what is on the table. A record without
+  // them is the headless driver's: the old wording stays.
+  const menu =
+    item.options.length > 0
+      ? ` — ${item.options.map((opt, i) => `${i + 1}) ${opt.name}`).join(' · ')}`
+      : '';
   const label =
     o.type === 'answered'
       ? (OUTCOME[o.optionKind] ?? o.optionKind)
       : o.type === 'withdrawn'
         ? 'withdrawn'
         : o.type === 'pending'
-          ? 'pending — open a terminal to handle'
+          ? item.options.length > 0
+            ? `awaiting your answer${menu}`
+            : 'pending — open a terminal to handle'
           : 'denied';
   return [
     { text: '⚠ ', token: 'warn' },

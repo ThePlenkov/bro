@@ -6,7 +6,8 @@
  * an option — nothing here imports herdr.
  */
 import { type CliRenderer, createCliRenderer } from '@opentui/core';
-import type { mountPane } from './app.tsx';
+import type { KeyEvent } from '@opentui/core';
+import type { mountPane, Pane } from './app.tsx';
 
 type MountOpts = Omit<Parameters<typeof mountPane>[0], 'renderer'>;
 
@@ -17,11 +18,30 @@ export interface ServeOpts extends MountOpts {
   /** System-clipboard bridge — the Ctrl+C key emits OSC 52 AND calls
    *  this when set (the plugin wires its platform helper). */
   copy?: (text: string) => void;
+  /** The keymap — the default is the browse grammar (j/k, folds,
+   *  scroll, Ctrl+C copy). A live pane passes its own: the composer,
+   *  the cancel, the permission answers. */
+  keys?: (pane: Pane, key: KeyEvent) => void;
 }
 
 export interface ServedPane {
   pane: Awaited<ReturnType<typeof mountPane>>;
   renderer: CliRenderer;
+}
+
+/**
+ * The pane's copy gesture — OSC 52 AND the direct clipboard bridge.
+ *
+ * The OSC 52 escape may not survive the pty → mux → terminal chain,
+ * so the host's own clipboard helper is called too; the row's text is
+ * the payload either way.
+ */
+export function copyRow(pane: Pane, copy?: (text: string) => void): void {
+  const text = pane.writer.copy();
+  if (text === undefined || text === '') return;
+  process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
+  copy?.(text);
+  pane.toast?.('copied');
 }
 
 /** Mount one pane — clear screen (BEFORE the renderer so stdout
@@ -30,7 +50,7 @@ export interface ServedPane {
  *  handles the caller's feed/report loops ride. The returned pane's
  *  drain/commit cadence is the caller's interval. */
 export async function serve(opts: ServeOpts): Promise<ServedPane> {
-  const { renderer: rOpts, copy, ...mount } = opts;
+  const { renderer: rOpts, copy, keys, ...mount } = opts;
   process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
 
   // the JSX transform is a Bun plugin and must register BEFORE the
@@ -63,37 +83,39 @@ export async function serve(opts: ServeOpts): Promise<ServedPane> {
    *  Ctrl+C copies the current row as OSC 52. No quit binding — the
    *  pane's owner owns lifecycle. */
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  renderer.keyInput.on('keypress', key => /* NOSONAR typescript:S3776 */ {
-    if (key.ctrl && key.name === 'c') {
-      const text = pane.writer.copy();
-      if (text === undefined || text === '') return;
-      process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
-      copy?.(text);
-      pane.toast?.('copied');
-      if (toastTimer !== undefined) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => pane.toast?.(''), 1500);
-    } else if (key.name === 'j') pane.writer.select(1);
-    else if (key.name === 'k') pane.writer.select(-1);
-    // ±3 — the opencode wheel step (CustomSpeedScroll(3)); ?1007
-    // delivers the wheel as these same arrow keys, so one detent
-    // feels like a real scroll, not a crawl
-    else if (key.name === 'up') pane.scroll?.(-3);
-    else if (key.name === 'down') pane.scroll?.(3);
-    else if (key.name === 'pageup') pane.scrollPage?.(-1);
-    else if (key.name === 'pagedown') pane.scrollPage?.(1);
-    else if (key.name === 'home') pane.scrollEdge?.(0);
-    else if (key.name === 'end') pane.scrollEdge?.(1);
-    else if (key.name === 'a') pane.writer.toggleAll(true);
-    else if (key.name === 'z') pane.writer.toggleAll(false);
-    else if (
-      key.name === 'return' ||
-      key.name === 'enter' ||
-      key.name === 'c' ||
-      key.name === 'space' ||
-      key.name === ' '
-    )
-      pane.writer.toggle();
-  });
+  if (keys !== undefined) {
+    // the caller's grammar owns every key — the pane's own browse
+    // keys would fight the composer's
+    renderer.keyInput.on('keypress', key => keys(pane, key));
+  } else {
+    renderer.keyInput.on('keypress', key => /* NOSONAR typescript:S3776 */ {
+      if (key.ctrl && key.name === 'c') {
+        copyRow(pane, copy);
+        if (toastTimer !== undefined) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => pane.toast?.(''), 1500);
+      } else if (key.name === 'j') pane.writer.select(1);
+      else if (key.name === 'k') pane.writer.select(-1);
+      // ±3 — the opencode wheel step (CustomSpeedScroll(3)); ?1007
+      // delivers the wheel as these same arrow keys, so one detent
+      // feels like a real scroll, not a crawl
+      else if (key.name === 'up') pane.scroll?.(-3);
+      else if (key.name === 'down') pane.scroll?.(3);
+      else if (key.name === 'pageup') pane.scrollPage?.(-1);
+      else if (key.name === 'pagedown') pane.scrollPage?.(1);
+      else if (key.name === 'home') pane.scrollEdge?.(0);
+      else if (key.name === 'end') pane.scrollEdge?.(1);
+      else if (key.name === 'a') pane.writer.toggleAll(true);
+      else if (key.name === 'z') pane.writer.toggleAll(false);
+      else if (
+        key.name === 'return' ||
+        key.name === 'enter' ||
+        key.name === 'c' ||
+        key.name === 'space' ||
+        key.name === ' '
+      )
+        pane.writer.toggle();
+    });
+  }
 
   return { pane, renderer };
 }
