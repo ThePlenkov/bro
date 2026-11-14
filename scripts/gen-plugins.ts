@@ -386,7 +386,7 @@ they drift.
 ## Install
 
 \`\`\`sh
-bro plugins install opencode            # both scopes
+bro plugins install opencode            # one scope — opencode can't dedupe project+global copies
 bro plugins install opencode --global   # ~/.config/opencode/plugins/bro/
 bro plugins install opencode --local    # <repo>/.opencode/plugins/bro/
 \`\`\`
@@ -417,7 +417,7 @@ drifts.
 ## Install
 
 \`\`\`sh
-bro plugins install kilo            # both scopes
+bro plugins install kilo            # one scope — kilo can't dedupe project+global copies
 bro plugins install kilo --global   # ~/.config/kilo/bro/bro.ts + kilo.json plugin[] entry
 bro plugins install kilo --local    # <repo>/.kilo/plugin/bro.ts
 \`\`\`
@@ -463,7 +463,7 @@ one self-contained module (node builtins only) by
 ## Install
 
 \`\`\`sh
-bro plugins install pi            # both scopes
+bro plugins install pi            # one scope — pi can't dedupe project+global copies
 bro plugins install pi --global   # ~/.pi/agent/extensions/bro.ts
 bro plugins install pi --local    # <repo>/.pi/extensions/bro.ts
 \`\`\`
