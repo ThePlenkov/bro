@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/mesh-wait.schema.json",
+  "title": "bro mesh wait --json",
+  "description": "{thread, stage?, turn?, envelopes} — cmdWait's JSON projection of ThreadState (packages/cli/src/commands/mesh.ts; packages/mesh/src/thread.ts). stage/turn keys are absent when the reduction has none (JSON.stringify drops undefined) — optional, never null. envelopes carries the raw MeshEnvelope set across own+peer stores.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thread", "envelopes"],
+  "properties": {
+    "thread": { "type": "string" },
+    "stage": { "enum": ["posted", "claimed", "submitted", "accepted", "rejected"] },
+    "turn": { "enum": ["requester", "worker"] },
+    "envelopes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/meshEnvelope" }
+    }
+  },
+  "$defs": {
+    "meshRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "enum": ["bead", "url", "pr"] },
+        "ref": { "type": "string" }
+      }
+    },
+    "meshTerms": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "priority": { "type": "string" },
+        "deadline": { "type": ["string", "null"] }
+      }
+    },
+    "meshEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "kind", "thread", "from", "to", "title", "body", "refs", "terms", "evidence"],
+      "properties": {
+        "v": { "const": "mesh/1" },
+        "id": { "type": "string" },
+        "kind": { "enum": ["request", "claim", "result", "accept", "reject"] },
+        "thread": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/meshRef" }
+        },
+        "terms": { "$ref": "#/$defs/meshTerms" },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/meshRef" }
+        }
+      }
+    }
+  }
+}

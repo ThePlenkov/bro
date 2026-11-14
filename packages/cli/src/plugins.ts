@@ -142,7 +142,10 @@ export const PLUGINS: BroPlugin[] = [
   // drift). --json emitters deliberately NOT schema'd — action reports,
   // acks, diagnostics, passthroughs, producer streams — are tabulated in
   // specs/bro-6ptci.2.md §4 (e.g. otel/doctor/guard/check/pulse/delegate,
-  // act wait, convoy run, agents prune, pipeline, telemetry).
+  // act wait, convoy run, agents prune, pipeline, telemetry); the §4
+  // deferred agent-facing reads are wired by specs/bro-6ptci.3.md
+  // (convoy next, wait, mesh wait/inbox — sessions resume has no --json
+  // by design and stays flags/exits-only).
   definePlugin({
     name: 'debt',
     group: 'review',
@@ -246,6 +249,24 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Convoy execution over beads molecules: status|next|done|pour|list|run',
     run: runConvoyCommand,
     skill: 'convoy',
+    contract: {
+      subs: {
+        next: {
+          flags: {
+            '[mol]': 'the molecule — default: the single open molecule in the store',
+            '--mol <id>': 'same molecule, flag spelling',
+          },
+          // no --json flag: `next` emits ConvoyNext as JSON
+          // unconditionally — the flag is rejected as an unknown option
+          json: 'schemas/cli/convoy-next.schema.json',
+          exits: {
+            0: 'next-step JSON emitted — state step|gate|blocked|complete',
+            1: 'molecule resolution failed — none open, ambiguous, or unreadable',
+            2: 'usage — unknown option',
+          },
+        },
+      },
+    },
     planSchema: (doc, source) => parseConvoyPlan(doc, source),
     planVersion: CONVOY_PLAN_VERSION,
     runPlan: plan => applyConvoyPlan(plan as ConvoyPlan),
@@ -455,6 +476,24 @@ export const PLUGINS: BroPlugin[] = [
         0: 'sessions printed',
         1: 'ledger unavailable',
         2: 'usage',
+      },
+      subs: {
+        resume: {
+          flags: {
+            '<id>': 'session key, sid (exact or unique prefix), or agentId',
+            '--print': 'render the resume argv without spawning it',
+            '--last': 'the most recently seen session',
+            '--pick': 'interactive picker — needs a TTY',
+          },
+          // no `json` ref: resume takes --print|--last|--pick only — it
+          // has no --json flag, so there is no schema to pin (the
+          // exclusion is documented in specs/bro-6ptci.3.md)
+          exits: {
+            0: 'argv printed (--print) or the host resume ran',
+            1: 'no sessions, host has no resume command, or the resume exited nonzero',
+            2: 'usage — missing/ambiguous target, --pick without a TTY',
+          },
+        },
       },
     },
   }),
@@ -1128,6 +1167,35 @@ export const PLUGINS: BroPlugin[] = [
     run: runMeshCommand,
     skill: 'mesh',
     configKey: 'mesh',
+    contract: {
+      subs: {
+        inbox: {
+          flags: {
+            '--json':
+              '[{peer, bead, …envelope, mismatch?, unbound?}] — pending requests addressed to this rig',
+            '--no-pull': 'serve replica stores as they stand — skip the sync leg',
+          },
+          json: 'schemas/cli/mesh-inbox.schema.json',
+          exits: {
+            0: 'inbox rows printed (human table or --json)',
+            2: 'not inside a git repository / rig unaddressed / usage',
+          },
+        },
+        wait: {
+          flags: {
+            '--json':
+              '{thread, stage?, turn?, envelopes} — stage/turn keys absent when the reduction has none',
+            '--no-pull': 'serve replica stores as they stand — skip the sync leg',
+          },
+          json: 'schemas/cli/mesh-wait.schema.json',
+          exits: {
+            0: 'thread state printed — --json always takes this arm',
+            1: 'no request visible for the thread (human mode only)',
+            2: 'not inside a git repository / rig unaddressed / usage',
+          },
+        },
+      },
+    },
     configSchema: meshSection,
   }),
   definePlugin({
@@ -1145,6 +1213,21 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Dep-plane watcher — `bro wait external:<rig>:<id>` polls the dep stores, verdict = exit code (specs/cross-repo)',
     run: runWaitCommand,
+    contract: {
+      flags: {
+        '--json': '{verdict, refs, unsettled?} — the exit code IS the verdict',
+        '--every <sec>': 'poll interval — default 30s',
+        '--timeout <sec>': 'the bound — default 2700s (45m); 0 waits unbounded',
+      },
+      json: 'schemas/cli/wait.schema.json',
+      exits: {
+        0: 'free — every watched dep shipped',
+        1: 'unreadable — a store failed 3 polls running',
+        2: 'unresolved — a ref is absent on its posting store (usage also exits 2)',
+        3: 'actionable — rejected or closed-unshipped; a human must move',
+        4: 'timeout — the bound held with refs still open',
+      },
+    },
   }),
   definePlugin({
     name: 'run',
