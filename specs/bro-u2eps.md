@@ -49,9 +49,12 @@ All in-process — no subprocess per tool call.
      (`finishTurn` semantics) — decide whether the re-prompt opens a new
      turn span or extends the current one; document the choice in code.
 
-3. **BRO_HOOKS=0.** When `BRO_HOOKS=0` is set for the proxy process (or the
-   session's environment carries it), skip both halves — the proxy is a
-   transport, not a gate, for machine-backend trees.
+3. **BRO_HOOKS=0.** When `BRO_HOOKS=0` is set for the proxy process, skip
+   both halves — the proxy is a transport, not a gate, for machine-backend
+   trees. (ACP carries no per-session env channel — `session/new` params are
+   `cwd`/`mcpServers` — so the process env is the only kill switch on this
+   leg. `acpChildEnv` separately pins `BRO_HOOKS=0` into the spawned agent's
+   env, which governs the child's own hook subprocesses, not the proxy's.)
 
 4. **Failure posture.** Guard/stop evaluation is advisory-to-blocking per
    the gate contract, but a throwing probe must never corrupt the wire:
