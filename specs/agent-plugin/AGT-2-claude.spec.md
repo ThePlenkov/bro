@@ -107,7 +107,11 @@ bro@bro`. No generated artifact beyond hooks.json.
   S10 native correlation. Not applicable — S4 `/bro` (no command
   surface by design), S6 per-turn sequence (manifest hooks are
   event-driven, not turn-scoped), S5 compaction (no compaction
-  event on this host). Pending — live e2e driver for claude.
+  event on this host). Hook dispatch verified e2e —
+  `manifest.e2e.test.ts` fires every hooks.json-declared event
+  through the shipped run.sh and asserts `bro hooks <event>` +
+  payload in the FakeBro journal. Pending — live claude-binary
+  driver.
 
 ## Changelog
 
@@ -116,3 +120,7 @@ bro@bro`. No generated artifact beyond hooks.json.
   (no /bro, no tools), skills-only delivery, native-correlation
   notes.
 - 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); catalog is contract per R7/R8.
+- 2026-11-14 — v4: hook dispatch verified e2e — `manifest.e2e.test.ts`
+  fires every hooks.json-declared event through the shipped run.sh
+  into a fixture plugin root; FakeBro journal asserts `bro hooks
+  <event>` + payload per event. Live claude-binary driver still pending.
