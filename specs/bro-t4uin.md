@@ -28,7 +28,7 @@ with this spec) asks each installed agent's `initialize` for its own
 capabilities — the wire, not our assumptions about it:
 
 | agent | `loadSession` | `resume` | `session/delete` | `session/list` | image |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `devin acp` | yes | no | yes | yes | yes |
 | `kilo acp` | yes | yes | no | yes | yes |
 | `opencode acp` | yes | yes | yes | yes | yes |
@@ -141,7 +141,7 @@ mode, because the existing keys are single-purpose and must not
 change meaning:
 
 | key | browse mode | compose mode |
-|---|---|---|
+| --- | --- | --- |
 | `i` / `/` | focus the composer | — |
 | `Enter` | fold the selected card | **send** the queued prompt |
 | `Esc` | — | cancel the composer (the queue survives) |
@@ -178,7 +178,7 @@ to a pane id, and returns early when `HERDR_ENV` is unset
 The standalone entry is `packages/acp/tui/main.ts` — a **new** file,
 not a mode of the herdr one:
 
-```
+```bash
 bun packages/acp/tui/main.ts --cmd 'devin acp' [--cwd DIR] [--session ID] [--resume] [--prompt TEXT]
 ```
 

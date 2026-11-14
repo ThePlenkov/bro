@@ -87,6 +87,20 @@ describe('argv — the config is the trust boundary', () => {
     assert.throws(() => splitArgv('a"b'), /unclosed quote/);
   });
 
+  test('an empty quoted word is still a word', () => {
+    assert.deepEqual(splitArgv('cmd "" x'), ['cmd', '', 'x']);
+  });
+
+  test('a trailing backslash protects nothing and is dropped', () => {
+    assert.deepEqual(splitArgv('cmd a\\'), ['cmd', 'a']);
+    // a lone backslash is no word at all
+    assert.deepEqual(splitArgv('\\'), []);
+  });
+
+  test('escapes inside a quoted span are the char itself', () => {
+    assert.deepEqual(splitArgv('cmd "a\\"b"'), ['cmd', 'a"b']);
+  });
+
   test('the detailed split says which words were quoted', () => {
     assert.deepEqual(splitArgvDetailed('a "b c" d'), [
       { text: 'a', quoted: false },
