@@ -718,7 +718,7 @@ function connectorContract(b: BackendCase): void {
       const c = b.make({ dir: f.main }, env);
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
-        /devin session quota reached — 1\/1 live sessions.*fx-1/
+        /devin session quota reached — 2\/1 live sessions.*fx-1/
       );
       // a refused spawn leaves no claim and no registry entry
       assert.equal(f.dbRows().find(r => r.id === 'fx-1')!.status, 'open');
@@ -762,7 +762,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(countSessionReservations(reservationsDir), 1);
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
-        /devin session quota reached — 2\/2 live sessions.*fx-2/
+        /devin session quota reached — 3\/2 live sessions.*fx-2/
       );
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
       await c.stop(first.id);
@@ -799,7 +799,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(first.state, 'running');
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
-        /devin worker quota reached — 1\/1 live workers.*fx-2/
+        /devin worker quota reached — 2\/1 live workers.*fx-2/
       );
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
       await c.stop(first.id);
@@ -899,7 +899,7 @@ function connectorContract(b: BackendCase): void {
         (err: unknown) =>
           err instanceof SpawnError &&
           err.kind === 'cap' &&
-          /provider 'devacp' lane cap reached — 1\/1 live lanes.*provider_cap/.test(err.message)
+          /provider 'devacp' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
       );
       assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
     } finally {

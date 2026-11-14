@@ -114,6 +114,7 @@ import {
   sessionCapRefusal,
   sessionCapViews,
   planesStartingSessions,
+  providerCapCensus,
   type SessionPlane,
   SpawnError,
   type SpawnSpec,
@@ -2780,6 +2781,13 @@ function prepareSpawn(
     // claim lands in crossKindReservations so the failure paths hand
     // it back untouched.
     const providerCap = providerCapLaneOf(env, backend, spec);
+    // the provider lane's AGGREGATE census — the combined count over
+    // every plane the provider's command claims (spec bro-x601l): a
+    // multi-plane command draws one session per plane on the same
+    // account lane, and a per-plane census admits each in isolation.
+    // The closure runs inside each plane's locked section — after its
+    // claim landed — so earlier planes' claims sit inside the count.
+    let providerCensus: (() => number) | undefined;
     // starts the provider-cap pass already claimed per kind — the
     // cross-kind pass below re-counts these kinds and must skip the
     // starts this pass covered, or one session's claims read as two
@@ -2787,6 +2795,11 @@ function prepareSpawn(
     if (providerCap !== undefined) {
       const providerCommand = providerEntryCommand(env, providerCap.provider);
       const providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
+      if (providerPlanes.length > 0) {
+        const planes = providerPlanes;
+        const lane = providerCap;
+        providerCensus = () => providerCapCensus(planes, agents, spec.env, lane);
+      }
       // the provider session the quota lane already claims — passing
       // the verdict to sessionQuota's own call keeps one claim for the
       // one session (a double claim would count the lane twice)
@@ -2807,6 +2820,7 @@ function prepareSpawn(
             scope,
             liveKeys: liveByKind.get(plane.kind) ?? EMPTY_KEYS,
             providerCap,
+            providerCensus,
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);
@@ -2896,7 +2910,7 @@ function prepareSpawn(
             workerEnv: spec.env,
             scope,
             liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
-            ...(quotaCoversProvider ? { providerCap } : {}),
+            ...(quotaCoversProvider ? { providerCap, providerCensus } : {}),
           });
   } catch (err) {
     // every claim this spawn holds goes back — the caller never saw them

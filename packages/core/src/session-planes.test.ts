@@ -309,7 +309,7 @@ describe('the batch lane (spec bro-9h86l)', () => {
         (e: unknown) =>
           e instanceof SpawnError &&
           e.kind === 'cap' &&
-          /batch worker quota reached — 1\/1 live batch workers.*fx-1/.test(e.message)
+          /batch worker quota reached — 2\/1 live batch workers.*fx-1/.test(e.message)
       );
       // the interactive lane still has room: 3 live of 4, no batch marker
       assert.doesNotThrow(() =>
@@ -398,7 +398,7 @@ describe('admitSessionSlot', () => {
       assert.throws(
         () => admitSessionSlot(plane, agents, { key: 'native-bb', molStep: 'fx-2' }),
         (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /1\/1 live sessions.*fx-2/.test(e.message)
+          e instanceof SpawnError && e.kind === 'cap' && /2\/1 live sessions.*fx-2/.test(e.message)
       );
       releaseSessionSlot(key!);
       assert.doesNotThrow(() => admitSessionSlot(plane, agents, { key: 'native-bb' }));
@@ -472,11 +472,12 @@ describe('admitSessionSlot', () => {
       };
       const agents = { testkind: { maxWorkers: 1, reservationsDir: resv } };
       assert.doesNotThrow(() => admitSessionSlot(interactive, agents, { key: 'native-aa' }));
-      // the held reservation IS a worker — the next spawn hits 1+0=1/1
+      // the held reservation IS a worker — the next spawn's own claim
+      // joins the count inside the mutex and it hits 2/1
       assert.throws(
         () => admitSessionSlot(interactive, agents, { key: 'native-bb', molStep: 'fx-3' }),
         (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /1\/1 live workers.*fx-3/.test(e.message)
+          e instanceof SpawnError && e.kind === 'cap' && /2\/1 live workers.*fx-3/.test(e.message)
       );
     });
   });
@@ -564,7 +565,7 @@ describe('admitSessionSlot', () => {
         (e: unknown) =>
           e instanceof SpawnError &&
           e.kind === 'cap' &&
-          /provider 'prov' lane cap reached — 3\/3 live lanes.*fleet\.providerCaps\.prov.*provider_cap.*fx-9/.test(
+          /provider 'prov' lane cap reached — 4\/3 live lanes.*fleet\.providerCaps\.prov.*provider_cap.*fx-9/.test(
             e.message
           )
       );

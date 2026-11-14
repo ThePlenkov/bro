@@ -28,12 +28,14 @@ import { SpawnError } from './agents.ts';
 import { acquireFileLockYielding, withFileLock } from './filelock.ts';
 import {
   countSessionReservations,
+  providerCapCensus,
   releaseSessionSlot,
   reserveSessionSlotOnce,
   sessionAdmissionLock,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
+  sessionStartCensusDir,
   type ProviderCapLane,
   type ReservationLane,
   type SessionPlane,
@@ -277,12 +279,12 @@ export interface SessionStartAdmission {
   refusal?: string;
 }
 
-/** The cap's check+claim under the kind's OWN admission mutex — the
+/** The cap's claim+check under the kind's OWN admission mutex — the
  *  same file `admitSessionSlot` locks, so a start through the guard,
- *  the conductor, or a bro spawn serializes on ONE budget: the count
- *  inside the mutex already holds every earlier claim. A check taken
- *  before the lock is exactly the stale read the race runs on, so the
- *  view is re-counted inside the section.
+ *  the conductor, or a bro spawn serializes on ONE budget. The claim
+ *  lands inside the mutex BEFORE the count — the same protocol every
+ *  un-locked fallback on this ledger runs, so a contender's claim
+ *  between the count and the slot write can never be missed.
  *
  *  Returns undefined when the plane does not claim the command or no
  *  cap is armed for the kind. Throws: `SpawnError('config')` on a
@@ -414,9 +416,17 @@ function providerCapLine(lane: ProviderCapLane, live: number, starts: number): s
   );
 }
 
-/** The locked section: re-count inside the mutex (every earlier claim
- *  is already in it), claim, then judge — the provider cap first (the
- *  outer account gate), then the kind quota's own lanes. */
+/** The locked section: claim inside the mutex FIRST, then take the
+ *  census, then judge — the same protocol every un-locked fallback on
+ *  this ledger runs (spec bro-x601l). A census taken before the claim
+ *  reads headroom a fallback contender can claim between the count
+ *  and the slot write; with the claim already landed, every census
+ *  sees every claim held, the verdicts are the strict post-claim
+ *  tests, and the lane can over-refuse under a burst but never
+ *  over-admit. The provider cap judges the AGGREGATE census — every
+ *  plane the command claims on the same lane, not this plane's alone
+ *  — and is refused first (the outer account gate), then the kind
+ *  quota's own lane. */
 function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmission | undefined {
   const plane = args.plane;
   const view = capViewFor(plane, args.command, args.agents, args.workerEnv);
@@ -427,20 +437,9 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
   const starts = view?.starts ?? plane.startsSessions?.(args.command) ?? 0;
   // the census dir — the providerCap's caller-scoped override when the
   // caller names one (a conductor's test seam), else the kind's own
-  const resDir =
-    providerCap?.reservationsDir !== undefined
-      ? sessionSlotsDir(plane.kind, providerCap.reservationsDir)
-      : sessionReservationsDir(plane.kind, args.agents);
-  // the census the provider cap judges — the kind's live count plus
-  // every claim held in the dir the claim lands in (the same figure
-  // the quota view carries when the dirs coincide)
-  const census =
-    providerCap?.reservationsDir === undefined && view !== undefined
-      ? view.live
-      : plane.countLive(args.agents?.[plane.kind] ?? {}, args.workerEnv) +
-        countSessionReservations(resDir);
+  const resDir = sessionStartCensusDir(plane, args.agents, providerCap);
   // claim first — a repeat event's slot is already inside the
-  // count, so its start is judged once (starts: 0), never twice
+  // post-claim count, so its start is judged once, never twice
   const claim = reserveSessionStart({
     kind: plane.kind,
     agents: args.agents,
@@ -449,15 +448,37 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
     lane: args.lane,
     dir: resDir,
   });
-  const claimedStarts = claim.fresh ? starts : 0;
+  // the post-claim census — this call's fresh claims sit inside it,
+  // so the verdicts are the strict held tests and no starts are added
+  let census: number;
+  let providerLive: number | undefined;
+  try {
+    census =
+      plane.countLive(args.agents?.[plane.kind] ?? {}, args.workerEnv) +
+      countSessionReservations(resDir);
+    providerLive =
+      providerCap === undefined
+        ? undefined
+        : providerCapCensus(
+            planesStartingSessions(args.command),
+            args.agents,
+            args.workerEnv,
+            providerCap
+          );
+  } catch (err) {
+    // a count that cannot be established must not strand the claim —
+    // the caller never receives a release for it
+    releaseSessionStart(claim.paths);
+    throw err;
+  }
   const extra = args.extraLive ?? 0;
   const refusal =
-    (providerCap === undefined
+    (providerCap === undefined || providerLive === undefined
       ? undefined
-      : providerCapRefusal(providerCap, census + extra, claimedStarts)) ??
+      : providerCapHeldRefusal(providerCap, providerLive + extra)) ??
     (view === undefined
       ? undefined
-      : sessionCapRefusal({ ...view, live: view.live + extra, starts: claimedStarts }));
+      : sessionCapHeldRefusal({ kind: view.kind, live: census + extra, cap: view.cap }));
   if (refusal !== undefined) {
     releaseSessionStart(claim.paths);
     return { paths: [], fresh: claim.fresh, refusal };
@@ -495,17 +516,20 @@ export interface ProviderSlotOpts {
   waitMs?: number;
 }
 
-/** The provider cap's locked section — census inside the mutex, claim,
- *  then judge. `countLanes` runs INSIDE the lock: the caller's own
- *  census (the spawn path's locked registry walk) is the numerator the
- *  reservations add to. */
+/** The provider cap's locked section — claim inside the mutex FIRST,
+ *  then the census, then the held verdict: the same protocol every
+ *  un-locked fallback on this ledger runs (spec bro-x601l). A census
+ *  taken before the claim reads headroom a fallback contender can
+ *  claim between the count and the slot write. `countLanes` runs
+ *  INSIDE the lock after the claim: the caller's own census (the
+ *  spawn path's locked registry walk) is the numerator the held
+ *  reservations add to — this call's fresh claim included. */
 function providerSlotSection(
   lane: ProviderCapLane,
   countLanes: () => number,
   opts: ProviderSlotOpts
 ): SessionStartAdmission {
   const dir = providerSlotsDir(lane.provider, lane.reservationsDir);
-  const live = countLanes() + countSessionReservations(dir);
   const claim = reserveSessionStart({
     kind: providerSlotsKind(lane.provider),
     agents: undefined,
@@ -514,7 +538,15 @@ function providerSlotSection(
     lane: opts.lane,
     dir,
   });
-  const refusal = providerCapRefusal(lane, live, claim.fresh ? 1 : 0);
+  let live: number;
+  try {
+    live = countLanes() + countSessionReservations(dir);
+  } catch (err) {
+    // a count that cannot be established must not strand the claim
+    releaseSessionStart(claim.paths);
+    throw err;
+  }
+  const refusal = providerCapHeldRefusal(lane, live);
   if (refusal !== undefined) {
     releaseSessionStart(claim.paths);
     return { paths: [], fresh: claim.fresh, refusal };

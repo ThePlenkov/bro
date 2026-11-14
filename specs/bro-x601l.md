@@ -56,7 +56,11 @@ For a provider entry `<name>`:
    transitively by other providers' workers — they all write the same
    lock files) **plus** `countSessionReservations` on the kind's slots
    dir. This is the same census the kind quota uses, so the two caps
-   judge one number.
+   judge one number. A command claiming SEVERAL planes is judged on
+   the **aggregate** — `providerCapCensus` sums every claiming plane's
+   live count and each distinct census dir's held claims, so a
+   multi-plane command cannot admit each plane in isolation past the
+   lane.
 2. **Registry fallback.** An entry with no counting plane (an `api`
    provider, or a `cli` whose basename no plane claims) admits against
    the local registry: entries carrying `provider === <name>` that
@@ -88,9 +92,15 @@ holder's claims reap at the TTL — never a wedge.
 
 Both admission forms gain `opts.providerCap: { provider, cap }`:
 
-- `admitSessionSlot` (the spawn path) runs the provider-cap verdict
-  **first** inside the kind's admission mutex — the outer gate — then
-  the existing kind lanes (`maxSessions`, worker lanes, work budget).
+- `admitSessionSlot` (the spawn path) claims its slot **first**
+  inside the kind's admission mutex, then counts and runs the
+  provider-cap verdict — the outer gate — then the existing kind
+  lanes (`maxSessions`, worker lanes, work budget). Claiming before
+  counting is the same protocol the un-locked fallbacks run on the
+  shared ledger: every census sees every claim held, the verdicts are
+  the strict post-claim tests, and the lane can over-refuse under a
+  burst but never over-admit (a pre-claim census reads headroom a
+  fallback contender can take between the count and the slot write).
   It is armed by `providerCap` alone: a provider cap with no kind
   quota still serializes, counts, claims and refuses.
 - `admitSessionStart`/`admitSessionStartAsync` (the guard + the
@@ -109,7 +119,7 @@ claims a `.slot` in `sessionSlotsDir('provider-<name>')`.
 Refusals are `SpawnError('cap')` whose message carries the literal
 cause token `provider_cap`:
 
-```
+```text
 provider <name> lane cap reached — 6 live + 1 starting > 6
 (fleet.providerCaps.<name> in the global bro config) — cause: provider_cap
 ```
@@ -126,7 +136,7 @@ a park signal, never a burned attempt — on both dialect mappers
 1. **`prepareSpawn`** (fleet agents up, convoy, drive, every connector
    facade): after the route walk settles `spec.provider`, before
    `enforceFleetCap` — `providerCapLane(env, spec)` resolves the entry
-   + cap; the provider's kind when a plane claims it rides the same
+   and its cap; the provider's kind when a plane claims it rides the same
    `admitSessionSlot` call the session quota already makes (one claim
    covers all armed caps on the kind), a different-kind provider cap
    admits on its own plane, and a plane-less provider admits through

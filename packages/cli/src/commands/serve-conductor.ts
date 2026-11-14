@@ -37,6 +37,7 @@ import {
   LockTimeout,
   MAX_TIMER_MS,
   planesStartingSessions,
+  providerCapCensus,
   providerCapHeldRefusal,
   providerSlotsDir,
   providerSlotsKind,
@@ -44,7 +45,7 @@ import {
   reserveSessionStart,
   sessionCapHeldRefusal,
   sessionCapViews,
-  sessionReservationsDir,
+  sessionStartCensusDir,
   SpawnError,
   type ProviderCapLane,
   type SessionStartAdmission,
@@ -2352,7 +2353,9 @@ export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): ()
       for (const plane of planes) {
         // a quota-armed kind claims its starts; an unarmed one claims
         // only when the provider cap armed its census — the same gate
-        // the locked admission runs
+        // the locked admission runs. The claim lands in the SAME dir
+        // the locked section's does, or locked and un-locked callers
+        // would never see each other on the census.
         if (armed !== undefined && !armed.has(plane.kind)) {
           continue;
         }
@@ -2362,6 +2365,7 @@ export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): ()
             agents: cfg.agents,
             key: claimKey,
             count: plane.startsSessions?.(command) ?? 1,
+            dir: sessionStartCensusDir(plane, cfg.agents, providerCap),
           }).paths
         );
       }
@@ -2385,13 +2389,10 @@ export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): ()
           ? countSessionReservations(
               providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
             )
-          : planes.reduce(
-              (sum, plane) =>
-                sum +
-                plane.countLive(cfg.agents[plane.kind] ?? {}) +
-                countSessionReservations(sessionReservationsDir(plane.kind, cfg.agents)),
-              0
-            );
+          : // the combined census the locked section judges — every
+            // plane the command claims on the lane, deduped on the
+            // census dir the claims landed in
+            providerCapCensus(planes, cfg.agents, undefined, providerCap);
     }
   } catch (err) {
     releaseSessionStart(held);

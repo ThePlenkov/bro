@@ -28,6 +28,7 @@ import {
   providerCapHeldRefusal,
   providerCapRefusal,
   providerSlotsKind,
+  reserveSessionStart,
   sessionCapHeldRefusal,
   sessionCapRefusal,
   sessionCapRefusalFor,
@@ -246,10 +247,9 @@ describe('admitSessionStart', () => {
           key: 'call-2',
         });
         assert.ok(second !== undefined);
-        assert.match(
-          second.refusal ?? '',
-          /alpha session quota reached — 1 live \+ 1 starting > 1/
-        );
+        // post-claim census: the fresh claim is already inside live —
+        // the strict held verdict names 2 held slots against cap 1
+        assert.match(second.refusal ?? '', /alpha session quota reached — 2 live > 1/);
         // the refused claim was dropped — the budget holds only the admitted one
         assert.equal(countSessionReservations(dir), 1);
       });
@@ -292,7 +292,8 @@ describe('admitSessionStart', () => {
           key: 'call-1',
           extraLive: 2,
         });
-        assert.match(admitted?.refusal ?? '', /2 live \+ 1 starting > 2/);
+        // post-claim: 1 held claim + 2 extra live = 3 > 2
+        assert.match(admitted?.refusal ?? '', /3 live > 2/);
       });
     });
   });
@@ -455,9 +456,10 @@ describe('provider cap admission (spec bro-x601l)', () => {
           providerCap: { provider: 'prov', cap: 2, reservationsDir: dir },
         });
         assert.ok(refused !== undefined);
+        // post-claim census: 2 live + the held claim = 3 > 2
         assert.match(
           refused.refusal ?? '',
-          /provider 'prov' lane cap reached — 2 live \+ 1 starting > 2.*fleet\.providerCaps\.prov.*provider_cap/
+          /provider 'prov' lane cap reached — 3 live > 2.*fleet\.providerCaps\.prov.*provider_cap/
         );
         // a refused start holds no slot
         assert.equal(countSessionReservations(dir), 0);
@@ -512,6 +514,115 @@ describe('provider cap admission (spec bro-x601l)', () => {
     });
   });
 
+  test('the provider cap judges the combined census of every plane the command claims', () => {
+    const dirA = mkdtempSync(join(tmpdir(), 'bro-cap-a-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'bro-cap-b-'));
+    try {
+      // a compound command one 'alpha' AND one 'beta' plane claim —
+      // a per-plane census admits each in isolation and overshoots
+      // the lane; the aggregate sees the earlier plane's claim
+      const lane = { provider: 'prov', cap: 1 };
+      const bags = { alpha: { reservationsDir: dirA }, beta: { reservationsDir: dirB } };
+      clearSessionPlanes();
+      try {
+        registerSessionPlane(testPlane('alpha', { live: 0 }));
+        registerSessionPlane(testPlane('beta', { live: 0 }));
+        const first = admitSessionStart({
+          plane: testPlane('alpha', { live: 0 }),
+          command: 'alpha-run beta-run',
+          agents: bags,
+          key: 'call-1',
+          providerCap: lane,
+        });
+        assert.equal(first?.refusal, undefined);
+        assert.equal(countSessionReservations(dirA), 1);
+        // the second plane's admission counts the alpha claim — 2 > 1
+        const second = admitSessionStart({
+          plane: testPlane('beta', { live: 0 }),
+          command: 'alpha-run beta-run',
+          agents: bags,
+          key: 'call-1',
+          providerCap: lane,
+        });
+        assert.match(
+          second?.refusal ?? '',
+          /provider 'prov' lane cap reached — 2 live > 1.*provider_cap/
+        );
+        // the refused claim went back — only the admitted one remains
+        assert.equal(countSessionReservations(dirA), 1);
+        assert.equal(countSessionReservations(dirB), 0);
+      } finally {
+        clearSessionPlanes();
+      }
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
+  test('the locked census is post-claim — a rival claim between reads is judged', () => {
+    withSlots(dir => {
+      // the interleave the un-locked fallback could take: the rival's
+      // claim lands after the section's own claim but before its
+      // census — a count saved from before the claim would judge
+      // stale headroom and both callers would proceed
+      let counts = 0;
+      const plane: SessionPlane = {
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        startsSessions: command => (command.includes('alpha-run') ? 1 : 0),
+        countLive: () => {
+          counts++;
+          if (counts === 2) {
+            // the post-claim recount — the rival's claim is inside
+            reserveSessionStart({ kind: 'alpha', agents: {}, key: 'rival', count: 1, dir });
+          }
+          return 0;
+        },
+      };
+      withPlane(plane, () => {
+        const refused = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { maxSessions: 1, reservationsDir: dir } },
+          key: 'call-1',
+        });
+        // this call's claim plus the rival's = 2 > 1 — refused and
+        // its own claim handed back
+        assert.match(refused?.refusal ?? '', /alpha session quota reached — 2 live > 1/);
+        assert.equal(countSessionReservations(dir), 1);
+      });
+    });
+  });
+
+  test('admitProviderSlot counts post-claim — a rival lane inside the census refuses it', () => {
+    withSlots(dir => {
+      const lane = { provider: 'prov', cap: 1, reservationsDir: dir };
+      // countLanes runs INSIDE the mutex after the claim — the rival
+      // lane it reports lands on top of this call's held slot
+      const refused = admitProviderSlot(
+        lane,
+        () => {
+          reserveSessionStart({
+            kind: providerSlotsKind('prov'),
+            agents: undefined,
+            key: 'rival',
+            count: 1,
+            dir,
+          });
+          return 0;
+        },
+        { key: 'spawn-1' }
+      );
+      assert.match(
+        refused?.refusal ?? '',
+        /provider 'prov' lane cap reached — 2 live > 1.*provider_cap/
+      );
+      // the refused claim went back — the rival's remains
+      assert.equal(countSessionReservations(dir), 1);
+    });
+  });
+
   test('admitProviderSlot — the caller census runs inside the provider mutex', () => {
     withSlots(dir => {
       const refused = admitProviderSlot(
@@ -520,9 +631,10 @@ describe('provider cap admission (spec bro-x601l)', () => {
         { key: 'spawn-1' }
       );
       assert.ok(refused !== undefined);
+      // post-claim census: the caller's 2 lanes + the held claim = 3 > 2
       assert.match(
         refused.refusal ?? '',
-        /provider 'prov' lane cap reached — 2 live \+ 1 starting > 2.*provider_cap/
+        /provider 'prov' lane cap reached — 3 live > 2.*provider_cap/
       );
       assert.equal(refused.paths.length, 0);
       assert.equal(countSessionReservations(dir), 0);

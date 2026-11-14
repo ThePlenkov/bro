@@ -669,6 +669,7 @@ export {
   countSessionReservations,
   isBatchSpawn,
   normalizeHookPayload,
+  providerCapCensus,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
@@ -682,6 +683,7 @@ export {
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
+  sessionStartCensusDir,
 } from './session-planes.ts';
 export type {
   CanonicalHookEvent,

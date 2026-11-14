@@ -605,16 +605,66 @@ export interface ProviderCapLane {
   reservationsDir?: string;
 }
 
-/** The lane checks inside the admission mutex. The plane counts run
- *  BEFORE the reservation tally: a plane that can see its own session
- *  marks retires a landed spawn's still-fresh `.slot` inside its own
- *  count, and the tally must see that sweep — otherwise a landed
- *  worker counts twice (live + reservation) and the cap refuses
- *  before reaching its configured capacity. Every remaining
- *  reservation is an in-flight spawn — the slot feed is worker-only
- *  by construction. Throws SpawnError — 'config' when a knob is
- *  unusable, 'cap' when a lane is full, 'unavailable' when a count
- *  can't be established. */
+/** The census dir a plane's session-start claims land in — the
+ *  provider cap's caller-scoped override when one is named (the test
+ *  seam every kind shares), else the kind's own ledger
+ *  (`agents.<kind>.reservationsDir`, then the host-shared default).
+ *  Every admission on a kind must claim and count in the SAME dir or
+ *  the ledger splits. */
+export function sessionStartCensusDir(
+  plane: SessionPlane,
+  agents: Record<string, Record<string, unknown>> | undefined,
+  providerCap?: ProviderCapLane
+): string {
+  const bag = agents?.[plane.kind]?.['reservationsDir'];
+  const override = providerCap?.reservationsDir ?? (typeof bag === 'string' ? bag : undefined);
+  return sessionSlotsDir(plane.kind, override);
+}
+
+/** The provider cap's census — the combined count over EVERY plane
+ *  the caller's command claims (spec bro-x601l): a multi-plane
+ *  command draws one session per plane on the same provider lane, so
+ *  a per-plane census admits each plane in isolation and overshoots
+ *  the cap. The reservation tally dedups on the dir — planes sharing
+ *  one census dir (the caller-scoped override) contribute its held
+ *  claims once. Count it INSIDE the caller's locked section or after
+ *  its claims landed: the figure must see every claim already held. */
+export function providerCapCensus(
+  planes: readonly SessionPlane[],
+  agents: Record<string, Record<string, unknown>> | undefined,
+  workerEnv: Record<string, string> | undefined,
+  providerCap: ProviderCapLane
+): number {
+  let live = 0;
+  const dirs = new Set<string>();
+  for (const plane of planes) {
+    live += plane.countLive(agents?.[plane.kind] ?? {}, workerEnv);
+    dirs.add(sessionStartCensusDir(plane, agents, providerCap));
+  }
+  for (const dir of dirs) {
+    live += countSessionReservations(dir);
+  }
+  return live;
+}
+
+/** The lane checks inside the admission mutex — POST-CLAIM: the
+ *  caller's own slot already sits inside `resDir`, so every cap's
+ *  verdict is the strict `live > cap` test (the held-count twin of
+ *  the pre-claim `live + 1 > cap`). Claiming before counting is the
+ *  protocol every un-locked fallback on this ledger runs: a census
+ *  taken before the claim reads headroom a contender can take between
+ *  the count and the slot write, so the lane can over-refuse under a
+ *  burst but never over-admit (spec bro-x601l).
+ *
+ *  The plane counts run BEFORE the reservation tally: a plane that
+ *  can see its own session marks retires a landed spawn's still-fresh
+ *  `.slot` inside its own count, and the tally must see that sweep —
+ *  otherwise a landed worker counts twice (live + reservation) and the
+ *  cap refuses before reaching its configured capacity. Every
+ *  remaining reservation is an in-flight spawn — the slot feed is
+ *  worker-only by construction. Throws SpawnError — 'config' when a
+ *  knob is unusable, 'cap' when a lane is full, 'unavailable' when a
+ *  count can't be established. */
 function checkSessionLanes(
   plane: SessionPlane,
   bag: Record<string, unknown>,
@@ -651,10 +701,13 @@ function checkSessionLanes(
   const batchReservations = countSessionReservations(resDir, 'batch');
   // the provider cap is the OUTER gate — a lane of the ACCOUNT, wider
   // than any kind lane, judged first so its refusal names the real
-  // constraint (spec bro-x601l)
+  // constraint (spec bro-x601l). `providerCensus` supplies the
+  // combined count over EVERY plane the provider's command claims —
+  // a multi-plane command draws one session per plane on the same
+  // lane, and a per-plane census would admit each in isolation.
   if (providerCap !== undefined && providerCap.cap > 0) {
-    const live = sessions + reservations;
-    if (live >= providerCap.cap) {
+    const live = opts.providerCensus?.() ?? sessions + reservations;
+    if (live > providerCap.cap) {
       throw new SpawnError(
         `provider '${providerCap.provider}' lane cap reached — ${live}/${providerCap.cap} live lanes ` +
           `(fleet.providerCaps.${providerCap.provider} in the global bro config) ` +
@@ -664,7 +717,7 @@ function checkSessionLanes(
       );
     }
   }
-  if (maxSessions > 0 && sessions + reservations >= maxSessions) {
+  if (maxSessions > 0 && sessions + reservations > maxSessions) {
     throw new SpawnError(
       `${plane.kind} session quota reached — ${sessions + reservations}/${maxSessions} live sessions ` +
         `(agents.${plane.kind}.maxSessions in bro.config)` +
@@ -693,7 +746,10 @@ function checkSessionLanes(
  *  registry does. `scope`/`liveKeys` opt the budget's dead-worker
  *  prune in: the caller's repo is the liveness truth for its own
  *  segments. `budgetDir` isolates the ledger in tests. `providerCap`
- *  arms the account-wide provider lane gate on the same census. */
+ *  arms the account-wide provider lane gate on the same census;
+ *  `providerCensus` is that gate's combined count over every plane
+ *  the provider's command claims (spec bro-x601l) — counted INSIDE
+ *  this plane's mutex, after this call's own claim landed. */
 interface SessionLaneOpts {
   key: string;
   molStep?: string;
@@ -703,6 +759,10 @@ interface SessionLaneOpts {
   now?: number;
   budgetDir?: string;
   providerCap?: ProviderCapLane;
+  /** The provider lane's aggregate census — this plane's own
+   *  `sessions + reservations` when the caller does not supply one
+   *  (a single-plane command needs no wider count). */
+  providerCensus?: () => number;
 }
 
 /** The work budget (spec bro-tdndq) — the fleet's running-time
@@ -815,7 +875,10 @@ function checkWorkerCap(
       'config'
     );
   }
-  if (cap.live + ctx.reservations >= cap.cap) {
+  // post-claim: the caller's own reservation already sits inside
+  // `ctx.reservations`, so the verdict is the strict held test —
+  // the same boundary the pre-claim `live + 1 > cap` drew
+  if (cap.live + ctx.reservations > cap.cap) {
     throw new SpawnError(
       `${plane.kind} ${cap.subject} quota reached — ${cap.live + ctx.reservations}/${cap.cap} live ${cap.population} ` +
         `(agents.${plane.kind}.${cap.knob} in bro.config)` +
@@ -825,12 +888,16 @@ function checkWorkerCap(
   }
 }
 
-/** Atomic host-wide admission: the plane's live count + held
- *  reservations and the slot claim run under ONE mutex shared by every
- *  repo — a per-repo registry lock cannot serialize this, so without
- *  it two spawns each count below the cap and both start. The mutex
- *  sits inside the slots dir under a non-`.slot` name so the counter
- *  never reads it as a reservation. Returns the reservation path —
+/** Atomic host-wide admission: the slot claim lands under ONE mutex
+ *  shared by every repo BEFORE the count is taken — a per-repo
+ *  registry lock cannot serialize this, so without it two spawns each
+ *  count below the cap and both start. Claiming before counting is
+ *  the same protocol the un-locked session-start fallbacks run on
+ *  this ledger (spec bro-x601l): every census sees every claim held,
+ *  the verdicts are the strict post-claim tests, and the lane can
+ *  over-refuse under a burst but never over-admit. The mutex sits
+ *  inside the slots dir under a non-`.slot` name so the counter never
+ *  reads it as a reservation. Returns the reservation path —
  *  released by the caller when the spawn fails before a session
  *  exists; a landed session needs no release — its own mark is the
  *  count, and a plane that can see its marks retires the slot inside
@@ -869,12 +936,28 @@ export function admitSessionSlot(
             'config'
           );
         }
-        checkSessionLanes(plane, bag, quota, resDir, opts);
-        return reserveSessionSlot(
+        // claim first — the same protocol the session-start admissions
+        // and the un-locked fallbacks on this ledger run (spec
+        // bro-x601l): the lane checks below count with this call's
+        // slot already inside, so a contender's claim between the
+        // count and the write can never be missed. The verdicts are
+        // the strict post-claim tests — the lane can over-refuse
+        // under a burst, never over-admit.
+        const claim = reserveSessionSlot(
           resDir,
           opts.key,
           isBatchSpawn(opts.workerEnv) ? 'batch' : 'interactive'
         );
+        try {
+          checkSessionLanes(plane, bag, quota, resDir, opts);
+        } catch (err) {
+          // a refused lane (or a count that cannot be established)
+          // hands the claim back inside the section — the budget
+          // never holds a slot for a start that did not run
+          releaseSessionSlot(claim);
+          throw err;
+        }
+        return claim;
       },
       { label: `${plane.kind} session quota admission` }
     );
