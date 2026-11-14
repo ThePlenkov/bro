@@ -36,6 +36,9 @@ import {
   readLedgerWalls,
   recordWall,
   registerExternalPlane,
+  registerSessionPlane,
+  clearSessionPlanes,
+  sessionPlanes,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -935,6 +938,64 @@ function connectorContract(b: BackendCase): void {
       cleanup(f);
     }
   });
+
+  if (b.name === 'native') {
+    test('a provider cap claims each started kind once — starts shared with the spawned command are never double-counted (spec bro-x601l)', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        // two scripted kinds — the provider's entry command AND the
+        // spawned command both start them (alpha once, beta twice), so
+        // the provider pass claims 1+2 slots and the cross-kind pass
+        // must skip exactly those starts
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.includes('alpha-run') ? 1 : 0),
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.includes('beta-run') ? 2 : 0),
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { maxSessions: 1, reservationsDir: dirA },
+            beta: { maxSessions: 2, reservationsDir: dirB },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run beta-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 3 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        // before the fix the cross-kind pass re-counted the provider
+        // pass's claims as fresh starts — alpha's 1+1 > cap 1 refused a
+        // rightful spawn (and re-claiming would double-count the lane)
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        assert.equal(info.state, 'running');
+        // one claim per START — alpha's single, beta's pair — never
+        // one per plane and never two passes over the same start
+        assert.equal(countSessionReservations(dirA), 1);
+        assert.equal(countSessionReservations(dirB), 2);
+        await c.stop(info.id);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+  }
 
   test('sessionKindOf — declared override beats argv detection', () => {
     const spec = SPEC('/r', '/b', 'fx-1', 'p');

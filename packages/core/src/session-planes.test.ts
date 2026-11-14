@@ -23,6 +23,7 @@ import {
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
+  retagSessionSlot,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
@@ -244,6 +245,32 @@ describe('pid-governed claims (spec bro-x601l)', () => {
     withDir(dir => {
       writeFileSync(join(dir, 'f.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
       assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 1);
+    });
+  });
+
+  test('retagging to a shorter pid truncates the stale tail — the claim stays parseable', () => {
+    withDir(dir => {
+      // a long holder pid writes a longer JSON; rebinding to a shorter
+      // one must not leave the old tail behind (an `r+` write alone
+      // never truncates — the census would then fail to parse the pid
+      // and reap a live holder's claim)
+      const slot = reserveSessionSlot(dir, 'held-1', 'interactive', 99999999);
+      retagSessionSlot(slot, 4242);
+      const meta = JSON.parse(readFileSync(slot, 'utf8')) as { at: number; pid: number };
+      assert.equal(meta.pid, 4242);
+      stale(slot);
+      // the retagged holder still governs: stale but alive → counted
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => true }), 1);
+      // dead → reaped, the truncated file never misreads as holder-less
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 0);
+    });
+  });
+
+  test('retagging a swept claim never recreates it — gone stays gone', () => {
+    withDir(dir => {
+      const slot = join(dir, 'swept.slot');
+      retagSessionSlot(slot, 4242);
+      assert.equal(existsSync(slot), false);
     });
   });
 });

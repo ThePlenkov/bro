@@ -8,7 +8,18 @@
  *  the serialized admit. Vendor names never reach this file — planes
  *  register themselves, callers ask the registry. */
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  ftruncateSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
@@ -506,7 +517,18 @@ function slotContent(holderPid: number): string {
  *  claim stays gone. */
 export function retagSessionSlot(path: string, holderPid: number): void {
   try {
-    writeFileSync(path, slotContent(holderPid), { flag: 'r+' });
+    // `r+` keeps the gone-stays-gone guard (it never recreates a swept
+    // claim), but it does NOT truncate — a shorter holder pid would
+    // leave the old tail behind and the claim's JSON would no longer
+    // parse. Write then ftruncate to the content's exact length.
+    const fd = openSync(path, 'r+');
+    try {
+      const content = slotContent(holderPid);
+      writeSync(fd, content, 0, 'utf8');
+      ftruncateSync(fd, Buffer.byteLength(content));
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     // a claim the census reaped or a race swept is nothing to retag
   }

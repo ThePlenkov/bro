@@ -28,9 +28,12 @@ import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 import {
   clearSessionPlanes,
   commandCliName,
+  countSessionReservations,
+  providerSlotsDir,
   registerSessionPlane,
   scrubEnv,
   sessionPlanes,
+  sessionReservationsDir,
   SpawnError,
 } from '@broject/core';
 
@@ -3456,6 +3459,13 @@ describe('the provider lane cap (spec bro-x601l)', () => {
     }
   };
 
+  /** The cap refusal verdict — SpawnError('cap') carrying the
+   *  provider_cap cause token the wire's park classifier reads. The
+   *  semantic check is the structured kind; `endsWith` pins the exact
+   *  suffix, never a substring guess. */
+  const providerCapRefusal = (e: unknown): boolean =>
+    e instanceof SpawnError && e.kind === 'cap' && e.message.endsWith('— cause: provider_cap');
+
   test('fleet.providerCaps reaches ConductorConfig — the global layer only', () => {
     const xdg = mkdtempSync(join(tmpdir(), 'bro-provcap-cfg-'));
     const prev = process.env.XDG_CONFIG_HOME;
@@ -3486,9 +3496,8 @@ describe('the provider lane cap (spec bro-x601l)', () => {
       await assert.rejects(
         admitLaneCap(cfg, 'req-2'),
         (e: unknown) =>
-          e instanceof SpawnError &&
-          e.kind === 'cap' &&
-          /provider 'dv-acp' lane cap reached.*fleet\.providerCaps\.dv-acp.*provider_cap/.test(
+          providerCapRefusal(e) &&
+          /provider 'dv-acp' lane cap reached — \d+ live( \+ \d+ starting)? > 1 \(fleet\.providerCaps\.dv-acp/.test(
             e.message
           )
       );
@@ -3502,19 +3511,11 @@ describe('the provider lane cap (spec bro-x601l)', () => {
     withXdg(async () => {
       const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
       const release = await admitLaneCap(cfg, 'req-1');
-      assert.throws(
-        () => admitLaneCapUnlocked(cfg, 'req-2'),
-        (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
-      );
+      assert.throws(() => admitLaneCapUnlocked(cfg, 'req-2'), providerCapRefusal);
       // and the fallback's own claim fills the lane for the locked path
       release();
       const unlockedRelease = admitLaneCapUnlocked(cfg, 'req-3');
-      await assert.rejects(
-        admitLaneCap(cfg, 'req-4'),
-        (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
-      );
+      await assert.rejects(admitLaneCap(cfg, 'req-4'), providerCapRefusal);
       unlockedRelease();
     }));
 
@@ -3533,15 +3534,105 @@ describe('the provider lane cap (spec bro-x601l)', () => {
         const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
         // the plane's one live lane already fills the cap — the open
         // refuses before any claim
-        await assert.rejects(
-          admitLaneCap(cfg, 'req-1'),
-          (e: unknown) =>
-            e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
-        );
+        await assert.rejects(admitLaneCap(cfg, 'req-1'), providerCapRefusal);
       } finally {
         clearSessionPlanes();
         for (const plane of prior) registerSessionPlane(plane);
       }
+    }));
+
+  test('a mid-compound failure hands the earlier planes claims back', () =>
+    withXdg(async () => {
+      // two planes claim the entry's command; the second cannot count —
+      // the admission throws through, and the first plane's claim must
+      // not strand against the cap until the holder dies
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 0,
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      registerSessionPlane({
+        kind: 'dv2',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => {
+          throw new SpawnError('cannot count dv2', 'unavailable');
+        },
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 4 } };
+        await assert.rejects(
+          admitLaneCap(cfg, 'req-1'),
+          (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
+        );
+        assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 0);
+        assert.equal(countSessionReservations(sessionReservationsDir('dv2', cfg.agents)), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
+  test('the fallback claims every plane a provider cap arms, and a refusal hands them back', () =>
+    withXdg(async () => {
+      const prior = sessionPlanes();
+      const plane = (kind: string) => ({
+        kind,
+        detectsCli: (cli: string) => cli === 'dv',
+        countLive: () => 0,
+        startsSessions: (cmd: string) => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      registerSessionPlane(plane('dv'));
+      registerSessionPlane(plane('dv2'));
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+        // cap 1 < the 2 claims a two-plane command lands — the
+        // claim-first fallback must refuse AND hand both claims back:
+        // a stranded slot would count against the lane until its
+        // holder dies
+        assert.throws(
+          () => admitLaneCapUnlocked(cfg, 'req-1'),
+          (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+        );
+        assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 0);
+        assert.equal(countSessionReservations(sessionReservationsDir('dv2', cfg.agents)), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const p of prior) registerSessionPlane(p);
+      }
+    }));
+
+  test('the fallback can never over-admit — a refused caller hands its claim back', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const release = await admitLaneCap(cfg, 'req-1');
+      const dir = providerSlotsDir('dv-acp');
+      assert.equal(countSessionReservations(dir), 1);
+      // the fallback's claim lands BEFORE its count — a burst can
+      // over-refuse, never over-admit: this caller refuses and the
+      // claim it briefly held goes back with the verdict
+      assert.throws(
+        () => admitLaneCapUnlocked(cfg, 'req-2'),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+      );
+      assert.equal(countSessionReservations(dir), 1);
+      release();
+    }));
+
+  test('the fallback judges a repeat event once — its claim is already inside the count', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const first = admitLaneCapUnlocked(cfg, 'req-1');
+      // a retry of the same event claims no second slot — its earlier
+      // claim sits inside the count, so judging starts again would
+      // refuse a rightful admit
+      const second = admitLaneCapUnlocked(cfg, 'req-1');
+      assert.equal(countSessionReservations(providerSlotsDir('dv-acp')), 1);
+      second();
+      first();
+      assert.equal(countSessionReservations(providerSlotsDir('dv-acp')), 0);
     }));
 
   test('a capped lane answers 429 — a retained session holds the lane', () =>
@@ -3570,7 +3661,7 @@ describe('the provider lane cap (spec bro-x601l)', () => {
         const b = await post('b');
         assert.equal(b.status, 429);
         assert.ok(Number(b.headers.get('retry-after')) > 0);
-        assert.match(await b.text(), /provider_cap/);
+        assert.match(await b.text(), /— cause: provider_cap/);
         assert.equal(fake.sessions.length, 1, 'the refused open opened nothing');
       } finally {
         await close();

@@ -363,12 +363,24 @@ export function acpTransport(
    *  teardown, the sweep, a failed turn's eviction, and a session that
    *  landed after its conn died. Fire-and-forget: a dead upstream must
    *  not stall the drop, but even a wedged one answers inside the
-   *  request budget (peer.req is a deadline, not a hang). */
+   *  request budget (peer.req is a deadline, not a hang).
+   *
+   *  The lane's cap claim frees only when the close SETTLES — a
+   *  session still open upstream still draws on the provider cap, so
+   *  freeing the claim at fire time would admit a replacement over the
+   *  cap while the session it counted lives on. A dead link rejects
+   *  the request into the same settle (the pool death callback covers
+   *  every session still indexed then), so no path wedges the claim. */
   const closeUpstream = (sess: BrokeredSession, sid: string): void => {
+    const releaseCap = sess.releaseCap;
+    sess.releaseCap = undefined;
     void sess.peer.ctx
       .request('session/close', { sessionId: sid }, sess.peer.req(Date.now() + cfg.timeoutMs))
       .catch(() => {
         // dead upstream — the local drop is the point
+      })
+      .finally(() => {
+        releaseCap?.();
       });
     release(sid);
   };
@@ -533,13 +545,17 @@ export function acpTransport(
           throw err;
         }
         // the admission mutex outlived the wait — the same contention
-        // degrade the conductor runs: un-locked check+claim, never a
+        // degrade the conductor runs: an un-locked claim+judge that
+        // can over-refuse under a burst but never over-admit, never a
         // silent bypass of an armed cap
         releaseCap = admitLaneCapUnlocked(cfg, `acp-${randomUUID()}`);
       }
-      const peer = await pool.link();
+      let peer: AcpPeer;
       let retained: AcpRetainedSession;
       try {
+        // a link that never lands opens no session either — its
+        // failure takes the same claims-back path a failed retain does
+        peer = await pool.link();
         retained = await acpSessionRetain(peer, cfg.entry, wireOpts, Date.now() + cfg.timeoutMs, {
           by,
           sessionRequest: params as NewSessionRequest,

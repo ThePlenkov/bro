@@ -25,6 +25,10 @@ import {
   admitProviderSlot,
   admitSessionStart,
   planeStartingSessions,
+  providerCapHeldRefusal,
+  providerCapRefusal,
+  providerSlotsKind,
+  sessionCapHeldRefusal,
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
@@ -551,5 +555,82 @@ describe('provider cap admission (spec bro-x601l)', () => {
         assert.ok(p.startsWith(dir), `claim escaped the slots dir: ${p}`);
       }
     });
+  });
+
+  test('providerSlotsKind encodes injectively — distinct keys never share a ledger', () => {
+    const keys = ['a/b', 'a:b', 'a.b', 'a-b', 'a--b', 'ax002fb', 'weird/prov:name'];
+    const kinds = keys.map(providerSlotsKind);
+    // a flat unsafe-char→'-' fold would collapse 'a/b', 'a:b' and 'a.b'
+    // onto one claim dir + mutex — the escaped fold keeps every key on
+    // its own ledger so their caps never interfere
+    assert.equal(new Set(kinds).size, keys.length);
+    for (const kind of kinds) {
+      assert.match(kind, /^provider-[A-Za-z0-9_-]+$/);
+    }
+    // the marker itself round-trips: '-' doubles, so an escaped key
+    // never collides with a literal carrying the escape's shape
+    assert.equal(providerSlotsKind('a-x002fb'), 'provider-a--x002fb');
+  });
+
+  test('a quota-free bag reservationsDir steers BOTH the mutex and the claims', () => {
+    withSlots(dir => {
+      const plane = testPlane('alpha', { live: 0 });
+      withPlane(plane, () => {
+        // no maxSessions — the provider cap alone arms the admission;
+        // the bag's dir override must steer the same census the section
+        // claims+counts in, or spawn and session-start admissions lock
+        // different files over one ledger. A live file-form mutex in
+        // THAT dir must stall this admit; a mutex on the default dir
+        // would not contend at all.
+        const mutex = sessionAdmissionLock('alpha', dir);
+        writeFileSync(mutex, `${process.pid}:held`, { flag: 'wx' });
+        try {
+          assert.throws(
+            () =>
+              admitSessionStart({
+                plane,
+                command: 'alpha-run',
+                agents: { alpha: { reservationsDir: dir } },
+                key: 'call-1',
+                providerCap: { provider: 'prov', cap: 4 },
+                waitMs: 150,
+              }),
+            (err: unknown) => err instanceof LockTimeout
+          );
+        } finally {
+          rmSync(mutex, { force: true });
+        }
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { reservationsDir: dir } },
+          key: 'call-1',
+          providerCap: { provider: 'prov', cap: 4 },
+        });
+        assert.equal(admitted?.refusal, undefined);
+        assert.equal(countSessionReservations(dir), 1);
+      });
+    });
+  });
+
+  test('the held refusals judge a census whose claims are already inside', () => {
+    // post-claim: the pending starts are counted in `live` — the test
+    // is strict, nothing remains "starting"
+    assert.equal(sessionCapHeldRefusal({ kind: 'alpha', live: 3, cap: 3 }), undefined);
+    assert.match(
+      sessionCapHeldRefusal({ kind: 'alpha', live: 4, cap: 3 }) ?? '',
+      /alpha session quota reached — 4 live > 3/
+    );
+    // cap <= 0 means uncapped, like the starts variant
+    assert.equal(sessionCapHeldRefusal({ kind: 'alpha', live: 9, cap: 0 }), undefined);
+    const lane = { provider: 'prov', cap: 2 };
+    assert.equal(providerCapHeldRefusal(lane, 2), undefined);
+    assert.match(
+      providerCapHeldRefusal(lane, 3) ?? '',
+      /provider 'prov' lane cap reached — 3 live > 2.*cause: provider_cap$/
+    );
+    // and the pre-claim twin still words the pending starts — both
+    // halves of one contract
+    assert.match(providerCapRefusal(lane, 2, 1) ?? '', /2 live \+ 1 starting > 2/);
   });
 });

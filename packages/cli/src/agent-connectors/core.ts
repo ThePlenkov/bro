@@ -111,7 +111,7 @@ import {
   resolveStepClass,
   scanProc,
   SESSION_SLOT_TTL_MS,
-  sessionCapRefusalFor,
+  sessionCapRefusal,
   sessionCapViews,
   planesStartingSessions,
   type SessionPlane,
@@ -2780,6 +2780,10 @@ function prepareSpawn(
     // claim lands in crossKindReservations so the failure paths hand
     // it back untouched.
     const providerCap = providerCapLaneOf(env, backend, spec);
+    // starts the provider-cap pass already claimed per kind — the
+    // cross-kind pass below re-counts these kinds and must skip the
+    // starts this pass covered, or one session's claims read as two
+    const providerClaimedStarts = new Map<string, number>();
     if (providerCap !== undefined) {
       const providerCommand = providerEntryCommand(env, providerCap.provider);
       const providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
@@ -2791,16 +2795,23 @@ function prepareSpawn(
         if (plane.kind === sessionQuota?.plane.kind) {
           continue;
         }
-        const claimed = admitSessionSlot(plane, agents, {
-          key: agentId,
-          molStep: spec.molStep,
-          workerEnv: spec.env,
-          scope,
-          liveKeys: liveByKind.get(plane.kind) ?? EMPTY_KEYS,
-          providerCap,
-        });
-        if (claimed !== undefined) {
-          crossKindReservations.push(claimed);
+        // every session the provider's command would start draws on
+        // the lane — a multi-start command claims one slot per start,
+        // each judged inside the kind's mutex like the cross-kind pass
+        const starts = plane.startsSessions?.(providerCommand) ?? 1;
+        for (let i = 0; i < starts; i++) {
+          const claimed = admitSessionSlot(plane, agents, {
+            key: agentId,
+            molStep: spec.molStep,
+            workerEnv: spec.env,
+            scope,
+            liveKeys: liveByKind.get(plane.kind) ?? EMPTY_KEYS,
+            providerCap,
+          });
+          if (claimed !== undefined) {
+            crossKindReservations.push(claimed);
+            providerClaimedStarts.set(plane.kind, (providerClaimedStarts.get(plane.kind) ?? 0) + 1);
+          }
         }
       }
       if (providerPlanes.length === 0) {
@@ -2835,10 +2846,16 @@ function prepareSpawn(
     enforceFleetCap(dir, home, registry, spec, opts.cap);
     if (spawnedCommand !== '') {
       // a pre-flight refusal ahead of any claim; the authoritative
-      // count re-runs inside each kind's admission mutex below
-      const crossRefusal = sessionCapRefusalFor(spawnedCommand, agents, spec.env);
-      if (crossRefusal !== undefined) {
-        throw new SpawnError(crossRefusal, 'cap');
+      // count re-runs inside each kind's admission mutex below. Starts
+      // the provider pass already claimed sit INSIDE the view's live
+      // count — the pending starts are what is left, or one session's
+      // claims read as two and a rightful first spawn refuses.
+      for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
+        const pending = Math.max(0, view.starts - (providerClaimedStarts.get(view.kind) ?? 0));
+        const crossRefusal = sessionCapRefusal({ ...view, starts: pending });
+        if (crossRefusal !== undefined) {
+          throw new SpawnError(crossRefusal, 'cap');
+        }
       }
       for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
         if (view.kind === sessionQuota?.plane.kind) {
@@ -2852,8 +2869,11 @@ function prepareSpawn(
         // admitSessionSlot holds — so a check-then-reserve here cannot
         // race a parallel start into overshooting the cap. A kind's
         // multi-start view claims one serialized slot per start; a
-        // refusal mid-way is rolled back by the catch below.
-        for (let i = 0; i < view.starts; i++) {
+        // refusal mid-way is rolled back by the catch below. Starts the
+        // provider pass already admitted are skipped — their claims
+        // already ride crossKindReservations.
+        const pending = view.starts - (providerClaimedStarts.get(view.kind) ?? 0);
+        for (let i = 0; i < pending; i++) {
           const claimed = admitSessionSlot(plane, agents, {
             key: agentId,
             molStep: spec.molStep,

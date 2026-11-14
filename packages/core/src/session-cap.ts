@@ -62,10 +62,31 @@ export function sessionCapRefusal(view: SessionCapView): string | undefined {
   if (view.live + view.starts <= view.cap) {
     return undefined;
   }
+  return sessionCapLine(view.kind, view.live, view.cap, view.starts);
+}
+
+/** The kind-quota refusal line — `starts` joins the wording only when
+ *  the count does not already carry it. */
+function sessionCapLine(kind: string, live: number, cap: number, starts: number): string {
   return (
-    `${view.kind} session quota reached — ${view.live} live + ${view.starts} starting ` +
-    `> ${view.cap} (agents.${view.kind}.maxSessions in bro.config)`
+    `${kind} session quota reached — ${live} live` +
+    (starts > 0 ? ` + ${starts} starting` : '') +
+    ` > ${cap} (agents.${kind}.maxSessions in bro.config)`
   );
+}
+
+/** `sessionCapRefusal`'s post-claim twin — the pending starts are
+ *  INSIDE `live` (a claim-first census counts the claims it just
+ *  wrote), so the cap test is strict and nothing is "starting". */
+export function sessionCapHeldRefusal(view: {
+  kind: string;
+  live: number;
+  cap: number;
+}): string | undefined {
+  if (view.cap <= 0 || view.live <= view.cap) {
+    return undefined;
+  }
+  return sessionCapLine(view.kind, view.live, view.cap, 0);
 }
 
 /** The budget of every kind this command would start a session of.
@@ -347,7 +368,15 @@ function admissionGate(args: SessionStartAdmissionArgs): { resDir?: string } | u
   if (quota === undefined && args.providerCap === undefined) {
     return undefined;
   }
-  return { resDir: args.providerCap?.reservationsDir ?? quota?.reservationsDir };
+  // the dir the locked section claims+counts in — the mutex must sit
+  // on the SAME census or spawn and session-start admissions serialize
+  // on different files over one ledger. `sessionReservationsDir`
+  // resolves the bag's override whether or not a quota lane armed it —
+  // a quota-free bag still names the dir the claims land in.
+  return {
+    resDir:
+      args.providerCap?.reservationsDir ?? sessionReservationsDir(args.plane.kind, args.agents),
+  };
 }
 
 /** The provider-cap refusal line — undefined when the lane fits. The
@@ -361,9 +390,26 @@ export function providerCapRefusal(
   if (lane.cap <= 0 || starts <= 0 || live + starts <= lane.cap) {
     return undefined;
   }
+  return providerCapLine(lane, live, starts);
+}
+
+/** `providerCapRefusal`'s post-claim twin — the pending starts are
+ *  INSIDE `live`, so the verdict is strict: held claims the cap
+ *  cannot seat are the excess. */
+export function providerCapHeldRefusal(lane: ProviderCapLane, live: number): string | undefined {
+  if (lane.cap <= 0 || live <= lane.cap) {
+    return undefined;
+  }
+  return providerCapLine(lane, live, 0);
+}
+
+/** The provider-cap refusal line — the numbers, the knob, and the
+ *  `provider_cap` cause token every wait/park classifier looks for. */
+function providerCapLine(lane: ProviderCapLane, live: number, starts: number): string {
   return (
-    `provider '${lane.provider}' lane cap reached — ${live} live + ${starts} starting ` +
-    `> ${lane.cap} (fleet.providerCaps.${lane.provider} in the global bro config) ` +
+    `provider '${lane.provider}' lane cap reached — ${live} live` +
+    (starts > 0 ? ` + ${starts} starting` : '') +
+    ` > ${lane.cap} (fleet.providerCaps.${lane.provider} in the global bro config) ` +
     `— cause: provider_cap`
   );
 }
@@ -421,10 +467,16 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
 
 /** The sanitized slots-dir kind a provider-namespaced census lives
  *  under — a providers entry key can carry characters a dir path
- *  cannot, so the namespace is `provider-<key>` with unsafe chars
- *  folded to '-'. */
+ *  cannot, so every unsafe char ESCAPES: `-` doubles (`--`), anything
+ *  else becomes `-x<hhhh>` (the char's UTF-16 code unit, hex). The
+ *  fold is INJECTIVE — `a/b`, `a:b`, `a.b` and `a-b` keep distinct
+ *  claims and mutexes where a flat `-` replacement would collapse
+ *  them onto one ledger. */
 export function providerSlotsKind(provider: string): string {
-  return `provider-${provider.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+  const encoded = provider.replace(/[^A-Za-z0-9_]/g, c =>
+    c === '-' ? '--' : `-x${c.charCodeAt(0).toString(16).padStart(4, '0')}`
+  );
+  return `provider-${encoded}`;
 }
 
 /** The provider-namespaced census dir — the claims every surface's

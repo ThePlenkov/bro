@@ -76,10 +76,14 @@ half-entered tree (the remote-only copilot backend skips this).
   count misses sessions the kind's cloud side may hold —
   a plane reports only what the host can verify.
 - **The account cap is the outer gate.** `fleet.providerCaps.<provider>`
-  in the _global_ config caps every live lane one provider entry opens,
+  in the _global_ config caps every live lane one provider entry opens.
+  A provider whose command a session plane counts is capped
   machine-wide: registry workers, `bro serve` conductor turns, brokered
   `/api/v1/acp` sessions, ACP children spawned transitively, and the
-  operator's own interactive sessions all share the count. It judges
-  before the kind quota and the fleet cap, parks as a retryable
-  `provider_cap` cause — never a burned attempt — and counts through
-  pid-governed claims, so a live holder's lane survives the slot TTL.
+  operator's own interactive sessions all share the count. A plane-less
+  entry (an `api` provider, a cli no plane claims) counts its own
+  registry occupants plus the shared claim ledger — repo-local by
+  design limit (spec bro-x601l). It judges before the kind quota and
+  the fleet cap, parks as a retryable `provider_cap` cause — never a
+  burned attempt — and counts through pid-governed claims, so a live
+  holder's lane survives the slot TTL.

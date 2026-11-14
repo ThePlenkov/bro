@@ -37,12 +37,12 @@ import {
   LockTimeout,
   MAX_TIMER_MS,
   planesStartingSessions,
-  providerCapRefusal,
+  providerCapHeldRefusal,
   providerSlotsDir,
   providerSlotsKind,
   releaseSessionStart,
   reserveSessionStart,
-  sessionCapRefusal,
+  sessionCapHeldRefusal,
   sessionCapViews,
   sessionReservationsDir,
   SpawnError,
@@ -2189,39 +2189,48 @@ export async function admitLaneCap(cfg: ConductorConfig, claimKey: string): Prom
   const admissions: SessionStartAdmission[] = [];
   let refusal: string | undefined;
   const planes = planesStartingSessions(command);
-  for (const plane of planes) {
-    const admission = await admitSessionStartAsync({
-      plane,
-      command,
-      agents: cfg.agents,
-      key: claimKey,
-      providerCap,
-      waitMs: CAP_LOCK_WAIT_MS,
-    });
-    if (admission === undefined) {
-      continue;
-    }
-    if (admission.refusal !== undefined) {
-      refusal = admission.refusal;
-      break;
-    }
-    admissions.push(admission);
-  }
-  // a provider NO plane counts still gates (spec bro-x601l): the claim
-  // ledger is its whole census — the lane's held claims are already
-  // inside it, so the caller's own count adds nothing
-  if (refusal === undefined && planes.length === 0 && providerCap !== undefined) {
-    const admission = await admitProviderSlotAsync(providerCap, () => 0, {
-      key: claimKey,
-      waitMs: CAP_LOCK_WAIT_MS,
-    });
-    if (admission !== undefined) {
+  try {
+    for (const plane of planes) {
+      const admission = await admitSessionStartAsync({
+        plane,
+        command,
+        agents: cfg.agents,
+        key: claimKey,
+        providerCap,
+        waitMs: CAP_LOCK_WAIT_MS,
+      });
+      if (admission === undefined) {
+        continue;
+      }
       if (admission.refusal !== undefined) {
         refusal = admission.refusal;
-      } else {
-        admissions.push(admission);
+        break;
+      }
+      admissions.push(admission);
+    }
+    // a provider NO plane counts still gates (spec bro-x601l): the claim
+    // ledger is its whole census — the lane's held claims are already
+    // inside it, so the caller's own count adds nothing
+    if (refusal === undefined && planes.length === 0 && providerCap !== undefined) {
+      const admission = await admitProviderSlotAsync(providerCap, () => 0, {
+        key: claimKey,
+        waitMs: CAP_LOCK_WAIT_MS,
+      });
+      if (admission !== undefined) {
+        if (admission.refusal !== undefined) {
+          refusal = admission.refusal;
+        } else {
+          admissions.push(admission);
+        }
       }
     }
+  } catch (err) {
+    // a later plane's throw (the lock outliving the wait, an
+    // unverifiable count, the claim's own fs error) must not strand the
+    // claims the earlier planes took — the caller never receives a
+    // release for them, so they would count until the holder died
+    releaseSessionStart(admissions.flatMap(a => a.paths));
+    throw err;
   }
   if (refusal !== undefined) {
     releaseSessionStart(admissions.flatMap(a => a.paths));
@@ -2281,109 +2290,128 @@ function claimRelease(paths: string[]): () => void {
  *  a wedged holder. */
 const CAP_LOCK_WAIT_MS = 5_000;
 
-/** The un-locked check+claim — the path the conductor ran before the
- *  admission mutex serialized it, kept as the contention fallback on
- *  every caller of `admitLaneCap`. */
+/** The un-locked claim+judge — the contention fallback on every caller
+ *  of `admitLaneCap`, kept so a mutex that outlives the wait never
+ *  stalls the request loop.
+ *
+ *  It claims FIRST and counts second — the mirror of the locked
+ *  section's own order. A check-then-claim outside the mutex would let
+ *  two contenders read the same headroom and both open past the cap;
+ *  with the claim already landed, every census sees every caller, the
+ *  cap's excess is REFUSED (the claim handed back), and the lane can
+ *  over-refuse under a burst but never over-admit. */
 export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): () => void {
-  let views;
+  const command = cfg.entry.command;
+  const providerCap = laneProviderCap(cfg);
+  const planes = planesStartingSessions(command);
+  // the kinds whose quota gates this command — the pre-claim view only
+  // decides which unarmed planes skip the claim (a provider cap arms
+  // every claiming plane's census itself). Nothing armed at all means
+  // the lane never gates.
+  let armed: Set<string> | undefined;
+  if (providerCap === undefined) {
+    let views;
+    try {
+      views = sessionCapViews(command, cfg.agents);
+    } catch (err) {
+      // the count could not be established — fail closed, with the reason
+      // the operator needs (a quota that cannot be verified is not walked
+      // past)
+      if (err instanceof SpawnError) {
+        throw err;
+      }
+      throw new Error(
+        `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+      );
+    }
+    if (views.length === 0) {
+      return claimRelease([]);
+    }
+    armed = new Set(views.map(v => v.kind));
+  }
+  // claim first — a repeat event's slots are already held (its key is
+  // idempotent), and a mid-loop failure hands back the claims already
+  // taken instead of stranding them against the cap
+  const held: string[] = [];
   try {
-    views = sessionCapViews(cfg.entry.command, cfg.agents);
+    if (planes.length === 0) {
+      // a provider NO plane counts still claims — the provider-
+      // namespaced ledger is its whole census (spec bro-x601l)
+      if (providerCap !== undefined) {
+        held.push(
+          ...reserveSessionStart({
+            kind: providerSlotsKind(providerCap.provider),
+            agents: undefined,
+            key: claimKey,
+            count: 1,
+            dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
+          }).paths
+        );
+      }
+    } else {
+      for (const plane of planes) {
+        // a quota-armed kind claims its starts; an unarmed one claims
+        // only when the provider cap armed its census — the same gate
+        // the locked admission runs
+        if (armed !== undefined && !armed.has(plane.kind)) {
+          continue;
+        }
+        held.push(
+          ...reserveSessionStart({
+            kind: plane.kind,
+            agents: cfg.agents,
+            key: claimKey,
+            count: plane.startsSessions?.(command) ?? 1,
+          }).paths
+        );
+      }
+    }
   } catch (err) {
-    // the count could not be established — fail closed, with the reason
-    // the operator needs (a quota that cannot be verified is not walked
-    // past)
+    releaseSessionStart(held);
+    throw new Error(
+      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+    );
+  }
+  // the post-claim census — every held claim (this caller's included)
+  // already sits inside `live`, so the verdicts are the strict
+  // post-claim tests and no `starts` may be added again
+  let postViews;
+  let providerLive = 0;
+  try {
+    postViews = sessionCapViews(command, cfg.agents);
+    if (providerCap !== undefined) {
+      providerLive =
+        planes.length === 0
+          ? countSessionReservations(
+              providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
+            )
+          : planes.reduce(
+              (sum, plane) =>
+                sum +
+                plane.countLive(cfg.agents[plane.kind] ?? {}) +
+                countSessionReservations(sessionReservationsDir(plane.kind, cfg.agents)),
+              0
+            );
+    }
+  } catch (err) {
+    releaseSessionStart(held);
+    if (err instanceof SpawnError) {
+      throw err;
+    }
     throw new Error(
       `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
     );
   }
-  const providerCap = laneProviderCap(cfg);
-  const view = views[0];
-  // the provider cap's census — the same arithmetic the locked section
-  // runs (spec bro-x601l): every claiming plane's own count plus the
-  // claims held in its dir; a command no plane claims counts the
-  // provider-namespaced ledger alone
-  const providerLive = (() => {
-    if (providerCap === undefined) {
-      return 0;
-    }
-    const planes = planesStartingSessions(cfg.entry.command);
-    if (planes.length === 0) {
-      return countSessionReservations(
-        providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
-      );
-    }
-    return planes.reduce(
-      (sum, plane) =>
-        sum +
-        plane.countLive(cfg.agents[plane.kind] ?? {}) +
-        countSessionReservations(sessionReservationsDir(plane.kind, cfg.agents)),
-      0
-    );
-  })();
-  // the kind quota's own verdict — view.live already carries every
-  // held claim: a retained conversation's stale claim counts while
-  // this process lives (spec bro-x601l), so sessions.size and the
-  // pending opens' marks must NOT be added again the way TTL-only
-  // claims required
   const refusal =
-    (providerCap === undefined
-      ? undefined
-      : providerCapRefusal(providerCap, providerLive, view?.starts ?? 1)) ??
-    (view === undefined ? undefined : sessionCapRefusal(view));
+    (providerCap === undefined ? undefined : providerCapHeldRefusal(providerCap, providerLive)) ??
+    postViews.map(sessionCapHeldRefusal).find((line): line is string => line !== undefined);
   if (refusal !== undefined) {
     // the same refusal class the locked section throws — the wire
     // reads 'cap' as the park verdict either path takes
+    releaseSessionStart(held);
     throw new SpawnError(refusal, 'cap');
   }
-  if (view !== undefined) {
-    try {
-      const { paths } = reserveSessionStart({
-        kind: view.kind,
-        agents: cfg.agents,
-        key: claimKey,
-        count: view.starts,
-      });
-      return claimRelease(paths);
-    } catch (err) {
-      throw new Error(
-        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
-      );
-    }
-  }
-  // no kind view at all — a provider cap alone still claims, where the
-  // locked admission claims it: each claiming plane's kind dir, or the
-  // provider-namespaced ledger when no plane claims (spec bro-x601l)
-  if (providerCap !== undefined) {
-    const planes = planesStartingSessions(cfg.entry.command);
-    try {
-      if (planes.length === 0) {
-        const { paths } = reserveSessionStart({
-          kind: providerSlotsKind(providerCap.provider),
-          agents: undefined,
-          key: claimKey,
-          count: 1,
-          dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
-        });
-        return claimRelease(paths);
-      }
-      const held: string[] = [];
-      for (const plane of planes) {
-        const { paths } = reserveSessionStart({
-          kind: plane.kind,
-          agents: cfg.agents,
-          key: claimKey,
-          count: plane.startsSessions?.(cfg.entry.command) ?? 1,
-        });
-        held.push(...paths);
-      }
-      return claimRelease(held);
-    } catch (err) {
-      throw new Error(
-        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
-      );
-    }
-  }
-  return claimRelease([]);
+  return claimRelease(held);
 }
 
 /** The one-shot path — a session on the shared peer, nothing retained. */
