@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/watch.schema.json",
+  "title": "bro watch --json",
+  "description": "One heartbeat tick — mirrors WatchSnapshot in packages/cli/src/commands/watch.ts. Additive error/section keys (molsError, prErrors, wallsError, janitor, activity, clock, fleet.error, gates.reason/error/lookupErrors, loop.error, daemon.error) appear only when their plane has news.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ts", "attention", "mols", "gates", "fleet", "loop", "daemon"],
+  "properties": {
+    "ts": { "type": "string", "description": "ISO-8601 tick clock." },
+    "attention": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ready human gates, lost agents, walled providers, blocked/unprobeable PR gates. Empty = the fleet is quiet."
+    },
+    "mols": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/WatchMol" }
+    },
+    "molsError": { "type": "string", "description": "Set when the mols plane itself threw — never a false 'no open molecules'." },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "prs"],
+      "properties": {
+        "available": {
+          "type": "boolean",
+          "description": "false when no review host resolved — the section is 'unavailable', never a phantom dead fleet."
+        },
+        "reason": { "type": "string" },
+        "error": { "type": "string", "description": "The probe machinery itself threw — every gate unprobed." },
+        "lookupErrors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "branch→PR lookups that failed — an empty prs then means 'couldn't resolve'."
+        },
+        "prs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/WatchPrGate" }
+        }
+      }
+    },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "degraded", "conflicts"],
+      "properties": {
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/FleetRow" } },
+        "degraded": { "type": "array", "items": { "type": "string" } },
+        "conflicts": { "type": "array", "items": { "type": "string" } },
+        "prErrors": { "type": "array", "items": { "type": "string" } },
+        "walls": { "type": "array", "items": { "$ref": "#/$defs/ProviderWall" } },
+        "wallsError": { "type": "string" },
+        "error": { "type": "string", "description": "Set when the fleet plane itself threw — 'unavailable', never a false empty fleet." }
+      }
+    },
+    "janitor": { "$ref": "#/$defs/JanitorReport" },
+    "loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stallMin", "runs"],
+      "properties": {
+        "stallMin": { "type": "number" },
+        "runs": { "type": "array", "items": { "$ref": "#/$defs/LoopRunView" } },
+        "error": { "type": "string" }
+      }
+    },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["live", "recorded", "installed"],
+      "properties": {
+        "live": { "type": "boolean" },
+        "pid": { "type": "integer" },
+        "recorded": { "type": "boolean", "description": "An armer record exists (daemon.json) — dead+recorded is the 'restart me' signal." },
+        "installed": { "type": "boolean", "description": "bro drive install armed bro/drive.json — a dead daemon under it is a checkpoint-rearm gap." },
+        "error": { "type": "string" }
+      }
+    },
+    "activity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latest"],
+      "properties": {
+        "latest": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "agent key → the one-line verdict of its newest in-turn event."
+        },
+        "gapped": { "type": "boolean", "description": "The ring tail was truncated — the map is the newest slice." }
+      },
+      "description": "'agent' topic tail — absent entirely when the bus recorded nothing."
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local", "skewed"],
+      "properties": {
+        "local": { "type": "string", "description": "Date.now() at probe time — the tick's own clock reading." },
+        "remote": { "type": "string", "description": "The review host's HTTP Date header — the external authority." },
+        "skewMs": { "type": "number", "description": "remote − local in ms; + means the local clock runs behind." },
+        "skewed": { "type": "boolean" },
+        "error": { "type": "string" }
+      },
+      "description": "The tick's own clock check — absent when no github host serves this rig."
+    }
+  },
+  "$defs": {
+    "WatchMol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mol", "state", "ready", "gates", "inProgress", "blocked"],
+      "properties": {
+        "mol": { "type": "string" },
+        "state": { "type": "string" },
+        "ready": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "kind"],
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "kind": { "type": "string" }
+            }
+          }
+        },
+        "gates": { "type": "array", "items": { "type": "string" } },
+        "inProgress": { "type": "array", "items": { "type": "string" } },
+        "blocked": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "WatchPrGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pr", "link"],
+      "properties": {
+        "pr": { "type": "integer" },
+        "link": { "type": "string" },
+        "ok": { "type": "boolean", "description": "absent = the exit gate evaluated; present = the probe itself failed" },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "alerts": { "type": "array", "items": { "type": "string" }, "description": "Advisory-check alerts — never blockers." },
+        "error": { "type": "string" },
+        "mergeable": { "type": "string" },
+        "mergeState": { "type": "string" },
+        "openThreads": { "type": "integer" },
+        "ciPending": { "type": "integer" },
+        "ciFailing": { "type": "integer" },
+        "reviewersPending": { "type": "integer" },
+        "sastPending": { "type": "integer" },
+        "ownership": { "enum": ["managed", "review", "human"] }
+      }
+    },
+    "FleetRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mol", "step", "title", "kind", "state", "agent"],
+      "properties": {
+        "mol": { "type": "string" },
+        "step": { "type": "string" },
+        "title": { "type": "string" },
+        "kind": { "type": "string" },
+        "state": { "type": "string" },
+        "agent": { "type": "string" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "worktree": { "type": "string" },
+        "pr": { "type": "string" },
+        "prNum": { "type": "integer" },
+        "prNums": { "type": "array", "items": { "type": "integer" } }
+      }
+    },
+    "ProviderWall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "cause"],
+      "properties": {
+        "provider": { "type": "string" },
+        "account": { "type": "string" },
+        "cause": { "enum": ["rate_limited", "quota"] },
+        "until": { "type": "string" },
+        "bound": { "type": "boolean" }
+      }
+    },
+    "JanitorReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dryRun", "sessions", "agentEntries", "reaped", "truncated"],
+      "properties": {
+        "dryRun": { "type": "boolean" },
+        "sessions": { "type": "array", "items": { "type": "string" } },
+        "agentEntries": { "type": "array", "items": { "type": "string" } },
+        "reaped": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["markers", "hinted", "fired", "cursors", "drops", "agentFiles", "locks", "debris", "trace"],
+          "properties": {
+            "markers": { "type": "integer" },
+            "hinted": { "type": "integer" },
+            "fired": { "type": "integer" },
+            "cursors": { "type": "integer" },
+            "drops": { "type": "integer" },
+            "agentFiles": { "type": "integer" },
+            "locks": { "type": "integer" },
+            "debris": { "type": "integer" },
+            "trace": { "type": "integer" }
+          }
+        },
+        "truncated": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes"],
+            "properties": {
+              "path": { "type": "string" },
+              "bytes": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "LoopRunView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["beadId", "slug", "pid", "state", "silentMs"],
+      "properties": {
+        "beadId": { "type": "string" },
+        "beadIds": { "type": "array", "items": { "type": "string" } },
+        "slug": { "type": "string" },
+        "pid": { "type": ["integer", "null"] },
+        "state": { "enum": ["running", "dead"] },
+        "startedAt": { "type": "string" },
+        "worktree": { "type": "string" },
+        "log": { "type": "string" },
+        "silentMs": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

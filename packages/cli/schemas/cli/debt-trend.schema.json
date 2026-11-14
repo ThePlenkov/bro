@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/debt-trend.schema.json",
+  "title": "bro debt trend --json",
+  "description": "TrendPoint[] — mirrors TrendPoint in packages/debt/src/trend.ts. One point per time bucket × --by group key.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["bucket", "key", "opened", "closed", "open"],
+    "properties": {
+      "bucket": {
+        "type": "string",
+        "description": "Bucket start — YYYY-MM-DD, UTC (weeks start Monday)."
+      },
+      "key": { "type": "string", "description": "Group key — 'all' when ungrouped." },
+      "opened": { "type": "integer", "description": "Findings whose open interval started inside this bucket." },
+      "closed": { "type": "integer", "description": "Findings whose open interval ended inside this bucket." },
+      "open": { "type": "integer", "description": "Open at bucket end — the in-progress bucket counts at now." }
+    }
+  }
+}

@@ -2,18 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://broject.dev/schemas/cli/skills-list.schema.json",
   "title": "bro skills list --json",
+  "description": "{command: 'skills list', data: {rows}} — rows mirror SkillRow in packages/cli/src/commands/skills.ts.",
   "type": "object",
+  "additionalProperties": false,
   "required": ["command", "data"],
   "properties": {
     "command": { "const": "skills list" },
     "data": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["rows"],
       "properties": {
         "rows": {
           "type": "array",
           "items": {
             "type": "object",
+            "additionalProperties": false,
             "required": ["name", "source", "state"],
             "properties": {
               "name": { "type": "string" },
@@ -22,13 +26,10 @@
                 "enum": ["ok", "linked", "present", "missing", "drifted", "extra", "pending", "error"]
               },
               "detail": { "type": "string" }
-            },
-            "additionalProperties": false
+            }
           }
         }
-      },
-      "additionalProperties": true
+      }
     }
-  },
-  "additionalProperties": true
+  }
 }

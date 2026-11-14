@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/debt-stats.schema.json",
+  "title": "bro debt stats --json",
+  "description": "StatBucket[] — mirrors StatBucket in packages/debt/src/stats.ts. One bucket per --by group key.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["key", "total", "open", "claimed", "done", "wontfix", "duplicate", "fixRate"],
+    "properties": {
+      "key": { "type": "string", "description": "The --by group value (author, area, priority, …)." },
+      "total": { "type": "integer" },
+      "open": { "type": "integer" },
+      "claimed": { "type": "integer" },
+      "done": { "type": "integer" },
+      "wontfix": { "type": "integer" },
+      "duplicate": { "type": "integer" },
+      "fixRate": {
+        "type": ["number", "null"],
+        "description": "done / (done + wontfix + duplicate); null until something is decided."
+      }
+    }
+  }
+}
