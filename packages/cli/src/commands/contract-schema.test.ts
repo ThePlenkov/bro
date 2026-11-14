@@ -289,6 +289,40 @@ async function emittedDoc(fn: () => unknown): Promise<unknown> {
 
 const SHA = 'a'.repeat(40);
 
+const SCHEMA_THREADS: ReviewThread[] = [
+  {
+    id: 't-1',
+    resolved: false,
+    outdated: false,
+    comment: {
+      author: 'bot',
+      bot: true,
+      path: 'x.ts',
+      line: 1,
+      body: 'n',
+      createdAt: new Date().toISOString(),
+    },
+  },
+];
+
+const SCHEMA_CHECKS: CheckInfo[] = [
+  { name: 'build', state: 'SUCCESS', bucket: 'pass' },
+  { name: 'greptile', state: 'PENDING', bucket: 'pending' },
+];
+
+const GREEN_CHECKS: CheckInfo[] = [{ name: 'build', state: 'SUCCESS', bucket: 'pass' }];
+
+const schemaPrMeta = (pr: number): PrMeta => ({
+  state: 'OPEN',
+  isDraft: false,
+  url: `https://github.com/o/r/pull/${pr}`,
+  headSha: SHA,
+  headRef: `work/fx-${pr}`,
+  baseRef: 'main',
+  mergeable: 'MERGEABLE',
+  mergeState: 'CLEAN',
+});
+
 /** The review host both `act status` and `watch` resolve through — a
  *  connector-registered facade so the producers exercise the commands'
  *  own resolution + gate + emit paths rather than rebuilding their
@@ -296,36 +330,6 @@ const SHA = 'a'.repeat(40);
  *  resolve ledger first it reads `reopened` on the watch gate row.
  *  PR 8 is the clean row (gate ok, zero threads). */
 function schemaReviewFacade(): ReviewFacade {
-  const meta = (pr: number): PrMeta => ({
-    state: 'OPEN',
-    isDraft: false,
-    url: `https://github.com/o/r/pull/${pr}`,
-    headSha: SHA,
-    headRef: `work/fx-${pr}`,
-    baseRef: 'main',
-    mergeable: 'MERGEABLE',
-    mergeState: 'CLEAN',
-  });
-  const threads: ReviewThread[] = [
-    {
-      id: 't-1',
-      resolved: false,
-      outdated: false,
-      comment: {
-        author: 'bot',
-        bot: true,
-        path: 'x.ts',
-        line: 1,
-        body: 'n',
-        createdAt: new Date().toISOString(),
-      },
-    },
-  ];
-  const checks: CheckInfo[] = [
-    { name: 'build', state: 'SUCCESS', bucket: 'pass' },
-    { name: 'greptile', state: 'PENDING', bucket: 'pending' },
-  ];
-  const green: CheckInfo[] = [{ name: 'build', state: 'SUCCESS', bucket: 'pass' }];
   return {
     resolveRepo: () => 'o/r',
     prLink: (_repo: string, pr: number) => `https://github.com/o/r/pull/${pr}`,
@@ -337,11 +341,11 @@ function schemaReviewFacade(): ReviewFacade {
     ],
     parsePrRef: () => null,
     labels: () => [],
-    prMeta: (t: { pr: number }) => meta(t.pr),
-    reviewThreads: async (t: { pr: number }) => (t.pr === 7 ? threads : []),
+    prMeta: (t: { pr: number }) => schemaPrMeta(t.pr),
+    reviewThreads: async (t: { pr: number }) => (t.pr === 7 ? SCHEMA_THREADS : []),
     // PR 8's row must reach ok:true — a pending AI reviewer blocks the
     // gate as surely as a red job, so it gets the all-green check set
-    checks: (t: { pr: number }) => (t.pr === 8 ? green : checks),
+    checks: (t: { pr: number }) => (t.pr === 8 ? GREEN_CHECKS : SCHEMA_CHECKS),
     checkAnnotations: () => new Map(),
     reviewedShas: () => [SHA],
     resolveThread: () => {},
