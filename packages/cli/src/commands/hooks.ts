@@ -2489,6 +2489,17 @@ async function emitPostToolObserve(
   }
 }
 
+/** The waste-guard's post-tool marker commit, boxed so the payload
+ *  field reads (`??`/ternary decision points) live here instead of
+ *  growing emitPostTool's branch count. */
+function wasteRecordFor(input: HookInput, sessionId: string, outcome: unknown): void {
+  wasteGuardRecord(process.cwd(), sessionId, {
+    tool: typeof input.tool_name === 'string' ? input.tool_name : '',
+    input: (input.tool_input ?? {}) as Record<string, unknown>,
+    outcome,
+  });
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const lines: string[] = [];
@@ -2506,13 +2517,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // reaches this event, so a marker only stands for a call that
   // actually ran (spec bro-rw8z3). Passive state like the trace
   // journal, so it records in observe mode too.
-  wasteGuardRecord(
-    process.cwd(),
-    sessionId,
-    typeof input.tool_name === 'string' ? input.tool_name : '',
-    (input.tool_input ?? {}) as Record<string, unknown>,
-    outcome
-  );
+  wasteRecordFor(input, sessionId, outcome);
   // `bro mode <name>` binds to this session here — runs in EVERY mode,
   // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
   // A proven-failed call binds nothing (the mode was never applied);
@@ -2758,7 +2763,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   // bro-rw8z3); fail-open inside, so a state-dir failure never stalls.
   // pre-tool only checks — the marker commit lands at post-tool, so a
   // call vetoed here or below can never shadow its own retry
-  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, tool, toolInput);
+  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput });
   if (wasteBlock !== undefined) {
     emitPreToolDeny(wasteBlock);
     return;

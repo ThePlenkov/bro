@@ -30,14 +30,27 @@ const READ_KEY_FIELDS = ['file_path', 'path', 'pattern', 'query', 'glob', 'url']
 /** Verify-shaped commands — the test/build runs the guard budgets. */
 const VERIFY_CMD_RE =
   /(?:^|[;&|]\s*)(?:npm\s+(?:run\s+)?(?:test|build|typecheck|check)\b|npx\s+tsc\b|(?:vitest|jest|pytest|py\.test|go\s+test|cargo\s+test|tsx\s+--test|node\s+--test)\b)/;
-/** Leading env assignments (`FOO=bar cmd`, `env FOO=bar cmd`) must not
- *  smuggle a verify past the gate — the prefix never reaches the hook's
- *  own env, so honoring it would teach a bypass that does not exist. */
-const ENV_PREFIX_RE = /^(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s+)*/;
+/** One env-prefix token — `env` itself, an env option (the arg-taking
+ *  short/long forms consume their value), or a shell `NAME=value`
+ *  assignment with a quoted or empty value. Leading env/assignment
+ *  chains never reach the hook's own env, so honoring them would teach
+ *  a bypass that does not exist; anything unrecognized is left in the
+ *  command and simply fails to match VERIFY_CMD_RE. */
+const ENV_TOKEN_RE =
+  /^(?:env|-(?:u|C|S|a)\s+\S+|--(?:unset|chdir|split-string|argv0|default-signal|block-signal|ignore-signal)\s+\S+|--?[\w-]+(?:=\S+)?|[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*))\s+/;
 
 /** Untracked files at or under this size are content-hashed into the
  *  tree fingerprint; larger ones contribute mtime+size instead. */
 const UNTRACKED_CONTENT_CAP = 256 * 1024;
+
+/** One guarded tool call — the name/payload the guards read, plus the
+ *  host's outcome at post-tool (`tool_response.success`; absent means
+ *  the host cannot report one, which counts as unproven, not failed). */
+export interface GuardedCall {
+  tool: string;
+  input: Record<string, unknown>;
+  outcome?: unknown;
+}
 
 function enabled(): boolean {
   return process.env.BRO_WASTE_GUARD !== '0';
@@ -169,6 +182,29 @@ function commandOf(input: Record<string, unknown>): string {
   return typeof c === 'string' ? c : '';
 }
 
+/** The command with its leading env/assignment chain stripped —
+ *  `FOO=1 env -i npm test` and `env FOO='a b' npm test` normalize to
+ *  `npm test`. Every token match consumes at least the token plus its
+ *  trailing whitespace, so the strip loop always terminates. */
+function stripEnvPrefix(cmd: string): string {
+  let rest = cmd;
+  for (;;) {
+    const m = ENV_TOKEN_RE.exec(rest);
+    if (m === null) {
+      return rest;
+    }
+    rest = rest.slice(m[0].length);
+  }
+}
+
+/** True when the input's shell command is verify-shaped once the
+ *  leading env/assignment noise is stripped — the only part of the
+ *  payload the verify-gate reads. */
+function isVerifyCommand(input: Record<string, unknown>): boolean {
+  const cmd = stripEnvPrefix(commandOf(input));
+  return cmd !== '' && VERIFY_CMD_RE.test(cmd);
+}
+
 /** The resolved marker scope both hook legs share — the state dir plus
  *  the fs-safe session key, or null when the guard is off, sessionless,
  *  or outside a git repo (fail-open). */
@@ -178,7 +214,10 @@ interface GuardScope {
 }
 
 function guardScope(dir: string, sessionId: string): GuardScope | null {
-  if (!enabled() || sessionId === '') {
+  if (!enabled()) {
+    return null;
+  }
+  if (sessionId === '') {
     return null;
   }
   const sd = stateDir(dir);
@@ -196,36 +235,29 @@ function guardScope(dir: string, sessionId: string): GuardScope | null {
 export function wasteGuardBlock(
   dir: string,
   sessionId: string,
-  tool: string,
-  input: Record<string, unknown>
+  call: GuardedCall
 ): string | undefined {
   const scope = guardScope(dir, sessionId);
   if (scope === null) {
     return undefined;
   }
-  return verifyGateBlock(dir, scope, input) ?? dupReadBlock(dir, scope, tool, input);
+  return verifyGateBlock(dir, scope, call.input) ?? dupReadBlock(dir, scope, call);
 }
 
 /** The post-tool leg — commit the markers a pre-tool admit deferred.
  *  A call that never executed (denied pre-tool, connector veto,
  *  refused prompt) never reaches here, so no marker can shadow its
- *  retry. `outcome` is the host's `tool_response.success`; a
+ *  retry. `call.outcome` is the host's `tool_response.success`; a
  *  proven-failed inspection call leaves no dup marker (there is no
  *  result to reuse), while a verify run marks on any outcome — an
  *  attempted verify at this tree state is spent either way. */
-export function wasteGuardRecord(
-  dir: string,
-  sessionId: string,
-  tool: string,
-  input: Record<string, unknown>,
-  outcome: unknown
-): void {
+export function wasteGuardRecord(dir: string, sessionId: string, call: GuardedCall): void {
   const scope = guardScope(dir, sessionId);
   if (scope === null) {
     return;
   }
-  verifyGateRecord(dir, scope, input);
-  dupReadRecord(dir, scope, tool, input, outcome);
+  verifyGateRecord(dir, scope, call.input);
+  dupReadRecord(dir, scope, call);
 }
 
 /** verify-gate — a test/build command re-run on an unchanged tree: same
@@ -235,8 +267,7 @@ function verifyGateBlock(
   scope: GuardScope,
   input: Record<string, unknown>
 ): string | undefined {
-  const cmd = commandOf(input).replace(ENV_PREFIX_RE, '');
-  if (cmd === '' || !VERIFY_CMD_RE.test(cmd)) {
+  if (!isVerifyCommand(input)) {
     return undefined;
   }
   const fp = treeFingerprint(dir);
@@ -255,8 +286,7 @@ function verifyGateBlock(
 }
 
 function verifyGateRecord(dir: string, scope: GuardScope, input: Record<string, unknown>): void {
-  const cmd = commandOf(input).replace(ENV_PREFIX_RE, '');
-  if (cmd === '' || !VERIFY_CMD_RE.test(cmd)) {
+  if (!isVerifyCommand(input)) {
     return;
   }
   const fp = treeFingerprint(dir);
@@ -270,44 +300,42 @@ function verifyGateRecord(dir: string, scope: GuardScope, input: Record<string, 
  *  session on the same tree returns identical output, so the repeat is
  *  pure waste. The fingerprint in the aspect is what an edit defeats:
  *  after the tree moves, the same call is a NEW question and re-arms. */
-function dupAspect(fp: string, tool: string, input: Record<string, unknown>): string {
-  return `waste-dup-${fp}-${callHash(tool, input)}`;
+function dupAspect(fp: string, call: GuardedCall): string {
+  return `waste-dup-${fp}-${callHash(call.tool, call.input)}`;
 }
 
-function dupReadBlock(
-  dir: string,
-  scope: GuardScope,
-  tool: string,
-  input: Record<string, unknown>
-): string | undefined {
-  if (!READ_TOOL_RE.test(tool) || readIdentity(input) === undefined) {
+function dupReadBlock(dir: string, scope: GuardScope, call: GuardedCall): string | undefined {
+  if (!READ_TOOL_RE.test(call.tool)) {
+    return undefined;
+  }
+  if (readIdentity(call.input) === undefined) {
     return undefined;
   }
   const fp = treeFingerprint(dir);
   if (fp === null) {
     return undefined;
   }
-  if (markerExists(scope.sd, scope.session, dupAspect(fp, tool, input))) {
-    return `waste-guard: identical ${tool} call already ran this session — reuse the earlier result`;
+  if (markerExists(scope.sd, scope.session, dupAspect(fp, call))) {
+    return `waste-guard: identical ${call.tool} call already ran this session — reuse the earlier result`;
   }
   return undefined;
 }
 
-function dupReadRecord(
-  dir: string,
-  scope: GuardScope,
-  tool: string,
-  input: Record<string, unknown>,
-  outcome: unknown
-): void {
-  if (!READ_TOOL_RE.test(tool) || readIdentity(input) === undefined || outcome === false) {
+function dupReadRecord(dir: string, scope: GuardScope, call: GuardedCall): void {
+  if (!READ_TOOL_RE.test(call.tool)) {
+    return;
+  }
+  if (readIdentity(call.input) === undefined) {
+    return;
+  }
+  if (call.outcome === false) {
     return;
   }
   const fp = treeFingerprint(dir);
   if (fp === null) {
     return;
   }
-  touch(scope.sd, scope.session, dupAspect(fp, tool, input));
+  touch(scope.sd, scope.session, dupAspect(fp, call));
 }
 
 /** Test seam — the marker prefix a session's waste state lives under. */
