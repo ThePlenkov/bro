@@ -235,6 +235,7 @@ where its native surface can express the trigger.
 | S9 | skills delivery | plugin install | plugin skills register exactly once; dedup vs `~/.agents/skills/` holds; no shadowing of native skills |
 | S10 | native correlation | plugin + native commands coexist | plugin assets extend, never shadow — `/loop`, `/goal`, native slash commands and tools keep native behavior (AGT-1 §Native correlation) |
 | S4f | command family | user runs `/learn`, `/wtf <frustration>`, `/bro:<name>` | family verb reaches `bro <verb> [args]` with identical argv semantics as `/bro`; a host-native name forces `bro:<name>` registration and the native command is untouched |
+| S11 | dead-loop gate | agent repeats one identical tool call ≥4× | post-tool warns once + arms `trace/<session>.deadloop.json`; the next identical pre-tool is vetoed (`decision:block`/codex deny); different signature or session passes; observe mode stays silent (bro-803dm) |
 
 Hosts declare applicability in their child spec's Verify; the
 e2e suite tags each test with its S-ID so coverage is auditable.
@@ -261,3 +262,8 @@ e2e suite tags each test with its S-ID so coverage is auditable.
   native-correlation rule (`bro:<name>` fallback, verified omp
   `/goal`+`/loop`, opencode `/goal`); S4f scenario added;
   `nativeCommands` host field carries each host's native set.
+- 2026-11-14 — v6: S11 dead-loop gate — `bro hooks` detects
+  ≥4 consecutive identical tool signatures from the trace journal
+  (post-tool warn + marker) and vetoes the repeat at pre-tool;
+  signature-scoped, 15min TTL, observe-passive; every hook host
+  inherits it through the shared `bro hooks` path (bro-803dm).
