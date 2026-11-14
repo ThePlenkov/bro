@@ -334,6 +334,8 @@ export class AcpClient {
       await this.openSession();
       this.state = 'live';
       this.notifyState();
+      // the words typed while the session was opening go now
+      void this.drain();
       return caps;
     } catch (err) {
       this.fail(errMsg(err));
@@ -475,6 +477,14 @@ export class AcpClient {
    * human sees their message waiting rather than delivered.
    */
   async prompt(text: string): Promise<void> {
+    if (this.state === 'idle' || this.state === 'starting') {
+      // the session is not open yet — the human's words WAIT for it
+      // (a prompt sent into a session that does not exist yet is a
+      // lost prompt, not a queued one)
+      this.queue.push(text);
+      this.notifyState();
+      return;
+    }
     if (this.state !== 'live' && this.state !== 'busy') {
       throw new Error(`acp client: not live (${this.state})`);
     }

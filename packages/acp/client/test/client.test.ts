@@ -217,6 +217,17 @@ describe('the queue — what the protocol does not have', () => {
     await h.client.close();
   });
 
+  test('a prompt typed BEFORE the session opens waits for it', async () => {
+    const h = harness();
+    // the pane is usable while the handshake is still running
+    await h.client.prompt('typed early');
+    assert.deepEqual(h.client.pendingPrompts, [{ ordinal: 1, text: 'typed early' }]);
+    await h.client.start();
+    await waitFor(() => promptRows(h.rows).includes('typed early'));
+    assert.deepEqual(h.client.pendingPrompts, []);
+    await h.client.close();
+  });
+
   test('the queue drains itself when the turn ends', async () => {
     const h = harness();
     await h.client.start();

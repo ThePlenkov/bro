@@ -20,6 +20,7 @@
  * are, under `npm test`.
  */
 import { AcpClient, type ClientRow, type PermissionAsk, splitArgv } from '../client/src/index.ts';
+import { sanitise } from '../model/src/index.ts';
 import { pickImpl } from '../session/src/index.ts';
 import { type ComposerSubmitEvent, liveAction, type LiveMode, type LiveView } from './live.ts';
 import { copyRow, serve } from './serve.ts';
@@ -128,7 +129,7 @@ async function main(): Promise<void> {
     },
     onState: () => {
       setQueue(client.pendingPrompts);
-      setAsk(client.awaitingPermission);
+      setAsk(sanitisedAsk(client.awaitingPermission));
       setStatus(client.status);
     },
     onNote: line => {
@@ -150,6 +151,23 @@ async function main(): Promise<void> {
     }
   };
 
+  /**
+   * The pending ask, with the agent's text sanitised for APPROVAL.
+   *
+   * The bar is where a human decides — so it gets the approval mode
+   * (bidi overrides and zero-width characters stripped): the text
+   * presented must be the text read, or the agent could word its own
+   * ask into something it is not.
+   */
+  const sanitisedAsk = (ask: PermissionAsk | undefined): PermissionAsk | undefined =>
+    ask === undefined
+      ? undefined
+      : {
+          ...ask,
+          title: sanitise(ask.title, 'approval'),
+          options: ask.options.map(o => ({ ...o, name: sanitise(o.name, 'approval') })),
+        };
+
   /** What the pane knows right now — the keymap reads this. */
   const view = (): LiveView => ({
     mode: mode(),
@@ -166,7 +184,12 @@ async function main(): Promise<void> {
     const trimmed = text.trim();
     if (trimmed === '') return;
     if (pane?.input !== undefined) pane.input.value = '';
-    void client.prompt(trimmed);
+    // the client queues the prompt while the session is opening and
+    // refuses it when the session is gone — a refusal must be SEEN,
+    // never an unhandled rejection that eats the human's words
+    void client.prompt(trimmed).catch((err: unknown) => {
+      served.pane.toast?.(`the prompt was not sent: ${err instanceof Error ? err.message : err}`);
+    });
   };
 
   const served = await serve({
