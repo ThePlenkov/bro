@@ -1234,6 +1234,103 @@ describe('acpProxy — tool_call guards + turn-end stop gate (bro-u2eps)', () =>
     }
   });
 
+  test('session/cancel during an in-flight gate turn crosses immediately — a stalled turn still receives it', async () => {
+    const seen: string[] = [];
+    const cancels: string[] = [];
+    let releaseGateTurn!: () => void;
+    const gateTurnLatch = new Promise<void>(r2 => {
+      releaseGateTurn = r2;
+    });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const responder = (async () => {
+      const reader = agentSide.readable.getReader();
+      const writer = agentSide.writable.getWriter();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) {
+          await writer.close().catch(() => {});
+          return;
+        }
+        const m = value as {
+          id?: JsonRpcId;
+          method?: string;
+          params?: { prompt?: Array<{ text?: string }>; sessionId?: string };
+        };
+        if (m.method === 'initialize') {
+          await writer.write({
+            jsonrpc: '2.0',
+            id: m.id,
+            result: { protocolVersion: 1 },
+          } as AnyMessage);
+        } else if (m.method === 'session/new') {
+          await writer.write({
+            jsonrpc: '2.0',
+            id: m.id,
+            result: { sessionId: 's-cx' },
+          } as AnyMessage);
+        } else if (m.method === 'session/cancel') {
+          cancels.push(m.params?.sessionId ?? '');
+        } else if (m.method === 'session/prompt') {
+          seen.push((m.params?.prompt ?? []).map(b => b.text ?? '').join(''));
+          if (seen.length === 2) {
+            // the gate re-prompt — parked until released: any cancel that
+            // arrives below lands while the turn is provably in flight
+            void gateTurnLatch.then(() =>
+              writer.write({
+                jsonrpc: '2.0',
+                id: m.id,
+                result: { stopReason: 'cancelled' },
+              } as AnyMessage)
+            );
+          } else {
+            await writer.write({
+              jsonrpc: '2.0',
+              id: m.id,
+              result: { stopReason: 'end_turn' },
+            } as AnyMessage);
+          }
+        }
+      }
+    })();
+    const conn = client({ name: 'test-client' }).connect(clientSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      seam: { stopGate: async () => ({ block: 'gate msg' }) },
+      log: () => {},
+    });
+    try {
+      await conn.agent.request('initialize', INIT_PARAMS);
+      await conn.agent.request('session/new', { cwd: '/gate-repo', mcpServers: [] });
+      const firstP = conn.agent.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 's-cx',
+        prompt: [{ type: 'text', text: 'one' }],
+      });
+      // wait for the gate turn to start — its response is parked
+      while (seen.length < 2) {
+        await new Promise(r2 => setTimeout(r2, 5));
+      }
+      // the cancel's real target is the in-flight gate turn — it must
+      // reach the wire now, not after the discharge it exists to cause
+      await conn.agent.notify('session/cancel', { sessionId: 's-cx' });
+      await new Promise(r2 => setTimeout(r2, 60));
+      assert.deepEqual(cancels, ['s-cx']);
+      // the held client request is already answered upstream; the gate
+      // turn's late response lands on an empty slot
+      assert.equal((await firstP).stopReason, 'cancelled');
+      releaseGateTurn();
+      await new Promise(r2 => setTimeout(r2, 40));
+      assert.equal(seen.length, 2);
+    } finally {
+      conn.close();
+      await clientSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      assert.equal(await proxyDone, 0);
+      await responder;
+    }
+  });
+
   test('session/cancel while the gate verdict is pending answers the held prompt cancelled — no gate prompt ever crosses', async () => {
     let releaseGate!: () => void;
     const gate = new Promise<void>(r2 => {

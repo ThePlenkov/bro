@@ -550,7 +550,20 @@ export async function acpProxy(
   /** c2a notification — verbatim modulo the cancel check. */
   const onClientNotification = (m: AnyMessage): void => {
     if (wire(m).method !== 'session/cancel' || cancelCrosses(m)) {
-      writeDownFor(sessionIdOf(m), m);
+      const sid = sessionIdOf(m);
+      // a gate turn in flight is the cancel's real target — queueing
+      // behind its discharge would make the abort unreachable exactly
+      // when it matters (a stalled turn never receives its cancel).
+      // The gate prompt already crossed, so writing immediately keeps
+      // the cancel-after-prompt order the writeQ exists to enforce.
+      const gateInFlight =
+        wire(m).method === 'session/cancel' &&
+        [...pending.values()].some(p => p.gateFor !== undefined && p.prompt?.sessionId === sid);
+      if (gateInFlight) {
+        writeDown(m);
+      } else {
+        writeDownFor(sid, m);
+      }
     }
   };
 
