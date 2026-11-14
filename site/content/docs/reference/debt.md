@@ -1,11 +1,11 @@
 ---
 title: "bro debt"
-description: "Review-debt pipeline: collect|status|prs|list|mark|sync|set"
+description: "Review-debt pipeline: collect|status|stats|trend|prs|list|mark|set|sync|next|watch"
 ---
 
-**`bro debt`** — Review-debt pipeline: collect|status|prs|list|mark|sync|set
+**`bro debt`** — Review-debt pipeline: collect|status|stats|trend|prs|list|mark|set|sync|next|watch
 
-`bro debt collect|status|prs|list|mark|sync|set`
+`bro debt collect|status|stats|trend|prs|list|mark|set|sync|next|watch`
 
 | | |
 | --- | --- |

@@ -9,13 +9,19 @@
   "properties": {
     "dryRun": { "type": "boolean" },
     "sweep": {
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "required": ["line", "didWork"],
-      "properties": {
-        "line": { "type": "string" },
-        "didWork": { "type": "boolean" }
-      }
+      "description": "The key is always present (required); null when the janitor never ran (no git common dir) vs the {line,didWork} report — oneOf keeps the two cases distinct.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["line", "didWork"],
+          "properties": {
+            "line": { "type": "string" },
+            "didWork": { "type": "boolean" }
+          }
+        }
+      ]
     },
     "watch": {
       "type": "object",

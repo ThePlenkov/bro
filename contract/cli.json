@@ -75,7 +75,7 @@
     "debt": {
       "name": "debt",
       "group": "review",
-      "summary": "Review-debt pipeline: collect|status|prs|list|mark|sync|set",
+      "summary": "Review-debt pipeline: collect|status|stats|trend|prs|list|mark|set|sync|next|watch",
       "spellings": ["debt", "review debt"],
       "aliases": [],
       "hidden": false,

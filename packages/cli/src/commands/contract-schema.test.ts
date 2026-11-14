@@ -20,15 +20,17 @@ import { join, resolve } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { ErrorObject, ValidateFunction } from 'ajv';
-import { evaluateExitGate, fetchPrActState } from '@broject/act';
+import { resolveLedger } from '@broject/act';
 import { rigNext } from '@broject/rig';
 import {
   ledgerFacade,
   localLeaseStore,
   projectId,
   recordWall,
+  registerConnector,
   scrubEnv,
   testGit,
+  unregisterConnector,
   type ClaimFacade,
   type ClaimRow,
   type CheckInfo,
@@ -40,6 +42,7 @@ import {
 } from '@broject/core';
 import { PLUGINS, GROUP_META } from '../plugins.ts';
 import { registerAgentConnector } from '../agent-connectors/core.ts';
+import { runActCommand } from './act.ts';
 import { runAgentsCommand } from './agents.ts';
 import { runClaimCommand } from './claim.ts';
 import { buildDump, type ContractDump } from './contract.ts';
@@ -51,10 +54,10 @@ import { runNextCommand } from './next.ts';
 import { runResumeCommand } from './resume.ts';
 import { rigStatus } from './rig.ts';
 import { runSessionsCommand } from './sessions.ts';
-import { collectRows, runSync, skillsSection } from './skills.ts';
+import { runSkillsCommand } from './skills.ts';
 import { collectStatus } from './status.ts';
 import { runWatchdogCommand } from './watchdog.ts';
-import { collectSnapshot } from './watch.ts';
+import { tickOnce } from './watch.ts';
 import { capture, initRepo, insideAsync, installFakeBd, tmpDir, writeBeads } from './testrepo.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -129,6 +132,9 @@ process.env.BEADS_DIR = bdRoot;
 // a fixture XDG home keeps the session ledger, mode files and the lease
 // store off the host's real state
 process.env.XDG_STATE_HOME = tmpDir('bro-schema-state-');
+// same for the global config layer — a host bro.config's skills.install
+// or connectors section must not leak into fixture loadBroConfig reads
+process.env.XDG_CONFIG_HOME = tmpDir('bro-schema-config-');
 
 // --- schema validation ---------------------------------------------------
 
@@ -151,9 +157,16 @@ function schemaFor(rel: string): { validate: ValidateFunction; schema: SchemaDoc
   }
   let validate = compiled.get(rel);
   if (validate === undefined) {
-    const v = ajv.compile(schema);
-    if (v === undefined) {
-      throw new Error(`${rel}: schema did not compile`);
+    // compile() throws on a bad schema — it never returns undefined.
+    // Name the schema in the failure or a broken $ref aborts the whole
+    // suite behind an opaque stack.
+    let v: ValidateFunction;
+    try {
+      v = ajv.compile(schema);
+    } catch (err) {
+      throw new Error(
+        `${rel}: schema did not compile — ${err instanceof Error ? err.message : String(err)}`
+      );
     }
     validate = v;
     compiled.set(rel, v);
@@ -187,29 +200,34 @@ function assertInvalid(rel: string, doc: unknown, why: string): void {
 
 // --- contract ref walk (same walk contract.test.ts proves on disk) --------
 
+function collectEntryRefs(rec: Record<string, unknown>, refs: string[]): void {
+  for (const [key, value] of Object.entries(rec)) {
+    if (key === 'json' && typeof value === 'string') {
+      refs.push(value);
+    } else {
+      collectRefs(value, refs);
+    }
+  }
+}
+
+function collectRefs(node: unknown, refs: string[]): void {
+  if (typeof node !== 'object' || node === null) {
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectRefs(item, refs);
+    }
+    return;
+  }
+  collectEntryRefs(node as Record<string, unknown>, refs);
+}
+
 function schemaRefs(dump: ContractDump): string[] {
   const refs: string[] = [];
-  const walk = (node: unknown): void => {
-    if (typeof node !== 'object' || node === null) {
-      return;
-    }
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        walk(item);
-      }
-      return;
-    }
-    for (const [key, value] of Object.entries(node)) {
-      if (key === 'json' && typeof value === 'string') {
-        refs.push(value);
-      } else {
-        walk(value);
-      }
-    }
-  };
   for (const row of Object.values(dump.commands)) {
     if (row.contract !== undefined) {
-      walk(row.contract);
+      collectRefs(row.contract, refs);
     }
   }
   return refs.sort();
@@ -234,37 +252,60 @@ function ledgerFixture(): { ledger: LedgerFacade } {
   return { ledger: ledgerFacade({ dbPath: join(dir, 'ledger.db'), env }) };
 }
 
-/** The captured console.log of an emit path, parsed as the single JSON
- *  document every --json verb prints. */
+/** The captured console.log of an emit path, parsed as the JSON
+ *  document every --json verb prints as its final stdout write.
+ *  Entries scan backwards so a progress/diagnostic line emitted ahead
+ *  of the document can't poison the parse, and only an object/array
+ *  counts — a bare-scalar diagnostic is not the doc. */
 async function emittedDoc(fn: () => unknown): Promise<unknown> {
-  const r = await capture(() => Promise.resolve().then(() => fn()));
-  const text = r.out.join('\n');
+  const prevCode = process.exitCode;
+  let r: { code: number; out: string[]; err: string[] };
   try {
-    return JSON.parse(text) as unknown;
-  } catch (err) {
-    throw new Error(
-      `emit produced no parseable JSON doc (code ${r.code}): ${text.slice(0, 300)} ` +
-        `stderr: ${r.err.join(' | ').slice(0, 300)} ` +
-        `${err instanceof Error ? err.message : ''}`
-    );
+    r = await capture(() => Promise.resolve().then(() => fn()));
+  } finally {
+    // an emit's exitCode is a verdict for the shell, not for the
+    // caller — a blocked gate (act status) or failed sync must not
+    // leak 1 into the test process's own exit
+    process.exitCode = prevCode;
   }
+  for (let i = r.out.length - 1; i >= 0; i -= 1) {
+    try {
+      const v: unknown = JSON.parse(r.out[i]!);
+      if (typeof v === 'object' && v !== null) {
+        return v;
+      }
+    } catch {
+      // not the payload entry — keep scanning backwards
+    }
+  }
+  const text = r.out.join('\n');
+  throw new Error(
+    `emit produced no parseable JSON doc (code ${r.code}): ${text.slice(0, 300)} ` +
+      `stderr: ${r.err.join(' | ').slice(0, 300)}`
+  );
 }
 
 // --- producers — one per contract `json` ref, each the real emit path -----
 
 const SHA = 'a'.repeat(40);
 
-function fakeReview(): ReviewFacade {
-  const meta: PrMeta = {
+/** The review host both `act status` and `watch` resolve through — a
+ *  connector-registered facade so the producers exercise the commands'
+ *  own resolution + gate + emit paths rather than rebuilding their
+ *  output envelopes. PR 7 carries an open thread; seeded into the
+ *  resolve ledger first it reads `reopened` on the watch gate row.
+ *  PR 8 is the clean row (gate ok, zero threads). */
+function schemaReviewFacade(): ReviewFacade {
+  const meta = (pr: number): PrMeta => ({
     state: 'OPEN',
     isDraft: false,
-    url: 'https://github.com/o/r/pull/7',
+    url: `https://github.com/o/r/pull/${pr}`,
     headSha: SHA,
-    headRef: 'feat/x',
+    headRef: `work/fx-${pr}`,
     baseRef: 'main',
     mergeable: 'MERGEABLE',
     mergeState: 'CLEAN',
-  };
+  });
   const threads: ReviewThread[] = [
     {
       id: 't-1',
@@ -284,21 +325,59 @@ function fakeReview(): ReviewFacade {
     { name: 'build', state: 'SUCCESS', bucket: 'pass' },
     { name: 'greptile', state: 'PENDING', bucket: 'pending' },
   ];
+  const green: CheckInfo[] = [{ name: 'build', state: 'SUCCESS', bucket: 'pass' }];
   return {
-    prMeta: () => meta,
-    reviewThreads: async () => threads,
-    checks: () => checks,
+    resolveRepo: () => 'o/r',
+    prLink: (_repo: string, pr: number) => `https://github.com/o/r/pull/${pr}`,
+    currentPr: () => null,
+    prsForBranch: () => [],
+    openPrs: () => [
+      { pr: 7, headRef: 'work/fx' },
+      { pr: 8, headRef: 'loop/fy' },
+    ],
+    parsePrRef: () => null,
+    labels: () => [],
+    prMeta: (t: { pr: number }) => meta(t.pr),
+    reviewThreads: async (t: { pr: number }) => (t.pr === 7 ? threads : []),
+    // PR 8's row must reach ok:true — a pending AI reviewer blocks the
+    // gate as surely as a red job, so it gets the all-green check set
+    checks: (t: { pr: number }) => (t.pr === 8 ? green : checks),
     checkAnnotations: () => new Map(),
     reviewedShas: () => [SHA],
+    resolveThread: () => {},
+    replyThread: () => {},
+    mergedPrInfo: () => {
+      throw new Error('unused');
+    },
+    mergedPrs: () => [],
   } as unknown as ReviewFacade;
 }
 
-/** `bro act status --json` — {pr, exit_gate} assembled exactly like
- *  cmdStatus (act.ts): fetchPrActState → evaluateExitGate → one doc. */
+/** Claim `dir` for the fixture review host — a matchDir connector wins
+ *  auto-detection without a remote, so the real facade resolution path
+ *  serves the fake (github/gitlab are remote-only matchers). */
+function registerSchemaReviews(dir: string): () => void {
+  registerConnector({
+    name: 'schema-reviews',
+    matchDir: d => d === dir,
+    reviews: () => schemaReviewFacade(),
+  });
+  return () => unregisterConnector('schema-reviews');
+}
+
+/** `bro act status 7 --json` — the real cmdStatus emit: reviews
+ *  facade → fetchPrActState → evaluateExitGate → the {pr, exit_gate}
+ *  document, captured on stdout. */
 async function emitActStatus(): Promise<unknown> {
-  const state = await fetchPrActState(fakeReview(), { repo: 'o/r', pr: 7 }, {});
-  const gate = evaluateExitGate(state, {});
-  return JSON.parse(JSON.stringify({ pr: state, exit_gate: gate }));
+  const { root, main } = initRepo('bro-schema-act-');
+  const dispose = registerSchemaReviews(main);
+  try {
+    return await insideAsync(main, root, () =>
+      emittedDoc(() => runActCommand(['status', '7', '--json']))
+    );
+  } finally {
+    dispose();
+  }
 }
 
 /** `bro agents status --json` — the board over a fixture backend
@@ -556,43 +635,68 @@ async function emitSessions(): Promise<unknown> {
   return emittedDoc(() => runSessionsCommand(['--json'], { dir: main, ledger, now: T0 + 60_000 }));
 }
 
-/** `bro skills list --json` — the {command,data:{rows}} envelope over a
- *  declared-but-uninstalled local source. */
-async function emitSkillsList(): Promise<unknown> {
+/** A fixture root whose bro.config.json declares the skills.install
+ *  the command reads — the producers run `runSkillsCommand` itself so
+ *  the {command,data} envelope is the emitter's, never a literal. */
+function skillsRoot(withSkill: boolean): string {
   const root = tmpDir('bro-schema-skills-');
-  const cfg = skillsSection({ install: ['local:skills/lx'] });
-  const { rows } = collectRows(root, cfg);
-  return JSON.parse(JSON.stringify({ command: 'skills list', data: { rows } }));
-}
-
-/** `bro skills sync --json` — the {command,data:{steps,rows,drift}}
- *  envelope; a local source links without a spawn (injected stubs make
- *  a stray spawn impossible). */
-async function emitSkillsSync(): Promise<unknown> {
-  const root = tmpDir('bro-schema-skills-');
-  mkdirSync(join(root, 'skills', 'lx'), { recursive: true });
-  writeFileSync(join(root, 'skills', 'lx', 'SKILL.md'), '# lx\n');
-  const cfg = skillsSection({ install: ['local:skills/lx'] });
-  const spawn = () => {
-    throw new Error('spawn must not run for a local source');
-  };
-  const probe = () => false;
-  const { steps, rows, drift, failed } = runSync(root, cfg, spawn, probe);
-  assert.equal(failed, false);
-  return JSON.parse(
-    JSON.stringify({
-      command: 'skills sync',
-      data: { steps, rows, drift: drift.map(d => ({ name: d.name, kind: d.kind })) },
-    })
+  writeFileSync(
+    join(root, 'bro.config.json'),
+    `${JSON.stringify({ skills: { install: ['local:skills/lx'] } }, null, 2)}\n`
   );
+  if (withSkill) {
+    mkdirSync(join(root, 'skills', 'lx'), { recursive: true });
+    writeFileSync(join(root, 'skills', 'lx', 'SKILL.md'), '# lx\n');
+  }
+  return root;
 }
 
-/** `bro watch --json` — collectSnapshot's heartbeat doc; bare-repo
- *  planes degrade (unavailable sections), the shape stands. */
+/** `bro skills list --json` — declared-but-uninstalled local source,
+ *  real cmdList emit. */
+async function emitSkillsList(): Promise<unknown> {
+  const root = skillsRoot(false);
+  return emittedDoc(() => runSkillsCommand(['list', '--root', root, '--json']));
+}
+
+/** `bro skills sync --json` — a local source links inside the command
+ *  itself (no skills-cli spawn on that path), real cmdSync emit. */
+async function emitSkillsSync(): Promise<unknown> {
+  const root = skillsRoot(true);
+  return emittedDoc(() => runSkillsCommand(['sync', '--root', root, '--json']));
+}
+
+/** `bro watch --json` — one real tickOnce: the janitor leg runs before
+ *  the snapshot (its report rides `snap.janitor`), and a registered
+ *  reviews connector turns the gates plane's `prs` into real gate
+ *  rows — the seeded resolve-ledger record makes PR 7's open thread a
+ *  `reopenedThreads` row, PR 8 the clean row. */
 async function emitWatch(): Promise<unknown> {
   const { main } = initRepo('bro-schema-watch-');
-  const snap = await collectSnapshot(main);
-  return JSON.parse(JSON.stringify(snap));
+  const dispose = registerSchemaReviews(main);
+  try {
+    resolveLedger(main)?.record({ repo: 'o/r', pr: 7, thread: 't-1' });
+    const { snap } = await tickOnce(main);
+    // fixture-quality assertions — a silent `prs: []` or missing
+    // janitor would still validate, which is exactly the vacuous
+    // coverage this producer exists to prevent
+    assert.equal(
+      snap.gates.available,
+      true,
+      'fixture reviews connector must serve the gates plane'
+    );
+    assert.ok(
+      snap.gates.prs.some(g => g.ok === true),
+      'gates.prs must carry the green row (PR 8)'
+    );
+    assert.ok(
+      snap.gates.prs.some(g => (g.reopenedThreads ?? 0) > 0),
+      'gates.prs must carry the reopenedThreads row (PR 7)'
+    );
+    assert.ok(snap.janitor !== undefined, 'tickOnce must attach the janitor leg');
+    return JSON.parse(JSON.stringify(snap));
+  } finally {
+    dispose();
+  }
 }
 
 /** `bro watchdog --json` — the {ts, skill, baselines} launch brief;

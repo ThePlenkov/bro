@@ -145,6 +145,7 @@
         "mergeable": { "type": "string" },
         "mergeState": { "type": "string" },
         "openThreads": { "type": "integer" },
+        "reopenedThreads": { "type": "integer" },
         "ciPending": { "type": "integer" },
         "ciFailing": { "type": "integer" },
         "reviewersPending": { "type": "integer" },

@@ -160,7 +160,7 @@ New test file `packages/cli/src/commands/contract-schema.test.ts`:
 
   | Schema | Producer |
   | --- | --- |
-  | act-status | `fetchPrActState(fakeRev)` + `evaluateExitGate` → `{pr,exit_gate}` (same assembly as `cmdStatus`) |
+  | act-status | `runActCommand(['status','7','--json'])` under a connector-registered fixture reviews facade — the real cmdStatus emit, captured stdout |
   | agents-status | `runAgentsCommand(['status','--json','--connector',fixture])` — fixture connector via `registerAgentConnector`, captured stdout |
   | claim | `runClaimCommand(['list','--json'],{claims,dir})` — ClaimFacade stub |
   | debt-next/stats/trend | `runDebtCommand([sub,'--json'])`, `BRO_DEBT_DIR` → seeded `debt.jsonl` |
@@ -174,9 +174,9 @@ New test file `packages/cli/src/commands/contract-schema.test.ts`:
   | rig-status | `rigStatus(main,'test')` on an `initRepo` checkout |
   | rig-next | `rigNext(dir,item,{store})` — injected `TaskStore` stub |
   | sessions | `runSessionsCommand(['--json'],{ledger,dir})` — `ledgerFacade` fixture |
-  | skills-list | `collectRows(root,cfg)` → `{command:'skills list',data:{rows}}` (same assembly as `cmdList`) |
-  | skills-sync | `runSync(root,cfg,spawnStub,probeStub)` with a `local:` source → same `{command,data}` assembly as `cmdSync` |
-  | watch | `collectSnapshot(dir)` in a bare fixture repo — planes degrade (`unavailable` fields), the shape stands |
+  | skills-list | `runSkillsCommand(['list','--root',r,'--json'])` — bro.config.json-declared local source, real cmdList emit |
+  | skills-sync | `runSkillsCommand(['sync','--root',r,'--json'])` — `local:` source links inside the command (no skills-cli spawn) |
+  | watch | `tickOnce(dir)` in a fixture repo — the janitor leg + connector-pinned reviews facade produce real `gates.prs` rows (a seeded resolve-ledger record → `reopenedThreads`) |
   | watchdog | `runWatchdogCommand(['--json'])` in a tmpdir — probes degrade to `{unavailable}` |
 
 - **Tests**
@@ -214,9 +214,9 @@ New test file `packages/cli/src/commands/contract-schema.test.ts`:
 - No schema for the excluded surfaces in §4 (table stands as the
   audit trail) and no contract blocks for the deferred reads
   (convoy next, wait, mesh) — follow-up bead.
-- `fleet.schema.json`, `agents-status`, `sessions`, `mode`, `claim`,
-  `next`, `rig-*`, `skills-list`, `fleet-hosts` schemas stay as they
-  are — already non-stub; this bead does not re-tighten them.
+- `next`, `act-status`, `rig-next`, `watchdog` schemas stay as they
+  are — already non-stub; the §2 stub fleshing and the §4 closed-shape
+  tightening are the full schema set this bead touches.
 - No runtime validation in the shipped CLI — validation is a CI-time
   contract check only (the emitters must not pay ajv's cost).
 
