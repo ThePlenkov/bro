@@ -1005,10 +1005,12 @@ export async function acpProxy(
         verdict = 'error';
       } else if (isRecord(outcome) && outcome['outcome'] === 'selected') {
         optionId = str(outcome['optionId']);
+        // exact kind match — pickPermissionOption's own discipline: a
+        // closed enum, never a prefix read ('allowance' is not allow)
         const kind = perm.options.find(o => o.optionId === optionId)?.kind;
-        if (kind !== undefined && kind.startsWith('allow')) {
+        if (kind === 'allow_once' || kind === 'allow_always') {
           verdict = 'approved';
-        } else if (kind !== undefined && kind.startsWith('reject')) {
+        } else if (kind === 'reject_once' || kind === 'reject_always') {
           verdict = 'denied';
         } else {
           verdict = 'selected';
