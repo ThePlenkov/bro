@@ -99,7 +99,8 @@ All calls async + fail-open.
   session-start ctx, S3 stop gate (settle reprompt), S4 `/bro`
   dispatch + `bro_status` tool (verified e2e — RPC `prompt` →
   `disposition:"handled"`, `bro <args>` argv in FakeBro journal,
-  `bro-command.e2e.test.ts`), S7 fail-open, S9 skills, S10
+  `bro-command.e2e.test.ts`), S4f command family (bare names —
+  pi owns no family name natively), S7 fail-open, S9 skills, S10
   native correlation. Not applicable — S2 pre-tool guard
   (`tool_call` event unwired — declared gap). Pending — S5/S6/
   S8 driver verification.
@@ -113,3 +114,7 @@ All calls async + fail-open.
 - 2026-11-14 — v4: S4 `/bro` dispatch verified e2e — RPC `prompt`
   leg of `bro-command.e2e.test.ts` asserts `disposition:"handled"`,
   identical `bro <args>` argv, session-start hook in the journal.
+- 2026-11-14 — v5: S4f command family verified e2e — `/learn
+  backlog` and `/wtf <multilingual args>` dispatch bare names to
+  identical `bro <verb> [args]` argv (`bro-command.e2e.test.ts`);
+  pi owns none of the eight family names natively.

@@ -23,6 +23,54 @@ const RUN_TIMEOUT_MS = 6e4;
 *  re-probing the npx rung on every keystroke would be worse than
 *  the outage. */
 const RESOLVE_RETRY_MS = 6e4;
+/** The curated command family — first-class slash aliases for bro's
+*  workflow verbs. `verb` is the CLI argv head; `name` is the slash
+*  name, renamed to `bro:<name>` when the host owns it natively
+*  (AGT-1 §command family — a host-native command always wins).
+*  `/wtf` passes any args through untouched — the wtf routine owns
+*  multilingual frustration input itself. */
+const BRO_COMMANDS = [
+	{
+		name: "act",
+		verb: "act",
+		description: "bro act — PR review gate, threads, resolve"
+	},
+	{
+		name: "wtf",
+		verb: "wtf",
+		description: "bro wtf — frustration → retrospect capture, any language"
+	},
+	{
+		name: "retro",
+		verb: "retrospect",
+		description: "bro retrospect — learn + backlog review"
+	},
+	{
+		name: "learn",
+		verb: "learn",
+		description: "bro learn — lessons and backlog"
+	},
+	{
+		name: "drill",
+		verb: "drill",
+		description: "bro drill — deep research routine, scoped investigation"
+	},
+	{
+		name: "judge",
+		verb: "judge",
+		description: "bro judge — typed decision on session state"
+	},
+	{
+		name: "loop",
+		verb: "loop",
+		description: "bro loop — iterations with exit condition or formula"
+	},
+	{
+		name: "goal",
+		verb: "goal",
+		description: "bro goal — goal tracking, hooks remind every turn"
+	}
+];
 /**
 * `node` on PATH, not process.execPath — a host may ship as a compiled
 * binary whose execPath IS that binary, so running it with our own
@@ -1230,14 +1278,19 @@ async function BroSetup(ctx) {
 				await run(sessionID, verb, `bro ${verb.join(" ")}`);
 			}
 		});
-		editor.add?.({
-			name: "act",
-			description: "shortcut for `/bro act` — PR review gate/threads (bro act)",
-			execute: async ({ sessionID, prompt }) => {
-				const verb = ["act", ...splitArgs(prompt?.text ?? "")];
-				await run(sessionID, verb, `bro ${verb.join(" ")}`);
-			}
-		});
+		const natives = new Set(["goal"]);
+		for (const c of BRO_COMMANDS) {
+			const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+			editor.add?.({
+				name,
+				description: c.description,
+				execute: async ({ sessionID, prompt }) => {
+					const args = splitArgs(prompt?.text ?? "");
+					const verb = [c.verb, ...args];
+					await run(sessionID, verb, `bro ${verb.join(" ")}`);
+				}
+			});
+		}
 	}));
 	if (typeof ctx.options?.mcpPort === "number") {
 		const mcpPort = ctx.options.mcpPort;

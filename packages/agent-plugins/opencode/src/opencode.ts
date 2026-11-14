@@ -34,15 +34,16 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  HOOK_TIMEOUT_MS,
-  REHYDRATION_TIMEOUT_MS,
-  RUN_TIMEOUT_MS,
+  BRO_COMMANDS,
   callHook,
   contextOf,
   createCommandResolver,
-  hookEmitEnv,
-  runCommand,
+  HOOK_TIMEOUT_MS,
   type HookControl,
+  hookEmitEnv,
+  REHYDRATION_TIMEOUT_MS,
+  RUN_TIMEOUT_MS,
+  runCommand,
 } from '@broject/adapter-core/core';
 import { Plugin } from '@opencode/plugin';
 import { Bro, type BroBoard, emptyBoard, parseBoard } from './rpc.ts';
@@ -959,15 +960,23 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           await run(sessionID, verb, `bro ${verb.join(' ')}`);
         },
       });
-      editor.add?.({
-        name: 'act',
-        description: 'shortcut for `/bro act` — PR review gate/threads (bro act)',
-        execute: async ({ sessionID, prompt }) => {
-          const args = splitArgs(prompt?.text ?? '');
-          const verb = ['act', ...args];
-          await run(sessionID, verb, `bro ${verb.join(' ')}`);
-        },
-      });
+      // Command family — same table the pi/omp lineage registers. A
+      // host-native command of the same name always wins: opencode 2.x
+      // owns `/goal` natively (verified in the binary), so that alias
+      // lands on `bro:goal`; the rest keep bare names.
+      const natives = new Set(['goal']);
+      for (const c of BRO_COMMANDS) {
+        const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+        editor.add?.({
+          name,
+          description: c.description,
+          execute: async ({ sessionID, prompt }) => {
+            const args = splitArgs(prompt?.text ?? '');
+            const verb = [c.verb, ...args];
+            await run(sessionID, verb, `bro ${verb.join(' ')}`);
+          },
+        });
+      }
     })
   );
 

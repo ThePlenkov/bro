@@ -121,7 +121,9 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   run-turn, ≥8 direct `bro_*` tools). S4 `/bro` dispatch verified
   e2e — `bro-command.e2e.test.ts` drives `POST
   /api/session/{id}/command` and asserts `bro <args>` argv in the
-  FakeBro journal plus the follow-up turn on aimock. Declared
+  FakeBro journal plus the follow-up turn on aimock. S4f command
+  family verified e2e — `bro:goal` namespaced (native `/goal`),
+  `/wtf` bare, same BRO_COMMANDS table. Declared
   applicable — S5 compaction rehydrate,
   S6 multi-turn, S7 fail-open, S9 skills dedup, S10 native
   correlation. S8 dep-degraded covered at the bro layer —
@@ -167,3 +169,6 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   `POST /api/session/{id}/command` leg of `bro-command.e2e.test.ts`
   asserts identical `bro <args>` argv in the FakeBro journal and the
   follow-up turn reaching aimock.
+- 2026-11-14 — v9: S4f command family verified e2e — opencode owns
+  `/goal` natively → `bro:goal`; `/wtf` bare. Same BRO_COMMANDS
+  table as the pi/omp lineage (`bro-command.e2e.test.ts`).

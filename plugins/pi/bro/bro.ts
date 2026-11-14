@@ -21,6 +21,54 @@ const RUN_TIMEOUT_MS = 6e4;
 *  re-probing the npx rung on every keystroke would be worse than
 *  the outage. */
 const RESOLVE_RETRY_MS = 6e4;
+/** The curated command family — first-class slash aliases for bro's
+*  workflow verbs. `verb` is the CLI argv head; `name` is the slash
+*  name, renamed to `bro:<name>` when the host owns it natively
+*  (AGT-1 §command family — a host-native command always wins).
+*  `/wtf` passes any args through untouched — the wtf routine owns
+*  multilingual frustration input itself. */
+const BRO_COMMANDS = [
+	{
+		name: "act",
+		verb: "act",
+		description: "bro act — PR review gate, threads, resolve"
+	},
+	{
+		name: "wtf",
+		verb: "wtf",
+		description: "bro wtf — frustration → retrospect capture, any language"
+	},
+	{
+		name: "retro",
+		verb: "retrospect",
+		description: "bro retrospect — learn + backlog review"
+	},
+	{
+		name: "learn",
+		verb: "learn",
+		description: "bro learn — lessons and backlog"
+	},
+	{
+		name: "drill",
+		verb: "drill",
+		description: "bro drill — deep research routine, scoped investigation"
+	},
+	{
+		name: "judge",
+		verb: "judge",
+		description: "bro judge — typed decision on session state"
+	},
+	{
+		name: "loop",
+		verb: "loop",
+		description: "bro loop — iterations with exit condition or formula"
+	},
+	{
+		name: "goal",
+		verb: "goal",
+		description: "bro goal — goal tracking, hooks remind every turn"
+	}
+];
 /**
 * `node` on PATH, not process.execPath — a host may ship as a compiled
 * binary whose execPath IS that binary, so running it with our own
@@ -446,6 +494,7 @@ function sharedBinding(host) {
 			return { content };
 		},
 		npxPin: host.npxPin,
+		nativeCommands: host.nativeCommands,
 		hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin })
 	};
 }
@@ -664,6 +713,22 @@ function createBroDriver(host, api) {
 	});
 	/** Run a bro subcommand — resolve the CLI first, then hand off. */
 	const run = async (args, cwd) => runBro(await command(), args, cwd);
+	/** `/bro <args>` and every family alias share one dispatch: split,
+	*  run, surface. Bare family names never reach here — they always
+	*  carry their verb. */
+	const dispatchArgs = async (argv, ctx) => {
+		const result = await run(argv, host.cwd(ctx));
+		const text = (result.stdout || result.stderr).trim();
+		if (result.code !== 0) {
+			host.notify(ctx, `bro ${argv.join(" ")}: exit ${result.code}`, "error");
+			return;
+		}
+		api.sendMessage({
+			customType: "bro-output",
+			content: `$ bro ${argv.join(" ")}\n${text}`,
+			display: true
+		}, { triggerTurn: false });
+	};
 	/** The shared surfaces. `/bro` is a thin passthrough — `bro
 	*  act|next|fleet|drill` reachable without leaving the editor — and
 	*  `bro_status` hands the model the same board JSON the widget
@@ -678,19 +743,20 @@ function createBroDriver(host, api) {
 				host.notify(ctx, "bro: board refreshed", "info");
 				return;
 			}
-			const result = await run(trimmed.split(/\s+/), host.cwd(ctx));
-			const text = (result.stdout || result.stderr).trim();
-			if (result.code !== 0) {
-				host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, "error");
-				return;
-			}
-			api.sendMessage({
-				customType: "bro-output",
-				content: `$ bro ${trimmed}\n${text}`,
-				display: true
-			}, { triggerTurn: false });
+			await dispatchArgs(trimmed.split(/\s+/), ctx);
 		}
 	});
+	const natives = new Set(host.nativeCommands ?? []);
+	for (const c of BRO_COMMANDS) {
+		const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+		api.registerCommand(name, {
+			description: c.description,
+			getArgumentCompletions: host.argumentCompletions,
+			async handler(args, ctx) {
+				await dispatchArgs([c.verb, ...args.trim().split(/\s+/).filter((a) => a !== "")], ctx);
+			}
+		});
+	}
 	api.registerTool({
 		name: "bro_status",
 		label: "bro status",
@@ -810,6 +876,34 @@ function binding(pi) {
 		...sharedBinding({
 			kind: "pi",
 			npxPin: NPX_PIN,
+			nativeCommands: [
+				"settings",
+				"model",
+				"thinking",
+				"scoped-models",
+				"login",
+				"logout",
+				"llama",
+				"new",
+				"resume",
+				"name",
+				"session",
+				"tree",
+				"fork",
+				"clone",
+				"compact",
+				"import",
+				"copy",
+				"export",
+				"share",
+				"bug",
+				"trust",
+				"mcp",
+				"reload",
+				"hotkeys",
+				"changelog",
+				"quit"
+			],
 			stop: "agent_before_settle",
 			on(event, handler) {
 				pi.on(event, handler);

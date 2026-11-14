@@ -75,9 +75,25 @@ delivered per host capability:
   into the transcript without a turn. OpenCode's command palette is
   prompt-submission by design, so its `/bro [args]` runs the verb and
   submits the output *as the next prompt* (bare defaults to `status`)
-  — the model sees the result immediately; `/act` is the `act`
-  shortcut. On manifest hosts there is no command surface — bro
-  reaches the model through hook context + skills instead.
+  — the model sees the result immediately. On manifest hosts there
+  is no command surface — bro reaches the model through hook context
+  + skills instead.
+- **Command family** — the curated verbs as first-class slash
+  commands, registered by the same shared table on every command
+  surface (`BRO_COMMANDS` in `adapter-core/core.ts`):
+  `/act`, `/wtf`, `/retro` (→ `retrospect`), `/learn`, `/drill`,
+  `/judge`, `/loop`, `/goal`. Each dispatches `bro <verb> [args]`
+  through the identical output path as `/bro <args>` — quote-aware
+  split where the host provides it, transcript injection or
+  next-prompt per host semantics. **Native correlation is
+  mandatory**: a host that already owns a name keeps it — the bro
+  alias then registers as `bro:<name>` (`/bro:loop`, `/bro:goal`)
+  instead of shadowing. Verified collisions: omp owns `/goal` +
+  `/loop`, opencode owns `/goal`; pi owns none of the eight.
+  Hosts declare their native set via `nativeCommands` (pi/omp
+  lineage) or a local set (opencode). Kilo has no command slot —
+  the family is reachable through its write-capable `bro` tool
+  (`{sub:'learn', args:[…]}`).
 - **`bro_*` model tools** — read-verbs pinned to fixed argv so the
   model gets reads, never arbitrary bro: `bro_status` (board JSON),
   `bro_convoy_status`, `bro_act_status`, `bro_fleet`, `bro_next`,
@@ -218,6 +234,7 @@ where its native surface can express the trigger.
 | S8 | service-degraded | downstream dep fails (bd/dolt/gh via ScriptedCli) | hook responds within contract — degraded context allowed, host never blocked by dep failure; dep journal shows the call |
 | S9 | skills delivery | plugin install | plugin skills register exactly once; dedup vs `~/.agents/skills/` holds; no shadowing of native skills |
 | S10 | native correlation | plugin + native commands coexist | plugin assets extend, never shadow — `/loop`, `/goal`, native slash commands and tools keep native behavior (AGT-1 §Native correlation) |
+| S4f | command family | user runs `/learn`, `/wtf <frustration>`, `/bro:<name>` | family verb reaches `bro <verb> [args]` with identical argv semantics as `/bro`; a host-native name forces `bro:<name>` registration and the native command is untouched |
 
 Hosts declare applicability in their child spec's Verify; the
 e2e suite tags each test with its S-ID so coverage is auditable.
@@ -238,3 +255,9 @@ e2e suite tags each test with its S-ID so coverage is auditable.
   conformance contract with per-scenario acceptance criteria
   verified against journals; mock planes named (aimock LLM,
   FakeBro, ScriptedCli deps). R7/R8 bind children to the catalog.
+- 2026-11-14 — v5: command family — `BRO_COMMANDS` table
+  (`/act` `/wtf` `/retro` `/learn` `/drill` `/judge` `/loop`
+  `/goal`) registered on every command surface; mandatory
+  native-correlation rule (`bro:<name>` fallback, verified omp
+  `/goal`+`/loop`, opencode `/goal`); S4f scenario added;
+  `nativeCommands` host field carries each host's native set.
