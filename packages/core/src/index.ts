@@ -807,7 +807,7 @@ export {
   scanProc,
 } from './proc.ts';
 export type { ProcEntry } from './proc.ts';
-export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
+export { checkPlanVersion, planKind, PLAN_ENVELOPE_KEYS, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';
 export type { Printer } from './output.ts';

@@ -4,43 +4,48 @@
  * plugin whose name matches, validates via its planSchema, and executes
  * via runPlan. `retrospect` is the reference implementation.
  */
-import { readFileSync } from 'node:fs'
-import { parse } from 'smol-toml'
+import { readFileSync } from 'node:fs';
+import { parse } from 'smol-toml';
 
 /** A plugin's plan validator: parsed TOML doc in, typed plan out.
  *  Throw with every problem listed — the agent fixes the file once. */
-export type PlanSchema<T> = (doc: unknown, source?: string) => T
+export type PlanSchema<T> = (doc: unknown, source?: string) => T;
+
+/** The plan envelope — top-level keys every kind accepts regardless of
+ *  payload: `kind` routes, `version` pins the schema contract, `$schema`
+ *  lets an authored plan name its published JSON Schema
+ *  (schemas/plans/<kind>.schema.json). Kind validators allowlist these
+ *  plus their own payload keys — never reject an envelope key. */
+export const PLAN_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['kind', 'version', '$schema']);
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** Reads + TOML-parses a plan file. Throws with the file path in the
  *  message — callers never add context of their own. */
 export function readPlanDoc(file: string): Record<string, unknown> {
-  let text: string
+  let text: string;
   try {
-    text = readFileSync(file, 'utf8')
+    text = readFileSync(file, 'utf8');
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(`${file}: cannot read plan — ${msg}`)
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`${file}: cannot read plan — ${msg}`);
   }
-  let doc: unknown
+  let doc: unknown;
   try {
-    doc = parse(text)
+    doc = parse(text);
   } catch (err) {
-    throw new Error(
-      `${file}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`
-    )
+    throw new Error(`${file}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`);
   }
   if (!isRecord(doc)) {
-    throw new Error(`${file}: plan must be a TOML table`)
+    throw new Error(`${file}: plan must be a TOML table`);
   }
-  return doc
+  return doc;
 }
 
 /** The envelope's routing key — undefined when absent or non-string. */
 export function planKind(doc: Record<string, unknown>): string | undefined {
-  return typeof doc.kind === 'string' ? doc.kind : undefined
+  return typeof doc.kind === 'string' ? doc.kind : undefined;
 }
 
 /** The envelope's `version` gate — the schema the producer pinned must
@@ -55,15 +60,15 @@ export function checkPlanVersion(
   errors: string[]
 ): void {
   if (raw === undefined) {
-    return
+    return;
   }
   if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
-    errors.push('version: must be a positive integer')
-    return
+    errors.push('version: must be a positive integer');
+    return;
   }
   if (raw > latest) {
     errors.push(
       `version: ${kind} schema v${raw} is newer than this bro understands (latest v${latest})`
-    )
+    );
   }
 }

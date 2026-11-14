@@ -146,3 +146,13 @@ exclude_paths:
   # data; the code is a VERBATIM move from commands/work.ts (bro-jamp7) —
   # the same false positive as plane.ts above, not new code.
   - 'packages/rig/src/worktree-claim.ts'
+
+  # filters.match IS a plan-carried regex: the feature's semantics are
+  # "the operator's pattern filters bead titles", so `new RegExp` on a
+  # non-literal is the file's job, not injected data. A plan file is
+  # operator-authored code — it already claims beads and runs graphql
+  # documents, a trust boundary far wider than one slow pattern.
+  # Codacy's non-literal-regexp (ReDoS) rule reads any compiled input as
+  # attacker-controlled; the flag only appeared because the PR's style
+  # reformat made the pre-existing line read as added.
+  - 'packages/cli/src/commands/next-plan.ts'

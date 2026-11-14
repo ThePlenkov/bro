@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/retrospect.schema.json",
+  "title": "bro plan — retrospect",
+  "description": "Structural contract for a `kind = \"retrospect\"` TOML plan — the parsed document `parsePlanDoc` (packages/retro/src/plan.ts) consumes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "retro"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/retrospect.schema.json"
+    },
+    "kind": { "const": "retrospect" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed RETRO_PLAN_VERSION (latest: 1)"
+    },
+    "retro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["what", "why"],
+      "properties": {
+        "what": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "What went wrong, one line"
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Root cause, not the symptom"
+        },
+        "scope": {
+          "enum": ["universal", "project", "user", "agent", "session"],
+          "description": "Where the lesson must persist — default project"
+        },
+        "wtf": {
+          "type": "string",
+          "description": "Open wtf bead this retro answers — closed on record"
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "description": "Shas, PR urls, bead ids — bd provenance"
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "sink"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "sink": {
+            "enum": [
+              "backlog",
+              "memory",
+              "agentic-documents",
+              "upstream-issue",
+              "workaround"
+            ],
+            "description": "Where the executor lands the prevention bead"
+          },
+          "scope": {
+            "enum": ["universal", "project", "user", "agent", "session"],
+            "description": "Overrides retro.scope for this action"
+          },
+          "detail": {
+            "type": "string",
+            "description": "Body of the follow-up bead"
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "retrospect",
+      "version": 1,
+      "retro": {
+        "what": "review threads were resolved without pushing the fix",
+        "why": "the resolve call ran before the push finished",
+        "scope": "project",
+        "wtf": "bro-abc12",
+        "evidence": ["a1b2c3d", "https://github.com/o/r/pull/66"]
+      },
+      "actions": [
+        {
+          "title": "assert head sha before resolve",
+          "sink": "workaround",
+          "detail": "resolve only threads filed against the pushed sha"
+        },
+        {
+          "title": "document the ordering rule",
+          "sink": "agentic-documents",
+          "scope": "universal"
+        }
+      ]
+    }
+  ]
+}

@@ -19,6 +19,10 @@ export interface ContractCommandRow {
   configKey?: string;
   plan: boolean;
   planVersion?: number;
+  /** The kind's shipped plan-input schema — `schemas/plans/<name>.schema.json`
+   *  by convention (spec bro-hp0su). Externals derive no ref: their files
+   *  cannot live in this package. */
+  planSchema?: string;
   /** Argv spliced ahead of the user's args — a reroute as real as
    *  aliasOf (`unwind` → `drill up`). */
   argvPrefix?: string[];
@@ -51,6 +55,10 @@ function commandRow(p: BroPlugin, aliases: string[]): ContractCommandRow {
     configKey: p.configKey,
     plan: p.planSchema !== undefined,
     planVersion: p.planSchema !== undefined ? (p.planVersion ?? 1) : undefined,
+    planSchema:
+      p.planSchema !== undefined && p.external !== true
+        ? `schemas/plans/${p.name}.schema.json`
+        : undefined,
     argvPrefix: p.argvPrefix,
     contract: p.contract,
     external: p.external === true,

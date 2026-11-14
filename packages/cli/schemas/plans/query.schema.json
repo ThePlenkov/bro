@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/query.schema.json",
+  "title": "bro plan — query",
+  "description": "Structural contract for a `kind = \"query\"` TOML plan — the parsed document `parseQueryPlan` (packages/query/src/plan.ts) consumes. Cross-field rules stay in that validator: graphql documents must be read-only (no mutation/subscription keywords after comment/string stripping) and step ids must be unique.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "steps"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/query.schema.json"
+    },
+    "kind": { "const": "query" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed QUERY_PLAN_VERSION (latest: 1)"
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Fan-out cap — default comes from the query.concurrency config"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "graphql"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "The output key — must be unique across steps (validator-checked)"
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Data-plane connector name (github, gitlab, atlassian, …) — never a providers[] model-plane entry"
+          },
+          "graphql": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "The raw GraphQL document — v1 is read-only; mutation/subscription are rejected by the validator"
+          },
+          "vars": {
+            "type": "object",
+            "description": "[steps.vars] — serialized as CLI fields or the JSON variables body, per connector"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "propertyNames": {
+              "not": { "enum": ["ATLASSIAN_API_URL", "PATH", "HOME"] }
+            },
+            "description": "[steps.env] — literal string→string overlay; execution-shaping vars are operator-config only"
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "query",
+      "version": 1,
+      "concurrency": 4,
+      "steps": [
+        {
+          "id": "gh-prs",
+          "provider": "github",
+          "graphql": "query ($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 20, states: OPEN) { nodes { number title url } } } }",
+          "vars": { "owner": "theplenkov", "name": "bro" }
+        }
+      ]
+    }
+  ]
+}

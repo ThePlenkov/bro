@@ -42,6 +42,11 @@ Repeat `next` → `claim` → work → `done` until `next` reports
 `--mol`) — pass it whenever more than one convoy is open; no-arg
 resolution only works with exactly one.
 
+A convoy can also be **declared**: `bro plan run convoy.toml` pours
+`[[molecules]]` (formula refs or inline `steps`) from a validated plan.
+The authoring schema is `schemas/plans/convoy.schema.json` —
+`bro plan describe convoy` prints it (the example as a TOML template).
+
 `next` states:
 
 - `step` — execute `step` (id, title, description = the work instructions),

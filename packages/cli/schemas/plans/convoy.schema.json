@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/plans/convoy.schema.json",
+  "title": "bro plan — convoy",
+  "description": "Structural contract for a `kind = \"convoy\"` TOML plan — the parsed document `parseConvoyPlan` (packages/convoy/src/plan.ts) consumes. A molecule is either a formula pour or an inline step list — never both. Cross-field rules stay in that validator: needs[] edges are a DAG (no self-refs, undeclared ids, cycles, or duplicate step ids), and gates = \"forbid\" rejects inline molecules containing a human-gate step.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "molecules"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema pin — https://unpkg.com/@broject/bro/schemas/plans/convoy.schema.json"
+    },
+    "kind": { "const": "convoy" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Schema pin — must not exceed CONVOY_PLAN_VERSION (latest: 1)"
+    },
+    "gates": {
+      "enum": ["allow", "forbid"],
+      "description": "Plan-wide default gate policy — a molecule's own gates wins"
+    },
+    "molecules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "title": "formula pour",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["formula"],
+            "properties": {
+              "formula": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "Registered formula/proto name"
+              },
+              "vars": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "[molecules.vars] — string→string substitutions"
+              },
+              "gates": { "enum": ["allow", "forbid"] }
+            }
+          },
+          {
+            "title": "inline molecule",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title", "steps"],
+            "properties": {
+              "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "description": { "type": "string" },
+              "gates": { "enum": ["allow", "forbid"] },
+              "steps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["id", "title"],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "description": "Sibling key referenced by needs[] — not the bead id"
+                    },
+                    "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                    "type": {
+                      "type": "string",
+                      "description": "agent | human | any bd type — \"human\" declares a gate"
+                    },
+                    "needs": {
+                      "type": "array",
+                      "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                      "description": "Ids of sibling steps that must finish first — a DAG (validator-checked)"
+                    },
+                    "description": { "type": "string" },
+                    "priority": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4,
+                      "description": "bd priority 0–4"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "examples": [
+    {
+      "kind": "convoy",
+      "version": 1,
+      "gates": "allow",
+      "molecules": [
+        {
+          "formula": "debt-pipeline",
+          "vars": { "scope": "--last 20" }
+        },
+        {
+          "title": "ship v0.1",
+          "steps": [
+            { "id": "tag", "title": "cut the tag", "type": "agent" },
+            {
+              "id": "announce",
+              "title": "post the release notes",
+              "type": "human",
+              "needs": ["tag"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
