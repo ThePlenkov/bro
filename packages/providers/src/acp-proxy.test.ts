@@ -1116,6 +1116,124 @@ describe('acpProxy — tool_call guards + turn-end stop gate (bro-u2eps)', () =>
     }
   });
 
+  test('a prompt queued during gate eval never races the gate turn — it crosses only after discharge', async () => {
+    const seen: string[] = [];
+    let releaseEval!: () => void;
+    let releaseGateTurn!: () => void;
+    const evalLatch = new Promise<void>(r2 => {
+      releaseEval = r2;
+    });
+    const gateTurnLatch = new Promise<void>(r2 => {
+      releaseGateTurn = r2;
+    });
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const responder = (async () => {
+      const reader = agentSide.readable.getReader();
+      const writer = agentSide.writable.getWriter();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) {
+          await writer.close().catch(() => {});
+          return;
+        }
+        const m = value as {
+          id?: JsonRpcId;
+          method?: string;
+          params?: { prompt?: Array<{ text?: string }> };
+        };
+        if (m.method === 'initialize') {
+          await writer.write({
+            jsonrpc: '2.0',
+            id: m.id,
+            result: { protocolVersion: 1 },
+          } as AnyMessage);
+        } else if (m.method === 'session/new') {
+          await writer.write({
+            jsonrpc: '2.0',
+            id: m.id,
+            result: { sessionId: 's-rq' },
+          } as AnyMessage);
+        } else if (m.method === 'session/prompt') {
+          seen.push((m.params?.prompt ?? []).map(b => b.text ?? '').join(''));
+          if (seen.length === 2) {
+            // the gate re-prompt — its response parks until released so
+            // the gate turn is provably still in flight while we check
+            // the wire for the queued client prompt
+            void gateTurnLatch.then(() =>
+              writer.write({
+                jsonrpc: '2.0',
+                id: m.id,
+                result: { stopReason: 'refusal' },
+              } as AnyMessage)
+            );
+          } else {
+            await writer.write({
+              jsonrpc: '2.0',
+              id: m.id,
+              result: { stopReason: 'end_turn' },
+            } as AnyMessage);
+          }
+        }
+      }
+    })();
+    const conn = client({ name: 'test-client' }).connect(clientSide);
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      seam: {
+        stopGate: async () => {
+          await evalLatch;
+          return { block: 'gate msg' };
+        },
+      },
+      log: () => {},
+    });
+    try {
+      await conn.agent.request('initialize', INIT_PARAMS);
+      await conn.agent.request('session/new', { cwd: '/gate-repo', mcpServers: [] });
+      const firstP = conn.agent.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 's-rq',
+        prompt: [{ type: 'text', text: 'one' }],
+      });
+      // let 'one' cross, its end_turn land, and the eval park on the latch
+      while (seen.length < 1) {
+        await new Promise(r2 => setTimeout(r2, 5));
+      }
+      await new Promise(r2 => setTimeout(r2, 60));
+      // the client's next prompt enqueues DURING the gate eval — the
+      // window the chained-.then() barrier leaked through (PR #1067)
+      const secondP = conn.agent.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 's-rq',
+        prompt: [{ type: 'text', text: 'two' }],
+      });
+      await new Promise(r2 => setTimeout(r2, 30));
+      releaseEval();
+      while (seen.length < 2) {
+        await new Promise(r2 => setTimeout(r2, 5));
+      }
+      assert.equal(seen[1], 'gate msg');
+      // 'two' must wait out the whole gate turn — give any leaked write
+      // room to show itself before discharging the gate response
+      await new Promise(r2 => setTimeout(r2, 80));
+      assert.equal(seen.length, 2);
+      releaseGateTurn();
+      while (seen.length < 3) {
+        await new Promise(r2 => setTimeout(r2, 5));
+      }
+      assert.equal(seen[2], 'two');
+      const [r1, r2res] = await Promise.all([firstP, secondP]);
+      assert.equal(r1.stopReason, 'refusal');
+      assert.equal(r2res.stopReason, 'end_turn');
+    } finally {
+      conn.close();
+      await clientSide.writable
+        .getWriter()
+        .close()
+        .catch(() => {});
+      assert.equal(await proxyDone, 0);
+      await responder;
+    }
+  });
+
   test('session/cancel while the gate verdict is pending answers the held prompt cancelled — no gate prompt ever crosses', async () => {
     let releaseGate!: () => void;
     const gate = new Promise<void>(r2 => {

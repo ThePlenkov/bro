@@ -804,8 +804,13 @@ export async function acpProxy(
       } as AnyMessage);
       // the gate turn is crossed work — session-scoped writes that
       // arrive while it runs (the client's next prompt) queue behind
-      // its discharge, never interleave mid-turn on the downstream leg
-      ses.writeQ = ses.writeQ.then(() => done.promise);
+      // its discharge, never interleave mid-turn on the downstream
+      // leg. This callback IS the writeQ slot — awaiting the turn
+      // inside it holds the position for every writer, whenever it
+      // enqueued; a .then() chained here would only guard writers
+      // that arrive after this line, letting a prompt that queued
+      // during eval race the gate turn (PR #1067 review).
+      await done.promise;
     });
   };
 
@@ -817,11 +822,16 @@ export async function acpProxy(
   const onAgentResponse = (m: AnyMessage): void => {
     const id = wire(m).id as JsonRpcId;
     const req = pending.get(id);
-    pending.delete(id);
     if (req === undefined) {
+      // every crossed request registers a pending entry, so an a2c
+      // response with none is a wire anomaly — a duplicate, or an
+      // answer to an already-discharged id. The proxy is the wire:
+      // forward verbatim, but name it so the stderr log can see it.
+      log(`acp proxy: unmatched agent response id ${String(id)} — forwarding`);
       writeUp(m);
       return;
     }
+    pending.delete(id);
     // a gate turn ended — its response answers the held client
     // request under the client's own id (the held original never
     // crosses — the client's request resolves once). Never re-gated:
