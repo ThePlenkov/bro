@@ -79,6 +79,16 @@ export interface AgentTurnPlane {
    *  user-side records (session/prompt is RPC, never journaled) and a
    *  pane replaying the file can't say what was asked (spec bro-q2edc). */
   start(prompt?: string): void;
+  /** An out-of-band archive row — same file, written outside the update
+   *  funnel: a permission verdict is a client-bound exchange the
+   *  session/update stream never carries, so a cross-process viewer
+   *  only sees it through the journal (spec bro-9qopj). This is the
+   *  `agentEventRecord` posture moved onto the plane itself — the
+   *  archive the plane already resolved, proxy scope included (an
+   *  unbadged `bro acp proxy` journals under `bro/proxy/` where
+   *  `agentEventRecord`'s badge requirement would write nothing).
+   *  Archive-only, same contract: publishes stay off the bus. */
+  note(row: Record<string, unknown>): void;
   stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void;
   drain(timeoutMs?: number): Promise<void>;
 }
@@ -333,6 +343,10 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
         // body; a reader needing the whole prompt reads the file
         emit('prompt', { sessionId: opts.sessionId, text: prompt.slice(0, 200) });
       }
+    },
+
+    note(row) {
+      record({ ...stamp(), ...row });
     },
 
     update(u) {

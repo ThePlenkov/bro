@@ -1,6 +1,6 @@
 /**
  * `bro acp` — bro on the ACP wire (specs bro-rs8sp.md, bro-bhyo1.md,
- * bro-u2eps.md, bro-tegz2.md). Two surfaces, one pump:
+ * bro-u2eps.md, bro-9qopj.md, bro-tegz2.md). Two surfaces, one pump:
  *
  * - `bro acp` (agent mode) — bro IS the agent: the CLI contract
  *   advertised as slash commands, free-form prompts forwarded to the
@@ -11,14 +11,16 @@
  *   except the session's first `session/prompt` (which carries the
  *   hook seam's session-start + prompt-submit context as one
  *   prepended text block), the tool-call updates that feed the
- *   in-process arming/guard pass, and the turn-end responses the
- *   stop gate can hold for exactly one re-prompt.
+ *   in-process arming/guard pass, the turn-end responses the stop
+ *   gate can hold for exactly one re-prompt, and the
+ *   `session/request_permission` asks the permission policy answers
+ *   or relays.
  *
  * The seam is the same code `bro hooks` runs — collectSessionContext /
- * collectPromptContext / collectToolCallGuards / collectStopGate as
- * library calls keyed on `session/new`'s cwd, never a subprocess and
- * never the proxy's own cwd. `acpHookSeam()` in acp-agent.ts wires it
- * for both surfaces.
+ * collectPromptContext / collectToolCallGuards / collectStopGate /
+ * collectPermission as library calls keyed on `session/new`'s cwd,
+ * never a subprocess and never the proxy's own cwd. `acpHookSeam()`
+ * in acp-agent.ts wires it for both surfaces.
  */
 import { CommandError, EXIT, passthroughExitCode } from '@broject/core';
 import { acpAgentFlags, acpHookSeam, runAcpAgent } from './acp-agent.ts';

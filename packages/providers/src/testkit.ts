@@ -71,10 +71,22 @@ export interface FakeAcpAgent {
   clientCapabilities?: unknown;
   /** The client's answer to a scripted session/request_permission. */
   permissionOutcome?: unknown;
+  /** The permission asks the agent sent — `{options, toolCall}` per
+   *  scripted request (the raw params, minus sessionId). */
+  permissionAsks: Array<{ options: unknown; toolCall: unknown }>;
   /** What the agent got back from a scripted terminal/* round-trip. */
   terminalResult?: { output: string; exitCode: number | null | undefined };
   /** The client's answer to a scripted probeClient call (bro-ymbq1). */
   probeResult?: unknown;
+}
+
+/** The scripted permission ask's wire params — a bare `PermissionOption[]`
+ *  is shorthand for `{options}` (the pre-bro-9qopj shape); `toolCall`
+ *  overrides the `{toolCallId:'tc-1', title:'run tests'}` default so a
+ *  test can give the seam real `rawInput` to classify. */
+export interface PermissionAsk {
+  options: PermissionOption[];
+  toolCall?: Record<string, unknown>;
 }
 
 /** The mid-prompt client-bound scripts a test can arm — a scripted
@@ -84,18 +96,23 @@ async function runClientProbes(
   client: AgentContext,
   sessionId: string,
   opts: {
-    askPermission?: PermissionOption[];
+    askPermission?: PermissionOption[] | PermissionAsk;
     askTerminal?: string;
     probeClient?: (client: AgentContext, sessionId: string) => Promise<unknown>;
   },
   seen: FakeAcpAgent
 ): Promise<void> {
   if (opts.askPermission !== undefined) {
-    const res = await client.request('session/request_permission', {
+    const ask: PermissionAsk = Array.isArray(opts.askPermission)
+      ? { options: opts.askPermission }
+      : opts.askPermission;
+    const toolCall = { toolCallId: 'tc-1', title: 'run tests', ...ask.toolCall };
+    seen.permissionAsks.push({ options: ask.options, toolCall });
+    const res = (await client.request('session/request_permission', {
       sessionId,
-      toolCall: { toolCallId: 'tc-1', title: 'run tests' },
-      options: opts.askPermission,
-    });
+      toolCall,
+      options: ask.options,
+    })) as { outcome?: unknown };
     seen.permissionOutcome = res.outcome;
   }
   if (opts.askTerminal !== undefined) {
@@ -141,8 +158,10 @@ export function fakeAcpAgent(
      *  'cancel' answers -32800 like an aborted request. */
     failConfig?: 'refuse' | 'cancel';
     /** Ask session/request_permission mid-prompt with these options —
-     *  the outcome lands in `permissionOutcome`. */
-    askPermission?: PermissionOption[];
+     *  the outcome lands in `permissionOutcome`. The `{options, toolCall}`
+     *  form gives the ask a real toolCall (rawInput for the seam's
+     *  classifier). */
+    askPermission?: PermissionOption[] | PermissionAsk;
     /** A client-bound call made mid-prompt — e.g.
      *  `(client, sid) => client.request('fs/read_text_file',
      *  {sessionId: sid, path: '/x'})`; its result lands in
@@ -218,6 +237,7 @@ export function fakeAcpAgent(
     forks: [],
     loads: [],
     resumes: [],
+    permissionAsks: [],
   };
   const app = agent({ name: 'fake-acp' })
     .onRequest('initialize', ctx => {

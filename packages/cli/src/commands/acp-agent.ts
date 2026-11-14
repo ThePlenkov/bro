@@ -36,6 +36,7 @@ import type {
 } from '@broject/providers';
 import { buildDump, type ContractDump } from './contract-dump.ts';
 import {
+  collectPermission,
   collectPromptContext,
   collectSessionContext,
   collectStopGate,
@@ -432,6 +433,12 @@ export function acpHookSeam(): AcpProxySeam {
       const r = await collectStopGate(cwd, sessionId);
       return r.block === undefined && r.hints.length === 0 ? undefined : r;
     },
+    // the permission leg (spec bro-9qopj): the PermissionRequest
+    // hook's policy as a library call — allow/deny answer downstream
+    // on the spot, ask forwards to the client. `call` arrives as the
+    // proxy's AcpProxyPermissionCall shape; AcpPermissionCall is the
+    // same structure declared on this side of the module edge.
+    permission: async (cwd, sessionId, call) => collectPermission(cwd, sessionId, call),
   };
 }
 

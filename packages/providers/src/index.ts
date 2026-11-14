@@ -72,6 +72,8 @@ export type {
   AcpAgentOverlay,
   AcpAgentTurn,
   AcpProxyOptions,
+  AcpProxyPermissionCall,
+  AcpProxyPermissionVerdict,
   AcpProxySeam,
   AcpProxyToolCall,
 } from './acp-proxy.ts';
