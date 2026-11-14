@@ -237,7 +237,7 @@ export function advertisedCommands(dump: ContractDump): AvailableCommand[] {
  *  leading context or whitespace means free-form text, not a command.
  *  The args stay RAW — tokenizing is the runner's job (an unclosed
  *  quote is the command's own error to report). */
-const SLASH_RE = /^\/([A-Za-z][\w-]*)[ \t]*([\s\S]*)$/;
+const SLASH_RE = /^\/([A-Za-z][\w-]*)(?:\s([\s\S]*))?$/;
 
 export function matchSlash(text: string): { name: string; args: string } | undefined {
   const m = SLASH_RE.exec(text);
@@ -372,7 +372,8 @@ export async function runSlash(
       if (code !== 0) {
         const tail = stderr.trim();
         const how = code === null ? `killed by ${sig ?? 'signal'}` : `exited ${code}`;
-        chunk(`\n\n— ${cmd} ${how}${tail === '' ? '' : `: ${tail}`}`);
+        const suffix = tail === '' ? '' : `: ${tail}`;
+        chunk(`\n\n— ${cmd} ${how}${suffix}`);
       }
       resolve();
     });
