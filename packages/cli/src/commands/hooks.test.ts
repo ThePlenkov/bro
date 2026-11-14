@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -11,12 +12,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   armSession,
   classifyArmCommand,
   classifyArmCommands,
   classifyExecCommand,
   classifySkillMutation,
+  collectPermission,
   collectStopGate,
   collectToolCallGuards,
   hookDeadlineMs,
@@ -1022,6 +1025,150 @@ describe('acp proxy seam collectors (bro-u2eps)', () => {
         assert.equal(r.block, undefined);
       } finally {
         unregisterConnector('u2eps-fake-gate');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+});
+
+describe('acp proxy permission collector (bro-9qopj)', () => {
+  /** The session dir is what the seam resolves inside — process.cwd()
+   *  deliberately differs (the proxy's own cwd is never a fallback). */
+  test('a connector preTool block denies with the block text as reason', async () => {
+    const { root, main } = initRepo('bro-acp-perm-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      registerConnector({
+        name: 'perm-block',
+        hooks: () => ({
+          preTool: () => [{ block: 'no force pushes to main' }],
+        }),
+      });
+      try {
+        const r = await collectPermission(main, 's1', {
+          toolCallId: 'tc-1',
+          name: 'Bash',
+          input: { command: 'git push --force' },
+        });
+        assert.equal(r.verdict, 'deny');
+        assert.match(r.reason ?? '', /no force pushes/);
+      } finally {
+        unregisterConnector('perm-block');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('warn verdicts become hints; input overrides degrade — an unopposed call asks', async () => {
+    const { root, main } = initRepo('bro-acp-perm-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      registerConnector({
+        name: 'perm-warn',
+        hooks: () => ({
+          preTool: () => [
+            { warn: 'careful — shared branch' },
+            // an input rewrite has no wire path (the call already
+            // announced its input) — it degrades to its verdict, which
+            // here is nothing: the call still asks
+            { input: { command: 'git push origin HEAD' } },
+          ],
+        }),
+      });
+      try {
+        const r = await collectPermission(main, 's1', {
+          toolCallId: 'tc-1',
+          name: 'Bash',
+          input: { command: 'git push' },
+        });
+        assert.equal(r.verdict, 'ask');
+        assert.deepEqual(r.hints, ['careful — shared branch']);
+      } finally {
+        unregisterConnector('perm-warn');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('self-tool commands auto-approve — bro/bd/npx bro like the PermissionRequest hook', async () => {
+    const { root, main } = initRepo('bro-acp-perm-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      for (const cmd of ['bd ready', 'bro status', 'npx @broject/bro doctor']) {
+        const r = await collectPermission(main, 's1', {
+          toolCallId: 'tc-1',
+          name: 'Bash',
+          input: { command: cmd },
+        });
+        assert.equal(r.verdict, 'allow', cmd);
+      }
+      const ordinary = await collectPermission(main, 's1', {
+        toolCallId: 'tc-2',
+        name: 'Bash',
+        input: { command: 'git status' },
+      });
+      assert.equal(ordinary.verdict, 'ask');
+      // a chained command is never a self-tool call — the second stage
+      // could be anything
+      const chained = await collectPermission(main, 's1', {
+        toolCallId: 'tc-3',
+        name: 'Bash',
+        input: { command: 'bd ready && rm -rf /' },
+      });
+      assert.equal(chained.verdict, 'ask');
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  test('fails open to ask — outside a bro repo, an empty session id, a throwing connector', async () => {
+    const bare = mkdtempSync(join(tmpdir(), 'bro-acp-perm-norepo-'));
+    try {
+      const r = await collectPermission(bare, 's1', {
+        toolCallId: 'tc-1',
+        name: 'Bash',
+        input: { command: 'bd ready' },
+      });
+      assert.equal(r.verdict, 'ask');
+    } finally {
+      rmSync(bare, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+    const { root, main } = initRepo('bro-acp-perm-', m => {
+      writeFileSync(join(m, 'bro.config.json'), '{}');
+    });
+    try {
+      registerConnector({
+        name: 'perm-throw',
+        hooks: () => ({
+          preTool: () => {
+            throw new Error('connector died');
+          },
+        }),
+      });
+      try {
+        // a wedged connector is fail-open inside preToolVerdicts —
+        // the self-tool allow still lands
+        const r = await collectPermission(main, 's1', {
+          toolCallId: 'tc-1',
+          name: 'Bash',
+          input: { command: 'bd ready' },
+        });
+        assert.equal(r.verdict, 'allow');
+        // and an empty session id skips everything — ask
+        const r2 = await collectPermission(main, '', {
+          toolCallId: 'tc-1',
+          name: 'Bash',
+          input: { command: 'bd ready' },
+        });
+        assert.equal(r2.verdict, 'ask');
+      } finally {
+        unregisterConnector('perm-throw');
       }
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

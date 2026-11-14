@@ -55,10 +55,18 @@ context or nothing (fail-open, same as the hook).
   carrying the gate's message, and the gate turn's own end passes
   unconditionally — gates, not loops.
 - `BRO_HOOKS=0` makes the proxy a pure transport — no arming, no
-  guards, no gate (the spawned agent already runs with it, which is
-  why the child env pins it).
-- Permission policy (`bro-9qopj`) and agent mode (`bro-tegz2`) are
-  separate beads — permission requests forward verbatim today.
+  guards, no gate, no permission policy (the spawned agent already
+  runs with it, which is why the child env pins it).
+- `session/request_permission` runs the same policy the
+  PermissionRequest hook does (spec bro-9qopj): session-cap refusals
+  and connector `preTool` blocks deny (reject_once, or `cancelled`
+  when no reject is offered), bro/bd self-tool commands approve
+  (allow_once), everything else forwards to the client verbatim and
+  the client's own answer relays back. Guard `warn` verdicts ride the
+  next prompt as advisory text. Every decision journals —
+  `kind:'permission'` rows with `decidedBy:'proxy'|'client'` in the
+  session's events archive (`<git-common>/bro/proxy/` unbadged).
+- Agent mode (`bro-tegz2`) is a separate bead.
 
 ## Telemetry
 

@@ -209,6 +209,53 @@ describe('agentTurnPlane', () => {
     assert.equal(existsSync(join(common, 'bro', 'agents')), false);
   });
 
+  test('plane.note lands an out-of-band row in the plane\u2019s own archive (spec bro-9qopj)', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-t1';
+    try {
+      const plane = agentTurnPlane({ cwd: dir, by: 'acp proxy', sessionId: 'sess-1' });
+      plane.start();
+      // a permission verdict is a client-bound exchange — the update
+      // funnel never carries it, so it journals through note()
+      plane.note({ kind: 'permission', title: 'rm -rf /', decidedBy: 'proxy', verdict: 'denied' });
+      plane.stop('end_turn');
+      const rows = readArchive(dir, 'native-t1');
+      const perm = rows.find(r => r.kind === 'permission');
+      assert.equal(perm?.verdict, 'denied');
+      assert.equal(perm?.title, 'rm -rf /');
+      assert.equal(perm?.decidedBy, 'proxy');
+      // the stamp rides: session/by/key land like any archived row
+      assert.equal(perm?.session, 'sess-1');
+      assert.equal(perm?.key, 'native-t1');
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('plane.note on the unbadged proxy scope archives under bro/proxy — where agentEventRecord writes nothing', () => {
+    const dir = repo();
+    delete process.env.BRO_AGENT_ID;
+    const plane = agentTurnPlane({
+      cwd: dir,
+      by: 'acp proxy',
+      sessionId: 'sess-9',
+      plane: 'proxy',
+    });
+    plane.note({ kind: 'permission', title: 'bd ready', decidedBy: 'client', verdict: 'approved' });
+    const common = gitCommonDir(dir)!;
+    const pdir = join(common, 'bro', 'proxy');
+    const files = readdirSync(pdir).filter(f => f.startsWith('acp-sess-9-'));
+    assert.equal(files.length, 1);
+    const rows = readFileSync(join(pdir, files[0]!), 'utf8')
+      .split('\n')
+      .filter(l => l !== '')
+      .map(l => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.kind, 'permission');
+    assert.equal(rows[0]!.verdict, 'approved');
+    assert.equal(rows[0]!.session, 'sess-9');
+  });
+
   test('unbadged turns key acp:<sessionId> and never write an archive', async () => {
     const dir = repo();
     const broker = await startBusBrokerAt(busSocketPath(dir)!);
