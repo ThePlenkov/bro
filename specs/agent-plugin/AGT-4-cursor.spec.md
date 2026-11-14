@@ -112,7 +112,10 @@ resolve inside the checkout).
   the scenario asserts exactly one reprompt, never a loop), S7
   fail-open, S8 dep-degraded, S9 skills, S10 native correlation.
   Not applicable — S4 `/bro` (no command surface), S5/S6 pending
-  driver verification.
+  driver verification. Hook dispatch verified e2e —
+  `manifest.e2e.test.ts` fires every hooks.json-declared event
+  through the shipped run.sh and asserts `bro hooks <event>` +
+  payload in the FakeBro journal.
 
 ## Changelog
 
@@ -120,3 +123,6 @@ resolve inside the checkout).
 - 2026-11-12 — v2 rewrite: assets inventory, mandatory-answer rule
   promoted to contract-level, cloud fallback named.
 - 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); S3 asserts loop_limit:1 single reprompt.
+- 2026-11-14 — v4: hook dispatch verified e2e — `manifest.e2e.test.ts`
+  fires every hooks.json-declared event through the shipped run.sh;
+  FakeBro journal asserts `bro hooks <event>` + payload per event.

@@ -105,7 +105,10 @@ negotiation; future layered-install hosts inherit it.
   S8 dep-degraded, S9 skills, S10 native correlation (project-
   local hook ownership). S2/S4/S5/S6 pending — the hook chain's
   per-event coverage is narrower than the manifest hosts';
-  declared, not assumed.
+  declared, not assumed. Hook dispatch verified e2e —
+  `manifest.e2e.test.ts` fires every hooks.json-declared event
+  through the shipped run.sh and asserts `bro hooks <event>` +
+  payload in the FakeBro journal.
 
 ## Changelog
 
@@ -113,3 +116,6 @@ negotiation; future layered-install hosts inherit it.
 - 2026-11-12 — v2 rewrite: assets inventory, hook-ownership rule
   promoted to contract, PostCompaction/field-outcome noted.
 - 2026-11-12 — v3: Verify gains the AGT-1 scenario map (S1–S10 applicability); narrower per-event coverage declared pending driver.
+- 2026-11-14 — v4: hook dispatch verified e2e — `manifest.e2e.test.ts`
+  fires every hooks.json-declared event through the shipped run.sh;
+  FakeBro journal asserts `bro hooks <event>` + payload per event.
