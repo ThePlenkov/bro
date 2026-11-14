@@ -95,6 +95,13 @@ interface ClientSpec {
    *  current layout lands. */
   legacy?(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string[]>;
   registration?(scope: PluginScope, path: string, env: NodeJS.ProcessEnv): Registration | null;
+  /** Hosts that load project and global copies of the same extension
+   *  without dedupe — a dual install conflicts on tool/command names
+   *  (bro-b7mae). When both scopes are requested the install collapses
+   *  to global (it covers the repo too) and this note explains why;
+   *  an explicit single scope still installs, with a warning when the
+   *  other scope already holds a bro copy. */
+  singleScope?: string;
 }
 
 /** The bro package root — this module sits at src/commands/ in a
@@ -344,6 +351,9 @@ const CLIENTS: Record<string, ClientSpec> = {
         },
       },
     ],
+    singleScope:
+      'pi loads project and global copies of the same extension without ' +
+      'dedupe — tool names conflict (bro-b7mae)',
   },
   omp: {
     // omp discovers <cwd>/.omp/extensions/ locally and
@@ -360,6 +370,9 @@ const CLIENTS: Record<string, ClientSpec> = {
         },
       },
     ],
+    singleScope:
+      'omp loads project and global copies of the same extension without ' +
+      'dedupe — tool names conflict (bro-b7mae)',
   },
 };
 
@@ -513,8 +526,19 @@ function knownClient(name: string): ClientSpec {
 export function installClient(name: string, scopes: PluginScope[], opts: MutateOpts): Outcome[] {
   const client = knownClient(name);
   const surfaces = client.surfaces(opts.cwd, opts.env);
+  // singleScope clients cannot hold both copies — the host loads them
+  // and the duplicate registrations collide. A bare `install` converges
+  // to ONE scope: whichever already holds a bro copy (refreshing the
+  // user's existing choice beats silently adding the other), global
+  // when neither or both do. An explicit scope flag is still honored.
+  const wantsBoth = scopes.includes('global') && scopes.includes('local');
+  const effective =
+    client.singleScope !== undefined && wantsBoth
+      ? ([preferredSingleScope(surfaces)] as PluginScope[])
+      : scopes;
+  const collapsed = effective !== scopes;
   const outcomes: Outcome[] = [];
-  for (const scope of scopes) {
+  for (const scope of effective) {
     for (const [idx, surface] of surfaces.entries()) {
       const owner = idx === 0 ? client : { ...client, registration: undefined };
       outcomes.push(
@@ -532,7 +556,77 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
       }
     }
   }
+  if (client.singleScope !== undefined) {
+    const notes: string[] = [];
+    if (collapsed) {
+      const scope = effective[0];
+      notes.push(
+        `${client.singleScope}; only the ${scope}-scope copy was installed ` +
+          '— pass an explicit scope flag to choose the other one instead'
+      );
+    }
+    const conflict = crossScopeBroCopy(surfaces, effective);
+    if (conflict !== null) {
+      notes.push(conflict);
+    }
+    const last = outcomes.at(-1);
+    if (notes.length > 0 && last !== undefined) {
+      last.note = last.note === undefined ? notes.join('; ') : `${last.note}; ${notes.join('; ')}`;
+    }
+  }
   return outcomes;
+}
+
+/** Which scope a collapsed singleScope install lands in: the scope
+ *  that already holds a bro copy wins (a bare install refreshes the
+ *  user's existing choice instead of adding the colliding twin);
+ *  global is the default when neither — or both — do. */
+function preferredSingleScope(surfaces: Surface[]): PluginScope {
+  const holders = (['global', 'local'] as PluginScope[]).filter(scope =>
+    surfaces.some(surface => scopeHasBroCopy(surface, scope))
+  );
+  const only = holders.length === 1 ? holders[0] : undefined;
+  return only ?? 'global';
+}
+
+function scopeHasBroCopy(surface: Surface, scope: PluginScope): boolean {
+  const target =
+    surface.kind === 'file' ? surface.targets[scope] : join(surface.dirs[scope], 'index.ts');
+  if (!existsSync(target)) {
+    return false;
+  }
+  try {
+    return isBroAdapter(readFileSync(target, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** A bro copy already sitting in the scope opposite the ones just
+ *  installed — the host will load both and the duplicate registrations
+ *  collide, so the install warns rather than discovering it live. */
+function crossScopeBroCopy(surfaces: Surface[], scopes: PluginScope[]): string | null {
+  for (const surface of surfaces) {
+    for (const scope of scopes) {
+      const other = scope === 'global' ? 'local' : 'global';
+      const target =
+        surface.kind === 'file' ? surface.targets[other] : join(surface.dirs[other], 'index.ts');
+      if (!existsSync(target)) {
+        continue;
+      }
+      try {
+        if (isBroAdapter(readFileSync(target, 'utf8'))) {
+          return (
+            `a ${other}-scope copy exists at ${target} — the host loads both ` +
+            'scopes and the duplicate tool/command names conflict; remove one'
+          );
+        }
+      } catch {
+        // unreadable — not ours to judge
+      }
+    }
+  }
+  return null;
 }
 
 function installOne(

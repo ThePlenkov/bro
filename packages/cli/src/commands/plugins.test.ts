@@ -224,20 +224,24 @@ describe('plugins install/uninstall/list', () => {
     const agentDir = join(f.opts.env.XDG_CONFIG_HOME!, 'omp-agent');
     f.opts.env.PI_CODING_AGENT_DIR = agentDir;
 
+    // bare install collapses to global — omp loads project+global copies
+    // of the same extension without dedupe (bro-b7mae), same as pi
     const out = installClient('omp', ['global', 'local'], f.opts);
     const globalPath = join(agentDir, 'extensions', 'bro.ts');
     const localPath = join(f.cwd, '.omp', 'extensions', 'bro.ts');
     assert.deepEqual(
       out.map(o => `${o.action}:${o.path}`),
-      [`installed:${globalPath}`, `installed:${localPath}`]
+      [`installed:${globalPath}`]
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     // the shipped adapter carries bro's ownership sentinel
     assert.ok(isBroAdapter(readFileSync(globalPath, 'utf8')));
+    assert.ok(!existsSync(localPath));
 
     const again = installClient('omp', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
-      ['current', 'current']
+      ['current']
     );
   });
 
@@ -420,15 +424,17 @@ describe('plugins install/uninstall/list', () => {
 
   test('pi install lands in .pi/extensions/ and the agent dir', () => {
     const f = fixture();
+    // bare install collapses to global — pi cannot dedupe project+global
+    // copies of the same extension (bro-b7mae); the note says why
     const out = installClient('pi', ['global', 'local'], f.opts);
     assert.deepEqual(
       out.map(o => o.action),
-      ['installed', 'installed']
+      ['installed']
     );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
     const piGlobal = join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts');
-    const piLocal = join(f.cwd, '.pi', 'extensions', 'bro.ts');
     assert.ok(existsSync(piGlobal));
-    assert.ok(existsSync(piLocal));
+    assert.ok(!existsSync(join(f.cwd, '.pi', 'extensions', 'bro.ts')));
     // the installed adapter is a self-contained bundle — pi's jiti loads
     // it with no node_modules to resolve against, and it must still be
     // recognizable as bro's own
@@ -438,6 +444,55 @@ describe('plugins install/uninstall/list', () => {
       [...installed.matchAll(/from\s+['"](\.[^'"]*)['"]/g)].map(m => m[1] ?? ''),
       []
     );
+  });
+
+  test('pi explicit --local still installs the project copy', () => {
+    const f = fixture();
+    const out = installClient('pi', ['local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    const piLocal = join(f.cwd, '.pi', 'extensions', 'bro.ts');
+    assert.ok(existsSync(piLocal));
+    assert.ok(!existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
+  });
+
+  test('pi bare install refreshes an existing local copy instead of adding global', () => {
+    const f = fixture();
+    installClient('pi', ['local'], f.opts);
+    const out = installClient('pi', ['global', 'local'], f.opts);
+    // the scope that already holds bro wins — refreshing it beats
+    // creating the colliding twin the collapse exists to prevent
+    assert.deepEqual(
+      out.map(o => `${o.action}:${o.path}`),
+      [`current:${join(f.cwd, '.pi', 'extensions', 'bro.ts')}`]
+    );
+    assert.match(out[0]!.note ?? '', /only the local-scope copy/);
+    assert.ok(!existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
+  });
+
+  test('pi install warns when the other scope already holds a bro copy', () => {
+    const f = fixture();
+    // seed a project copy first, then install global-only — the host
+    // would load both and collide, so the outcome carries the warning
+    installClient('pi', ['local'], f.opts);
+    const out = installClient('pi', ['global'], f.opts);
+    assert.equal(out[0]!.action, 'installed');
+    assert.match(out[0]!.note ?? '', /local-scope copy exists/);
+  });
+
+  test('omp bare install collapses to global like pi', () => {
+    const f = fixture();
+    const out = installClient('omp', ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
+    // ompAgentDir honors PI_CODING_AGENT_DIR as an override — the fixture
+    // sets it, so the global target lands under the same sandboxed dir
+    assert.ok(existsSync(join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')));
   });
 });
 
