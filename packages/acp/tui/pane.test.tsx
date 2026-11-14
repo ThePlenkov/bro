@@ -18,7 +18,7 @@ import { describe, test } from 'node:test';
 import type { CliRenderer, ScrollBoxRenderable } from '@opentui/core';
 import { createMockMouse, createTestRenderer } from '@opentui/core/testing';
 import { SessionModel } from '../session/src/index.ts';
-import type { PaneWriter } from './app.tsx';
+import type { ComposerProps, PaneWriter } from './app.tsx';
 
 /**
  * Load the pane the way `main.ts` does.
@@ -41,8 +41,10 @@ const upd = (u: Record<string, unknown>): Record<string, unknown> => ({
 const chunk = (kind: string, text: string): Record<string, unknown> =>
   upd({ sessionUpdate: kind, content: { type: 'text', text } });
 
-/** The pane mounted on a headless renderer, plus the model feeding it. */
-async function mount(): Promise<{
+/** The pane mounted on a headless renderer, plus the model feeding it.
+ *  `composer` mounts the pane WITH the composer's strip — the
+ *  standalone pane's surface (spec bro-t4uin). */
+async function mount(composer?: ComposerProps): Promise<{
   frame: () => Promise<string>;
   model: SessionModel;
   writer: PaneWriter;
@@ -61,6 +63,7 @@ async function mount(): Promise<{
   const pane = await mountPane({
     renderer: setup.renderer,
     meta: { worktree: '/tmp/wt' },
+    ...(composer !== undefined ? { composer } : {}),
   });
   const flush = async (): Promise<void> => {
     pane.writer.apply(model.drain());
@@ -519,6 +522,64 @@ describe('the Solid session pane', () => {
       assert.deepEqual(printed, ['done-call']);
     } finally {
       await setup.dispose();
+    }
+  });
+
+  test('the composer is pinned above the footer, dim until focused', async () => {
+    const p = await mount({
+      composing: () => false,
+      queue: () => [],
+      permission: () => undefined,
+      onSubmit: () => {},
+    });
+    try {
+      await p.flush();
+      const frame = await p.frame();
+      assert.match(frame, /press i to write a prompt/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test('a queued prompt is VISIBLE — waiting is not delivered', async () => {
+    const p = await mount({
+      composing: () => false,
+      queue: () => [{ ordinal: 1, text: 'and then the docs' }],
+      permission: () => undefined,
+      onSubmit: () => {},
+    });
+    try {
+      await p.flush();
+      const frame = await p.frame();
+      assert.match(frame, /1 queued/);
+      assert.match(frame, /and then the docs/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test("the permission bar lists the agent's own options", async () => {
+    const p = await mount({
+      composing: () => false,
+      queue: () => [],
+      permission: () => ({
+        requestId: 7,
+        title: 'Run ls',
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+        ],
+      }),
+      onSubmit: () => {},
+    });
+    try {
+      await p.flush();
+      const frame = await p.frame();
+      assert.match(frame, /permission/);
+      assert.match(frame, /Allow once/);
+      assert.match(frame, /Reject/);
+    } finally {
+      await p.dispose();
     }
   });
 
