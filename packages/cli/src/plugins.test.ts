@@ -2,13 +2,16 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { connectors } from '@broject/core';
 import { tmpDir } from './commands/testrepo.ts';
 import {
   assertMutableConfig,
   ConfigPolicyError,
+  connectorProblem,
   loadExternalPlugins,
   PLUGINS,
   pluginConfigSections,
+  pluginExportProblem,
   pluginGroups,
   runPlanFile,
 } from './plugins.ts';
@@ -43,6 +46,26 @@ async function expectRejected(source: string): Promise<void> {
   const dir = repoWith(source, ['./my.ts']);
   const loaded = await loadExternalPlugins(dir);
   assert.equal(loaded.length, 0);
+}
+
+/** Rejection must be actionable — the warning names the failing field
+ *  so the author fixes it instead of bisecting the export. Captures
+ *  console.error for the load duration only. */
+async function expectRejectedNaming(source: string, fieldPattern: RegExp): Promise<void> {
+  const dir = repoWith(source, ['./my.ts']);
+  const warnings: string[] = [];
+  const orig = console.error;
+  console.error = (msg: unknown) => warnings.push(String(msg));
+  try {
+    const loaded = await loadExternalPlugins(dir);
+    assert.equal(loaded.length, 0);
+  } finally {
+    console.error = orig;
+  }
+  assert.ok(
+    warnings.some(w => fieldPattern.test(w)),
+    `expected a rejection warning matching ${fieldPattern}, got: ${warnings.join(' | ') || '(none)'}`
+  );
 }
 
 describe('plugin registry', () => {
@@ -470,11 +493,70 @@ describe('external plugin/connector validation', () => {
       'sparse optInFacades holes rejected',
       `export default { name: 'bad12', summary: 'x', run: () => {}, connectors: [{ name: 'c12', optInFacades: [,'tasks'] }] }`,
     ],
+    [
+      'connector activeIn must be a hook→modes record',
+      `export default { name: 'bad13', summary: 'x', run: () => {}, connectors: [{ name: 'c13', activeIn: 5 }] }`,
+    ],
+    [
+      'connector activeIn values must be mode lists',
+      `export default { name: 'bad14', summary: 'x', run: () => {}, connectors: [{ name: 'c14', activeIn: { stopGate: 5 } }] }`,
+    ],
+    [
+      'connector activeIn keys must be hook kinds',
+      `export default { name: 'bad15', summary: 'x', run: () => {}, connectors: [{ name: 'c15', activeIn: { notAHook: ['code'] } }] }`,
+    ],
+    [
+      'connector activeIn elements must be modes',
+      `export default { name: 'bad16', summary: 'x', run: () => {}, connectors: [{ name: 'c16', activeIn: { stopGate: ['bogus'] } }] }`,
+    ],
+    [
+      'sparse connector activeIn mode list rejected',
+      `export default { name: 'bad17', summary: 'x', run: () => {}, connectors: [{ name: 'c17', activeIn: { stopGate: [,'code'] } }] }`,
+    ],
+    [
+      'plugin external must be a boolean',
+      `export default { name: 'bad18', summary: 'x', run: () => {}, external: 'yes' }`,
+    ],
   ];
 
   for (const [title, source] of rejectionCases) {
     test(title, async () => {
       await expectRejected(source);
+    });
+  }
+
+  // field-naming diagnostics — the rejection tells the author WHICH
+  // field failed, not just that the export "is not a BroPlugin"
+  const namingCases: Array<[string, string, RegExp]> = [
+    [
+      'rejection names connector matchDir',
+      `export default { name: 'diag1', summary: 'x', run: () => {}, connectors: [{ name: 'd1', matchDir: 1 }] }`,
+      /connectors\[0\]\.matchDir/,
+    ],
+    [
+      'rejection names connector optInFacades',
+      `export default { name: 'diag2', summary: 'x', run: () => {}, connectors: [{ name: 'd2', optInFacades: 4 }] }`,
+      /connectors\[0\]\.optInFacades/,
+    ],
+    [
+      'rejection names argvPrefix',
+      `export default { name: 'diag3', summary: 'x', run: () => {}, argvPrefix: [1] }`,
+      /argvPrefix/,
+    ],
+    [
+      'rejection names the missing half of a schema pair',
+      `export default { name: 'diag4', summary: 'x', run: () => {}, configKey: 'x' }`,
+      /configSchema/,
+    ],
+    [
+      'rejection names connector activeIn',
+      `export default { name: 'diag5', summary: 'x', run: () => {}, connectors: [{ name: 'd5', activeIn: { stopGate: 5 } }] }`,
+      /connectors\[0\]\.activeIn\.stopGate/,
+    ],
+  ];
+  for (const [title, source, pattern] of namingCases) {
+    test(title, async () => {
+      await expectRejectedNaming(source, pattern);
     });
   }
 
@@ -489,6 +571,38 @@ describe('external plugin/connector validation', () => {
       assert.equal(loaded[0].name, 'good1');
     } finally {
       unload(loaded);
+    }
+  });
+
+  test('connector declaring optInFacades + activeIn registers', async () => {
+    const dir = repoWith(
+      `export default { name: 'good2', summary: 'x', run: () => {}, connectors: [{ name: 'gc2', optIn: true, optInFacades: ['tasks', 'ledger'], activeIn: { stopGate: ['code', 'review'], sessionStart: ['observe'] } }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good2');
+    } finally {
+      unload(loaded);
+    }
+  });
+});
+
+describe('TypeScript↔runtime consistency (spec bro-l8c4f.1)', () => {
+  // the runtime half of the contract: objects TypeScript accepts
+  // (every built-in plugin/connector IS a typed BroPlugin/Connector)
+  // must produce no validation problem — the checks reject malformed
+  // shapes, never valid ones
+  test('every built-in plugin passes external validation', () => {
+    for (const p of PLUGINS) {
+      assert.equal(pluginExportProblem(p), undefined, `plugin "${p.name}"`);
+    }
+  });
+
+  test('every registered connector passes validation', () => {
+    for (const c of connectors()) {
+      assert.equal(connectorProblem(c, `connector "${c.name}"`), undefined);
     }
   });
 });
