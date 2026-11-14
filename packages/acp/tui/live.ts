@@ -85,6 +85,69 @@ export type LiveAction =
   | { kind: 'none' };
 
 /**
+ * The browse mode's static keys.
+ *
+ * A TABLE, not a chain of `if`s: the pane's grammar is a lookup, and
+ * a lookup reads in one glance. The keys that depend on the session's
+ * state (the permission's digits, `d`) cannot live in a table — they
+ * are `browseAction`'s job.
+ */
+const BROWSE_KEYS: Record<string, LiveAction> = {
+  i: { kind: 'compose' },
+  '/': { kind: 'compose' },
+  j: { kind: 'select', delta: 1 },
+  k: { kind: 'select', delta: -1 },
+  up: { kind: 'scroll', lines: -3 },
+  down: { kind: 'scroll', lines: 3 },
+  pageup: { kind: 'page', dir: -1 },
+  pagedown: { kind: 'page', dir: 1 },
+  home: { kind: 'edge', edge: 0 },
+  end: { kind: 'edge', edge: 1 },
+  a: { kind: 'expand-all' },
+  z: { kind: 'collapse-all' },
+  return: { kind: 'fold' },
+  enter: { kind: 'fold' },
+  space: { kind: 'fold' },
+  c: { kind: 'fold' },
+  q: { kind: 'quit' },
+};
+
+/** The control keys — they mean the same thing in every mode. */
+function controlAction(name: string): LiveAction {
+  if (name === 'c') return { kind: 'copy' };
+  // Ctrl+X, not Ctrl+C: Ctrl+C is the pane's copy (and the
+  // terminal's own interrupt), and a cancel must not be one keystroke
+  // away from a copy.
+  if (name === 'x') return { kind: 'cancel' };
+  if (name === 'd') return { kind: 'quit' };
+  return { kind: 'none' };
+}
+
+/** Compose mode — the INPUT owns every key but one. */
+function composeAction(name: string): LiveAction {
+  if (name === 'escape') return { kind: 'browse' };
+  // everything else belongs to the input
+  return { kind: 'none' };
+}
+
+/** Browse mode — the table, then the permission's own keys. */
+function browseAction(name: string, view: LiveView): LiveAction {
+  const known = BROWSE_KEYS[name];
+  if (known !== undefined) return known;
+
+  // the permission ask owns the number keys and 'd' — but ONLY while
+  // it is pending, so the digits stay free otherwise
+  const ask = view.permission;
+  if (ask === undefined) return { kind: 'none' };
+  if (name === 'd') return { kind: 'deny' };
+  const index = Number.parseInt(name, 10);
+  if (Number.isInteger(index) && index >= 1 && index <= ask.options.length) {
+    return { kind: 'answer', index: index - 1 };
+  }
+  return { kind: 'none' };
+}
+
+/**
  * Map a key press onto an action.
  *
  * The rule that shapes everything: in compose mode the INPUT owns
@@ -94,52 +157,9 @@ export type LiveAction =
  * interpreting it.
  */
 export function liveAction(key: LiveKey, view: LiveView): LiveAction {
-  const name = key.name;
-
-  if (key.ctrl === true) {
-    if (name === 'c') return { kind: 'copy' };
-    // Ctrl+X, not Ctrl+C: Ctrl+C is the pane's copy (and the
-    // terminal's own interrupt), and a cancel must not be one keystroke
-    // away from a copy.
-    if (name === 'x') return { kind: 'cancel' };
-    if (name === 'd') return { kind: 'quit' };
-    return { kind: 'none' };
-  }
-
-  if (view.mode === 'compose') {
-    if (name === 'escape') return { kind: 'browse' };
-    // everything else belongs to the input
-    return { kind: 'none' };
-  }
-
-  if (name === 'i' || name === '/') return { kind: 'compose' };
-  if (name === 'j') return { kind: 'select', delta: 1 };
-  if (name === 'k') return { kind: 'select', delta: -1 };
-  if (name === 'up') return { kind: 'scroll', lines: -3 };
-  if (name === 'down') return { kind: 'scroll', lines: 3 };
-  if (name === 'pageup') return { kind: 'page', dir: -1 };
-  if (name === 'pagedown') return { kind: 'page', dir: 1 };
-  if (name === 'home') return { kind: 'edge', edge: 0 };
-  if (name === 'end') return { kind: 'edge', edge: 1 };
-  if (name === 'a') return { kind: 'expand-all' };
-  if (name === 'z') return { kind: 'collapse-all' };
-  if (name === 'return' || name === 'enter' || name === 'space' || name === 'c') {
-    return { kind: 'fold' };
-  }
-  if (name === 'q') return { kind: 'quit' };
-
-  // the permission ask owns the number keys and 'd' — but ONLY while
-  // it is pending, so the digits stay free otherwise
-  const ask = view.permission;
-  if (ask !== undefined) {
-    if (name === 'd') return { kind: 'deny' };
-    const index = Number.parseInt(name, 10);
-    if (Number.isInteger(index) && index >= 1 && index <= ask.options.length) {
-      return { kind: 'answer', index: index - 1 };
-    }
-  }
-
-  return { kind: 'none' };
+  if (key.ctrl === true) return controlAction(key.name);
+  if (view.mode === 'compose') return composeAction(key.name);
+  return browseAction(key.name, view);
 }
 
 /** The composer hint — the footer tells the human what the keys do. */

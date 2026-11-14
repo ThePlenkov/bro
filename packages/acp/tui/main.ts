@@ -192,6 +192,9 @@ async function main(): Promise<void> {
         case 'browse':
           key.preventDefault();
           setMode('browse');
+          // the input keeps the focus unless it is told otherwise —
+          // a focused input would swallow j/k/Enter from the pane
+          served.pane.blurComposer?.();
           break;
         case 'cancel':
           key.preventDefault();

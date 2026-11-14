@@ -130,7 +130,12 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
         at: t,
       });
     }
-    const verdict = row.verdict;
+    // ONLY an explicit answer closes the record. The headless
+    // driver's row carries a verdict TOO, but that verdict is the
+    // driver's, not the pane's — the archive's ask stays OPEN, which
+    // is what makes the pane say 'blocked · permission' (the row IS
+    // the pane's blocked signal, spec bro-l8wqu).
+    const verdict = row.phase === 'answer' ? row.verdict : undefined;
     if (verdict !== undefined && verdict !== '') {
       if (verdict === 'cancelled') {
         events.push({ type: 'permission_cancelled', toolCallId, at: t });

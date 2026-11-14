@@ -1508,6 +1508,19 @@ export async function mountPane(opts: {
   const [toast, setToast] = createSignal('');
   let scroller: ScrollBoxRenderable | undefined;
   let input: InputRenderable | undefined;
+  // the composer owns the input element — the pane captures it so
+  // the shell can read the draft and clear it after a send, and so
+  // the mode can blur it without reaching into the tree
+  const composer: ComposerProps | undefined =
+    opts.composer === undefined
+      ? undefined
+      : {
+          ...opts.composer,
+          onInput: el => {
+            input = el;
+            opts.composer?.onInput?.(el);
+          },
+        };
   await render(
     () => (
       <Pane
@@ -1532,7 +1545,7 @@ export async function mountPane(opts: {
           setTimeout(() => setToast(''), 1500);
         }}
         onToggleRow={id => pane.writer.toggleRow(id)}
-        composer={opts.composer}
+        composer={composer}
       />
     ),
     opts.renderer

@@ -18,7 +18,7 @@ import { describe, test } from 'node:test';
 import type { CliRenderer, ScrollBoxRenderable } from '@opentui/core';
 import { createMockMouse, createTestRenderer } from '@opentui/core/testing';
 import { SessionModel } from '../session/src/index.ts';
-import type { ComposerProps, PaneWriter } from './app.tsx';
+import type { ComposerProps, Pane, PaneWriter } from './app.tsx';
 
 /**
  * Load the pane the way `main.ts` does.
@@ -47,6 +47,7 @@ const chunk = (kind: string, text: string): Record<string, unknown> =>
 async function mount(composer?: ComposerProps): Promise<{
   frame: () => Promise<string>;
   model: SessionModel;
+  pane: Pane;
   writer: PaneWriter;
   renderer: CliRenderer;
   scroller: () => ScrollBoxRenderable | undefined;
@@ -72,6 +73,7 @@ async function mount(composer?: ComposerProps): Promise<{
   return {
     frame: async () => setup.captureCharFrame(),
     model,
+    pane,
     writer: pane.writer,
     renderer: setup.renderer,
     scroller: () => pane.scroller,
@@ -578,6 +580,29 @@ describe('the Solid session pane', () => {
       assert.match(frame, /permission/);
       assert.match(frame, /Allow once/);
       assert.match(frame, /Reject/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test('the pane captures the composer input — the shell can read and clear it', async () => {
+    const p = await mount({
+      composing: () => false,
+      queue: () => [],
+      permission: () => undefined,
+      onSubmit: () => {},
+    });
+    try {
+      await p.flush();
+      assert.ok(p.pane.input !== undefined, 'the pane must capture the input element');
+      p.pane.input.value = 'typed words';
+      await p.flush();
+      assert.equal(p.pane.input.value, 'typed words');
+      // leaving the composer blurs it — a focused input would keep
+      // swallowing the pane's own keys
+      p.pane.blurComposer?.();
+      await p.flush();
+      assert.equal(p.pane.input.focused, false);
     } finally {
       await p.dispose();
     }

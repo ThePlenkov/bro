@@ -73,9 +73,18 @@ describe('argv — the config is the trust boundary', () => {
     assert.deepEqual(splitArgv('a\\\\b'), ['a\\b']);
   });
 
+  test('a quoted span concatenates with its neighbours, like a shell', () => {
+    assert.deepEqual(splitArgv("a'b c'd"), ['ab cd']);
+    assert.deepEqual(splitArgv('a"b"c'), ['abc']);
+  });
+
   test('an unclosed quote is a config error, never a half command', () => {
     assert.throws(() => splitArgv('kilo "acp'), /unclosed quote/);
     assert.throws(() => splitArgv("kilo 'acp"), /unclosed quote/);
+  });
+
+  test('a quote inside a bare word is a quote nobody closed', () => {
+    assert.throws(() => splitArgv('a"b'), /unclosed quote/);
   });
 
   test('the detailed split says which words were quoted', () => {
@@ -137,6 +146,20 @@ describe('the handshake', () => {
     });
     await assert.rejects(() => client.start(), /loadSession/);
     await client.close();
+  });
+
+  test('a capability map advertises by NAME — `resume: {}` means yes', async () => {
+    const h = harness({ caps: { sessionCapabilities: { resume: {} } } });
+    const caps = await h.client.start();
+    // ACP's capability maps hold an option BAG per name; the name
+    // being there is the advertisement
+    assert.equal(caps.resume, true);
+    await h.client.close();
+
+    const off = harness({ caps: { sessionCapabilities: { resume: false } } });
+    const offCaps = await off.client.start();
+    assert.equal(offCaps.resume, false);
+    await off.client.close();
   });
 
   test('resume is opt-in and needs the capability the agent advertises', async () => {
@@ -321,6 +344,28 @@ describe('permissions — the human decides', () => {
     await waitFor(() => h.asks.length === 1);
     await h.client.close();
     assert.equal(h.client.awaitingPermission, undefined);
+  });
+});
+
+describe('a wedged turn', () => {
+  test('the turn fails loudly — it never hangs the pane', async () => {
+    const h = harness({ mode: 'hold' });
+    await h.client.start();
+    // the agent holds the turn open; the client's own deadline ends it
+    const client = new AcpClient({
+      command: cmd(),
+      env: { FAKE_AGENT: JSON.stringify({ mode: 'hold' }) },
+      turnMs: 150,
+      onRow: row => h.rows.push(row),
+    });
+    await client.start();
+    await client.prompt('never answered');
+    const stop = h.rows.find(r => r.kind === 'turn' && r.phase === 'stop');
+    assert.ok(stop !== undefined, 'the turn must end, not hang');
+    assert.equal(stop.kind === 'turn' ? stop.stopReason : '', 'error');
+    assert.equal(client.status, 'failed');
+    await client.close();
+    await h.client.close();
   });
 });
 

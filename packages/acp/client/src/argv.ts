@@ -13,114 +13,82 @@
  */
 
 /** One word's pieces — the literal text and whether it was quoted. */
-interface Word {
+export interface Word {
   text: string;
   quoted: boolean;
 }
 
-/** Split a command line into argv words — no expansion, ever. */
-export function splitArgv(command: string): string[] {
+/**
+ * The command's segments: a CLOSED quoted span, an escaped char, a
+ * bare run, or whitespace (the word boundary).
+ *
+ * Only CLOSED quotes match — an unterminated one is left in the gap
+ * between the segments, which is how `splitArgv` names it a config
+ * error instead of half-parsing the command.
+ */
+const SEGMENT = /"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^\s'"\\]+|\s+/g;
+
+/** Does this leftover text hold a quote nobody closed? */
+const hasQuote = (text: string): boolean => text.includes('"') || text.includes("'");
+
+/** One segment's literal text — the quotes come off, the escapes stay. */
+function decodeSegment(segment: string): Word {
+  if (segment.startsWith('"')) {
+    // a double-quoted span: the backslash escapes the next char
+    return { text: segment.slice(1, -1).replace(/\\(.)/g, '$1'), quoted: true };
+  }
+  if (segment.startsWith("'")) {
+    // a single-quoted span: everything inside is literal (the shell's
+    // own rule)
+    return { text: segment.slice(1, -1), quoted: true };
+  }
+  if (segment.startsWith('\\')) {
+    // an escaped char — the char itself, whatever it is
+    return { text: segment.slice(1), quoted: false };
+  }
+  return { text: segment, quoted: false };
+}
+
+/**
+ * Split a command line into argv words, plus whether each came from
+ * a quoted span — a quoted word is DATA, an unquoted one is also
+ * data, but a caller that cares about the difference (an operator's
+ * own quoting) can ask.
+ */
+export function splitArgvDetailed(command: string): Word[] {
   const words: Word[] = [];
   let cur = '';
+  let quoted = false;
   let started = false;
-  let quote: '"' | "'" | undefined;
-  let escaped = false;
+  let consumed = 0;
 
-  for (const ch of command) {
-    if (escaped) {
-      cur += ch;
-      escaped = false;
-      started = true;
-      continue;
-    }
-    if (ch === '\\' && quote !== "'") {
-      // a backslash escapes the next char — inside single quotes it
-      // is literal (the shell's own rule)
-      escaped = true;
-      started = true;
-      continue;
-    }
-    if (quote !== undefined) {
-      if (ch === quote) quote = undefined;
-      else cur += ch;
-      started = true;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      started = true;
-      continue;
-    }
-    if (/\s/.test(ch)) {
+  for (const match of command.matchAll(SEGMENT)) {
+    const gap = command.slice(consumed, match.index);
+    if (hasQuote(gap)) throw new Error('unclosed quote');
+    consumed = match.index + match[0].length;
+    const segment = match[0];
+    if (/^\s+$/.test(segment)) {
+      // the word boundary
       if (started) {
-        words.push({ text: cur, quoted: false });
+        words.push({ text: cur, quoted });
         cur = '';
+        quoted = false;
         started = false;
       }
       continue;
     }
-    cur += ch;
+    const decoded = decodeSegment(segment);
+    cur += decoded.text;
+    quoted = quoted || decoded.quoted;
     started = true;
   }
-  if (quote !== undefined) throw new Error('unclosed quote');
-  if (escaped) cur += '\\';
-  if (started) words.push({ text: cur, quoted: false });
-  return words.map(w => w.text);
+  const tail = command.slice(consumed);
+  if (hasQuote(tail)) throw new Error('unclosed quote');
+  if (started) words.push({ text: cur, quoted });
+  return words;
 }
 
-/**
- * The words, plus whether any of them came from a quoted span — a
- * quoted word is DATA, an unquoted one is also data, but a caller
- * that cares about the difference (an operator's own quoting) can
- * ask.
- */
-export function splitArgvDetailed(command: string): { text: string; quoted: boolean }[] {
-  const out: { text: string; quoted: boolean }[] = [];
-  let cur = '';
-  let started = false;
-  let quoted = false;
-  let quote: '"' | "'" | undefined;
-  let escaped = false;
-  const push = (): void => {
-    if (!started) return;
-    out.push({ text: cur, quoted });
-    cur = '';
-    started = false;
-    quoted = false;
-  };
-  for (const ch of command) {
-    if (escaped) {
-      cur += ch;
-      escaped = false;
-      started = true;
-      continue;
-    }
-    if (ch === '\\' && quote !== "'") {
-      escaped = true;
-      started = true;
-      continue;
-    }
-    if (quote !== undefined) {
-      if (ch === quote) quote = undefined;
-      else cur += ch;
-      started = true;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      quoted = true;
-      started = true;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      push();
-      continue;
-    }
-    cur += ch;
-    started = true;
-  }
-  if (quote !== undefined) throw new Error('unclosed quote');
-  if (escaped) cur += '\\';
-  push();
-  return out;
+/** Split a command line into argv words — no expansion, ever. */
+export function splitArgv(command: string): string[] {
+  return splitArgvDetailed(command).map(w => w.text);
 }

@@ -166,6 +166,14 @@ export interface AcpClientOptions {
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/**
+ * Is a capability advertised? ACP's capability maps hold an OPTION
+ * BAG per name (`resume: {}`), so the name being there is the
+ * advertisement — but an explicit `null` or `false` is a no.
+ */
+const advertised = (value: unknown): boolean =>
+  value !== undefined && value !== null && value !== false;
+
 /** The default handshake budget — an agent that never answers must not pin the pane. */
 const INIT_MS = 20_000;
 /** The default turn budget — a wedged agent must not hang the composer forever. */
@@ -277,7 +285,7 @@ export class AcpClient {
   /** One outbound frame — NDJSON, one object per line. */
   private send(msg: RpcMessage): void {
     const stdin = this.child?.stdin;
-    if (stdin === undefined || stdin === null || stdin.destroyed) {
+    if (!stdin || stdin.destroyed) {
       throw new Error('acp client: the transport is gone');
     }
     stdin.write(`${JSON.stringify(msg)}\n`);
@@ -320,6 +328,21 @@ export class AcpClient {
   async start(): Promise<AgentCapabilities> {
     if (this.state !== 'idle') throw new Error(`acp client: already ${this.state}`);
     this.state = 'starting';
+    try {
+      this.spawnTransport();
+      const caps = await this.handshake();
+      await this.openSession();
+      this.state = 'live';
+      this.notifyState();
+      return caps;
+    } catch (err) {
+      this.fail(errMsg(err));
+      throw err;
+    }
+  }
+
+  /** Spawn the agent and wire the transport to the client. */
+  private spawnTransport(): void {
     const argv = this.opts.command;
     if (argv.length === 0) throw new Error('acp client: the command must name an executable');
     const child = spawn(argv[0] as string, argv.slice(1), {
@@ -345,79 +368,66 @@ export class AcpClient {
     const rl = createInterface({ input: child.stdout as NodeJS.ReadableStream });
     rl.on('line', line => this.onLine(line));
     rl.on('close', () => this.fail('transport closed'));
+  }
 
-    try {
-      const init = (await this.request(
-        'initialize',
-        {
-          protocolVersion: PROTOCOL_VERSION,
-          clientInfo: { name: this.opts.clientName ?? 'bro', version: '1' },
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
-          },
+  /** The handshake — `initialize`, and the capabilities it answers with. */
+  private async handshake(): Promise<AgentCapabilities> {
+    const init = (await this.request(
+      'initialize',
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        clientInfo: { name: this.opts.clientName ?? 'bro', version: '1' },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
         },
-        this.opts.initMs ?? INIT_MS
-      )) as {
-        protocolVersion?: number;
-        agentCapabilities?: {
-          loadSession?: boolean;
-          promptCapabilities?: { image?: boolean; audio?: boolean; embeddedContext?: boolean };
-          sessionCapabilities?: { resume?: unknown };
-        };
-        agentInfo?: { name?: string; version?: string };
+      },
+      this.opts.initMs ?? INIT_MS
+    )) as {
+      protocolVersion?: number;
+      agentCapabilities?: {
+        loadSession?: boolean;
+        promptCapabilities?: { image?: boolean; audio?: boolean; embeddedContext?: boolean };
+        sessionCapabilities?: { resume?: unknown };
       };
-      const ac = init.agentCapabilities;
-      this.caps = {
-        loadSession: ac?.loadSession === true,
-        resume: ac?.sessionCapabilities?.resume !== undefined,
-        promptImage: ac?.promptCapabilities?.image === true,
-        promptAudio: ac?.promptCapabilities?.audio === true,
-        promptEmbeddedContext: ac?.promptCapabilities?.embeddedContext === true,
-        ...(init.agentInfo?.name !== undefined ? { agentName: init.agentInfo.name } : {}),
-        ...(init.agentInfo?.version !== undefined ? { agentVersion: init.agentInfo.version } : {}),
-        protocolVersion: init.protocolVersion ?? PROTOCOL_VERSION,
-        raw: ac,
-      };
-      if (this.caps.protocolVersion !== PROTOCOL_VERSION) {
-        this.fail(
-          `agent negotiated protocol ${this.caps.protocolVersion} — this client speaks v${PROTOCOL_VERSION} only`
-        );
-        throw new Error(`acp client: unsupported protocol ${this.caps.protocolVersion}`);
-      }
-      await this.openSession();
-      this.state = 'live';
-      this.notifyState();
-      return this.caps;
-    } catch (err) {
-      this.fail(errMsg(err));
-      throw err;
+      agentInfo?: { name?: string; version?: string };
+    };
+    const ac = init.agentCapabilities;
+    const caps: AgentCapabilities = {
+      loadSession: ac?.loadSession === true,
+      // ACP's `sessionCapabilities` is a MAP of names to option bags:
+      // `resume: {}` means "yes, I support it" — the capability is the
+      // NAME being there. An explicit null/false is a no.
+      resume: advertised(ac?.sessionCapabilities?.resume),
+      promptImage: ac?.promptCapabilities?.image === true,
+      promptAudio: ac?.promptCapabilities?.audio === true,
+      promptEmbeddedContext: ac?.promptCapabilities?.embeddedContext === true,
+      ...(init.agentInfo?.name !== undefined ? { agentName: init.agentInfo.name } : {}),
+      ...(init.agentInfo?.version !== undefined ? { agentVersion: init.agentInfo.version } : {}),
+      protocolVersion: init.protocolVersion ?? PROTOCOL_VERSION,
+      raw: ac,
+    };
+    if (caps.protocolVersion !== PROTOCOL_VERSION) {
+      this.fail(
+        `agent negotiated protocol ${caps.protocolVersion} — this client speaks v${PROTOCOL_VERSION} only`
+      );
+      throw new Error(`acp client: unsupported protocol ${caps.protocolVersion}`);
     }
+    this.caps = caps;
+    return caps;
   }
 
   /** Open the session — new, or continue an existing one. */
   private async openSession(): Promise<void> {
     const cwd = this.opts.cwd ?? process.cwd();
-    if (this.opts.sessionId !== undefined) {
-      const resume = this.opts.useResume === true;
-      if (resume && this.caps?.resume !== true) {
-        throw new Error(
-          'acp client: the agent does not advertise sessionCapabilities.resume — use session/load'
-        );
-      }
-      if (!resume && this.caps?.loadSession !== true) {
-        throw new Error(
-          'acp client: the agent does not advertise loadSession — cannot continue the session'
-        );
-      }
-      const result = (await this.request(
-        resume ? 'session/resume' : 'session/load',
-        { sessionId: this.opts.sessionId, cwd, mcpServers: [] },
-        this.opts.initMs ?? INIT_MS
-      )) as { sessionId?: string };
-      this.session = result.sessionId ?? this.opts.sessionId;
-      return;
-    }
+    this.session =
+      this.opts.sessionId === undefined
+        ? await this.newSession(cwd)
+        : await this.continueSession(cwd, this.opts.sessionId);
+  }
+
+  /** A fresh session — `session/new`. */
+  private async newSession(cwd: string): Promise<string> {
     const result = (await this.request(
       'session/new',
       { cwd, mcpServers: [] },
@@ -425,7 +435,35 @@ export class AcpClient {
     )) as {
       sessionId?: string;
     };
-    this.session = result.sessionId ?? '?';
+    return result.sessionId ?? '?';
+  }
+
+  /**
+   * Continue an existing session — `session/load` (the portable
+   * spelling) or `session/resume` (opt-in).
+   *
+   * A `session/load` against an agent that does not advertise
+   * `loadSession` is a refusal, not a silent no-op — the client says
+   * so and stays closed.
+   */
+  private async continueSession(cwd: string, sessionId: string): Promise<string> {
+    const resume = this.opts.useResume === true;
+    if (resume && this.caps?.resume !== true) {
+      throw new Error(
+        'acp client: the agent does not advertise sessionCapabilities.resume — use session/load'
+      );
+    }
+    if (!resume && this.caps?.loadSession !== true) {
+      throw new Error(
+        'acp client: the agent does not advertise loadSession — cannot continue the session'
+      );
+    }
+    const result = (await this.request(
+      resume ? 'session/resume' : 'session/load',
+      { sessionId, cwd, mcpServers: [] },
+      this.opts.initMs ?? INIT_MS
+    )) as { sessionId?: string };
+    return result.sessionId ?? sessionId;
   }
 
   /**
@@ -465,8 +503,13 @@ export class AcpClient {
       params: { sessionId: this.session, prompt: [{ type: 'text', text }] },
     });
     this.turnTimer = setTimeout(() => {
-      if (!this.pending.has(id)) return;
+      // the slot is rejected HERE: fail() rejects what is left in the
+      // map, and this one is already gone — a turn that waited on a
+      // promise nobody could settle would hang the pane forever
+      const slot = this.pending.get(id);
+      if (slot === undefined) return;
       this.pending.delete(id);
+      slot.reject(new Error('acp client: the turn timed out'));
       this.fail('the turn timed out');
     }, this.opts.turnMs ?? TURN_MS);
     this.turnTimer.unref?.();
@@ -634,34 +677,47 @@ export class AcpClient {
   private dispatch(msg: RpcMessage): void {
     // a response (no method) — settles a pending request
     if (msg.method === undefined && msg.id !== undefined && msg.id !== null) {
-      const slot = this.pending.get(msg.id);
-      if (slot !== undefined) {
-        this.pending.delete(msg.id);
-        if (msg.error !== undefined) {
-          slot.reject(
-            new Error(
-              `${slot.method} failed (${msg.error.code ?? '?'}): ${msg.error.message ?? '?'}`
-            )
-          );
-        } else {
-          slot.resolve(msg.result);
-        }
-      }
+      this.onResponse(msg);
       return;
     }
     // a notification
     if (msg.id === undefined || msg.id === null) {
-      if (msg.method === 'session/update') {
-        const params = (msg.params ?? {}) as { update?: SessionUpdateLike };
-        if (params.update !== undefined) {
-          this.row({ kind: 'update', ts: new Date().toISOString(), update: params.update });
-        }
-      } else if (msg.method !== undefined) {
-        this.note(`${msg.method}`);
-      }
+      this.onNotification(msg);
       return;
     }
     // an inbound request — the agent asking the client something
+    this.onRequest(msg);
+  }
+
+  /** A response to one of our requests — it settles the promise. */
+  private onResponse(msg: RpcMessage): void {
+    const id = msg.id as number | string;
+    const slot = this.pending.get(id);
+    if (slot === undefined) return;
+    this.pending.delete(id);
+    if (msg.error !== undefined) {
+      slot.reject(
+        new Error(`${slot.method} failed (${msg.error.code ?? '?'}): ${msg.error.message ?? '?'}`)
+      );
+      return;
+    }
+    slot.resolve(msg.result);
+  }
+
+  /** A notification — `session/update` is the feed's currency. */
+  private onNotification(msg: RpcMessage): void {
+    if (msg.method === 'session/update') {
+      const params = (msg.params ?? {}) as { update?: SessionUpdateLike };
+      if (params.update !== undefined) {
+        this.row({ kind: 'update', ts: new Date().toISOString(), update: params.update });
+      }
+      return;
+    }
+    if (msg.method !== undefined) this.note(`${msg.method}`);
+  }
+
+  /** An inbound request — the permission ask, or an unadvertised cap. */
+  private onRequest(msg: RpcMessage): void {
     if (msg.method === 'session/request_permission') {
       this.onPermissionRequest(msg);
       return;

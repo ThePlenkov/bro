@@ -72,6 +72,40 @@ describe('the pane impl seam', () => {
     assert.match(v?.mode ?? '', /^since /);
   });
 
+  test('an interactive permission: the ask opens, the answer closes it', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.feed({
+      kind: 'permission',
+      phase: 'ask',
+      title: 'write /x',
+      toolCallId: 'tool-1',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      ts: '2026-01-01T00:00:30Z',
+    });
+    impl.beginLive();
+    // the ask is open — the pane is blocked until a human answers
+    assert.equal(impl.verdict?.led.state, 'blocked');
+    const asked = impl.dump().join('\n');
+    assert.match(asked, /Allow once/);
+
+    impl.feed({
+      kind: 'permission',
+      phase: 'answer',
+      title: 'write /x',
+      toolCallId: 'tool-1',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      verdict: 'approved',
+      optionId: 'allow',
+      optionKind: 'allow_once',
+      ts: '2026-01-01T00:00:40Z',
+    });
+    const answered = impl.dump().join('\n');
+    assert.match(answered, /allow once/);
+    // the ask is closed — the pane is not blocked any more
+    assert.notEqual(impl.verdict?.led.state, 'blocked');
+  });
+
   test('the permission clock starts at the ask — later rows do not move it', async () => {
     const impl = await pickImpl('acp', {});
     impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
