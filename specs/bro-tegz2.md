@@ -193,7 +193,7 @@ legs.
   resolution (`--provider`, routing class→head, a non-acp head is a
   config error, the first-acp fallback, none → error); the
   advertised set (hidden out, blocklist out, hint shape);
-  `parseSlash`; and the e2e — a fake client over a stream pair in
+  `matchSlash`; and the e2e — a fake client over a stream pair in
   front of a stub downstream lists the commands, runs `/act status`
   (a stub spawn echoes), and a free-form prompt forwards to the
   downstream and streams its updates back verbatim.

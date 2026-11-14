@@ -25,7 +25,12 @@ import type {
   SessionUpdate,
   Stream,
 } from '@agentclientprotocol/sdk';
-import { acpProxy, type AcpProxySeam, type AcpProxyToolCall } from './acp-proxy.ts';
+import {
+  acpProxy,
+  type AcpAgentOverlay,
+  type AcpProxySeam,
+  type AcpProxyToolCall,
+} from './acp-proxy.ts';
 import { fakeAcpAgent, type FakeAcpAgent } from './testkit.ts';
 
 /** In-process Stream pair — the object-message shape the pump and the
@@ -62,11 +67,13 @@ interface Rig {
 
 /** client → proxy → fake agent — all in-process. `fakeOpts` carries
  *  the same option bag fakeAcpAgent takes (replyText, askPermission,
- *  failPrompt, …). */
+ *  failPrompt, …); `agent` is the bro-tegz2 overlay (slash commands,
+ *  bro's initialize identity). */
 function rig(
   fakeOpts: Parameters<typeof fakeAcpAgent>[0],
   seam?: AcpProxySeam,
-  log: (line: string) => void = () => {}
+  log: (line: string) => void = () => {},
+  agent?: AcpAgentOverlay
 ): Rig {
   const fake = fakeAcpAgent(fakeOpts);
   const updates: unknown[] = [];
@@ -81,7 +88,7 @@ function rig(
       updates.push(ctx.params);
     })
     .connect(clientSide);
-  const proxyDone = acpProxy(proxyUp, proxyDown, { seam, log });
+  const proxyDone = acpProxy(proxyUp, proxyDown, { seam, log, agent });
   return { fake, conn, agentConn, acp: conn.agent, proxyDone, updates, clientSide, agentSide };
 }
 
@@ -1363,6 +1370,250 @@ describe('acpProxy — tool_call guards + turn-end stop gate (bro-u2eps)', () =>
       // the block would have sent never crossed downstream
       await new Promise(r2 => setTimeout(r2, 30));
       assert.equal(r.fake.prompts.length, 1);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+});
+
+describe('acpProxy — agent overlay (bro-tegz2)', () => {
+  const COMMANDS = [
+    { name: 'act', description: 'Open-PR loop', input: { hint: 'status|threads' } },
+    { name: 'next', description: 'claim the top bead', input: { hint: 'args' } },
+  ];
+
+  /** The available_commands_update notifications the client leg saw. */
+  const cmdsUpdate = (updates: unknown[]) =>
+    updates.filter(
+      u =>
+        (u as { update?: { sessionUpdate?: string } }).update?.sessionUpdate ===
+        'available_commands_update'
+    );
+
+  /** The agent_message_chunk texts the client leg saw, in order. */
+  const chunks = (updates: unknown[]) =>
+    updates
+      .map(u => (u as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update)
+      .filter(u => u?.sessionUpdate === 'agent_message_chunk')
+      .map(u => u?.content?.text);
+
+  /** The announce rides the same stream right after the open response —
+   *  poll for it rather than racing its write. */
+  async function until(cond: () => boolean, ms = 3000): Promise<void> {
+    const t0 = Date.now();
+    while (!cond()) {
+      if (Date.now() - t0 > ms) {
+        throw new Error('until: timed out');
+      }
+      await new Promise(r => setTimeout(r, 10));
+    }
+  }
+
+  test('a stamped session announces the overlay commands once — right after its open response', async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, { commands: COMMANDS });
+    try {
+      const sessionId = await openSession(r.acp);
+      await until(() => cmdsUpdate(r.updates).length === 1);
+      const u = cmdsUpdate(r.updates)[0] as {
+        sessionId: string;
+        update: { availableCommands: unknown[] };
+      };
+      assert.equal(u.sessionId, sessionId);
+      assert.deepEqual(u.update.availableCommands, COMMANDS);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('each stamped session announces — a second session gets its own available_commands_update', async () => {
+    const r = rig({ replyText: 'ok', uniqueSessions: true }, undefined, () => {}, {
+      commands: COMMANDS,
+    });
+    try {
+      const s1 = await openSession(r.acp);
+      const s2 = await openSession(r.acp);
+      assert.notEqual(s1, s2);
+      await until(() => cmdsUpdate(r.updates).length === 2);
+      assert.deepEqual(
+        cmdsUpdate(r.updates).map(u => (u as { sessionId: string }).sessionId),
+        [s1, s2]
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('no overlay → no announcement (verbatim stays verbatim)', async () => {
+    const r = rig({ replyText: 'ok' });
+    try {
+      await openSession(r.acp);
+      await new Promise(r2 => setTimeout(r2, 60));
+      assert.equal(cmdsUpdate(r.updates).length, 0);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a handled prompt answers upstream with streamed updates — the downstream never sees it', async () => {
+    const seen: string[] = [];
+    const r = rig({ replyText: 'DOWNSTREAM' }, undefined, () => {}, {
+      prompt: async turn => {
+        seen.push(turn.text);
+        turn.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'LOCAL-1 ' },
+        });
+        turn.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'LOCAL-2' },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      const res = await r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: '/act status' }],
+      });
+      assert.equal(res.stopReason, 'end_turn');
+      assert.deepEqual(seen, ['/act status']);
+      assert.deepEqual(r.fake.prompts, []);
+      assert.deepEqual(chunks(r.updates), ['LOCAL-1 ', 'LOCAL-2']);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('an unhandled prompt falls through to verbatim forwarding — seam injection included', async () => {
+    const r = rig(
+      { replyText: 'ok' },
+      { sessionContext: async () => ({ text: 'CTX', settled: true }) },
+      () => {},
+      { prompt: async () => undefined }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      const res = await r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'hello agent' }],
+      });
+      assert.equal(res.stopReason, 'end_turn');
+      assert.equal(r.fake.prompts.length, 1);
+      // the session-start context still injected — the first block is CTX
+      const first = r.fake.blocks[0]![0]!;
+      assert.equal(first.type === 'text' ? first.text : '', 'CTX');
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a locally handled prompt does not consume the first-prompt injection slot', async () => {
+    const r = rig(
+      { replyText: 'ok' },
+      { sessionContext: async () => ({ text: 'CTX', settled: true }) },
+      () => {},
+      {
+        prompt: async turn => (turn.text.startsWith('/') ? { stopReason: 'end_turn' } : undefined),
+      }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: '/act status' }],
+      });
+      assert.deepEqual(r.fake.prompts, []);
+      // the FIRST crossed prompt still carries the session context —
+      // a local turn never claimed the slot
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'real question' }],
+      });
+      assert.equal(r.fake.prompts.length, 1);
+      const first = r.fake.blocks[0]![0]!;
+      assert.equal(first.type === 'text' ? first.text : '', 'CTX');
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('session/cancel mid-local-turn answers cancelled, fires the abort signal, and never crosses', async () => {
+    let aborted = false;
+    let emitsAfter = 0;
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              // a late emit after the cancel must not reach the wire
+              turn.emit({
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'LATE' },
+              });
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        }),
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      const p = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: '/watch' }],
+      });
+      await new Promise(r2 => setTimeout(r2, 50));
+      await r.acp.notify('session/cancel', { sessionId });
+      assert.equal((await p).stopReason, 'cancelled');
+      assert.equal(aborted, true);
+      await new Promise(r2 => setTimeout(r2, 30));
+      assert.deepEqual(r.fake.prompts, []);
+      // no crossed work → the cancel never crossed downstream, and the
+      // late 'LATE' emit never reached the client
+      assert.deepEqual(r.fake.cancels, []);
+      emitsAfter = chunks(r.updates).filter(t => t === 'LATE').length;
+      assert.equal(emitsAfter, 0);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a thrown handler answers -32603 — never a synthesized success', async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      prompt: async () => {
+        throw new Error('slash runner exploded');
+      },
+    });
+    try {
+      const sessionId = await openSession(r.acp);
+      await assert.rejects(
+        r.acp.request('session/prompt', {
+          sessionId,
+          prompt: [{ type: 'text', text: '/x' }],
+        }),
+        (e: unknown) =>
+          e instanceof RequestError && e.code === -32603 && /slash runner exploded/.test(e.message)
+      );
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test("initialize reports the overlay's agentInfo — the downstream's survives under _meta.bro.downstreamAgent", async () => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, {
+      agentInfo: { name: 'bro', version: '9.9.9', title: 'bro agent mode' },
+    });
+    try {
+      const init = (await r.acp.request('initialize', INIT_PARAMS)) as {
+        agentInfo?: { name?: string; version?: string; title?: string };
+        _meta?: { bro?: { downstreamAgent?: { name?: string } } };
+      };
+      assert.equal(init.agentInfo?.name, 'bro');
+      assert.equal(init.agentInfo?.version, '9.9.9');
+      assert.equal(init._meta?.bro?.downstreamAgent?.name, 'fake-acp');
     } finally {
       assert.equal(await close(r), 0);
     }
