@@ -11,7 +11,7 @@ drifts.
 ## Install
 
 ```sh
-bro plugins install kilo            # both scopes
+bro plugins install kilo            # one scope — kilo can't dedupe project+global copies
 bro plugins install kilo --global   # ~/.config/kilo/bro/bro.ts + kilo.json plugin[] entry
 bro plugins install kilo --local    # <repo>/.kilo/plugin/bro.ts
 ```
