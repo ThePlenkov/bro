@@ -306,6 +306,53 @@ describe('bro acp — runSlash', () => {
       texts.join()
     );
   });
+
+  test('a child that ignores SIGTERM is SIGKILLed after the grace window', async () => {
+    const ctrl = new AbortController();
+    const texts: string[] = [];
+    const t0 = Date.now();
+    const run = runSlash(
+      // traps SIGTERM and parks — without escalation 'close' would
+      // wait the whole 60s timeout and jam the writeQ behind it
+      [process.execPath, '-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1e9)'],
+      process.cwd(),
+      60_000,
+      ctrl.signal,
+      t => texts.push(t)
+    );
+    setTimeout(() => ctrl.abort(), 100);
+    await run;
+    const elapsed = Date.now() - t0;
+    assert.ok(
+      elapsed < 30_000,
+      `a SIGTERM-ignoring child held the turn ${elapsed}ms — no escalation`
+    );
+    assert.ok(
+      texts.some(t => t.includes('killed by SIGKILL')),
+      texts.join()
+    );
+  });
+
+  test('a multibyte sequence split across stdout chunks decodes whole — no U+FFFD', async () => {
+    const texts: string[] = [];
+    await runSlash(
+      [
+        process.execPath,
+        '-e',
+        // a 4-byte emoji split mid-sequence: two writes 80ms apart
+        // land as two 'data' events; a per-chunk toString would
+        // stream a replacement pair mid-character
+        'const b=Buffer.from("🚀","utf8");process.stdout.write(b.subarray(0,2));setTimeout(()=>process.stdout.write(b.subarray(2)),80);setTimeout(()=>{},160)',
+      ],
+      process.cwd(),
+      20_000,
+      new AbortController().signal,
+      t => texts.push(t)
+    );
+    const out = texts.join('');
+    assert.ok(out.includes('🚀'), `expected the emoji whole, got: ${out}`);
+    assert.ok(!out.includes('�'), `replacement char leaked: ${out}`);
+  });
 });
 
 describe('bro acp — matchSlash', () => {

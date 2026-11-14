@@ -193,8 +193,11 @@ set falls through — the prompt forwards downstream, so the agent's
 own slash vocabulary composes with bro's. `session/cancel` SIGTERMs
 the child and answers `cancelled` (a cancel that landed while the
 turn queued still kills it); `SLASH_TIMEOUT_MS` (5 min) bounds a
-stuck run, and a client/downstream close mid-turn aborts it with the
-wire.
+stuck run, a SIGTERM-ignoring child gets SIGKILL after
+`KILL_GRACE_MS` (1.5 s), and a client/downstream close mid-turn
+aborts it with the wire. Chunked stdout decodes through a
+StringDecoder — a multibyte sequence split across pipe reads never
+streams replacement chars.
 
 ### Seam — same as proxy mode
 

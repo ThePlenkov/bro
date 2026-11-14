@@ -16,6 +16,7 @@
  */
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type { AvailableCommand, Stream } from '@agentclientprotocol/sdk';
 import {
   CommandError,
@@ -248,6 +249,10 @@ export function matchSlash(text: string): { name: string; args: string } | undef
 /** A slash command is a turn — bounded, not a daemon lease. */
 export const SLASH_TIMEOUT_MS = 5 * 60_000;
 
+/** SIGTERM→SIGKILL grace: a child that ignores the term signal gets
+ *  this long to exit before the hard kill. Exported for tests. */
+export const KILL_GRACE_MS = 1_500;
+
 /** `node <argv1>` spawns a `bro` child identical to this process —
  *  dist/index.js installed, src/index.ts in dev (node ≥22.18 strips
  *  types natively). Resolved once against the server's cwd — the
@@ -288,13 +293,36 @@ export async function runSlash(
       // wait forever on a write end nobody owns
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // stdout/stderr cross chunk boundaries — a multibyte sequence
+    // split between two 'data' events decodes through a StringDecoder
+    // (the same accumulator acp-terminal.ts uses); a per-chunk
+    // toString() would emit U+FFFD pairs mid-character
+    const outDec = new StringDecoder('utf8');
+    const errDec = new StringDecoder('utf8');
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let killing = false;
+    const terminate = () => {
+      if (killing) {
+        return;
+      }
+      killing = true;
+      child.kill('SIGTERM');
+      // a child that traps SIGTERM or keeps its stdout pipe open
+      // would hold 'close' — and every prompt queued behind it in
+      // the session writeQ — until the timeout cap; escalate after
+      // a short grace
+      killTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      terminate();
     }, timeoutMs);
-    const onAbort = () => child.kill('SIGTERM');
+    const onAbort = () => terminate();
     const cleanup = () => {
       clearTimeout(timer);
+      if (killTimer !== undefined) {
+        clearTimeout(killTimer);
+      }
       signal.removeEventListener('abort', onAbort);
     };
     signal.addEventListener('abort', onAbort, { once: true });
@@ -304,9 +332,9 @@ export async function runSlash(
     if (signal.aborted) {
       onAbort();
     }
-    child.stdout.on('data', (d: Buffer) => chunk(d.toString()));
+    child.stdout.on('data', (d: Buffer) => chunk(outDec.write(d)));
     child.stderr.on('data', (d: Buffer) => {
-      stderr = (stderr + d.toString()).slice(-2048);
+      stderr = (stderr + errDec.write(d)).slice(-2048);
     });
     child.on('error', e => {
       cleanup();

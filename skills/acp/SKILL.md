@@ -26,7 +26,7 @@ Bare `bro acp` IS the agent — the client's "custom agent" argv is just
   no routing table the first `acp` entry answers. The head must be an
   `acp`-type entry — a wrong kind is a config error, never a silent
   re-route.
-- Cancel dies the running turn (SIGTERM to a slash child, or the
+- Cancel dies the running turn (SIGTERM→SIGKILL to a slash child, or the
   downstream's own `session/cancel`); a slash command's stdout never
   crosses after its cancel.
 
