@@ -118,8 +118,11 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
   S1 session-start ctx, S2 pre-tool veto, S3 stop gate (serve
   mode, v2 `session.execution.*` taxonomy) in
   `fakebro.e2e.test.ts` + `opencode.e2e.test.ts` (S-coverage:
-  run-turn, ≥8 direct `bro_*` tools). Declared applicable —
-  S4 `/bro`+`/act` dispatch, S5 compaction rehydrate,
+  run-turn, ≥8 direct `bro_*` tools). S4 `/bro` dispatch verified
+  e2e — `bro-command.e2e.test.ts` drives `POST
+  /api/session/{id}/command` and asserts `bro <args>` argv in the
+  FakeBro journal plus the follow-up turn on aimock. Declared
+  applicable — S5 compaction rehydrate,
   S6 multi-turn, S7 fail-open, S9 skills dedup, S10 native
   correlation. S8 dep-degraded covered at the bro layer —
   `deps.e2e.test.ts` runs real `bro hooks post-tool` against a
@@ -160,3 +163,7 @@ CLI resolution: local dist → `bro` PATH → `npx @broject/bro@0.3.0`.
 - 2026-11-12 — v7: S8 lands at the bro layer — `deps.e2e.test.ts`
   proves real `bro hooks` stays fail-open against a dead `bd`
   shim and journals the dep probe.
+- 2026-11-14 — v8: S4 `/bro` dispatch verified e2e — serve-mode
+  `POST /api/session/{id}/command` leg of `bro-command.e2e.test.ts`
+  asserts identical `bro <args>` argv in the FakeBro journal and the
+  follow-up turn reaching aimock.
