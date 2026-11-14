@@ -199,13 +199,16 @@ interface ReduceCtx {
   login: { get: () => string | undefined };
 }
 
-function lazyLogin(): ReduceCtx['login'] {
+function lazyLogin(left?: () => number | undefined): ReduceCtx['login'] {
   let ready = false;
   let login: string | undefined;
   const get = (): string | undefined => {
     if (!ready) {
       ready = true;
-      login = ghSelfLogin().login;
+      const budget = left?.();
+      // a spent reduction budget is "unauthenticated", never a free
+      // unbounded `gh api user` past the caller's deadline
+      login = budget !== undefined && budget < 1 ? undefined : ghSelfLogin(budget).login;
     }
     return login;
   };
@@ -273,14 +276,28 @@ function admitOwnBeads(rows: BeadLike[], thread: string, ctx: ReduceCtx): void {
  *  url on the repo origin points at gets its comments read directly.
  *  Same provenance rule as the peer scan: a bound login attests the
  *  peer, this account attests us, anything else drops flagged. */
-function admitSelfRepoGithub(dir: string, ctx: ReduceCtx): void {
+function admitSelfRepoGithub(dir: string, ctx: ReduceCtx, left?: () => number | undefined): void {
   const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
   const selfRepo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null;
   if (selfRepo === null) {
     return;
   }
   for (const t of ctx.threads) {
-    admitIssueComments(t, selfRepo, ctx);
+    const k = issueKey({ thread: t });
+    // non-issue aliases and foreign repos cost no subprocess — the
+    // budget gate only guards the one call that would spend it
+    if (k.repo === null || k.n === null) {
+      continue;
+    }
+    if (k.repo.owner !== selfRepo.owner || k.repo.repo !== selfRepo.repo) {
+      continue;
+    }
+    const budget = left?.();
+    if (budget !== undefined && budget < 1) {
+      ctx.state.errors.push('self: github comment read budget exhausted');
+      return;
+    }
+    admitIssueComments(t, selfRepo, ctx, budget);
   }
 }
 
@@ -289,7 +306,8 @@ function admitSelfRepoGithub(dir: string, ctx: ReduceCtx): void {
 function admitIssueComments(
   t: string,
   selfRepo: { owner: string; repo: string },
-  ctx: ReduceCtx
+  ctx: ReduceCtx,
+  timeoutMs?: number
 ): void {
   const k = issueKey({ thread: t });
   if (k.repo === null || k.n === null) {
@@ -299,7 +317,7 @@ function admitIssueComments(
   if (repo.owner !== selfRepo.owner || repo.repo !== selfRepo.repo) {
     return;
   }
-  const cs = issueComments(repo, { number: n });
+  const cs = issueComments(repo, { number: n }, timeoutMs);
   for (const e of cs.errors) {
     ctx.state.errors.push(`self: ${e}`);
   }
@@ -367,16 +385,22 @@ export function meshThread(
 ): ThreadState {
   const state: ThreadState = { envelopes: [], provenance: {}, threads: [], errors: [] };
   const ownRig = selfRig(dir);
+  // one deadline across the whole reduction — own store, peer scan,
+  // and the self-repo github read SHARE the caller's slice instead of
+  // each re-granting it; the remainder is recomputed per leg
+  const deadline = call.timeoutMs === undefined ? undefined : performance.now() + call.timeoutMs;
+  const rem = (): number | undefined =>
+    deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
   const ctx: ReduceCtx = {
     threads: new Set([thread]),
     seen: new Set(),
     state,
     ownRig,
     peers,
-    login: lazyLogin(),
+    login: lazyLogin(rem),
   };
 
-  const own = ownBeads(dir, call.timeoutMs);
+  const own = ownBeads(dir, rem());
   if (own.error !== undefined) {
     state.errors.push(`self: ${own.error}`);
   }
@@ -391,7 +415,7 @@ export function meshThread(
     pull: call.pull,
     closedLocal: true,
     selfRig: ownRig ?? undefined,
-    timeoutMs: call.timeoutMs,
+    timeoutMs: rem(),
   });
   if (scan.errors.length > 0) {
     state.scanFailed = true;
@@ -402,7 +426,7 @@ export function meshThread(
     admitPeerRecord(r, ctx);
   }
 
-  admitSelfRepoGithub(dir, ctx);
+  admitSelfRepoGithub(dir, ctx, rem);
   reduceStage(state);
   return state;
 }

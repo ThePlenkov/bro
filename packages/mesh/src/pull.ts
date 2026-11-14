@@ -24,7 +24,9 @@ function dolt(args: string[], cwd?: string, timeoutMs = 120_000): DoltResult {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       encoding: 'utf8',
-      timeout: timeoutMs,
+      // a caller's deadline slice replaces the default; clamped ≥1 —
+      // a 0 here means NO kill to spawnSync, the unbounded footgun
+      timeout: Math.max(1, Math.floor(timeoutMs)),
       maxBuffer: 32 * 1024 * 1024,
     }
   );
