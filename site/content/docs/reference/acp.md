@@ -1,13 +1,14 @@
 ---
 title: "bro acp"
-description: "ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro-bhyo1)"
+description: "ACP edge — bare `bro acp` is bro-as-agent (slash commands + routed provider); `proxy -- <agent cmd>` the cascade edge"
 ---
 
-**`bro acp`** — ACP edge — `proxy -- &lt;agent cmd&gt;` puts bro on the wire (spec bro-bhyo1)
+**`bro acp`** — ACP edge — bare `bro acp` is bro-as-agent (slash commands + routed provider); `proxy -- &lt;agent cmd&gt;` the cascade edge
 
 | | |
 | --- | --- |
 | group | `fleet` |
 | npm latest | `0.3.0` |
 | skill | `acp` |
+| guide | [commands/acp](/docs/commands/acp) |
 

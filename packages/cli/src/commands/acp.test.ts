@@ -19,11 +19,9 @@ import { collectStopGate, collectToolCallGuards, readArmed } from './hooks.ts';
 const acp = (argv: string[]) => capture(() => runAcpCommand(argv));
 
 describe('bro acp — usage', () => {
-  test('missing subcommand, unknown subcommand, missing --, empty tail → usage exit 2', async () => {
-    const bare = await acp([]);
-    assert.equal(bare.code, 2);
-    assert.match(bare.err.join('\n'), /usage: bro acp proxy/);
-
+  test('unknown subcommand, missing --, empty tail → usage exit 2', async () => {
+    // bare `bro acp` is the agent-mode server (bro-tegz2) — it serves
+    // stdin/stdout, so only the usage shapes are exercised here
     const bad = await acp(['bogus']);
     assert.equal(bad.code, 2);
 

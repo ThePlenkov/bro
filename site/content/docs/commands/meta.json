@@ -24,6 +24,7 @@
     "---Plumbing---",
     "providers",
     "provider",
+    "acp",
     "mcp",
     "status",
     "sweep",

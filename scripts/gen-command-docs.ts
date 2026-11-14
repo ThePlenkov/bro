@@ -62,6 +62,7 @@ const rows = Object.values(
 /** command → curated guide page (site/content/docs/commands/<page>.md).
  *  Wrong links are worse than none — only mapped names get a link. */
 const GUIDES: Record<string, string> = {
+  acp: 'acp',
   act: 'act',
   convoy: 'convoy',
   debt: 'debt',
