@@ -33,7 +33,12 @@ tool-vs-command asymmetry, and the honest enforcement gap.
 dir: `~/.config/kilo/plugin/bro.ts` / `.kilo/plugin/bro.ts`. kilo.json's
 `plugin` array does **not** honor file paths (verified against kilo
 7.8.x — `file://` and plain-path entries both load nothing); npm-package
-entries are a different mechanism bro does not use.
+entries are a different mechanism bro does not use. **Single-scope
+contract (bro-b7mae):** verified on kilo 7.8.27 that `kilo run`
+executes BOTH the config-dir and project plugin files — same
+no-dedupe collision class as pi/omp — so a bare install collapses
+to the scope already holding bro (global default); explicit scope
+flags honored with a cross-scope warning.
 
 ### Event mapping (HOOK_MATRIX `kilo` row)
 
@@ -125,3 +130,7 @@ binding dedups so hydration injects once.
   the self-contained `plugins/kilo/bro/bro.ts` bundle over adapter
   src (unresolvable `@broject/adapter-core` import outside the
   monorepo). S4 verified e2e via the `bro` tool matrix leg.
+- 2026-11-14 — v6: install contract gains the single-scope rule
+  (bro-b7mae) — dual plugin-dir load verified empirically on
+  kilo 7.8.27 (`kilo run` executed probe plugins from both scopes);
+  `ClientSpec.singleScope` collapse identical to AGT-7/AGT-8.
