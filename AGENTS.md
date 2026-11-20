@@ -61,6 +61,13 @@ Developing bro itself: see CONTRIBUTING.md.
   guards). When a gate does flag new code, redesign the shape — do not
   split a long function into five trivial ones to game the metric;
   that is worse code, not better code.
+- **Loop with retro** — when a gate or check fails, iterate until it is
+  green and learn from each failure: after every red round, name the
+  concrete finding (which rule, which function), the shape that caused
+  it, and the pattern that would have avoided it, then carry that
+  pattern into the next write. A failure that teaches nothing produces
+  the same failure again next PR — the retro is what makes the loop
+  converge instead of bouncing between flags.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).
