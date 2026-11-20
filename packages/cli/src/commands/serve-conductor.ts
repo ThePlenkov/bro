@@ -2222,6 +2222,9 @@ export async function admitLaneCap(
   // timer, and stream behind it.
   const admissions: SessionStartAdmission[] = [];
   let refusal: string | undefined;
+  // the refusing lane rides WITH the refusal — the SpawnError carries
+  // it as capCause so a classifier never re-parses the formatted text
+  let capCause: 'provider_cap' | undefined;
   const planes = planesStartingSessions(command);
   try {
     for (const plane of planes) {
@@ -2239,6 +2242,7 @@ export async function admitLaneCap(
       }
       if (admission.refusal !== undefined) {
         refusal = admission.refusal;
+        capCause = admission.capCause;
         break;
       }
       admissions.push(admission);
@@ -2254,6 +2258,7 @@ export async function admitLaneCap(
       if (admission !== undefined) {
         if (admission.refusal !== undefined) {
           refusal = admission.refusal;
+          capCause = admission.capCause;
         } else {
           admissions.push(admission);
         }
@@ -2269,7 +2274,7 @@ export async function admitLaneCap(
   }
   if (refusal !== undefined) {
     releaseSessionStart(admissions.flatMap(a => a.paths));
-    throw new SpawnError(refusal, 'cap');
+    throw new SpawnError(refusal, 'cap', capCause);
   }
   return claimRelease(admissions.flatMap(a => a.paths));
 }
@@ -2445,14 +2450,20 @@ export function admitLaneCapUnlocked(
       `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
     );
   }
+  const providerRefusal =
+    providerCap === undefined ? undefined : providerCapHeldRefusal(providerCap, providerLive);
   const refusal =
-    (providerCap === undefined ? undefined : providerCapHeldRefusal(providerCap, providerLive)) ??
+    providerRefusal ??
     postViews.map(sessionCapHeldRefusal).find((line): line is string => line !== undefined);
   if (refusal !== undefined) {
     // the same refusal class the locked section throws — the wire
     // reads 'cap' as the park verdict either path takes
     releaseSessionStart(held);
-    throw new SpawnError(refusal, 'cap');
+    throw new SpawnError(
+      refusal,
+      'cap',
+      providerRefusal !== undefined ? 'provider_cap' : undefined
+    );
   }
   return claimRelease(held);
 }

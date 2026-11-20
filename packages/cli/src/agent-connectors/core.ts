@@ -2843,7 +2843,7 @@ function prepareSpawn(
         );
         if (admission !== undefined) {
           if (admission.refusal !== undefined) {
-            throw new SpawnError(admission.refusal, 'cap');
+            throw new SpawnError(admission.refusal, 'cap', admission.capCause);
           }
           providerReservations.push(...admission.paths);
         }

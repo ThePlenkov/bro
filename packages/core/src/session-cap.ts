@@ -283,6 +283,11 @@ export interface SessionStartAdmission {
   fresh: boolean;
   /** the refusal line when the cap is full. */
   refusal?: string;
+  /** which lane refused — 'provider_cap' when the provider cap fired
+   *  (spec bro-x601l), absent for the kind quota's own lane. Throwers
+   *  forward it onto `SpawnError.capCause` so a classifier branches on
+   *  the field instead of re-parsing the refusal's formatted text. */
+  capCause?: 'provider_cap';
 }
 
 /** The cap's claim+check under the kind's OWN admission mutex — the
@@ -394,7 +399,9 @@ function admissionGate(args: SessionStartAdmissionArgs): { resDir?: string } | u
 
 /** The provider-cap refusal line — undefined when the lane fits. The
  *  wording names the provider entry, the numbers, the knob, and the
- *  `provider_cap` cause token every wait/park classifier looks for. */
+ *  `provider_cap` cause token — carried on `SpawnError.capCause` /
+ *  `SessionStartAdmission.capCause` for the classifiers that branch
+ *  on it, and kept in the text for the string-only surfaces. */
 export function providerCapRefusal(
   lane: ProviderCapLane,
   live: number,
@@ -417,7 +424,7 @@ export function providerCapHeldRefusal(lane: ProviderCapLane, live: number): str
 }
 
 /** The provider-cap refusal line — the numbers, the knob, and the
- *  `provider_cap` cause token every wait/park classifier looks for. */
+ *  `provider_cap` cause token the structured `capCause` field mirrors. */
 function providerCapLine(lane: ProviderCapLane, live: number, starts: number): string {
   return (
     `provider '${lane.provider}' lane cap reached — ${live} live` +
@@ -484,16 +491,23 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
     throw err;
   }
   const extra = args.extraLive ?? 0;
-  const refusal =
-    (providerCap === undefined || providerLive === undefined
+  const providerRefusal =
+    providerCap === undefined || providerLive === undefined
       ? undefined
-      : providerCapHeldRefusal(providerCap, providerLive + extra)) ??
+      : providerCapHeldRefusal(providerCap, providerLive + extra);
+  const refusal =
+    providerRefusal ??
     (view === undefined
       ? undefined
       : sessionCapHeldRefusal({ kind: view.kind, live: census + extra, cap: view.cap }));
   if (refusal !== undefined) {
     releaseSessionStart(claim.paths);
-    return { paths: [], fresh: claim.fresh, refusal };
+    return {
+      paths: [],
+      fresh: claim.fresh,
+      refusal,
+      ...(providerRefusal !== undefined ? { capCause: 'provider_cap' as const } : {}),
+    };
   }
   return { paths: claim.paths, fresh: claim.fresh };
 }
@@ -561,7 +575,7 @@ function providerSlotSection(
   const refusal = providerCapHeldRefusal(lane, live);
   if (refusal !== undefined) {
     releaseSessionStart(claim.paths);
-    return { paths: [], fresh: claim.fresh, refusal };
+    return { paths: [], fresh: claim.fresh, refusal, capCause: 'provider_cap' };
   }
   return { paths: claim.paths, fresh: claim.fresh };
 }

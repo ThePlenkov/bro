@@ -415,8 +415,8 @@ function refusalStep(ctx: ConvoyCtx, item: ConvoyItem, err: SpawnError): RunStep
   if (err.kind === 'cap') {
     ctx.infraStreak = 0; // a classified refusal — the machinery answered
     // a provider lane cap parks exactly like the repo's fleet cap —
-    // the refusal text names which (spec bro-x601l)
-    const capWhat = err.message.includes('provider_cap') ? 'provider lane cap' : 'fleet cap';
+    // the refusal's capCause field names which (spec bro-x601l)
+    const capWhat = err.capCause === 'provider_cap' ? 'provider lane cap' : 'fleet cap';
     deps.say(`run ${item.mol}: ${capWhat} full — waiting a poll tick`);
     return { waitSec: cfg.pollSec };
   }

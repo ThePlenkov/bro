@@ -745,7 +745,8 @@ function checkSessionLanes(
           `(fleet.providerCaps.${providerCap.provider} in the global bro config) ` +
           `— cause: provider_cap` +
           refused,
-        'cap'
+        'cap',
+        'provider_cap'
       );
     }
   }
