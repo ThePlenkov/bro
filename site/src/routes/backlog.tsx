@@ -506,8 +506,7 @@ function FilterControls({ f, setF, view, setView }: Readonly<{
   );
 }
 
-function BacklogPage() {
-  const state = useBacklog();
+function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   const [view, setView] = useState<'list' | 'graph'>('list');
   const [picked, setPicked] = useState<Bead | null>(null);
   const [f, setF] = useState<Filters>({
@@ -515,11 +514,44 @@ function BacklogPage() {
     priority: new Set(ALL_PRIORITY), source: 'all', orphansOnly: false,
   });
 
-  const beads = state.kind === 'ready' ? state.data.snapshot.issues : [];
-  const gh = state.kind === 'ready' ? state.data.gh : [];
-  const filtered = useMemo(() => applyFilters(beads, gh, f), [beads, gh, f]);
+  const beads = data.snapshot.issues;
+  const filtered = useMemo(() => applyFilters(beads, data.gh, f), [beads, data.gh, f]);
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
+  const pick = (id: string) => { const t = byId.get(id); if (t) setPicked(t); };
 
+  return (
+    <>
+      {cached && (
+        <section className="debt-empty"><p>showing the last cached snapshot — GitHub API unreachable right now</p></section>
+      )}
+      <Stats data={data} gh={data.gh} inView={filtered.length} />
+      <FilterControls f={f} setF={setF} view={view} setView={setView} />
+
+      {view === 'list' && <ListView rows={filtered} now={Date.now()} onPick={setPicked} />}
+      {view === 'graph' && (
+        <section>
+          <Graph items={filtered.filter(x => x.src === 'beads').map(x => x.b)} onPick={setPicked} />
+        </section>
+      )}
+      {picked && <Detail b={picked} onClose={() => setPicked(null)} onJump={pick} />}
+    </>
+  );
+}
+
+function Gate({ state }: Readonly<{ state: LoadState }>) {
+  if (state.kind === 'loading') return <section className="debt-empty"><p>loading…</p></section>;
+  if (state.kind === 'error') {
+    return (
+      <section className="debt-empty">
+        <p>⚠ {state.message} — <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated views.</p>
+      </section>
+    );
+  }
+  return <Ready data={state.data} cached={state.cached} />;
+}
+
+function BacklogPage() {
+  const state = useBacklog();
   return (
     <>
       <main className="bl-main">
@@ -532,33 +564,7 @@ function BacklogPage() {
             snapshot on every merge to main — what you see is what the store holds now.
           </p>
         </section>
-
-        {state.kind === 'loading' && <section className="debt-empty"><p>loading…</p></section>}
-        {state.kind === 'error' && (
-          <section className="debt-empty">
-            <p>⚠ {state.message} — <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated views.</p>
-          </section>
-        )}
-        {state.kind === 'ready' && (
-          <>
-            {state.cached && (
-              <section className="debt-empty"><p>showing the last cached snapshot — GitHub API unreachable right now</p></section>
-            )}
-            <Stats data={state.data} gh={gh} inView={filtered.length} />
-            <FilterControls f={f} setF={setF} view={view} setView={setView} />
-
-            {view === 'list' && <ListView rows={filtered} now={Date.now()} onPick={setPicked} />}
-            {view === 'graph' && (
-              <section>
-                <Graph items={filtered.filter(x => x.src === 'beads').map(x => x.b)} onPick={setPicked} />
-              </section>
-            )}
-            {picked && (
-              <Detail b={picked} onClose={() => setPicked(null)}
-                onJump={id => { const t = byId.get(id); if (t) setPicked(t); }} />
-            )}
-          </>
-        )}
+        <Gate state={state} />
       </main>
       <footer className="foot">
         <p className="links">
