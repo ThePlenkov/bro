@@ -1371,6 +1371,11 @@ export interface PooledTurnOpts {
   /** The silence bound for the turn, ms — a turn that produces no
    *  `session/update` for this long is ended (spec bro-b961a). 0 = off. */
   stallMs?: number;
+  /** Fires the moment `session/new` is accepted — the caller's spend
+   *  accounting boundary: a failure before this point opened nothing
+   *  (its charge is refundable); a failure after it was paid for
+   *  (spec bro-ezboq). */
+  onSessionOpened?: () => void;
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -1536,6 +1541,9 @@ export async function acpSessionRetain(
       turn.sessionRequest,
       turn.guard
     );
+    // the open was accepted — anything that fails past this point
+    // already cost the provider a session (spec bro-ezboq)
+    turn.onSessionOpened?.();
     const configOptions = session.newSessionResponse.configOptions ?? [];
     const base = opts.model ?? entry.model;
     // the RAW requested id (possibly a composite like 'swe-2-max') —
