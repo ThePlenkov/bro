@@ -54,6 +54,7 @@ function Home() {
           <p className="caption">real commands, dramatized agents.</p>
         </section>
         <Wedge />
+        <Scenario />
         <OptionalOrchestration />
         <Dogfood />
       </main>
@@ -80,8 +81,10 @@ function CliHero() {
       </h1>
       <p className="lede">
         <strong>ICP:</strong> maintainers and small teams with existing agents, a task store, and
-        PR/CI. <strong>JTBD:</strong> close work without gaps — bro drives the review gate to merge
-        and sweeps the debt after. Start with gate and debt — no fleet, no model gateway required.{' '}
+        PR/CI. <strong>JTBD:</strong> deterministic lifecycle closure — `task → agent → PR → gate → debt`.{' '}
+        <strong>Wedge:</strong> portable `task → agent → PR → gate → debt` contract. Start with the
+        review gate and debt ledger — no fleet, no model-gateway required. Orchestration
+        (fleet/convoy/loop) is optional and progressive, not a replacement runtime.{' '}
         <em>Done is a verdict, not a vibe.</em>
       </p>
       <Install />
@@ -103,6 +106,36 @@ function Wedge() {
         <a href={`${BASE_URL}debt`}>the debt ledger is live</a>. Start here with existing agents, a
         task store, and PR/CI — no fleet, no model-gateway configuration required.
       </p>
+    </section>
+  );
+}
+
+function Scenario() {
+  return (
+    <section className="self">
+      <h2>End-to-end scenario (no fleet/model gateway required)</h2>
+      <pre className="code-block">
+        {`# 1) Claim work from your task store
+npx @broject/bro next
+BEAD="<bead-id>"
+
+# 2) Implement and open a PR
+git add -A
+git commit -m "$BEAD: <summary>"
+git push -u origin HEAD
+gh pr create --fill
+
+# 3) Drive the PR through the review gate
+npx @broject/bro act status
+npx @broject/bro act threads
+npx @broject/bro act merge --bead "$BEAD"
+
+# 4) Sweep merged threads into debt
+npx @broject/bro debt prs
+npx @broject/bro debt collect
+npx @broject/bro debt status
+npx @broject/bro debt next`}
+      </pre>
     </section>
   );
 }
