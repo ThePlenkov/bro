@@ -1507,12 +1507,31 @@ function optInFacadesProblem(v: unknown, path: string): string | undefined {
   return undefined;
 }
 
+/** One activeIn value — absent or the dense Mode list
+ *  connectorHookActive's `modes.includes(mode)` walks. */
+const isModeList = (v: unknown): boolean => v === undefined || isDenseArray(v, isMode);
+
+/** activeIn own keys — a name outside ConnectorHooks is a typo'd kind
+ *  that would silently never match in hook dispatch. */
+function activeInKindProblem(v: Record<string, unknown>, path: string): string | undefined {
+  const bad = Object.keys(v).find(
+    kind => !(CONNECTOR_HOOK_KEYS as readonly string[]).includes(kind)
+  );
+  return bad === undefined ? undefined : field(`${path}.${bad}`, 'is not a hook kind');
+}
+
+/** activeIn values — the pass reads `v[kind]`, the same prototype-chain
+ *  read dispatch makes, so an inherited `stopGate: 5` cannot slip past
+ *  `Object.keys`/`entries` (own keys only). */
+function activeInModesProblem(v: Record<string, unknown>, path: string): string | undefined {
+  const bad = CONNECTOR_HOOK_KEYS.find(kind => !isModeList(v[kind]));
+  return bad === undefined ? undefined : field(`${path}.${bad}`, 'must be an array of modes');
+}
+
 /** activeIn — `Partial<Record<keyof ConnectorHooks, readonly Mode[]>>`;
  *  a wrong value reaches connectorHookActive's `modes.includes(mode)`
- *  as a delayed TypeError in hook dispatch (spec bro-l8c4f.1). The
- *  own-key pass gates typos; the value pass reads `v[kind]` — the same
- *  prototype-chain read dispatch makes — so an inherited `stopGate: 5`
- *  cannot slip past `Object.keys`/`entries` (own keys only). */
+ *  as a delayed TypeError in hook dispatch (spec bro-l8c4f.1). Key and
+ *  value passes stay in named helpers so this gate remains flat. */
 function activeInProblem(v: unknown, path: string): string | undefined {
   if (v === undefined) {
     return undefined;
@@ -1520,18 +1539,7 @@ function activeInProblem(v: unknown, path: string): string | undefined {
   if (!isRecord(v)) {
     return field(path, 'must map hook kinds to mode lists');
   }
-  for (const kind of Object.keys(v)) {
-    if (!(CONNECTOR_HOOK_KEYS as readonly string[]).includes(kind)) {
-      return field(`${path}.${kind}`, 'is not a hook kind');
-    }
-  }
-  for (const kind of CONNECTOR_HOOK_KEYS) {
-    const modes = v[kind];
-    if (modes !== undefined && !isDenseArray(modes, isMode)) {
-      return field(`${path}.${kind}`, 'must be an array of modes');
-    }
-  }
-  return undefined;
+  return activeInKindProblem(v, path) ?? activeInModesProblem(v, path);
 }
 
 /** Function-typed optional connector fields — a present-but-wrong
