@@ -2792,6 +2792,10 @@ function prepareSpawn(
     // cross-kind pass below re-counts these kinds and must skip the
     // starts this pass covered, or one session's claims read as two
     const providerClaimedStarts = new Map<string, number>();
+    // the kinds whose census dirs the provider cap counts — a cross-kind
+    // claim that outlasts the provider pass's own claims still lands on
+    // the provider lane's ledger, so its admit rides the aggregate too
+    const providerPlaneKinds = new Set<string>();
     if (providerCap !== undefined) {
       const providerCommand = providerEntryCommand(env, providerCap.provider);
       const providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
@@ -2805,6 +2809,7 @@ function prepareSpawn(
       // one session (a double claim would count the lane twice)
       quotaCoversProvider = providerPlanes.some(p => p.kind === sessionQuota?.plane.kind);
       for (const plane of providerPlanes) {
+        providerPlaneKinds.add(plane.kind);
         if (plane.kind === sessionQuota?.plane.kind) {
           continue;
         }
@@ -2894,6 +2899,11 @@ function prepareSpawn(
             workerEnv: spec.env,
             scope,
             liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
+            // a kind the provider cap counts still owes the aggregate
+            // verdict — the spawned command can start more of the kind
+            // than the provider's own entry did, and the excess claims
+            // land on the SAME provider-counted ledger
+            ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);
