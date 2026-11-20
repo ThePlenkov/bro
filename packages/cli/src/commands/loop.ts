@@ -97,6 +97,7 @@ import {
   clumpMembers,
   diskFloorBreach,
   diskFloorBytes,
+  diskFloorFor,
   expandAgentCmd,
   FLEET_HEAD_PREFIXES,
   type FleetPrRow,
@@ -2114,9 +2115,11 @@ function dryRunDisk(ctx: Ctx): void {
     console.log(`  disk: ${Math.floor(p.freeBytes / MB)}M free on ${p.path}`);
   }
   if (breach !== undefined) {
+    const eff = diskFloorFor(ctx.cfg, breach);
+    const slots = diskFloorBytes(ctx.cfg);
     console.log(
-      `  disk: HOLD — below floor ${Math.floor(diskFloorBytes(ctx.cfg) / MB)}M ` +
-        `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M)`
+      `  disk: HOLD — below floor ${Math.floor(eff / MB)}M ` +
+        `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M${eff === slots ? '' : ' + small-fs half'})`
     );
   }
 }

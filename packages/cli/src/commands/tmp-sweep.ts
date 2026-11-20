@@ -24,10 +24,11 @@
  * is the stronger signal the scan cannot provide — it is what keeps a
  * live nx daemon's `nx@latest` install safe (spec bro-d9znu).
  */
-import { readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { readdirSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
-import { pidAlive } from '@broject/core';
+import { basename, dirname, join } from 'node:path';
+import { type AgentRegistryEntry, gitCommonDir, pidAlive, readAgentRegistry } from '@broject/core';
+import { registryEntryHoldsClaim } from '@broject/rig';
 
 const STALE_MS = 60 * 60 * 1000; // 1 hour
 /** Dead-owner dirs get a shorter leash than the general TTL: the
@@ -253,6 +254,110 @@ export interface TmpSweepOptions {
    *  relays this output (drive's `work prune --loop` child). Deleted and
    *  summary lines still print. */
   quietKeeps?: boolean;
+  /** Extra roots swept under the same verdict — the worker tmpdirs the
+   *  spawn pins point at (spec bro-v96mp, workerTmpRoots). A root that
+   *  cannot be listed warns and is skipped, never fatal like tmpdir. */
+  extraRoots?: string[];
+}
+
+/** Direct child directory names, [] on any listing failure — a sweep
+ *  helper never dies on a vanished tree. */
+function listDirs(dir: string): string[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Every worker tmpdir the connector's TMPDIR pin can write to
+ *  (spec bro-v96mp): `<common>/bro-tmp/<agentId>` for the main
+ *  checkout, plus each linked worktree's
+ *  `<common>/worktrees/<n>/bro-tmp/<agentId>`. Inside an agentId dir
+ *  sit the same `tmp-*`/`npm-*` leaf shapes os.tmpdir() collects — so
+ *  each one is a sweep root, not a candidate itself. `dir` is any
+ *  path in the repo; outside one the answer is []. */
+export function workerTmpRoots(dir: string): string[] {
+  const common = gitCommonDir(dir);
+  if (common === null) {
+    return [];
+  }
+  const bases = [join(common, 'bro-tmp')];
+  for (const wt of listDirs(join(common, 'worktrees'))) {
+    bases.push(join(common, 'worktrees', wt, 'bro-tmp'));
+  }
+  const roots: string[] = [];
+  for (const base of bases) {
+    for (const agent of listDirs(base)) {
+      roots.push(join(base, agent));
+    }
+  }
+  return roots;
+}
+
+/** `rmdir` only — a root that refilled (or never emptied) stays. The
+ *  emptied `<agentId>` shell is litter of the same class as its
+ *  contents. */
+function rmdirIfEmpty(dir: string): void {
+  try {
+    rmdirSync(dir);
+  } catch {
+    // not empty / gone / not ours — all keeps
+  }
+}
+
+/** The emptied extra-root's owner verdict (spec bro-v96mp). A
+ *  `bro-tmp/<agentId>` shell is a live worker's pinned TMPDIR — the
+ *  leaf sweep can empty it while the worker still runs, and rmdir'ing
+ *  it out from under the worker makes its next mkdtemp die ENOENT,
+ *  worse than the litter the shell held. 'live' — a registry agent
+ *  still holding its claim owns the shell; 'free' — the registry
+ *  proves no owner (or none exists — orphan litter); 'unknown' —
+ *  nothing could be proved, the fail-open verdict. */
+function rootOwnerVerdict(root: string): 'live' | 'free' | 'unknown' {
+  const gitdir = dirname(dirname(root));
+  const common = gitCommonDir(gitdir);
+  if (common === null) {
+    return 'unknown';
+  }
+  let reg: Record<string, AgentRegistryEntry>;
+  try {
+    reg = readAgentRegistry(gitdir);
+  } catch {
+    // a corrupt/unreadable registry can't prove orphan — keep
+    return 'unknown';
+  }
+  const agentId = basename(root);
+  const home = join(common, 'bro', 'agents');
+  for (const e of Object.values(reg)) {
+    if (e.agentId === agentId && registryEntryHoldsClaim(home, e)) {
+      return 'live';
+    }
+  }
+  return 'free';
+}
+
+/** rmdir an emptied extra root only when nothing can still write to
+ *  it (spec bro-v96mp). Two keeps before the rmdir: a dir mtime inside
+ *  the TTL — something just created or drained entries (this pass's
+ *  own leaf deletes included — an emptied shell earns one stale
+ *  window before it goes), and a live registry owner. A stale shell
+ *  with no live owner is the litter the PIN meant for `git worktree
+ *  remove` — this reap is only for what outlived its tree. */
+function rmdirRootIfOrphaned(root: string, ctx: RootCtx): void {
+  try {
+    if (ctx.now - statSync(root).mtimeMs < STALE_MS) {
+      return;
+    }
+  } catch {
+    return; // vanished or unreadable — nothing to prove against
+  }
+  if (rootOwnerVerdict(root) !== 'free') {
+    return;
+  }
+  rmdirIfEmpty(root);
 }
 
 /** Shared sweep context — everything a per-entry decision needs that
@@ -350,10 +455,46 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
   }
 }
 
-/** Delete stale temp directories in `os.tmpdir()`. `dryRun` reports
- *  without removing. Per-entry failures warn and continue; a tmpdir
- *  that cannot be listed at all sets exitCode — same contract the
- *  original `bro cleanup` sweep had. */
+/** Shared context fields that don't vary between roots. */
+type RootCtx = Omit<SweepCtx, 'tmp'>;
+
+/** The verdict loop for one root's pattern-matching children. */
+function sweepEntries(root: string, entries: string[], ctx: RootCtx): number {
+  let deleted = 0;
+  for (const name of entries.filter(e => TARGET_PATTERNS.some(re => re.test(e)))) {
+    if (sweepEntry(name, { ...ctx, tmp: root })) {
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
+/** An extra root (a worker tmpdir — spec bro-v96mp): same verdicts,
+ *  but an unlistable root warns-and-skips rather than failing the run,
+ *  and an emptied root is rmdir'd only once it is provably orphaned —
+ *  stale AND no live registry owner (rmdirRootIfOrphaned). */
+function sweepExtraRoot(root: string, ctx: RootCtx): number {
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch (err) {
+    console.error(
+      `cleanup: cannot list ${root} (${err instanceof Error ? err.message : err}) — skipped`
+    );
+    return 0;
+  }
+  const deleted = sweepEntries(root, entries, ctx);
+  if (!ctx.dryRun) {
+    rmdirRootIfOrphaned(root, ctx);
+  }
+  return deleted;
+}
+
+/** Delete stale temp directories in `os.tmpdir()` plus any
+ *  `opts.extraRoots` (the per-worker `bro-tmp` dirs — spec bro-v96mp).
+ *  `dryRun` reports without removing. Per-entry failures warn and
+ *  continue; the tmpdir itself failing to list sets exitCode — same
+ *  contract the original `bro cleanup` sweep had. */
 export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): void {
   const tmp = tmpdir();
   let entries: string[];
@@ -365,13 +506,7 @@ export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): voi
     return;
   }
 
-  const targets = entries.filter(e => TARGET_PATTERNS.some(re => re.test(e)));
-  if (targets.length === 0) {
-    return;
-  }
-
-  const ctx: SweepCtx = {
-    tmp,
+  const ctx: RootCtx = {
     now: Date.now(),
     currentUid: ourUid(),
     dryRun,
@@ -379,11 +514,9 @@ export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): voi
     inUseMessage: process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use',
   };
 
-  let deleted = 0;
-  for (const name of targets) {
-    if (sweepEntry(name, ctx)) {
-      deleted++;
-    }
+  let deleted = sweepEntries(tmp, entries, ctx);
+  for (const root of opts.extraRoots ?? []) {
+    deleted += sweepExtraRoot(root, ctx);
   }
   if (deleted > 0) {
     console.log(`cleanup: ${dryRun ? 'would delete' : 'deleted'} ${deleted} tmp item(s)`);
