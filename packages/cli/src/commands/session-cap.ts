@@ -90,7 +90,7 @@ export function sessionCapVerdict(
   // raw (pre-sanitization) key — move it under the new key BEFORE the
   // locked count, or the admission reads the same call as a stranger
   // and refuses it at cap (the upgrade window's double-count)
-  const legacy = legacyKey(command, ctx);
+  const legacy = legacyKey(ctx);
   if (legacy !== undefined) {
     for (const plane of planesStartingSessions(command)) {
       migrateLegacyClaims(plane.kind, bags, legacy, key);
@@ -135,7 +135,7 @@ export function sessionCapVerdict(
     // applies the budget, and its claim-then-count order keeps a
     // racing burst honest (the slot write is atomic, so the recount
     // sees every claim that landed before it)
-    return verdictUnlocked(command, bags, key, legacyKey(command, ctx));
+    return verdictUnlocked(command, bags, key, legacyKey(ctx));
   }
   if (lockedRefusal !== undefined) {
     releaseClaims(admissions);
@@ -277,12 +277,22 @@ function callKey(command: string, ctx: ConnectorCtx): string {
  *  existed. Only an existing file is ever touched, and only inside
  *  the kind's reservations dir; a raw segment that cannot be a plain
  *  file name (`/` or `..` — the very thing `keyPart` now sanitizes)
- *  can never have been claimed, so there is nothing to recognize. */
-function legacyKey(command: string, ctx: ConnectorCtx): string | undefined {
+ *  can never have been claimed, so there is nothing to recognize.
+ *
+ *  A call WITHOUT a client id has no legacy key at all: the old
+ *  format keyed it on the command's hash — an identity every
+ *  identical command in the session shared. A file matching it may
+ *  be a DIFFERENT call's claim, and adopting it under this call's
+ *  key reads fresh=false/starts=0 inside the admission — the very
+ *  conflation the per-event nonce exists to close. The old file just
+ *  expires on its TTL; a stranger's claim is never migrated. */
+function legacyKey(ctx: ConnectorCtx): string | undefined {
   const session = ctx.sessionId ?? 'nosession';
   const id = ctx.toolUseId;
-  const call = id === undefined || id === '' ? commandKey(command) : `id-${id}`;
-  const legacy = `guard-${session}-${call}`;
+  if (id === undefined || id === '') {
+    return undefined;
+  }
+  const legacy = `guard-${session}-id-${id}`;
   return /[/\\]|\.\./.test(legacy) ? undefined : legacy;
 }
 
@@ -359,12 +369,6 @@ function keyPart(raw: string): string {
   // share the 48-char safe prefix from colliding either.
   const digest = createHash('sha256').update(raw, 'utf16le').digest('hex').slice(0, 24);
   return `${safe}-${digest}`;
-}
-
-/** A short digest of a command — the claim's key half. The same
- *  command claims the same slot; a different one claims its own. */
-function commandKey(command: string): string {
-  return createHash('sha1').update(command).digest('hex').slice(0, 12);
 }
 
 /** The refusal for a command, from the hook's point of view.

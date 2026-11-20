@@ -2179,7 +2179,15 @@ async function assertSessionCap(env: TurnEnv, claimKey: string): Promise<() => v
     if (err instanceof LockTimeout) {
       // the mutex outlived the wait — contention is not a reason to
       // refuse a request; the un-locked check+claim still enforces
-      return assertSessionCapUnlocked(env, claimKey);
+      return assertSessionCapUnlocked(
+        {
+          command,
+          agents: env.cfg.agents,
+          retained: env.sessions.size,
+          pendingOpens: env.pendingOpens,
+        },
+        claimKey
+      );
     }
     if (err instanceof SpawnError) {
       // the count could not be established — fail closed, with the
@@ -2224,12 +2232,37 @@ function claimRelease(paths: string[]): () => void {
  *  a wedged holder. */
 const CAP_LOCK_WAIT_MS = 5_000;
 
-/** The un-locked check+claim — the path the conductor ran before the
- *  admission mutex serialized it, kept as the contention fallback. */
-function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): () => void {
+/** The conductor state the un-locked cap check reads — narrow on
+ *  purpose, so the fallback's race tests drive it without a TurnEnv. */
+export interface SessionCapCallSite {
+  /** the acp entry's command — which planes the cap asks */
+  command: string;
+  /** the `agents.<kind>` bags — the cap's knobs */
+  agents: Record<string, Record<string, unknown>>;
+  /** retained conversations the plane cannot see (one shared peer) */
+  retained: number;
+  /** key → when its open's slot claim was taken */
+  pendingOpens: ReadonlyMap<string, number>;
+}
+
+/** The un-locked check+claim — the conductor's contention fallback.
+ *
+ *  Without the mutex the check and the claim cannot be one section, so
+ *  the order inverts — the same rule the hook's `verdictUnlocked`
+ *  runs: claim FIRST (each `wx` slot write is atomic), then re-count.
+ *  A racing start's claim either landed before the recount — it is
+ *  inside `live` and this call refuses itself — or lands after — that
+ *  call sees THIS claim and refuses itself. The stale pre-claim
+ *  headroom the old order judged is never read, so a fallback burst
+ *  cannot slip past the cap together.
+ *
+ *  Fails CLOSED: the conductor is a quota surface, not a hook — a
+ *  count that cannot be established or a claim that cannot be written
+ *  refuses the request. */
+export function assertSessionCapUnlocked(env: SessionCapCallSite, claimKey: string): () => void {
   let views;
   try {
-    views = sessionCapViews(env.cfg.entry.command, env.cfg.agents);
+    views = sessionCapViews(env.command, env.agents);
   } catch (err) {
     // the count could not be established — fail closed, with the reason
     // the operator needs (a quota that cannot be verified is not walked
@@ -2238,35 +2271,60 @@ function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): () => void {
       `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
     );
   }
-  const view = views[0];
-  // in-flight opens still inside their claim's TTL are already counted
-  // — their reservation sits in view.live; only an open that outlived
-  // its claim is added here (fresh claims double-count, #926 review)
-  const refusal = conductorSessionRefusal(
-    view,
-    env.sessions.size,
-    pendingOpensBeyondClaim(env.pendingOpens),
-    view?.starts ?? 1
-  );
-  if (refusal !== undefined) {
-    throw new Error(refusal);
-  }
-  if (view !== undefined) {
-    try {
-      const { paths } = reserveSessionStart({
+  // claim every kind's slots BEFORE counting — the recount then holds
+  // this call's claims AND every claim a racer landed first. A claim
+  // that cannot be written rolls the whole set back and refuses the
+  // request: a session whose claim the budget never saw is exactly
+  // the unbudgeted session this check exists to stop.
+  const claims: { kind: string; paths: string[] }[] = [];
+  try {
+    for (const view of views) {
+      claims.push({
         kind: view.kind,
-        agents: env.cfg.agents,
-        key: claimKey,
-        count: view.starts,
+        paths: reserveSessionStart({
+          kind: view.kind,
+          agents: env.agents,
+          key: claimKey,
+          count: view.starts,
+        }).paths,
       });
-      return claimRelease(paths);
-    } catch (err) {
-      throw new Error(
-        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
-      );
+    }
+  } catch (err) {
+    releaseSessionStart(claims.flatMap(c => c.paths));
+    throw new Error(
+      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+    );
+  }
+  let counted;
+  try {
+    counted = sessionCapViews(env.command, env.agents);
+  } catch (err) {
+    releaseSessionStart(claims.flatMap(c => c.paths));
+    throw new Error(
+      `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+    );
+  }
+  for (const view of counted) {
+    // this call's claims are already inside `live` — subtract them so
+    // live + starts judges whether live alone broke the cap (a fresh
+    // claim on a full kind still refuses); a kind whose claim failed
+    // is judged on the command's starts (the slot it could not take).
+    // in-flight opens still inside their claim's TTL are already
+    // counted — only an open that outlived its claim is added here
+    // (fresh claims double-count, #926 review)
+    const own = claims.find(c => c.kind === view.kind);
+    const refusal = conductorSessionRefusal(
+      own === undefined ? view : { ...view, live: view.live - own.paths.length },
+      env.retained,
+      pendingOpensBeyondClaim(env.pendingOpens),
+      own?.paths.length ?? view.starts
+    );
+    if (refusal !== undefined) {
+      releaseSessionStart(claims.flatMap(c => c.paths));
+      throw new Error(refusal);
     }
   }
-  return claimRelease([]);
+  return claimRelease(claims.flatMap(c => c.paths));
 }
 
 /** The one-shot path — a session on the shared peer, nothing retained. */
