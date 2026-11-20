@@ -231,6 +231,11 @@ guards are independent, both must hold.
 - One `bro flow loop` per repo — two runners would race the same top beads
   (claim is atomic, so the loser just takes the next one — wasteful,
   not corrupting).
+- **The supervised forms belong to the owner (spec bro-wb3yc).**
+  `bro flow loop --every` and `bro flow loop install` are the daemon's
+  loop legs — `bro fleet daemon run --loop` owns the cadence and
+  `bro/drive.json`'s sibling `loop.json` carries the want; a raw
+  `--every` run is an unrecorded owner.
 
 ## Done means verified-clean, not exited
 

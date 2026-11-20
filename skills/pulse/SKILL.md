@@ -10,6 +10,12 @@ description: "Use when a session needs its own watchdog cadence — 'arm the pul
 metronome mechanics live in `bro pulse`, the snapshot shape in
 `bro review watch`.
 
+`bro pulse` is **the only session wake** (spec bro-wb3yc): the owner is
+`bro fleet daemon`, re-entry is `bro fleet rig next`, and `bro review
+watch`/`bro review act wait`/`bro wait external:` are bounded observers.
+If you're reaching for a different mechanism to stay informed, the pulse
+is the one you meant.
+
 Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 
 ## Commands

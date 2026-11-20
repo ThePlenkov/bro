@@ -1,13 +1,14 @@
 ---
+
 name: rig
-description: "Use when the rig's own bro install must stay current — 'keep the checkout fresh', a staleness check, the fetch→ff-pull→rebuild poll. Thin wrapper over the bro CLI: `bro fleet rig sync` is the pass, `bro fleet rig install` arms the session pulse. Requires `bro` (npx -y @broject/bro@0)."
+description: "Use when the rig's own bro install must stay current — 'keep the checkout fresh', a staleness check, the fetch→ff-pull→rebuild poll. Thin wrapper over the bro CLI: `bro fleet rig sync` is the pass, `bro fleet rig install` arms the freshness cadence. Requires `bro` (npx -y @broject/bro@0)."
 ---
 
 # /rig (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-Rig freshness keeps the machine's *main checkout* tracking its upstream
+Rig freshness keeps the machine's _main checkout_ tracking its upstream
 — agents run the `bro` built from it, so a lagging checkout means the
 fleet runs stale dist. One pass: `git fetch` →
 `git merge --ff-only @{upstream}` → the post-merge refresh
@@ -18,19 +19,19 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro fleet rig sync [--repo <dir>]` | One freshness pass on the resolved checkout: guards (dirty → skip, no upstream/diverged → error) → fetch → ff-only merge → install→build→patch refresh. Exit 1 on error or an incomplete refresh (done-sha ≠ HEAD). |
-| `bro fleet rig status [--repo] [--json]` | Read plane, no network — branch → upstream, ahead/behind vs the stored ref, dirty count, done-sha freshness, resolved refresh steps, rig-pulse state |
-| `bro fleet rig watch [--every N] [--for S]` | Foreground supervisor — `rig sync` per tick under `bro/rig-pulse.lock` (one per repo, standby on contention); cadence `rig.intervalSec` (default 600s); `--for` bounds a session-side run. Orchestrator-only — refuses under `BRO_AGENT_ID` |
-| `bro fleet rig install [--every N] [--print]` | Arm the session pulse — writes `bro/rig-pulse.json`; the session's checkpoints rearm a bounded `bro fleet rig watch` window from it (bro-killn: no OS timer is written) |
-| `bro fleet rig uninstall` | Disarm the marker — a live `rig watch` keeps its lock until it exits |
-| `bro rig next [<item>] [--json]` | The engine's re-entry verdict over durable state: `step` (work it), `gate` (PR open — gate decision), `wait` (parked frame or live worker — a signal re-enters), `done`, `blocked` (foreign claim/deps). Stateless and read-only — races resolve on the next call |
+| Command                                       | What it does                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro fleet rig sync [--repo <dir>]`           | One freshness pass on the resolved checkout: guards (dirty → skip, no upstream/diverged → error) → fetch → ff-only merge → install→build→patch refresh. Exit 1 on error or an incomplete refresh (done-sha ≠ HEAD).                                                                                                                      |
+| `bro fleet rig status [--repo] [--json]`      | Read plane, no network — branch → upstream, ahead/behind vs the stored ref, dirty count, done-sha freshness, resolved refresh steps, rig-pulse state                                                                                                                                                                                     |
+| `bro fleet rig watch [--every N] [--for S]`   | Foreground freshness cadence — `rig sync` per tick under `bro/rig-pulse.lock` (one per repo, standby on contention); cadence `rig.intervalSec` (default 600s); `--for` bounds a session-side run. Orchestrator-only — refuses under `BRO_AGENT_ID`. A second owner-cadence stack slated to fold into `bro fleet daemon` (spec bro-wb3yc) |
+| `bro fleet rig install [--every N] [--print]` | Arm the freshness cadence — writes `bro/rig-pulse.json`; the session's checkpoints rearm a bounded `bro fleet rig watch` window from it (bro-killn: no OS timer is written). Slated to fold with the rig-pulse stack (spec bro-wb3yc)                                                                                                    |
+| `bro fleet rig uninstall`                     | Disarm the marker — a live `rig watch` keeps its lock until it exits                                                                                                                                                                                                                                                                     |
+| `bro fleet rig next [<item>] [--json]`        | **The** re-entry verdict over durable state (spec bro-wb3yc — the only re-entry): `step` (work it), `gate` (PR open — gate decision), `wait` (parked frame or live worker — a signal re-enters), `done`, `blocked` (foreign claim/deps). Stateless and read-only — races resolve on the next call                                        |
 
 ## Policy
 
 - **The target is the main checkout, never the worktree you're in.**
-  Resolution: `--repo` > `rig.repo` config > the repo's *main* worktree.
+  Resolution: `--repo` > `rig.repo` config > the repo's _main_ worktree.
   A `loop/*` scratch worktree is never the rig — `bro fleet rig sync` typed
   inside one still freshens the checkout the rig's binaries come from.
 - **Upstream is the contract.** Whatever branch the main checkout sits
@@ -41,6 +42,12 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
   (install/build/patch incl. the `~/.local/share/bro-hotpatch.sh` slot)
   stay owned by the `freshness` config section — hotpatches re-apply
   after every build until their upstream lands.
+- **Three liveness mechanisms, one role each (spec bro-wb3yc).**
+  `bro fleet daemon` is the owner — the rig freshness cadence is
+  converging into a daemon leg; `bro pulse` is the session wake;
+  `bro fleet rig next` is the **only re-entry** — any signal (a wake, a
+  restart, a dead worker) re-enters by calling it, never by inventing a
+  resurrection path.
 - **Arm, don't babysit.** `rig watch` is the debug/foreground shape —
   for a durable poll use `bro fleet rig install`: the want-marker survives
   reboots and session deaths, the orchestrator session's checkpoints
