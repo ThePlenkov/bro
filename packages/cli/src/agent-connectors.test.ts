@@ -1101,6 +1101,71 @@ function connectorContract(b: BackendCase): void {
         cleanup(f);
       }
     });
+
+    test('a provider-covered kind with NO kind quota still draws judged slots (spec bro-x601l)', async () => {
+      // neither kind carries maxSessions — sessionCapViews yields no
+      // row for either, so the spawned command's starts would escape
+      // the provider lane entirely without the provider-covered-kind
+      // pass: beta's second session must claim (and refuse) like any
+      // other draw on the 'prov' lane
+      const f = fixture(
+        [{ id: 'fx-1', status: 'open' }],
+        'node {promptFile} alpha-run beta-run beta-run'
+      );
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/beta-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { reservationsDir: dirA },
+            beta: { reservationsDir: dirB },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run beta-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 2 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        // the provider pass claims alpha×1 + beta×1 = 2/2 — the spawned
+        // command's SECOND beta start claims a third slot and the
+        // aggregate verdict refuses it; unclaimed it would draw on the
+        // lane unjudged
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached — 3\/2 live lanes.*provider_cap/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+        // the refused spawn handed every claim back
+        assert.equal(countSessionReservations(dirA), 0);
+        assert.equal(countSessionReservations(dirB), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
   }
 
   test('sessionKindOf — declared override beats argv detection', () => {

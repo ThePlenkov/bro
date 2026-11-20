@@ -321,7 +321,10 @@ function migrateLegacyClaims(
       continue;
     }
     const from = join(dir, name);
-    const to = join(dir, `${key}${name.slice(legacyKey.length)}`);
+    // the rename target is the CURRENT claim format — the kind prefix
+    // `reserveSessionStart` writes so two planes on a shared census dir
+    // never collapse onto one filename
+    const to = join(dir, `${kind}-${key}${name.slice(legacyKey.length)}`);
     try {
       if (existsSync(to)) {
         rmSync(from, { force: true });

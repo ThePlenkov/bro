@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
 import { LockTimeout, withFileLock } from './filelock.ts';
-import { pidAlive } from './proc.ts';
+import { pidAlive, procStat } from './proc.ts';
 import {
   DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
   laneBudgetAdmit,
@@ -417,11 +417,21 @@ function reservationInLane(name: string, lane: ReservationLane | undefined): boo
 interface SessionSlotMeta {
   at?: unknown;
   pid?: unknown;
+  /** the holder's start identity (`procStat().start`) — pins the pid
+   *  against reuse: a recycled number fails the identity check even
+   *  while it stays live */
+  start?: unknown;
+  /** the claim key — the census's handoff correlation: a claim swept
+   *  for a landing is swept on its key, so the key is what proves a
+   *  vanished claim's session now sits in the live rows */
+  key?: unknown;
 }
 
-/** The holder pid a claim recorded — undefined for old-format files
- *  (a bare timestamp) and for content that was never JSON. */
-function slotHolderPid(path: string): number | undefined {
+/** What a claim recorded — `{pid, start, key}` — all undefined for
+ *  old-format files (a bare timestamp) and for content that was never
+ *  JSON. `start`/`key` are undefined when the claim predates the
+ *  identity pin or the writer could not prove them. */
+function slotHolder(path: string): { pid?: number; start?: string; key?: string } | undefined {
   let parsed: SessionSlotMeta;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8')) as SessionSlotMeta;
@@ -429,7 +439,13 @@ function slotHolderPid(path: string): number | undefined {
     return undefined;
   }
   const pid = parsed.pid;
-  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  const start = parsed.start;
+  const key = parsed.key;
+  return {
+    ...(typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? { pid } : {}),
+    ...(typeof start === 'string' && start !== '' ? { start } : {}),
+    ...(typeof key === 'string' && key !== '' ? { key } : {}),
+  };
 }
 
 /** Fresh reservations — files younger than the TTL count as claimed
@@ -439,17 +455,35 @@ function slotHolderPid(path: string): number | undefined {
  *  bro-x601l — pid-governed staleness). A missing dir is zero
  *  reservations; other read failures throw 'unavailable' — an
  *  unverifiable count fails closed, never silently admits. */
-export function countSessionReservations(
+/** One counted claim's row — the path plus the holder identity the
+ *  file recorded (pid, start, key — each undefined on legacy content):
+ *  the census's handoff-correlation pair. `batch` is the lane the
+ *  claim's filename carries. */
+interface SessionClaimRow {
+  path: string;
+  pid?: number;
+  start?: string;
+  key?: string;
+  batch: boolean;
+}
+
+/** The claims a census counts — files younger than the TTL plus stale
+ *  files whose recorded holder still lives; stale dead files are
+ *  reaped in passing. Same rules as the tally below, returned as rows
+ *  so a caller can re-verify a claim that retired mid-scan. Throws
+ *  'unavailable' on an unreadable dir (ENOENT is zero), like the
+ *  tally. */
+function countedSessionReservations(
   resDir: string,
-  lane?: ReservationLane,
-  opts?: { pidAlive?: (pid: number) => boolean }
-): number {
+  lane: ReservationLane | undefined,
+  alive: (pid: number, pidStart?: string) => boolean
+): SessionClaimRow[] {
   let names: string[];
   try {
     names = readdirSync(resDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return 0;
+      return [];
     }
     throw new SpawnError(
       `cannot verify session reservations — ${resDir}: ${(err as Error).message}`,
@@ -457,21 +491,25 @@ export function countSessionReservations(
     );
   }
   const now = Date.now();
-  const alive = opts?.pidAlive ?? pidAlive;
-  let fresh = 0;
+  const rows: SessionClaimRow[] = [];
   for (const name of names) {
     if (!name.endsWith('.slot') || !reservationInLane(name, lane)) {
       continue;
     }
     const path = join(resDir, name);
     try {
+      const batch = name.endsWith('.batch.slot');
       if (now - statSync(path).mtimeMs < SESSION_SLOT_TTL_MS) {
-        fresh++;
+        rows.push({ path, batch, ...slotHolder(path) });
         continue;
       }
-      const holder = slotHolderPid(path);
-      if (holder !== undefined && alive(holder)) {
-        fresh++;
+      const holder = slotHolder(path);
+      // the start identity rides the check when the claim recorded it —
+      // a pid recycled into a stranger fails it instead of holding the
+      // lane for the stranger's whole lifetime; legacy claims without a
+      // start keep the pid-only verdict
+      if (holder?.pid !== undefined && alive(holder.pid, holder.start)) {
+        rows.push({ path, batch, ...holder });
         continue;
       }
       rmSync(path, { force: true });
@@ -479,7 +517,107 @@ export function countSessionReservations(
       // stat raced a reap — ignore
     }
   }
-  return fresh;
+  return rows;
+}
+
+export function countSessionReservations(
+  resDir: string,
+  lane?: ReservationLane,
+  opts?: { pidAlive?: (pid: number, pidStart?: string) => boolean }
+): number {
+  return countedSessionReservations(resDir, lane, opts?.pidAlive ?? pidAlive).length;
+}
+
+/** A live+claims census that keeps the reservation→live handoff
+ *  observable (spec bro-x601l). The claims are snapshotted BEFORE
+ *  `countLive` runs and recounted after. A claim retired between the
+ *  two reads is either the handoff completing — the landing session
+ *  already sits inside `counts`, its claim redundant — or a
+ *  concurrent count's sweep on a landing OUR scan never saw, where
+ *  the claim is the only trace of a session `counts` missed. With
+ *  `liveRows` the census proves the difference: a retired claim
+ *  forgiven only when the live rows carry its holder pid or claim
+ *  key, else it still counts. WITHOUT `liveRows` the census cannot
+ *  prove the rarer external sweep apart from the plane's own
+ *  in-count one — every count of a landed session retires its claim
+ *  — so it keeps the classic post-count tally and over-admits that
+ *  residue rather than double-count every landing. `claims` splits
+ *  out `batch` for the fleet's own lane tallies.
+ *
+ *  `countLive` must run EVERY plane count the tally depends on —
+ *  countLive, countWorkers, countBatchWorkers alike: a plane's own
+ *  in-count sweep retires landed claims inside ANY of them, and the
+ *  AFTER tally must see every sweep it made. */
+export function sessionLaneCensus<T>(args: {
+  /** the census dirs the claims sit in — deduped by the caller */
+  dirs: readonly string[];
+  /** the plane's own counts, taken between the two claim reads —
+   *  returned through as `counts` */
+  countLive: () => T;
+  /** the live rows the handoff correlates against — omit entirely
+   *  when the plane cannot enumerate sessions: correlation with no
+   *  rows could never prove coverage, and every unproven retirement
+   *  would ghost-count — the double-count the ordering exists to
+   *  prevent */
+  liveRows?: () => Iterable<DiscoveredSession>;
+}): { counts: T; claims: number; batchClaims: number } {
+  const before = new Map<string, SessionClaimRow>();
+  for (const dir of args.dirs) {
+    for (const row of countedSessionReservations(dir, undefined, pidAlive)) {
+      before.set(row.path, row);
+    }
+  }
+  const counts = args.countLive();
+  const after = new Set<string>();
+  let claims = 0;
+  let batchClaims = 0;
+  for (const dir of args.dirs) {
+    for (const row of countedSessionReservations(dir, undefined, pidAlive)) {
+      after.add(row.path);
+      claims++;
+      if (row.batch) {
+        batchClaims++;
+      }
+    }
+  }
+  let ghosts = 0;
+  let batchGhosts = 0;
+  let known: { pids: Set<number>; keys: Set<string> } | undefined;
+  for (const row of before.values()) {
+    if (after.has(row.path)) {
+      continue;
+    }
+    // retired mid-scan — forgiven only when OUR live rows already hold
+    // its session: the holder pid a retagged claim carries, or the
+    // claim key a landed sweep matched on. No rows to prove against
+    // means no handoff protection at all — the plane's own in-count
+    // sweep explains the far likelier retirement
+    if (args.liveRows !== undefined && (row.pid !== undefined || row.key !== undefined)) {
+      const liveRows = args.liveRows;
+      known ??= (() => {
+        const pids = new Set<number>();
+        const keys = new Set<string>();
+        for (const r of liveRows()) {
+          pids.add(r.pid);
+          if (r.agentId !== undefined) {
+            keys.add(r.agentId);
+          }
+        }
+        return { pids, keys };
+      })();
+      if (
+        (row.pid !== undefined && known.pids.has(row.pid)) ||
+        (row.key !== undefined && known.keys.has(row.key))
+      ) {
+        continue;
+      }
+      ghosts++;
+      if (row.batch) {
+        batchGhosts++;
+      }
+    }
+  }
+  return { counts, claims: claims + ghosts, batchClaims: batchClaims + batchGhosts };
 }
 
 /** Claim a host-wide slot — `wx` exclusive create plus a random suffix,
@@ -500,13 +638,27 @@ export function reserveSessionSlot(
   // (a caller that forgot) would undercount the fleet
   const tag = lane === 'batch' ? '.batch' : '';
   const path = join(resDir, `${key}-${randomBytes(4).toString('hex')}${tag}.slot`);
-  writeFileSync(path, slotContent(holderPid ?? process.pid), { flag: 'wx' });
+  writeFileSync(path, slotContent(holderPid ?? process.pid, key), { flag: 'wx' });
   return path;
 }
 
-/** The claim's on-disk content — the write time plus the holder pid. */
-function slotContent(holderPid: number): string {
-  return JSON.stringify({ at: Date.now(), pid: holderPid });
+/** The claim's on-disk content — the write time, the claim key, the
+ *  holder pid, and the holder's start identity. `start` pins the pid
+ *  against reuse: a holder that exits and leaves its number to a
+ *  stranger fails the census's identity check instead of holding the
+ *  lane for the stranger's lifetime. `key` is the handoff
+ *  correlation: a claim a sweep retired for a landing is forgiven by
+ *  a live row carrying the same key. Unprovable facts stay absent —
+ *  the census then falls back to the pid-only verdict it gives legacy
+ *  claims. */
+function slotContent(holderPid: number, key?: string): string {
+  const start = procStat(holderPid)?.start;
+  return JSON.stringify({
+    at: Date.now(),
+    pid: holderPid,
+    ...(start !== undefined && start !== '' ? { start } : {}),
+    ...(key !== undefined && key !== '' ? { key } : {}),
+  });
 }
 
 /** Rebind a claim to the process actually holding its lane — the claim
@@ -514,7 +666,8 @@ function slotContent(holderPid: number): string {
  *  the child's pid lands, the claim follows the child, so a lane
  *  counts exactly as long as its session runs (spec bro-x601l). `r+`
  *  refuses to recreate a claim the census already swept — a gone
- *  claim stays gone. */
+ *  claim stays gone. The recorded `at`/`key` carry over — the retag
+ *  changes the HOLDER, not the claim's identity. */
 export function retagSessionSlot(path: string, holderPid: number): void {
   try {
     // `r+` keeps the gone-stays-gone guard (it never recreates a swept
@@ -523,7 +676,18 @@ export function retagSessionSlot(path: string, holderPid: number): void {
     // parse. Write then ftruncate to the content's exact length.
     const fd = openSync(path, 'r+');
     try {
-      const content = slotContent(holderPid);
+      let prior: SessionSlotMeta = {};
+      try {
+        prior = JSON.parse(readFileSync(fd, 'utf8')) as SessionSlotMeta;
+      } catch {
+        // unparseable prior content — the retag keeps what it can prove
+      }
+      const start = procStat(holderPid)?.start;
+      const content = JSON.stringify({
+        ...prior,
+        pid: holderPid,
+        ...(start !== undefined && start !== '' ? { start } : {}),
+      });
       writeSync(fd, content, 0, 'utf8');
       ftruncateSync(fd, Buffer.byteLength(content));
     } finally {
@@ -566,7 +730,7 @@ export function reserveSessionSlotOnce(
   const tag = lane === 'batch' ? '.batch' : '';
   const path = join(resDir, `${key}${tag}.slot`);
   try {
-    writeFileSync(path, slotContent(holderPid ?? process.pid), { flag: 'wx' });
+    writeFileSync(path, slotContent(holderPid ?? process.pid, key), { flag: 'wx' });
     return { path, fresh: true };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -667,16 +831,23 @@ export function providerCapCensus(
   providerCap: ProviderCapLane,
   excludePids?: ReadonlySet<number>
 ): number {
-  let live = 0;
   const dirs = new Set<string>();
   for (const plane of planes) {
-    live += planeLiveExcluding(plane, agents?.[plane.kind] ?? {}, workerEnv, excludePids);
     dirs.add(sessionStartCensusDir(plane, agents, providerCap));
   }
-  for (const dir of dirs) {
-    live += countSessionReservations(dir);
-  }
-  return live;
+  const census = sessionLaneCensus({
+    dirs: [...dirs],
+    countLive: () =>
+      planes.reduce(
+        (live, plane) =>
+          live + planeLiveExcluding(plane, agents?.[plane.kind] ?? {}, workerEnv, excludePids),
+        0
+      ),
+    liveRows: planes.some(p => p.listLive !== undefined)
+      ? () => planes.flatMap(p => p.listLive?.(agents?.[p.kind] ?? {}, workerEnv) ?? [])
+      : undefined,
+  });
+  return census.counts + census.claims;
 }
 
 /** The lane checks inside the admission mutex — POST-CLAIM: the
@@ -710,27 +881,54 @@ function checkSessionLanes(
   const maxBatchWorkers = quota?.maxBatchWorkers ?? 0;
   const maxSessions = quota?.maxSessions ?? 0;
   const batch = isBatchSpawn(opts.workerEnv);
-  // the provider cap counts the same census the session lane does —
-  // the plane's host-wide sweep plus the claims held
-  const sessions =
-    maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0;
   // The plane counts run BEFORE the reservation tally: a plane that
   // retires a landed spawn's still-fresh `.slot` inside its own count
   // must have that sweep VISIBLE to the tally, or a landed worker
   // counts twice (live + reservation) and the cap refuses a rightful
-  // admit. The batch count rides the same rule.
-  const workers =
-    maxWorkers > 0 && plane.countWorkers !== undefined
-      ? plane.countWorkers(bag, opts.workerEnv)
-      : 0;
-  const batchWorkers =
-    maxBatchWorkers > 0 && batch && plane.countBatchWorkers !== undefined
-      ? plane.countBatchWorkers(bag, opts.workerEnv)
-      : 0;
-  const reservations = countSessionReservations(resDir);
+  // admit. The claims snapshot rides AHEAD of the plane count inside
+  // sessionLaneCensus — a claim a CONCURRENT count's sweep retires
+  // mid-scan (a landing our own scan never saw) still counts unless
+  // our live rows prove its holder, so the handoff can over-refuse,
+  // never under-count (spec bro-x601l). The batch count rides the
+  // same rule.
+  const census = sessionLaneCensus({
+    dirs: [resDir],
+    // EVERY plane count runs inside the window — a sweep retires a
+    // landed claim inside countWorkers as readily as countLive, and
+    // the after-tally must see each of them
+    countLive: () => ({
+      // the provider cap counts the same census the session lane
+      // does — the plane's host-wide sweep plus the claims held
+      sessions:
+        maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0,
+      workers:
+        maxWorkers > 0 && plane.countWorkers !== undefined
+          ? plane.countWorkers(bag, opts.workerEnv)
+          : 0,
+      batchWorkers:
+        maxBatchWorkers > 0 && batch && plane.countBatchWorkers !== undefined
+          ? plane.countBatchWorkers(bag, opts.workerEnv)
+          : 0,
+    }),
+    // listLive absent means handoff correlation has nothing to prove
+    // against — pass undefined, not an empty iterator (the census
+    // reads that as "protection on, nothing provable" and
+    // double-counts every landing the count just swept)
+    liveRows:
+      plane.listLive === undefined
+        ? undefined
+        : () => {
+            const listLive = plane.listLive;
+            return listLive === undefined ? [] : listLive(bag, opts.workerEnv);
+          },
+  });
+  const sessions = census.counts.sessions;
+  const workers = census.counts.workers;
+  const batchWorkers = census.counts.batchWorkers;
+  const reservations = census.claims;
   // the fleet's share counts the fleet's reservations only — an
   // interactive spawn in flight must not eat the batch lane's cap
-  const batchReservations = countSessionReservations(resDir, 'batch');
+  const batchReservations = census.batchClaims;
   // the provider cap is the OUTER gate — a lane of the ACCOUNT, wider
   // than any kind lane, judged first so its refusal names the real
   // constraint (spec bro-x601l). `providerCensus` supplies the

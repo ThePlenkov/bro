@@ -2876,10 +2876,12 @@ function prepareSpawn(
           throw new SpawnError(crossRefusal, 'cap');
         }
       }
+      const coveredKinds = new Set<string>();
       for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
         if (view.kind === sessionQuota?.plane.kind) {
           continue; // admitSessionSlot below covers this kind's full lane
         }
+        coveredKinds.add(view.kind);
         const plane = sessionPlane(view.kind);
         if (plane === undefined) {
           continue;
@@ -2904,6 +2906,37 @@ function prepareSpawn(
             // than the provider's own entry did, and the excess claims
             // land on the SAME provider-counted ledger
             ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
+          });
+          if (claimed !== undefined) {
+            crossKindReservations.push(claimed);
+          }
+        }
+      }
+      // A provider-covered kind the spawned command starts WITHOUT a
+      // kind quota produces no sessionCapViews row, so the loop above
+      // never sees its starts — but every session it opens still draws
+      // on the provider lane (a provider cap of 1 must refuse a second
+      // start the quota layer never armed). Claim what the provider
+      // pass did not already cover, judged on the aggregate census.
+      for (const kind of providerPlaneKinds) {
+        if (coveredKinds.has(kind) || kind === sessionQuota?.plane.kind) {
+          continue;
+        }
+        const plane = sessionPlane(kind);
+        if (plane === undefined) {
+          continue;
+        }
+        const starts = plane.startsSessions?.(spawnedCommand) ?? 0;
+        const pending = starts - (providerClaimedStarts.get(kind) ?? 0);
+        for (let i = 0; i < pending; i++) {
+          const claimed = admitSessionSlot(plane, agents, {
+            key: agentId,
+            molStep: spec.molStep,
+            workerEnv: spec.env,
+            scope,
+            liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
+            providerCap,
+            providerCensus,
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);

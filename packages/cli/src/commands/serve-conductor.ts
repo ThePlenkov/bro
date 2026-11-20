@@ -2359,7 +2359,7 @@ export function admitLaneCapUnlocked(
   // the lane never gates.
   let armed: Set<string> | undefined;
   if (providerCap === undefined) {
-    let views;
+    let views: ReturnType<typeof sessionCapViews>;
     try {
       views = sessionCapViews(command, cfg.agents);
     } catch (err) {
@@ -2427,7 +2427,7 @@ export function admitLaneCapUnlocked(
   // the post-claim census — every held claim (this caller's included)
   // already sits inside `live`, so the verdicts are the strict
   // post-claim tests and no `starts` may be added again
-  let postViews;
+  let postViews: ReturnType<typeof sessionCapViews>;
   let providerLive = 0;
   try {
     postViews = sessionCapViews(command, cfg.agents, undefined, excludePids);

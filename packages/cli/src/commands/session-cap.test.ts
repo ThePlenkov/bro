@@ -189,10 +189,11 @@ describe('sessionCapVerdict', () => {
           bags
         );
         assert.deepEqual(verdicts, []);
-        // the claim migrated to the new key — one file, not two
+        // the claim migrated to the new key — one file, not two, in
+        // the current kind-prefixed claim format
         const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
         assert.equal(files.length, 1);
-        assert.ok(files[0]!.startsWith('guard-sess-1-'));
+        assert.ok(files[0]!.startsWith('upg-guard-sess-1-'));
       });
     });
   });

@@ -763,4 +763,18 @@ describe('provider cap admission (spec bro-x601l)', () => {
     // halves of one contract
     assert.match(providerCapRefusal(lane, 2, 1) ?? '', /2 live \+ 1 starting > 2/);
   });
+
+  test('two planes on a shared census dir never collapse one claim onto another (spec bro-x601l)', () => {
+    withSlots(dir => {
+      // a caller-scoped reservationsDir override puts BOTH kinds on one
+      // ledger — the claim name must carry the kind or alpha's claim
+      // reads as beta's own (a repeat event), and one slot stands in
+      // for two sessions
+      const a = reserveSessionStart({ kind: 'alpha', agents: {}, key: 'same-key', count: 1, dir });
+      const b = reserveSessionStart({ kind: 'beta', agents: {}, key: 'same-key', count: 1, dir });
+      assert.equal(a.fresh, true);
+      assert.equal(b.fresh, true); // a second kind's claim is fresh — never adopted
+      assert.equal(countSessionReservations(dir), 2);
+    });
+  });
 });

@@ -133,12 +133,22 @@ const withDevinProc = (fn: (procDir: string) => void): void => {
 
 /** A live process that reads as the devin cli — the live-session
  *  count checks the process identity (argv[0]), so the fixture must BE
- *  named devin: a lock's pid must still be the cli that wrote it. */
+ *  named devin: a lock's pid must still be the cli that wrote it. The
+ *  exec'd binary is bash, not sleep — a multicall coreutils binary
+ *  (cargo-coreutils on some hosts) refuses a foreign argv[0] and the
+ *  child exits before the count ever sees it. */
 const spawnDevinCli = (env: Record<string, string> = {}): ChildProcess => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-devin-bin-'));
   const bin = join(dir, 'devin');
-  symlinkSync('/bin/sleep', bin);
-  return spawn(bin, ['30'], { stdio: 'ignore', env: { ...process.env, ...env } });
+  symlinkSync('/bin/bash', bin);
+  // `sleep 30 & wait` — NOT a bare `sleep 30`: bash execs a lone
+  // last command, the argv[0] becomes 'sleep', and the identity check
+  // reads a non-devin process. The & + wait keeps bash itself (the
+  // 'devin' argv[0]) alive for the count's whole window.
+  return spawn(bin, ['-c', 'sleep 30 & wait'], {
+    stdio: 'ignore',
+    env: { ...process.env, ...env },
+  });
 };
 
 /** An `lstart=,command=` row as ps prints it — `day mon dd hh:mm:ss
@@ -682,6 +692,28 @@ describe('countDevinWorkers', () => {
     const child = spawnDevinCli({ BRO_AGENT_ID: 'native-test' });
     if (!child.pid) throw new Error('spawn failed to create child process');
     try {
+      // spawn() resolves at fork — until execve lands, /proc/<pid>/{environ,
+      // cmdline} still read the PARENT (the flake the scripted-proc test
+      // below names). Wait for the exec'd identity AND the badge to be
+      // visible before counting.
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        let cmdline = '';
+        let env = '';
+        try {
+          cmdline = readFileSync(`/proc/${child.pid}/cmdline`, 'utf8');
+          env = readFileSync(`/proc/${child.pid}/environ`, 'utf8');
+        } catch {
+          // a pid not yet exec'd can be unreadable — keep waiting
+        }
+        if (
+          cmdline.split('\0')[0]?.endsWith('devin') === true &&
+          env.includes('BRO_AGENT_ID=native-test')
+        ) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, 10));
+      }
       withLockDir(dir => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid));
         assert.equal(countDevinWorkers([dir]), 1);

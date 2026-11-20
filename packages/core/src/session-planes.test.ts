@@ -273,6 +273,52 @@ describe('pid-governed claims (spec bro-x601l)', () => {
       assert.equal(existsSync(slot), false);
     });
   });
+
+  test('the recorded start identity rides the liveness check — a recycled pid never holds the lane', () => {
+    withDir(dir => {
+      // the holder exited and its number went to a stranger: the claim
+      // records the ORIGINAL start, and pidAlive's verdict on that pair
+      // (a stranger's start would not match) is what governs
+      writeFileSync(
+        join(dir, 'recycled.slot'),
+        JSON.stringify({ at: Date.now(), pid: 4242, start: 'boot-1' })
+      );
+      stale(join(dir, 'recycled.slot'));
+      const seen: Array<[number, string | undefined]> = [];
+      const pidAlive = (pid: number, start?: string): boolean => {
+        seen.push([pid, start]);
+        return start === 'boot-1';
+      };
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive }), 1);
+      // a stranger at the number fails the pair — reaped, not counted
+      writeFileSync(
+        join(dir, 'recycled.slot'),
+        JSON.stringify({ at: Date.now(), pid: 4242, start: 'boot-1' })
+      );
+      stale(join(dir, 'recycled.slot'));
+      seen.length = 0;
+      const stranger = (pid: number, start?: string): boolean => {
+        seen.push([pid, start]);
+        return start === 'boot-2';
+      };
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: stranger }), 0);
+      assert.deepEqual(seen, [[4242, 'boot-1']]);
+    });
+  });
+
+  test('a stale claim without a recorded start keeps the pid-only verdict', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'legacy.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
+      stale(join(dir, 'legacy.slot'));
+      const seen: string[] = [];
+      const pidAlive = (pid: number, start?: string): boolean => {
+        seen.push(String(start));
+        return true;
+      };
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive }), 1);
+      assert.deepEqual(seen, ['undefined']); // nothing recorded → nothing to check
+    });
+  });
 });
 
 describe('the batch lane (spec bro-9h86l)', () => {
@@ -434,6 +480,92 @@ describe('admitSessionSlot', () => {
         },
       };
       const agents = { testkind: { maxWorkers: 2, reservationsDir: resv } };
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
+    });
+  });
+
+  test('a claim retired mid-census is forgiven when our live rows already hold it (spec bro-x601l)', () => {
+    withDir(resv => {
+      // the reservation→live handoff, seen mid-flight: a claim that
+      // was there before the count is gone after it, and the plane's
+      // own live rows carry its session — the row's agentId IS the
+      // retired claim's key. Session plus claim read as one, not two.
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 1;
+        },
+        listLive: () => [{ pid: 31337, agentId: 'native-aa' }],
+      };
+      const agents = { testkind: { maxSessions: 2, reservationsDir: resv } };
+      // 1 live (the landed session) + our held claim = 2 — a ghost
+      // count on the retired claim would read 3 and refuse
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
+    });
+  });
+
+  test('a claim retired mid-census its holder pid proves — the retag correlation', () => {
+    withDir(resv => {
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      retagSessionSlot(landed, 31337);
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 1;
+        },
+        // the row carries no agentId — the retagged holder pid is the
+        // proof the claim's session already sits inside the count
+        listLive: () => [{ pid: 31337 }],
+      };
+      const agents = { testkind: { maxSessions: 2, reservationsDir: resv } };
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
+    });
+  });
+
+  test('a claim retired mid-census with no live row to prove it still counts — the handoff never under-counts', () => {
+    withDir(resv => {
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        // the claim vanished but our rows carry only OTHER sessions —
+        // the gone claim is the only trace of a session the count
+        // missed, so the census keeps it (over-refuse, never under)
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 0;
+        },
+        listLive: () => [{ pid: 31337, agentId: 'other' }],
+      };
+      const agents = { testkind: { maxSessions: 1, reservationsDir: resv } };
+      assert.throws(
+        () => admitSessionSlot(sweeping, agents, { key: 'native-bb' }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /2\/1 live sessions/.test(e.message)
+      );
+    });
+  });
+
+  test('a listLive-less plane keeps the plain post-count tally on a mid-count retirement', () => {
+    withDir(resv => {
+      // without per-session rows the census cannot prove a retired
+      // claim's session apart from the count's own sweep — the far
+      // likelier explanation — so it counts what the after-read sees
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 1;
+        },
+      };
+      const agents = { testkind: { maxSessions: 2, reservationsDir: resv } };
       assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
     });
   });

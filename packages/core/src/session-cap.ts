@@ -33,6 +33,7 @@ import {
   releaseSessionSlot,
   reserveSessionSlotOnce,
   sessionAdmissionLock,
+  sessionLaneCensus,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
@@ -158,9 +159,21 @@ function capViewFor(
     return undefined;
   }
   const bag = agents?.[plane.kind] ?? {};
-  const live = planeLiveExcluding(plane, bag, workerEnv, excludePids);
-  const reservations = countSessionReservations(sessionSlotsDir(plane.kind, quota.reservationsDir));
-  return { kind: plane.kind, live: live + reservations, cap: quota.maxSessions, starts };
+  const census = sessionLaneCensus({
+    dirs: [sessionSlotsDir(plane.kind, quota.reservationsDir)],
+    countLive: () => planeLiveExcluding(plane, bag, workerEnv, excludePids),
+    // undefined, not an empty iterator — no listLive means no
+    // provable handoff, and protection-on-unprovable double-counts
+    // every landing the count itself swept
+    liveRows:
+      plane.listLive === undefined
+        ? undefined
+        : () => {
+            const listLive = plane.listLive;
+            return listLive === undefined ? [] : listLive(bag, workerEnv);
+          },
+  });
+  return { kind: plane.kind, live: census.counts + census.claims, cap: quota.maxSessions, starts };
 }
 
 /** The first refusal among the kinds a command touches, or undefined. */
@@ -255,7 +268,12 @@ export function reserveSessionStart(claim: {
   const freshPaths: string[] = [];
   try {
     for (let i = 0; i < claim.count; i++) {
-      const claimed = reserveSessionSlotOnce(dir, `${claim.key}-${i}`, lane);
+      // the KIND rides the claim's identity — two planes sharing one
+      // census dir (a caller-scoped reservationsDir override) must not
+      // collapse onto the same filename: the second exclusive create
+      // would read the first plane's claim as its own and a multi-plane
+      // command would count one slot for two sessions
+      const claimed = reserveSessionSlotOnce(dir, `${claim.kind}-${claim.key}-${i}`, lane);
       if (claimed.fresh) {
         freshPaths.push(claimed.path);
       }
@@ -471,9 +489,26 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
   let census: number;
   let providerLive: number | undefined;
   try {
-    census =
-      planeLiveExcluding(plane, args.agents?.[plane.kind] ?? {}, args.workerEnv, args.excludePids) +
-      countSessionReservations(resDir);
+    const laneCensus = sessionLaneCensus({
+      dirs: [resDir],
+      countLive: () =>
+        planeLiveExcluding(
+          plane,
+          args.agents?.[plane.kind] ?? {},
+          args.workerEnv,
+          args.excludePids
+        ),
+      liveRows:
+        plane.listLive === undefined
+          ? undefined
+          : () => {
+              const listLive = plane.listLive;
+              return listLive === undefined
+                ? []
+                : listLive(args.agents?.[plane.kind] ?? {}, args.workerEnv);
+            },
+    });
+    census = laneCensus.counts + laneCensus.claims;
     providerLive =
       providerCap === undefined
         ? undefined

@@ -681,6 +681,7 @@ export {
   retagSessionSlots,
   SESSION_SLOT_TTL_MS,
   sessionAdmissionLock,
+  sessionLaneCensus,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
