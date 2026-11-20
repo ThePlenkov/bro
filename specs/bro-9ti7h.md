@@ -48,30 +48,51 @@ append plus the cap check, called by both writers (`record()` inside
 1. `sizeOf(file) <= AGENT_ARCHIVE_MAX_BYTES` → no-op (one statSync per
    row, the otel sink's exact shape — proportional next to the
    open/write/close the append already pays).
-2. `readTailSlice(file, size - AGENT_ARCHIVE_KEEP_BYTES)` — bounded
-   memory: only the tail is read, so a legacy multi-GB archive caps on
-   its next write without a whole-file read.
-3. Drop the slice's first line (possibly torn mid-row); when the tail
-   holds no second line it is kept whole — an archive never truncates
-   to empty while data remains (the janitor `capFile` edge rule).
-4. `writePrivateFileSync(file, tail)` — truncate+write on the
-   verified fd: the 0600 pin is repaired, O_NOFOLLOW refuses a
-   swapped-in symlink, a foreign-owned file is refused — the cap
-   inherits the archive's whole security posture instead of opening a
-   plain path around it. In-place, no tmp+rename: no
-   briefly-world-readable staging file and no inode swap under a
-   follow reader.
+2. Read the tail through ONE `O_RDONLY | O_NOFOLLOW` fd — a path
+   swapped to a symlink is refused like the write seam refuses it,
+   and the open pins the instance so a racing resize reads honest
+   offsets. The read runs to the fd's own EOF, not the first stat's:
+   rows appended mid-cap land inside the kept tail instead of being
+   renamed away (bounded — a runaway appender stretches the read by
+   at most one extra MAX). Bounded memory throughout — a
+   pre-existing giant archive converges on its next write without a
+   whole-file read.
+3. Keep only complete JSONL rows — the slice's first line can be
+   torn mid-row and drops; no newline at all means the tail is one
+   unparseable fragment (a row bigger than the keep window): dead
+   weight, not data — the archive converges to empty and grows
+   fresh rows.
+4. Replace via a staged private write + atomic rename
+   (`<file>.cap-<pid>` → `<file>`): the archive is never empty or
+   partial — a kill mid-cap leaves the OLD file whole or the NEW
+   one, never a truncated middle (an in-place truncate+write can't
+   say that). No consumer holds the archive's fd — every reader
+   opens per poll — so the inode swap strands nothing; the staged
+   file is pinned 0600 by the same seam as the append, and a stale
+   `.cap-<pid>` is bounded 0600 debris. A swapped-in symlink AT the
+   archive path is itself replaced by the rename — the cap restores
+   the real file.
 
 **Fail-open** — the cap runs inside `record`'s existing try/catch; a
 cap fault (or the append's own) is swallowed exactly like every other
 archive failure: telemetry never fails a turn.
 
+**Reader resync** — one consumer needed a real fix: `pumpEvents`
+(`herdr-kit`) kept its saved offset past a truncated EOF, so post-cap
+appends were skipped until the file regrew past it. It now resyncs
+`min(offset, size)` on an empty slice — the `pumpLog` posture it was
+already meant to mirror. Every other consumer is already
+truncation-safe (`tailWindow` skips a torn head, `followLog` reports
+truncation and rides remove/reopen, serve's `readLogTail` is bounded
+per request).
+
 **Race posture** — one writer owns each archive path (the agent's own
-process; the proxy archive is even pid-keyed). A concurrent appender
-between the tail read and the truncate can lose a row — the same
-bounded telemetry loss `capFile` documents, never corruption: all
-writers append with O_APPEND, so post-cap writes land at the new EOF,
-never a sparse hole.
+process; the proxy archive is even pid-keyed). The read-to-EOF loop
+captures appends that land mid-read; an append landing between the
+last read and the rename loses a row — the same bounded telemetry
+loss `capFile` documents, never corruption: all writers append with
+O_APPEND, so post-cap writes land at the new EOF, never a sparse
+hole.
 
 ## Non-goals
 
@@ -79,17 +100,27 @@ never a sparse hole.
   "self-cap" comment true as written.
 - The bus ring (already bounded) and `.log`/`.stderr` bounds
   (janitor-owned).
-- Reader changes — every consumer is already truncation-safe.
+- Cross-process append/cap locking — same-agentId concurrency is
+  outside the archive's ownership model; the read-to-EOF window
+  already shrinks the residual loss to microseconds of telemetry.
 
 ## Tests
 
 - **Bounded under volume**: drive `agentTurnPlane` updates carrying
   fat rows past the cap — final size stays within
   `AGENT_ARCHIVE_MAX_BYTES` + one row, every line still parses, the
-  newest marker rows survive, the oldest drop.
+  newest marker rows survive, the oldest drop, and a lower bound on
+  retained rows rules out an over-truncating cap.
+- **Proxy scope**: the `bro/proxy/` archive (the bead's named
+  surface) self-caps identically.
 - **Legacy convergence**: pre-seed an archive past the bound — the
-  first `record()` caps it to the newest whole lines.
+  first `record()` caps it to the newest whole lines, seeded rows
+  survive in bulk, and the file stays owner-only.
+- **Oversized row**: a single row bigger than the keep window leaves
+  no unparseable fragment — every retained line is complete.
 - **Fail-open**: archive path planted as a directory — `update()`/
   `stop()`/`drain()` complete, the turn never sees the fs fault.
 - **Readers**: `tailArchive` (the shared consumer pump) over a capped
-  file returns parsed rows and a valid resume offset.
+  file returns parsed rows and a valid resume offset; `pumpEvents`
+  resyncs a saved offset that outlives a cap (pumpLog parity — the
+  closure has no test seam, the mirror is line-for-line).

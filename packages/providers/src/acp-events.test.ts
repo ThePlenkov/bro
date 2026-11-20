@@ -493,6 +493,10 @@ describe('agentTurnPlane', () => {
       const last = rows.at(-1)!;
       assert.equal(last.kind, 'turn');
       assert.equal(last.phase, 'stop');
+      // retention is a tail, not a stub — an over-truncating cap that
+      // kept only the last row would still pass the marker checks
+      assert.ok(rows.length >= 5, `kept ${rows.length} rows — the tail should hold many`);
+      assert.ok(text.includes(`tok-${ROWS - 4}-`), 'a mid-tail row survived, not just the last');
       // the oldest rows dropped — ~6 MiB written into a ≤4 MiB file
       // proves the file truncated rather than merely growing slowly
       assert.ok(!text.includes('tok-0-'), 'the oldest rows dropped under the cap');
@@ -530,8 +534,12 @@ describe('agentTurnPlane', () => {
     const text = readFileSync(file, 'utf8');
     assert.ok(text.includes(`p-${ROWS - 1}-`), 'the newest proxy row survived');
     assert.ok(!text.includes('p-0-'), 'the oldest proxy rows dropped');
-    // whole rows only — the retained head parses clean
-    for (const l of text.split('\n').filter(l => l !== '')) {
+    // whole rows only — the retained head parses clean, and the kept
+    // tail is a tail: an over-truncating cap keeping only the last
+    // row fails this bound
+    const lines = text.split('\n').filter(l => l !== '');
+    assert.ok(lines.length >= 5, `kept ${lines.length} rows`);
+    for (const l of lines) {
       JSON.parse(l);
     }
   });
@@ -567,15 +575,61 @@ describe('agentTurnPlane', () => {
         `converged archive ${size}B should sit at the kept tail`
       );
       // the turn's own rows are the newest — they rode the cap through
-      const lines = readFileSync(file, 'utf8')
-        .split('\n')
-        .filter(l => l !== '');
+      const text = readFileSync(file, 'utf8');
+      const lines = text.split('\n').filter(l => l !== '');
       const last = JSON.parse(lines.at(-1)!) as Record<string, unknown>;
       assert.equal(last.kind, 'turn');
       assert.equal(last.phase, 'stop');
-      // the cap's in-place rewrite went through the private seam —
-      // the legacy 0644 is pinned back to 0600, not carried forward
+      // the kept tail retains seeded rows — an over-truncating cap
+      // that dropped every legacy row keeps the file small too
+      assert.ok(lines.length > 100, `kept ${lines.length} rows — seeded rows survive`);
+      assert.ok(text.includes('yyyy'), 'a seeded legacy row is inside the kept tail');
+      // the cap's rewrite went through the private seam — the staged
+      // file it renames in is created 0600, so a permissive staged
+      // write would leak 0644 here. (An in-place unpinned rewrite
+      // keeps the mode the append already repaired — out of this
+      // assert's reach.)
       assert.equal(statSync(file).mode & 0o777, 0o600);
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('a row bigger than the keep window still converges — only complete rows survive', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-giant';
+    try {
+      const common = gitCommonDir(dir)!;
+      const file = join(common, 'bro', 'agents', 'native-giant.events.jsonl');
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 'sess-giant' });
+      plane.start();
+      // one update row over the 2 MiB keep window — its fragment can
+      // never parse, so the cap keeps nothing of it
+      plane.update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `giant-${'g'.repeat(3 * 1024 * 1024)}` },
+      } as SessionUpdate);
+      for (let i = 0; i < 6; i++) {
+        plane.update(fatChunk(`tail-${i}`));
+      }
+      plane.stop('end_turn');
+      const size = statSync(file).size;
+      assert.ok(size <= AGENT_ARCHIVE_MAX_BYTES, `archive ${size}B exceeds the cap`);
+      const lines = readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(l => l !== '');
+      // EVERY retained line is a complete row — a fragment of the
+      // giant row would throw here, and 'giant-' is nowhere inside
+      for (const l of lines) {
+        JSON.parse(l);
+      }
+      assert.ok(!lines.join('\n').includes('giant-'), 'the oversized row left no fragment');
+      const last = JSON.parse(lines.at(-1)!) as Record<string, unknown>;
+      assert.equal(last.phase, 'stop');
+      assert.ok(
+        lines.join('\n').includes('tail-5-'),
+        'the small rows after the giant one survived'
+      );
     } finally {
       delete process.env.BRO_AGENT_ID;
     }

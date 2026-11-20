@@ -25,9 +25,10 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
+import { closeSync, constants, fstatSync, openSync, readSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { eventsFile, proxyEventsFile, readTailSlice, sizeOf } from '@broject/acp-session';
+import { eventsFile, proxyEventsFile, sizeOf } from '@broject/acp-session';
 import {
   appendPrivateFileSync,
   busPublish,
@@ -157,29 +158,77 @@ const archiveFile = (
 export const AGENT_ARCHIVE_MAX_BYTES = 4 * 1024 * 1024;
 export const AGENT_ARCHIVE_KEEP_BYTES = 2 * 1024 * 1024;
 
-/** Cap one archive to its newest whole lines — a tail-only read so a
- *  pre-existing giant archive converges without a whole-file read,
- *  then an in-place rewrite through the private seam: the 0600 pin,
- *  the symlink refusal, and the foreign-owner refusal ride the cap
- *  exactly like the append (and no tmp+rename ever leaves a
- *  briefly-permissive staging file or swaps the inode under a follow
- *  reader). Runs inside the caller's try — housekeeping never
- *  outranks the row. */
+/** O_NOFOLLOW where the platform has it — the cap's tail read refuses
+ *  a path swapped to a symlink exactly like the private write seam
+ *  does. Absent on win32, where the profile ACL owns the guarantee
+ *  (private-files.ts's own posture). */
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+/** Cap one archive to its newest whole lines (spec bro-9ti7h):
+ *
+ *  - READ through one NOFOLLOW fd — a path swapped to a symlink is
+ *    refused like the write seam refuses it, and the open pins the
+ *    instance so a racing resize reads honest offsets. The read runs
+ *    to the fd's own EOF, not the first stat's: rows appended mid-cap
+ *    land inside the kept tail instead of being renamed away (the
+ *    bound stretches to cover them — newest data always wins).
+ *  - KEEP only complete JSONL rows — the slice's first line can be
+ *    torn mid-row and drops; no newline at all means the whole tail
+ *    is one unparseable fragment (a single row bigger than the keep
+ *    window), which is dead weight, not data — the archive converges
+ *    to empty and grows fresh rows.
+ *  - REPLACE via a staged private write + atomic rename — the archive
+ *    is never empty or partial: a kill mid-cap leaves the OLD file
+ *    whole or the NEW one, never a truncated middle (an in-place
+ *    truncate+write can't say that). No consumer holds the archive's
+ *    fd — every reader opens per poll — so the inode swap strands
+ *    nothing, and the staged tmp is pinned 0600 by the same seam as
+ *    the append.
+ *
+ *  Bounded memory throughout — a pre-existing giant archive converges
+ *  on its next write without a whole-file read. Runs inside the
+ *  caller's try — housekeeping never outranks the row. */
 const capArchive = (file: string): void => {
-  const size = sizeOf(file);
-  if (size <= AGENT_ARCHIVE_MAX_BYTES) {
+  if (sizeOf(file) <= AGENT_ARCHIVE_MAX_BYTES) {
     return;
   }
-  const slice = readTailSlice(file, size - AGENT_ARCHIVE_KEEP_BYTES);
-  if (slice === undefined) {
-    return;
+  const fd = openSync(file, constants.O_RDONLY | NOFOLLOW);
+  let tail: Buffer;
+  try {
+    const sz = fstatSync(fd).size;
+    if (sz <= AGENT_ARCHIVE_MAX_BYTES) {
+      return; // a concurrent cap already shrank the file
+    }
+    const from = sz - AGENT_ARCHIVE_KEEP_BYTES;
+    const parts: Buffer[] = [];
+    let at = from;
+    for (;;) {
+      const chunk = Buffer.alloc(64 * 1024);
+      const n = readSync(fd, chunk, 0, chunk.length, at);
+      if (n === 0) {
+        break;
+      }
+      parts.push(chunk.subarray(0, n));
+      at += n;
+      // a runaway same-file appender can't stretch the read forever —
+      // beyond one extra MAX the tail is let go, still bounded
+      if (at - from > AGENT_ARCHIVE_MAX_BYTES) {
+        break;
+      }
+    }
+    const slice = Buffer.concat(parts);
+    const nl = slice.indexOf(0x0a);
+    tail = nl >= 0 ? slice.subarray(nl + 1) : Buffer.alloc(0);
+  } finally {
+    closeSync(fd);
   }
-  // drop the slice's first line — it can be torn mid-row. A tail with
-  // no SECOND line keeps whole: the archive never truncates to empty
-  // while data remains (the janitor capFile edge rule).
-  const nl = slice.buf.indexOf(0x0a);
-  const tail = nl >= 0 && nl + 1 < slice.buf.length ? slice.buf.subarray(nl + 1) : slice.buf;
-  writePrivateFileSync(file, tail);
+  const staged = `${file}.cap-${process.pid}`;
+  try {
+    writePrivateFileSync(staged, tail);
+    renameSync(staged, file);
+  } finally {
+    rmSync(staged, { force: true }); // a no-op once the rename landed
+  }
 };
 
 /** Append one archive row, then self-cap — the ONE helper every writer
