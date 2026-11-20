@@ -44,7 +44,7 @@
  * bro-5tpx0 add theirs when they land).
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { e2eEnv, initRepo, installFakeBd } from '../packages/cli/src/commands/testrepo.ts';
@@ -143,6 +143,12 @@ interface RowSpec {
 interface Fixture {
   cwd: string;
   env: NodeJS.ProcessEnv;
+  /** Fast fixture only — a PATH-earlier `node` shim appends the event
+   *  arg of every hooks.js/index.js dispatch, one line each. The
+   *  early-exit rows must leave their event at zero lines: latency
+   *  can't tell a 200 ms dispatch from a fast machine's early exit,
+   *  the canary can. */
+  nodeLog?: string;
 }
 
 interface RunLimits {
@@ -261,6 +267,29 @@ function buildFixture(kind: FixtureKind): Fixture {
     writeFileSync(join(gdir, '.stamp'), '\n');
   }
   const { binDir, db } = installFakeBd(root, []);
+  let nodeLog: string | undefined;
+  if (kind === 'fast') {
+    // mechanism canary: a `node` shim first on PATH logs the last argv
+    // of every hooks.js/index.js dispatch, then defers to the real
+    // node — zero cost on the early exit, and any logged post-tool/
+    // prompt-submit line is proof the fast path fell through to Node
+    // inside the latency budget (sourcery finding on the PR)
+    nodeLog = join(root, 'node-dispatch.log');
+    writeFileSync(nodeLog, '');
+    const shim = join(binDir, 'node');
+    writeFileSync(
+      shim,
+      '#!/bin/sh\n' +
+        'case "$1" in\n' +
+        '  */hooks.js|*/index.js)\n' +
+        '    for _l do :; done\n' +
+        `    printf '%s\\n' "$_l" >> ${JSON.stringify(nodeLog)}\n` +
+        '    ;;\n' +
+        'esac\n' +
+        `exec ${JSON.stringify(process.execPath)} "$@"\n`
+    );
+    chmodSync(shim, 0o755);
+  }
   const env = e2eEnv({
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
     FAKE_BD_DB: db,
@@ -270,7 +299,7 @@ function buildFixture(kind: FixtureKind): Fixture {
     BRO_TELEMETRY: '0',
     BRO_HOOKS_NO_FALLBACK: '1',
   });
-  return { cwd: main, env };
+  return { cwd: main, env, nodeLog };
 }
 
 interface Attempt {
@@ -417,6 +446,18 @@ function laneEvents(lane: Lane): typeof EVENTS {
   return lane === 'fast' ? EVENTS.filter(e => FAST_EVENTS.has(e.event)) : EVENTS;
 }
 
+/** Lines the fast fixture's node shim logged for `event` — zero for
+ *  the early-exit rows. Each event is benched once per fixture, so the
+ *  count covers exactly this row's warmup + measured runs. */
+function dispatchCount(nodeLog: string | undefined, event: string): number {
+  if (nodeLog === undefined || !existsSync(nodeLog)) {
+    return 0;
+  }
+  return readFileSync(nodeLog, 'utf8')
+    .split('\n')
+    .filter(l => l === event).length;
+}
+
 /** Fixtures build lazily per kind — a `--lanes fast` run must not pay
  *  for the armed repo's fake-bd store, and vice versa. */
 function runBench(opts: Options): Map<string, Row> {
@@ -429,7 +470,24 @@ function runBench(opts: Options): Map<string, Row> {
     const laneEnv = lane === 'noop' ? { ...fx.env, BRO_HOOKS: '0' } : fx.env;
     const laneFx = { cwd: fx.cwd, env: laneEnv };
     for (const { event, payload } of laneEvents(lane)) {
-      rows.set(`${lane}:${event}`, benchRow({ lane, event, payload }, laneFx, lim));
+      const row = benchRow({ lane, event, payload }, laneFx, lim);
+      // mechanism proof for the early-exit rows: any node dispatch is
+      // a fast-path regression even when it lands inside the p50 cap —
+      // count it into errors so the row fails like a broken hook
+      if (
+        lane === 'fast' &&
+        (event === 'post-tool' || event === 'prompt-submit') &&
+        row.errors === 0
+      ) {
+        const dispatches = dispatchCount(fx.nodeLog, event);
+        if (dispatches > 0) {
+          console.error(
+            `bench-hooks: fast:${event} reached node ${dispatches}× — the early exit did not settle`
+          );
+          row.errors += dispatches;
+        }
+      }
+      rows.set(`${lane}:${event}`, row);
     }
   }
   return rows;
