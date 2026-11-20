@@ -580,6 +580,41 @@ export function sessionLaneCensus<T>(args: {
       }
     }
   }
+  const { ghosts, batchGhosts } = retiredClaimGhosts(before, after, args.liveRows);
+  return { counts, claims: claims + ghosts, batchClaims: batchClaims + batchGhosts };
+}
+
+/** The pids and claim keys the live rows already carry — the proof a
+ *  retired claim's session landed inside `counts`. */
+function liveRowIdentities(liveRows: () => Iterable<DiscoveredSession>): {
+  pids: Set<number>;
+  keys: Set<string>;
+} {
+  const pids = new Set<number>();
+  const keys = new Set<string>();
+  for (const r of liveRows()) {
+    pids.add(r.pid);
+    if (r.agentId !== undefined) {
+      keys.add(r.agentId);
+    }
+  }
+  return { pids, keys };
+}
+
+/** The retired-claim half of the handoff census — the claims `before`
+ *  held that `after` no longer does. A retired claim with a provable
+ *  identity is forgiven only when OUR live rows already hold its
+ *  session: the holder pid a retagged claim carries, or the claim
+ *  key a landed sweep matched on — unmatched it ghost-counts, the
+ *  conservative keep of a landing OUR scan never saw. A claim with
+ *  NO provable identity, or a census with no rows to prove against,
+ *  keeps the classic post-count verdict — the plane's own in-count
+ *  sweep explains the far likelier retirement (spec bro-x601l). */
+function retiredClaimGhosts(
+  before: ReadonlyMap<string, SessionClaimRow>,
+  after: ReadonlySet<string>,
+  liveRows: (() => Iterable<DiscoveredSession>) | undefined
+): { ghosts: number; batchGhosts: number } {
   let ghosts = 0;
   let batchGhosts = 0;
   let known: { pids: Set<number>; keys: Set<string> } | undefined;
@@ -587,24 +622,8 @@ export function sessionLaneCensus<T>(args: {
     if (after.has(row.path)) {
       continue;
     }
-    // retired mid-scan — forgiven only when OUR live rows already hold
-    // its session: the holder pid a retagged claim carries, or the
-    // claim key a landed sweep matched on. No rows to prove against
-    // means no handoff protection at all — the plane's own in-count
-    // sweep explains the far likelier retirement
-    if (args.liveRows !== undefined && (row.pid !== undefined || row.key !== undefined)) {
-      const liveRows = args.liveRows;
-      known ??= (() => {
-        const pids = new Set<number>();
-        const keys = new Set<string>();
-        for (const r of liveRows()) {
-          pids.add(r.pid);
-          if (r.agentId !== undefined) {
-            keys.add(r.agentId);
-          }
-        }
-        return { pids, keys };
-      })();
+    if (liveRows !== undefined && (row.pid !== undefined || row.key !== undefined)) {
+      known ??= liveRowIdentities(liveRows);
       if (
         (row.pid !== undefined && known.pids.has(row.pid)) ||
         (row.key !== undefined && known.keys.has(row.key))
@@ -617,7 +636,7 @@ export function sessionLaneCensus<T>(args: {
       }
     }
   }
-  return { counts, claims: claims + ghosts, batchClaims: batchClaims + batchGhosts };
+  return { ghosts, batchGhosts };
 }
 
 /** Claim a host-wide slot — `wx` exclusive create plus a random suffix,

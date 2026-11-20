@@ -2331,6 +2331,28 @@ function claimRelease(paths: string[]): () => void {
  *  a wedged holder. */
 const CAP_LOCK_WAIT_MS = 5_000;
 
+/** The pre-claim kind views, fail-closed — a quota whose count cannot
+ *  be established is not walked past, and the reason rides the error
+ *  the caller surfaces. */
+function capViewsOrThrow(
+  command: string,
+  agents: Record<string, Record<string, unknown>> | undefined
+): ReturnType<typeof sessionCapViews> {
+  try {
+    return sessionCapViews(command, agents);
+  } catch (err) {
+    // the count could not be established — fail closed, with the reason
+    // the operator needs (a quota that cannot be verified is not walked
+    // past)
+    if (err instanceof SpawnError) {
+      throw err;
+    }
+    throw new Error(
+      `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+    );
+  }
+}
+
 /** The un-locked claim+judge — the contention fallback on every caller
  *  of `admitLaneCap`, kept so a mutex that outlives the wait never
  *  stalls the request loop.
@@ -2359,20 +2381,7 @@ export function admitLaneCapUnlocked(
   // the lane never gates.
   let armed: Set<string> | undefined;
   if (providerCap === undefined) {
-    let views: ReturnType<typeof sessionCapViews>;
-    try {
-      views = sessionCapViews(command, cfg.agents);
-    } catch (err) {
-      // the count could not be established — fail closed, with the reason
-      // the operator needs (a quota that cannot be verified is not walked
-      // past)
-      if (err instanceof SpawnError) {
-        throw err;
-      }
-      throw new Error(
-        `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
-      );
-    }
+    const views = capViewsOrThrow(command, cfg.agents);
     if (views.length === 0) {
       return claimRelease([]);
     }
