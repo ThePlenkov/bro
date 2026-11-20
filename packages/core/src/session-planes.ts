@@ -549,7 +549,7 @@ function countedSessionReservations(
       // lane for the stranger's whole lifetime; legacy claims without a
       // start keep the pid-only verdict
       if (!stale || (holder?.pid !== undefined && alive(holder.pid, holder.start))) {
-        rows.push({ path, batch, ...(holder ?? {}) });
+        rows.push({ path, batch, ...holder });
         continue;
       }
       reapStaleClaim(resDir, name, content);
@@ -736,25 +736,28 @@ function retiredClaimGhosts(
   after: ReadonlySet<string>,
   rows: Iterable<DiscoveredSession> | undefined
 ): { ghosts: number; batchGhosts: number } {
+  // a claim is PROVABLE only when the census produced rows AND the
+  // claim recorded an identity — anything else keeps the classic
+  // post-count verdict (the in-count sweep explains its retirement)
+  let known: { pids: Set<number>; keys: Set<string> } | undefined;
+  const provable = (row: SessionClaimRow): boolean =>
+    rows !== undefined && (row.pid !== undefined || row.key !== undefined);
+  const proven = (row: SessionClaimRow): boolean => {
+    known ??= liveRowIdentities(rows as Iterable<DiscoveredSession>);
+    return (
+      (row.pid !== undefined && known.pids.has(row.pid)) ||
+      (row.key !== undefined && known.keys.has(row.key))
+    );
+  };
   let ghosts = 0;
   let batchGhosts = 0;
-  let known: { pids: Set<number>; keys: Set<string> } | undefined;
   for (const row of before.values()) {
-    if (after.has(row.path)) {
+    if (after.has(row.path) || !provable(row) || proven(row)) {
       continue;
     }
-    if (rows !== undefined && (row.pid !== undefined || row.key !== undefined)) {
-      known ??= liveRowIdentities(rows);
-      if (
-        (row.pid !== undefined && known.pids.has(row.pid)) ||
-        (row.key !== undefined && known.keys.has(row.key))
-      ) {
-        continue;
-      }
-      ghosts++;
-      if (row.batch) {
-        batchGhosts++;
-      }
+    ghosts++;
+    if (row.batch) {
+      batchGhosts++;
     }
   }
   return { ghosts, batchGhosts };

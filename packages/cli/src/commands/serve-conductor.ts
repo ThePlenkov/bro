@@ -48,6 +48,7 @@ import {
   SpawnError,
   stateCommonDir,
   type ProviderCapLane,
+  type SessionPlane,
   type SessionStartAdmission,
 } from '@broject/core';
 import type {
@@ -2353,6 +2354,54 @@ function capViewsOrThrow(
   }
 }
 
+/** One plane's claims for this call — empty when the kind is not
+ *  armed: a quota-armed kind claims its starts; an unarmed one claims
+ *  only when the provider cap armed its census — the same gate the
+ *  locked admission runs. The claim lands in the SAME dir the locked
+ *  section's does, or locked and un-locked callers would never see
+ *  each other on the census. */
+function planeClaims(
+  plane: SessionPlane,
+  args: {
+    cfg: ConductorConfig;
+    command: string;
+    claimKey: string;
+    providerCap: ReturnType<typeof laneProviderCap>;
+    armed: Set<string> | undefined;
+  }
+): string[] {
+  const { cfg, command, claimKey, providerCap, armed } = args;
+  if (armed !== undefined && !armed.has(plane.kind)) {
+    return [];
+  }
+  return reserveSessionStart({
+    kind: plane.kind,
+    agents: cfg.agents,
+    key: claimKey,
+    count: plane.startsSessions?.(command) ?? 1,
+    dir: sessionStartCensusDir(plane, cfg.agents, providerCap),
+  }).paths;
+}
+
+/** The provider-namespaced claim for a command NO plane counts —
+ *  that ledger is its whole census (spec bro-x601l). Empty when no
+ *  provider cap arms the call. */
+function providerLedgerClaims(
+  providerCap: ReturnType<typeof laneProviderCap>,
+  claimKey: string
+): string[] {
+  if (providerCap === undefined) {
+    return [];
+  }
+  return reserveSessionStart({
+    kind: providerSlotsKind(providerCap.provider),
+    agents: undefined,
+    key: claimKey,
+    count: 1,
+    dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
+  }).paths;
+}
+
 /** The claim half of the un-locked admit — land every claim the armed
  *  kinds owe, first, so the census that follows already sees this
  *  caller. `armed` is the pre-claim selection the caller computed
@@ -2368,43 +2417,14 @@ function collectLaneClaims(args: {
   providerCap: ReturnType<typeof laneProviderCap>;
   armed: Set<string> | undefined;
 }): string[] {
-  const { cfg, command, claimKey, planes, providerCap, armed } = args;
+  const { claimKey, planes, providerCap } = args;
   const held: string[] = [];
   try {
     if (planes.length === 0) {
-      // a provider NO plane counts still claims — the provider-
-      // namespaced ledger is its whole census (spec bro-x601l)
-      if (providerCap !== undefined) {
-        held.push(
-          ...reserveSessionStart({
-            kind: providerSlotsKind(providerCap.provider),
-            agents: undefined,
-            key: claimKey,
-            count: 1,
-            dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
-          }).paths
-        );
-      }
-      return held;
+      return providerLedgerClaims(providerCap, claimKey);
     }
     for (const plane of planes) {
-      // a quota-armed kind claims its starts; an unarmed one claims
-      // only when the provider cap armed its census — the same gate
-      // the locked admission runs. The claim lands in the SAME dir
-      // the locked section's does, or locked and un-locked callers
-      // would never see each other on the census.
-      if (armed !== undefined && !armed.has(plane.kind)) {
-        continue;
-      }
-      held.push(
-        ...reserveSessionStart({
-          kind: plane.kind,
-          agents: cfg.agents,
-          key: claimKey,
-          count: plane.startsSessions?.(command) ?? 1,
-          dir: sessionStartCensusDir(plane, cfg.agents, providerCap),
-        }).paths
-      );
+      held.push(...planeClaims(plane, args));
     }
     return held;
   } catch (err) {
