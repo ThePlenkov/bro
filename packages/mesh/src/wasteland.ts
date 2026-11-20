@@ -42,11 +42,13 @@ function getSpawnOutput(p: ReturnType<typeof spawnSync>): string {
   return typeof stdout === 'string' ? stdout : '';
 }
 
-function wl(call: { args: string[] }): WlResult {
+function wl(call: { args: string[]; timeoutMs?: number }): WlResult {
   const opts: SpawnSyncOptions = {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
-    timeout: 120_000,
+    // a caller's deadline slice replaces the default; clamped ≥1 — a
+    // 0 here means NO kill to spawnSync, the unbounded footgun
+    timeout: call.timeoutMs === undefined ? 120_000 : Math.max(1, Math.floor(call.timeoutMs)),
     maxBuffer: 32 * 1024 * 1024,
   };
   // PATH lookup is the contract (same as pull.ts's dolt)
@@ -315,7 +317,10 @@ function projectVerdict(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[
   return projectImplicitAccept({ row, ctx });
 }
 
-function wlJson<T>(call: { args: string[] }): { data?: T; error?: string } {
+function wlJson<T>(call: { args: string[]; timeoutMs?: number }): {
+  data?: T;
+  error?: string;
+} {
   const r = wl(call);
   if (r.code !== 0) {
     return { error: r.err || r.out };
@@ -506,9 +511,13 @@ function isValidWantedRow(w: unknown): w is WantedRow {
 /** The open board — `wl browse --json` over the commons, never the
  *  fork. Rows are returned raw; `projectWanted` turns them into the
  *  records the thread reduction reads. */
-export function browseWanted(remote: string): { rows: WantedRow[]; error?: string } {
+export function browseWanted(
+  remote: string,
+  timeoutMs?: number
+): { rows: WantedRow[]; error?: string } {
   const r = wlJson<WantedRow[] | { rows?: WantedRow[] }>({
     args: [...remoteArgs(remote), 'browse', '--json', '--limit', '500'],
+    timeoutMs,
   });
   if (r.error !== undefined) {
     return { rows: [], error: `wl browse failed — ${r.error}` };
@@ -522,8 +531,11 @@ function isValidWantedData(data: WantedRow | undefined): data is WantedRow {
 }
 
 /** One thread's board row — `wl status <id> --json` over the commons. */
-export function wantedStatus(t: WlTarget): { row?: WantedRow; error?: string } {
-  const r = wlJson<WantedRow>({ args: [...remoteArgs(t.remote), 'status', t.id, '--json'] });
+export function wantedStatus(t: WlTarget, timeoutMs?: number): { row?: WantedRow; error?: string } {
+  const r = wlJson<WantedRow>({
+    args: [...remoteArgs(t.remote), 'status', t.id, '--json'],
+    timeoutMs,
+  });
   if (r.error !== undefined) {
     return { error: `wl status ${t.id} failed — ${r.error}` };
   }

@@ -5,7 +5,7 @@
  * wiring: argv/env resolution, the config seam, and the command
  * surface (`runSessionView(argv, opts)` kept for callers/tests).
  */
-import { gitCommonDir } from '@broject/core';
+import { stateCommonDir } from '@broject/core';
 import {
   fleetStatusPath,
   runSessionPane,
@@ -52,7 +52,9 @@ function viewContext(argv: string[]): SessionPaneCtx | undefined {
   if (process.env.HERDR_ENV !== '1') return undefined;
   const pane = process.env.HERDR_PANE_ID;
   if (pane === undefined || pane === '') return undefined;
-  const base = gitCommonDir(worktree) ?? worktree;
+  // the fleet-status root — same state dir the daemon projector writes
+  // through (stateCommonDir), so a BRO_STATE_DIR pin moves both ends
+  const base = stateCommonDir(worktree) ?? worktree;
   const events = flag(argv, '--events');
   const agent = flag(argv, '--agent');
   return {

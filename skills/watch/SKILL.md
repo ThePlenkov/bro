@@ -16,11 +16,11 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 
 | Command                                          | What it does                                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bro review watch [--once]`                      | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows                                                                                                                                                                                                                                   |
-| `bro review watch --every N --for S`             | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
+| `bro review watch [--once]`                      | One snapshot — the observer read: attention list + open molecules + act gates per fleet PR + fleet rows                                                                                                                                                                                                                                    |
+| `bro review watch --every N --for S`             | The bounded observer window — also the spawned fallback leg of `bro pulse` (the wake): ticks the snapshot every N seconds under `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` bounds the window — omitting it leaves an unbounded watcher only an external supervisor may own |
 | `bro review watch --notify`                      | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session                                                                                                                                                                                        |
 | `bro review watch --json`                        | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}`                                                                                                                                                                                                                                                                           |
-| `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed                                                                                                    |
+| `bro review watch install [--every N] [--print]` | Arm the wake — writes `<git-common>/bro/pulse.json` (the want-marker checkpoints rearm `bro pulse`'s fallback leg from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed                                                                                     |
 | `bro review watch uninstall`                     | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own                                                                                                                                                                                                                                                       |
 
 Every tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
@@ -37,6 +37,13 @@ context), never an inference from whether a session was polled.
   degraded / unavailable / probe-failed lines before treating the
   snapshot as healthy, and don't go hunting for work the heartbeat
   didn't raise.
+- **Three liveness mechanisms, one role each (spec bro-wb3yc).**
+  `bro fleet daemon` is the process **owner**; `bro pulse` is the
+  session **wake**; `bro fleet rig next` is **re-entry**. `bro review
+  watch` is none of them — it is the bounded **observer**: a read you
+  run (its tick's only writes are `heartbeat.json` and the janitor's
+  dead-residue reaps — see below), or the fallback leg the checkpoint
+  spawns for the wake.
 - **The session owns the cadence — the attended leg is `bro pulse`.**
   A live orchestrator session arms `bro pulse <S>` in a visible
   background shell (the `/pulse` skill) — a continuous metronome whose

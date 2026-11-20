@@ -12,6 +12,11 @@ import { conductorProxy } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 
+// bro-eajeu — CFG.cwd is this checkout (realistic), but a worktree's
+// common resolves the operator's live .git/bro: the pin redirects the
+// serve-turns journal + turn-plane archives into a sandbox.
+process.env.BRO_STATE_DIR = mkdtempSync(join(tmpdir(), 'bro-deadloop-state-'));
+
 const BODY = { messages: [{ role: 'user', content: 'x' }], stream: false };
 
 /** A conductor whose churn budget is one session — the second failure

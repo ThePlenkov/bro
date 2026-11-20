@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, stateCommonDir } from './git.ts';
 import { withFileLock } from './filelock.ts';
 import { publishLifecycleBusEvent } from './lifecycle-bus.ts';
 import { bdActor } from './tasks.ts';
@@ -98,7 +98,7 @@ const LIFECYCLE_KEEP_BYTES = 2 * 1024 * 1024;
 /** `<git-common>/bro/events.jsonl` — null outside a repo; shared
  *  across linked worktrees the same way the sibling journals are. */
 export function lifecyclePath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'events.jsonl');
 }
 
@@ -151,7 +151,7 @@ function compactLifecycle(file: string): void {
  *  so the mirror costs no second git probe. */
 export function emitLifecycle(dir: string, input: LifecycleInput): void {
   try {
-    const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+    const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
     if (common === null) {
       return;
     }

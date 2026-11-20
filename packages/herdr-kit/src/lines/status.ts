@@ -9,7 +9,7 @@
 import { mkdirSync, readFileSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { PaneLed } from '@broject/acp-session';
-import { gitCommonDir } from '@broject/core';
+import { stateCommonDir } from '@broject/core';
 import {
   call,
   metaArgs as kitMetaArgs,
@@ -156,7 +156,9 @@ function viewContext(argv: string[]): ViewCtx | undefined {
   if (process.env.HERDR_ENV !== '1') return undefined;
   const pane = process.env.HERDR_PANE_ID;
   if (pane === undefined || pane === '') return undefined;
-  const base = gitCommonDir(worktree) ?? worktree;
+  // the fleet-status root — same state dir the daemon projector writes
+  // through (stateCommonDir), so a BRO_STATE_DIR pin moves both ends
+  const base = stateCommonDir(worktree) ?? worktree;
   return { worktree, pane, statePath: fleetStatusPath(base, worktree) };
 }
 

@@ -1,4 +1,5 @@
 ---
+
 name: resume
 description: "Use after a host/session restart to recover the rig — dead watches, a recorded-but-dead daemon, loop residue, lost agents, dirty worktrees. `bro fleet resume` is the post-reboot runbook as one pass. Thin wrapper over the bro CLI — mechanics live in the CLI. Requires `bro` (npx -y @broject/bro@0)."
 ---
@@ -10,7 +11,10 @@ description: "Use after a host/session restart to recover the rig — dead watch
 A restart kills processes and keeps promises: claims, worktrees, the
 agent registry, `daemon.json`, watch markers, and `loop.lock` survive —
 watchers, the daemon, the loop, and exec shells do not. `bro fleet
-resume` is the recovery runbook as one ordered pass.
+resume` is the recovery runbook as one ordered pass — the operator-facing
+re-entry leg: under spec bro-wb3yc the re-entry **verdict** is `bro
+fleet rig next`, and resume is the executor that walks the same durable
+state (dead markers, armed wants) and brings it back.
 
 ## Command
 
@@ -20,14 +24,14 @@ resume` is the recovery runbook as one ordered pass.
 
 Legs, in order:
 
-| Leg | Restores | Reports |
-| --- | -------- | ------- |
-| sweep | janitor reap of dead session residue | reap counts |
-| watch | detached `act wait` per dead marker on an open PR; settled markers sweep + reconcile | rearmed / settled / kept |
-| daemon | recorded-but-dead `daemon.json` → `daemon run` at the recorded cadence | live / revived / unarmed |
-| loop | — | dead `loop.lock` holder + dead run records, `bro flow loop` hint |
-| agents | — | lost/exited registry entries, `bro fleet agents prune`/`up` hints |
-| worktrees | — | dirty sibling trees (stranded edits) |
+| Leg       | Restores                                                                             | Reports                                                           |
+| --------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| sweep     | janitor reap of dead session residue                                                 | reap counts                                                       |
+| watch     | detached `act wait` per dead marker on an open PR; settled markers sweep + reconcile | rearmed / settled / kept                                          |
+| daemon    | recorded-but-dead `daemon.json` → `daemon run` at the recorded cadence               | live / revived / unarmed                                          |
+| loop      | —                                                                                    | dead `loop.lock` holder + dead run records, `bro flow loop` hint  |
+| agents    | —                                                                                    | lost/exited registry entries, `bro fleet agents prune`/`up` hints |
+| worktrees | —                                                                                    | dirty sibling trees (stranded edits)                              |
 
 `--dry-run` prints the same plan with nothing spawned and nothing
 swept; `--json` emits the structured report.

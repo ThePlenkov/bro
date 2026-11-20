@@ -1947,25 +1947,44 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // `--paginate` walks every page: the fleet ceiling and orphan
       // reconcile count this listing as COMPLETE — a capped page would
       // undercount open PRs and admit work past the bound (and never
-      // reconcile heads past the cut). `--slurp` folds the pages into
-      // one array so the projection still answers a single JSON doc.
+      // reconcile heads past the cut).
       //
       // `--jq` projects the two fields this reads. The REST pull objects
       // carry every body and reaction count, so one busy page answered
       // ~1.9 MB — past Node's spawnSync buffer, which killed the child
       // and read as a bare 'gh api failed: '. The projection answers
       // ~3.5 KB for the same page.
-      return ghJson<Array<{ number: number; head?: string }>>(
+      //
+      // The projection is TSV, one PR per line, and NO `--slurp`: gh
+      // refuses `--slurp` together with `--jq` (the --slurp option is
+      // not supported with --jq or --template), and that refusal killed
+      // the listing — and with it the whole act gate, which reads it.
+      // One line per PR is the same projection without the conflict.
+      const out = gh(
         [
           'api',
           '--paginate',
-          '--slurp',
           `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`,
           '--jq',
-          '[.[][]|{number,head:.head.ref}]',
+          '.[] | [.number, .head.ref] | @tsv',
         ],
         dir
-      ).map(p => ({ pr: p.number, headRef: p.head ?? '' }));
+      );
+      return (
+        out
+          .split('\n')
+          // the emptiness check may trim; the LINE may not — a branch name
+          // may end in Unicode whitespace (git allows a trailing NBSP), and
+          // trimming it would name a DIFFERENT branch than the PR carries
+          .filter(line => line.trim() !== '')
+          .map(line => {
+            // only the line TERMINATOR's CR is noise — not the ref's own
+            // trailing whitespace
+            const clean = line.endsWith('\r') ? line.slice(0, -1) : line;
+            const [number, head] = clean.split('\t');
+            return { pr: Number(number), headRef: head ?? '' };
+          })
+      );
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text);

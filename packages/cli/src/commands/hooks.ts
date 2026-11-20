@@ -125,6 +125,7 @@ import { GUARD_PROBES } from '../guard-probes.ts';
 // whose import evaluates the whole PLUGINS registry on every hook event
 // (review #9, specs/bro-36sx7.7.md)
 import { sessionCapRefusalForHook } from './session-cap.ts';
+import { wasteGuardBlock, wasteGuardRecord } from './waste-guard.ts';
 import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
@@ -2488,6 +2489,17 @@ async function emitPostToolObserve(
   }
 }
 
+/** The waste-guard's post-tool marker commit, boxed so the payload
+ *  field reads (`??`/ternary decision points) live here instead of
+ *  growing emitPostTool's branch count. */
+function wasteRecordFor(input: HookInput, sessionId: string, outcome: unknown): void {
+  wasteGuardRecord(process.cwd(), sessionId, {
+    tool: typeof input.tool_name === 'string' ? input.tool_name : '',
+    input: (input.tool_input ?? {}) as Record<string, unknown>,
+    outcome,
+  });
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const lines: string[] = [];
@@ -2500,6 +2512,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   maybeSpawnTraceFlush(process.cwd());
   const outcome = input.tool_response?.success;
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+  // waste-guard markers commit at post-tool, not pre-tool — a call
+  // denied by the guard, a connector veto, or a refused prompt never
+  // reaches this event, so a marker only stands for a call that
+  // actually ran (spec bro-rw8z3). Passive state like the trace
+  // journal, so it records in observe mode too.
+  wasteRecordFor(input, sessionId, outcome);
   // `bro mode <name>` binds to this session here — runs in EVERY mode,
   // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
   // A proven-failed call binds nothing (the mode was never applied);
@@ -2713,6 +2731,24 @@ async function emitStopGateBody(
   }
 }
 
+/** A pre-tool veto — codex answers in its hookSpecificOutput envelope,
+ *  every other client takes the flat decision block. Shared by the
+ *  waste-guard and connector verdict paths so emitPreTool keeps one
+ *  branch per veto source. */
+function emitPreToolDeny(reason: string): void {
+  if (codexClient) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: reason,
+      },
+    });
+  } else {
+    emit({ decision: 'block', reason });
+  }
+}
+
 /** Connector pre-tool verdicts — the guard plane. The first `block`
  *  vetoes the call (`decision: block` — the opencode V2 adapter throws
  *  on it); `input` overrides merge in connector order and the adapter
@@ -2721,24 +2757,25 @@ async function emitStopGateBody(
 async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
+  const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+  // the waste-guard runs before connector verdicts — a deterministic
+  // duplicate/unchanged-verify veto costs no model call (spec
+  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls.
+  // pre-tool only checks — the marker commit lands at post-tool, so a
+  // call vetoed here or below can never shadow its own retry
+  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput });
+  if (wasteBlock !== undefined) {
+    emitPreToolDeny(wasteBlock);
+    return;
+  }
   const verdicts = await preToolVerdicts(
     hookCtx(process.cwd(), sessionId, callIdOf(input)),
     tool,
-    (input.tool_input ?? {}) as Record<string, unknown>
+    toolInput
   );
   const block = verdicts.find(v => v.block !== undefined)?.block;
   if (block !== undefined) {
-    if (codexClient) {
-      emit({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: block,
-        },
-      });
-    } else {
-      emit({ decision: 'block', reason: block });
-    }
+    emitPreToolDeny(block);
     return;
   }
   const merged: Record<string, unknown> = {};

@@ -16,7 +16,13 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitCommonDir, gitTry, type ProviderEntry, readAgentRegistry } from '@broject/core';
+import {
+  gitCommonDir,
+  gitTry,
+  type ProviderEntry,
+  readAgentRegistry,
+  stateCommonDir,
+} from '@broject/core';
 import {
   type ActEntry,
   type AgentRow,
@@ -64,12 +70,13 @@ export {
   workerToken,
 } from '@broject/herdr-kit';
 
-/** `<git-common>/bro/act-state/*.json` — the last gate each real
- *  poller observed. A label reads the freshest observation; it never
- *  pays a gh call itself. */
-function actStates(ctx: Pick<PassCtx, 'common'>): ActEntry[] {
-  if (ctx.common === null) return [];
-  const dir = join(ctx.common, 'bro', 'act-state');
+/** `<state>/bro/act-state/*.json` — the last gate each real poller
+ *  observed (the cache writes through stateCommonDir, so the read must
+ *  resolve the same root or a pinned rig's rows are invisible). A label
+ *  reads the freshest observation; it never pays a gh call itself. */
+function actStates(ctx: Pick<PassCtx, 'state'>): ActEntry[] {
+  if (ctx.state === null) return [];
+  const dir = join(ctx.state, 'bro', 'act-state');
   let names: string[];
   try {
     names = readdirSync(dir).filter(f => f.endsWith('.json'));
@@ -113,11 +120,17 @@ function stallMin(ctx: Pick<PassCtx, 'root'>): number {
 }
 
 /** One projection pass's shared context — the repo root, its git
- *  common dir, and the observation instant, threaded through the
- *  internals so every helper reads the same snapshot coordinates. */
+ *  common dir, the runtime-state root, and the observation instant,
+ *  threaded through the internals so every helper reads the same
+ *  snapshot coordinates. `common` and `state` diverge only under a
+ *  BRO_STATE_DIR pin: the plugin-ledger scope hash must stay on the
+ *  REAL common dir (the external herdr plugin resolves gitCommonDir
+ *  and never sees the pin), while bro's own runtime-state rows —
+ *  act-state, archives, fleet-status — follow the pin. */
 interface PassCtx {
   root: string;
   common: string | null;
+  state: string | null;
   now: number;
 }
 
@@ -125,6 +138,10 @@ interface PassCtx {
  *  managed∩open set proves at least one workspace is ours to label. */
 interface Planes {
   agentsHome: string | null;
+  /** `<state>/bro/agents` — the .events.jsonl archives the acp writers
+   *  pin; distinct from agentsHome because the spawn-side artifacts
+   *  (.exit/.handle/.go) still resolve the real common dir. */
+  eventsHome: string | null;
   registry: ReturnType<typeof readAgentRegistry>;
   branches: Map<string, string>;
   runs: ReturnType<typeof collectLoopRuns>;
@@ -151,6 +168,7 @@ function readPlanes(ctx: PassCtx): Planes {
   const hooks = hooksDirOf(ctx.root);
   return {
     agentsHome: ctx.common === null ? null : join(ctx.common, 'bro', 'agents'),
+    eventsHome: ctx.state === null ? null : join(ctx.state, 'bro', 'agents'),
     registry: tryRegistry(ctx),
     branches: gitBranches(ctx),
     runs: collectLoopRuns(ctx.root, ctx.now),
@@ -186,8 +204,8 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
         ...(typeof e.acpSessionId === 'string' ? { acpSessionId: e.acpSessionId } : {}),
         ...(typeof e.log === 'string' ? { log: e.log } : {}),
         ...(acp ? { acp: true } : {}),
-        ...(acp && p.agentsHome !== null && typeof e.agentId === 'string' && e.agentId !== ''
-          ? { events: join(p.agentsHome, `${e.agentId}.events.jsonl`) }
+        ...(acp && p.eventsHome !== null && typeof e.agentId === 'string' && e.agentId !== ''
+          ? { events: join(p.eventsHome, `${e.agentId}.events.jsonl`) }
           : {}),
         at: parseTs(e.spawnedAt),
       };
@@ -228,7 +246,8 @@ function treeInput(t: HerdrWorktree, p: Planes, ctx: PassCtx): TreeInput {
  *  wrapper only assembles the bro planes and the TreeInput builder. */
 export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult {
   const common = gitCommonDir(mainRoot);
-  const ctx: PassCtx = { root: mainRoot, common, now };
+  const state = stateCommonDir(mainRoot);
+  const ctx: PassCtx = { root: mainRoot, common, state, now };
   return runFleetPass(ctx, {
     planes: () => readPlanes(ctx),
     input: (t, planes) => treeInput(t, planes, ctx),

@@ -87,10 +87,15 @@ case "$1 $2" in
         fi ;;
       *) echo '{}' ;;
     esac ;;
-  "api --paginate") if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-BEGIN $4" >> "$FAKE_GH_LOG"; fi
+  "api --paginate") if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-BEGIN $*" >> "$FAKE_GH_LOG"; fi
       if [ -n "$FAKE_GH_ANN_SLEEP" ]; then sleep "$FAKE_GH_ANN_SLEEP"; fi
-      case "$4" in
-      *pulls\\?*) echo '[{"number":9,"head":"work/x"},{"number":11,"head":"loop/y"}]' ;;
+      # the endpoint is the one argument that names a repo path — the flags
+      # around it differ per call (--slurp for the annotations, --jq for
+      # the PR listing)
+      endpoint=""
+      for a in "$@"; do case "$a" in repos/*) endpoint="$a" ;; esac; done
+      case "$endpoint" in
+      *pulls\\?*) printf '9\twork/x\n11\tloop/y\n13\twork/nb\\302\\240\n' ;;
       *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
       *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
           echo '[[{"annotation_level":"failure"}]]' ;;
@@ -98,7 +103,7 @@ case "$1 $2" in
       *check-runs/4/annotations*) echo '{"message":"Not Found"}' ;;
       *check-runs/*/annotations*) echo '[[]]' ;;
     esac
-    if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-END $4" >> "$FAKE_GH_LOG"; fi ;;
+    if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-END $*" >> "$FAKE_GH_LOG"; fi ;;
   "pr edit"|"label create") if [ "$2" = "edit" ] && [ -n "$FAKE_GH_BODY_FILE" ]; then
       node -e 'const a=process.argv,i=a.indexOf("--body");if(i>0)require("fs").writeFileSync(a[1],a[i+1])' "$FAKE_GH_BODY_FILE" "$@"
       if [ -n "$FAKE_GH_EDIT_CLOBBER" ] && [ ! -e "$FAKE_GH_BODY_FILE.clob" ]; then
@@ -203,18 +208,27 @@ describe('githubReview', { skip: WIN32 }, () => {
       assert.deepEqual(rows, [
         { pr: 9, headRef: 'work/x' },
         { pr: 11, headRef: 'loop/y' },
+        // a branch name may end in Unicode whitespace (git allows a
+        // trailing NBSP) — trimming the line would name a DIFFERENT
+        // branch than the PR carries, and the exact-match gate would
+        // miss the PR
+        { pr: 13, headRef: 'work/nb\u00a0' },
       ]);
       // the projection IS the contract — the full REST pull objects carry
       // every body, and one busy page of them crosses Node's spawnSync
       // buffer, which killed the child and read as a bare 'gh api failed'.
-      // --paginate --slurp folds every page into one doc before the
-      // projection runs: the ceiling counts this listing as complete.
+      // --paginate walks every page: the ceiling counts this listing as
+      // complete.
       const args = readFileSync(log, 'utf8');
       assert.ok(args.includes('--paginate'), 'openPrs must page the full listing');
       assert.ok(
-        args.includes('--jq [.[][]|{number,head:.head.ref}]'),
+        args.includes('--jq .[] | [.number, .head.ref] | @tsv'),
         'openPrs must ask gh for the projected listing'
       );
+      // gh refuses --slurp together with --jq (the --slurp option is not
+      // supported with --jq or --template): the refusal killed the whole
+      // listing — and with it the act gate, which reads it.
+      assert.ok(!args.includes('--slurp'), 'openPrs must not ask gh for --slurp and --jq together');
     });
   });
 

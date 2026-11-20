@@ -108,9 +108,14 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
     return events;
   }
   if (row.kind === 'permission') {
-    const toolCallId = ((row as { toolCallId?: string }).toolCallId ?? 'unknown') as never;
-    return [
-      {
+    const toolCallId = (row.toolCallId ?? 'unknown') as never;
+    // The ASK opens the record; `phase: 'answer'` closes it. The
+    // headless driver's journal has ONE row that carries the verdict
+    // and no phase — for that shape the row opens AND closes, which is
+    // what keeps the archive's single-row permission working.
+    const events: ModelEvent[] = [];
+    if (row.phase !== 'answer') {
+      events.push({
         type: 'permission_opened',
         toolCallId,
         request: {
@@ -120,11 +125,32 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
             title: row.title ?? 'permission',
             status: 'in_progress',
           },
-          options: [],
+          options: (row.options ?? []) as never,
         },
         at: t,
-      },
-    ];
+      });
+    }
+    // ONLY an explicit answer closes the record. The headless
+    // driver's row carries a verdict TOO, but that verdict is the
+    // driver's, not the pane's — the archive's ask stays OPEN, which
+    // is what makes the pane say 'blocked · permission' (the row IS
+    // the pane's blocked signal, spec bro-l8wqu).
+    const verdict = row.phase === 'answer' ? row.verdict : undefined;
+    if (verdict !== undefined && verdict !== '') {
+      if (verdict === 'cancelled') {
+        events.push({ type: 'permission_cancelled', toolCallId, at: t });
+      } else {
+        events.push({
+          type: 'permission_answered',
+          toolCallId,
+          optionId: row.optionId ?? verdict,
+          optionKind: (row.optionKind ??
+            (verdict === 'approved' ? 'allow_once' : 'reject_once')) as never,
+          at: t,
+        });
+      }
+    }
+    return events;
   }
   return [];
 }
@@ -214,6 +240,21 @@ const permissionItem = (item: PermissionRecordItem, id: number): SideItem => {
         : o.type === 'pending'
           ? 'pending'
           : 'denied';
+  // The options are the ask's own menu — a record that carries them
+  // was asked OF A HUMAN, so the card says what is on the table
+  // instead of pointing at a terminal that is not there. A record
+  // without options is the headless driver's: the old wording stays.
+  if (item.options.length > 0) {
+    const menu = item.options.map((opt, i) => `${i + 1}) ${opt.name}`).join(' · ');
+    const tail = o.type === 'pending' ? `awaiting your answer: ${menu}` : label;
+    return {
+      id,
+      kind: 'permission',
+      text: `── ⚠ permission ‹${item.title}› — ${tail} ──`,
+      tone: 'warn',
+      vi: item,
+    };
+  }
   return {
     id,
     kind: 'permission',

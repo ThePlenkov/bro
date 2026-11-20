@@ -50,7 +50,7 @@ import {
   type EventFilter,
   type EventInput,
 } from './events.ts';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, stateCommonDir } from './git.ts';
 
 /** Hard budget for every client operation. REVIEW.md rates any path
  *  that can hang or exit non-zero on a hook event as critical, so the
@@ -268,9 +268,11 @@ export function busSocketPathForCommon(common: string): string {
   return join(busSocketBase(), 'bro-bus', `${hash}.sock`);
 }
 
-/** The broker socket for a repo, or null outside a repository. */
+/** The broker socket for a repo, or null outside a repository.
+ *  Resolves on the runtime-state common (`stateCommonDir`) so a
+ *  BRO_STATE_DIR-pinned process gets its own socket namespace. */
 export function busSocketPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   if (common === null) {
     return null;
   }
@@ -280,7 +282,7 @@ export function busSocketPath(dir: string): string | null {
 /** Discovery file — same shape as `serve.json`: how a client learns the
  *  socket path and pid without re-deriving the hash. */
 export function busStatePath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'bus.json');
 }
 
@@ -636,17 +638,17 @@ export async function startBusBrokerAt(
 }
 
 /** Dir-shaped wrapper: resolves the socket path and publishes discovery
- *  state so clients do not re-derive the hash. */
+ *  state so clients do not re-derive the hash. The namespace resolves
+ *  ONCE — a BRO_STATE_DIR change mid-startup must not put the listener
+ *  and the discovery record under different roots. */
 export async function startBusBroker(dir: string, opts: BusBrokerOptions = {}): Promise<BusBroker> {
-  const socketPath = busSocketPath(dir);
-  if (socketPath === null) {
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  if (common === null) {
     throw new Error('bro bus: not inside a git repository');
   }
+  const socketPath = busSocketPathForCommon(common);
   const broker = await startBusBrokerAt(socketPath, opts);
-  const statePath = busStatePath(dir);
-  if (statePath === null) {
-    return broker;
-  }
+  const statePath = join(common, 'bro', 'bus.json');
   const record = `${JSON.stringify(
     { socketPath, pid: process.pid, startedAt: new Date().toISOString() },
     null,

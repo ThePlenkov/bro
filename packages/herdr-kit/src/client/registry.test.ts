@@ -49,6 +49,34 @@ test('agentEntry — registry key first, then the log stem the pane argv carries
   });
 });
 
+test('agentEntry — a home chain falls through misses; the first hit wins (bro-eajeu)', () => {
+  withBase(pin => {
+    withBase(real => {
+      seedReg(real, {
+        'bro-2bv6q': {
+          agentId: 'native-ab656051',
+          log: '/x/native-ab656051.log',
+          provider: 'devin',
+        },
+      });
+      // a BRO_STATE_DIR-pinned journal derives the PIN as its registry
+      // home — agents.json stays on the real common, so the empty pin
+      // home must not blind the fallback (a provable crash read
+      // 'unknown' before the chain)
+      assert.equal(agentEntry([pin, real], 'native-ab656051')?.agentId, 'native-ab656051');
+      assert.equal(agentKey([pin, real], 'bro-2bv6q'), 'bro-2bv6q');
+      assert.equal(displayAgentOf([pin, real], 'bro-2bv6q'), 'devin');
+      // the journal's own home stays authoritative — a hit there is
+      // never overridden by a later home's colliding entry
+      seedReg(pin, { 'bro-2bv6q': { agentId: 'native-pin', log: '/x/native-pin.log' } });
+      assert.equal(agentEntry([pin, real], 'bro-2bv6q')?.agentId, 'native-pin');
+      // no home holding the id → the argv surface stands
+      assert.equal(agentEntry([pin, real], 'native-nope'), undefined);
+      assert.equal(displayAgentOf([pin, real], 'native-lost'), 'native-lost');
+    });
+  });
+});
+
 test('displayAgentOf — provider wins over the run id, stem is the last resort (bro-m2du9)', () => {
   withBase(base => {
     seedReg(base, {

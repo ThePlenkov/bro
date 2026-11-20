@@ -46,9 +46,11 @@ import { runActCommand } from './act.ts';
 import { runAgentsCommand } from './agents.ts';
 import { runClaimCommand } from './claim.ts';
 import { buildDump, type ContractDump } from './contract.ts';
+import { runConvoyCommand } from './convoy.ts';
 import { runDebtCommand } from './debt.ts';
 import { collectFleet, runFleetLeasesCommand, runFleetWallsCommand } from './fleet.ts';
 import { runFleetHostsCommand } from './fleet-hosts.ts';
+import { runMeshCommand } from './mesh.ts';
 import { runModeCommand } from './mode.ts';
 import { runNextCommand } from './next.ts';
 import { runResumeCommand } from './resume.ts';
@@ -56,9 +58,18 @@ import { rigStatus } from './rig.ts';
 import { runSessionsCommand } from './sessions.ts';
 import { runSkillsCommand } from './skills.ts';
 import { collectStatus } from './status.ts';
+import { runWaitCommand } from './wait.ts';
 import { runWatchdogCommand } from './watchdog.ts';
 import { tickOnce } from './watch.ts';
-import { capture, initRepo, insideAsync, installFakeBd, tmpDir, writeBeads } from './testrepo.ts';
+import {
+  capture,
+  initRepo,
+  initTarget,
+  insideAsync,
+  installFakeBd,
+  tmpDir,
+  writeBeads,
+} from './testrepo.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -710,6 +721,221 @@ async function emitWatchdog(): Promise<unknown> {
   return insideAsync(dir, dir, () => emittedDoc(() => runWatchdogCommand(['--json'])));
 }
 
+// --- deferred-read producers (spec bro-6ptci.3) ----------------------------
+
+/** A bound-`local` mesh fixture: `main` pins mesh.rig in bro.config.json
+ *  (the pin keeps selfRig off the forge-url probe — no github self-repo
+ *  scan) and binds `sibling` — initTarget's github.com/acme remote names
+ *  mesh://acme/sibling — whose checkout path is the peer's `local`
+ *  remote. Peer-store reads route through storeFor's taskStoreAt pin, so
+ *  the ambient BEADS_DIR this file sets globally never reroutes them. */
+function meshCheckout(prefix: string): {
+  root: string;
+  main: string;
+  sibling: { dir: string; db: string };
+} {
+  const { root, main } = initRepo(prefix);
+  const sibling = initTarget(root, 'sibling');
+  writeFileSync(
+    join(main, 'bro.config.json'),
+    `${JSON.stringify(
+      {
+        mesh: {
+          rig: 'mesh://test/self',
+          peers: { sibling: { rig: 'mesh://acme/sibling', remote: sibling.dir } },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+  return { root, main, sibling };
+}
+
+/** A mesh/1 envelope bead — the label-only record envelopeFromBead
+ *  reconstructs (a `request` threads to itself, so its thread label
+ *  must equal the bead id; lifecycle kinds carry the request id). */
+function meshBead(e: {
+  id: string;
+  kind: 'request' | 'claim' | 'result' | 'accept' | 'reject';
+  from: string;
+  to: string;
+  title: string;
+  thread?: string;
+}): Record<string, unknown> {
+  const thread = e.thread ?? e.id;
+  return {
+    id: e.id,
+    title: e.title,
+    status: 'open',
+    issue_type: 'task',
+    labels: [
+      'mesh:v:1',
+      `mesh:kind:${e.kind}`,
+      `mesh:thread:${thread}`,
+      `mesh:from:${e.from}`,
+      `mesh:to:${e.to}`,
+    ],
+  };
+}
+
+/** `bro convoy next <mol>` — the always-JSON emit (there is no --json
+ *  flag; KNOWN_FLAGS for `next` is VALUE_FLAGS only). The shared fake-`bd`
+ *  store gets a molecule exercising every ConvoyNext arm — a closed dep
+ *  for inputs[], open blockers for blocked[], a dep loop for stuck[], an
+ *  in_progress row and a human step for gates[]/inProgress[] — and is
+ *  restored after the emit so the rest of the suite still sees the
+ *  fixture it seeded.
+ *
+ *  The read→mutate→await→restore window is safe ONLY because node:test
+ *  runs a describe's subtests sequentially — the same invariant every
+ *  other producer here leans on (capture() swaps console + process.exit,
+ *  insideAsync() swaps process.cwd(), and the env pins are process-wide
+ *  inside awaits). Setting `concurrency` on the describe would turn this
+ *  — and all of those — into a shared-store race, so it stays unset. */
+async function emitConvoyNext(): Promise<unknown> {
+  const orig = readFileSync(bdFx.db, 'utf8');
+  const db = JSON.parse(orig) as {
+    rows: Array<Record<string, unknown>>;
+    mols: Record<string, unknown>;
+  };
+  db.rows.push({
+    id: 'fx-cv.a',
+    title: 'step a',
+    status: 'closed',
+    issue_type: 'task',
+    close_reason: 'gate shipped',
+  });
+  db.mols['fx-cv'] = {
+    root: { id: 'fx-cv', title: 'convoy fixture', status: 'open', issue_type: 'molecule' },
+    issues: [
+      // the closed dep lives in issues AND rows — stepsOf reads the
+      // mol's closed set, stepInputs reads close_reason via `bd show`
+      { id: 'fx-cv.a', title: 'step a', status: 'closed', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.b', title: 'step b', status: 'open', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.c', title: 'step c', status: 'open', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.d', title: 'step d', status: 'open', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.e', title: 'step e', status: 'open', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.f', title: 'step f', status: 'open', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.g', title: 'step g', status: 'in_progress', issue_type: 'task', priority: 2 },
+      { id: 'fx-cv.h', title: 'review gate', status: 'open', issue_type: 'human', priority: 2 },
+    ],
+    dependencies: [
+      { issue_id: 'fx-cv.b', depends_on_id: 'fx-cv.a', type: 'blocks' },
+      { issue_id: 'fx-cv.c', depends_on_id: 'fx-cv.d', type: 'blocks' },
+      { issue_id: 'fx-cv.e', depends_on_id: 'fx-cv.f', type: 'blocks' },
+      { issue_id: 'fx-cv.f', depends_on_id: 'fx-cv.e', type: 'blocks' },
+    ],
+  };
+  writeFileSync(bdFx.db, JSON.stringify(db));
+  try {
+    const doc = (await emittedDoc(() => runConvoyCommand(['next', 'fx-cv']))) as {
+      step?: { id: string };
+      inputs?: unknown[];
+      gates: string[];
+      blocked: string[];
+      stuck: string[];
+      inProgress: string[];
+    };
+    // fixture quality — the degenerate doc (empty arms) still validates;
+    // a silently wrong molecule must not pass as coverage
+    assert.equal(doc.step?.id, 'fx-cv.b');
+    assert.ok(Array.isArray(doc.inputs) && doc.inputs.length === 1, 'closed dep → step.inputs');
+    assert.deepEqual(doc.gates, ['fx-cv.h']);
+    assert.deepEqual(doc.blocked, ['fx-cv.c', 'fx-cv.e', 'fx-cv.f']);
+    assert.deepEqual(doc.stuck, ['fx-cv.e', 'fx-cv.f']);
+    assert.deepEqual(doc.inProgress, ['fx-cv.g']);
+    return doc;
+  } finally {
+    writeFileSync(bdFx.db, orig);
+  }
+}
+
+/** `bro wait external:<rig>:<id> --json` — a bound `local` peer whose
+ *  store carries the request bead + the requester's own reject envelope:
+ *  the first poll settles `actionable` (the verdict is the envelope SET,
+ *  not the reduced stage), so the emitted refEntry exercises the
+ *  reason/stage annotation arms. `--timeout 30` is the bound's safety
+ *  net — a broken fixture fails in seconds, not the 45m default. */
+async function emitWait(): Promise<unknown> {
+  const { root, main, sibling } = meshCheckout('bro-schema-wait-');
+  writeBeads(sibling.db, [
+    meshBead({
+      id: 'req-1',
+      kind: 'request',
+      from: 'mesh://test/self',
+      to: 'mesh://acme/sibling',
+      title: 'port the gate',
+    }),
+    meshBead({
+      id: 'fx-v1',
+      kind: 'reject',
+      thread: 'req-1',
+      from: 'mesh://test/self',
+      to: 'mesh://acme/sibling',
+      title: 'scope changed — re-post',
+    }),
+  ]);
+  const ref = 'external:mesh://acme/sibling:req-1';
+  return insideAsync(main, root, () =>
+    emittedDoc(() => runWaitCommand([ref, '--every', '0.1', '--timeout', '30', '--json']))
+  );
+}
+
+/** `bro mesh wait <thread> --json` — {thread, stage?, turn?, envelopes}
+ *  over the bound local peer's store: the delivered request (self-
+ *  authored — localSelf admit) + the peer's claim → stage claimed,
+ *  worker's turn. */
+async function emitMeshWait(): Promise<unknown> {
+  const { root, main, sibling } = meshCheckout('bro-schema-mwait-');
+  writeBeads(sibling.db, [
+    meshBead({
+      id: 'req-1',
+      kind: 'request',
+      from: 'mesh://test/self',
+      to: 'mesh://acme/sibling',
+      title: 'port the gate',
+    }),
+    meshBead({
+      id: 'fx-c1',
+      kind: 'claim',
+      thread: 'req-1',
+      from: 'mesh://acme/sibling',
+      to: 'mesh://test/self',
+      title: 'claimed',
+    }),
+  ]);
+  return insideAsync(main, root, () =>
+    emittedDoc(() => runMeshCommand(['wait', 'req-1', '--json', '--no-pull']))
+  );
+}
+
+/** `bro mesh inbox --json` — rows are {peer, bead, …envelope, flags?}:
+ *  a clean inbound request (from = the binding rig) plus a forged one
+ *  (from ≠ binding) cover the plain and `mismatch` arms. */
+async function emitMeshInbox(): Promise<unknown> {
+  const { root, main, sibling } = meshCheckout('bro-schema-minbox-');
+  writeBeads(sibling.db, [
+    meshBead({
+      id: 'req-ok',
+      kind: 'request',
+      from: 'mesh://acme/sibling',
+      to: 'mesh://test/self',
+      title: 'inbound ask',
+    }),
+    meshBead({
+      id: 'req-bad',
+      kind: 'request',
+      from: 'mesh://mallory/forge',
+      to: 'mesh://test/self',
+      title: 'forged ask',
+    }),
+  ]);
+  return insideAsync(main, root, () =>
+    emittedDoc(() => runMeshCommand(['inbox', '--json', '--no-pull']))
+  );
+}
+
 // --- the producer table: contract ref → real emit -------------------------
 
 interface Producer {
@@ -750,6 +976,10 @@ const PRODUCERS: Record<string, Producer> = {
     emit: emitClaim,
     breakRequired: dropKey('claims'),
   },
+  'schemas/cli/convoy-next.schema.json': {
+    emit: emitConvoyNext,
+    breakRequired: dropKey('mol'),
+  },
   'schemas/cli/debt-next.schema.json': {
     emit: () => emitDebt('next'),
     breakRequired: dropKey('thread_id'),
@@ -786,6 +1016,14 @@ const PRODUCERS: Record<string, Producer> = {
     emit: emitFleetWalls,
     breakRequired: dropItemKey('account'),
   },
+  'schemas/cli/mesh-inbox.schema.json': {
+    emit: emitMeshInbox,
+    breakRequired: dropItemKey('peer'),
+  },
+  'schemas/cli/mesh-wait.schema.json': {
+    emit: emitMeshWait,
+    breakRequired: dropKey('envelopes'),
+  },
   'schemas/cli/mode.schema.json': {
     emit: emitMode,
     breakRequired: dropKey('modes'),
@@ -813,6 +1051,10 @@ const PRODUCERS: Record<string, Producer> = {
   'schemas/cli/skills-sync.schema.json': {
     emit: emitSkillsSync,
     breakRequired: dropKey('command'),
+  },
+  'schemas/cli/wait.schema.json': {
+    emit: emitWait,
+    breakRequired: dropKey('verdict'),
   },
   'schemas/cli/watch.schema.json': {
     emit: emitWatch,

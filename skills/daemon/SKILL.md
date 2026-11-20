@@ -8,13 +8,22 @@ description: "Use when the project needs a supervisor that outlives the session 
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-The three process roles, never conflated:
+Three liveness mechanisms, one role each (spec bro-wb3yc — the target
+architecture; until the migration beads land, a raw `drive --every` /
+`loop --every` / `rig watch` still works but is a transitional owner,
+and everything else is a pass, an observer, or a policy alias):
 
-| Role     | Command                                                                                    | Lifetime                           |
-| -------- | ------------------------------------------------------------------------------------------ | ---------------------------------- |
-| Owner    | `bro fleet daemon up` — spawns `daemon run` (the `bro review drive --every` loop) detached | long-lived, until `down`           |
-| Observer | `bro review watch --every N --for S`                                                       | bounded window, dies on its own    |
-| UI       | `bro fleet serve`                                                                          | a debug surface, not orchestration |
+| Role     | Command                                                                                    | Lifetime                        |
+| -------- | ------------------------------------------------------------------------------------------ | ------------------------------- |
+| Owner    | `bro fleet daemon up` — spawns `daemon run` (the `bro review drive --every` loop) detached | long-lived, until `down`        |
+| Wake     | `bro pulse <S>` — the session-owned metronome; mailbox beats are the session's wakes       | until the arming shell kills it |
+| Re-entry | `bro fleet rig next` — durable state → step\|gate\|wait\|done\|blocked                     | per call — stateless            |
+
+Bounded observers (never cadence owners): `bro review watch
+[--once|--every N --for S]`, `bro review act wait [PR]`, `bro wait
+external:<rig>:<id>`. (`act wait --merge/--cleanup/--bead` also acts on
+settle — merges, retires the worktree, closes the bead.) `bro fleet
+serve` is the UI surface — a debug surface, not orchestration.
 
 The daemon holds `drive.lock` (one supervisor per repo) and owns the
 drive pass: act gates → fixer spawns → merges. Task agents are spawned
