@@ -55,6 +55,8 @@ feature itself.
 
 ```
 bro goal <condition…>     set/replace the session goal   [--session <id>] [--turns N]
+bro goal -- <text…>       verbatim condition — the tail after -- is never
+                          a flag or verb (specs/bro-5fg2h.md)
 bro goal                  status — condition, status, age, evals/maxTurns, last verdict
 bro goal clear            resolve the goal (aliases: stop, off, reset, none, cancel)
 bro goal pause|resume     suspend / reactivate (resume resets evals)

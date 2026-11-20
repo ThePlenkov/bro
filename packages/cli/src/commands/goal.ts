@@ -531,9 +531,13 @@ export function runGoalCommand(argv: string[]): void {
     withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson));
     return;
   }
-  if (!verbatim && (verb === 'status' || verb === undefined)) {
+  const condition = positional.join(' ');
+  // no usable condition text (no positional, `goal -- ""`, whitespace
+  // only) is the status path — writing an empty record would report
+  // "goal set" for a condition readGoal then rejects
+  if (condition.trim() === '' || (!verbatim && verb === 'status')) {
     printStatus(verbGoal(), target, asJson);
     return;
   }
-  setGoal(dir, target, positional.join(' '), turns, asJson);
+  setGoal(dir, target, condition, turns, asJson);
 }
