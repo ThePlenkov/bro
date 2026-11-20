@@ -301,18 +301,30 @@ function settleAbsent(w: Watch, read: DepRead): void {
  *  the envelope SET, not the reduced stage — a ship followed by a
  *  reject is contradictory lifecycle history, not a free dep. */
 function threadOf(w: Watch, ctx: WaitCtx, timeoutMs?: number): ReturnType<typeof meshThread> {
-  let t = timeoutMs;
   const d = ctx.deadline;
-  if (d !== undefined) {
-    const rem = Math.max(0, d - performance.now());
-    if (t === undefined) {
-      t = rem < 1 ? undefined : Math.max(1, Math.floor(rem));
-    } else {
-      t = Math.min(t, rem < 1 ? 0 : Math.max(1, Math.floor(rem)));
-    }
-    if (t !== undefined && t < 1) {
-      t = undefined;
-    }
+  const rem = d === undefined ? undefined : Math.max(0, d - performance.now());
+  if (rem !== undefined && rem < 1) {
+    // a spent deadline is not "no bound" — a 0/undefined slice here
+    // would hand meshThread the tools' full defaults (dolt/gh 120s,
+    // bd 15s) and overshoot the very deadline that just ran out. The
+    // skipped read is a FAILED scan, not a clean empty one: without
+    // scanFailed a found ship would settle free while a reject sits
+    // unread on the planes nobody reached.
+    return {
+      envelopes: [],
+      provenance: {},
+      threads: [],
+      errors: ['thread read budget exhausted'],
+      scanFailed: true,
+      scanErrors: ['thread read budget exhausted'],
+    };
+  }
+  // the read's bound is the smaller of its own slice and what the
+  // deadline still leaves — an absent slice defers to the deadline
+  let t = timeoutMs;
+  if (rem !== undefined) {
+    const floorRem = Math.max(1, Math.floor(rem));
+    t = t === undefined ? floorRem : Math.min(t, floorRem);
   }
   const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, {
     gitCommon: ctx.common,

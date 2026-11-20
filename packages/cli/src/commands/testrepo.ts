@@ -1776,10 +1776,21 @@ const FAKE_DOLT = `#!/usr/bin/env node
 const fs = require('node:fs')
 const path = require('node:path')
 const fail = (m) => { console.error('fake dolt: ' + m); process.exit(1) }
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 const storeDir = process.cwd()
 const storeFile = path.join(storeDir, '.dolt', 'db.json')
 const load = () => JSON.parse(fs.readFileSync(storeFile, 'utf8'))
 const args = process.argv.slice(2)
+// FAKE_DOLT_WEDGE=<file> — the replica-side outage dial, same shape as
+// FAKE_BD_WEDGE: 'hang:<cmd>' sleeps past the caller's slice so the
+// spawn's own timeout lands the incident signature, a bare name fails
+// fast. Absent file → healthy replica.
+const WEDGE = process.env.FAKE_DOLT_WEDGE
+if (WEDGE && fs.existsSync(WEDGE)) {
+  const spec = fs.readFileSync(WEDGE, 'utf8').split('\\n').map((l) => l.trim()).filter(Boolean)
+  if (spec.some((l) => l === 'hang:' + args[0])) { pause(20_000); process.exit(0) }
+  if (spec.includes(args[0])) fail(args[0])
+}
 switch (args[0]) {
   case 'clone': {
     const src = path.join(args[1], 'db.json')

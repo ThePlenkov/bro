@@ -129,36 +129,12 @@ export interface DepRead {
   errors: string[];
 }
 
-/** the timeout-aware probe leg — a non-zero code or unparseable
- *  payload is the read's error; `undefined` means the probe gave no
- *  usable payload and the caller falls back to `store.list` */
-function probeProvides(
-  probe: (args: string[], timeoutMs?: number) => any,
-  id: string,
-  timeoutMs: number
-): { shipped?: boolean; error?: string } | undefined {
-  const res = probe(['list', '--json', '--label', `provides:${id}`, '--all'], timeoutMs);
-  if (res?.code !== 0) {
-    return { error: res?.err || `store list failed (${res?.code})` };
-  }
-  if (typeof res?.out !== 'string') {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(res.out);
-    const rows = Array.isArray(parsed) ? parsed : (parsed?.rows ?? []);
-    return { shipped: rows.some((r: any) => r?.status === 'closed') };
-  } catch (err) {
-    return {
-      error: `store list failed — ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-}
-
 /** The ship rule on a `local` peer: `bd -C <checkout>` answers the
  *  closed `provides:<id>` row the inbox scan structurally cannot
  *  return (it drops closed rows). localCheckout's null is the
- *  gone-checkout probe — a deleted dir is unreadable, not unshipped. */
+ *  gone-checkout probe — a deleted dir is unreadable, not unshipped.
+ *  The wait's remaining budget bounds the read via listWithTimeout;
+ *  a store without the capability falls back to its own default. */
 function shippedOnCheckout(
   peer: MeshPeer,
   id: string,
@@ -170,19 +146,11 @@ function shippedOnCheckout(
   }
   try {
     const store = storeFor(checkout);
-    // Prefer a timeout-aware probe if available; fall back to list
-    const probe = (store as any).probe;
-    if (typeof probe === 'function' && timeoutMs !== undefined) {
-      const probed = probeProvides(probe, id, timeoutMs);
-      if (probed !== undefined) {
-        return probed;
-      }
-    }
-    const rows = store.list<{ id: string; status?: string }>({
-      labels: [`provides:${id}`],
-      all: true,
-      limit: 0,
-    });
+    const filter = { labels: [`provides:${id}`], all: true, limit: 0 };
+    const rows =
+      timeoutMs !== undefined && typeof store.listWithTimeout === 'function'
+        ? store.listWithTimeout<{ id: string; status?: string }>(filter, timeoutMs)
+        : store.list<{ id: string; status?: string }>(filter);
     return { shipped: rows.some(r => r.status === 'closed') };
   } catch (err) {
     return { error: `store list failed — ${err instanceof Error ? err.message : String(err)}` };
@@ -195,11 +163,10 @@ function shippedOnCheckout(
 function readRequestRow(store: unknown, id: string, timeoutMs?: number): DepRead['request'] {
   const s = store as {
     get?<T>(id: string): T | null | undefined;
-    getWithTimeout?(id: string, timeoutMs: number): unknown;
+    getWithTimeout?<T>(id: string, timeoutMs: number): T | null;
   };
   if (typeof s.getWithTimeout === 'function' && timeoutMs !== undefined) {
-    const res = s.getWithTimeout(id, timeoutMs) as { value?: DepRead['request'] } | null;
-    return res !== null && 'value' in res ? (res.value ?? null) : (res as DepRead['request']);
+    return s.getWithTimeout<NonNullable<DepRead['request']>>(id, timeoutMs);
   }
   if (typeof s.get === 'function') {
     return s.get<NonNullable<DepRead['request']>>(id) ?? null;
@@ -212,18 +179,23 @@ function readRequestRow(store: unknown, id: string, timeoutMs?: number): DepRead
  *  collect into `errors`; a failed read never fakes a row. */
 export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): DepRead {
   const out: DepRead = { errors: [] };
-  const remaining = (ms?: number): number | undefined =>
-    ms === undefined ? undefined : Math.max(1, Math.floor(ms));
   // one budget across the posting-store get and the ship read — a
   // slow first read shrinks what the second gets; never re-grant the
-  // full slice
+  // full slice. A sub-1ms remainder is NO read: the subprocess layer
+  // clamps 0→1ms (spawnSync's timeout:0 means unbounded), so the leg
+  // reports the spent budget instead of spawning only to be killed
   const t0 = performance.now();
   const left = (): number | undefined =>
-    timeoutMs === undefined ? undefined : remaining(timeoutMs - (performance.now() - t0));
+    timeoutMs === undefined ? undefined : Math.max(0, timeoutMs - (performance.now() - t0));
 
   try {
     const store = plane.postForeign ? storeFor(plane.postDir) : taskStore(plane.postDir);
-    out.request = readRequestRow(store, id, left());
+    const first = left();
+    if (first !== undefined && first < 1) {
+      out.errors.push(`${plane.peer.alias}: posting store read budget exhausted`);
+    } else {
+      out.request = readRequestRow(store, id, first);
+    }
   } catch (err) {
     out.errors.push(
       `${plane.peer.alias}: posting store unreadable — ` +
@@ -239,7 +211,9 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     const shipped =
       out.replicaAgeMs === undefined
         ? { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
-        : shippedIssues(plane.peerDir, id, shipTimeout);
+        : shipTimeout !== undefined && shipTimeout < 1
+          ? { error: 'ship read budget exhausted' }
+          : shippedIssues(plane.peerDir, id, shipTimeout);
     if (shipped.error !== undefined) {
       out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
     } else {
@@ -248,7 +222,10 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     return out;
   }
   const checkoutTimeout = left();
-  const shipped = shippedOnCheckout(plane.peer, id, checkoutTimeout);
+  const shipped =
+    checkoutTimeout !== undefined && checkoutTimeout < 1
+      ? { error: 'ship read budget exhausted' }
+      : shippedOnCheckout(plane.peer, id, checkoutTimeout);
   if (shipped.error !== undefined) {
     out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
   } else {
