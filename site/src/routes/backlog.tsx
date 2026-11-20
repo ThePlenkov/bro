@@ -184,60 +184,59 @@ interface GEdge {
   kind: 'parent' | 'blocks';
 }
 
-function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: GEdge[]; w: number; h: number } {
+const ROW_H = 56;
+const COL_W = 220;
+const W_COLS = 5;
+
+function forestRoots(issues: Bead[], includeFlat: boolean): { starts: Bead[]; children: Map<string, Bead[]> } {
   const byId = new Map(issues.map(i => [i.id, i]));
   const children = new Map<string, Bead[]>();
   const roots: Bead[] = [];
   for (const i of issues) {
     const p = i.parent && byId.has(i.parent) ? i.parent : null;
-    if (p) {
-      (children.get(p) ?? children.set(p, []).get(p)!).push(i);
-    } else {
-      roots.push(i);
-    }
+    if (p) (children.get(p) ?? children.set(p, []).get(p)!).push(i);
+    else roots.push(i);
   }
   const epics = roots
     .filter(r => r.type === 'epic' || children.has(r.id))
     .sort((a, b) => a.priority - b.priority || b.open_children - a.open_children);
   const flat = roots.filter(r => !epics.includes(r));
-  const starts = includeFlat ? [...epics, ...flat] : epics;
+  return { starts: includeFlat ? [...epics, ...flat] : epics, children };
+}
 
-  // Vertical bands — one per root; each subtree is BFS'd level by level,
-  // every level wrapped across W_COLS columns so the whole forest fits a
-  // fixed-width strip the page scrolls through.
-  const ROW_H = 56;
-  const COL_W = 220;
-  const W_COLS = 5;
-  const nodes: GNode[] = [];
-  const edges: GEdge[] = [];
+// One vertical band per root; each subtree is BFS'd level by level,
+// every level wrapped across W_COLS columns so the whole forest fits a
+// fixed-width strip the page scrolls through.
+function layoutBand(root: Bead, bandY: number, children: Map<string, Bead[]>, pos: Map<string, GNode>): number {
+  let frontier: Bead[] = [root];
+  let levelY = bandY + 24;
+  let depth = 0;
+  while (frontier.length > 0) {
+    const next: Bead[] = [];
+    frontier.forEach((n, idx) => {
+      pos.set(n.id, {
+        bead: n,
+        x: (idx % W_COLS) * COL_W + COL_W / 2,
+        y: levelY + Math.floor(idx / W_COLS) * ROW_H,
+        depth,
+      });
+      for (const k of children.get(n.id) ?? []) next.push(k);
+    });
+    levelY += Math.ceil(frontier.length / W_COLS) * ROW_H;
+    frontier = next;
+    depth += 1;
+  }
+  return levelY + 8;
+}
+
+function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: GEdge[]; w: number; h: number } {
+  const { starts, children } = forestRoots(issues, includeFlat);
   const pos = new Map<string, GNode>();
   let bandY = 0;
+  for (const root of starts) bandY = layoutBand(root, bandY, children, pos);
 
-  for (const root of starts) {
-    let frontier: Bead[] = [root];
-    let levelY = bandY + 24;
-    let depth = 0;
-    while (frontier.length > 0) {
-      const next: Bead[] = [];
-      frontier.forEach((n, idx) => {
-        const gn: GNode = {
-          bead: n,
-          x: (idx % W_COLS) * COL_W + COL_W / 2,
-          y: levelY + Math.floor(idx / W_COLS) * ROW_H,
-          depth,
-        };
-        nodes.push(gn);
-        pos.set(n.id, gn);
-        for (const k of children.get(n.id) ?? []) next.push(k);
-      });
-      levelY += Math.ceil(frontier.length / W_COLS) * ROW_H;
-      frontier = next;
-      depth += 1;
-    }
-    bandY = levelY + 8;
-  }
-
-  for (const n of nodes) {
+  const edges: GEdge[] = [];
+  for (const n of pos.values()) {
     for (const k of children.get(n.bead.id) ?? []) {
       const t = pos.get(k.id);
       if (t) edges.push({ x1: n.x, y1: n.y + 12, x2: t.x, y2: t.y - 12, kind: 'parent' });
@@ -247,7 +246,7 @@ function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: 
       if (other) edges.push({ x1: n.x, y1: n.y, x2: other.x, y2: other.y, kind: 'blocks' });
     }
   }
-  return { nodes, edges, w: W_COLS * COL_W, h: bandY + 20 };
+  return { nodes: [...pos.values()], edges, w: W_COLS * COL_W, h: bandY + 20 };
 }
 
 // --- components ---------------------------------------------------------

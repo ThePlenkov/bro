@@ -43,48 +43,68 @@ export interface BacklogSnapshot {
 
 const OPEN_STATUSES = new Set(['open', 'in_progress', 'in-progress', 'blocked']);
 
+interface Edges {
+  parentOf: Map<string, string>;
+  closedChildren: Map<string, number>;
+  blocks: Map<string, string[]>;
+  blockedBy: Map<string, string[]>;
+}
+
+function push(m: Map<string, string[]>, k: string, v: string) {
+  (m.get(k) ?? m.set(k, []).get(k)!).push(v);
+}
+
 /** bd export and the dolt join emit the same facts under slightly
  *  different keys — accept both. */
-export function compactBacklog(rows: BeadRow[], now = new Date()): BacklogSnapshot {
-  const open = new Set(rows.filter(r => OPEN_STATUSES.has(r.status)).map(r => r.id));
-  const closedChildren = new Map<string, number>();
-  const parentOf = new Map<string, string>();
-  const blocks = new Map<string, string[]>();
-  const blockedBy = new Map<string, string[]>();
-  const push = (m: Map<string, string[]>, k: string, v: string) => {
-    const arr = m.get(k) ?? m.set(k, []).get(k)!;
-    arr.push(v);
+function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
+  const e: Edges = {
+    parentOf: new Map(),
+    closedChildren: new Map(),
+    blocks: new Map(),
+    blockedBy: new Map(),
   };
   for (const r of rows) {
     for (const d of r.dependencies ?? []) {
       const tgt = d.depends_on_id ?? d.depends_on_issue_id;
       if (!tgt) continue;
       if (d.type === 'parent-child') {
-        parentOf.set(r.id, tgt);
-        if (!open.has(r.id)) closedChildren.set(tgt, (closedChildren.get(tgt) ?? 0) + 1);
+        e.parentOf.set(r.id, tgt);
+        if (!open.has(r.id)) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
       } else if (d.type === 'blocks' && open.has(r.id) && open.has(tgt)) {
-        push(blocks, r.id, tgt);
-        push(blockedBy, tgt, r.id);
+        push(e.blocks, r.id, tgt);
+        push(e.blockedBy, tgt, r.id);
       }
     }
   }
-  const issues: BacklogIssue[] = rows
-    .filter(r => open.has(r.id))
-    .map(r => ({
-      id: r.id,
-      title: r.title,
-      status: r.status.replace(/_/g, '-'),
-      priority: Number(r.priority),
-      type: r.issue_type,
-      created_at: r.created_at,
-      parent: parentOf.get(r.id),
-      assignee: r.assignee ?? undefined,
-      labels: (r.labels ?? []).map(l => (typeof l === 'string' ? l : (l.label ?? l.name ?? ''))),
-      blocks: blocks.get(r.id) ?? [],
-      blocked_by: blockedBy.get(r.id) ?? [],
-      closed_children: closedChildren.get(r.id) ?? 0,
-      open_children: 0,
-    }));
+  return e;
+}
+
+function labelName(l: string | { label?: string; name?: string }): string {
+  return typeof l === 'string' ? l : (l.label ?? l.name ?? '');
+}
+
+function toIssue(r: BeadRow, e: Edges): BacklogIssue {
+  return {
+    id: r.id,
+    title: r.title,
+    status: r.status.replace(/_/g, '-'),
+    priority: Number(r.priority),
+    type: r.issue_type,
+    created_at: r.created_at,
+    parent: e.parentOf.get(r.id),
+    assignee: r.assignee ?? undefined,
+    labels: (r.labels ?? []).map(labelName),
+    blocks: e.blocks.get(r.id) ?? [],
+    blocked_by: e.blockedBy.get(r.id) ?? [],
+    closed_children: e.closedChildren.get(r.id) ?? 0,
+    open_children: 0,
+  };
+}
+
+export function compactBacklog(rows: BeadRow[], now = new Date()): BacklogSnapshot {
+  const open = new Set(rows.filter(r => OPEN_STATUSES.has(r.status)).map(r => r.id));
+  const edges = collectEdges(rows, open);
+  const issues = rows.filter(r => open.has(r.id)).map(r => toIssue(r, edges));
   const byId = new Map(issues.map(i => [i.id, i]));
   for (const i of issues) {
     if (i.parent && byId.has(i.parent)) byId.get(i.parent)!.open_children += 1;
