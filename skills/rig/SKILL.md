@@ -47,12 +47,16 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
   converging into a daemon leg; `bro pulse` is the session wake;
   `bro fleet rig next` is the **only re-entry** — any signal (a wake, a
   restart, a dead worker) re-enters by calling it, never by inventing a
-  resurrection path.
+  resurrection path. `rig next` only computes the verdict — restoring
+  dead processes is the executors' job (`bro fleet resume`, `bro review
+  act rearm`), and post-restart recovery runs `bro fleet resume`.
 - **Arm, don't babysit.** `rig watch` is the debug/foreground shape —
   for a durable poll use `bro fleet rig install`: the want-marker survives
   reboots and session deaths, the orchestrator session's checkpoints
   rearm a bounded window whenever the pulse is dead (bro-killn — the
-  same model `bro review watch install` rides). Point-check `bro fleet rig status`
+  same model `bro review watch install` rides). Transitional — the arm
+  verb folds into owner policy with the rig-pulse stack (spec bro-wb3yc).
+  Point-check `bro fleet rig status`
   between turns; never sit in a foreground wait.
 - **A pull drops one `rig:` mailbox event** so live sessions learn the
   binary under them changed — a session seeing that drop should expect

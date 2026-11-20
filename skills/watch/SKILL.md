@@ -41,7 +41,9 @@ context), never an inference from whether a session was polled.
   `bro fleet daemon` is the process **owner**; `bro pulse` is the
   session **wake**; `bro fleet rig next` is **re-entry**. `bro review
   watch` is none of them — it is the bounded **observer**: a read you
-  run, or the fallback leg the checkpoint spawns for the wake.
+  run (its tick's only writes are `heartbeat.json` and the janitor's
+  dead-residue reaps — see below), or the fallback leg the checkpoint
+  spawns for the wake.
 - **The session owns the cadence — the attended leg is `bro pulse`.**
   A live orchestrator session arms `bro pulse <S>` in a visible
   background shell (the `/pulse` skill) — a continuous metronome whose

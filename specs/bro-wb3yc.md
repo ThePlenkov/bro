@@ -65,7 +65,7 @@ a bounded read-only watch; **pass** = the work itself, one run.
 | rig install | `bro fleet rig install\|uninstall` | arm the rig-pulse want | `rig-pulse.json` want-marker | operators | `watch install` — same verb on a second marker stack |
 | loop cadence | `bro flow loop --every S` | **owner** (work loop) | `loop.lock` heartbeated hold | `daemon run --loop`; hand-rolled supervisors | `daemon` — same story as `drive --every` |
 | loop install | `bro flow loop install\|uninstall` | arm the owner want | `loop.json` want-marker → `daemon run --loop` | operators | `drive install` — identical shape on a second plane |
-| act wait | `bro review act wait [PR] [--detach] [--merge] [--cleanup] [--bead]` | observer (bounded, per-PR) | `watches/<pr>-<pid>-<nonce>.json` markers, `act-wait-<pr>.log` | sessions, convoy/loop arming, `fleet resume` re-entry | `watch --every` — bounded-observer family; `--detach` is a self-detach the daemon could own |
+| act wait | `bro review act wait [PR] [--detach] [--merge] [--cleanup] [--bead]` | observer (bounded, per-PR — but `--merge`/`--cleanup`/`--bead` act on settle) | `watches/<pr>-<pid>-<nonce>.json` markers, `act-wait-<pr>.log` | sessions, convoy/loop arming, `fleet resume` re-entry | `watch --every` — bounded-observer family; `--detach` is a self-detach the daemon could own |
 | act rearm | `bro review act rearm` | **re-entry** executor | resurrects dead `watches/` markers | session-start nudge, `fleet resume` | `rig next` — its verdict ladder does not cover dead wait markers today, so this re-entry path is bespoke |
 | fleet resume | `bro fleet resume` | re-entry runbook | reads every marker/record, respawns dead waits + daemon | operators post-restart | `act rearm` (its watch leg), the connectors' checkpoints, `rig next` |
 | dep wait | `bro wait external:<rig>:<id>` | observer (bounded, dep plane) | — | sessions between turns | `act wait` — same bounded-watcher contract on a different plane |
@@ -95,12 +95,18 @@ re-entry   bro fleet rig next [<item>]             the ONLY re-entry
                                                  → step|gate|wait|done|blocked
 ```
 
-The bounded observers stay observers — reads, never owners:
+The bounded observers stay observers — no ownership of work, never a
+cadence:
 
 - `bro review watch [--once]` — the snapshot; `--every N --for S` is the
   same observer on a bounded window, and doubles as the checkpoint's
-  spawned fallback leg when no session's pulse holds `pulse.lock`.
-- `bro review act wait [PR]` — the bounded observer over one PR's gate.
+  spawned fallback leg when no session's pulse holds `pulse.lock`. Its
+  tick is not side-effect-free: it rewrites `heartbeat.json` and runs
+  the janitor (reaps dead residue — retention, not workflow).
+- `bro review act wait [PR]` — the bounded observer over one PR's gate;
+  armed with `--merge`/`--cleanup`/`--bead` it also acts on settle
+  (merges, retires the worktree, closes the bead) — an observer whose
+  bounded verdict is the merge mechanism, still never a cadence owner.
 - `bro wait external:<rig>:<id>` — the bounded observer over a dep edge.
 
 Passes stay passes: `bro review drive --once`, `bro fleet rig sync`,
@@ -110,8 +116,10 @@ Everything a cadence owns is a **daemon leg**: `daemon run` already IS
 `drive --every` in-process and `daemon run --loop` IS `loop --every`; the
 rig freshness cadence migrates to the same shape (follow-up bead). A raw
 `--every` typed by hand is an unrecorded owner — the daemon's
-`supervisionProcs` sweep already hunts them for `down`; the surface
-stops advertising them.
+`supervisionProcs` sweep already hunts the drive/loop spellings for
+`down` (the rig-pulse stack keeps its own `rig-pulse.lock` and is
+outside that sweep until its migration bead); the surface stops
+advertising them.
 
 Intent survives as **want-markers the daemon plane reads** —
 `drive.json`/`loop.json` today, `pulse.json` for the wake. One marker
@@ -136,14 +144,14 @@ not parallel ladders.
 | `bro review watch install\|uninstall` | keep — policy alias | arms `pulse.json` = the wake's want; document as "arm/disarm the wake". A later spelling may move under `pulse`; no `deprecated:` yet — the arm verb is still live |
 | `bro pulse [S]` | keep — canonical | the only session wake |
 | `bro review drive [--once]` | keep — canonical | the pass |
-| `bro review drive --every N` | deprecate → `bro fleet daemon run` | identical loop, unrecorded owner. Deprecation is flag-level (`deprecatedFlag`/`deprecatedSub`), NOT plugin-level: `daemon run` calls `runDriveCommand(['--every'])` in-process, so the warning must be gated on entry argv (or daemon passes a hidden spawn marker). Follow-up bead owns the seam |
+| `bro review drive --every N` | deprecate → `bro fleet daemon` | identical loop, unrecorded owner — the operator spelling is `daemon up` (`daemon run` is the internal leg `up` spawns, not for direct use). Deprecation is flag-level (`deprecatedFlag`/`deprecatedSub`), NOT plugin-level: `daemon run` calls `runDriveCommand(['--every'])` in-process, so the warning must be gated on entry argv (or daemon passes a hidden spawn marker). Follow-up bead owns the seam |
 | `bro review drive install\|uninstall` | keep — policy alias of daemon install | "install the merge path" = arm `drive.json` + `daemon up`; docs name the owner, not a separate mechanism |
 | `bro fleet daemon up\|status\|down\|run` | keep — canonical | the only owner |
 | `bro fleet rig sync\|status` | keep — canonical | pass + read |
 | `bro fleet rig next` | keep — canonical | the only re-entry verdict; `bro flow next` stays the backlog-claim verb — the spec only rules on `rig next` being THE re-entry |
 | `bro fleet rig watch` | deprecate → daemon leg | migration bead picks `daemon run --rig` vs a `rig next`-driven freshness verdict; the `rig-pulse.*` marker stack retires with it |
 | `bro fleet rig install\|uninstall` | deprecate → owner policy | freshness intent becomes a daemon/config policy row, not a second pulse stack |
-| `bro flow loop --every S` | deprecate → `bro fleet daemon run --loop` | same `daemon run` aliasing question as `drive --every` — one migration bead covers both raw `--every` spellings |
+| `bro flow loop --every S` | deprecate → `bro fleet daemon` | same `daemon run` aliasing question as `drive --every` — one migration bead covers both raw `--every` spellings; `daemon up --loop`/`daemon run --loop` is the owned shape |
 | `bro flow loop install\|uninstall` | keep — policy alias of daemon install | same as `drive install` |
 | `bro review act wait [PR] --detach` | keep — canonical observer | the bounded per-PR watch; `--detach` is its documented survival form |
 | `bro review act rearm` | keep — re-entry executor | stays the resurrection executor; `rig next` gains the dead-marker plane so rearm is what the verdict invokes, not a parallel re-entry ladder |
