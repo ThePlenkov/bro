@@ -2577,6 +2577,128 @@ function releaseSpawnLease(dir: string, lease: Lease): void {
   }
 }
 
+/** The spawned command's cross-kind session claims — every session
+ *  kind the command starts BEYOND the spawn's own quota lane (that
+ *  lane's admit rides sessionQuota's admitSessionSlot itself). Each
+ *  kind claims through its OWN admission mutex — the same lock
+ *  admitSessionSlot holds — so a check-then-reserve cannot race a
+ *  parallel start past the cap, and every claim lands on `out` so a
+ *  refusal's rollback drops it with the rest (spec bro-x601l).
+ *
+ *  A provider-covered kind the spawned command starts WITHOUT a kind
+ *  quota produces no sessionCapViews row, so the views loop never
+ *  sees its starts — but every session it opens still draws on the
+ *  provider lane (a provider cap of 1 must refuse a second start the
+ *  quota layer never armed). A second pass over providerPlaneKinds
+ *  claims what the provider pass did not already cover, judged on
+ *  the same aggregate census. */
+function admitSpawnedCommandStarts(args: {
+  spawnedCommand: string;
+  agents: Record<string, Record<string, unknown>> | undefined;
+  workerEnv: Record<string, string> | undefined;
+  molStep: string | undefined;
+  agentId: string;
+  scope: string;
+  liveByKind: Map<string, Set<string>>;
+  providerClaimedStarts: Map<string, number>;
+  providerPlaneKinds: ReadonlySet<string>;
+  providerCap: ProviderCapLane | undefined;
+  providerCensus: (() => number) | undefined;
+  /** the spawn's own quota lane — its admit below covers the kind's
+   *  full lane; the cross-kind loops must not double-claim it */
+  quotaPlaneKind: string | undefined;
+  out: string[];
+}): void {
+  const {
+    spawnedCommand,
+    agents,
+    workerEnv,
+    molStep,
+    agentId,
+    scope,
+    liveByKind,
+    providerClaimedStarts,
+    providerPlaneKinds,
+    providerCap,
+    providerCensus,
+    quotaPlaneKind,
+    out,
+  } = args;
+  // a pre-flight refusal ahead of any claim; the authoritative
+  // count re-runs inside each kind's admission mutex below. Starts
+  // the provider pass already claimed sit INSIDE the view's live
+  // count — the pending starts are what is left, or one session's
+  // claims read as two and a rightful first spawn refuses.
+  for (const view of sessionCapViews(spawnedCommand, agents, workerEnv)) {
+    const pending = Math.max(0, view.starts - (providerClaimedStarts.get(view.kind) ?? 0));
+    const crossRefusal = sessionCapRefusal({ ...view, starts: pending });
+    if (crossRefusal !== undefined) {
+      throw new SpawnError(crossRefusal, 'cap');
+    }
+  }
+  const coveredKinds = new Set<string>();
+  for (const view of sessionCapViews(spawnedCommand, agents, workerEnv)) {
+    if (view.kind === quotaPlaneKind) {
+      continue; // admitSessionSlot below covers this kind's full lane
+    }
+    coveredKinds.add(view.kind);
+    const plane = sessionPlane(view.kind);
+    if (plane === undefined) {
+      continue;
+    }
+    // Admit through the kind's OWN admission mutex — the same lock
+    // admitSessionSlot holds — so a check-then-reserve here cannot
+    // race a parallel start into overshooting the cap. A kind's
+    // multi-start view claims one serialized slot per start; a
+    // refusal mid-way is rolled back by the catch below. Starts the
+    // provider pass already admitted are skipped — their claims
+    // already ride crossKindReservations.
+    const pending = view.starts - (providerClaimedStarts.get(view.kind) ?? 0);
+    for (let i = 0; i < pending; i++) {
+      const claimed = admitSessionSlot(plane, agents, {
+        key: agentId,
+        molStep,
+        workerEnv,
+        scope,
+        liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
+        // a kind the provider cap counts still owes the aggregate
+        // verdict — the spawned command can start more of the kind
+        // than the provider's own entry did, and the excess claims
+        // land on the SAME provider-counted ledger
+        ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
+      });
+      if (claimed !== undefined) {
+        out.push(claimed);
+      }
+    }
+  }
+  for (const kind of providerPlaneKinds) {
+    if (coveredKinds.has(kind) || kind === quotaPlaneKind) {
+      continue;
+    }
+    const plane = sessionPlane(kind);
+    if (plane === undefined) {
+      continue;
+    }
+    const starts = plane.startsSessions?.(spawnedCommand) ?? 0;
+    const pending = starts - (providerClaimedStarts.get(kind) ?? 0);
+    for (let i = 0; i < pending; i++) {
+      const claimed = admitSessionSlot(plane, agents, {
+        key: agentId,
+        molStep,
+        workerEnv,
+        scope,
+        liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
+        providerCap,
+        providerCensus,
+      });
+      if (claimed !== undefined) {
+        out.push(claimed);
+      }
+    }
+  }
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -2864,85 +2986,21 @@ function prepareSpawn(
     // so a refusal leaves no half-spawned state
     enforceFleetCap(dir, home, registry, spec, opts.cap);
     if (spawnedCommand !== '') {
-      // a pre-flight refusal ahead of any claim; the authoritative
-      // count re-runs inside each kind's admission mutex below. Starts
-      // the provider pass already claimed sit INSIDE the view's live
-      // count — the pending starts are what is left, or one session's
-      // claims read as two and a rightful first spawn refuses.
-      for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
-        const pending = Math.max(0, view.starts - (providerClaimedStarts.get(view.kind) ?? 0));
-        const crossRefusal = sessionCapRefusal({ ...view, starts: pending });
-        if (crossRefusal !== undefined) {
-          throw new SpawnError(crossRefusal, 'cap');
-        }
-      }
-      const coveredKinds = new Set<string>();
-      for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
-        if (view.kind === sessionQuota?.plane.kind) {
-          continue; // admitSessionSlot below covers this kind's full lane
-        }
-        coveredKinds.add(view.kind);
-        const plane = sessionPlane(view.kind);
-        if (plane === undefined) {
-          continue;
-        }
-        // Admit through the kind's OWN admission mutex — the same lock
-        // admitSessionSlot holds — so a check-then-reserve here cannot
-        // race a parallel start into overshooting the cap. A kind's
-        // multi-start view claims one serialized slot per start; a
-        // refusal mid-way is rolled back by the catch below. Starts the
-        // provider pass already admitted are skipped — their claims
-        // already ride crossKindReservations.
-        const pending = view.starts - (providerClaimedStarts.get(view.kind) ?? 0);
-        for (let i = 0; i < pending; i++) {
-          const claimed = admitSessionSlot(plane, agents, {
-            key: agentId,
-            molStep: spec.molStep,
-            workerEnv: spec.env,
-            scope,
-            liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
-            // a kind the provider cap counts still owes the aggregate
-            // verdict — the spawned command can start more of the kind
-            // than the provider's own entry did, and the excess claims
-            // land on the SAME provider-counted ledger
-            ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
-          });
-          if (claimed !== undefined) {
-            crossKindReservations.push(claimed);
-          }
-        }
-      }
-      // A provider-covered kind the spawned command starts WITHOUT a
-      // kind quota produces no sessionCapViews row, so the loop above
-      // never sees its starts — but every session it opens still draws
-      // on the provider lane (a provider cap of 1 must refuse a second
-      // start the quota layer never armed). Claim what the provider
-      // pass did not already cover, judged on the aggregate census.
-      for (const kind of providerPlaneKinds) {
-        if (coveredKinds.has(kind) || kind === sessionQuota?.plane.kind) {
-          continue;
-        }
-        const plane = sessionPlane(kind);
-        if (plane === undefined) {
-          continue;
-        }
-        const starts = plane.startsSessions?.(spawnedCommand) ?? 0;
-        const pending = starts - (providerClaimedStarts.get(kind) ?? 0);
-        for (let i = 0; i < pending; i++) {
-          const claimed = admitSessionSlot(plane, agents, {
-            key: agentId,
-            molStep: spec.molStep,
-            workerEnv: spec.env,
-            scope,
-            liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
-            providerCap,
-            providerCensus,
-          });
-          if (claimed !== undefined) {
-            crossKindReservations.push(claimed);
-          }
-        }
-      }
+      admitSpawnedCommandStarts({
+        spawnedCommand,
+        agents,
+        workerEnv: spec.env,
+        molStep: spec.molStep,
+        agentId,
+        scope,
+        liveByKind,
+        providerClaimedStarts,
+        providerPlaneKinds,
+        providerCap,
+        providerCensus,
+        quotaPlaneKind: sessionQuota?.plane.kind,
+        out: crossKindReservations,
+      });
     }
     reservation =
       sessionQuota === undefined
