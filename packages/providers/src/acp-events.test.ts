@@ -3,14 +3,17 @@ import assert from 'node:assert/strict';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { tailArchive } from '@broject/acp-session';
 import {
   busProbe,
   busSocketPath,
@@ -23,7 +26,13 @@ import {
   type BusBroker,
 } from '@broject/core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { agentEventRecord, agentTurnPlane, DRAIN_DEFAULT_MS } from './acp-events.ts';
+import {
+  AGENT_ARCHIVE_KEEP_BYTES,
+  AGENT_ARCHIVE_MAX_BYTES,
+  agentEventRecord,
+  agentTurnPlane,
+  DRAIN_DEFAULT_MS,
+} from './acp-events.ts';
 
 // in-process git + the BRO_* badge read must never inherit the OUTER
 // session's pins — same scrub rule every fixture suite carries
@@ -441,6 +450,212 @@ describe('agentTurnPlane', () => {
       assert.equal(events[0]!.key, 'acp:sess-x');
       const common = gitCommonDir(dir)!;
       assert.equal(existsSync(join(common, 'bro', 'agents')), false);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  // spec bro-9ti7h — ~256KiB rows: 17 of them cross the 4 MiB ceiling,
+  // so 24 force the cap at least twice
+  const fatChunk = (tok: string): SessionUpdate =>
+    ({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `${tok}-${'x'.repeat(256 * 1024)}` },
+    }) as SessionUpdate;
+
+  test('a chatty turn self-caps — the archive keeps only its newest whole rows', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-cap';
+    try {
+      const common = gitCommonDir(dir)!;
+      const file = join(common, 'bro', 'agents', 'native-cap.events.jsonl');
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 'sess-cap' });
+      const ROWS = 24;
+      plane.start();
+      for (let i = 0; i < ROWS; i++) {
+        plane.update(fatChunk(`tok-${i}`));
+      }
+      plane.stop('end_turn');
+      const size = statSync(file).size;
+      assert.ok(
+        size <= AGENT_ARCHIVE_MAX_BYTES,
+        `archive ${size}B exceeds the ${AGENT_ARCHIVE_MAX_BYTES}B cap`
+      );
+      const lines = readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(l => l !== '');
+      // every retained line is a WHOLE row — a torn head would throw here
+      const rows = lines.map(l => JSON.parse(l) as Record<string, unknown>);
+      assert.ok(rows.length > 0);
+      const text = lines.join('\n');
+      // the newest data survives — the last update and the stop bookend
+      assert.ok(text.includes(`tok-${ROWS - 1}-`), 'the newest update survived the cap');
+      const last = rows.at(-1)!;
+      assert.equal(last.kind, 'turn');
+      assert.equal(last.phase, 'stop');
+      // retention is a tail, not a stub — an over-truncating cap that
+      // kept only the last row would still pass the marker checks
+      assert.ok(rows.length >= 5, `kept ${rows.length} rows — the tail should hold many`);
+      assert.ok(text.includes(`tok-${ROWS - 4}-`), 'a mid-tail row survived, not just the last');
+      // the oldest rows dropped — ~6 MiB written into a ≤4 MiB file
+      // proves the file truncated rather than merely growing slowly
+      assert.ok(!text.includes('tok-0-'), 'the oldest rows dropped under the cap');
+      assert.ok(!text.includes('tok-7-'), 'the kept tail is far smaller than the corpus');
+      // the shared consumer pump reads the capped file clean
+      const tail = tailArchive(file);
+      assert.ok(tail !== undefined);
+      assert.ok(tail.rows.length > 0);
+      assert.equal(tail.offset, size);
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('the proxy-scope archive self-caps the same way', () => {
+    const dir = repo();
+    delete process.env.BRO_AGENT_ID;
+    const plane = agentTurnPlane({
+      cwd: dir,
+      by: 'acp proxy',
+      sessionId: 'sess-pcap',
+      plane: 'proxy',
+    });
+    const ROWS = 20;
+    plane.start();
+    for (let i = 0; i < ROWS; i++) {
+      plane.update(fatChunk(`p-${i}`));
+    }
+    plane.stop('end_turn');
+    const pdir = join(gitCommonDir(dir)!, 'bro', 'proxy');
+    const files = readdirSync(pdir).filter(f => f.startsWith('acp-sess-pcap-'));
+    assert.equal(files.length, 1);
+    const file = join(pdir, files[0]!);
+    assert.ok(statSync(file).size <= AGENT_ARCHIVE_MAX_BYTES);
+    const text = readFileSync(file, 'utf8');
+    assert.ok(text.includes(`p-${ROWS - 1}-`), 'the newest proxy row survived');
+    assert.ok(!text.includes('p-0-'), 'the oldest proxy rows dropped');
+    // whole rows only — the retained head parses clean, and the kept
+    // tail is a tail: an over-truncating cap keeping only the last
+    // row fails this bound
+    const lines = text.split('\n').filter(l => l !== '');
+    assert.ok(lines.length >= 5, `kept ${lines.length} rows`);
+    for (const l of lines) {
+      JSON.parse(l);
+    }
+  });
+
+  test('a pre-existing oversized archive converges on the next write — and stays owner-only', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-old';
+    try {
+      const common = gitCommonDir(dir)!;
+      const file = join(common, 'bro', 'agents', 'native-old.events.jsonl');
+      mkdirSync(dirname(file), { recursive: true });
+      // a legacy archive already past the bound — valid rows at the
+      // umask-022 mode the pre-pin era could leave
+      const row = JSON.stringify({
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'update',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'y'.repeat(1024) },
+        },
+      });
+      const repeats = Math.ceil((AGENT_ARCHIVE_MAX_BYTES + 4096) / (row.length + 1));
+      writeFileSync(file, `${row}\n`.repeat(repeats), { mode: 0o644 });
+      assert.ok(statSync(file).size > AGENT_ARCHIVE_MAX_BYTES);
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+      plane.start();
+      plane.stop('end_turn');
+      const size = statSync(file).size;
+      // the tail read kept only KEEP bytes; the turn's two small rows
+      // landed after — the file converged far under the ceiling
+      assert.ok(
+        size <= AGENT_ARCHIVE_KEEP_BYTES + 4096,
+        `converged archive ${size}B should sit at the kept tail`
+      );
+      // the turn's own rows are the newest — they rode the cap through
+      const text = readFileSync(file, 'utf8');
+      const lines = text.split('\n').filter(l => l !== '');
+      const last = JSON.parse(lines.at(-1)!) as Record<string, unknown>;
+      assert.equal(last.kind, 'turn');
+      assert.equal(last.phase, 'stop');
+      // the kept tail retains seeded rows — an over-truncating cap
+      // that dropped every legacy row keeps the file small too
+      assert.ok(lines.length > 100, `kept ${lines.length} rows — seeded rows survive`);
+      assert.ok(text.includes('yyyy'), 'a seeded legacy row is inside the kept tail');
+      // the cap's rewrite went through the private seam — the staged
+      // file it renames in is created 0600, so a permissive staged
+      // write would leak 0644 here. (An in-place unpinned rewrite
+      // keeps the mode the append already repaired — out of this
+      // assert's reach.)
+      assert.equal(statSync(file).mode & 0o777, 0o600);
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('a row bigger than the keep window still converges — only complete rows survive', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-giant';
+    try {
+      const common = gitCommonDir(dir)!;
+      const file = join(common, 'bro', 'agents', 'native-giant.events.jsonl');
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 'sess-giant' });
+      plane.start();
+      // one update row over the 2 MiB keep window — its fragment can
+      // never parse, so the cap keeps nothing of it
+      plane.update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `giant-${'g'.repeat(3 * 1024 * 1024)}` },
+      } as SessionUpdate);
+      for (let i = 0; i < 6; i++) {
+        plane.update(fatChunk(`tail-${i}`));
+      }
+      plane.stop('end_turn');
+      const size = statSync(file).size;
+      assert.ok(size <= AGENT_ARCHIVE_MAX_BYTES, `archive ${size}B exceeds the cap`);
+      const lines = readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(l => l !== '');
+      // EVERY retained line is a complete row — a fragment of the
+      // giant row would throw here, and 'giant-' is nowhere inside
+      for (const l of lines) {
+        JSON.parse(l);
+      }
+      assert.ok(!lines.join('\n').includes('giant-'), 'the oversized row left no fragment');
+      const last = JSON.parse(lines.at(-1)!) as Record<string, unknown>;
+      assert.equal(last.phase, 'stop');
+      assert.ok(
+        lines.join('\n').includes('tail-5-'),
+        'the small rows after the giant one survived'
+      );
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('a broken archive path never fails the turn — the bus still gets every event', async () => {
+    const dir = repo();
+    const broker: BusBroker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      process.env.BRO_AGENT_ID = 'native-broken';
+      const common = gitCommonDir(dir)!;
+      // the archive path planted as a DIRECTORY — every append EISDIRs
+      mkdirSync(join(common, 'bro', 'agents', 'native-broken.events.jsonl'), {
+        recursive: true,
+      });
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+      plane.start();
+      plane.update(toolOpen);
+      plane.update(toolDone);
+      plane.stop('end_turn');
+      await plane.drain(); // resolves — the archive's ruin is not the turn's
+      const events = await probeAgent(dir);
+      assert.deepEqual(
+        events.map(e => `${e.kind}:${(e.payload as { phase?: string }).phase ?? ''}`),
+        ['turn:start', 'tool_call:open', 'tool_call:finish', 'turn:stop']
+      );
     } finally {
       await broker.close();
     }

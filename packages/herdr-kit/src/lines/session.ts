@@ -258,7 +258,16 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     const more = readTailSlice(a.eventsPath, a.eventsOffset ?? 0);
     if (more === undefined) return;
     const end = completePart(more.buf);
-    if (end === 0) return;
+    if (end === 0) {
+      // nothing complete to consume — either a torn tail row still
+      // being written (offset already sits on a line boundary, the
+      // min is a no-op) or the archive self-capped under us and the
+      // saved offset now points past the new EOF: resync so the rows
+      // appended after the cap reach the pane instead of being
+      // skipped forever (spec bro-9ti7h; pumpLog's own posture)
+      a.eventsOffset = Math.min(a.eventsOffset ?? 0, more.size);
+      return;
+    }
     a.eventsOffset = (a.eventsOffset ?? 0) + end;
     for (const row of parseArchiveRows(more.buf.subarray(0, end).toString('utf8'))) {
       eventRow(a, row, t);
