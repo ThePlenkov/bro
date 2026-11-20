@@ -638,17 +638,17 @@ export async function startBusBrokerAt(
 }
 
 /** Dir-shaped wrapper: resolves the socket path and publishes discovery
- *  state so clients do not re-derive the hash. */
+ *  state so clients do not re-derive the hash. The namespace resolves
+ *  ONCE — a BRO_STATE_DIR change mid-startup must not put the listener
+ *  and the discovery record under different roots. */
 export async function startBusBroker(dir: string, opts: BusBrokerOptions = {}): Promise<BusBroker> {
-  const socketPath = busSocketPath(dir);
-  if (socketPath === null) {
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  if (common === null) {
     throw new Error('bro bus: not inside a git repository');
   }
+  const socketPath = busSocketPathForCommon(common);
   const broker = await startBusBrokerAt(socketPath, opts);
-  const statePath = busStatePath(dir);
-  if (statePath === null) {
-    return broker;
-  }
+  const statePath = join(common, 'bro', 'bus.json');
   const record = `${JSON.stringify(
     { socketPath, pid: process.pid, startedAt: new Date().toISOString() },
     null,

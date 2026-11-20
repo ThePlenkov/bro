@@ -268,9 +268,14 @@ function managedTargets(
 /** One projection pass over every plugin-managed open workspace. The
  *  herdr probes (worktree/workspace/pane lists) run here through the
  *  client seam; the TreeInput each target projects from is the
- *  caller's build — bro-plane reads stay outside the kit. */
+ *  caller's build — bro-plane reads stay outside the kit. `common` is
+ *  the REAL git common dir (the plugin ledger's scope hash mirrors the
+ *  plugin's own resolution); `state` is bro's runtime-state root —
+ *  the fleet-status files live there, same base the status/session
+ *  panes resolve (stateCommonDir), so a BRO_STATE_DIR pin moves both
+ *  ends together. */
 export function runFleetPass<P extends { beads: { id: string }[] }>(
-  ctx: { root: string; common: string | null; now: number },
+  ctx: { root: string; common: string | null; state: string | null; now: number },
   deps: {
     /** lazily assembled — an unreachable herdr or an empty target set
      *  must never pay the bro-plane reads. */
@@ -295,9 +300,9 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   }
   const wsById = new Map(wsList.workspaces.map(w => [w.workspace_id, w]));
   const targets = managedTargets(trees.worktrees, pluginLedger(ctx, wsById), wsById);
-  // state files live under the common dir the pane resolves identically
-  // (gitCommonDir(worktree) ?? worktree) — prune has the same base
-  const statusBase = ctx.common ?? ctx.root;
+  // state files live under the state root the pane resolves identically
+  // (stateCommonDir(worktree) ?? worktree) — prune has the same base
+  const statusBase = ctx.state ?? ctx.root;
   // prune keeps every file a live workspace could still be rendering:
   // a tree herdr lists with an open workspace keeps its file even when
   // the ledger read was blind — wiping on a transient miss would blank

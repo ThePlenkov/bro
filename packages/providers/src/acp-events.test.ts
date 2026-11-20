@@ -1,6 +1,14 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -445,12 +453,21 @@ describe('BRO_STATE_DIR — runtime state redirects wholesale (bro-eajeu)', () =
    *  session path with the linked cwd appends to the main checkout's
    *  live `bro/` state. The pin stands the common dir in so a harness
    *  keeps every byte in a sandbox. */
-  function worktree(): { main: string; linked: string } {
+  function worktree(): { main: string; linkRoot: string; linked: string } {
     const main = mkdtempSync(join(tmpdir(), 'bro-state-main-'));
     testRepoInit(main);
-    const linked = join(mkdtempSync(join(tmpdir(), 'bro-state-link-')), 'linked');
+    const linkRoot = mkdtempSync(join(tmpdir(), 'bro-state-link-'));
+    const linked = join(linkRoot, 'linked');
     testGit(['-C', main, 'worktree', 'add', '-q', linked, '-b', 'work/state']);
-    return { main, linked };
+    return { main, linkRoot, linked };
+  }
+
+  /** Drop the whole fixture — the linked worktree registration dies
+   *  with `main/.git`, so the roots are all that need removing. */
+  function cleanup(...roots: string[]): void {
+    for (const root of roots) {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 
   function readJsonl(file: string): Array<Record<string, unknown>> {
@@ -461,7 +478,7 @@ describe('BRO_STATE_DIR — runtime state redirects wholesale (bro-eajeu)', () =
   }
 
   test('turn archives and the bus socket resolve the pin — the worktree common stays untouched', async () => {
-    const { main, linked } = worktree();
+    const { main, linkRoot, linked } = worktree();
     const pin = mkdtempSync(join(tmpdir(), 'bro-state-pin-'));
     const prev = process.env.BRO_STATE_DIR;
     process.env.BRO_STATE_DIR = pin;
@@ -502,11 +519,12 @@ describe('BRO_STATE_DIR — runtime state redirects wholesale (bro-eajeu)', () =
       if (prev === undefined) delete process.env.BRO_STATE_DIR;
       else process.env.BRO_STATE_DIR = prev;
       delete process.env.BRO_AGENT_ID;
+      cleanup(main, linkRoot, pin);
     }
   });
 
   test('BRO_STATE_DIR=0 resolves "no repo" — archives and the socket go dark', () => {
-    const { main, linked } = worktree();
+    const { main, linkRoot, linked } = worktree();
     const prev = process.env.BRO_STATE_DIR;
     process.env.BRO_STATE_DIR = '0';
     try {
@@ -524,6 +542,7 @@ describe('BRO_STATE_DIR — runtime state redirects wholesale (bro-eajeu)', () =
     } finally {
       if (prev === undefined) delete process.env.BRO_STATE_DIR;
       else process.env.BRO_STATE_DIR = prev;
+      cleanup(main, linkRoot);
     }
   });
 });

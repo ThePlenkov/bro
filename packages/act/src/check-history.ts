@@ -18,7 +18,7 @@
  */
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, withFileLock } from '@broject/core';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, stateCommonDir, withFileLock } from '@broject/core';
 import { compactLedger, parseLedger } from './ledger.ts';
 
 export interface CheckObservation {
@@ -117,9 +117,11 @@ export function fileCheckHistory(file: string): CheckHistory {
 }
 
 /** The repo ledger — `<git-common-dir>/bro/act-checks.jsonl`; null
- *  outside a repo (callers treat absent history as streak 0). */
+ *  outside a repo (callers treat absent history as streak 0). Resolves
+ *  the state root — a BRO_STATE_DIR pin moves the ledger with the rest
+ *  of the runtime state. */
 export function checkHistoryPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'act-checks.jsonl');
 }
 

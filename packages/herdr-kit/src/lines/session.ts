@@ -20,7 +20,7 @@ import {
   tailWindow,
   utf8End,
 } from '@broject/acp-session';
-import { gitCommonDir, type ProviderEntry } from '@broject/core';
+import { gitCommonDir, stateCommonDir, type ProviderEntry } from '@broject/core';
 import type {
   AcpRenderer as AcpRendererT,
   AcpSessionViewResult,
@@ -462,10 +462,19 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   const bound = ctx.events !== undefined || ctx.agent !== undefined;
   // the registry home: the worktree's git common dir, else the bound
   // journal's own <git-common>/bro/agents location — a '.' worktree
-  // (the worktree-less live view) must not blind the worker floor
+  // (the worktree-less live view) must not blind the worker floor.
+  // agents.json stays on the REAL common dir — the spawn-side registry
+  // writers don't resolve the state pin.
   const base =
     (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
     gitCommonDir(ctx.worktree) ??
+    ctx.worktree;
+  // the archive root: the .events.jsonl writers resolve stateCommonDir,
+  // so a BRO_STATE_DIR-pinned worker's journal lives under the pin —
+  // derive the read side identically or a pinned rig's pane goes blind
+  const eventsBase =
+    (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
+    stateCommonDir(ctx.worktree) ??
     ctx.worktree;
   /** The bound worker's registry entry — `--agent` first; a
    *  journal-only bind (`--events` alone) still names its worker by
@@ -486,7 +495,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   const eventsPathOf = (): string | undefined => {
     if (ctx.events !== undefined) return ctx.events;
     if (ctx.agent === undefined) return undefined;
-    return eventsFile(base, logStem(entryOf()) ?? ctx.agent);
+    return eventsFile(eventsBase, logStem(entryOf()) ?? ctx.agent);
   };
   /** The worker floor with its reason stamped — a blocked worker
    *  reports WHEN it exited (the journal's last write), an idle one

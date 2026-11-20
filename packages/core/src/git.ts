@@ -297,7 +297,8 @@ export async function gitCommonDirAsync(dir: string, timeoutMs?: number): Promis
  *  runs session/conductor code inside a checkout must never append to
  *  that checkout's live `<common>/bro` — pin the root and every
  *  converted surface (turn archives, proxy journals, the bus socket,
- *  watches, act-state, the serve-turns journal) lands in the sandbox
+ *  watches, act-state + the act ledgers, the serve-turns journal, the
+ *  lifecycle journal, loop runs, fleet-status) lands in the sandbox
  *  (spec bro-eajeu). Read per call — no cache — so a test can pin and
  *  unpin inside one process. */
 export function stateCommonDir(dir: string, timeoutMs?: number): string | null {

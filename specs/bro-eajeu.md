@@ -41,18 +41,31 @@ have no seam to redirect the state root away from a real checkout.
   common dir exactly as today. `gitCommonDir` itself is untouched:
   real git-dir consumers (worktree ops, locks) never see the pin.
 
-Surfaces converted (the leak paths the bead names + their transport):
+Surfaces converted (the leak paths the bead names + their transport,
+plus the read sides a pinned process must keep coherent):
 
 - `acp-events.ts` — `agentTurnPlane` and `agentEventRecord` archive
-  resolution (`bro/proxy/*`, `bro/agents/*`).
+  resolution (`bro/proxy/*`, `bro/agents/*`); the session pane and the
+  fleet projector derive the same archive root for their reads.
 - `bus.ts` — `busSocketPath`/`busStatePath` (the socket hash and the
   discovery doc move with the pin, so a pinned suite's publishes and
-  brokers share one sandbox namespace).
-- `serve-conductor.ts` — the `otelJournal` pin.
-- `act` — `watchesDir`/`watchesDirAsync` (pending-watch) and the
-  act-state cache root (`prStateCache`).
+  brokers share one sandbox namespace; `startBusBroker` resolves the
+  namespace once so the pair can't split across roots).
+- `serve-conductor.ts` — the `otelJournal` pin (cleared when the state
+  root resolves null; `otelJournal` creates the parent at pin time).
+- `act` — `watchesDir`/`watchesDirAsync` (pending-watch), the
+  act-state cache root (`prStateCache`), the check-history ledger
+  (`act-checks.jsonl`) and the resolve ledger (`act-resolves.jsonl`).
+- `lifecycle.ts` — `lifecyclePath`/`emitLifecycle` journal; the bus
+  mirror rides the same resolved root, so pinned lifecycles reach a
+  pinned broker.
+- `loop-state.ts` — `loopRunsDir` (`bro/loop/*.json|.log`).
+- the fleet projector + panes — `bro/act-state` reads, archive paths
+  and `bro/fleet-status` resolve the state root; the plugin-ledger
+  scope hash stays on the real common dir (the external plugin never
+  sees the pin).
 
-Remaining `<common>/bro` writers (agents.json, lifecycle events,
+Remaining `<common>/bro` writers (agents.json + spawn artifacts,
 notify, serve.json, hooks/*) are reachable only through explicit
 fixture dirs today; they migrate to `stateCommonDir` as tests surface
 them — the helper is the documented pattern going forward.
