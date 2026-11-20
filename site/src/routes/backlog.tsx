@@ -392,17 +392,21 @@ function haystack(b: Bead): string {
   return `${b.id} ${b.title} ${b.labels.join(' ')}`.toLowerCase();
 }
 
+const ghRows = (gh: GhItem[], q: string): Row[] =>
+  gh.map(normalizeGh)
+    .filter(b => !q || haystack(b).includes(q))
+    .map(b => ({ b, src: 'github' as const }));
+
+const beadRows = (beads: Bead[], f: Filters, q: string): Row[] =>
+  beads.filter(b => beadPredicates.every(p => p(b, f)) && (!q || haystack(b).includes(q)))
+    .map(b => ({ b, src: 'beads' as const }));
+
 function applyFilters(beads: Bead[], gh: GhItem[], f: Filters): Row[] {
   const q = f.q.trim().toLowerCase();
-  const match = (b: Bead) => beadPredicates.every(p => p(b, f)) && (!q || haystack(b).includes(q));
-  const rows: Row[] = f.source === 'github' ? [] : beads.filter(match).map(b => ({ b, src: 'beads' as const }));
-  if (f.source !== 'beads' && !f.orphansOnly) {
-    for (const g of gh) {
-      const b = normalizeGh(g);
-      if (!q || haystack(b).includes(q)) rows.push({ b, src: 'github' });
-    }
-  }
-  return rows;
+  return [
+    ...(f.source === 'github' ? [] : beadRows(beads, f, q)),
+    ...(f.source !== 'beads' && !f.orphansOnly ? ghRows(gh, q) : []),
+  ];
 }
 
 // --- page -----------------------------------------------------------------
