@@ -241,16 +241,12 @@ const EDGE_SOURCES: Array<{ kind: GEdge['kind']; targets: (n: GNode, children: M
 ];
 
 function collectLayoutEdges(pos: Map<string, GNode>, children: Map<string, Bead[]>): GEdge[] {
-  const edges: GEdge[] = [];
-  for (const n of pos.values()) {
-    for (const src of EDGE_SOURCES) {
-      for (const id of src.targets(n, children)) {
+  return [...pos.values()].flatMap(n =>
+    EDGE_SOURCES.flatMap(src =>
+      src.targets(n, children).flatMap(id => {
         const t = pos.get(id);
-        if (t) edges.push({ x1: n.x, y1: n.y + src.yOff[0], x2: t.x, y2: t.y + src.yOff[1], kind: src.kind });
-      }
-    }
-  }
-  return edges;
+        return t ? [{ x1: n.x, y1: n.y + src.yOff[0], x2: t.x, y2: t.y + src.yOff[1], kind: src.kind }] : [];
+      })));
 }
 
 function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: GEdge[]; w: number; h: number } {
