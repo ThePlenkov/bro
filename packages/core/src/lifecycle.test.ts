@@ -175,11 +175,18 @@ describe('lifecycle journal', () => {
 
   test('fail-open — emit outside a repo and read of a missing file are no-ops', () => {
     const bare = mkdtempSync(join(tmpdir(), 'bro-lifecycle-norepo-'));
+    // no withRepo here (the point is "no repo") — but an ambient
+    // BRO_STATE_DIR pin resolves without one, so the no-repo check
+    // must shed the pin itself or it reads '<pin>/bro/events.jsonl'
+    const pin = process.env.BRO_STATE_DIR;
+    delete process.env.BRO_STATE_DIR;
     try {
       assert.equal(lifecyclePath(bare), null);
       emitLifecycle(bare, { kind: 'claim' }); // must not throw
       assert.deepEqual(readLifecycle(bare), []);
     } finally {
+      if (pin === undefined) delete process.env.BRO_STATE_DIR;
+      else process.env.BRO_STATE_DIR = pin;
       rmSync(bare, { recursive: true, force: true });
     }
   });

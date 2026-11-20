@@ -460,15 +460,25 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   // mid-turn must read 'blocked' and a silent-for-days journal
   // 'idle', not a working lie frozen at arm time.
   const bound = ctx.events !== undefined || ctx.agent !== undefined;
-  // the registry home: the worktree's git common dir, else the bound
-  // journal's own <git-common>/bro/agents location — a '.' worktree
-  // (the worktree-less live view) must not blind the worker floor.
-  // agents.json stays on the REAL common dir — the spawn-side registry
-  // writers don't resolve the state pin.
-  const base =
-    (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
-    gitCommonDir(ctx.worktree) ??
-    ctx.worktree;
+  // the registry homes, in authority order: the bound journal's own
+  // <git-common>/bro/agents location first, then the worktree's real
+  // common dir, the bare worktree last — a '.' worktree (the
+  // worktree-less live view) must not blind the worker floor: a later
+  // home only answers what an earlier one missed, so an unrelated
+  // checkout's common can never override the bound journal's home.
+  // The real common stays in the chain because agents.json lives on
+  // it — the spawn-side registry writers don't resolve the state pin,
+  // so a BRO_STATE_DIR-pinned journal derives the PIN as its home and
+  // every registry read there comes back empty.
+  const registryHomes = [
+    ...new Set(
+      [
+        ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined,
+        gitCommonDir(ctx.worktree),
+        ctx.worktree,
+      ].filter((h): h is string => h !== undefined && h !== null)
+    ),
+  ];
   // the archive root: the .events.jsonl writers resolve stateCommonDir,
   // so a BRO_STATE_DIR-pinned worker's journal lives under the pin —
   // derive the read side identically or a pinned rig's pane goes blind
@@ -481,7 +491,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
    *  the file's own stem, or a provable crash reads 'unknown'. */
   const entryOf = (): AgentEntry | undefined =>
     agentEntry(
-      base,
+      registryHomes,
       ctx.agent ??
         (ctx.events !== undefined
           ? basename(ctx.events).replace(/\.events\.jsonl$/, '')
@@ -525,7 +535,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       // the display agent is the true provider name — the same label
       // the OpenTUI path resolves — never the registry run key
       ...(ctx.agent !== undefined
-        ? { agent: displayAgentOf(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
+        ? { agent: displayAgentOf(registryHomes, ctx.agent) ?? ctx.agent, slug: ctx.agent }
         : {}),
       // the native log rides along — an events-render failure tails
       // it instead of ending on a bare note
