@@ -47,6 +47,7 @@ export function SiteNav() {
           </div>
         </details>
         <a href={`${base}marketplace`}>marketplace</a>
+        <a href={`${base}backlog`}>backlog</a>
         <a href={`${base}docs`}>docs</a>
         <a href="https://github.com/ThePlenkov/bro">github ↗</a>
       </nav>
