@@ -14,6 +14,20 @@ ROOT="$(git rev-parse --show-toplevel)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Self-contained dolt install: pinned version + sha256, so the script
+# needs no pre-provisioned binary. Skipped when dolt is already on PATH.
+DOLT_VERSION="2.1.7"
+DOLT_SHA256="15983e811341ed94e5d47fbfc41d2f57d8c7aa65eee511d25a3c3fd5477e28e7"
+if ! command -v dolt >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -fsSL \
+    "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-amd64.tar.gz" \
+    -o "$WORK/dolt.tgz" # NOSONAR — verified against DOLT_SHA256 below
+  echo "$DOLT_SHA256  $WORK/dolt.tgz" | sha256sum -c -
+  mkdir -p "$WORK/dolt-bin"
+  tar -xzf "$WORK/dolt.tgz" -C "$WORK/dolt-bin" --strip-components=1 dolt-linux-amd64/bin
+  export PATH="$WORK/dolt-bin:$PATH"
+fi
+
 DOLT_DIR="${DOLT_DIR:-$WORK/dolt-repo}"
 if [[ -d "$DOLT_DIR/.dolt" ]]; then
   (cd "$DOLT_DIR" && dolt fetch origin 'refs/dolt/data:refs/remotes/origin/dolt/data' >/dev/null 2>&1 || dolt pull >/dev/null)

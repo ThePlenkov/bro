@@ -20,8 +20,7 @@ if (!doltDir || !outFile) {
 }
 
 function sql<T>(query: string): T[] {
-  // NOSONAR S8707 — argv paths are this script's documented API
-  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], {
+  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], { // NOSONAR — argv paths are this script's documented API
     cwd: doltDir,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,

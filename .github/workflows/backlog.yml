@@ -25,15 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install dolt
-        env:
-          DOLT_SHA256: 15983e811341ed94e5d47fbfc41d2f57d8c7aa65eee511d25a3c3fd5477e28e7
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v2.1.7/dolt-linux-amd64.tar.gz -o "$RUNNER_TEMP/dolt.tgz"
-          echo "$DOLT_SHA256  $RUNNER_TEMP/dolt.tgz" | sha256sum -c -
-          sudo tar -xzf "$RUNNER_TEMP/dolt.tgz" -C /usr/local --strip-components=1 dolt-linux-amd64/bin
-          dolt version
-
       - name: Publish backlog.json to refs/bro/data
         env:
           GIT_REPO: ThePlenkov/bro
