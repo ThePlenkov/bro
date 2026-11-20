@@ -11,10 +11,12 @@ import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   ftruncateSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -431,11 +433,23 @@ interface SessionSlotMeta {
  *  old-format files (a bare timestamp) and for content that was never
  *  JSON. `start`/`key` are undefined when the claim predates the
  *  identity pin or the writer could not prove them. */
-function slotHolder(path: string): { pid?: number; start?: string; key?: string } | undefined {
-  let parsed: SessionSlotMeta;
+/** The holder facts a claim's CONTENT carries — `undefined` when the
+ *  content is not a JSON object (a bare timestamp, `null`, a scalar),
+ *  so a malformed-but-fresh claim still counts and a stale one reaps
+ *  on the normal no-holder path instead of throwing past the row. */
+function slotHolderContent(
+  content: string | undefined
+): { pid?: number; start?: string; key?: string } | undefined {
+  if (content === undefined) {
+    return undefined;
+  }
+  let parsed: SessionSlotMeta | null;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8')) as SessionSlotMeta;
+    parsed = JSON.parse(content) as SessionSlotMeta | null;
   } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object') {
     return undefined;
   }
   const pid = parsed.pid;
@@ -446,6 +460,16 @@ function slotHolder(path: string): { pid?: number; start?: string; key?: string 
     ...(typeof start === 'string' && start !== '' ? { start } : {}),
     ...(typeof key === 'string' && key !== '' ? { key } : {}),
   };
+}
+
+function slotHolder(path: string): { pid?: number; start?: string; key?: string } | undefined {
+  let content: string | undefined;
+  try {
+    content = readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
+  return slotHolderContent(content);
 }
 
 /** Fresh reservations — files younger than the TTL count as claimed
@@ -493,26 +517,42 @@ function countedSessionReservations(
   const now = Date.now();
   const rows: SessionClaimRow[] = [];
   for (const name of names) {
+    // a tombstone a previous sweep orphaned — settle it before the
+    // `.slot` filter hides it: its claim is invisible while the name
+    // lasts, so it restores while fresh and reaps on its own
+    // staleness verdict (spec bro-x601l). The suffix must match the
+    // exact `…reap-<pid>-<hex>` a reap writes — a claim whose key
+    // merely contains the marker is never mistaken for debris
+    const reapMatch = /\.reap-\d+-[0-9a-f]{8}$/.exec(name);
+    if (reapMatch !== null) {
+      settleTombstone(resDir, name.slice(0, reapMatch.index), name, now);
+      continue;
+    }
     if (!name.endsWith('.slot') || !reservationInLane(name, lane)) {
       continue;
     }
     const path = join(resDir, name);
     try {
       const batch = name.endsWith('.batch.slot');
-      if (now - statSync(path).mtimeMs < SESSION_SLOT_TTL_MS) {
-        rows.push({ path, batch, ...slotHolder(path) });
-        continue;
+      const stale = now - statSync(path).mtimeMs >= SESSION_SLOT_TTL_MS;
+      // one read serves both branches — the holder facts AND the
+      // identity a reap must match before it deletes
+      let content: string | undefined;
+      try {
+        content = readFileSync(path, 'utf8');
+      } catch {
+        content = undefined;
       }
-      const holder = slotHolder(path);
+      const holder = slotHolderContent(content);
       // the start identity rides the check when the claim recorded it —
       // a pid recycled into a stranger fails it instead of holding the
       // lane for the stranger's whole lifetime; legacy claims without a
       // start keep the pid-only verdict
-      if (holder?.pid !== undefined && alive(holder.pid, holder.start)) {
-        rows.push({ path, batch, ...holder });
+      if (!stale || (holder?.pid !== undefined && alive(holder.pid, holder.start))) {
+        rows.push({ path, batch, ...(holder ?? {}) });
         continue;
       }
-      rmSync(path, { force: true });
+      reapStaleClaim(resDir, name, content);
     } catch {
       // stat raced a reap — ignore
     }
@@ -528,16 +568,97 @@ export function countSessionReservations(
   return countedSessionReservations(resDir, lane, opts?.pidAlive ?? pidAlive).length;
 }
 
+/** Delete a claim only when the file at the name is STILL the one the
+ *  staleness verdict read (spec bro-x601l — reclamation and
+ *  replacement share one ownership protocol). A plain `rmSync(path)`
+ *  races a deterministic re-claim: two counters can both mark the same
+ *  expired claim, the first's delete lets a reserve recreate the name,
+ *  and the second's delete drops the FRESH claim — the lane it held
+ *  vanishes while its start is still in flight. The rename moves
+ *  whatever sits at the name NOW; only the exact content the verdict
+ *  read gets deleted, anything else goes back — a hard link, never a
+ *  copy, so restoring can never overwrite a claim that retook the
+ *  name. A tombstone the verify never finishes (a crash between
+ *  rename and check) is settled by the next sweep, never deleted
+ *  blind. */
+function reapStaleClaim(resDir: string, name: string, verified: string | undefined): void {
+  const tombstone = `${name}.reap-${process.pid}-${randomBytes(4).toString('hex')}`;
+  const from = join(resDir, name);
+  const to = join(resDir, tombstone);
+  try {
+    renameSync(from, to);
+  } catch {
+    return; // another reaper took it, or the file is already gone
+  }
+  let content: string | undefined;
+  try {
+    content = readFileSync(to, 'utf8');
+  } catch {
+    content = undefined;
+  }
+  if (content === verified) {
+    rmSync(to, { force: true });
+    return;
+  }
+  // not the file the verdict condemned — a claim landed between the
+  // read and the rename. Put it back under its name only when the
+  // name is still free; a `wx` create may already hold it again
+  try {
+    linkSync(to, from);
+    rmSync(to, { force: true });
+  } catch {
+    // the name is held or the dir rejects the restore — the claim
+    // stays tombstoned for the next sweep's settle pass
+  }
+}
+
+/** A tombstone a previous sweep orphaned — a crash between the rename
+ *  and the verify leaves a claim outside `.slot` sight: restore it
+ *  under its original name while it is still fresh (the link cannot
+ *  overwrite a claim that already retook the name), or reap it when
+ *  the file itself reads stale on THIS sweep's own verdict — the
+ *  tombstone keeps the condemned file's mtime, so its verdict is the
+ *  same file's, not the sweep's first guess. */
+function settleTombstone(resDir: string, orig: string, name: string, now: number): void {
+  const from = join(resDir, name);
+  const to = join(resDir, orig);
+  let stale: boolean;
+  try {
+    stale = now - statSync(from).mtimeMs >= SESSION_SLOT_TTL_MS;
+  } catch {
+    return; // vanished between the listing and the stat — nothing to settle
+  }
+  if (stale) {
+    rmSync(from, { force: true });
+    return;
+  }
+  try {
+    linkSync(from, to);
+    rmSync(from, { force: true });
+  } catch {
+    // the original name already holds a claim — that file is the
+    // same logical claim (deterministic names), so the tombstone is
+    // redundant bookkeeping, safe to drop
+    rmSync(from, { force: true });
+  }
+}
+
 /** A live+claims census that keeps the reservation→live handoff
  *  observable (spec bro-x601l). The claims are snapshotted BEFORE
  *  `countLive` runs and recounted after. A claim retired between the
  *  two reads is either the handoff completing — the landing session
  *  already sits inside `counts`, its claim redundant — or a
  *  concurrent count's sweep on a landing OUR scan never saw, where
- *  the claim is the only trace of a session `counts` missed. With
- *  `liveRows` the census proves the difference: a retired claim
- *  forgiven only when the live rows carry its holder pid or claim
- *  key, else it still counts. WITHOUT `liveRows` the census cannot
+ *  the claim is the only trace of a session `counts` missed. The
+ *  `rows` `countLive` returns prove the difference: a retired claim
+ *  forgiven only when those rows carry its holder pid or claim key,
+ *  else it still counts. Rows MUST come from the same observation as
+ *  `counts` — enumerate them inside the callback BEFORE the count
+ *  reads, so a row the count never saw can only mean the session
+ *  died between the two, never that a later scan caught a landing
+ *  the count missed (a later scan would forgive a claim for a
+ *  session `counts` could not have charged — the under-count this
+ *  census exists to prevent). WITHOUT `rows` the census cannot
  *  prove the rarer external sweep apart from the plane's own
  *  in-count one — every count of a landed session retires its claim
  *  — so it keeps the classic post-count tally and over-admits that
@@ -551,15 +672,15 @@ export function countSessionReservations(
 export function sessionLaneCensus<T>(args: {
   /** the census dirs the claims sit in — deduped by the caller */
   dirs: readonly string[];
-  /** the plane's own counts, taken between the two claim reads —
-   *  returned through as `counts` */
-  countLive: () => T;
-  /** the live rows the handoff correlates against — omit entirely
-   *  when the plane cannot enumerate sessions: correlation with no
-   *  rows could never prove coverage, and every unproven retirement
-   *  would ghost-count — the double-count the ordering exists to
-   *  prevent */
-  liveRows?: () => Iterable<DiscoveredSession>;
+  /** the plane's own counts taken between the two claim reads, plus
+   *  the live rows the SAME observation produced — enumerate rows
+   *  inside this callback, before the counts read, or the proof rows
+   *  and the counts they justify can disagree about a landing. Omit
+   *  `rows` entirely when the plane cannot enumerate sessions:
+   *  correlation with no rows could never prove coverage, and every
+   *  unproven retirement would ghost-count — the double-count the
+   *  ordering exists to prevent */
+  countLive: () => { counts: T; rows?: Iterable<DiscoveredSession> };
 }): { counts: T; claims: number; batchClaims: number } {
   const before = new Map<string, SessionClaimRow>();
   for (const dir of args.dirs) {
@@ -567,7 +688,7 @@ export function sessionLaneCensus<T>(args: {
       before.set(row.path, row);
     }
   }
-  const counts = args.countLive();
+  const { counts, rows } = args.countLive();
   const after = new Set<string>();
   let claims = 0;
   let batchClaims = 0;
@@ -580,19 +701,19 @@ export function sessionLaneCensus<T>(args: {
       }
     }
   }
-  const { ghosts, batchGhosts } = retiredClaimGhosts(before, after, args.liveRows);
+  const { ghosts, batchGhosts } = retiredClaimGhosts(before, after, rows);
   return { counts, claims: claims + ghosts, batchClaims: batchClaims + batchGhosts };
 }
 
 /** The pids and claim keys the live rows already carry — the proof a
  *  retired claim's session landed inside `counts`. */
-function liveRowIdentities(liveRows: () => Iterable<DiscoveredSession>): {
+function liveRowIdentities(rows: Iterable<DiscoveredSession>): {
   pids: Set<number>;
   keys: Set<string>;
 } {
   const pids = new Set<number>();
   const keys = new Set<string>();
-  for (const r of liveRows()) {
+  for (const r of rows) {
     pids.add(r.pid);
     if (r.agentId !== undefined) {
       keys.add(r.agentId);
@@ -613,7 +734,7 @@ function liveRowIdentities(liveRows: () => Iterable<DiscoveredSession>): {
 function retiredClaimGhosts(
   before: ReadonlyMap<string, SessionClaimRow>,
   after: ReadonlySet<string>,
-  liveRows: (() => Iterable<DiscoveredSession>) | undefined
+  rows: Iterable<DiscoveredSession> | undefined
 ): { ghosts: number; batchGhosts: number } {
   let ghosts = 0;
   let batchGhosts = 0;
@@ -622,8 +743,8 @@ function retiredClaimGhosts(
     if (after.has(row.path)) {
       continue;
     }
-    if (liveRows !== undefined && (row.pid !== undefined || row.key !== undefined)) {
-      known ??= liveRowIdentities(liveRows);
+    if (rows !== undefined && (row.pid !== undefined || row.key !== undefined)) {
+      known ??= liveRowIdentities(rows);
       if (
         (row.pid !== undefined && known.pids.has(row.pid)) ||
         (row.key !== undefined && known.keys.has(row.key))
@@ -705,7 +826,12 @@ export function retagSessionSlot(path: string, holderPid: number): void {
       const content = JSON.stringify({
         ...prior,
         pid: holderPid,
-        ...(start !== undefined && start !== '' ? { start } : {}),
+        // a failed identity lookup must NOT keep the previous holder's
+        // `start` — `...prior` would carry it over and the stale-claim
+        // check would compare the NEW pid against the OLD identity,
+        // reaping the lane while its holder lives. Set it only when
+        // proven; absent otherwise.
+        ...(start !== undefined && start !== '' ? { start } : { start: undefined }),
       });
       writeSync(fd, content, 0, 'utf8');
       ftruncateSync(fd, Buffer.byteLength(content));
@@ -739,6 +865,26 @@ export function releaseSessionSlot(path: string): void {
  *  slot twice, and the budget would read one session as two). The
  *  deterministic name makes the second claim a no-op: the file is
  *  there, the slot is already held. */
+/** One component of a deterministic claim name, escaped so a literal
+ *  `-` can NEVER appear in it: the filename joins components on bare
+ *  `-`, so a `-` inside a kind or key left raw would let two distinct
+ *  (kind, key) pairs — `(alpha, beta-x)` and `(alpha-beta, x)` — land
+ *  on one filename and the second exclusive create would read the
+ *  first's claim as its own. Every char outside the filename-safe set
+ *  folds to `%<hex>` — `-` included, `%` first — so the encoding is
+ *  injective and the joined name unambiguous. */
+function claimComponent(raw: string): string {
+  return raw.replace(/[^A-Za-z0-9._]/g, c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+}
+
+/** The deterministic claim's filename base — `<kind>-<key>-<i>` with
+ *  each component escaped, so the pair it names is unambiguous on a
+ *  ledger two planes can share (spec bro-x601l). The claim's CONTENT
+ *  keeps the raw kind/key; the encoding is filename-only. */
+export function sessionClaimName(kind: string, key: string, index: number): string {
+  return `${claimComponent(kind)}-${claimComponent(key)}-${index}`;
+}
+
 export function reserveSessionSlotOnce(
   resDir: string,
   key: string,
@@ -818,14 +964,18 @@ export function planeLiveExcluding(
   plane: SessionPlane,
   bag: Record<string, unknown>,
   workerEnv: Record<string, string> | undefined,
-  excludePids: ReadonlySet<number> | undefined
+  excludePids: ReadonlySet<number> | undefined,
+  /** the live rows already enumerated for this observation — reused
+   *  instead of a second `listLive` scan so the exclusion reads the
+   *  same rows the caller's census correlates on */
+  rows?: Iterable<DiscoveredSession>
 ): number {
   const live = plane.countLive(bag, workerEnv);
   if (excludePids === undefined || excludePids.size === 0 || plane.listLive === undefined) {
     return live;
   }
   let own = 0;
-  for (const row of plane.listLive(bag, workerEnv)) {
+  for (const row of rows ?? plane.listLive(bag, workerEnv)) {
     if (excludePids.has(row.pid)) {
       own++;
     }
@@ -856,15 +1006,26 @@ export function providerCapCensus(
   }
   const census = sessionLaneCensus({
     dirs: [...dirs],
-    countLive: () =>
-      planes.reduce(
-        (live, plane) =>
-          live + planeLiveExcluding(plane, agents?.[plane.kind] ?? {}, workerEnv, excludePids),
-        0
-      ),
-    liveRows: planes.some(p => p.listLive !== undefined)
-      ? () => planes.flatMap(p => p.listLive?.(agents?.[p.kind] ?? {}, workerEnv) ?? [])
-      : undefined,
+    countLive: () => {
+      // each plane's rows enumerated AHEAD of its count — the rows
+      // the correlation forgives on and the count they justify are
+      // one observation (spec bro-x601l), and the same rows feed the
+      // pid exclusion so no scan counts what another proved
+      const rows: DiscoveredSession[] = [];
+      let enumerable = false;
+      const live = planes.reduce((total, plane) => {
+        const planeRows = plane.listLive?.(agents?.[plane.kind] ?? {}, workerEnv);
+        if (planeRows !== undefined) {
+          enumerable = true;
+          rows.push(...planeRows);
+        }
+        return (
+          total +
+          planeLiveExcluding(plane, agents?.[plane.kind] ?? {}, workerEnv, excludePids, planeRows)
+        );
+      }, 0);
+      return { counts: live, ...(enumerable ? { rows } : {}) };
+    },
   });
   return census.counts + census.claims;
 }
@@ -914,32 +1075,35 @@ function checkSessionLanes(
     dirs: [resDir],
     // EVERY plane count runs inside the window — a sweep retires a
     // landed claim inside countWorkers as readily as countLive, and
-    // the after-tally must see each of them
-    countLive: () => ({
-      // the provider cap counts the same census the session lane
-      // does — the plane's host-wide sweep plus the claims held
-      sessions:
-        maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0,
-      workers:
-        maxWorkers > 0 && plane.countWorkers !== undefined
-          ? plane.countWorkers(bag, opts.workerEnv)
-          : 0,
-      batchWorkers:
-        maxBatchWorkers > 0 && batch && plane.countBatchWorkers !== undefined
-          ? plane.countBatchWorkers(bag, opts.workerEnv)
-          : 0,
-    }),
-    // listLive absent means handoff correlation has nothing to prove
-    // against — pass undefined, not an empty iterator (the census
-    // reads that as "protection on, nothing provable" and
-    // double-counts every landing the count just swept)
-    liveRows:
-      plane.listLive === undefined
-        ? undefined
-        : () => {
-            const listLive = plane.listLive;
-            return listLive === undefined ? [] : listLive(bag, opts.workerEnv);
-          },
+    // the after-tally must see each of them. The live rows ride the
+    // SAME observation, enumerated ahead of the counts — a row the
+    // counts never saw can only be a session that died between the
+    // list and the count, never a landing a later scan forgave on
+    // behalf of a count that missed it.
+    countLive: () => {
+      const rows = plane.listLive?.(bag, opts.workerEnv);
+      return {
+        counts: {
+          // the provider cap counts the same census the session lane
+          // does — the plane's host-wide sweep plus the claims held
+          sessions:
+            maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0,
+          workers:
+            maxWorkers > 0 && plane.countWorkers !== undefined
+              ? plane.countWorkers(bag, opts.workerEnv)
+              : 0,
+          batchWorkers:
+            maxBatchWorkers > 0 && batch && plane.countBatchWorkers !== undefined
+              ? plane.countBatchWorkers(bag, opts.workerEnv)
+              : 0,
+        },
+        // listLive absent means handoff correlation has nothing to
+        // prove against — undefined, not an empty set (the census
+        // reads that as "protection on, nothing provable" and
+        // double-counts every landing the count just swept)
+        ...(rows === undefined ? {} : { rows }),
+      };
+    },
   });
   const sessions = census.counts.sessions;
   const workers = census.counts.workers;
@@ -1013,6 +1177,11 @@ interface SessionLaneOpts {
    *  `sessions + reservations` when the caller does not supply one
    *  (a single-plane command needs no wider count). */
   providerCensus?: () => number;
+  /** Called when a work-budget segment just opened for `key` on this
+   *  plane's kind — the spawn path records them so a LATER refusal
+   *  (fleet cap, a sibling plane's verdict) can refund the segment
+   *  instead of charging minutes for a worker that never ran. */
+  budgetCharged?: (kind: string) => void;
 }
 
 /** The work budget (spec bro-tdndq) — the fleet's running-time
@@ -1050,6 +1219,10 @@ function checkWorkBudget(
       'cap'
     );
   }
+  // the segment is live bookkeeping now — tell the caller so a later
+  // refusal can hand it back; a refund that never comes charges it
+  // when the next scan closes it, the leak this hook exists to close
+  opts.budgetCharged?.(plane.kind);
 }
 
 /**

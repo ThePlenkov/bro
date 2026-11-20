@@ -144,11 +144,29 @@ const spawnDevinCli = (env: Record<string, string> = {}): ChildProcess => {
   // `sleep 30 & wait` — NOT a bare `sleep 30`: bash execs a lone
   // last command, the argv[0] becomes 'sleep', and the identity check
   // reads a non-devin process. The & + wait keeps bash itself (the
-  // 'devin' argv[0]) alive for the count's whole window.
+  // 'devin' argv[0]) alive for the count's whole window — and puts
+  // `sleep` in the fixture's own process group, so `detached` lets
+  // killDevinCli reap BOTH: killing bash alone leaves the sleep to
+  // run its timer out.
   return spawn(bin, ['-c', 'sleep 30 & wait'], {
     stdio: 'ignore',
+    detached: true,
     env: { ...process.env, ...env },
   });
+};
+
+/** Stop the whole fixture group — `detached` made the child a group
+ *  leader and `sleep` shares that group, so a -pid kill stops both;
+ *  a lone-child kill orphans the sleep for its whole timer. */
+const killDevinCli = (child: ChildProcess): void => {
+  if (child.pid === undefined) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
 };
 
 /** An `lstart=,command=` row as ps prints it — `day mon dd hh:mm:ss
@@ -719,7 +737,7 @@ describe('countDevinWorkers', () => {
         assert.equal(countDevinWorkers([dir]), 1);
       });
     } finally {
-      child.kill('SIGKILL');
+      killDevinCli(child);
     }
   });
 
@@ -870,7 +888,7 @@ describe('listDevinSessions', () => {
         assert.equal(rows[0]!.agentId, 'native-xyz');
       });
     } finally {
-      child.kill('SIGKILL');
+      killDevinCli(child);
     }
   });
 

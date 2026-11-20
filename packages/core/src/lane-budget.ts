@@ -312,6 +312,32 @@ export function laneBudgetAdmit(
   });
 }
 
+/** `laneBudgetAdmit`'s rollback — the spawn's claim released before
+ *  the worker ever ran, so the segment it opened goes back uncharged:
+ *  the newest OPEN segment for `key` is removed outright (a closed-at-
+ *  now segment would still meter its residue). No-op when the worker
+ *  has no open segment — a double refund cannot eat an earlier admit's
+ *  running time. */
+export function laneBudgetRefund(kind: string, key: string, opts: LaneBudgetOpts = {}): void {
+  mutate(kind, opts, ledger => {
+    const worker = ledger.workers[key];
+    if (worker === undefined) {
+      return;
+    }
+    for (let i = worker.segments.length - 1; i >= 0; i--) {
+      if (worker.segments[i].e === undefined) {
+        worker.segments.splice(i, 1);
+        break;
+      }
+    }
+    if (worker.segments.length === 0 && worker.paused !== true) {
+      delete ledger.workers[key];
+      return;
+    }
+    ledger.workers[key] = worker;
+  });
+}
+
 /** Freeze bookkeeping: the worker stopped spending — close its open
  *  segment and mark it owed a fresh one on thaw. Creates the record
  *  when missing (a live worker whose ledger entry pruned out between

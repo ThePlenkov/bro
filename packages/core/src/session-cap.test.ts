@@ -513,6 +513,52 @@ describe('provider cap admission (spec bro-x601l)', () => {
     });
   });
 
+  test('an unregistered plane still joins the provider census — the public API enforces the cap', () => {
+    withSlots(dir => {
+      clearSessionPlanes();
+      try {
+        // `admitSessionStart` takes its plane directly — the registry
+        // never heard of it, so `planesStartingSessions` returns
+        // nothing and a registry-only census would see zero. The
+        // admit's own plane must join the census or its live sessions
+        // and claims escape the cap entirely (spec bro-x601l).
+        const plane = testPlane('alpha', { live: 1 });
+        const refused = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { reservationsDir: dir } },
+          key: 'call-1',
+          providerCap: { provider: 'prov', cap: 1, reservationsDir: dir },
+        });
+        // the census sees the plane's 1 live + the held claim = 2 > 1
+        assert.match(refused?.refusal ?? '', /provider_cap/);
+        assert.equal(countSessionReservations(dir), 0);
+      } finally {
+        clearSessionPlanes();
+      }
+    });
+  });
+
+  test('a registered plane is counted once — the census dedups by kind', () => {
+    withSlots(dir => {
+      const plane = testPlane('alpha', { live: 1 });
+      withPlane(plane, () => {
+        // live 1 + the held claim = 2 = cap — admitted. A census that
+        // counted the plane twice (registered AND appended) would read
+        // 3 > 2 and refuse a rightful start.
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { reservationsDir: dir } },
+          key: 'call-1',
+          providerCap: { provider: 'prov', cap: 2, reservationsDir: dir },
+        });
+        assert.equal(admitted?.refusal, undefined);
+        assert.equal(countSessionReservations(dir), 1);
+      });
+    });
+  });
+
   test('the provider verdict rides the same admit as the kind quota — one claim', () => {
     withSlots(dir => {
       const plane = testPlane('alpha', { live: 0 });

@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
-import { laneBudgetAdmit, laneBudgetKey } from './lane-budget.ts';
+import { laneBudgetAdmit, laneBudgetKey, laneBudgetRefund } from './lane-budget.ts';
 import {
   admitSessionSlot,
   clearSessionPlanes,
@@ -24,6 +24,7 @@ import {
   releaseSessionSlot,
   reserveSessionSlot,
   retagSessionSlot,
+  sessionClaimName,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
@@ -303,6 +304,53 @@ describe('pid-governed claims (spec bro-x601l)', () => {
       };
       assert.equal(countSessionReservations(dir, undefined, { pidAlive: stranger }), 0);
       assert.deepEqual(seen, [[4242, 'boot-1']]);
+    });
+  });
+
+  test('a null-content slot is holder-less, not a skip — fresh counts, stale reaps', () => {
+    withDir(dir => {
+      // JSON `null` parses but carries no pid — a fresh claim must
+      // still count (a skipped one under-counts the lane), and a stale
+      // one takes the normal no-holder reap
+      const slot = join(dir, 'nullish.slot');
+      writeFileSync(slot, 'null');
+      assert.equal(countSessionReservations(dir), 1);
+      const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000);
+      utimesSync(slot, past, past);
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => true }), 0);
+      assert.equal(readdirSync(dir).length, 0);
+    });
+  });
+
+  test('the deterministic claim name keeps kind and key unambiguous (spec bro-x601l)', () => {
+    // (alpha, beta-x) and (alpha-beta, x) must never share a filename —
+    // a collision would read another call's claim as this call's own
+    assert.notEqual(sessionClaimName('alpha', 'beta-x', 0), sessionClaimName('alpha-beta', 'x', 0));
+    // identical pairs stay idempotent — a repeat claims no second slot
+    assert.equal(sessionClaimName('alpha', 'beta-x', 0), sessionClaimName('alpha', 'beta-x', 0));
+    // and the index suffix stays a distinct slot per start
+    assert.notEqual(sessionClaimName('alpha', 'k', 0), sessionClaimName('alpha', 'k', 1));
+  });
+
+  test('a retag drops the prior start identity when the new holder is unreadable', () => {
+    withDir(dir => {
+      // a holder whose /proc entry is gone yields no start — carrying
+      // the OLD holder's over would pin the new pid against a start it
+      // never owned and the stale check would reap a live lane
+      const slot = join(dir, 'held.slot');
+      writeFileSync(
+        slot,
+        JSON.stringify({ at: Date.now(), pid: 1111, start: 'old-boot', key: 'k-1' })
+      );
+      retagSessionSlot(slot, 99999999); // no /proc/<pid>/stat — the lookup fails
+      const meta = JSON.parse(readFileSync(slot, 'utf8')) as {
+        pid: number;
+        start?: string;
+        key?: string;
+      };
+      assert.equal(meta.pid, 99999999);
+      assert.equal(meta.start, undefined);
+      assert.equal(meta.key, 'k-1');
     });
   });
 
@@ -904,6 +952,35 @@ describe('the work budget lane (bro-tdndq)', () => {
         rmSync(budgetDir, { recursive: true, force: true });
       }
     });
+  });
+
+  test('laneBudgetRefund removes the newest open segment — a refused spawn never meters (spec bro-x601l)', () => {
+    const budgetDir = mkdtempSync(join(tmpdir(), 'bro-budget-'));
+    try {
+      const cfg = { minutes: 30, windowMinutes: 60 };
+      const key = laneBudgetKey('repo', 'x-1');
+      laneBudgetAdmit('testkind', key, cfg, { now: 0, dir: budgetDir });
+      laneBudgetRefund('testkind', key, { dir: budgetDir });
+      // the segment is gone entirely — the ledger holds no worker at all
+      const ledger = JSON.parse(readFileSync(join(budgetDir, 'testkind.json'), 'utf8')) as {
+        workers: Record<string, { segments: unknown[] }>;
+      };
+      assert.deepEqual(ledger.workers, {});
+      // a double refund cannot eat another admit's running time: the
+      // next admit's segment is ITS own, and a no-op refund leaves it
+      const admitted = laneBudgetAdmit('testkind', key, cfg, { now: 1, dir: budgetDir });
+      assert.equal(admitted.ok, true);
+      laneBudgetRefund('testkind', laneBudgetKey('repo', 'other'), { dir: budgetDir });
+      const after = JSON.parse(readFileSync(join(budgetDir, 'testkind.json'), 'utf8')) as {
+        workers: Record<string, { segments: Array<{ e?: number }> }>;
+      };
+      assert.equal(
+        after.workers[key]?.segments.some(seg => seg.e === undefined),
+        true
+      );
+    } finally {
+      rmSync(budgetDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -2353,6 +2353,104 @@ function capViewsOrThrow(
   }
 }
 
+/** The claim half of the un-locked admit — land every claim the armed
+ *  kinds owe, first, so the census that follows already sees this
+ *  caller. `armed` is the pre-claim selection the caller computed
+ *  (undefined under a provider cap — every claiming plane arms). A
+ *  repeat event's slots are already held (its key is idempotent), and
+ *  a mid-loop failure hands back the claims already taken instead of
+ *  stranding them against the cap. */
+function collectLaneClaims(args: {
+  cfg: ConductorConfig;
+  command: string;
+  claimKey: string;
+  planes: ReturnType<typeof planesStartingSessions>;
+  providerCap: ReturnType<typeof laneProviderCap>;
+  armed: Set<string> | undefined;
+}): string[] {
+  const { cfg, command, claimKey, planes, providerCap, armed } = args;
+  const held: string[] = [];
+  try {
+    if (planes.length === 0) {
+      // a provider NO plane counts still claims — the provider-
+      // namespaced ledger is its whole census (spec bro-x601l)
+      if (providerCap !== undefined) {
+        held.push(
+          ...reserveSessionStart({
+            kind: providerSlotsKind(providerCap.provider),
+            agents: undefined,
+            key: claimKey,
+            count: 1,
+            dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
+          }).paths
+        );
+      }
+      return held;
+    }
+    for (const plane of planes) {
+      // a quota-armed kind claims its starts; an unarmed one claims
+      // only when the provider cap armed its census — the same gate
+      // the locked admission runs. The claim lands in the SAME dir
+      // the locked section's does, or locked and un-locked callers
+      // would never see each other on the census.
+      if (armed !== undefined && !armed.has(plane.kind)) {
+        continue;
+      }
+      held.push(
+        ...reserveSessionStart({
+          kind: plane.kind,
+          agents: cfg.agents,
+          key: claimKey,
+          count: plane.startsSessions?.(command) ?? 1,
+          dir: sessionStartCensusDir(plane, cfg.agents, providerCap),
+        }).paths
+      );
+    }
+    return held;
+  } catch (err) {
+    releaseSessionStart(held);
+    throw new Error(
+      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+    );
+  }
+}
+
+/** The verdict half of the un-locked admit — the post-claim census:
+ *  every held claim (this caller's included) already sits inside
+ *  `live`, so the verdicts are the strict post-claim tests and no
+ *  `starts` may be added again. Returns the refusal and its class, or
+ *  `undefined` to keep the claims. A census that cannot be
+ *  established throws untranslated — the caller owns the release and
+ *  the error shape. */
+function laneCapVerdict(args: {
+  cfg: ConductorConfig;
+  command: string;
+  planes: ReturnType<typeof planesStartingSessions>;
+  providerCap: ReturnType<typeof laneProviderCap>;
+  excludePids: ReadonlySet<number>;
+}): { refusal: string; provider: boolean } | undefined {
+  const { cfg, command, planes, providerCap, excludePids } = args;
+  const postViews = sessionCapViews(command, cfg.agents, undefined, excludePids);
+  const providerRefusal =
+    providerCap === undefined
+      ? undefined
+      : providerCapHeldRefusal(
+          providerCap,
+          planes.length === 0
+            ? countSessionReservations(
+                providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
+              )
+            : // the combined census the locked section judges — every
+              // plane the command claims on the lane, deduped on the
+              // census dir the claims landed in
+              providerCapCensus(planes, cfg.agents, undefined, providerCap, excludePids)
+        );
+  const refusal =
+    providerRefusal ??
+    postViews.map(sessionCapHeldRefusal).find((line): line is string => line !== undefined);
+  return refusal === undefined ? undefined : { refusal, provider: providerRefusal !== undefined };
+}
+
 /** The un-locked claim+judge — the contention fallback on every caller
  *  of `admitLaneCap`, kept so a mutex that outlives the wait never
  *  stalls the request loop.
@@ -2387,70 +2485,10 @@ export function admitLaneCapUnlocked(
     }
     armed = new Set(views.map(v => v.kind));
   }
-  // claim first — a repeat event's slots are already held (its key is
-  // idempotent), and a mid-loop failure hands back the claims already
-  // taken instead of stranding them against the cap
-  const held: string[] = [];
+  const held = collectLaneClaims({ cfg, command, claimKey, planes, providerCap, armed });
+  let verdict: { refusal: string; provider: boolean } | undefined;
   try {
-    if (planes.length === 0) {
-      // a provider NO plane counts still claims — the provider-
-      // namespaced ledger is its whole census (spec bro-x601l)
-      if (providerCap !== undefined) {
-        held.push(
-          ...reserveSessionStart({
-            kind: providerSlotsKind(providerCap.provider),
-            agents: undefined,
-            key: claimKey,
-            count: 1,
-            dir: providerSlotsDir(providerCap.provider, providerCap.reservationsDir),
-          }).paths
-        );
-      }
-    } else {
-      for (const plane of planes) {
-        // a quota-armed kind claims its starts; an unarmed one claims
-        // only when the provider cap armed its census — the same gate
-        // the locked admission runs. The claim lands in the SAME dir
-        // the locked section's does, or locked and un-locked callers
-        // would never see each other on the census.
-        if (armed !== undefined && !armed.has(plane.kind)) {
-          continue;
-        }
-        held.push(
-          ...reserveSessionStart({
-            kind: plane.kind,
-            agents: cfg.agents,
-            key: claimKey,
-            count: plane.startsSessions?.(command) ?? 1,
-            dir: sessionStartCensusDir(plane, cfg.agents, providerCap),
-          }).paths
-        );
-      }
-    }
-  } catch (err) {
-    releaseSessionStart(held);
-    throw new Error(
-      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
-    );
-  }
-  // the post-claim census — every held claim (this caller's included)
-  // already sits inside `live`, so the verdicts are the strict
-  // post-claim tests and no `starts` may be added again
-  let postViews: ReturnType<typeof sessionCapViews>;
-  let providerLive = 0;
-  try {
-    postViews = sessionCapViews(command, cfg.agents, undefined, excludePids);
-    if (providerCap !== undefined) {
-      providerLive =
-        planes.length === 0
-          ? countSessionReservations(
-              providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
-            )
-          : // the combined census the locked section judges — every
-            // plane the command claims on the lane, deduped on the
-            // census dir the claims landed in
-            providerCapCensus(planes, cfg.agents, undefined, providerCap, excludePids);
-    }
+    verdict = laneCapVerdict({ cfg, command, planes, providerCap, excludePids });
   } catch (err) {
     releaseSessionStart(held);
     if (err instanceof SpawnError) {
@@ -2460,20 +2498,11 @@ export function admitLaneCapUnlocked(
       `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
     );
   }
-  const providerRefusal =
-    providerCap === undefined ? undefined : providerCapHeldRefusal(providerCap, providerLive);
-  const refusal =
-    providerRefusal ??
-    postViews.map(sessionCapHeldRefusal).find((line): line is string => line !== undefined);
-  if (refusal !== undefined) {
+  if (verdict !== undefined) {
     // the same refusal class the locked section throws — the wire
     // reads 'cap' as the park verdict either path takes
     releaseSessionStart(held);
-    throw new SpawnError(
-      refusal,
-      'cap',
-      providerRefusal !== undefined ? 'provider_cap' : undefined
-    );
+    throw new SpawnError(verdict.refusal, 'cap', verdict.provider ? 'provider_cap' : undefined);
   }
   return claimRelease(held);
 }

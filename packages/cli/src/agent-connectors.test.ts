@@ -31,6 +31,7 @@ import {
   BATCH_MARKER_ENV,
   deriveProviderWalls,
   handleOwner,
+  laneBudgetDir,
   localLeaseStore,
   projectId,
   readLedgerWalls,
@@ -899,7 +900,11 @@ function connectorContract(b: BackendCase): void {
         (err: unknown) =>
           err instanceof SpawnError &&
           err.kind === 'cap' &&
-          /provider 'devacp' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+          // the outer gate's pre-flight — the pre-claim phrasing: the
+          // one live lane plus this starting one over the cap of 1
+          /provider 'devacp' lane cap reached — 1 live \+ 1 starting > 1.*provider_cap/.test(
+            err.message
+          )
       );
       assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
     } finally {
@@ -1163,6 +1168,185 @@ function connectorContract(b: BackendCase): void {
         for (const plane of prior) registerSessionPlane(plane);
         rmSync(dirA, { recursive: true, force: true });
         rmSync(dirB, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a multi-start command on the quota plane owes the provider lane every start (spec bro-x601l)', async () => {
+      // alpha IS the spawn's quota lane — the provider pass defers its
+      // verdict to the quota admit. A single claim there would judge
+      // 1/1 and admit a command that opens TWO alpha sessions on a cap
+      // of 1; the per-start admit lands the second claim inside the
+      // same locked section and the aggregate verdict sees it
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run alpha-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov', sessionKind: 'alpha' },
+            alpha: { maxSessions: 3, reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 1 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+        // every claim the refused spawn briefly held went back
+        assert.equal(countSessionReservations(dirA), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('the provider verdict precedes the fleet cap — a full lane is never masked as repo-local (spec bro-x601l)', async () => {
+      // provider cap AND fleet cap both full: the account lane is the
+      // outer gate, so the refusal names provider_cap, not the fleet
+      // count — a masked provider refusal parks the wrong budget
+      const f = fixture(
+        [
+          { id: 'fx-1', status: 'open' },
+          { id: 'fx-2', status: 'open' },
+        ],
+        'node {promptFile} alpha-run'
+      );
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov', sessionKind: 'alpha' },
+            alpha: { maxSessions: 3, reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run' },
+          },
+          fleet: { maxConcurrent: 1, providerCaps: { prov: 1 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        assert.equal(first.state, 'running');
+        // fleet 1/1 AND provider 1/1 — the refusal must name the lane
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached.*provider_cap/.test(err.message) &&
+            !/fleet cap reached/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
+        await c.stop(first.id);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a refused spawn refunds the work-budget segment its earlier claims opened (spec bro-x601l)', async () => {
+      // a batch spawn: alpha's admit opens a work-budget segment; beta's
+      // lane reads full only inside its own locked section (its live
+      // count turns 1 once alpha's claim exists). The refusal must hand
+      // the segment back — an open one charges worker-minutes for a
+      // worker that never ran
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const budgetLedger = join(laneBudgetDir(), 'alpha.json');
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          // live turns 1 only once alpha's claim exists — the pre-flight
+          // admits on 0+1 and the post-claim census is what refuses, so
+          // the segment is real when the verdict lands
+          countLive: () => (countSessionReservations(dirA) > 0 ? 1 : 0),
+          startsSessions: cmd => (cmd.match(/beta-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            alpha: { maxSessions: 5, workBudgetMinutes: 30, reservationsDir: dirA },
+            beta: { maxSessions: 1, reservationsDir: dirB },
+          },
+          fleet: { maxConcurrent: 0 },
+        };
+        const c = b.make({ dir: f.main }, env);
+        await assert.rejects(
+          c.spawn({
+            ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+            env: { BRO_BATCH: '1' },
+          }),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /beta session quota reached/.test(err.message)
+        );
+        assert.equal(countSessionReservations(dirA), 0);
+        assert.equal(countSessionReservations(dirB), 0);
+        // the refunded segment leaves no open charge — the ledger may
+        // keep an empty record, never an un-closed segment
+        if (existsSync(budgetLedger)) {
+          const ledger = JSON.parse(readFileSync(budgetLedger, 'utf8')) as {
+            workers: Record<string, { segments: Array<{ e?: number }> }>;
+          };
+          for (const worker of Object.values(ledger.workers)) {
+            assert.equal(
+              worker.segments.every(seg => seg.e !== undefined),
+              true,
+              'an open segment survived the refused spawn'
+            );
+          }
+        }
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        rmSync(budgetLedger, { force: true });
         cleanup(f);
       }
     });

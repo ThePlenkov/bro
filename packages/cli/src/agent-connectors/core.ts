@@ -48,6 +48,7 @@ import {
   classifyExitCauseParts,
   cliCommandModel,
   commandCliName,
+  countSessionReservations,
   DEFAULT_CONFIG,
   type DiscoveredSession,
   deriveAccountWalls,
@@ -66,6 +67,8 @@ import {
   handleOwner,
   isAgentCause,
   isAgentLearnCheck,
+  laneBudgetKey,
+  laneBudgetRefund,
   rateDeathBackoff,
   isBatchSpawn,
   isQualifiedRouteId,
@@ -115,6 +118,8 @@ import {
   sessionCapViews,
   planesStartingSessions,
   providerCapCensus,
+  providerCapRefusal,
+  providerSlotsDir,
   type SessionPlane,
   SpawnError,
   type SpawnSpec,
@@ -2607,6 +2612,9 @@ function admitSpawnedCommandStarts(args: {
   /** the spawn's own quota lane — its admit below covers the kind's
    *  full lane; the cross-kind loops must not double-claim it */
   quotaPlaneKind: string | undefined;
+  /** reports a work-budget segment an admit just opened — the caller
+   *  refunds them all when a later refusal unwinds the spawn */
+  budgetCharged?: (kind: string) => void;
   out: string[];
 }): void {
   const {
@@ -2622,6 +2630,7 @@ function admitSpawnedCommandStarts(args: {
     providerCap,
     providerCensus,
     quotaPlaneKind,
+    budgetCharged,
     out,
   } = args;
   // a pre-flight refusal ahead of any claim; the authoritative
@@ -2666,6 +2675,7 @@ function admitSpawnedCommandStarts(args: {
         // than the provider's own entry did, and the excess claims
         // land on the SAME provider-counted ledger
         ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
+        ...(budgetCharged === undefined ? {} : { budgetCharged }),
       });
       if (claimed !== undefined) {
         out.push(claimed);
@@ -2691,6 +2701,7 @@ function admitSpawnedCommandStarts(args: {
         liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
         providerCap,
         providerCensus,
+        ...(budgetCharged === undefined ? {} : { budgetCharged }),
       });
       if (claimed !== undefined) {
         out.push(claimed);
@@ -2868,6 +2879,13 @@ function prepareSpawn(
   // replaces the slot, exactly like a plane's own mark retiring a
   // kind slot inside its sweep)
   const providerReservations: string[] = [];
+  // the work-budget ledger's own facts (spec bro-tdndq): the repo
+  // scope keys this rig's segments in the host-shared ledger, and
+  // work-budget segments this spawn's admits opened sit in
+  // budgetChargedKinds — both catches hand them back so a refused
+  // spawn never meters minutes for a worker that never ran
+  const scope = projectId(dir);
+  const budgetChargedKinds: string[] = [];
   try {
     // Cross-kind admission: judge every session kind the spawned command
     // starts — a native/template worker running e.g. `devin -p …` consumes
@@ -2884,11 +2902,8 @@ function prepareSpawn(
       return typeof opts.spawnCommand === 'string' ? opts.spawnCommand : '';
     })();
     const agents = opts.env?.agents ?? sessionQuota?.agents ?? {};
-    // the work-budget ledger's own facts (spec bro-tdndq): the repo
-    // scope keys this rig's segments in the host-shared ledger, and the
-    // live-keys map lets each admission close segments whose workers
-    // the registry says already ended
-    const scope = projectId(dir);
+    // the live-keys map lets each admission close budget segments
+    // whose workers the registry says already ended
     const liveByKind = liveSessionKeysByKind(registry);
     // true when the provider's own session plane IS the quota lane's —
     // the verdict then rides sessionQuota's admitSessionSlot (below)
@@ -2918,20 +2933,55 @@ function prepareSpawn(
     // claim that outlasts the provider pass's own claims still lands on
     // the provider lane's ledger, so its admit rides the aggregate too
     const providerPlaneKinds = new Set<string>();
+    // every budget segment an admit opens registers on
+    // budgetChargedKinds (hoisted above the try) — a LATER refusal
+    // hands them all back in the catch
+    const budgetCharged = (kind: string): void => {
+      budgetChargedKinds.push(kind);
+    };
+    let providerCommand = '';
+    let providerPlanes: SessionPlane[] = [];
     if (providerCap !== undefined) {
-      const providerCommand = providerEntryCommand(env, providerCap.provider);
-      const providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
+      providerCommand = providerEntryCommand(env, providerCap.provider);
+      providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
       if (providerPlanes.length > 0) {
         const planes = providerPlanes;
         const lane = providerCap;
         providerCensus = () => providerCapCensus(planes, agents, spec.env, lane);
+        for (const plane of planes) {
+          providerPlaneKinds.add(plane.kind);
+        }
       }
       // the provider session the quota lane already claims — passing
       // the verdict to sessionQuota's own call keeps one claim for the
       // one session (a double claim would count the lane twice)
       quotaCoversProvider = providerPlanes.some(p => p.kind === sessionQuota?.plane.kind);
+      // the OUTER gate's read-only pre-flight — judged BEFORE the
+      // repo-local fleet cap: when the provider verdict would defer to
+      // the quota lane's own admit (its only plane IS that lane), a
+      // full fleet would otherwise refuse first and name the wrong
+      // constraint. The authoritative count still re-runs inside each
+      // plane's locked section after the claims land.
+      const providerLive =
+        providerPlanes.length > 0
+          ? (providerCensus as () => number)()
+          : providerRegistryCensus(dir, home, registry, env, providerCap.provider) +
+            countSessionReservations(
+              providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
+            );
+      const providerRefusal = providerCapRefusal(providerCap, providerLive, 1);
+      if (providerRefusal !== undefined) {
+        throw new SpawnError(providerRefusal, 'cap', 'provider_cap');
+      }
+    }
+    // the provider verdict judged — the repo-local fleet cap is the
+    // INNER gate (spec bro-x601l: an account-lane refusal must not be
+    // masked by a repo-local count); still before the registry write,
+    // and before ANY claim or budget segment lands, so a refusal here
+    // leaves no half-spawned state to hand back
+    enforceFleetCap(dir, home, registry, spec, opts.cap);
+    if (providerCap !== undefined) {
       for (const plane of providerPlanes) {
-        providerPlaneKinds.add(plane.kind);
         if (plane.kind === sessionQuota?.plane.kind) {
           continue;
         }
@@ -2948,6 +2998,7 @@ function prepareSpawn(
             liveKeys: liveByKind.get(plane.kind) ?? EMPTY_KEYS,
             providerCap,
             providerCensus,
+            budgetCharged,
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);
@@ -2974,17 +3025,8 @@ function prepareSpawn(
           }
           providerReservations.push(...admission.paths);
         }
-      } else if (!quotaCoversProvider) {
-        // plane-covered but NOT this spawn's session kind — the
-        // providerCap verdict already ran inside each plane's section
-        // above; nothing extra to do
       }
     }
-    // the provider verdict judged — the repo-local fleet cap is the
-    // INNER gate (spec bro-x601l: an account-lane refusal must not be
-    // masked by a repo-local count); still before the registry write,
-    // so a refusal leaves no half-spawned state
-    enforceFleetCap(dir, home, registry, spec, opts.cap);
     if (spawnedCommand !== '') {
       admitSpawnedCommandStarts({
         spawnedCommand,
@@ -2999,26 +3041,65 @@ function prepareSpawn(
         providerCap,
         providerCensus,
         quotaPlaneKind: sessionQuota?.plane.kind,
+        budgetCharged,
         out: crossKindReservations,
       });
     }
-    reservation =
-      sessionQuota === undefined
-        ? undefined
-        : admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
-            key: agentId,
-            molStep: spec.molStep,
-            workerEnv: spec.env,
-            scope,
-            liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
-            ...(quotaCoversProvider ? { providerCap, providerCensus } : {}),
-          });
+    if (sessionQuota !== undefined) {
+      // every session the spawned command opens on the quota kind owes
+      // the lane a claim — a multi-start command judged once but
+      // claimed once would read one session where two land, and the
+      // provider census would admit on a slot count that under-counts
+      // the lane. Each admit re-judges post-claim: the Nth claim trips
+      // the refusal exactly when headroom cannot seat N.
+      const quotaView = sessionCapViews(spawnedCommand, agents, spec.env).find(
+        v => v.kind === sessionQuota.plane.kind
+      );
+      const quotaStarts = Math.max(
+        1,
+        quotaView?.starts ?? sessionQuota.plane.startsSessions?.(spawnedCommand) ?? 1
+      );
+      for (let i = 0; i < quotaStarts; i++) {
+        const claimed = admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
+          key: agentId,
+          molStep: spec.molStep,
+          workerEnv: spec.env,
+          scope,
+          liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
+          ...(quotaCoversProvider ? { providerCap, providerCensus } : {}),
+          budgetCharged,
+        });
+        if (i === 0) {
+          reservation = claimed;
+        } else if (claimed !== undefined) {
+          crossKindReservations.push(claimed);
+        }
+      }
+    }
   } catch (err) {
-    // every claim this spawn holds goes back — the caller never saw them
+    // every claim this spawn holds goes back — the caller never saw
+    // them, and every budget segment the claims charged refunds: a
+    // refused spawn never ran a worker to spend them on
+    if (reservation !== undefined) {
+      // the quota lane's own claims land per-start — an early one can
+      // be held when a later start's verdict refuses; the first catch
+      // owns it just like the second
+      releaseSessionSlot(reservation);
+      reservation = undefined;
+    }
     releaseSessionStart(crossKindReservations);
     crossKindReservations.length = 0;
     releaseSessionStart(providerReservations);
     providerReservations.length = 0;
+    for (const kind of budgetChargedKinds) {
+      try {
+        laneBudgetRefund(kind, laneBudgetKey(scope, agentId));
+      } catch {
+        // the refund is best-effort — a failed one charges the residue
+        // the next scan closes, the pre-refund behavior
+      }
+    }
+    budgetChargedKinds.length = 0;
     releaseSpawnLease(dir, workLease.lease);
     // a 'cap' refusal can be the work budget parking the lane (spec
     // bro-tdndq): the spend in flight must stop too — the same freeze
@@ -3092,6 +3173,16 @@ function prepareSpawn(
     }
     releaseSessionStart(crossKindReservations);
     releaseSessionStart(providerReservations);
+    // the work-budget segments the released claims opened refund too —
+    // a spawn that never ran must not meter minutes (spec bro-x601l)
+    for (const kind of budgetChargedKinds) {
+      try {
+        laneBudgetRefund(kind, laneBudgetKey(scope, agentId));
+      } catch {
+        // best-effort — a missed refund closes on the next budget scan
+      }
+    }
+    budgetChargedKinds.length = 0;
     // the same door for the charge: everything still inside this try
     // precedes launch, so a spawn that never ran gives its tokens back
     if (charged !== undefined) {

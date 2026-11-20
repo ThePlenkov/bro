@@ -3598,10 +3598,21 @@ describe('the provider lane cap (spec bro-x601l)', () => {
         countLive: () => 0,
         startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
       });
+      // dv2's census fails only once ITS OWN claim exists — the earlier
+      // (dv) admit has already returned then, so the claim dir holds
+      // dv's slot at the failure point. An unconditional throw fires
+      // during dv's aggregate census instead: dv2 never claims, and the
+      // dir assertions below pass even if the conductor's rollback is
+      // removed entirely.
+      let dvHeldAtFailure = -1;
       registerSessionPlane({
         kind: 'dv2',
         detectsCli: cli => cli === 'dv',
         countLive: () => {
+          if (countSessionReservations(sessionReservationsDir('dv2', CFG.agents)) === 0) {
+            return 0;
+          }
+          dvHeldAtFailure = countSessionReservations(sessionReservationsDir('dv', CFG.agents));
           throw new SpawnError('cannot count dv2', 'unavailable');
         },
         startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
@@ -3612,6 +3623,9 @@ describe('the provider lane cap (spec bro-x601l)', () => {
           admitLaneCap(cfg, 'req-1'),
           (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
         );
+        // dv's claim WAS held when dv2's admit failed — the clean dirs
+        // are the rollback's work, not a claim that never landed
+        assert.equal(dvHeldAtFailure, 1);
         assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 0);
         assert.equal(countSessionReservations(sessionReservationsDir('dv2', cfg.agents)), 0);
       } finally {
@@ -3684,9 +3698,12 @@ describe('the provider lane cap (spec bro-x601l)', () => {
     withXdg(async () => {
       const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
       const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
-      const { url, close } = await listen(
-        deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
-      );
+      // the proxy outlives the listener — close() stops the HTTP side
+      // but leaves the pooled peer and conversation A's retained
+      // session claiming the ledger, so dispose runs first while the
+      // xdg ledger still stands
+      const proxy = conductorProxy(cfg, { acp: { peer: fake.app } });
+      const { url, close } = await listen(deps({ provider: proxy }));
       try {
         const post = (key: string) =>
           fetch(`${url}/v1/messages`, {
@@ -3709,6 +3726,9 @@ describe('the provider lane cap (spec bro-x601l)', () => {
         assert.match(await b.text(), /— cause: provider_cap/);
         assert.equal(fake.sessions.length, 1, 'the refused open opened nothing');
       } finally {
+        // dispose BEFORE the ledger is removed — the pooled peer and
+        // the retained session release their claims back onto it
+        proxy.dispose();
         await close();
       }
     }));

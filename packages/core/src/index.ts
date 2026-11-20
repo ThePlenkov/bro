@@ -196,6 +196,7 @@ export {
   laneBudgetKey,
   laneBudgetLevel,
   laneBudgetPause,
+  laneBudgetRefund,
   laneBudgetResume,
 } from './lane-budget.ts';
 export type { LaneBudgetLevel, LaneBudgetOpts, LaneWorkBudget } from './lane-budget.ts';
@@ -681,6 +682,7 @@ export {
   retagSessionSlots,
   SESSION_SLOT_TTL_MS,
   sessionAdmissionLock,
+  sessionClaimName,
   sessionLaneCensus,
   sessionPlane,
   sessionPlaneForCli,

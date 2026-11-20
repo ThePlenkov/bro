@@ -33,6 +33,7 @@ import {
   releaseSessionSlot,
   reserveSessionSlotOnce,
   sessionAdmissionLock,
+  sessionClaimName,
   sessionLaneCensus,
   sessionPlanes,
   sessionQuotaConfig,
@@ -161,17 +162,19 @@ function capViewFor(
   const bag = agents?.[plane.kind] ?? {};
   const census = sessionLaneCensus({
     dirs: [sessionSlotsDir(plane.kind, quota.reservationsDir)],
-    countLive: () => planeLiveExcluding(plane, bag, workerEnv, excludePids),
-    // undefined, not an empty iterator — no listLive means no
-    // provable handoff, and protection-on-unprovable double-counts
-    // every landing the count itself swept
-    liveRows:
-      plane.listLive === undefined
-        ? undefined
-        : () => {
-            const listLive = plane.listLive;
-            return listLive === undefined ? [] : listLive(bag, workerEnv);
-          },
+    countLive: () => {
+      // the rows and the count are ONE observation — enumerated ahead
+      // of the count so a row can never forgive a claim for a landing
+      // the count had no chance to charge
+      const rows = plane.listLive?.(bag, workerEnv);
+      return {
+        counts: planeLiveExcluding(plane, bag, workerEnv, excludePids, rows),
+        // undefined, not an empty set — no listLive means no provable
+        // handoff, and protection-on-unprovable double-counts every
+        // landing the count itself swept
+        ...(rows === undefined ? {} : { rows }),
+      };
+    },
   });
   return { kind: plane.kind, live: census.counts + census.claims, cap: quota.maxSessions, starts };
 }
@@ -273,7 +276,7 @@ export function reserveSessionStart(claim: {
       // collapse onto the same filename: the second exclusive create
       // would read the first plane's claim as its own and a multi-plane
       // command would count one slot for two sessions
-      const claimed = reserveSessionSlotOnce(dir, `${claim.kind}-${claim.key}-${i}`, lane);
+      const claimed = reserveSessionSlotOnce(dir, sessionClaimName(claim.kind, claim.key, i), lane);
       if (claimed.fresh) {
         freshPaths.push(claimed.path);
       }
@@ -491,34 +494,40 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
   try {
     const laneCensus = sessionLaneCensus({
       dirs: [resDir],
-      countLive: () =>
-        planeLiveExcluding(
-          plane,
-          args.agents?.[plane.kind] ?? {},
-          args.workerEnv,
-          args.excludePids
-        ),
-      liveRows:
-        plane.listLive === undefined
-          ? undefined
-          : () => {
-              const listLive = plane.listLive;
-              return listLive === undefined
-                ? []
-                : listLive(args.agents?.[plane.kind] ?? {}, args.workerEnv);
-            },
+      countLive: () => {
+        const rows = plane.listLive?.(args.agents?.[plane.kind] ?? {}, args.workerEnv);
+        return {
+          counts: planeLiveExcluding(
+            plane,
+            args.agents?.[plane.kind] ?? {},
+            args.workerEnv,
+            args.excludePids,
+            rows
+          ),
+          ...(rows === undefined ? {} : { rows }),
+        };
+      },
     });
     census = laneCensus.counts + laneCensus.claims;
-    providerLive =
-      providerCap === undefined
-        ? undefined
-        : providerCapCensus(
-            planesStartingSessions(args.command),
-            args.agents,
-            args.workerEnv,
-            providerCap,
-            args.excludePids
-          );
+    if (providerCap !== undefined) {
+      // the AGGREGATE census must count the plane THIS admission
+      // claims on even when the global registry does not know it —
+      // `planesStartingSessions` reads the registry, and an
+      // unregistered plane's dir+live would otherwise vanish from the
+      // verdict while its claim still charges the lane. A registered
+      // twin dedups by kind (spec bro-x601l).
+      const registered = planesStartingSessions(args.command);
+      const censusPlanes = registered.some(p => p.kind === plane.kind)
+        ? registered
+        : [...registered, plane];
+      providerLive = providerCapCensus(
+        censusPlanes,
+        args.agents,
+        args.workerEnv,
+        providerCap,
+        args.excludePids
+      );
+    }
   } catch (err) {
     // a count that cannot be established must not strand the claim —
     // the caller never receives a release for it

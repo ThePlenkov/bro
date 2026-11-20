@@ -11,6 +11,7 @@ import {
   clearSessionPlanes,
   registerSessionPlane,
   sessionCapViews,
+  sessionClaimName,
   type PreToolVerdict,
   type SessionPlane,
 } from '@broject/core';
@@ -55,6 +56,14 @@ const withPlane = (plane: SessionPlane, fn: () => void): void => {
     clearSessionPlanes();
   }
 };
+
+/** The claim key's sanitization, mirrored from `keyPart` — the tests
+ *  seed the on-disk filename formats, which are the source's contract. */
+const keyPartForTest = (raw: string): string =>
+  `${raw
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/\.{2,}/g, '_')
+    .slice(0, 48)}-${createHash('sha256').update(raw, 'utf16le').digest('hex').slice(0, 24)}`;
 
 /** A scratch reservations dir — the claim files live here, never in the
  *  developer's real data home (a claim that outlives the test would
@@ -190,10 +199,38 @@ describe('sessionCapVerdict', () => {
         );
         assert.deepEqual(verdicts, []);
         // the claim migrated to the new key — one file, not two, in
-        // the current kind-prefixed claim format
+        // the current kind-prefixed claim format (kind and key encoded
+        // as separate components, so a `-` in either never collides)
+        const key = `guard-${keyPartForTest('sess-1')}-id-${keyPartForTest('call-9')}`;
+        const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
+        assert.deepEqual(files, [`${sessionClaimName('upg', key, 0)}.slot`]);
+      });
+    });
+  });
+
+  test('a claim under the previous raw-key name migrates — the upgrade window counts the call once', () => {
+    withReservations(dir => {
+      withPlane(testPlane('upg2', { live: 0 }), () => {
+        const bags = { upg2: { maxSessions: 1, reservationsDir: dir } };
+        // the format ONE release back — this call's CURRENT key
+        // (`guard-<safe session>-id-<safe id>-<digest>`) plus the -<i>
+        // tail, before the kind prefix existed. Mirrors `keyPart`'s
+        // safe+digest shape; the seeds are simple so the safe half is
+        // the raw string.
+        const rawKey = `guard-${keyPartForTest('sess-1')}-id-${keyPartForTest('call-8')}`;
+        writeFileSync(join(dir, `${rawKey}-0.slot`), String(Date.now()));
+        // the updated binary's event for the SAME call must see the
+        // held slot — at cap 1 an unrecognized claim plus the new one
+        // would refuse the call its own continuation
+        const verdicts = sessionCapVerdict(
+          { dir: process.cwd(), sessionId: 'sess-1', toolUseId: 'call-8' } as never,
+          { tool: 'bash', input: { command: 'upg2-run --now' } },
+          bags
+        );
+        assert.deepEqual(verdicts, []);
         const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
         assert.equal(files.length, 1);
-        assert.ok(files[0]!.startsWith('upg-guard-sess-1-'));
+        assert.ok(files[0]!.startsWith('upg2-'));
       });
     });
   });
