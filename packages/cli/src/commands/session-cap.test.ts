@@ -2,6 +2,7 @@
  *  bro-bww9v): the guard plane's veto and the ACP surface's refusal. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -192,6 +193,51 @@ describe('sessionCapVerdict', () => {
         const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
         assert.equal(files.length, 1);
         assert.ok(files[0]!.startsWith('guard-sess-1-'));
+      });
+    });
+  });
+
+  test('two identical commands without a tool-use id are TWO calls — the second refuses at cap', () => {
+    withReservations(dir => {
+      withPlane(testPlane('dup', { live: 0 }), () => {
+        const bags = { dup: { maxSessions: 1, reservationsDir: dir } };
+        // no toolUseId: there is no per-call identity — the command
+        // text is not one (bro-4bx61). Each event is a DISTINCT call
+        // and must claim its own slot.
+        const call = () => verdictFor('dup-run --now', bags);
+        assert.deepEqual(call(), []);
+        const second = call();
+        assert.equal(second.length, 1);
+        assert.match(second[0]!.block ?? '', /dup session quota reached/);
+      });
+    });
+  });
+
+  test("a tool-less call does not adopt a legacy command-hash claim — it may be a stranger's", () => {
+    withReservations(dir => {
+      withPlane(testPlane('lgc', { live: 0 }), () => {
+        const bags = { lgc: { maxSessions: 1, reservationsDir: dir } };
+        const command = 'lgc-run --now';
+        // the pre-sanitization, tool-less key was the command's hash —
+        // every identical command in the session shared it, so this
+        // file can belong to a DIFFERENT call still starting its
+        // session (an old binary's claim, fresh inside the TTL)
+        const hash = createHash('sha1').update(command).digest('hex').slice(0, 12);
+        writeFileSync(join(dir, `guard-sess-1-${hash}-0.slot`), String(Date.now()));
+        // the new event is a DISTINCT call: it must claim its own
+        // slot, and at cap 1 the stranger's claim fills the budget —
+        // the call is refused. Adopting the file as its own reads
+        // fresh=false/starts=0 and walks it past the cap (bro-4bx61).
+        const verdicts = verdictFor(command, bags);
+        assert.equal(verdicts.length, 1);
+        assert.match(verdicts[0]!.block ?? '', /lgc session quota reached/);
+        // the stranger's claim is untouched — it still covers its own
+        // start until the TTL expires it, and the refused call leaves
+        // nothing behind
+        assert.deepEqual(
+          readdirSync(dir).filter(n => n.endsWith('.slot')),
+          [`guard-sess-1-${hash}-0.slot`]
+        );
       });
     });
   });
