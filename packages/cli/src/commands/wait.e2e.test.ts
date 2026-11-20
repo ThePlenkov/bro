@@ -310,7 +310,10 @@ describe('bro wait', () => {
       });
       const elapsed = Date.now() - t0;
       assert.equal(res.code, 4, res.stderr);
-      assert.ok(elapsed < 12_000, `wait overshot the deadline — ${elapsed}ms for --timeout 1`);
+      // ~2s healthy (CLI spawn + the 1s deadline + kill latency); the
+      // bound must reject a subprocess handed a multi-second timeout —
+      // a loose 12s ceiling let a 10s one slip through
+      assert.ok(elapsed < 5_000, `wait overshot the deadline — ${elapsed}ms for --timeout 1`);
       assert.match(res.stderr, /posting store unreadable/);
     });
   });
@@ -333,7 +336,7 @@ describe('bro wait', () => {
       });
       const elapsed = Date.now() - t0;
       assert.equal(res.code, 4, res.stderr);
-      assert.ok(elapsed < 12_000, `wait overshot the deadline — ${elapsed}ms for --timeout 1`);
+      assert.ok(elapsed < 5_000, `wait overshot the deadline — ${elapsed}ms for --timeout 1`);
     });
   });
 
@@ -368,7 +371,12 @@ describe('bro wait', () => {
       });
       const elapsed = Date.now() - t0;
       assert.equal(res.code, 4, res.stderr);
-      assert.ok(elapsed < 12_000, `wait overshot the deadline — ${elapsed}ms for --timeout 1`);
+      // heavier fixture — healthy is ~4.5s locally (fake-dolt boot,
+      // replica materialization, then the 1s deadline); the bound
+      // still must reject a subprocess handed a ~10s timeout, whose
+      // floor is ~10.5s — so it sits under that, not under the healthy
+      // path's own slowness
+      assert.ok(elapsed < 9_000, `wait overshot the deadline — ${elapsed}ms for --timeout 1`);
     });
   });
 });

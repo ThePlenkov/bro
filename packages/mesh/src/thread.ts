@@ -196,23 +196,32 @@ interface ReduceCtx {
   state: ThreadState;
   ownRig: string | null;
   peers: MeshPeer[];
-  login: { get: () => string | undefined };
+  login: { get: () => string | undefined; failed: () => boolean };
 }
 
 function lazyLogin(left?: () => number | undefined): ReduceCtx['login'] {
   let ready = false;
   let login: string | undefined;
+  let failed = false;
   const get = (): string | undefined => {
     if (!ready) {
       ready = true;
       const budget = left?.();
       // a spent reduction budget is "unauthenticated", never a free
-      // unbounded `gh api user` past the caller's deadline
-      login = budget !== undefined && budget < 1 ? undefined : ghSelfLogin(budget).login;
+      // unbounded `gh api user` past the caller's deadline — and a
+      // login the read never served (skipped, or gh itself failed)
+      // drops every record it would authenticate as "unauthenticated":
+      // incomplete evidence, which `failed` lets the caller flag
+      if (budget !== undefined && budget < 1) {
+        failed = true;
+      } else {
+        login = ghSelfLogin(budget).login;
+        failed = login === undefined;
+      }
     }
     return login;
   };
-  return { get };
+  return { get, failed: () => failed };
 }
 
 /** Own-store leg: mirror beads carry the remote thread in
@@ -277,24 +286,46 @@ function admitOwnBeads(rows: BeadLike[], thread: string, ctx: ReduceCtx): void {
  *  Same provenance rule as the peer scan: a bound login attests the
  *  peer, this account attests us, anything else drops flagged. */
 function admitSelfRepoGithub(dir: string, ctx: ReduceCtx, left?: () => number | undefined): void {
-  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
+  // issue aliases are this leg's whole input — resolve them before
+  // the origin probe so an issue-free thread set costs no subprocess
+  // (and a spent budget on one has nothing to skip)
+  const keys = new Map<string, { repo: { owner: string; repo: string }; n: number }>();
+  for (const t of ctx.threads) {
+    const k = issueKey({ thread: t });
+    if (k.repo !== null && k.n !== null) {
+      keys.set(t, { repo: k.repo, n: k.n });
+    }
+  }
+  if (keys.size === 0) {
+    return;
+  }
+  // the origin probe is a subprocess like every other leg — it runs
+  // inside the shared budget, and a spent one skips it FLAGGED: the
+  // unread comments may carry a verdict no ship read can overrule
+  const probe = left?.();
+  if (probe !== undefined && probe < 1) {
+    ctx.state.errors.push('self: github repo probe budget exhausted');
+    ctx.state.scanFailed = true;
+    return;
+  }
+  const origin = gitTry(
+    ['-C', dir, 'remote', 'get-url', 'origin'],
+    probe === undefined ? undefined : Math.max(1, Math.floor(probe))
+  );
   const selfRepo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null;
   if (selfRepo === null) {
     return;
   }
-  for (const t of ctx.threads) {
-    const k = issueKey({ thread: t });
+  for (const [t, k] of keys) {
     // non-issue aliases and foreign repos cost no subprocess — the
     // budget gate only guards the one call that would spend it
-    if (k.repo === null || k.n === null) {
-      continue;
-    }
     if (k.repo.owner !== selfRepo.owner || k.repo.repo !== selfRepo.repo) {
       continue;
     }
     const budget = left?.();
     if (budget !== undefined && budget < 1) {
       ctx.state.errors.push('self: github comment read budget exhausted');
+      ctx.state.scanFailed = true;
       return;
     }
     admitIssueComments(t, selfRepo, ctx, budget);
@@ -318,6 +349,11 @@ function admitIssueComments(
     return;
   }
   const cs = issueComments(repo, { number: n }, timeoutMs);
+  if (cs.failed === true) {
+    // the gh call itself failed — comments nobody read may carry a
+    // verdict; per-comment parse skips stay plain error lines
+    ctx.state.scanFailed = true;
+  }
   for (const e of cs.errors) {
     ctx.state.errors.push(`self: ${e}`);
   }
@@ -384,13 +420,14 @@ export function meshThread(
   call: { gitCommon: string; pull?: boolean; timeoutMs?: number }
 ): ThreadState {
   const state: ThreadState = { envelopes: [], provenance: {}, threads: [], errors: [] };
-  const ownRig = selfRig(dir);
-  // one deadline across the whole reduction — own store, peer scan,
-  // and the self-repo github read SHARE the caller's slice instead of
-  // each re-granting it; the remainder is recomputed per leg
+  // one deadline across the whole reduction — selfRig's origin probe,
+  // own store, peer scan, and the self-repo github read SHARE the
+  // caller's slice instead of each re-granting it; the remainder is
+  // recomputed per leg
   const deadline = call.timeoutMs === undefined ? undefined : performance.now() + call.timeoutMs;
   const rem = (): number | undefined =>
     deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
+  const ownRig = selfRig(dir, rem());
   const ctx: ReduceCtx = {
     threads: new Set([thread]),
     seen: new Set(),
@@ -400,9 +437,19 @@ export function meshThread(
     login: lazyLogin(rem),
   };
 
-  const own = ownBeads(dir, rem());
+  const ownBudget = rem();
+  // a sub-1ms remainder is no read — the store layer clamps it to
+  // 1ms and would spawn bd only to kill it after the budget is gone
+  const own =
+    ownBudget !== undefined && ownBudget < 1
+      ? { rows: [] as BeadLike[], error: 'own store read budget exhausted' }
+      : ownBeads(dir, ownBudget);
   if (own.error !== undefined) {
     state.errors.push(`self: ${own.error}`);
+    // an own store nobody read is incomplete evidence — a reject
+    // could sit unread in it; a ship verdict must not settle on
+    // the gap any more than on a failed peer scan
+    state.scanFailed = true;
   }
   admitOwnBeads(own.rows, thread, ctx);
   state.threads = [...ctx.threads];
@@ -427,6 +474,12 @@ export function meshThread(
   }
 
   admitSelfRepoGithub(dir, ctx, rem);
+  // github records authenticate against this account's login — when
+  // the budget or gh never served it they dropped as unauthenticated
+  // without being read: the scan is incomplete, not clean
+  if (ctx.login.failed()) {
+    state.scanFailed = true;
+  }
   reduceStage(state);
   return state;
 }

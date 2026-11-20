@@ -306,12 +306,17 @@ function threadOf(w: Watch, ctx: WaitCtx, timeoutMs?: number): ReturnType<typeof
   if (rem !== undefined && rem < 1) {
     // a spent deadline is not "no bound" — a 0/undefined slice here
     // would hand meshThread the tools' full defaults (dolt/gh 120s,
-    // bd 15s) and overshoot the very deadline that just ran out
+    // bd 15s) and overshoot the very deadline that just ran out. The
+    // skipped read is a FAILED scan, not a clean empty one: without
+    // scanFailed a found ship would settle free while a reject sits
+    // unread on the planes nobody reached.
     return {
       envelopes: [],
       provenance: {},
       threads: [],
       errors: ['thread read budget exhausted'],
+      scanFailed: true,
+      scanErrors: ['thread read budget exhausted'],
     };
   }
   // the read's bound is the smaller of its own slice and what the

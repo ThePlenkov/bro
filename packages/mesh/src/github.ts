@@ -535,7 +535,7 @@ export function issueComments(
   repo: GithubRepo,
   issue: GhIssue,
   timeoutMs?: number
-): { records: GhRecord[]; errors: string[] } {
+): { records: GhRecord[]; errors: string[]; failed?: boolean } {
   const r = ghJson<(GhCommentRow | GhCommentRow[])[]>({
     args: [
       'api',
@@ -549,6 +549,9 @@ export function issueComments(
     return {
       records: [],
       errors: [`${repo.owner}/${repo.repo}#${issue.number}: comments failed — ${r.error}`],
+      // the read itself never happened — distinct from comments that
+      // read fine but skipped on parse; callers gate verdicts on it
+      failed: true,
     };
   }
   return collectIssueCommentRecords(repo, issue, slurpedRows(r.data));

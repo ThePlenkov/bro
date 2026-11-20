@@ -81,8 +81,10 @@ in-flight call's kill latency is the only overshoot.
   the changes only add optional params it never passes.
 - `bro mesh inbox`/`pull`/`request` — command paths, not the watcher;
   their per-call defaults stand.
-- `git` subprocess reads (`remote get-url origin`) already bound at
-  `GIT_SYNC_PROBE_TIMEOUT_MS` (1.5s).
+- `git` subprocess reads inside the wait path (`remote get-url origin`
+  in `selfRig` and `admitSelfRepoGithub`) DO take the shared slice —
+  a hung probe would otherwise overshoot the deadline like any other
+  read; unbounded callers keep today's no-timeout behavior.
 
 ## Tests
 

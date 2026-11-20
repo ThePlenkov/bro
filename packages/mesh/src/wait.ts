@@ -179,18 +179,23 @@ function readRequestRow(store: unknown, id: string, timeoutMs?: number): DepRead
  *  collect into `errors`; a failed read never fakes a row. */
 export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): DepRead {
   const out: DepRead = { errors: [] };
-  const remaining = (ms?: number): number | undefined =>
-    ms === undefined ? undefined : Math.max(1, Math.floor(ms));
   // one budget across the posting-store get and the ship read — a
   // slow first read shrinks what the second gets; never re-grant the
-  // full slice
+  // full slice. A sub-1ms remainder is NO read: the subprocess layer
+  // clamps 0→1ms (spawnSync's timeout:0 means unbounded), so the leg
+  // reports the spent budget instead of spawning only to be killed
   const t0 = performance.now();
   const left = (): number | undefined =>
-    timeoutMs === undefined ? undefined : remaining(timeoutMs - (performance.now() - t0));
+    timeoutMs === undefined ? undefined : Math.max(0, timeoutMs - (performance.now() - t0));
 
   try {
     const store = plane.postForeign ? storeFor(plane.postDir) : taskStore(plane.postDir);
-    out.request = readRequestRow(store, id, left());
+    const first = left();
+    if (first !== undefined && first < 1) {
+      out.errors.push(`${plane.peer.alias}: posting store read budget exhausted`);
+    } else {
+      out.request = readRequestRow(store, id, first);
+    }
   } catch (err) {
     out.errors.push(
       `${plane.peer.alias}: posting store unreadable — ` +
@@ -206,7 +211,9 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     const shipped =
       out.replicaAgeMs === undefined
         ? { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
-        : shippedIssues(plane.peerDir, id, shipTimeout);
+        : shipTimeout !== undefined && shipTimeout < 1
+          ? { error: 'ship read budget exhausted' }
+          : shippedIssues(plane.peerDir, id, shipTimeout);
     if (shipped.error !== undefined) {
       out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
     } else {
@@ -215,7 +222,10 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     return out;
   }
   const checkoutTimeout = left();
-  const shipped = shippedOnCheckout(plane.peer, id, checkoutTimeout);
+  const shipped =
+    checkoutTimeout !== undefined && checkoutTimeout < 1
+      ? { error: 'ship read budget exhausted' }
+      : shippedOnCheckout(plane.peer, id, checkoutTimeout);
   if (shipped.error !== undefined) {
     out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
   } else {
