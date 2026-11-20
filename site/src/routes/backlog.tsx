@@ -326,8 +326,18 @@ function nodeStroke(b: Bead): string {
   return TYPE_COLOR[b.type] ?? '#3f5147';
 }
 
+function RelRow({ label, ids, onJump }: Readonly<{ label: string; ids: string[]; onJump: (id: string) => void }>) {
+  if (ids.length === 0) return null;
+  return (
+    <p className="bl-detail-meta">
+      {label}: {ids.map(id => <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">{id} </button>)}
+    </p>
+  );
+}
+
 function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
+  const kids = b.open_children + b.closed_children;
   return (
     <aside className="bl-detail">
       <div className="bl-detail-head">
@@ -343,21 +353,30 @@ function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void;
         <p><a href={`${GITHUB}/issues/${b.id.split('-')[1]}`}>open on github ↗</a></p>
       )}
       {b.labels.length > 0 && <p className="bl-detail-meta">labels: {b.labels.join(', ')}</p>}
-      {b.open_children + b.closed_children > 0 && (
-        <p className="bl-detail-meta">children: {b.open_children} open / {b.closed_children} closed</p>
-      )}
-      {b.blocks.length > 0 && (
-        <p className="bl-detail-meta">
-          blocks: {b.blocks.map(id => <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">{id} </button>)}
-        </p>
-      )}
-      {b.blocked_by.length > 0 && (
-        <p className="bl-detail-meta">
-          blocked by: {b.blocked_by.map(id => <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">{id} </button>)}
-        </p>
-      )}
+      {kids > 0 && <p className="bl-detail-meta">children: {b.open_children} open / {b.closed_children} closed</p>}
+      <RelRow label="blocks" ids={b.blocks} onJump={onJump} />
+      <RelRow label="blocked by" ids={b.blocked_by} onJump={onJump} />
     </aside>
   );
+}
+
+function beadMatches(b: Bead, f: Filters, q: string): boolean {
+  if (!f.status.has(b.status) || !f.type.has(b.type) || !f.priority.has(Number(b.priority))) return false;
+  if (f.orphansOnly && b.parent) return false;
+  return !q || `${b.id} ${b.title} ${b.labels.join(' ')}`.toLowerCase().includes(q);
+}
+
+function applyFilters(beads: Bead[], gh: GhItem[], f: Filters): Array<{ b: Bead; src: 'beads' | 'github' }> {
+  const q = f.q.trim().toLowerCase();
+  const list: Array<{ b: Bead; src: 'beads' | 'github' }> = [];
+  if (f.source !== 'github') for (const b of beads) if (beadMatches(b, f, q)) list.push({ b, src: 'beads' });
+  if (f.source !== 'beads' && !f.orphansOnly) {
+    for (const g of gh) {
+      const b = normalizeGh(g);
+      if (!q || `${b.id} ${b.title}`.toLowerCase().includes(q)) list.push({ b, src: 'github' });
+    }
+  }
+  return list;
 }
 
 function BacklogPage() {
@@ -386,28 +405,7 @@ function BacklogPage() {
 
   const beads = state.kind === 'ready' ? state.data.snapshot.issues : [];
   const gh = state.kind === 'ready' ? state.data.gh : [];
-
-  const filtered = useMemo(() => {
-    const q = f.q.trim().toLowerCase();
-    const list: Array<{ b: Bead; src: 'beads' | 'github' }> = [];
-    if (f.source !== 'github') {
-      for (const b of beads) {
-        if (!f.status.has(b.status) || !f.type.has(b.type) || !f.priority.has(Number(b.priority))) continue;
-        if (f.orphansOnly && b.parent) continue;
-        if (q && !(`${b.id} ${b.title} ${b.labels.join(' ')}`.toLowerCase().includes(q))) continue;
-        list.push({ b, src: 'beads' });
-      }
-    }
-    if (f.source !== 'beads') {
-      for (const g of gh) {
-        const b = normalizeGh(g);
-        if (q && !(`${b.id} ${b.title}`.toLowerCase().includes(q))) continue;
-        if (f.orphansOnly) continue;
-        list.push({ b, src: 'github' });
-      }
-    }
-    return list;
-  }, [beads, gh, f]);
+  const filtered = useMemo(() => applyFilters(beads, gh, f), [beads, gh, f]);
 
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
   const now = Date.now();
