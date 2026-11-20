@@ -474,6 +474,38 @@ function ListView({ rows, now, onPick }: Readonly<{ rows: Row[]; now: number; on
   );
 }
 
+function FilterControls({ f, setF, view, setView }: Readonly<{
+  f: Filters;
+  setF: React.Dispatch<React.SetStateAction<Filters>>;
+  view: 'list' | 'graph';
+  setView: (v: 'list' | 'graph') => void;
+}>) {
+  const set = <K extends keyof Filters>(k: K, v: Filters[K]) => setF(p => ({ ...p, [k]: v }));
+  const toggle = (k: 'status' | 'type' | 'priority', v: string | number) =>
+    setF(p => ({ ...p, [k]: toggleSet(p[k] as Set<string | number>, v) }));
+  const groups: ChipItem[][] = [
+    (['all', 'beads', 'github'] as const).map(s => ({ v: s, label: s, active: f.source === s, onClick: () => set('source', s) })),
+    ALL_STATUS.map(s => ({ v: s, label: s, active: f.status.has(s), onClick: () => toggle('status', s) })),
+    ALL_TYPE.map(t => ({ v: t, label: t, active: f.type.has(t), onClick: () => toggle('type', t) })),
+    ALL_PRIORITY.map(p => ({ v: `p${p}`, label: `P${p}`, active: f.priority.has(p), onClick: () => toggle('priority', p) })),
+    [{ v: 'orphans', label: 'orphans only', active: f.orphansOnly, onClick: () => set('orphansOnly', !f.orphansOnly) }],
+    (['list', 'graph'] as const).map(v => ({ v, label: v, active: view === v, onClick: () => setView(v) })),
+  ];
+
+  return (
+    <section className="bl-controls">
+      <input
+        type="search"
+        placeholder="filter by id / title / label…"
+        value={f.q}
+        onChange={e => set('q', e.target.value)}
+        className="bl-search"
+      />
+      <ChipRow groups={groups} />
+    </section>
+  );
+}
+
 function BacklogPage() {
   const state = useBacklog();
   const [view, setView] = useState<'list' | 'graph'>('list');
@@ -487,18 +519,6 @@ function BacklogPage() {
   const gh = state.kind === 'ready' ? state.data.gh : [];
   const filtered = useMemo(() => applyFilters(beads, gh, f), [beads, gh, f]);
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
-  const set = <K extends keyof Filters>(k: K, v: Filters[K]) => setF(p => ({ ...p, [k]: v }));
-  const toggle = (k: 'status' | 'type' | 'priority', v: string | number) =>
-    setF(p => ({ ...p, [k]: toggleSet(p[k] as Set<string | number>, v) }));
-
-  const groups: ChipItem[][] = [
-    (['all', 'beads', 'github'] as const).map(s => ({ v: s, label: s, active: f.source === s, onClick: () => set('source', s) })),
-    ALL_STATUS.map(s => ({ v: s, label: s, active: f.status.has(s), onClick: () => toggle('status', s) })),
-    ALL_TYPE.map(t => ({ v: t, label: t, active: f.type.has(t), onClick: () => toggle('type', t) })),
-    ALL_PRIORITY.map(p => ({ v: `p${p}`, label: `P${p}`, active: f.priority.has(p), onClick: () => toggle('priority', p) })),
-    [{ v: 'orphans', label: 'orphans only', active: f.orphansOnly, onClick: () => set('orphansOnly', !f.orphansOnly) }],
-    (['list', 'graph'] as const).map(v => ({ v, label: v, active: view === v, onClick: () => setView(v) })),
-  ];
 
   return (
     <>
@@ -525,16 +545,7 @@ function BacklogPage() {
               <section className="debt-empty"><p>showing the last cached snapshot — GitHub API unreachable right now</p></section>
             )}
             <Stats data={state.data} gh={gh} inView={filtered.length} />
-            <section className="bl-controls">
-              <input
-                type="search"
-                placeholder="filter by id / title / label…"
-                value={f.q}
-                onChange={e => set('q', e.target.value)}
-                className="bl-search"
-              />
-              <ChipRow groups={groups} />
-            </section>
+            <FilterControls f={f} setF={setF} view={view} setView={setView} />
 
             {view === 'list' && <ListView rows={filtered} now={Date.now()} onPick={setPicked} />}
             {view === 'graph' && (

@@ -56,15 +56,20 @@ function push(m: Map<string, string[]>, k: string, v: string) {
 
 type Dep = NonNullable<BeadRow['dependencies']>[number];
 
+interface EdgeCtx {
+  open: Set<string>;
+  e: Edges;
+}
+
 // Dependency kinds are data: each type maps to its edge effect, so a new
 // kind is a table entry, not another branch.
-const DEP_HANDLERS: Record<string, (src: string, srcOpen: boolean, tgt: string, tgtOpen: boolean, e: Edges) => void> = {
-  'parent-child': (src, srcOpen, tgt, _tgtOpen, e) => {
+const DEP_HANDLERS: Record<string, (src: string, tgt: string, ctx: EdgeCtx) => void> = {
+  'parent-child': (src, tgt, { open, e }) => {
     e.parentOf.set(src, tgt);
-    if (!srcOpen) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
+    if (!open.has(src)) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
   },
-  blocks: (src, srcOpen, tgt, tgtOpen, e) => {
-    if (srcOpen && tgtOpen) {
+  blocks: (src, tgt, { open, e }) => {
+    if (open.has(src) && open.has(tgt)) {
       push(e.blocks, src, tgt);
       push(e.blockedBy, tgt, src);
     }
@@ -74,19 +79,17 @@ const DEP_HANDLERS: Record<string, (src: string, srcOpen: boolean, tgt: string, 
 /** bd export and the dolt join emit the same facts under slightly
  *  different keys — accept both. */
 function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
-  const e: Edges = {
-    parentOf: new Map(),
-    closedChildren: new Map(),
-    blocks: new Map(),
-    blockedBy: new Map(),
+  const ctx: EdgeCtx = {
+    open,
+    e: { parentOf: new Map(), closedChildren: new Map(), blocks: new Map(), blockedBy: new Map() },
   };
   for (const r of rows) {
     for (const d of r.dependencies ?? []) {
       const tgt = d.depends_on_id ?? d.depends_on_issue_id;
-      if (tgt) DEP_HANDLERS[d.type]?.(r.id, open.has(r.id), tgt, open.has(tgt), e);
+      if (tgt) DEP_HANDLERS[d.type]?.(r.id, tgt, ctx);
     }
   }
-  return e;
+  return ctx.e;
 }
 
 function labelName(l: string | { label?: string; name?: string }): string {

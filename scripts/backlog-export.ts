@@ -20,7 +20,7 @@ if (!doltDir || !outFile) {
 }
 
 function sql<T>(query: string): T[] {
-  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], { // NOSONAR — argv paths are this script's documented API
+  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], {
     cwd: doltDir,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -70,5 +70,5 @@ const rows: BeadRow[] = issues.map(r => ({
 }));
 
 const snap = compactBacklog(rows);
-writeFileSync(outFile, JSON.stringify(snap)); // NOSONAR S8707 — argv out path is the API
+writeFileSync(outFile, JSON.stringify(snap));
 console.log(`backlog-export: ${snap.total_open} open issues → ${outFile}`);
