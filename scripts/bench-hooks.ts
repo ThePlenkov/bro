@@ -518,17 +518,33 @@ function strayErrors(rows: Map<string, Row>, budget: Record<string, number>): Ve
   return out;
 }
 
+/** Did `<lane>:<event>`'s lane run — a budget key on an unselected
+ *  lane is skipped, never failed (`--lanes runsh` must not be gated on
+ *  unmeasured fast rows). A key on a SELECTED lane with an event the
+ *  lane never measures is not skipped — it falls through to the 'no
+ *  row measured' verdict, so a misspelt or impossible key still trips. */
+function laneInScope(key: string, opts: Options): boolean {
+  const [lane] = key.split(':');
+  return (opts.lanes as string[]).includes(lane);
+}
+
 /** The CI ratchet: budgeted rows must hold p50 with zero errors, and
- *  ANY measured row with errors fails. Verdicts go to the injected
+ *  ANY measured row with errors fails. Budget keys on unselected lanes
+ *  are reported as skips, not verdicts. Verdicts go to the injected
  *  sink — stderr under --json so stdout stays parseable, stdout
  *  otherwise. Returns true on failure. */
 function enforce(
   rows: Map<string, Row>,
   budget: Record<string, number>,
+  opts: Options,
   say: (line: string) => void
 ): boolean {
   let failed = false;
   for (const [key, cap] of Object.entries(budget)) {
+    if (!laneInScope(key, opts)) {
+      say(`skip ${key} — lane not in --lanes`);
+      continue;
+    }
     const v = budgetVerdict({ key, cap }, rows.get(key));
     say(v.line);
     failed = failed || v.failed;
@@ -552,7 +568,7 @@ function main(): void {
   const say = opts.asJson
     ? (line: string) => console.error(line)
     : (line: string) => console.log(line);
-  if (opts.enforce && enforce(rows, budget, say)) {
+  if (opts.enforce && enforce(rows, budget, opts, say)) {
     process.exit(1);
   }
 }
