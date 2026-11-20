@@ -537,6 +537,25 @@ describe('external plugin/connector validation', () => {
       'docType render must be a function',
       `export default { name: 'bad23', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), render: 'x' }] }`,
     ],
+    // the enumerable-key-count blind spot: a sparse hole plus an extra
+    // own prop nets `keys.length === length`, and every() skips the
+    // hole — each isDenseArray consumer gets the same regression case
+    [
+      'sparse argvPrefix hole hidden by an extra prop rejected',
+      `export default { name: 'bad24', summary: 'x', run: () => {}, argvPrefix: Object.assign([,'ok'], { label: 'x' }) }`,
+    ],
+    [
+      'sparse activeIn mode list hidden by an extra prop rejected',
+      `export default { name: 'bad25', summary: 'x', run: () => {}, connectors: [{ name: 'c25', activeIn: { stopGate: Object.assign([,'code'], { label: 'x' }) } }] }`,
+    ],
+    [
+      'sparse docType aliases hole hidden by an extra prop rejected',
+      `export default { name: 'bad26', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), aliases: Object.assign([,'al'], { tag: 1 }) }] }`,
+    ],
+    [
+      'sparse docType scopes hole hidden by an extra prop rejected',
+      `export default { name: 'bad27', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), scopes: Object.assign([,'project'], { tag: 1 }) }] }`,
+    ],
   ];
 
   for (const [title, source] of rejectionCases) {
@@ -641,6 +660,24 @@ describe('external plugin/connector validation', () => {
     try {
       assert.equal(loaded.length, 1);
       assert.equal(loaded[0].name, 'good5');
+    } finally {
+      unload(loaded);
+    }
+  });
+
+  test('dense arrays carrying extra non-index props still register', async () => {
+    // extra own props are not elements — dispatch only ever reads
+    // indices (spread/includes/index access), the same contract the
+    // docs/connectors/optInFacades loops already hold
+    const dir = repoWith(
+      `export default { name: 'good6', summary: 'x', run: () => {}, argvPrefix: Object.assign(['pfx'], { label: 'x' }), connectors: [{ name: 'gc6', activeIn: { stopGate: Object.assign(['code'], { tag: 1 }) } }], docs: [{ name: 'dt6', aliases: Object.assign(['a6'], { tag: 1 }), scopes: ['project'], adapter: () => ({}) }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good6');
+      assert.equal(loaded[0].argvPrefix?.[0], 'pfx');
     } finally {
       unload(loaded);
     }

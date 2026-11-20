@@ -1307,11 +1307,23 @@ function isBoolean(v: unknown): boolean {
 function isPlanVersion(v: unknown): boolean {
   return typeof v === 'number' && Number.isInteger(v) && v >= 1;
 }
+/** Dense element check — index reads, the same iteration the
+ *  docs/connectors/optInFacades loops use. `every()` skips sparse
+ *  holes (a hole must read `undefined` and fail the predicate), and an
+ *  enumerable-key count conflates the two ways `keys ≠ indices`: a
+ *  hole plus an extra prop nets the right count, and a dense list
+ *  carrying a non-index prop gets rejected though dispatch only ever
+ *  reads indices 0..length-1 (spread/includes/index access). */
 function isDenseArray(v: unknown, ok: (item: unknown) => boolean): boolean {
-  if (!Array.isArray(v) || Object.keys(v).length !== v.length) {
+  if (!Array.isArray(v)) {
     return false;
   }
-  return v.every(ok);
+  for (let i = 0; i < v.length; i++) {
+    if (!ok(v[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 function isDenseStringArray(v: unknown): boolean {
   return isDenseArray(v, item => typeof item === 'string');
