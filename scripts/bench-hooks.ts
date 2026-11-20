@@ -3,7 +3,7 @@
  *
  * Spawns each session-lifecycle hook event N times in a fresh process
  * against a quiet bro-enabled fixture and reports min/p50/p95/max per
- * row as JSON. Three rows per event:
+ * row as JSON. Four lanes:
  *
  *   runsh:<event>   sh hooks/run.sh — the process plugin hosts exec
  *   dist:<event>    node packages/cli/dist/hooks.js — dispatch minus
@@ -12,10 +12,17 @@
  *                   `index.js hooks` (specs/bro-36sx7.7.md)
  *   noop:<event>    BRO_HOOKS=0 sh hooks/run.sh — the machine-backend
  *                   skip; a spawned-agent tree pays ~nothing (bro-ddksm)
+ *   fast:<event>    sh hooks/run.sh on the fast-path fixture — the
+ *                   early exit bro-arm83 built; only the per-tool-call
+ *                   events run (specs/bro-5tpx0.1.md)
  *
  * "Quiet" = a scratch repo with bro.config.json + a `.beads/` store
  * served by the e2e fake bd/docker: healthy and empty — a real bd's
  * dolt handshake is a property of the store, not of bro's dispatch.
+ * The fast lane's fixture drops `.beads/` — a manifest-less store
+ * trips run.sh's bead-store barometer and pins NEED_NODE forever —
+ * and pre-seeds guards/.stamp so the shell fast path can actually
+ * settle (buildFixture below).
  * The env is scrubbed (ambient GH_TOKEN/BRO_/XDG dropped, HOME +
  * XDG_* pinned into the fixture, BRO_TELEMETRY=0) so operator config,
  * mailbox state and the OTLP plane can't leak into the number.
@@ -80,17 +87,30 @@ const EVENTS = EVENT_SPECS.map(e => ({
   payload: (sid: string): unknown => ({ session_id: sid, ...e.extra }),
 }));
 
-/** p50 budgets in ms (bead bro-qbnre's initial numbers; E2/E3 tighten
- *  and extend). Keys are `<lane>:<event>` — rows not listed are
- *  recorded, not latency-gated. */
+/** p50 budgets in ms (bead bro-qbnre's initial numbers, extended by
+ *  bro-5tpx0.1 to the hot armed rows and the fast lane; E2/E3 tighten).
+ *  Keys are `<lane>:<event>` — rows not listed are recorded, not
+ *  latency-gated. Armed-path caps carry ~1.5–1.7× headroom over the CI
+ *  baseline (run 42977847108: runsh post-tool 240, prompt-submit 251,
+ *  pre-tool 175, session-start 370, stop 310; dist ~10–20 ms cheaper).
+ *  The fast caps sit BELOW the armed p50 so a fast-path regression that
+ *  falls back to Node reads OVER, not as a pass. */
 const BUDGET_P50_MS: Record<string, number> = {
   'noop:post-tool': 150,
   'noop:prompt-submit': 150,
+  'fast:post-tool': 200,
+  'fast:prompt-submit': 200,
+  'fast:pre-tool': 300,
+  'runsh:post-tool': 400,
+  'runsh:prompt-submit': 400,
+  'runsh:pre-tool': 300,
   'runsh:session-start': 600,
   'runsh:stop': 600,
+  'dist:session-start': 500,
+  'dist:stop': 450,
 };
 
-const LANES = ['runsh', 'dist', 'noop'] as const;
+const LANES = ['runsh', 'dist', 'noop', 'fast'] as const;
 type Lane = (typeof LANES)[number];
 
 interface Row {
@@ -206,16 +226,40 @@ function loadBudget(opts: Options): Record<string, number> {
   }
 }
 
-/** Quiet fixture: opted-in repo, healthy-empty beads store, scrubbed
- *  env. BRO_HOOKS_NO_FALLBACK pins run.sh to the in-tree dist so a
- *  broken build can never hide behind a PATH-bro or npx fallback. */
-function buildFixture(): Fixture {
-  const { root, main } = initRepo('bro-bench-hooks-', m => {
+/** The fixture families lanes draw from — 'armed' is the original
+ *  quiet repo (a manifest-less `.beads` defers every fast-path check,
+ *  so the lane always pays Node), 'fast' is the variant the shell
+ *  early-exit can settle (specs/bro-5tpx0.1.md). */
+type FixtureKind = 'armed' | 'fast';
+
+/** Quiet fixture: opted-in repo, scrubbed env. The 'armed' kind adds a
+ *  healthy-empty beads store served by the e2e fake bd/docker. The
+ *  'fast' kind carries bro.config.json only — no `.beads`, so the
+ *  bead-store barometer demands no manifest and the lessons/drills
+ *  cache snapshots are never consulted — plus a pre-seeded
+ *  guards/.stamp: fresh session ids per run keep per-session markers
+ *  from accumulating, so the fast path can only rely on repo-level
+ *  stamps that persist across runs. The stamp's bare-newline body is
+ *  recordGuardEvents' zero-coverage form (no event names, no .trace),
+ *  and it lands after every config file so no CFGS entry is newer.
+ *  BRO_HOOKS_NO_FALLBACK pins run.sh to the in-tree dist so a broken
+ *  build can never hide behind a PATH-bro or npx fallback. */
+function buildFixture(kind: FixtureKind): Fixture {
+  const { root, main } = initRepo(`bro-bench-hooks-${kind}-`, m => {
     writeFileSync(join(m, 'bro.config.json'), '{}\n');
-    mkdirSync(join(m, '.beads'), { recursive: true });
-    writeFileSync(join(m, '.beads', 'beads.json'), '{"rows":[]}\n');
+    if (kind === 'armed') {
+      mkdirSync(join(m, '.beads'), { recursive: true });
+      writeFileSync(join(m, '.beads', 'beads.json'), '{"rows":[]}\n');
+    }
     mkdirSync(join(m, 'home'), { recursive: true });
   });
+  if (kind === 'fast') {
+    // <git-common>/bro/hooks/guards — the main checkout's common dir is
+    // its own .git
+    const gdir = join(main, '.git', 'bro', 'hooks', 'guards');
+    mkdirSync(gdir, { recursive: true });
+    writeFileSync(join(gdir, '.stamp'), '\n');
+  }
   const { binDir, db } = installFakeBd(root, []);
   const env = e2eEnv({
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
@@ -362,13 +406,29 @@ function benchRow(spec: RowSpec, fx: Fixture, lim: RunLimits): Row {
   };
 }
 
-function runBench(opts: Options, fx: Fixture): Map<string, Row> {
+/** The fast lane measures only the per-tool-call contract: post-tool
+ *  and prompt-submit can settle in shell; pre-tool never fast-paths
+ *  (the session-cap veto stays live in every mode) so it records the
+ *  armed floor on the same minimal repo — the number the fast rows
+ *  must stay under. */
+const FAST_EVENTS = new Set(['post-tool', 'prompt-submit', 'pre-tool']);
+
+function laneEvents(lane: Lane): typeof EVENTS {
+  return lane === 'fast' ? EVENTS.filter(e => FAST_EVENTS.has(e.event)) : EVENTS;
+}
+
+/** Fixtures build lazily per kind — a `--lanes fast` run must not pay
+ *  for the armed repo's fake-bd store, and vice versa. */
+function runBench(opts: Options): Map<string, Row> {
   const rows = new Map<string, Row>();
   const lim = { runs: opts.runs, warmup: opts.warmup };
+  const fixtures: Partial<Record<FixtureKind, Fixture>> = {};
   for (const lane of opts.lanes) {
+    const kind: FixtureKind = lane === 'fast' ? 'fast' : 'armed';
+    const fx = (fixtures[kind] ??= buildFixture(kind));
     const laneEnv = lane === 'noop' ? { ...fx.env, BRO_HOOKS: '0' } : fx.env;
     const laneFx = { cwd: fx.cwd, env: laneEnv };
-    for (const { event, payload } of EVENTS) {
+    for (const { event, payload } of laneEvents(lane)) {
       rows.set(`${lane}:${event}`, benchRow({ lane, event, payload }, laneFx, lim));
     }
   }
@@ -408,7 +468,8 @@ function writeReport(rows: Map<string, Row>, budget: Record<string, number>, opt
       platform: `${process.platform}/${process.arch}`,
       runs: opts.runs,
       warmup: opts.warmup,
-      fixture: 'quiet (bro.config.json + empty fake-bd store)',
+      fixture:
+        'armed: bro.config.json + empty fake-bd store; fast: bro.config.json only + seeded guards/.stamp',
     },
     rows: Object.fromEntries(rows),
     budget,
@@ -486,8 +547,7 @@ function main(): void {
     process.exit(2);
   }
   const budget = loadBudget(opts);
-  const fx = buildFixture();
-  const rows = runBench(opts, fx);
+  const rows = runBench(opts);
   writeReport(rows, budget, opts);
   const say = opts.asJson
     ? (line: string) => console.error(line)
