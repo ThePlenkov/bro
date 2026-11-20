@@ -30,6 +30,7 @@
  *  Policy interface names lifecycle moments; the driver is the
  *  policy's engine (the same contract convoyPolicy sets). */
 import {
+  type Dirent,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -102,6 +103,7 @@ import {
   type DiskProbe,
   diskFloorBreach,
   diskFloorBytes,
+  diskFloorFor,
   type FleetPrRow,
   type GateSnapshot,
   isFleetHead,
@@ -562,6 +564,9 @@ export interface LoopQueue {
   /** The disk floor's transition edge — the held/resumed lines say
    *  once per episode, not once per tick (spec bro-2spp7). */
   diskHeld: boolean;
+  /** The top-consumers summary measured on the breach edge — the idle
+   *  heartbeat names the filler, not just the floor (spec bro-v96mp). */
+  diskFiller?: string;
   /** A member sitting in a wall wait holds pushes — the transition
    *  edge for the once-per-episode line (bro-36bhc). */
   wallHeld: boolean;
@@ -3103,9 +3108,13 @@ export function probeDisk(ctx: LoopCtx, p: string, warned?: Set<string>): DiskPr
   try {
     const s = statfsSync(p, { bigint: true });
     const free = s.bavail * s.bsize;
+    const total = s.blocks * s.bsize;
+    const sat = (n: bigint) =>
+      n > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(n);
     return {
       path: p,
-      freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
+      freeBytes: sat(free),
+      totalBytes: sat(total),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -3117,6 +3126,118 @@ export function probeDisk(ctx: LoopCtx, p: string, warned?: Set<string>): DiskPr
     }
     return undefined;
   }
+}
+
+/** Human size for the filler summary — sub-gig sizes round to whole
+ *  MB, anything bigger reads `N.NG`. */
+function sizeText(bytes: number): string {
+  return bytes >= 1024 * MB
+    ? `${(bytes / (1024 * MB)).toFixed(1)}G`
+    : `${Math.max(1, Math.round(bytes / MB))}M`;
+}
+
+/** The group key a top-level name rolls up to — `tmp-3695941-…`,
+ *  `npm-*`, `bro--*` worktree siblings: the leak families are
+ *  prefix-named, so the first `-` segment is the family. */
+function fillerKey(name: string): string {
+  return /^[A-Za-z0-9]+-/.test(name) ? name.replace(/-.*$/, '-*') : name;
+}
+
+/** The largest consumers under `path`, prefix-grouped and biggest
+ *  first — 'tmp-* ×49 3.4G'. Sizes come from a bounded recursive
+ *  walk: a breach edge may land on a tree with millions of files, and
+ *  the cap truncates rather than stalls the tick ('…' marks it). ''
+ *  when the root cannot be listed — the hold line works without it
+ *  (spec bro-v96mp). */
+export function topFillers(
+  path: string,
+  budget: { nodes: number; ms: number } = { nodes: 60_000, ms: 1500 }
+): string {
+  interface Grp {
+    bytes: number;
+    count: number;
+  }
+  const groups = new Map<string, Grp>();
+  let truncated = false;
+  let nodes = 0;
+  const t0 = Date.now();
+  const spent = () => {
+    if (nodes > budget.nodes || Date.now() - t0 > budget.ms) {
+      truncated = true;
+      return true;
+    }
+    return false;
+  };
+  const dirSize = (dir: string): number => {
+    let total = 0;
+    let ents: Dirent[];
+    try {
+      ents = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    for (const e of ents) {
+      if (spent()) {
+        return total;
+      }
+      nodes += 1;
+      const p = join(dir, e.name);
+      try {
+        if (e.isDirectory()) {
+          total += dirSize(p);
+        } else if (e.isFile()) {
+          total += statSync(p).size;
+        }
+        // symlinks et al. count nothing — the bytes they name live on
+        // another fs
+      } catch {
+        // vanished mid-walk — skip
+      }
+    }
+    return total;
+  };
+  let top: Dirent[];
+  try {
+    top = readdirSync(path, { withFileTypes: true });
+  } catch {
+    return '';
+  }
+  for (const e of top) {
+    if (spent()) {
+      break;
+    }
+    nodes += 1;
+    const p = join(path, e.name);
+    let bytes = 0;
+    try {
+      if (e.isDirectory()) {
+        bytes = dirSize(p);
+      } else if (e.isFile()) {
+        bytes = statSync(p).size;
+      }
+    } catch {
+      // vanished mid-listing — count it at 0
+    }
+    const key = fillerKey(e.name);
+    const g = groups.get(key) ?? { bytes: 0, count: 0 };
+    g.bytes += bytes;
+    g.count += 1;
+    groups.set(key, g);
+  }
+  const top3 = [...groups.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 3);
+  if (top3.length === 0) {
+    return '';
+  }
+  const parts = top3.map(
+    ([k, g]) => `${k}${g.count > 1 ? ` ×${g.count}` : ''} ${sizeText(g.bytes)}`
+  );
+  if (groups.size > top3.length) {
+    parts.push('+more');
+  }
+  if (truncated) {
+    parts.push('…');
+  }
+  return parts.join(', ');
 }
 
 /** A done-path push outcome — tallied, the park journaled (it never
@@ -3424,6 +3545,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
   }
   if (ctx.q.diskHeld) {
     ctx.q.diskHeld = false;
+    ctx.q.diskFiller = undefined;
     ctx.deps.say('loop: disk back above floor — pushes resume');
   }
   ctx.stage = 'claim';
@@ -3536,10 +3658,16 @@ function holdForDisk(ctx: LoopCtx, breach: DiskProbe): false {
   ctx.q.pushHoldUntil = ctx.deps.now() + ctx.intervalS * 1000;
   if (!ctx.q.diskHeld) {
     ctx.q.diskHeld = true;
+    // measured once on the transition edge — a filler report every
+    // tick would walk the fs on a timer it doesn't need (spec bro-v96mp)
+    const filler = topFillers(breach.path);
+    ctx.q.diskFiller = filler === '' ? undefined : filler;
     ctx.deps.say(
       `loop: disk below floor on ${breach.path} — ` +
         `${Math.floor(breach.freeBytes / MB)}M free < ` +
-        `${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M — pushes held`
+        `${Math.floor(diskFloorFor(ctx.cfg, breach) / MB)}M floor` +
+        `${ctx.q.diskFiller === undefined ? '' : ` — top: ${ctx.q.diskFiller}`}` +
+        ' — pushes held'
     );
   }
   return false;
@@ -3646,7 +3774,11 @@ async function runQueue(ctx: LoopCtx): Promise<void> {
         const pending = ctx.q.stack.find(m => m.worker !== undefined);
         const idle =
           ctx.q.holdStage ??
-          (ctx.q.wallHeld ? 'idle (wall wait)' : ctx.q.diskHeld ? 'idle (disk floor)' : 'idle');
+          (ctx.q.wallHeld
+            ? 'idle (wall wait)'
+            : ctx.q.diskHeld
+              ? `idle (disk floor${ctx.q.diskFiller === undefined ? '' : ` — ${ctx.q.diskFiller}`})`
+              : 'idle');
         ctx.stage =
           pending === undefined
             ? idle

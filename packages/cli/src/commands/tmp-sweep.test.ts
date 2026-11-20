@@ -4,7 +4,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTmpDirs, isPathInUse, tmpSweepVerdict, type TmpSweepInput } from './tmp-sweep.ts';
+import {
+  cleanupTmpDirs,
+  isPathInUse,
+  tmpSweepVerdict,
+  type TmpSweepInput,
+  workerTmpRoots,
+} from './tmp-sweep.ts';
 
 const HOUR = 60 * 60 * 1000;
 const GRACE = 10 * 60 * 1000;
@@ -257,5 +263,80 @@ describe('cleanupTmpDirs', () => {
         child.kill();
       }
     });
+  });
+
+  test("an extraRoots worker tmpdir sweeps by the same verdicts — emptied root rmdir'd (bro-v96mp)", () => {
+    const pid = deadPid();
+    assert.ok(pid > 0);
+    withTmp(dir => {
+      const agentDir = join(dir, 'bro-tmp', 'agent-x');
+      const leaf = join(agentDir, `tmp-${pid}-cccccccccccc`);
+      mkdirSync(leaf, { recursive: true, mode: 0o700 });
+      writeFileSync(join(leaf, 'marker'), 'x');
+      ageDir(leaf, GRACE + 60_000);
+      // a live-owner leaf beside it keeps — the daemon's own install
+      const live = join(agentDir, `tmp-${process.pid}-dddddddddddd`);
+      mkdirSync(live, { recursive: true, mode: 0o700 });
+      const out = lines(() => cleanupTmpDirs(false, { extraRoots: [agentDir] }));
+      assert.ok(
+        out.some(l => l.includes('deleted')),
+        `expected a delete line, got: ${out}`
+      );
+      assert.equal(existsSync(leaf), false);
+      assert.ok(existsSync(live));
+      // the emptied shell is litter of the same class — rmdir'd only
+      // once the live leaf is gone too
+      assert.ok(existsSync(agentDir));
+      rmSync(live, { recursive: true, force: true });
+    });
+  });
+
+  test('a missing extraRoots dir skips silently — the sweep never dies mid-listing', () => {
+    withTmp(dir => {
+      const out = lines(() =>
+        cleanupTmpDirs(false, { extraRoots: [join(dir, 'no-such-bro-tmp')] })
+      );
+      assert.ok(!out.some(l => l.includes('error')), `got: ${out}`);
+    });
+  });
+});
+
+describe('workerTmpRoots (bro-v96mp)', () => {
+  /** A real `git init` — gitCommonDir answers via rev-parse, so a .git
+   *  shape alone is not enough. */
+  const withRepo = (fn: (root: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-sweep-repo-'));
+    spawnSync('git', ['init', '-q', root]);
+    try {
+      fn(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test('lists the main + linked worktree bro-tmp dirs', () => {
+    withRepo(root => {
+      const common = join(root, '.git');
+      mkdirSync(join(common, 'bro-tmp', 'agent-a'), { recursive: true });
+      mkdirSync(join(common, 'worktrees', 'wt1', 'bro-tmp', 'agent-b'), {
+        recursive: true,
+      });
+      // a stray file under bro-tmp is not an agent dir — never a root
+      writeFileSync(join(common, 'bro-tmp', 'stray'), 'x');
+      assert.deepEqual(workerTmpRoots(root).sort(), [
+        join(common, 'bro-tmp', 'agent-a'),
+        join(common, 'worktrees', 'wt1', 'bro-tmp', 'agent-b'),
+      ]);
+    });
+  });
+
+  test('[] outside a repository and with no bro-tmp dirs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sweep-notrepo-'));
+    try {
+      assert.deepEqual(workerTmpRoots(dir), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    withRepo(root => assert.deepEqual(workerTmpRoots(root), []));
   });
 });

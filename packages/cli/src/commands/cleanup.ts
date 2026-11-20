@@ -9,7 +9,7 @@
 import { facadeAuth, git, gitTry, hasHelpFlag, printUsage, reviewHost } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
 import { positionals } from './args.ts';
-import { cleanupTmpDirs } from './tmp-sweep.ts';
+import { cleanupTmpDirs, workerTmpRoots } from './tmp-sweep.ts';
 import { isAncestor } from './work.ts';
 export { isAncestor };
 
@@ -167,7 +167,7 @@ export function runCleanupCommand(argv: string[]): void {
     console.error(`cleanup: ${auth} — planning from local state`);
   }
   // Run temp cleanup independently of network so a stalled fetch can't block it
-  cleanupTmpDirs(dryRun);
+  cleanupTmpDirs(dryRun, { extraRoots: workerTmpRoots(process.cwd()) });
 
   // freshen remote state — tolerable to proceed if the fetch fails
   // (offline): deletion decisions still come from the local view.

@@ -4,7 +4,7 @@
  *  internals now, and the member/queue describes drive the policy
  *  through a scripted `LoopDeps` — no CLI imports, no `process.exit`. */
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -15,6 +15,7 @@ import {
   freshLoopQueue,
   loopPolicy,
   loopWatch,
+  topFillers,
   wallWaitUntil,
   type LoopCtx,
   type LoopDeps,
@@ -253,5 +254,65 @@ describe('loopPolicy.serviceMember — cadence and wall waits', () => {
     assert.equal(v, 'kept');
     // the backoff stamp survives — the member re-polls AT it, not before
     assert.equal(m.nextPollAt, NOW + 30_000);
+  });
+});
+
+// --- topFillers — the breach edge's "what filled it" report (spec bro-v96mp) --
+
+describe('topFillers — the filler report on a breach edge (bro-v96mp)', () => {
+  const withDir = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-fillers-'));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('prefix-groups top consumers — tmp-* ×N names the leak family', () => {
+    withDir(dir => {
+      for (const n of ['tmp-11-aa', 'tmp-22-bb']) {
+        mkdirSync(join(dir, n));
+        writeFileSync(join(dir, n, 'blob'), Buffer.alloc(2 * 1024 * 1024));
+      }
+      mkdirSync(join(dir, 'node-compile-cache'));
+      writeFileSync(join(dir, 'node-compile-cache', 'x'), Buffer.alloc(512 * 1024));
+      const out = topFillers(dir);
+      assert.match(out, /tmp-\* ×2 4M/);
+      assert.match(out, /node-\* 1M/);
+    });
+  });
+
+  test('nested sizes count toward the top-level group', () => {
+    withDir(dir => {
+      mkdirSync(join(dir, 'big', 'nested', 'deep'), { recursive: true });
+      writeFileSync(join(dir, 'big', 'nested', 'deep', 'f'), Buffer.alloc(3 * 1024 * 1024));
+      mkdirSync(join(dir, 'small'));
+      writeFileSync(join(dir, 'small', 'f'), Buffer.alloc(1024));
+      const out = topFillers(dir);
+      assert.match(out, /^big 3M/);
+      assert.match(out, /small 1M/);
+    });
+  });
+
+  test('top 3 plus +more; an unlistable root answers empty', () => {
+    withDir(dir => {
+      for (const n of ['a-', 'b-', 'c-', 'd-']) {
+        mkdirSync(join(dir, `${n}x`));
+        writeFileSync(join(dir, `${n}x`, 'f'), Buffer.alloc(1024));
+      }
+      const out = topFillers(dir);
+      assert.match(out, /\+more/);
+    });
+    assert.equal(topFillers('/nonexistent/bro-fillers'), '');
+  });
+
+  test('a tiny node budget truncates and says so', () => {
+    withDir(dir => {
+      mkdirSync(join(dir, 'deep', 'deeper'), { recursive: true });
+      writeFileSync(join(dir, 'deep', 'deeper', 'f'), Buffer.alloc(1024));
+      const out = topFillers(dir, { nodes: 1, ms: 60_000 });
+      assert.match(out, /…/);
+    });
   });
 });

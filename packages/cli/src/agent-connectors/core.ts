@@ -124,6 +124,7 @@ import {
   walkChain,
   wallText,
   withAgentRegistryLock,
+  worktreeGitDir,
   writeAgentRegistry,
   writePrivateFileSync,
 } from '@broject/core';
@@ -1313,6 +1314,13 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_WORKTREE',
   'BRO_BRANCH',
   'BRO_REPO',
+  // the worker's private tmpdir is connector-owned too (spec
+  // bro-v96mp) — an ambient or spec.env TMPDIR would re-aim os.tmpdir()
+  // litter (an nx daemon's ~73M `nx@latest` probe install per
+  // workspace) at the tmpfs the pin exists to keep it off
+  'TMPDIR',
+  'TMP',
+  'TEMP',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -1422,6 +1430,47 @@ export function worktreeTelemetryDims(dir: string): WorktreeTelemetryDims {
   }
   telemetryDimsMemo.set(key, dims);
   return dims;
+}
+
+/** The worker's private tmpdir — `<repoRoot's git dir>/bro-tmp/<agentId>`.
+ *  On a linked worktree that is `<common>/worktrees/<n>`, so the whole
+ *  tree — worker, nx daemon, and every byte of os.tmpdir() litter —
+ *  dies with `git worktree remove` (spec bro-v96mp). A killed worker
+ *  cannot scrub its own litter (the nx daemon's ~73M `nx@latest` probe
+ *  install per workspace, SIGKILL'd mid-task, filled the /tmp tmpfs):
+ *  the pin puts it on real disk where the worktree reaper owns it, and
+ *  `bro work prune`'s sweep reaps what worktree removal misses (the
+ *  main checkout's `.git/bro-tmp`). Undefined outside a repository —
+ *  no pin, the ambient tmpdir stands. */
+export function workerTmpDir(repoRoot: string, agentId: string): string | undefined {
+  if (!SAFE_AGENT_ID.test(agentId)) {
+    return undefined;
+  }
+  const gitDir = worktreeGitDir(repoRoot);
+  return gitDir === null ? undefined : join(gitDir, 'bro-tmp', agentId);
+}
+
+/** The pin triple over a resolved workerTmpDir — Node's os.tmpdir()
+ *  consults TMPDIR/TMP/TEMP, and a bare-TMPDIR pin would leave the
+ *  fallbacks pointing at ambient. */
+export function workerTmpEnvPins(dir: string | undefined): [string, string][] {
+  return dir === undefined
+    ? []
+    : [
+        ['TMPDIR', dir],
+        ['TMP', dir],
+        ['TEMP', dir],
+      ];
+}
+
+/** mkdtemp needs the parent to exist — the pin comes with the dir,
+ *  mode 0700 like every private tmp base. Throws like the fd opens
+ *  beside it: a failed mkdir is a launch failure that hands the
+ *  reservation back, never a spawn into an unwritable tmpdir. */
+export function ensureWorkerTmpDir(dir: string | undefined): void {
+  if (dir !== undefined) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
 }
 
 /** The real pin values a backend injects over/around caller env —
@@ -4328,6 +4377,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
         maybeAbandonSpawn('reservation');
         const { handleFile, goFile } = attemptHandles(home, agentId, runId);
+        // resolved once inside the lock — the git probe is the only IO
+        // the pin needs and every consumer (mkdir, env) shares it
+        const workerTmp = workerTmpDir(spec.repoRoot, agentId);
         // the worker's stderr gets its own append fd — the .log stays
         // the agent-updates stream; the child/agent noise (and every
         // template worker's diagnostics) lands in .stderr (bro-e2ec0).
@@ -4341,6 +4393,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           if (stderrLog !== undefined) {
             errFd = openPrivateAppendSync(stderrLog);
           }
+          // the worker's tmpdir exists before the payload execs — the
+          // nx daemon's mkdtemp needs the parent (spec bro-v96mp)
+          ensureWorkerTmpDir(workerTmp);
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // The write targets the literal quoted path, never $out: a
@@ -4420,6 +4475,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 // ambient env minus the connector-owned pins
                 ...ambient,
                 ...fromSpec,
+                // the tmpdir pin rides the pin layer too — a spec.env
+                // TMPDIR must not re-aim worker scratch at the tmpfs
+                // (spec bro-v96mp)
+                ...Object.fromEntries(workerTmpEnvPins(workerTmp)),
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
                 ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
@@ -4957,9 +5016,14 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           writePrivateFileSync(envFile, `${ambient}\n`);
           const worker = workerWithResume(spec.worker, resumeSessionId);
           const cliBadge = workerCliBadge(worker, command);
-          const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
-            ([k, v]) => ['-e', `${k}=${v}`]
-          );
+          const workerTmp = workerTmpDir(spec.repoRoot, agentId);
+          const envArgs = [
+            ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol),
+            // the tmpdir pin (spec bro-v96mp) — non-secret path, -e is
+            // where tmux pins ride
+            ...workerTmpEnvPins(workerTmp),
+          ].flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+          ensureWorkerTmpDir(workerTmp);
           // the pane sources the ambient env and drops the file, then runs
           // the agent; $? lands in the .exit file before the pipeline
           // drains, tee keeps a log the way native's fd redirect does.
