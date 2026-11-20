@@ -144,14 +144,14 @@ not parallel ladders.
 | `bro review watch install\|uninstall` | keep — policy alias | arms `pulse.json` = the wake's want; document as "arm/disarm the wake". A later spelling may move under `pulse`; no `deprecated:` yet — the arm verb is still live |
 | `bro pulse [S]` | keep — canonical | the only session wake |
 | `bro review drive [--once]` | keep — canonical | the pass |
-| `bro review drive --every N` | deprecate → `bro fleet daemon` | identical loop, unrecorded owner — the operator spelling is `daemon up` (`daemon run` is the internal leg `up` spawns, not for direct use). Deprecation is flag-level (`deprecatedFlag`/`deprecatedSub`), NOT plugin-level: `daemon run` calls `runDriveCommand(['--every'])` in-process, so the warning must be gated on entry argv (or daemon passes a hidden spawn marker). Follow-up bead owns the seam |
+| `bro review drive --every N` | deprecate → `bro fleet daemon up` | identical loop, unrecorded owner — `daemon up` is the operator spelling (`daemon run` is the internal leg `up` spawns, not for direct use). Deprecation is flag-level (`deprecatedFlag`/`deprecatedSub`), NOT plugin-level: `daemon run` calls `runDriveCommand(['--every'])` in-process, so the warning must be gated on entry argv (or daemon passes a hidden spawn marker). Follow-up bead owns the seam |
 | `bro review drive install\|uninstall` | keep — policy alias of daemon install | "install the merge path" = arm `drive.json` + `daemon up`; docs name the owner, not a separate mechanism |
 | `bro fleet daemon up\|status\|down\|run` | keep — canonical | the only owner |
 | `bro fleet rig sync\|status` | keep — canonical | pass + read |
 | `bro fleet rig next` | keep — canonical | the only re-entry verdict; `bro flow next` stays the backlog-claim verb — the spec only rules on `rig next` being THE re-entry |
 | `bro fleet rig watch` | deprecate → daemon leg | migration bead picks `daemon run --rig` vs a `rig next`-driven freshness verdict; the `rig-pulse.*` marker stack retires with it |
 | `bro fleet rig install\|uninstall` | deprecate → owner policy | freshness intent becomes a daemon/config policy row, not a second pulse stack |
-| `bro flow loop --every S` | deprecate → `bro fleet daemon` | same `daemon run` aliasing question as `drive --every` — one migration bead covers both raw `--every` spellings; `daemon up --loop`/`daemon run --loop` is the owned shape |
+| `bro flow loop --every S` | deprecate → `bro fleet daemon up --loop` | same `daemon run` aliasing question as `drive --every` — one migration bead covers both raw `--every` spellings; `daemon up --loop` spawns `daemon run --loop`, the owned shape |
 | `bro flow loop install\|uninstall` | keep — policy alias of daemon install | same as `drive install` |
 | `bro review act wait [PR] --detach` | keep — canonical observer | the bounded per-PR watch; `--detach` is its documented survival form |
 | `bro review act rearm` | keep — re-entry executor | stays the resurrection executor; `rig next` gains the dead-marker plane so rearm is what the verdict invokes, not a parallel re-entry ladder |
