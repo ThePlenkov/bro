@@ -14,14 +14,12 @@ import {
   type BroPlugin,
   beadsSection,
   CommandError,
-  type ConfigDiagnostic,
   type ConfigLayerName,
   type ConfigSection,
   type Connector,
   type ConnectorHooks,
   checkBeads,
   configDiagnostics,
-  configPolicyErrors,
   type DocType,
   debtSection,
   definePlugin,
@@ -34,6 +32,7 @@ import {
   printUsage,
   querySection,
   registerConnector,
+  type Scope,
   sddSection,
   serveSection,
   stackSection,
@@ -1317,8 +1316,15 @@ function isDenseArray(v: unknown, ok: (item: unknown) => boolean): boolean {
 function isDenseStringArray(v: unknown): boolean {
   return isDenseArray(v, item => typeof item === 'string');
 }
-function isDocTypeArray(v: unknown): boolean {
-  return Array.isArray(v) && v.every(isDocType);
+/** DocType scopes — `satisfies` keeps every element a Scope; the
+ *  `Exclude<Scope, …>` pin in the coverage block fails typecheck when
+ *  core's union grows a value this list doesn't know. */
+const SCOPES = ['project', 'global'] as const satisfies readonly Scope[];
+function isScope(v: unknown): boolean {
+  return SCOPES.includes(v as Scope);
+}
+function isScopeArray(v: unknown): boolean {
+  return isDenseArray(v, isScope);
 }
 
 /** Table row — a present-but-wrong optional field answers the
@@ -1344,7 +1350,7 @@ const PLUGIN_FIELD_CHECKS = [
   check('flatDeprecated', 'must be a string', isString),
   check('configKey', 'must be a string', isString),
   check('argvPrefix', 'must be an array of strings', isDenseStringArray),
-  check('docs', 'must be DocType[] (name + adapter factory)', isDocTypeArray),
+  ['docs', docsProblem],
   ['connectors', connectorsProblem],
   check('contract', 'must be a CliContract (flags/exits/subs maps)', isCliContract),
   check('group', 'must be a string', isString),
@@ -1503,7 +1509,10 @@ function optInFacadesProblem(v: unknown, path: string): string | undefined {
 
 /** activeIn — `Partial<Record<keyof ConnectorHooks, readonly Mode[]>>`;
  *  a wrong value reaches connectorHookActive's `modes.includes(mode)`
- *  as a delayed TypeError in hook dispatch (spec bro-l8c4f.1). */
+ *  as a delayed TypeError in hook dispatch (spec bro-l8c4f.1). The
+ *  own-key pass gates typos; the value pass reads `v[kind]` — the same
+ *  prototype-chain read dispatch makes — so an inherited `stopGate: 5`
+ *  cannot slip past `Object.keys`/`entries` (own keys only). */
 function activeInProblem(v: unknown, path: string): string | undefined {
   if (v === undefined) {
     return undefined;
@@ -1511,20 +1520,42 @@ function activeInProblem(v: unknown, path: string): string | undefined {
   if (!isRecord(v)) {
     return field(path, 'must map hook kinds to mode lists');
   }
-  for (const [kind, modes] of Object.entries(v)) {
+  for (const kind of Object.keys(v)) {
     if (!(CONNECTOR_HOOK_KEYS as readonly string[]).includes(kind)) {
       return field(`${path}.${kind}`, 'is not a hook kind');
     }
-    if (!isDenseArray(modes, isMode)) {
+  }
+  for (const kind of CONNECTOR_HOOK_KEYS) {
+    const modes = v[kind];
+    if (modes !== undefined && !isDenseArray(modes, isMode)) {
       return field(`${path}.${kind}`, 'must be an array of modes');
     }
   }
   return undefined;
 }
 
+/** Function-typed optional connector fields — a present-but-wrong
+ *  value is a delayed TypeError at facade/hook dispatch. */
+function connectorFunctionProblem(c: Record<string, unknown>, path: string): string | undefined {
+  for (const key of CONNECTOR_FUNCTION_KEYS) {
+    const v = c[key];
+    if (v !== undefined && typeof v !== 'function') {
+      return field(`${path}.${key}`, 'must be a function');
+    }
+  }
+  return undefined;
+}
+
+function optInProblem(v: unknown, path: string): string | undefined {
+  return v !== undefined && typeof v !== 'boolean'
+    ? field(`${path}.optIn`, 'must be a boolean')
+    : undefined;
+}
+
 /** One connectors entry — undefined = valid; a string names the
  *  offending field + expectation (`path` lets the caller point at
- *  `connectors[i]` so the warning lands on the entry). */
+ *  `connectors[i]` so the warning lands on the entry). Field-group
+ *  helpers keep this gate flat as the Connector type grows. */
 export function connectorProblem(c: unknown, path: string): string | undefined {
   if (!isObject(c)) {
     return field(path, 'must be an object');
@@ -1532,20 +1563,12 @@ export function connectorProblem(c: unknown, path: string): string | undefined {
   if (!isNonEmptyString(c.name)) {
     return field(`${path}.name`, 'must be a non-empty string');
   }
-  for (const key of CONNECTOR_FUNCTION_KEYS) {
-    const v = c[key];
-    if (v !== undefined && typeof v !== 'function') {
-      return field(`${path}.${key}`, 'must be a function');
-    }
-  }
-  if (c.optIn !== undefined && typeof c.optIn !== 'boolean') {
-    return field(`${path}.optIn`, 'must be a boolean');
-  }
-  const facades = optInFacadesProblem(c.optInFacades, `${path}.optInFacades`);
-  if (facades !== undefined) {
-    return facades;
-  }
-  return activeInProblem(c.activeIn, `${path}.activeIn`);
+  return (
+    connectorFunctionProblem(c, path) ??
+    optInProblem(c.optIn, path) ??
+    optInFacadesProblem(c.optInFacades, `${path}.optInFacades`) ??
+    activeInProblem(c.activeIn, `${path}.activeIn`)
+  );
 }
 
 /** The `connectors` plugin field — an array whose every entry passes
@@ -1557,6 +1580,56 @@ function connectorsProblem(v: unknown): string | undefined {
   }
   for (let i = 0; i < v.length; i++) {
     const why = connectorProblem(v[i], `connectors[${i}]`);
+    if (why !== undefined) {
+      return why;
+    }
+  }
+  return undefined;
+}
+
+/** Optional DocType fields — the same present-but-wrong contract as
+ *  the plugin table: registration spreads `aliases` verbatim and
+ *  dispatch reads `scopes`/`idPrefix`/`render`/`describe` by name, so
+ *  a malformed one crashes docTypes/docVerbs or this loader. */
+const DOCTYPE_FIELD_CHECKS = [
+  ['aliases', 'must be an array of strings', isDenseStringArray],
+  ['scopes', 'must be an array of scopes ("project" | "global")', isScopeArray],
+  ['idPrefix', 'must be a string', isString],
+  ['render', 'must be a function', isFunction],
+  ['describe', 'must be a function', isFunction],
+] as const satisfies ReadonlyArray<readonly [keyof DocType, string, (v: unknown) => boolean]>;
+
+/** One docs entry — a DocType is name + adapter factory plus
+ *  well-typed optionals; anything less crashes dispatch or the
+ *  reserved-name sweep below. `path` lands the warning on `docs[i]`. */
+function docTypeProblem(d: unknown, path: string): string | undefined {
+  if (!isObject(d)) {
+    return field(path, 'must be a DocType object');
+  }
+  if (!isNonEmptyString(d.name)) {
+    return field(`${path}.name`, 'must be a non-empty string');
+  }
+  if (!isFunction(d.adapter)) {
+    return field(`${path}.adapter`, 'must be a function');
+  }
+  for (const [key, why, ok] of DOCTYPE_FIELD_CHECKS) {
+    const v = d[key];
+    if (v !== undefined && !ok(v)) {
+      return field(`${path}.${key}`, why);
+    }
+  }
+  return undefined;
+}
+
+/** The `docs` plugin field — index reads keep the diagnostic at
+ *  `docs[i].<field>`; a sparse hole reads `undefined` and the entry
+ *  check rejects it by name (same contract as `connectors`). */
+function docsProblem(v: unknown): string | undefined {
+  if (!Array.isArray(v)) {
+    return field('docs', 'must be an array');
+  }
+  for (let i = 0; i < v.length; i++) {
+    const why = docTypeProblem(v[i], `docs[${i}]`);
     if (why !== undefined) {
       return why;
     }
@@ -1577,19 +1650,8 @@ assertNever<
 assertNever<Exclude<FunctionKeysOf<Connector>, (typeof CONNECTOR_FUNCTION_KEYS)[number]>>();
 assertNever<Exclude<keyof FacadeMap, FacadeKey>>();
 assertNever<Exclude<keyof ConnectorHooks, (typeof CONNECTOR_HOOK_KEYS)[number]>>();
-
-/** A docs entry must be a DocType — name + adapter factory — else it
- *  would crash docVerbs/docTypes deep in dispatch or --help. */
-function isDocType(d: unknown): d is DocType {
-  const o = d as DocType;
-  return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    typeof o.adapter === 'function'
-  );
-}
+assertNever<Exclude<OptionalKeysOf<DocType>, (typeof DOCTYPE_FIELD_CHECKS)[number][0]>>();
+assertNever<Exclude<Scope, (typeof SCOPES)[number]>>();
 
 /** Imports one specifier → exported candidate entries, or undefined on
  *  failure (warned). Relative specs must resolve inside the repo root —

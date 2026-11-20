@@ -517,6 +517,26 @@ describe('external plugin/connector validation', () => {
       'plugin external must be a boolean',
       `export default { name: 'bad18', summary: 'x', run: () => {}, external: 'yes' }`,
     ],
+    [
+      'sparse docs array holes rejected',
+      `export default { name: 'bad19', summary: 'x', run: () => {}, docs: [, { name: 't', adapter: () => ({}) }] }`,
+    ],
+    [
+      'inherited activeIn value is read the way dispatch reads it',
+      `export default { name: 'bad20', summary: 'x', run: () => {}, connectors: [{ name: 'c20', activeIn: Object.create({ stopGate: 5 }) }] }`,
+    ],
+    [
+      'docType aliases must be a string array',
+      `export default { name: 'bad21', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), aliases: 5 }] }`,
+    ],
+    [
+      'docType scopes must be known scopes',
+      `export default { name: 'bad22', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), scopes: ['bogus'] }] }`,
+    ],
+    [
+      'docType render must be a function',
+      `export default { name: 'bad23', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), render: 'x' }] }`,
+    ],
   ];
 
   for (const [title, source] of rejectionCases) {
@@ -553,6 +573,16 @@ describe('external plugin/connector validation', () => {
       `export default { name: 'diag5', summary: 'x', run: () => {}, connectors: [{ name: 'd5', activeIn: { stopGate: 5 } }] }`,
       /connectors\[0\]\.activeIn\.stopGate/,
     ],
+    [
+      'rejection names the docs index and field',
+      `export default { name: 'diag6', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), aliases: 5 }] }`,
+      /docs\[0\]\.aliases/,
+    ],
+    [
+      'rejection names the inherited activeIn key dispatch would read',
+      `export default { name: 'diag7', summary: 'x', run: () => {}, connectors: [{ name: 'd7', activeIn: Object.create({ stopGate: 5 }) }] }`,
+      /connectors\[0\]\.activeIn\.stopGate/,
+    ],
   ];
   for (const [title, source, pattern] of namingCases) {
     test(title, async () => {
@@ -583,6 +613,34 @@ describe('external plugin/connector validation', () => {
     try {
       assert.equal(loaded.length, 1);
       assert.equal(loaded[0].name, 'good2');
+    } finally {
+      unload(loaded);
+    }
+  });
+
+  test('a plugin carrying a valid doc type registers', async () => {
+    const dir = repoWith(
+      `export default { name: 'good4', summary: 'x', run: () => {}, docs: [{ name: 'dcs', aliases: ['dc'], scopes: ['project'], adapter: () => ({}) }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].docs?.[0]?.name, 'dcs');
+    } finally {
+      unload(loaded);
+    }
+  });
+
+  test('a null-prototype activeIn map still registers', async () => {
+    const dir = repoWith(
+      `const ai = Object.create(null); ai.stopGate = ['code']; export default { name: 'good5', summary: 'x', run: () => {}, connectors: [{ name: 'gc5', activeIn: ai }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good5');
     } finally {
       unload(loaded);
     }
