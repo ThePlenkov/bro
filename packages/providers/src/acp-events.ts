@@ -16,7 +16,10 @@
  *   session/update lands as a row, chunks included, bookended by turn
  *   start/stop. Written only when the process carries a BRO_AGENT_ID
  *   badge — unmanaged turns (conductor sessions, judge calls) have no
- *   agent artifact home and simply don't archive.
+ *   agent artifact home and simply don't archive. The file self-caps
+ *   like the sibling journals (spec bro-9ti7h): past the byte ceiling
+ *   it truncates to its newest whole lines, so a long or chatty
+ *   session stays bounded instead of growing forever.
  *
  * Neither sink can fail a turn: publishes are serialized on a settled
  * queue and drain() is capped, file writes are swallowed whole — an
@@ -24,7 +27,7 @@
  */
 import { dirname } from 'node:path';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { eventsFile, proxyEventsFile } from '@broject/acp-session';
+import { eventsFile, proxyEventsFile, readTailSlice, sizeOf } from '@broject/acp-session';
 import {
   appendPrivateFileSync,
   busPublish,
@@ -32,6 +35,7 @@ import {
   type EventInput,
   mkdirPrivateSync,
   stateCommonDir,
+  writePrivateFileSync,
 } from '@broject/core';
 
 /** agentIds minted by agent-connectors are filename-safe — a badge
@@ -145,6 +149,49 @@ const archiveFile = (
   return agentId === undefined ? undefined : eventsFile(common, agentId);
 };
 
+/** The archive's self-cap bound (spec bro-9ti7h) — the lifecycle
+ *  journal's 4/2 MiB pair. The archive is the durable record behind a
+ *  windowed reader (TAIL_BYTES opens), so the kept tail outlasts any
+ *  consumer's scrollback while the file stays cheap to tail.
+ *  KEEP < MAX is the invariant the cap math relies on. */
+export const AGENT_ARCHIVE_MAX_BYTES = 4 * 1024 * 1024;
+export const AGENT_ARCHIVE_KEEP_BYTES = 2 * 1024 * 1024;
+
+/** Cap one archive to its newest whole lines — a tail-only read so a
+ *  pre-existing giant archive converges without a whole-file read,
+ *  then an in-place rewrite through the private seam: the 0600 pin,
+ *  the symlink refusal, and the foreign-owner refusal ride the cap
+ *  exactly like the append (and no tmp+rename ever leaves a
+ *  briefly-permissive staging file or swaps the inode under a follow
+ *  reader). Runs inside the caller's try — housekeeping never
+ *  outranks the row. */
+const capArchive = (file: string): void => {
+  const size = sizeOf(file);
+  if (size <= AGENT_ARCHIVE_MAX_BYTES) {
+    return;
+  }
+  const slice = readTailSlice(file, size - AGENT_ARCHIVE_KEEP_BYTES);
+  if (slice === undefined) {
+    return;
+  }
+  // drop the slice's first line — it can be torn mid-row. A tail with
+  // no SECOND line keeps whole: the archive never truncates to empty
+  // while data remains (the janitor capFile edge rule).
+  const nl = slice.buf.indexOf(0x0a);
+  const tail = nl >= 0 && nl + 1 < slice.buf.length ? slice.buf.subarray(nl + 1) : slice.buf;
+  writePrivateFileSync(file, tail);
+};
+
+/** Append one archive row, then self-cap — the ONE helper every writer
+ *  funnels through so the bound rides the plane's
+ *  start/update/note/stop funnel and agentEventRecord's out-of-band
+ *  row alike. One statSync per row, the otel sink's own shape —
+ *  proportional next to the open/write/close the append already pays. */
+const appendArchiveRow = (file: string, line: string): void => {
+  appendPrivateFileSync(file, line);
+  capArchive(file);
+};
+
 /** An out-of-band archive row — same file, same shape, written outside
  *  pumpTurn's update funnel (spec bro-l8wqu). The one consumer today is
  *  the acp-worker's permission handler: `session/request_permission` is
@@ -169,7 +216,7 @@ export function agentEventRecord(
   if (file === undefined) return;
   try {
     mkdirPrivateSync(dirname(file));
-    appendPrivateFileSync(
+    appendArchiveRow(
       file,
       `${JSON.stringify({ ts: new Date().toISOString(), session: sessionId, by, key: agentId, ...row })}\n`
     );
@@ -235,7 +282,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
         mkdirPrivateSync(dirname(file));
         dirReady = true;
       }
-      appendPrivateFileSync(file, `${JSON.stringify(row)}\n`);
+      appendArchiveRow(file, `${JSON.stringify(row)}\n`);
     } catch {
       /* the archive is telemetry — a disk failure never fails a turn */
     }
