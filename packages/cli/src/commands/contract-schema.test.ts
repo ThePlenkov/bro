@@ -785,7 +785,14 @@ function meshBead(e: {
  *  for inputs[], open blockers for blocked[], a dep loop for stuck[], an
  *  in_progress row and a human step for gates[]/inProgress[] — and is
  *  restored after the emit so the rest of the suite still sees the
- *  fixture it seeded. */
+ *  fixture it seeded.
+ *
+ *  The read→mutate→await→restore window is safe ONLY because node:test
+ *  runs a describe's subtests sequentially — the same invariant every
+ *  other producer here leans on (capture() swaps console + process.exit,
+ *  insideAsync() swaps process.cwd(), and the env pins are process-wide
+ *  inside awaits). Setting `concurrency` on the describe would turn this
+ *  — and all of those — into a shared-store race, so it stays unset. */
 async function emitConvoyNext(): Promise<unknown> {
   const orig = readFileSync(bdFx.db, 'utf8');
   const db = JSON.parse(orig) as {

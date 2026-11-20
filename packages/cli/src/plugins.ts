@@ -489,8 +489,11 @@ export const PLUGINS: BroPlugin[] = [
           // has no --json flag, so there is no schema to pin (the
           // exclusion is documented in specs/bro-6ptci.3.md)
           exits: {
-            0: 'argv printed (--print) or the host resume ran',
-            1: 'no sessions, host has no resume command, or the resume exited nonzero',
+            // an unsupported host is reported, never guessed — the
+            // launchResume resumeArgv===null arm returns normally, so
+            // it is an exit-0 outcome like --print or a cancelled pick
+            0: 'argv printed (--print), picker cancelled, host has no resume command, or the host resume ran',
+            1: 'no sessions in the ledger, spawn failed, or the resume exited nonzero',
             2: 'usage — missing/ambiguous target, --pick without a TTY',
           },
         },
@@ -1183,6 +1186,7 @@ export const PLUGINS: BroPlugin[] = [
         },
         wait: {
           flags: {
+            '<thread>': 'the request/thread id — `bro mesh request` and lifecycle verbs print it',
             '--json':
               '{thread, stage?, turn?, envelopes} — stage/turn keys absent when the reduction has none',
             '--no-pull': 'serve replica stores as they stand — skip the sync leg',
@@ -1215,6 +1219,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runWaitCommand,
     contract: {
       flags: {
+        'external:<rig>:<id>…': 'one or more dep refs — `bro request` prints the one it wired',
         '--json': '{verdict, refs, unsettled?} — the exit code IS the verdict',
         '--every <sec>': 'poll interval — default 30s',
         '--timeout <sec>': 'the bound — default 2700s (45m); 0 waits unbounded',
