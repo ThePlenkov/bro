@@ -234,24 +234,31 @@ function layoutBand(root: Bead, bandY: number, children: Map<string, Bead[]>, po
   return levelY + 8;
 }
 
+// One edge kind per relation source — the table drives both loops.
+const EDGE_SOURCES: Array<{ kind: GEdge['kind']; targets: (n: GNode, children: Map<string, Bead[]>) => string[]; yOff: [number, number] }> = [
+  { kind: 'parent', targets: (n, children) => (children.get(n.bead.id) ?? []).map(k => k.id), yOff: [12, -12] },
+  { kind: 'blocks', targets: n => n.bead.blocks, yOff: [0, 0] },
+];
+
+function collectLayoutEdges(pos: Map<string, GNode>, children: Map<string, Bead[]>): GEdge[] {
+  const edges: GEdge[] = [];
+  for (const n of pos.values()) {
+    for (const src of EDGE_SOURCES) {
+      for (const id of src.targets(n, children)) {
+        const t = pos.get(id);
+        if (t) edges.push({ x1: n.x, y1: n.y + src.yOff[0], x2: t.x, y2: t.y + src.yOff[1], kind: src.kind });
+      }
+    }
+  }
+  return edges;
+}
+
 function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: GEdge[]; w: number; h: number } {
   const { starts, children } = forestRoots(issues, includeFlat);
   const pos = new Map<string, GNode>();
   let bandY = 0;
   for (const root of starts) bandY = layoutBand(root, bandY, children, pos);
-
-  const edges: GEdge[] = [];
-  for (const n of pos.values()) {
-    for (const k of children.get(n.bead.id) ?? []) {
-      const t = pos.get(k.id);
-      if (t) edges.push({ x1: n.x, y1: n.y + 12, x2: t.x, y2: t.y - 12, kind: 'parent' });
-    }
-    for (const t of n.bead.blocks) {
-      const other = pos.get(t);
-      if (other) edges.push({ x1: n.x, y1: n.y, x2: other.x, y2: other.y, kind: 'blocks' });
-    }
-  }
-  return { nodes: [...pos.values()], edges, w: W_COLS * COL_W, h: bandY + 20 };
+  return { nodes: [...pos.values()], edges: collectLayoutEdges(pos, children), w: W_COLS * COL_W, h: bandY + 20 };
 }
 
 // --- components ---------------------------------------------------------
