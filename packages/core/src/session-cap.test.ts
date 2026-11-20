@@ -40,10 +40,11 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** A plane that claims a command by a marker word and counts a
- *  scripted number of live sessions. */
+ *  scripted number of live sessions. `list` scripts per-pid rows —
+ *  the exclusion the multiplexer census subtracts needs listLive. */
 const testPlane = (
   kind: string,
-  opts: { live?: number; starts?: number; fail?: boolean } = {}
+  opts: { live?: number; starts?: number; fail?: boolean; list?: number[] } = {}
 ): SessionPlane => ({
   kind,
   detectsCli: cli => cli === `${kind}-cli`,
@@ -54,6 +55,7 @@ const testPlane = (
     }
     return opts.live ?? 0;
   },
+  ...(opts.list === undefined ? {} : { listLive: () => opts.list!.map(pid => ({ pid })) }),
 });
 
 const withPlane = (plane: SessionPlane, fn: () => void): void => {
@@ -131,6 +133,22 @@ describe('sessionCapViews', () => {
         });
         assert.equal(claimed[0]?.live, 2);
       });
+    });
+  });
+
+  test('excludePids leaves caller-owned live rows out of the count', () => {
+    // a shared peer's deduped lock row is claim-covered already —
+    // charging it again would count one session twice (spec bro-x601l)
+    withPlane(testPlane('alpha', { live: 2, list: [10, 20] }), () => {
+      const agents = { alpha: { maxSessions: 5, reservationsDir: '/nonexistent' } };
+      assert.equal(sessionCapViews('alpha-run', agents)[0]?.live, 2);
+      assert.equal(sessionCapViews('alpha-run', agents, undefined, new Set([20]))[0]?.live, 1);
+      // an unlisted pid subtracts nothing; without listLive the count stands
+      assert.equal(sessionCapViews('alpha-run', agents, undefined, new Set([99]))[0]?.live, 2);
+    });
+    withPlane(testPlane('alpha', { live: 2 }), () => {
+      const agents = { alpha: { maxSessions: 5, reservationsDir: '/nonexistent' } };
+      assert.equal(sessionCapViews('alpha-run', agents, undefined, new Set([10]))[0]?.live, 2);
     });
   });
 

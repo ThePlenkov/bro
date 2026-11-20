@@ -669,6 +669,7 @@ export {
   countSessionReservations,
   isBatchSpawn,
   normalizeHookPayload,
+  planeLiveExcluding,
   providerCapCensus,
   registerSessionPlane,
   releaseSessionSlot,

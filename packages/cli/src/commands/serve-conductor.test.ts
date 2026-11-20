@@ -3541,6 +3541,41 @@ describe('the provider lane cap (spec bro-x601l)', () => {
       }
     }));
 
+  test("the lane's own shared peer is never charged for its lock row", () =>
+    withXdg(async () => {
+      // the coderabbit scenario: a pooled `dv acp` peer drops one lock
+      // row the plane dedupes to 1 — the request's own claim on top
+      // reads 2 against a cap of 1, so the lane would refuse its FIRST
+      // open. The peer's sessions are claim-covered one-for-one, so its
+      // lock row never joins the census.
+      const PEER = 4242;
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 1,
+        listLive: () => [{ pid: PEER }],
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+        // the caller-owned pid comes out of the count — the open's own
+        // claim is the lane's whole tally
+        const release = await admitLaneCap(cfg, 'req-1', new Set([PEER]));
+        release();
+        // the un-locked fallback applies the same accounting
+        const second = admitLaneCapUnlocked(cfg, 'req-2', new Set([PEER]));
+        second();
+        // a pid the caller does NOT own still charges — the same lock
+        // belonging to a foreign lane fills the cap and the open refuses
+        await assert.rejects(admitLaneCap(cfg, 'req-3'), providerCapRefusal);
+        assert.throws(() => admitLaneCapUnlocked(cfg, 'req-4'), providerCapRefusal);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
   test('a mid-compound failure hands the earlier planes claims back', () =>
     withXdg(async () => {
       // two planes claim the entry's command; the second cannot count —

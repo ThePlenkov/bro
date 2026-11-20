@@ -1034,6 +1034,28 @@ export interface AcpLinkPool {
 const pooledPeers = new Set<AcpPeer>();
 let poolExitArmed = false;
 
+/** The pids of every live pooled peer this process holds — the lane
+ *  census's multiplexer exclusion (spec bro-x601l): every session
+ *  inside a pooled peer opens through `admitLaneCap`, so each already
+ *  holds a claim on the shared ledger, and the peer's own deduped
+ *  lock row on the plane's census would charge the same sessions a
+ *  second time (a lane capped at 1 refused its first request on a
+ *  warm peer). Dead peers drop out on their abort; the signal check
+ *  filters a member whose death the pool has not swept yet. A peer
+ *  without a pid (a test-seam link) excludes nothing. */
+export function pooledPeerPids(): ReadonlySet<number> {
+  const pids = new Set<number>();
+  for (const peer of pooledPeers) {
+    if (peer.signal.aborted) {
+      continue;
+    }
+    if (peer.pid !== undefined) {
+      pids.add(peer.pid);
+    }
+  }
+  return pids;
+}
+
 export function acpLinkPool(
   by: string,
   entry: AcpEntry,
@@ -2178,9 +2200,20 @@ function laneProviderCap(cfg: ConductorConfig): ProviderCapLane | undefined {
  *  maps it to 429), `SpawnError` of other kinds when the count cannot
  *  be established, `LockTimeout` UNtranslated (the caller owns the
  *  degrade), and the claim's own fs error. */
-export async function admitLaneCap(cfg: ConductorConfig, claimKey: string): Promise<() => void> {
+export async function admitLaneCap(
+  cfg: ConductorConfig,
+  claimKey: string,
+  /** Extra caller-owned multiplexer pids to leave out of the count
+   *  (a peer the caller holds outside this process's pool registry —
+   *  the test seam); the live pooled peers' pids always ride along. */
+  ownPids?: ReadonlySet<number>
+): Promise<() => void> {
   const command = cfg.entry.command;
   const providerCap = laneProviderCap(cfg);
+  // the census never charges a shared peer for its own lock row —
+  // every session inside it already holds a claim on this ledger
+  const excludePids =
+    ownPids === undefined ? pooledPeerPids() : new Set([...pooledPeerPids(), ...ownPids]);
   // the serialized check+claim — under the kind's OWN admission mutex,
   // the same lock the spawn's admission takes, so a request burst and
   // a fleet spawn share ONE budget. The wait is the yielding form —
@@ -2198,6 +2231,7 @@ export async function admitLaneCap(cfg: ConductorConfig, claimKey: string): Prom
         agents: cfg.agents,
         key: claimKey,
         providerCap,
+        excludePids,
         waitMs: CAP_LOCK_WAIT_MS,
       });
       if (admission === undefined) {
@@ -2301,9 +2335,17 @@ const CAP_LOCK_WAIT_MS = 5_000;
  *  with the claim already landed, every census sees every caller, the
  *  cap's excess is REFUSED (the claim handed back), and the lane can
  *  over-refuse under a burst but never over-admit. */
-export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): () => void {
+export function admitLaneCapUnlocked(
+  cfg: ConductorConfig,
+  claimKey: string,
+  /** Same multiplexer exclusion the locked path runs — caller-owned
+   *  peer pids riding the live pooled registry's. */
+  ownPids?: ReadonlySet<number>
+): () => void {
   const command = cfg.entry.command;
   const providerCap = laneProviderCap(cfg);
+  const excludePids =
+    ownPids === undefined ? pooledPeerPids() : new Set([...pooledPeerPids(), ...ownPids]);
   const planes = planesStartingSessions(command);
   // the kinds whose quota gates this command — the pre-claim view only
   // decides which unarmed planes skip the claim (a provider cap arms
@@ -2382,7 +2424,7 @@ export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): ()
   let postViews;
   let providerLive = 0;
   try {
-    postViews = sessionCapViews(command, cfg.agents);
+    postViews = sessionCapViews(command, cfg.agents, undefined, excludePids);
     if (providerCap !== undefined) {
       providerLive =
         planes.length === 0
@@ -2392,7 +2434,7 @@ export function admitLaneCapUnlocked(cfg: ConductorConfig, claimKey: string): ()
           : // the combined census the locked section judges — every
             // plane the command claims on the lane, deduped on the
             // census dir the claims landed in
-            providerCapCensus(planes, cfg.agents, undefined, providerCap);
+            providerCapCensus(planes, cfg.agents, undefined, providerCap, excludePids);
     }
   } catch (err) {
     releaseSessionStart(held);

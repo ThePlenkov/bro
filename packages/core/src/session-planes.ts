@@ -621,24 +621,56 @@ export function sessionStartCensusDir(
   return sessionSlotsDir(plane.kind, override);
 }
 
+/** A plane's live count minus the caller-owned pids (spec bro-x601l):
+ *  a session MULTIPLEXER — a conductor's pooled `acp` peer — holds
+ *  sessions the claim ledger already counts one-for-one, so the
+ *  peer's own deduped lock row would charge the same sessions a
+ *  second time (a lane capped at 1 would refuse its first request on
+ *  a warm peer). `countLive` only sums — the subtraction needs the
+ *  per-pid rows `listLive` answers, so a plane without it cannot say
+ *  which pids its count covers and the count stands whole: the
+ *  residual over-count is the over-refuse direction, never an
+ *  over-admit. */
+export function planeLiveExcluding(
+  plane: SessionPlane,
+  bag: Record<string, unknown>,
+  workerEnv: Record<string, string> | undefined,
+  excludePids: ReadonlySet<number> | undefined
+): number {
+  const live = plane.countLive(bag, workerEnv);
+  if (excludePids === undefined || excludePids.size === 0 || plane.listLive === undefined) {
+    return live;
+  }
+  let own = 0;
+  for (const row of plane.listLive(bag, workerEnv)) {
+    if (excludePids.has(row.pid)) {
+      own++;
+    }
+  }
+  return Math.max(0, live - own);
+}
+
 /** The provider cap's census — the combined count over EVERY plane
  *  the caller's command claims (spec bro-x601l): a multi-plane
  *  command draws one session per plane on the same provider lane, so
  *  a per-plane census admits each plane in isolation and overshoots
  *  the cap. The reservation tally dedups on the dir — planes sharing
  *  one census dir (the caller-scoped override) contribute its held
- *  claims once. Count it INSIDE the caller's locked section or after
- *  its claims landed: the figure must see every claim already held. */
+ *  claims once. `excludePids` names caller-owned multiplexers whose
+ *  lock rows the claims already cover (see `planeLiveExcluding`).
+ *  Count it INSIDE the caller's locked section or after its claims
+ *  landed: the figure must see every claim already held. */
 export function providerCapCensus(
   planes: readonly SessionPlane[],
   agents: Record<string, Record<string, unknown>> | undefined,
   workerEnv: Record<string, string> | undefined,
-  providerCap: ProviderCapLane
+  providerCap: ProviderCapLane,
+  excludePids?: ReadonlySet<number>
 ): number {
   let live = 0;
   const dirs = new Set<string>();
   for (const plane of planes) {
-    live += plane.countLive(agents?.[plane.kind] ?? {}, workerEnv);
+    live += planeLiveExcluding(plane, agents?.[plane.kind] ?? {}, workerEnv, excludePids);
     dirs.add(sessionStartCensusDir(plane, agents, providerCap));
   }
   for (const dir of dirs) {

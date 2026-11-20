@@ -28,6 +28,7 @@ import { SpawnError } from './agents.ts';
 import { acquireFileLockYielding, withFileLock } from './filelock.ts';
 import {
   countSessionReservations,
+  planeLiveExcluding,
   providerCapCensus,
   releaseSessionSlot,
   reserveSessionSlotOnce,
@@ -106,14 +107,18 @@ export function sessionCapHeldRefusal(view: {
 export function sessionCapViews(
   command: string,
   agents: Record<string, Record<string, unknown>> | undefined,
-  workerEnv?: Record<string, string>
+  workerEnv?: Record<string, string>,
+  /** Live-session pids the count must not charge — caller-owned
+   *  session multiplexers (a conductor's pooled acp peer) whose
+   *  sessions the claim ledger already counts one-for-one. */
+  excludePids?: ReadonlySet<number>
 ): SessionCapView[] {
   if (command.trim() === '') {
     return [];
   }
   const views: SessionCapView[] = [];
   for (const plane of sessionPlanes()) {
-    const view = capViewFor(plane, command, agents, workerEnv);
+    const view = capViewFor(plane, command, agents, workerEnv, excludePids);
     if (view !== undefined) {
       views.push(view);
     }
@@ -127,7 +132,8 @@ function capViewFor(
   plane: SessionPlane,
   command: string,
   agents: Record<string, Record<string, unknown>> | undefined,
-  workerEnv?: Record<string, string>
+  workerEnv?: Record<string, string>,
+  excludePids?: ReadonlySet<number>
 ): SessionCapView | undefined {
   if (plane.startsSessions === undefined) {
     return undefined;
@@ -152,7 +158,7 @@ function capViewFor(
     return undefined;
   }
   const bag = agents?.[plane.kind] ?? {};
-  const live = plane.countLive(bag, workerEnv);
+  const live = planeLiveExcluding(plane, bag, workerEnv, excludePids);
   const reservations = countSessionReservations(sessionSlotsDir(plane.kind, quota.reservationsDir));
   return { kind: plane.kind, live: live + reservations, cap: quota.maxSessions, starts };
 }
@@ -348,6 +354,11 @@ export interface SessionStartAdmissionArgs {
    *  conductor's retained conversations riding one shared peer —
    *  counted with the host's inside the lock. */
   extraLive?: number;
+  /** live-session pids the count must not charge (spec bro-x601l) —
+   *  caller-owned session multiplexers: a pooled acp peer's sessions
+   *  all hold claims on this ledger, so the peer's own deduped lock
+   *  row would charge the same sessions a second time. */
+  excludePids?: ReadonlySet<number>;
   /** the provider's lane cap — `fleet.providerCaps.<provider>` (spec
    *  bro-x601l): judged on this kind's census inside the same section,
    *  the outer gate ahead of the kind quota's own lanes. */
@@ -429,7 +440,7 @@ function providerCapLine(lane: ProviderCapLane, live: number, starts: number): s
  *  quota's own lane. */
 function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmission | undefined {
   const plane = args.plane;
-  const view = capViewFor(plane, args.command, args.agents, args.workerEnv);
+  const view = capViewFor(plane, args.command, args.agents, args.workerEnv, args.excludePids);
   const providerCap = args.providerCap;
   if (view === undefined && providerCap === undefined) {
     return undefined;
@@ -454,7 +465,7 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
   let providerLive: number | undefined;
   try {
     census =
-      plane.countLive(args.agents?.[plane.kind] ?? {}, args.workerEnv) +
+      planeLiveExcluding(plane, args.agents?.[plane.kind] ?? {}, args.workerEnv, args.excludePids) +
       countSessionReservations(resDir);
     providerLive =
       providerCap === undefined
@@ -463,7 +474,8 @@ function admissionSection(args: SessionStartAdmissionArgs): SessionStartAdmissio
             planesStartingSessions(args.command),
             args.agents,
             args.workerEnv,
-            providerCap
+            providerCap,
+            args.excludePids
           );
   } catch (err) {
     // a count that cannot be established must not strand the claim —

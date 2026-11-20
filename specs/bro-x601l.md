@@ -73,6 +73,19 @@ A provider name absent from `providers` still gates (registry rows
 record `provider` verbatim); a name with no matching rows and no plane
 just counts zero.
 
+**Caller-owned multiplexers are excluded.** A pooled `devin acp` peer
+this `bro serve` process holds drops ONE deduped lock row on the plane
+census while every session inside it already holds a claim on the
+slot ledger — counting both charges the same sessions twice (a lane
+capped at 1 would refuse its first request on a warm peer). The lane
+admission therefore subtracts the pids `pooledPeerPids()` reports —
+via `planeLiveExcluding`, which needs the plane's `listLive` to name
+the rows the exclusion covers. A plane that cannot list its pids keeps
+the whole count: the residual over-count is the over-refuse direction,
+never an over-admit. A FOREIGN `bro serve`'s peer is not visible to
+the exclusion and still counts once on the census — again bounded at
+one row per process, on the safe side.
+
 ### Pid-governed slot claims — the census survives retention
 
 `.slot` claims stop being pure TTL files: each carries
