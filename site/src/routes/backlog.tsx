@@ -20,7 +20,7 @@ const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
 const SNAPSHOT_KEY = 'bro:backlog:snapshot:v1';
-const BACKLOG_PATH = 'backlog.json';
+const BACKLOG_PATH = '.agents/backlog.json';
 
 interface Bead {
   id: string;

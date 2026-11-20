@@ -34,14 +34,14 @@ TIP="$(git -C "$ROOT" rev-parse --verify --quiet FETCH_HEAD || true)"
 BLOB="$(git -C "$ROOT" hash-object -w "$WORK/backlog.json")"
 
 if [ -n "$TIP" ]; then
-  OLD_BLOB="$(git -C "$ROOT" rev-parse --verify --quiet "$TIP:backlog.json" || true)"
+  OLD_BLOB="$(git -C "$ROOT" rev-parse --verify --quiet "$TIP:.agents/backlog.json" || true)"
   if [ "$OLD_BLOB" = "$BLOB" ]; then
     echo "backlog-publish: $DATA_REF already carries this backlog.json — nothing to push"
     exit 0
   fi
   git -C "$ROOT" read-tree "$TIP"
 fi
-git -C "$ROOT" update-index --add --cacheinfo "100644,$BLOB,backlog.json"
+git -C "$ROOT" update-index --add --cacheinfo "100644,$BLOB,.agents/backlog.json"
 TREE="$(git -C "$ROOT" write-tree)"
 if [ -n "$TIP" ]; then
   COMMIT="$(git -C "$ROOT" commit-tree "$TREE" -p "$TIP" -m "bro data: backlog snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)")"

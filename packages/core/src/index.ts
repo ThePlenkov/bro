@@ -36,6 +36,8 @@ export {
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
 export { getJson } from './http.ts';
+export { compactBacklog } from './backlog.ts';
+export type { BeadRow, BacklogIssue, BacklogSnapshot } from './backlog.ts';
 export {
   bd,
   BdCompatError,
