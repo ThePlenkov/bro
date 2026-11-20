@@ -993,6 +993,13 @@ export interface AcpPeer {
    *  through it (bro-eua0d). Optional: peers built outside acpOpen
    *  carry no registry. */
   terminals?: AcpTerminals;
+  /** The spawned child's pid — the peer's lock-row identity on hosts
+   *  whose session plane counts processes (a lane census excludes it:
+   *  every session inside the peer is claim-covered, so the peer's
+   *  own deduped lock would charge the same sessions twice — spec
+   *  bro-x601l). Absent on peers built outside `acpOpen` (test
+   *  seams, externally supplied links). */
+  pid?: number;
 }
 
 /** The client-bound methods a brokered link relays (spec bro-ymbq1):
@@ -1204,6 +1211,7 @@ export async function acpOpen(
       caps,
       init,
       terminals,
+      pid: child?.pid,
     };
   } catch (err) {
     close();

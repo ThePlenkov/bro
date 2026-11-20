@@ -1,11 +1,19 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
-import { laneBudgetAdmit, laneBudgetKey } from './lane-budget.ts';
+import { laneBudgetAdmit, laneBudgetKey, laneBudgetRefund } from './lane-budget.ts';
 import {
   admitSessionSlot,
   clearSessionPlanes,
@@ -15,6 +23,8 @@ import {
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
+  retagSessionSlot,
+  sessionClaimName,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
@@ -156,7 +166,10 @@ describe('session slot reservations', () => {
       const stale = join(dir, f);
       const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000);
       utimesSync(stale, past, past);
-      assert.equal(countSessionReservations(dir), 0);
+      // a stale claim reaps when its holder is gone — a live holder's
+      // still counts (pid governance, spec bro-x601l); the pidAlive
+      // seam stands in for the dead process
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 0);
       assert.equal(readdirSync(dir).length, 0); // reaped, not just skipped
     });
   });
@@ -179,6 +192,179 @@ describe('session slot reservations', () => {
       } finally {
         rmSync(join(dir, 'admission.mutex'), { force: true });
       }
+    });
+  });
+});
+
+describe('pid-governed claims (spec bro-x601l)', () => {
+  const stale = (path: string): void => {
+    const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000);
+    utimesSync(path, past, past);
+  };
+
+  test('a claim records its holder pid', () => {
+    withDir(dir => {
+      const slot = reserveSessionSlot(dir, 'native-aa', 'interactive');
+      const meta = JSON.parse(readFileSync(slot, 'utf8')) as { at: number; pid: number };
+      assert.equal(meta.pid, process.pid);
+      assert.ok(meta.at > 0);
+    });
+  });
+
+  test('a stale claim whose holder is still alive counts — retained sessions stay visible', () => {
+    withDir(dir => {
+      // the claim this test writes names THIS process as holder — a
+      // conductor holding a session past the TTL reads exactly like it
+      const slot = reserveSessionSlot(dir, 'held-1', 'interactive');
+      stale(slot);
+      assert.equal(countSessionReservations(dir), 1);
+      // a live holder's claim is never reaped
+      assert.equal(readdirSync(dir).length, 1);
+    });
+  });
+
+  test('a stale claim whose holder died is reaped — a crashed holder never wedges the cap', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'gone.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
+      stale(join(dir, 'gone.slot'));
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 0);
+      assert.equal(readdirSync(dir).length, 0);
+    });
+  });
+
+  test('a stale claim with no recorded holder keeps the TTL-only reap — old-format files', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'old.slot'), String(Date.now()));
+      stale(join(dir, 'old.slot'));
+      // pidAlive says "alive", but the file never recorded a holder —
+      // nothing to govern by, so the TTL rules
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => true }), 0);
+    });
+  });
+
+  test('a fresh claim counts whatever the holder state is', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'f.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 1);
+    });
+  });
+
+  test('retagging to a shorter pid truncates the stale tail — the claim stays parseable', () => {
+    withDir(dir => {
+      // a long holder pid writes a longer JSON; rebinding to a shorter
+      // one must not leave the old tail behind (an `r+` write alone
+      // never truncates — the census would then fail to parse the pid
+      // and reap a live holder's claim)
+      const slot = reserveSessionSlot(dir, 'held-1', 'interactive', 99999999);
+      retagSessionSlot(slot, 4242);
+      const meta = JSON.parse(readFileSync(slot, 'utf8')) as { at: number; pid: number };
+      assert.equal(meta.pid, 4242);
+      stale(slot);
+      // the retagged holder still governs: stale but alive → counted
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => true }), 1);
+      // dead → reaped, the truncated file never misreads as holder-less
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => false }), 0);
+    });
+  });
+
+  test('retagging a swept claim never recreates it — gone stays gone', () => {
+    withDir(dir => {
+      const slot = join(dir, 'swept.slot');
+      retagSessionSlot(slot, 4242);
+      assert.equal(existsSync(slot), false);
+    });
+  });
+
+  test('the recorded start identity rides the liveness check — a recycled pid never holds the lane', () => {
+    withDir(dir => {
+      // the holder exited and its number went to a stranger: the claim
+      // records the ORIGINAL start, and pidAlive's verdict on that pair
+      // (a stranger's start would not match) is what governs
+      writeFileSync(
+        join(dir, 'recycled.slot'),
+        JSON.stringify({ at: Date.now(), pid: 4242, start: 'boot-1' })
+      );
+      stale(join(dir, 'recycled.slot'));
+      const seen: Array<[number, string | undefined]> = [];
+      const pidAlive = (pid: number, start?: string): boolean => {
+        seen.push([pid, start]);
+        return start === 'boot-1';
+      };
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive }), 1);
+      // a stranger at the number fails the pair — reaped, not counted
+      writeFileSync(
+        join(dir, 'recycled.slot'),
+        JSON.stringify({ at: Date.now(), pid: 4242, start: 'boot-1' })
+      );
+      stale(join(dir, 'recycled.slot'));
+      seen.length = 0;
+      const stranger = (pid: number, start?: string): boolean => {
+        seen.push([pid, start]);
+        return start === 'boot-2';
+      };
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: stranger }), 0);
+      assert.deepEqual(seen, [[4242, 'boot-1']]);
+    });
+  });
+
+  test('a null-content slot is holder-less, not a skip — fresh counts, stale reaps', () => {
+    withDir(dir => {
+      // JSON `null` parses but carries no pid — a fresh claim must
+      // still count (a skipped one under-counts the lane), and a stale
+      // one takes the normal no-holder reap
+      const slot = join(dir, 'nullish.slot');
+      writeFileSync(slot, 'null');
+      assert.equal(countSessionReservations(dir), 1);
+      const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000);
+      utimesSync(slot, past, past);
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive: () => true }), 0);
+      assert.equal(readdirSync(dir).length, 0);
+    });
+  });
+
+  test('the deterministic claim name keeps kind and key unambiguous (spec bro-x601l)', () => {
+    // (alpha, beta-x) and (alpha-beta, x) must never share a filename —
+    // a collision would read another call's claim as this call's own
+    assert.notEqual(sessionClaimName('alpha', 'beta-x', 0), sessionClaimName('alpha-beta', 'x', 0));
+    // identical pairs stay idempotent — a repeat claims no second slot
+    assert.equal(sessionClaimName('alpha', 'beta-x', 0), sessionClaimName('alpha', 'beta-x', 0));
+    // and the index suffix stays a distinct slot per start
+    assert.notEqual(sessionClaimName('alpha', 'k', 0), sessionClaimName('alpha', 'k', 1));
+  });
+
+  test('a retag drops the prior start identity when the new holder is unreadable', () => {
+    withDir(dir => {
+      // a holder whose /proc entry is gone yields no start — carrying
+      // the OLD holder's over would pin the new pid against a start it
+      // never owned and the stale check would reap a live lane
+      const slot = join(dir, 'held.slot');
+      writeFileSync(
+        slot,
+        JSON.stringify({ at: Date.now(), pid: 1111, start: 'old-boot', key: 'k-1' })
+      );
+      retagSessionSlot(slot, 99999999); // no /proc/<pid>/stat — the lookup fails
+      const meta = JSON.parse(readFileSync(slot, 'utf8')) as {
+        pid: number;
+        start?: string;
+        key?: string;
+      };
+      assert.equal(meta.pid, 99999999);
+      assert.equal(meta.start, undefined);
+      assert.equal(meta.key, 'k-1');
+    });
+  });
+
+  test('a stale claim without a recorded start keeps the pid-only verdict', () => {
+    withDir(dir => {
+      writeFileSync(join(dir, 'legacy.slot'), JSON.stringify({ at: Date.now(), pid: 4242 }));
+      stale(join(dir, 'legacy.slot'));
+      const seen: string[] = [];
+      const pidAlive = (pid: number, start?: string): boolean => {
+        seen.push(String(start));
+        return true;
+      };
+      assert.equal(countSessionReservations(dir, undefined, { pidAlive }), 1);
+      assert.deepEqual(seen, ['undefined']); // nothing recorded → nothing to check
     });
   });
 });
@@ -217,7 +403,7 @@ describe('the batch lane (spec bro-9h86l)', () => {
         (e: unknown) =>
           e instanceof SpawnError &&
           e.kind === 'cap' &&
-          /batch worker quota reached — 1\/1 live batch workers.*fx-1/.test(e.message)
+          /batch worker quota reached — 2\/1 live batch workers.*fx-1/.test(e.message)
       );
       // the interactive lane still has room: 3 live of 4, no batch marker
       assert.doesNotThrow(() =>
@@ -306,7 +492,7 @@ describe('admitSessionSlot', () => {
       assert.throws(
         () => admitSessionSlot(plane, agents, { key: 'native-bb', molStep: 'fx-2' }),
         (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /1\/1 live sessions.*fx-2/.test(e.message)
+          e instanceof SpawnError && e.kind === 'cap' && /2\/1 live sessions.*fx-2/.test(e.message)
       );
       releaseSessionSlot(key!);
       assert.doesNotThrow(() => admitSessionSlot(plane, agents, { key: 'native-bb' }));
@@ -346,6 +532,92 @@ describe('admitSessionSlot', () => {
     });
   });
 
+  test('a claim retired mid-census is forgiven when our live rows already hold it (spec bro-x601l)', () => {
+    withDir(resv => {
+      // the reservation→live handoff, seen mid-flight: a claim that
+      // was there before the count is gone after it, and the plane's
+      // own live rows carry its session — the row's agentId IS the
+      // retired claim's key. Session plus claim read as one, not two.
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 1;
+        },
+        listLive: () => [{ pid: 31337, agentId: 'native-aa' }],
+      };
+      const agents = { testkind: { maxSessions: 2, reservationsDir: resv } };
+      // 1 live (the landed session) + our held claim = 2 — a ghost
+      // count on the retired claim would read 3 and refuse
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
+    });
+  });
+
+  test('a claim retired mid-census its holder pid proves — the retag correlation', () => {
+    withDir(resv => {
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      retagSessionSlot(landed, 31337);
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 1;
+        },
+        // the row carries no agentId — the retagged holder pid is the
+        // proof the claim's session already sits inside the count
+        listLive: () => [{ pid: 31337 }],
+      };
+      const agents = { testkind: { maxSessions: 2, reservationsDir: resv } };
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
+    });
+  });
+
+  test('a claim retired mid-census with no live row to prove it still counts — the handoff never under-counts', () => {
+    withDir(resv => {
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        // the claim vanished but our rows carry only OTHER sessions —
+        // the gone claim is the only trace of a session the count
+        // missed, so the census keeps it (over-refuse, never under)
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 0;
+        },
+        listLive: () => [{ pid: 31337, agentId: 'other' }],
+      };
+      const agents = { testkind: { maxSessions: 1, reservationsDir: resv } };
+      assert.throws(
+        () => admitSessionSlot(sweeping, agents, { key: 'native-bb' }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /2\/1 live sessions/.test(e.message)
+      );
+    });
+  });
+
+  test('a listLive-less plane keeps the plain post-count tally on a mid-count retirement', () => {
+    withDir(resv => {
+      // without per-session rows the census cannot prove a retired
+      // claim's session apart from the count's own sweep — the far
+      // likelier explanation — so it counts what the after-read sees
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive');
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => {
+          rmSync(landed, { force: true });
+          return 1;
+        },
+      };
+      const agents = { testkind: { maxSessions: 2, reservationsDir: resv } };
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }));
+    });
+  });
+
   test('a malformed cap refuses config, never a silent admit', () => {
     withDir(resv => {
       const agents = { testkind: { maxSessions: 'x', reservationsDir: resv } };
@@ -380,11 +652,12 @@ describe('admitSessionSlot', () => {
       };
       const agents = { testkind: { maxWorkers: 1, reservationsDir: resv } };
       assert.doesNotThrow(() => admitSessionSlot(interactive, agents, { key: 'native-aa' }));
-      // the held reservation IS a worker — the next spawn hits 1+0=1/1
+      // the held reservation IS a worker — the next spawn's own claim
+      // joins the count inside the mutex and it hits 2/1
       assert.throws(
         () => admitSessionSlot(interactive, agents, { key: 'native-bb', molStep: 'fx-3' }),
         (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /1\/1 live workers.*fx-3/.test(e.message)
+          e instanceof SpawnError && e.kind === 'cap' && /2\/1 live workers.*fx-3/.test(e.message)
       );
     });
   });
@@ -434,6 +707,94 @@ describe('admitSessionSlot', () => {
         (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
       );
       assert.equal(countSessionReservations(resv), 0);
+    });
+  });
+
+  test('a provider cap alone arms the admission — a kind-quota-free gate (spec bro-x601l)', () => {
+    withDir(resv => {
+      // no agents.<kind> lane at all — fleet.providerCaps still
+      // serializes the admit, counts, and claims
+      const claimed = admitSessionSlot(
+        plane,
+        {},
+        {
+          key: 'native-aa',
+          providerCap: { provider: 'prov', cap: 2, reservationsDir: resv },
+        }
+      );
+      assert.ok(claimed !== undefined);
+      assert.equal(countSessionReservations(resv), 1);
+    });
+  });
+
+  test('the provider census counts live sessions and held claims', () => {
+    withDir(resv => {
+      reserveSessionSlot(resv, 'held-one', 'interactive');
+      // 2 live (the plane's sweep) + 1 held claim = 3/3 — full
+      assert.throws(
+        () =>
+          admitSessionSlot(
+            testPlane('testkind', 2),
+            {},
+            {
+              key: 'native-bb',
+              molStep: 'fx-9',
+              providerCap: { provider: 'prov', cap: 3, reservationsDir: resv },
+            }
+          ),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /provider 'prov' lane cap reached — 4\/3 live lanes.*fleet\.providerCaps\.prov.*provider_cap.*fx-9/.test(
+            e.message
+          )
+      );
+      // the refused admit claimed nothing — the budget holds the prior slot only
+      assert.equal(countSessionReservations(resv), 1);
+    });
+  });
+
+  test('below the provider cap the admit claims a slot the next admit sees', () => {
+    withDir(resv => {
+      const lane = { provider: 'prov', cap: 2, reservationsDir: resv };
+      // a cap of 2 admits two lanes — the second claim must land
+      admitSessionSlot(testPlane('testkind', 0), {}, { key: 'native-aa', providerCap: lane });
+      admitSessionSlot(testPlane('testkind', 0), {}, { key: 'native-bb', providerCap: lane });
+      assert.equal(countSessionReservations(resv), 2);
+      // the third admit sees both held claims — the census is full
+      assert.throws(
+        () =>
+          admitSessionSlot(
+            testPlane('testkind', 0),
+            {},
+            {
+              key: 'native-cc',
+              providerCap: lane,
+            }
+          ),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
+      // the refused admit claimed nothing — two slots is the census
+      assert.equal(countSessionReservations(resv), 2);
+    });
+  });
+
+  test('the provider verdict precedes the kind lanes — the outer gate', () => {
+    withDir(resv => {
+      // maxSessions=10 would admit on its own; the provider cap refuses
+      // first — the account-wide gate is judged before the kind lanes
+      const agents = { testkind: { maxSessions: 10, reservationsDir: resv } };
+      reserveSessionSlot(resv, 'held', 'interactive');
+      assert.throws(
+        () =>
+          admitSessionSlot(testPlane('testkind', 1), agents, {
+            key: 'native-x',
+            providerCap: { provider: 'prov', cap: 2, reservationsDir: resv },
+          }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
     });
   });
 
@@ -591,6 +952,35 @@ describe('the work budget lane (bro-tdndq)', () => {
         rmSync(budgetDir, { recursive: true, force: true });
       }
     });
+  });
+
+  test('laneBudgetRefund removes the newest open segment — a refused spawn never meters (spec bro-x601l)', () => {
+    const budgetDir = mkdtempSync(join(tmpdir(), 'bro-budget-'));
+    try {
+      const cfg = { minutes: 30, windowMinutes: 60 };
+      const key = laneBudgetKey('repo', 'x-1');
+      laneBudgetAdmit('testkind', key, cfg, { now: 0, dir: budgetDir });
+      laneBudgetRefund('testkind', key, { dir: budgetDir });
+      // the segment is gone entirely — the ledger holds no worker at all
+      const ledger = JSON.parse(readFileSync(join(budgetDir, 'testkind.json'), 'utf8')) as {
+        workers: Record<string, { segments: unknown[] }>;
+      };
+      assert.deepEqual(ledger.workers, {});
+      // a double refund cannot eat another admit's running time: the
+      // next admit's segment is ITS own, and a no-op refund leaves it
+      const admitted = laneBudgetAdmit('testkind', key, cfg, { now: 1, dir: budgetDir });
+      assert.equal(admitted.ok, true);
+      laneBudgetRefund('testkind', laneBudgetKey('repo', 'other'), { dir: budgetDir });
+      const after = JSON.parse(readFileSync(join(budgetDir, 'testkind.json'), 'utf8')) as {
+        workers: Record<string, { segments: Array<{ e?: number }> }>;
+      };
+      assert.equal(
+        after.workers[key]?.segments.some(seg => seg.e === undefined),
+        true
+      );
+    } finally {
+      rmSync(budgetDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -32,6 +32,7 @@ import {
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
+  sessionClaimName,
   sessionReservationsDir,
   SpawnError,
   type Connector,
@@ -86,15 +87,15 @@ export function sessionCapVerdict(
   // id (the two hook events of one call share it); without one there
   // is no per-call identity at all — see `callKey`.
   const key = `guard-${keyPart(ctx.sessionId ?? 'nosession')}-${callKey(command, ctx)}`;
-  // a pre-update event of THIS call may still hold its slot under the
-  // raw (pre-sanitization) key — move it under the new key BEFORE the
-  // locked count, or the admission reads the same call as a stranger
-  // and refuses it at cap (the upgrade window's double-count)
+  // a pre-update event of THIS call may still hold its slot under a
+  // pre-prefix name — the raw `<key>-<i>` the last release wrote, or
+  // the ID-keyed legacy when the client sent one. Move them under
+  // the kind-prefixed name BEFORE the locked count, or the admission
+  // reads the same call as a stranger and refuses it at cap (the
+  // upgrade window's double-count)
   const legacy = legacyKey(ctx);
-  if (legacy !== undefined) {
-    for (const plane of planesStartingSessions(command)) {
-      migrateLegacyClaims(plane.kind, bags, legacy, key);
-    }
+  for (const plane of planesStartingSessions(command)) {
+    migrateLegacyClaims(plane.kind, bags, key, legacy);
   }
   // the locked check+claim first — the cap serializes on the kind's
   // OWN admission mutex, so a burst of parallel starts shares one
@@ -296,17 +297,37 @@ function legacyKey(ctx: ConnectorCtx): string | undefined {
   return /[/\\]|\.\./.test(legacy) ? undefined : legacy;
 }
 
-/** Move this call's raw-key claims under the sanitized key — a rename
- *  keeps the claim while making the locked count recognize it as OURS.
- *  A target that already exists means the new key holds a slot too —
- *  the dup retires; either way no two files ever count one call. Runs
- *  outside the mutex: the window only ever double-counts the call
- *  against ITSELF (over-count, never past the budget). */
+/** The `<prefix>-<i>` tail a claim's filename carries — the start
+ *  index and lane tag it recorded. Exact match only: `<prefix>-x…`
+ *  for any other x is a stranger's claim, never migrated. */
+function claimTail(name: string, prefix: string): { i: number; batch: boolean } | undefined {
+  if (!name.startsWith(`${prefix}-`) || !name.endsWith('.slot')) {
+    return undefined;
+  }
+  const tail = name.slice(prefix.length + 1);
+  const batch = tail.endsWith('.batch.slot');
+  const idx = batch ? tail.slice(0, -'.batch.slot'.length) : tail.slice(0, -'.slot'.length);
+  if (!/^\d+$/.test(idx)) {
+    return undefined;
+  }
+  return { i: Number(idx), batch };
+}
+
+/** Move this call's pre-prefix claims under the kind-prefixed name —
+ *  a rename keeps the claim while making the locked count recognize
+ *  it as OURS. Two formats upgrade: the immediately previous
+ *  `<key>-<i>` raw-key names (an upgrade with one release between
+ *  leaves them counting as strangers) and the older ID-keyed
+ *  `<legacyKey>-<i>` names. A target that already exists means the
+ *  new key holds a slot too — the dup retires; either way no two
+ *  files ever count one call. Runs outside the mutex: the window
+ *  only ever double-counts the call against ITSELF (over-count,
+ *  never past the budget). */
 function migrateLegacyClaims(
   kind: string,
   bags: Record<string, Record<string, unknown>>,
-  legacyKey: string,
-  key: string
+  key: string,
+  legacyKey: string | undefined
 ): void {
   const dir = sessionReservationsDir(kind, bags);
   let names: string[];
@@ -316,12 +337,19 @@ function migrateLegacyClaims(
     return;
   }
   for (const name of names) {
-    // `<legacyKey>-<i>.slot` — the same naming the claim wrote
-    if (!name.startsWith(`${legacyKey}-`) || !name.endsWith('.slot')) {
+    const tail =
+      claimTail(name, key) ?? (legacyKey === undefined ? undefined : claimTail(name, legacyKey));
+    if (tail === undefined) {
       continue;
     }
     const from = join(dir, name);
-    const to = join(dir, `${key}${name.slice(legacyKey.length)}`);
+    // the rename target is the CURRENT claim format — the kind prefix
+    // `reserveSessionStart` writes (components escaped) so two planes
+    // on a shared census dir never collapse onto one filename
+    const to = join(
+      dir,
+      `${sessionClaimName(kind, key, tail.i)}${tail.batch ? '.batch' : ''}.slot`
+    );
     try {
       if (existsSync(to)) {
         rmSync(from, { force: true });
