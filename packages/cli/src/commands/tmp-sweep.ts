@@ -26,8 +26,9 @@
  */
 import { readdirSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
-import { gitCommonDir, pidAlive } from '@broject/core';
+import { basename, dirname, join } from 'node:path';
+import { type AgentRegistryEntry, gitCommonDir, pidAlive, readAgentRegistry } from '@broject/core';
+import { registryEntryHoldsClaim } from '@broject/rig';
 
 const STALE_MS = 60 * 60 * 1000; // 1 hour
 /** Dead-owner dirs get a shorter leash than the general TTL: the
@@ -307,6 +308,58 @@ function rmdirIfEmpty(dir: string): void {
   }
 }
 
+/** The emptied extra-root's owner verdict (spec bro-v96mp). A
+ *  `bro-tmp/<agentId>` shell is a live worker's pinned TMPDIR — the
+ *  leaf sweep can empty it while the worker still runs, and rmdir'ing
+ *  it out from under the worker makes its next mkdtemp die ENOENT,
+ *  worse than the litter the shell held. 'live' — a registry agent
+ *  still holding its claim owns the shell; 'free' — the registry
+ *  proves no owner (or none exists — orphan litter); 'unknown' —
+ *  nothing could be proved, the fail-open verdict. */
+function rootOwnerVerdict(root: string): 'live' | 'free' | 'unknown' {
+  const gitdir = dirname(dirname(root));
+  const common = gitCommonDir(gitdir);
+  if (common === null) {
+    return 'unknown';
+  }
+  let reg: Record<string, AgentRegistryEntry>;
+  try {
+    reg = readAgentRegistry(gitdir);
+  } catch {
+    // a corrupt/unreadable registry can't prove orphan — keep
+    return 'unknown';
+  }
+  const agentId = basename(root);
+  const home = join(common, 'bro', 'agents');
+  for (const e of Object.values(reg)) {
+    if (e.agentId === agentId && registryEntryHoldsClaim(home, e)) {
+      return 'live';
+    }
+  }
+  return 'free';
+}
+
+/** rmdir an emptied extra root only when nothing can still write to
+ *  it (spec bro-v96mp). Two keeps before the rmdir: a dir mtime inside
+ *  the TTL — something just created or drained entries (this pass's
+ *  own leaf deletes included — an emptied shell earns one stale
+ *  window before it goes), and a live registry owner. A stale shell
+ *  with no live owner is the litter the PIN meant for `git worktree
+ *  remove` — this reap is only for what outlived its tree. */
+function rmdirRootIfOrphaned(root: string, ctx: RootCtx): void {
+  try {
+    if (ctx.now - statSync(root).mtimeMs < STALE_MS) {
+      return;
+    }
+  } catch {
+    return; // vanished or unreadable — nothing to prove against
+  }
+  if (rootOwnerVerdict(root) !== 'free') {
+    return;
+  }
+  rmdirIfEmpty(root);
+}
+
 /** Shared sweep context — everything a per-entry decision needs that
  *  doesn't vary across the listing. */
 interface SweepCtx {
@@ -418,17 +471,21 @@ function sweepEntries(root: string, entries: string[], ctx: RootCtx): number {
 
 /** An extra root (a worker tmpdir — spec bro-v96mp): same verdicts,
  *  but an unlistable root warns-and-skips rather than failing the run,
- *  and an emptied root is rmdir'd with its contents. */
+ *  and an emptied root is rmdir'd only once it is provably orphaned —
+ *  stale AND no live registry owner (rmdirRootIfOrphaned). */
 function sweepExtraRoot(root: string, ctx: RootCtx): number {
   let entries: string[];
   try {
     entries = readdirSync(root);
-  } catch {
+  } catch (err) {
+    console.error(
+      `cleanup: cannot list ${root} (${err instanceof Error ? err.message : err}) — skipped`
+    );
     return 0;
   }
   const deleted = sweepEntries(root, entries, ctx);
   if (!ctx.dryRun) {
-    rmdirIfEmpty(root);
+    rmdirRootIfOrphaned(root, ctx);
   }
   return deleted;
 }

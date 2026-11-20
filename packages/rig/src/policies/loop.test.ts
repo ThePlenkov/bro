@@ -315,4 +315,20 @@ describe('topFillers — the filler report on a breach edge (bro-v96mp)', () => 
       assert.match(out, /…/);
     });
   });
+
+  test('the top-level listing itself is budget-bounded — a fat dir stops early', () => {
+    withDir(dir => {
+      // 40 same-family dirs; a 5-node budget must stop the enumeration
+      // long before all 40 are even listed (the streamed opendir read
+      // charges nodes as it goes — a readdirSync would see all 40 first)
+      for (let i = 0; i < 40; i++) {
+        mkdirSync(join(dir, `z-${String(i).padStart(3, '0')}`));
+      }
+      const out = topFillers(dir, { nodes: 5, ms: 60_000 });
+      const m = /z-\* ×(\d+)/.exec(out);
+      assert.ok(m !== null, `expected a z-* group, got: ${out}`);
+      assert.ok(Number(m[1]) < 40, `listing ran past the budget: ${out}`);
+      assert.match(out, /…/);
+    });
+  });
 });

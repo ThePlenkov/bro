@@ -291,12 +291,22 @@ describe('cleanupTmpDirs', () => {
     });
   });
 
-  test('a missing extraRoots dir skips silently — the sweep never dies mid-listing', () => {
+  test('a missing extraRoots dir warns and skips — never fatal like tmpdir', () => {
     withTmp(dir => {
-      const out = lines(() =>
-        cleanupTmpDirs(false, { extraRoots: [join(dir, 'no-such-bro-tmp')] })
-      );
+      const errs: string[] = [];
+      const orig = console.error;
+      console.error = (...args: unknown[]) => errs.push(args.join(' '));
+      let out: string[] = [];
+      try {
+        out = lines(() => cleanupTmpDirs(false, { extraRoots: [join(dir, 'no-such-bro-tmp')] }));
+      } finally {
+        console.error = orig;
+      }
       assert.ok(!out.some(l => l.includes('error')), `got: ${out}`);
+      assert.ok(
+        errs.some(l => l.includes('cannot list') && l.includes('no-such-bro-tmp')),
+        `expected a stderr warning, got: ${errs}`
+      );
     });
   });
 });
@@ -338,5 +348,93 @@ describe('workerTmpRoots (bro-v96mp)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
     withRepo(root => assert.deepEqual(workerTmpRoots(root), []));
+  });
+});
+
+describe('extra-root rmdir guard (bro-v96mp)', () => {
+  /** A real repo carrying a `bro-tmp/<agent>` shell — the emptied-root
+   *  rmdir only fires inside a gitdir the registry can be read from.
+   *  TMPDIR redirects to an empty fixture so the os.tmpdir() leg never
+   *  sweeps the real /tmp. */
+  const withRepo = (fn: (root: string, common: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-sweep-rmdir-'));
+    spawnSync('git', ['init', '-q', root]);
+    const common = join(root, '.git');
+    const tmp = join(root, 'faketmp');
+    mkdirSync(tmp);
+    const prev = process.env.TMPDIR;
+    process.env.TMPDIR = tmp;
+    try {
+      fn(root, common);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = prev;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  /** A registry entry whose agentId owns the shell — the fields
+   *  registryEntryState's liveness ladder reads. */
+  const writeAgents = (common: string, entries: Record<string, unknown>): void => {
+    mkdirSync(join(common, 'bro'), { recursive: true });
+    writeFileSync(join(common, 'bro', 'agents.json'), JSON.stringify(entries));
+  };
+
+  test("a stale emptied shell with no registry is orphan litter — rmdir'd", () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-gone');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.equal(existsSync(shell), false);
+    });
+  });
+
+  test('a fresh emptied shell keeps — the mtime is inside the TTL', () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-new');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    });
+  });
+
+  test('a stale shell a live registry agent owns keeps — its TMPDIR is not litter', () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-live');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      writeAgents(common, {
+        'mol-step-1': {
+          agentId: 'agent-live',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+        },
+      });
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    });
+  });
+
+  test("a stale shell whose registry agent already exited is litter — rmdir'd", () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-dead');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      writeAgents(common, {
+        'mol-step-1': {
+          agentId: 'agent-dead',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          exitStatus: 0,
+        },
+      });
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.equal(existsSync(shell), false);
+    });
   });
 });

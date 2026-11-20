@@ -97,4 +97,25 @@ describe('the small-fs leg (bro-v96mp)', () => {
     assert.equal(diskFloorFor(cfg, p), 800 * MB);
     assert.equal(diskFloorBreach([p], cfg)?.path, '/tmp');
   });
+
+  test('a saturated floor stays the cap on any total — no overflow math', () => {
+    // floor at MAX_SAFE_INTEGER: 16× it cannot be computed as a bound
+    // without sliding past safe-integer precision — the comparison is
+    // total/16 > floor, so a real statfs total still resolves to the
+    // cap, and the cap still breaches every real probe
+    const absurd = { worktreeMb: 1e20, diskMinSlots: 1e20 };
+    const p = probe('/tmp', 9_000_000, 500_000);
+    assert.equal(diskFloorFor(absurd, p), Number.MAX_SAFE_INTEGER);
+    assert.equal(diskFloorBreach([p], absurd)?.path, '/tmp');
+  });
+
+  test('the 16× boundary is exact — total/16 > floor, never the product', () => {
+    // total == 16 × the slot floor sits AT the small-fs edge: the
+    // proportional leg applies (12.8G total → 6.4G floor)
+    const at = probe('/tmp', 7000, 16 * 800);
+    assert.equal(diskFloorFor(cfg, at), Math.floor((16 * 800 * MB) / 2));
+    // one MB past it is a big filesystem — the slot price governs
+    const past = probe('/tmp', 7000, 16 * 800 + 1);
+    assert.equal(diskFloorFor(cfg, past), 800 * MB);
+  });
 });

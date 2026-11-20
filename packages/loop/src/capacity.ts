@@ -48,7 +48,12 @@ export function diskFloorFor(
 ): number {
   const floor = diskFloorBytes(cfg);
   const total = probe.totalBytes;
-  if (total === undefined || total <= 0 || total > SMALL_FS_SLOTS * floor) {
+  // total/SMALL_FS_SLOTS > floor, not total > SMALL_FS_SLOTS*floor: the
+  // product overflows MAX_SAFE_INTEGER's precision the moment the slot
+  // price saturates (an absurd config floors at the cap), where the
+  // bound stops meaning anything; the divide is a power-of-two exponent
+  // shift — exact at every magnitude a statfs can report.
+  if (total === undefined || total <= 0 || total / SMALL_FS_SLOTS > floor) {
     return floor;
   }
   return Math.max(floor, Math.floor(total / 2));

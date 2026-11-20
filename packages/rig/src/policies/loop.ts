@@ -30,9 +30,11 @@
  *  Policy interface names lifecycle moments; the driver is the
  *  policy's engine (the same contract convoyPolicy sets). */
 import {
+  type Dir,
   type Dirent,
   existsSync,
   mkdirSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -3145,10 +3147,13 @@ function fillerKey(name: string): string {
 
 /** The largest consumers under `path`, prefix-grouped and biggest
  *  first — 'tmp-* ×49 3.4G'. Sizes come from a bounded recursive
- *  walk: a breach edge may land on a tree with millions of files, and
- *  the cap truncates rather than stalls the tick ('…' marks it). ''
- *  when the root cannot be listed — the hold line works without it
- *  (spec bro-v96mp). */
+ *  walk AND bounded listings: a breach edge may land on a tree with
+ *  millions of files, or on a /tmp with a hundred thousand top-level
+ *  entries, so opendir streams every listing entry-by-entry and the
+ *  budget stops the enumeration mid-dir — a readdirSync would
+ *  materialize the whole dirent array before the loop's first
+ *  spent() check ('…' marks the truncation). '' when the root cannot
+ *  be listed — the hold line works without it (spec bro-v96mp). */
 export function topFillers(
   path: string,
   budget: { nodes: number; ms: number } = { nodes: 60_000, ms: 1500 }
@@ -3168,19 +3173,38 @@ export function topFillers(
     }
     return false;
   };
+  /** One dir's entries, budget-charged as they stream — stops reading
+   *  once either budget is spent, so the listing itself can never
+   *  out-cost the walk. [] on any listing failure. */
+  const listEntries = (dir: string): Dirent[] => {
+    const out: Dirent[] = [];
+    let d: Dir | undefined;
+    try {
+      d = opendirSync(dir);
+      for (let e = d.readSync(); e !== null; e = d.readSync()) {
+        if (spent()) {
+          break;
+        }
+        nodes += 1;
+        out.push(e);
+      }
+    } catch {
+      // unreadable or vanished mid-listing — what streamed still counts
+    } finally {
+      try {
+        d?.closeSync();
+      } catch {
+        // already closed — nothing to leak
+      }
+    }
+    return out;
+  };
   const dirSize = (dir: string): number => {
     let total = 0;
-    let ents: Dirent[];
-    try {
-      ents = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return 0;
-    }
-    for (const e of ents) {
+    for (const e of listEntries(dir)) {
       if (spent()) {
         return total;
       }
-      nodes += 1;
       const p = join(dir, e.name);
       try {
         if (e.isDirectory()) {
@@ -3196,17 +3220,14 @@ export function topFillers(
     }
     return total;
   };
-  let top: Dirent[];
-  try {
-    top = readdirSync(path, { withFileTypes: true });
-  } catch {
-    return '';
-  }
+  // an unlistable root streams nothing — groups stays empty and the
+  // top3 check below answers '' exactly like the old early return. The
+  // listing itself charged its entries against the budget, so what
+  // streamed back is always processed — a spent check here would
+  // report '' the moment the listing alone filled the budget, hiding
+  // the very '…' report the truncation exists to print
+  const top = listEntries(path);
   for (const e of top) {
-    if (spent()) {
-      break;
-    }
-    nodes += 1;
     const p = join(path, e.name);
     let bytes = 0;
     try {
