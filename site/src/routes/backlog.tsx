@@ -87,44 +87,49 @@ function readCache(): { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt
   }
 }
 
-async function load(): Promise<Data> {
+async function resolveSha(): Promise<string> {
   const refRes = await fetch(REF_API);
-  if (!refRes.ok) {
+  if (!refRes.ok) throw new Error(`could not resolve refs/bro/data (${refRes.status})`);
+  const { object } = (await refRes.json()) as { object: { sha: string } };
+  return object.sha;
+}
+
+interface GhRaw {
+  number: number;
+  title: string;
+  html_url: string;
+  created_at: string;
+  pull_request?: unknown;
+  labels?: Array<{ name?: string } | string>;
+}
+
+const toGh = (i: GhRaw): GhItem => ({
+  id: `${i.pull_request ? 'pr' : 'gh'}-${i.number}`,
+  title: i.title,
+  kind: i.pull_request ? 'pr' : 'issue',
+  created_at: i.created_at,
+  url: i.html_url,
+  labels: (i.labels ?? []).map(l => (typeof l === 'string' ? l : (l.name ?? ''))),
+});
+
+async function fetchGh(): Promise<GhItem[]> {
+  const res = await fetch(ISSUES_API);
+  return res.ok ? ((await res.json()) as GhRaw[]).map(toGh) : [];
+}
+
+async function load(): Promise<Data> {
+  let sha: string;
+  try {
+    sha = await resolveSha();
+  } catch {
     const cached = readCache();
     if (cached) return { ...cached, fetchedAt: cached.fetchedAt };
-    throw new Error(`could not resolve refs/bro/data (${refRes.status})`);
+    throw new Error('could not resolve refs/bro/data');
   }
-  const { object } = (await refRes.json()) as { object: { sha: string } };
-  const sha = object.sha;
 
-  const [backlogRes, issuesRes] = await Promise.all([
-    fetch(`${RAW}/${sha}/${BACKLOG_PATH}`),
-    fetch(ISSUES_API),
-  ]);
-  if (!backlogRes.ok) {
-    throw new Error(`backlog.json not on refs/bro/data (${backlogRes.status})`);
-  }
+  const [backlogRes, gh] = await Promise.all([fetch(`${RAW}/${sha}/${BACKLOG_PATH}`), fetchGh()]);
+  if (!backlogRes.ok) throw new Error(`backlog.json not on refs/bro/data (${backlogRes.status})`);
   const snapshot = (await backlogRes.json()) as Snapshot;
-
-  let gh: GhItem[] = [];
-  if (issuesRes.ok) {
-    const items = (await issuesRes.json()) as Array<{
-      number: number;
-      title: string;
-      html_url: string;
-      created_at: string;
-      pull_request?: unknown;
-      labels?: Array<{ name?: string } | string>;
-    }>;
-    gh = items.map(i => ({
-      id: `${i.pull_request ? 'pr' : 'gh'}-${i.number}`,
-      title: i.title,
-      kind: i.pull_request ? 'pr' : 'issue',
-      created_at: i.created_at,
-      url: i.html_url,
-      labels: (i.labels ?? []).map(l => (typeof l === 'string' ? l : (l.name ?? ''))),
-    }));
-  }
 
   const data = { snapshot, gh, sha, fetchedAt: new Date().toISOString() };
   try {
