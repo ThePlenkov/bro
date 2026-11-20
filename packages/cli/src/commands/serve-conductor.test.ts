@@ -2,7 +2,15 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -15,10 +23,23 @@ import {
 } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { AcpLaneCooldown, otelJournal, type AcpTerminals } from '@broject/providers';
-import { conductorConfig, conductorProxy, parseReply, sweepSessions } from './serve-conductor.ts';
+import {
+  assertSessionCapUnlocked,
+  conductorConfig,
+  conductorProxy,
+  parseReply,
+  sweepSessions,
+} from './serve-conductor.ts';
 import type { ConductorConfig, ConvSession } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
-import { scrubEnv, testGit, testRepoInit } from '@broject/core';
+import {
+  clearSessionPlanes,
+  registerSessionPlane,
+  scrubEnv,
+  testGit,
+  testRepoInit,
+  type SessionPlane,
+} from '@broject/core';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -3469,5 +3490,88 @@ describe('BRO_STATE_DIR — the serve-turns journal redirects (bro-eajeu)', () =
       rmSync(linkRoot, { recursive: true, force: true });
       rmSync(pin, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the conductor's un-locked cap fallback", () => {
+  /** A scratch reservations dir — the claim files live here, never in
+   *  the developer's real data home. */
+  const withReservations = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-cap-race-'));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const withPlane = (plane: SessionPlane, fn: () => void): void => {
+    clearSessionPlanes();
+    try {
+      registerSessionPlane(plane);
+      fn();
+    } finally {
+      clearSessionPlanes();
+    }
+  };
+
+  const capEnv = (dir: string, cap = 1) => ({
+    command: 'fake-run --now',
+    agents: { fake: { maxSessions: cap, reservationsDir: dir } },
+    retained: 0,
+    pendingOpens: new Map<string, number>(),
+  });
+
+  test('a session landing between the check and the claim is refused — the recount sees it', () => {
+    withReservations(dir => {
+      // countLive's scripted answers stand in for a racer: the first
+      // count is the pre-claim read, the second the recount — a
+      // session that landed between them is INSIDE the recount, where
+      // the old check-then-claim order never saw it (bro-4bx61)
+      const counts = [0, 1];
+      withPlane(
+        {
+          kind: 'fake',
+          detectsCli: () => false,
+          startsSessions: command => (command.includes('fake-run') ? 1 : 0),
+          countLive: () => counts.shift() ?? 1,
+        },
+        () => {
+          assert.throws(
+            () => assertSessionCapUnlocked(capEnv(dir), 'conductor-test-race'),
+            /fake session quota reached/
+          );
+          // the refused call leaves no claim behind
+          assert.equal(readdirSync(dir).filter(n => n.endsWith('.slot')).length, 0);
+        }
+      );
+    });
+  });
+
+  test('an admitted claim holds its slot — the next start refuses', () => {
+    withReservations(dir => {
+      withPlane(
+        {
+          kind: 'fake',
+          detectsCli: () => false,
+          startsSessions: command => (command.includes('fake-run') ? 1 : 0),
+          countLive: () => 0,
+        },
+        () => {
+          const env = capEnv(dir);
+          const release = assertSessionCapUnlocked(env, 'conductor-test-1');
+          // the first claim is inside the recount the second start
+          // runs — one budget, no second slot
+          assert.throws(
+            () => assertSessionCapUnlocked(env, 'conductor-test-2'),
+            /fake session quota reached/
+          );
+          release();
+          // the slot goes back — a start after the release fits again
+          const second = assertSessionCapUnlocked(env, 'conductor-test-3');
+          second();
+        }
+      );
+    });
   });
 });
