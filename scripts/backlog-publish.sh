@@ -15,7 +15,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 DOLT_DIR="${DOLT_DIR:-$WORK/dolt-repo}"
-if [ -d "$DOLT_DIR/.dolt" ]; then
+if [[ -d "$DOLT_DIR/.dolt" ]]; then
   (cd "$DOLT_DIR" && dolt fetch origin 'refs/dolt/data:refs/remotes/origin/dolt/data' >/dev/null 2>&1 || dolt pull >/dev/null)
 else
   dolt clone "git+https://github.com/${GIT_REPO:-ThePlenkov/bro}.git" "$DOLT_DIR" >/dev/null
@@ -33,17 +33,22 @@ git -C "$ROOT" fetch --quiet "$REMOTE" "$DATA_REF" || true
 TIP="$(git -C "$ROOT" rev-parse --verify --quiet FETCH_HEAD || true)"
 BLOB="$(git -C "$ROOT" hash-object -w "$WORK/backlog.json")"
 
-if [ -n "$TIP" ]; then
-  OLD_BLOB="$(git -C "$ROOT" rev-parse --verify --quiet "$TIP:.agents/backlog.json" || true)"
-  if [ "$OLD_BLOB" = "$BLOB" ]; then
-    echo "backlog-publish: $DATA_REF already carries this backlog.json — nothing to push"
+issues_blob() { # hash the issues array only — generated_at always differs
+  node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.stringify(JSON.parse(s).issues)))" | git -C "$ROOT" hash-object --stdin
+}
+
+if [[ -n "$TIP" ]]; then
+  NEW_CORE="$(issues_blob < "$WORK/backlog.json")"
+  OLD_CORE="$(git -C "$ROOT" show "$TIP:.agents/backlog.json" 2>/dev/null | issues_blob || true)"
+  if [[ "$OLD_CORE" == "$NEW_CORE" ]]; then
+    echo "backlog-publish: $DATA_REF already carries this backlog — nothing to push"
     exit 0
   fi
   git -C "$ROOT" read-tree "$TIP"
 fi
 git -C "$ROOT" update-index --add --cacheinfo "100644,$BLOB,.agents/backlog.json"
 TREE="$(git -C "$ROOT" write-tree)"
-if [ -n "$TIP" ]; then
+if [[ -n "$TIP" ]]; then
   COMMIT="$(git -C "$ROOT" commit-tree "$TREE" -p "$TIP" -m "bro data: backlog snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)")"
 else
   COMMIT="$(git -C "$ROOT" commit-tree "$TREE" -m "bro data: backlog snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)")"

@@ -54,6 +54,20 @@ function push(m: Map<string, string[]>, k: string, v: string) {
   (m.get(k) ?? m.set(k, []).get(k)!).push(v);
 }
 
+type Dep = NonNullable<BeadRow['dependencies']>[number];
+
+function addDep(r: BeadRow, d: Dep, open: Set<string>, e: Edges) {
+  const tgt = d.depends_on_id ?? d.depends_on_issue_id;
+  if (!tgt) return;
+  if (d.type === 'parent-child') {
+    e.parentOf.set(r.id, tgt);
+    if (!open.has(r.id)) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
+  } else if (d.type === 'blocks' && open.has(r.id) && open.has(tgt)) {
+    push(e.blocks, r.id, tgt);
+    push(e.blockedBy, tgt, r.id);
+  }
+}
+
 /** bd export and the dolt join emit the same facts under slightly
  *  different keys — accept both. */
 function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
@@ -63,19 +77,7 @@ function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
     blocks: new Map(),
     blockedBy: new Map(),
   };
-  for (const r of rows) {
-    for (const d of r.dependencies ?? []) {
-      const tgt = d.depends_on_id ?? d.depends_on_issue_id;
-      if (!tgt) continue;
-      if (d.type === 'parent-child') {
-        e.parentOf.set(r.id, tgt);
-        if (!open.has(r.id)) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
-      } else if (d.type === 'blocks' && open.has(r.id) && open.has(tgt)) {
-        push(e.blocks, r.id, tgt);
-        push(e.blockedBy, tgt, r.id);
-      }
-    }
-  }
+  for (const r of rows) for (const d of r.dependencies ?? []) addDep(r, d, open, e);
   return e;
 }
 
@@ -87,7 +89,7 @@ function toIssue(r: BeadRow, e: Edges): BacklogIssue {
   return {
     id: r.id,
     title: r.title,
-    status: r.status.replace(/_/g, '-'),
+    status: r.status.replaceAll('_', '-'),
     priority: Number(r.priority),
     type: r.issue_type,
     created_at: r.created_at,

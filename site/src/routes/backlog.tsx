@@ -251,7 +251,7 @@ function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: 
 
 // --- components ---------------------------------------------------------
 
-function Chip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function Chip({ active, label, onClick }: Readonly<{ active: boolean; label: string; onClick: () => void }>) {
   return (
     <button
       type="button"
@@ -263,7 +263,7 @@ function Chip({ active, label, onClick }: { active: boolean; label: string; onCl
   );
 }
 
-function Graph({ items, onPick }: { items: Bead[]; onPick: (b: Bead | null) => void }) {
+function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | null) => void }>) {
   const [flat, setFlat] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -279,6 +279,7 @@ function Graph({ items, onPick }: { items: Bead[]; onPick: (b: Bead | null) => v
         <span className="bl-graphhint">drag to pan · click node for details · red edge = blocks</span>
       </div>
       <svg
+        role="img"
         viewBox={`0 0 ${g.w} ${g.h}`}
         style={{width:"100%",height:"auto",display:"block",background:"#0e1410",cursor:"grab"}}
         onMouseDown={e => (drag.current = { x: e.clientX, y: e.clientY })}
@@ -292,19 +293,20 @@ function Graph({ items, onPick }: { items: Bead[]; onPick: (b: Bead | null) => v
           drag.current = { x: e.clientX, y: e.clientY };
         }}
       >
+        <title>backlog dependency graph</title>
         <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-          {g.edges.map((e, i) =>
+          {g.edges.map(e =>
             e.kind === 'parent' ? (
-              <line key={i} x1={e.x1} y1={e.y1 + 12} x2={e.x2} y2={e.y2 - 12} stroke="#3f5147" strokeWidth={1} />
+              <line key={`p${e.x1},${e.y1},${e.x2},${e.y2}`} x1={e.x1} y1={e.y1 + 12} x2={e.x2} y2={e.y2 - 12} stroke="#3f5147" strokeWidth={1} />
             ) : (
-              <line key={i} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#e0705a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.8} />
+              <line key={`b${e.x1},${e.y1},${e.x2},${e.y2}`} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#e0705a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.8} />
             ),
           )}
           {g.nodes.map(n => (
             <g key={n.bead.id} transform={`translate(${n.x},${n.y})`} onClick={() => onPick(n.bead)} className="bl-node">
               <rect x={-98} y={-14} width={196} height={28} rx={6}
                 fill={n.bead.status === 'blocked' ? '#3a2430' : '#172018'}
-                stroke={n.bead.status === 'in-progress' ? '#d8b56a' : n.bead.status === 'blocked' ? '#e0705a' : TYPE_COLOR[n.bead.type] ?? '#3f5147'}
+                stroke={nodeStroke(n.bead)}
                 strokeWidth={n.bead.type === 'epic' ? 2 : 1}
               />
               <text x={-90} y={4} fontSize={10} fill="#c8d4cc" fontFamily="var(--mono)">
@@ -318,7 +320,13 @@ function Graph({ items, onPick }: { items: Bead[]; onPick: (b: Bead | null) => v
   );
 }
 
-function Detail({ b, onClose, onJump }: { b: Bead; onClose: () => void; onJump: (id: string) => void }) {
+function nodeStroke(b: Bead): string {
+  if (b.status === 'in-progress') return '#d8b56a';
+  if (b.status === 'blocked') return '#e0705a';
+  return TYPE_COLOR[b.type] ?? '#3f5147';
+}
+
+function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
   return (
     <aside className="bl-detail">
@@ -340,12 +348,12 @@ function Detail({ b, onClose, onJump }: { b: Bead; onClose: () => void; onJump: 
       )}
       {b.blocks.length > 0 && (
         <p className="bl-detail-meta">
-          blocks: {b.blocks.map(id => <a key={id} onClick={() => onJump(id)} className="bl-jump">{id} </a>)}
+          blocks: {b.blocks.map(id => <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">{id} </button>)}
         </p>
       )}
       {b.blocked_by.length > 0 && (
         <p className="bl-detail-meta">
-          blocked by: {b.blocked_by.map(id => <a key={id} onClick={() => onJump(id)} className="bl-jump">{id} </a>)}
+          blocked by: {b.blocked_by.map(id => <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">{id} </button>)}
         </p>
       )}
     </aside>

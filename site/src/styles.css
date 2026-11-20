@@ -362,4 +362,4 @@ section.how, section.self, section.not, section.vocab { padding: 64px 0 0; }
 .bl-detail-title { margin: 10px 0 8px; color: var(--text); }
 .bl-detail-meta { color: var(--dim); font: 12px var(--mono); margin: 4px 0; }
 .bl-detail a { color: var(--accent); }
-.bl-jump { cursor: pointer; text-decoration: underline; }
+.bl-jump { cursor: pointer; text-decoration: underline; font: inherit; background: none; border: none; padding: 0; color: inherit; }
