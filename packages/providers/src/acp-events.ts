@@ -16,15 +16,19 @@
  *   session/update lands as a row, chunks included, bookended by turn
  *   start/stop. Written only when the process carries a BRO_AGENT_ID
  *   badge — unmanaged turns (conductor sessions, judge calls) have no
- *   agent artifact home and simply don't archive.
+ *   agent artifact home and simply don't archive. The file self-caps
+ *   like the sibling journals (spec bro-9ti7h): past the byte ceiling
+ *   it truncates to its newest whole lines, so a long or chatty
+ *   session stays bounded instead of growing forever.
  *
  * Neither sink can fail a turn: publishes are serialized on a settled
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
+import { closeSync, constants, fstatSync, openSync, readSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { eventsFile, proxyEventsFile } from '@broject/acp-session';
+import { eventsFile, proxyEventsFile, sizeOf } from '@broject/acp-session';
 import {
   appendPrivateFileSync,
   busPublish,
@@ -32,6 +36,7 @@ import {
   type EventInput,
   mkdirPrivateSync,
   stateCommonDir,
+  writePrivateFileSync,
 } from '@broject/core';
 
 /** agentIds minted by agent-connectors are filename-safe — a badge
@@ -145,6 +150,97 @@ const archiveFile = (
   return agentId === undefined ? undefined : eventsFile(common, agentId);
 };
 
+/** The archive's self-cap bound (spec bro-9ti7h) — the lifecycle
+ *  journal's 4/2 MiB pair. The archive is the durable record behind a
+ *  windowed reader (TAIL_BYTES opens), so the kept tail outlasts any
+ *  consumer's scrollback while the file stays cheap to tail.
+ *  KEEP < MAX is the invariant the cap math relies on. */
+export const AGENT_ARCHIVE_MAX_BYTES = 4 * 1024 * 1024;
+export const AGENT_ARCHIVE_KEEP_BYTES = 2 * 1024 * 1024;
+
+/** O_NOFOLLOW where the platform has it — the cap's tail read refuses
+ *  a path swapped to a symlink exactly like the private write seam
+ *  does. Absent on win32, where the profile ACL owns the guarantee
+ *  (private-files.ts's own posture). */
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+/** Cap one archive to its newest whole lines (spec bro-9ti7h):
+ *
+ *  - READ through one NOFOLLOW fd — a path swapped to a symlink is
+ *    refused like the write seam refuses it, and the open pins the
+ *    instance so a racing resize reads honest offsets. The read runs
+ *    to the fd's own EOF, not the first stat's: rows appended mid-cap
+ *    land inside the kept tail instead of being renamed away (the
+ *    bound stretches to cover them — newest data always wins).
+ *  - KEEP only complete JSONL rows — the slice's first line can be
+ *    torn mid-row and drops; no newline at all means the whole tail
+ *    is one unparseable fragment (a single row bigger than the keep
+ *    window), which is dead weight, not data — the archive converges
+ *    to empty and grows fresh rows.
+ *  - REPLACE via a staged private write + atomic rename — the archive
+ *    is never empty or partial: a kill mid-cap leaves the OLD file
+ *    whole or the NEW one, never a truncated middle (an in-place
+ *    truncate+write can't say that). No consumer holds the archive's
+ *    fd — every reader opens per poll — so the inode swap strands
+ *    nothing, and the staged tmp is pinned 0600 by the same seam as
+ *    the append.
+ *
+ *  Bounded memory throughout — a pre-existing giant archive converges
+ *  on its next write without a whole-file read. Runs inside the
+ *  caller's try — housekeeping never outranks the row. */
+const capArchive = (file: string): void => {
+  if (sizeOf(file) <= AGENT_ARCHIVE_MAX_BYTES) {
+    return;
+  }
+  const fd = openSync(file, constants.O_RDONLY | NOFOLLOW);
+  let tail: Buffer;
+  try {
+    const sz = fstatSync(fd).size;
+    if (sz <= AGENT_ARCHIVE_MAX_BYTES) {
+      return; // a concurrent cap already shrank the file
+    }
+    const from = sz - AGENT_ARCHIVE_KEEP_BYTES;
+    const parts: Buffer[] = [];
+    let at = from;
+    for (;;) {
+      const chunk = Buffer.alloc(64 * 1024);
+      const n = readSync(fd, chunk, 0, chunk.length, at);
+      if (n === 0) {
+        break;
+      }
+      parts.push(chunk.subarray(0, n));
+      at += n;
+      // a runaway same-file appender can't stretch the read forever —
+      // beyond one extra MAX the tail is let go, still bounded
+      if (at - from > AGENT_ARCHIVE_MAX_BYTES) {
+        break;
+      }
+    }
+    const slice = Buffer.concat(parts);
+    const nl = slice.indexOf(0x0a);
+    tail = nl >= 0 ? slice.subarray(nl + 1) : Buffer.alloc(0);
+  } finally {
+    closeSync(fd);
+  }
+  const staged = `${file}.cap-${process.pid}`;
+  try {
+    writePrivateFileSync(staged, tail);
+    renameSync(staged, file);
+  } finally {
+    rmSync(staged, { force: true }); // a no-op once the rename landed
+  }
+};
+
+/** Append one archive row, then self-cap — the ONE helper every writer
+ *  funnels through so the bound rides the plane's
+ *  start/update/note/stop funnel and agentEventRecord's out-of-band
+ *  row alike. One statSync per row, the otel sink's own shape —
+ *  proportional next to the open/write/close the append already pays. */
+const appendArchiveRow = (file: string, line: string): void => {
+  appendPrivateFileSync(file, line);
+  capArchive(file);
+};
+
 /** An out-of-band archive row — same file, same shape, written outside
  *  pumpTurn's update funnel (spec bro-l8wqu). The one consumer today is
  *  the acp-worker's permission handler: `session/request_permission` is
@@ -169,7 +265,7 @@ export function agentEventRecord(
   if (file === undefined) return;
   try {
     mkdirPrivateSync(dirname(file));
-    appendPrivateFileSync(
+    appendArchiveRow(
       file,
       `${JSON.stringify({ ts: new Date().toISOString(), session: sessionId, by, key: agentId, ...row })}\n`
     );
@@ -235,7 +331,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
         mkdirPrivateSync(dirname(file));
         dirReady = true;
       }
-      appendPrivateFileSync(file, `${JSON.stringify(row)}\n`);
+      appendArchiveRow(file, `${JSON.stringify(row)}\n`);
     } catch {
       /* the archive is telemetry — a disk failure never fails a turn */
     }
