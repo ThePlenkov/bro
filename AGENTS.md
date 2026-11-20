@@ -51,6 +51,16 @@ Developing bro itself: see CONTRIBUTING.md.
   still misfires, the exclusion lives in `.codacy.yml` /
   `.markdownlint.json` next to a written justification — pattern-wide,
   never a per-line suppression.
+- **Green on first write** — CodeScene and SonarCloud grade every new
+  file in the delta; write code that passes them the first time, not
+  code that needs a refactor PR after the gates complain. Concretely:
+  cognitive complexity stays ≤15 per function — pick data-driven
+  structure over branching (a table or handler map instead of an
+  if-else chain, a config array rendered generically instead of six
+  near-identical JSX blocks, a predicate list instead of nested
+  guards). When a gate does flag new code, redesign the shape — do not
+  split a long function into five trivial ones to game the metric;
+  that is worse code, not better code.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).

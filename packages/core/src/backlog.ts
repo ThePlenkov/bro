@@ -56,17 +56,20 @@ function push(m: Map<string, string[]>, k: string, v: string) {
 
 type Dep = NonNullable<BeadRow['dependencies']>[number];
 
-function addDep(r: BeadRow, d: Dep, open: Set<string>, e: Edges) {
-  const tgt = d.depends_on_id ?? d.depends_on_issue_id;
-  if (!tgt) return;
-  if (d.type === 'parent-child') {
-    e.parentOf.set(r.id, tgt);
-    if (!open.has(r.id)) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
-  } else if (d.type === 'blocks' && open.has(r.id) && open.has(tgt)) {
-    push(e.blocks, r.id, tgt);
-    push(e.blockedBy, tgt, r.id);
-  }
-}
+// Dependency kinds are data: each type maps to its edge effect, so a new
+// kind is a table entry, not another branch.
+const DEP_HANDLERS: Record<string, (src: string, srcOpen: boolean, tgt: string, tgtOpen: boolean, e: Edges) => void> = {
+  'parent-child': (src, srcOpen, tgt, _tgtOpen, e) => {
+    e.parentOf.set(src, tgt);
+    if (!srcOpen) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
+  },
+  blocks: (src, srcOpen, tgt, tgtOpen, e) => {
+    if (srcOpen && tgtOpen) {
+      push(e.blocks, src, tgt);
+      push(e.blockedBy, tgt, src);
+    }
+  },
+};
 
 /** bd export and the dolt join emit the same facts under slightly
  *  different keys — accept both. */
@@ -77,7 +80,12 @@ function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
     blocks: new Map(),
     blockedBy: new Map(),
   };
-  for (const r of rows) for (const d of r.dependencies ?? []) addDep(r, d, open, e);
+  for (const r of rows) {
+    for (const d of r.dependencies ?? []) {
+      const tgt = d.depends_on_id ?? d.depends_on_issue_id;
+      if (tgt) DEP_HANDLERS[d.type]?.(r.id, open.has(r.id), tgt, open.has(tgt), e);
+    }
+  }
   return e;
 }
 

@@ -253,13 +253,40 @@ function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: 
 
 function Chip({ active, label, onClick }: Readonly<{ active: boolean; label: string; onClick: () => void }>) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`bl-chip${active ? ' on' : ''}`}
-    >
+    <button type="button" onClick={onClick} className={`bl-chip${active ? ' on' : ''}`}>
       {label}
     </button>
+  );
+}
+
+// Chip rows are data, not JSX: every filter group is one entry and the
+// controls render it generically — adding a facet is a one-line change.
+interface ChipItem { v: string; label: string; active: boolean; onClick: () => void }
+
+function ChipRow({ groups }: Readonly<{ groups: ChipItem[][] }>) {
+  return (
+    <div className="bl-chiprow">
+      {groups.map((g, gi) => (
+        <span key={`g${gi}`} style={{ display: 'contents' }}>
+          {gi > 0 && <span className="bl-sep" />}
+          {g.map(c => <Chip key={c.v} active={c.active} label={c.label} onClick={c.onClick} />)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function nodeStroke(b: Bead): string {
+  if (b.status === 'in-progress') return '#d8b56a';
+  if (b.status === 'blocked') return '#e0705a';
+  return TYPE_COLOR[b.type] ?? '#3f5147';
+}
+
+function EdgeLine({ e }: Readonly<{ e: GEdge }>) {
+  return e.kind === 'parent' ? (
+    <line x1={e.x1} y1={e.y1 + 12} x2={e.x2} y2={e.y2 - 12} stroke="#3f5147" strokeWidth={1} />
+  ) : (
+    <line x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#e0705a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.8} />
   );
 }
 
@@ -269,39 +296,39 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const drag = useRef<{ x: number; y: number } | null>(null);
   const g = useMemo(() => layout(items, flat), [items, flat]);
+
+  const tools: ChipItem[] = [
+    { v: 'flat', label: 'include flat roots', active: flat, onClick: () => setFlat(f => !f) },
+    { v: 'zout', label: 'zoom −', active: false, onClick: () => setZoom(z => Math.max(0.15, z / 1.25)) },
+    { v: 'zin', label: 'zoom +', active: false, onClick: () => setZoom(z => Math.min(4, z * 1.25)) },
+    { v: 'reset', label: 'reset', active: false, onClick: () => { setZoom(1); setPan({ x: 0, y: 0 }); } },
+  ];
+
+  const onDrag = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!drag.current) return;
+    const k = g.w / e.currentTarget.getBoundingClientRect().width / zoom;
+    setPan(p => ({ x: p.x + (e.clientX - drag.current!.x) * k, y: p.y + (e.clientY - drag.current!.y) * k }));
+    drag.current = { x: e.clientX, y: e.clientY };
+  };
+
   return (
     <div className="bl-graphwrap">
       <div className="bl-graphtools">
-        <Chip active={flat} label="include flat roots" onClick={() => setFlat(f => !f)} />
-        <Chip active={false} label="zoom −" onClick={() => setZoom(z => Math.max(0.15, z / 1.25))} />
-        <Chip active={false} label="zoom +" onClick={() => setZoom(z => Math.min(4, z * 1.25))} />
-        <Chip active={false} label="reset" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} />
+        <ChipRow groups={[tools]} />
         <span className="bl-graphhint">drag to pan · click node for details · red edge = blocks</span>
       </div>
       <svg
         role="img"
         viewBox={`0 0 ${g.w} ${g.h}`}
-        style={{width:"100%",height:"auto",display:"block",background:"#0e1410",cursor:"grab"}}
+        style={{ width: '100%', height: 'auto', display: 'block', background: '#0e1410', cursor: 'grab' }}
         onMouseDown={e => (drag.current = { x: e.clientX, y: e.clientY })}
         onMouseUp={() => (drag.current = null)}
         onMouseLeave={() => (drag.current = null)}
-        onMouseMove={e => {
-          if (!drag.current) return;
-          const svg = e.currentTarget.getBoundingClientRect();
-          const k = g.w / svg.width / zoom;
-          setPan(p => ({ x: p.x + (e.clientX - drag.current!.x) * k, y: p.y + (e.clientY - drag.current!.y) * k }));
-          drag.current = { x: e.clientX, y: e.clientY };
-        }}
+        onMouseMove={onDrag}
       >
         <title>backlog dependency graph</title>
         <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-          {g.edges.map(e =>
-            e.kind === 'parent' ? (
-              <line key={`p${e.x1},${e.y1},${e.x2},${e.y2}`} x1={e.x1} y1={e.y1 + 12} x2={e.x2} y2={e.y2 - 12} stroke="#3f5147" strokeWidth={1} />
-            ) : (
-              <line key={`b${e.x1},${e.y1},${e.x2},${e.y2}`} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#e0705a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.8} />
-            ),
-          )}
+          {g.edges.map(e => <EdgeLine key={`${e.kind}${e.x1},${e.y1},${e.x2},${e.y2}`} e={e} />)}
           {g.nodes.map(n => (
             <g key={n.bead.id} transform={`translate(${n.x},${n.y})`} onClick={() => onPick(n.bead)} className="bl-node">
               <rect x={-98} y={-14} width={196} height={28} rx={6}
@@ -320,12 +347,6 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
   );
 }
 
-function nodeStroke(b: Bead): string {
-  if (b.status === 'in-progress') return '#d8b56a';
-  if (b.status === 'blocked') return '#e0705a';
-  return TYPE_COLOR[b.type] ?? '#3f5147';
-}
-
 function RelRow({ label, ids, onJump }: Readonly<{ label: string; ids: string[]; onJump: (id: string) => void }>) {
   if (ids.length === 0) return null;
   return (
@@ -335,9 +356,14 @@ function RelRow({ label, ids, onJump }: Readonly<{ label: string; ids: string[];
   );
 }
 
+// Detail meta lines are data too — each row is {when, text|element}.
 function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
-  const kids = b.open_children + b.closed_children;
+  const meta: string[] = [
+    `${b.type} · P${b.priority || '—'} · ${b.status}${b.parent ? ` · parent ${b.parent}` : ''}`,
+    ...(b.labels.length ? [`labels: ${b.labels.join(', ')}`] : []),
+    ...(b.open_children + b.closed_children ? [`children: ${b.open_children} open / ${b.closed_children} closed`] : []),
+  ];
   return (
     <aside className="bl-detail">
       <div className="bl-detail-head">
@@ -345,49 +371,44 @@ function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void;
         <button type="button" onClick={onClose}>✕</button>
       </div>
       <p className="bl-detail-title">{b.title}</p>
-      <p className="bl-detail-meta">
-        {b.type} · P{b.priority || '—'} · {b.status}
-        {b.parent ? ` · parent ${b.parent}` : ''}
-      </p>
-      {isGh && (
-        <p><a href={`${GITHUB}/issues/${b.id.split('-')[1]}`}>open on github ↗</a></p>
-      )}
-      {b.labels.length > 0 && <p className="bl-detail-meta">labels: {b.labels.join(', ')}</p>}
-      {kids > 0 && <p className="bl-detail-meta">children: {b.open_children} open / {b.closed_children} closed</p>}
+      {meta.map(m => <p key={m} className="bl-detail-meta">{m}</p>)}
+      {isGh && <p><a href={`${GITHUB}/issues/${b.id.split('-')[1]}`}>open on github ↗</a></p>}
       <RelRow label="blocks" ids={b.blocks} onJump={onJump} />
       <RelRow label="blocked by" ids={b.blocked_by} onJump={onJump} />
     </aside>
   );
 }
 
-function beadMatches(b: Bead, f: Filters, q: string): boolean {
-  if (!f.status.has(b.status) || !f.type.has(b.type) || !f.priority.has(Number(b.priority))) return false;
-  if (f.orphansOnly && b.parent) return false;
-  return !q || `${b.id} ${b.title} ${b.labels.join(' ')}`.toLowerCase().includes(q);
+// --- filtering ------------------------------------------------------------
+
+type Row = { b: Bead; src: 'beads' | 'github' };
+
+const beadPredicates = [
+  (b: Bead, f: Filters) => f.status.has(b.status) && f.type.has(b.type) && f.priority.has(b.priority),
+  (b: Bead, f: Filters) => !f.orphansOnly || !b.parent,
+];
+
+function haystack(b: Bead): string {
+  return `${b.id} ${b.title} ${b.labels.join(' ')}`.toLowerCase();
 }
 
-function applyFilters(beads: Bead[], gh: GhItem[], f: Filters): Array<{ b: Bead; src: 'beads' | 'github' }> {
+function applyFilters(beads: Bead[], gh: GhItem[], f: Filters): Row[] {
   const q = f.q.trim().toLowerCase();
-  const list: Array<{ b: Bead; src: 'beads' | 'github' }> = [];
-  if (f.source !== 'github') for (const b of beads) if (beadMatches(b, f, q)) list.push({ b, src: 'beads' });
+  const match = (b: Bead) => beadPredicates.every(p => p(b, f)) && (!q || haystack(b).includes(q));
+  const rows: Row[] = f.source === 'github' ? [] : beads.filter(match).map(b => ({ b, src: 'beads' as const }));
   if (f.source !== 'beads' && !f.orphansOnly) {
     for (const g of gh) {
       const b = normalizeGh(g);
-      if (!q || `${b.id} ${b.title}`.toLowerCase().includes(q)) list.push({ b, src: 'github' });
+      if (!q || haystack(b).includes(q)) rows.push({ b, src: 'github' });
     }
   }
-  return list;
+  return rows;
 }
 
-function BacklogPage() {
-  const [state, setState] = useState<LoadState>({ kind: 'loading' });
-  const [view, setView] = useState<'list' | 'graph'>('list');
-  const [picked, setPicked] = useState<Bead | null>(null);
-  const [f, setF] = useState<Filters>({
-    q: '', status: new Set(ALL_STATUS), type: new Set(ALL_TYPE),
-    priority: new Set(ALL_PRIORITY), source: 'all', orphansOnly: false,
-  });
+// --- page -----------------------------------------------------------------
 
+function useBacklog(): LoadState {
+  const [state, setState] = useState<LoadState>({ kind: 'loading' });
   useEffect(() => {
     let alive = true;
     load()
@@ -402,28 +423,89 @@ function BacklogPage() {
       });
     return () => { alive = false; };
   }, []);
+  return state;
+}
+
+function toggleSet<T>(s: Set<T>, v: T): Set<T> {
+  const next = new Set(s);
+  if (next.has(v)) next.delete(v); else next.add(v);
+  return next;
+}
+
+function Stats({ data, gh, inView }: Readonly<{ data: Data; gh: GhItem[]; inView: number }>) {
+  const cells: Array<[number, string]> = [
+    [data.snapshot.total_open, 'open beads'],
+    [gh.filter(g => g.kind === 'issue').length, 'github issues'],
+    [gh.filter(g => g.kind === 'pr').length, 'open PRs'],
+    [inView, 'in view'],
+  ];
+  return (
+    <section className="debt-grid">
+      {cells.map(([n, l]) => (
+        <div key={l} className="stat"><span className="stat-n">{n}</span><span className="stat-l">{l}</span></div>
+      ))}
+    </section>
+  );
+}
+
+function ListView({ rows, now, onPick }: Readonly<{ rows: Row[]; now: number; onPick: (b: Bead) => void }>) {
+  const CAP = 400;
+  return (
+    <section className="bl-listwrap">
+      <table className="debt-table">
+        <thead>
+          <tr><th>id</th><th>type</th><th>P</th><th>age</th><th>title</th></tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, CAP).map(({ b, src }) => (
+            <tr key={b.id} onClick={() => onPick(b)} className="bl-row">
+              <td>{b.id}</td>
+              <td>{src === 'github' ? `gh·${b.type}` : b.type}{b.status !== 'open' ? ` (${b.status})` : ''}</td>
+              <td className="num">{b.priority || '—'}</td>
+              <td className="num">{ageDays(b.created_at, now)}d</td>
+              <td>{b.title}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > CAP && <p className="debt-note">showing first {CAP} of {rows.length} — narrow the filters</p>}
+      {rows.length === 0 && <p className="debt-note">nothing matches — loosen a filter</p>}
+    </section>
+  );
+}
+
+function BacklogPage() {
+  const state = useBacklog();
+  const [view, setView] = useState<'list' | 'graph'>('list');
+  const [picked, setPicked] = useState<Bead | null>(null);
+  const [f, setF] = useState<Filters>({
+    q: '', status: new Set(ALL_STATUS), type: new Set(ALL_TYPE),
+    priority: new Set(ALL_PRIORITY), source: 'all', orphansOnly: false,
+  });
 
   const beads = state.kind === 'ready' ? state.data.snapshot.issues : [];
   const gh = state.kind === 'ready' ? state.data.gh : [];
   const filtered = useMemo(() => applyFilters(beads, gh, f), [beads, gh, f]);
-
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
-  const now = Date.now();
-  const toggle = <K extends 'status' | 'type' | 'priority'>(k: K, v: Filters[K] extends Set<infer T> ? T : never) =>
-    setF(prev => {
-      const s = new Set(prev[k] as Set<never>);
-      (s.has(v as never) ? s.delete(v as never) : s.add(v as never));
-      return { ...prev, [k]: s };
-    });
+  const set = <K extends keyof Filters>(k: K, v: Filters[K]) => setF(p => ({ ...p, [k]: v }));
+  const toggle = (k: 'status' | 'type' | 'priority', v: string | number) =>
+    setF(p => ({ ...p, [k]: toggleSet(p[k] as Set<string | number>, v) }));
+
+  const groups: ChipItem[][] = [
+    (['all', 'beads', 'github'] as const).map(s => ({ v: s, label: s, active: f.source === s, onClick: () => set('source', s) })),
+    ALL_STATUS.map(s => ({ v: s, label: s, active: f.status.has(s), onClick: () => toggle('status', s) })),
+    ALL_TYPE.map(t => ({ v: t, label: t, active: f.type.has(t), onClick: () => toggle('type', t) })),
+    ALL_PRIORITY.map(p => ({ v: `p${p}`, label: `P${p}`, active: f.priority.has(p), onClick: () => toggle('priority', p) })),
+    [{ v: 'orphans', label: 'orphans only', active: f.orphansOnly, onClick: () => set('orphansOnly', !f.orphansOnly) }],
+    (['list', 'graph'] as const).map(v => ({ v, label: v, active: view === v, onClick: () => setView(v) })),
+  ];
 
   return (
     <>
       <main className="bl-main">
         <section className="hero">
           <p className="kicker">the swamp, mapped</p>
-          <h1>
-            bro backlog, <em>live</em>.
-          </h1>
+          <h1>bro backlog, <em>live</em>.</h1>
           <p className="lede">
             Every open bead plus the GitHub queue, read straight off{' '}
             <code>refs/bro/data</code> and the REST API at page load. A publish job refreshes the
@@ -442,75 +524,27 @@ function BacklogPage() {
             {state.cached && (
               <section className="debt-empty"><p>showing the last cached snapshot — GitHub API unreachable right now</p></section>
             )}
-            <section className="debt-grid">
-              <div className="stat"><span className="stat-n">{state.data.snapshot.total_open}</span><span className="stat-l">open beads</span></div>
-              <div className="stat"><span className="stat-n">{gh.filter(g => g.kind === 'issue').length}</span><span className="stat-l">github issues</span></div>
-              <div className="stat"><span className="stat-n">{gh.filter(g => g.kind === 'pr').length}</span><span className="stat-l">open PRs</span></div>
-              <div className="stat"><span className="stat-n">{filtered.length}</span><span className="stat-l">in view</span></div>
-            </section>
-
+            <Stats data={state.data} gh={gh} inView={filtered.length} />
             <section className="bl-controls">
               <input
                 type="search"
                 placeholder="filter by id / title / label…"
                 value={f.q}
-                onChange={e => setF(p => ({ ...p, q: e.target.value }))}
+                onChange={e => set('q', e.target.value)}
                 className="bl-search"
               />
-              <div className="bl-chiprow">
-                {(['all', 'beads', 'github'] as const).map(s => (
-                  <Chip key={s} active={f.source === s} label={s} onClick={() => setF(p => ({ ...p, source: s }))} />
-                ))}
-                <span className="bl-sep" />
-                {ALL_STATUS.map(s => <Chip key={s} active={f.status.has(s)} label={s} onClick={() => toggle('status', s)} />)}
-                <span className="bl-sep" />
-                {ALL_TYPE.map(t => <Chip key={t} active={f.type.has(t)} label={t} onClick={() => toggle('type', t)} />)}
-                <span className="bl-sep" />
-                {ALL_PRIORITY.map(p => <Chip key={p} active={f.priority.has(p)} label={`P${p}`} onClick={() => toggle('priority', p)} />)}
-                <span className="bl-sep" />
-                <Chip active={f.orphansOnly} label="orphans only" onClick={() => setF(p => ({ ...p, orphansOnly: !p.orphansOnly }))} />
-                <span className="bl-sep" />
-                <Chip active={view === 'list'} label="list" onClick={() => setView('list')} />
-                <Chip active={view === 'graph'} label="graph" onClick={() => setView('graph')} />
-              </div>
+              <ChipRow groups={groups} />
             </section>
 
-            {view === 'list' && (
-              <section className="bl-listwrap">
-                <table className="debt-table">
-                  <thead>
-                    <tr><th>id</th><th>type</th><th>P</th><th>age</th><th>title</th></tr>
-                  </thead>
-                  <tbody>
-                    {filtered.slice(0, 400).map(({ b, src }) => (
-                      <tr key={b.id} onClick={() => setPicked(b)} className="bl-row">
-                        <td>{b.id}</td>
-                        <td>{src === 'github' ? `gh·${b.type}` : b.type}{b.status !== 'open' ? ` (${b.status})` : ''}</td>
-                        <td className="num">{b.priority || '—'}</td>
-                        <td className="num">{ageDays(b.created_at, now)}d</td>
-                        <td>{b.title}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {filtered.length > 400 && (
-                  <p className="debt-note">showing first 400 of {filtered.length} — narrow the filters</p>
-                )}
-                {filtered.length === 0 && <p className="debt-note">nothing matches — loosen a filter</p>}
-              </section>
-            )}
+            {view === 'list' && <ListView rows={filtered} now={Date.now()} onPick={setPicked} />}
             {view === 'graph' && (
               <section>
                 <Graph items={filtered.filter(x => x.src === 'beads').map(x => x.b)} onPick={setPicked} />
               </section>
             )}
-
             {picked && (
-              <Detail
-                b={picked}
-                onClose={() => setPicked(null)}
-                onJump={id => { const t = byId.get(id); if (t) setPicked(t); }}
-              />
+              <Detail b={picked} onClose={() => setPicked(null)}
+                onJump={id => { const t = byId.get(id); if (t) setPicked(t); }} />
             )}
           </>
         )}
