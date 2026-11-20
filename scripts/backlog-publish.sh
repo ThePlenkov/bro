@@ -30,7 +30,12 @@ fi
 
 DOLT_DIR="${DOLT_DIR:-$WORK/dolt-repo}"
 if [[ -d "$DOLT_DIR/.dolt" ]]; then
-  (cd "$DOLT_DIR" && dolt fetch origin 'refs/dolt/data:refs/remotes/origin/dolt/data' >/dev/null 2>&1 || dolt pull >/dev/null)
+  (
+    cd "$DOLT_DIR"
+    if ! dolt fetch origin 'refs/dolt/data:refs/remotes/origin/dolt/data' >/dev/null 2>&1; then
+      dolt pull >/dev/null
+    fi
+  )
 else
   dolt clone "git+https://github.com/${GIT_REPO:-ThePlenkov/bro}.git" "$DOLT_DIR" >/dev/null
 fi

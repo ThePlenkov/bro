@@ -272,7 +272,7 @@ function ChipRow({ groups }: Readonly<{ groups: ChipItem[][] }>) {
   return (
     <div className="bl-chiprow">
       {groups.map((g, gi) => (
-        <span key={`g${gi}`} style={{ display: 'contents' }}>
+        <span key={g.map(c => c.v).join('|')} style={{ display: 'contents' }}>
           {gi > 0 && <span className="bl-sep" />}
           {g.map(c => <Chip key={c.v} active={c.active} label={c.label} onClick={c.onClick} />)}
         </span>
@@ -292,6 +292,21 @@ function EdgeLine({ e }: Readonly<{ e: GEdge }>) {
     <line x1={e.x1} y1={e.y1 + 12} x2={e.x2} y2={e.y2 - 12} stroke="#3f5147" strokeWidth={1} />
   ) : (
     <line x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#e0705a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.8} />
+  );
+}
+
+function GraphNode({ n, onPick }: Readonly<{ n: GNode; onPick: (b: Bead | null) => void }>) {
+  return (
+    <g transform={`translate(${n.x},${n.y})`} onClick={() => onPick(n.bead)} className="bl-node">
+      <rect x={-98} y={-14} width={196} height={28} rx={6}
+        fill={n.bead.status === 'blocked' ? '#3a2430' : '#172018'}
+        stroke={nodeStroke(n.bead)}
+        strokeWidth={n.bead.type === 'epic' ? 2 : 1}
+      />
+      <text x={-90} y={4} fontSize={10} fill="#c8d4cc" fontFamily="var(--mono)">
+        {n.bead.id} · {n.bead.title.slice(0, 26)}
+      </text>
+    </g>
   );
 }
 
@@ -334,18 +349,7 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
         <title>backlog dependency graph</title>
         <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
           {g.edges.map(e => <EdgeLine key={`${e.kind}${e.x1},${e.y1},${e.x2},${e.y2}`} e={e} />)}
-          {g.nodes.map(n => (
-            <g key={n.bead.id} transform={`translate(${n.x},${n.y})`} onClick={() => onPick(n.bead)} className="bl-node">
-              <rect x={-98} y={-14} width={196} height={28} rx={6}
-                fill={n.bead.status === 'blocked' ? '#3a2430' : '#172018'}
-                stroke={nodeStroke(n.bead)}
-                strokeWidth={n.bead.type === 'epic' ? 2 : 1}
-              />
-              <text x={-90} y={4} fontSize={10} fill="#c8d4cc" fontFamily="var(--mono)">
-                {n.bead.id} · {n.bead.title.slice(0, 26)}
-              </text>
-            </g>
-          ))}
+          {g.nodes.map(n => <GraphNode key={n.bead.id} n={n} onPick={onPick} />)}
         </g>
       </svg>
     </div>
@@ -364,8 +368,9 @@ function RelRow({ label, ids, onJump }: Readonly<{ label: string; ids: string[];
 // Detail meta lines are data too — each row is {when, text|element}.
 function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
+  const parent = b.parent ? ` · parent ${b.parent}` : '';
   const meta: string[] = [
-    `${b.type} · P${b.priority || '—'} · ${b.status}${b.parent ? ` · parent ${b.parent}` : ''}`,
+    `${b.type} · P${b.priority || '—'} · ${b.status}${parent}`,
     ...(b.labels.length ? [`labels: ${b.labels.join(', ')}`] : []),
     ...(b.open_children + b.closed_children ? [`children: ${b.open_children} open / ${b.closed_children} closed`] : []),
   ];

@@ -20,7 +20,7 @@ if (!doltDir || !outFile) {
 }
 
 function sql<T>(query: string): T[] {
-  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], {
+  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], { // NOSONAR — literal argv, PATH-resolved binary (same contract as gh)
     cwd: doltDir,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -70,5 +70,5 @@ const rows: BeadRow[] = issues.map(r => ({
 }));
 
 const snap = compactBacklog(rows);
-writeFileSync(outFile, JSON.stringify(snap));
+writeFileSync(outFile, JSON.stringify(snap)); // NOSONAR — the workflow names its own mktemp output
 console.log(`backlog-export: ${snap.total_open} open issues → ${outFile}`);
