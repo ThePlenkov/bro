@@ -30,8 +30,8 @@ import {
   busPublish,
   busSocketPath,
   type EventInput,
-  gitCommonDir,
   mkdirPrivateSync,
+  stateCommonDir,
 } from '@broject/core';
 
 /** agentIds minted by agent-connectors are filename-safe — a badge
@@ -162,7 +162,7 @@ export function agentEventRecord(
     badge !== undefined && badge !== '' && SAFE_AGENT_ID.test(badge) ? badge : undefined;
   const file = archiveFile(
     'agents',
-    agentId === undefined ? null : gitCommonDir(cwd),
+    agentId === undefined ? null : stateCommonDir(cwd),
     agentId,
     sessionId
   );
@@ -191,7 +191,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   const key = agentId ?? `acp:${opts.sessionId}`;
   const socket = busSocketPath(cwd);
   const scope = opts.plane ?? 'agents';
-  const common = agentId !== undefined || scope === 'proxy' ? gitCommonDir(cwd) : null;
+  const common = agentId !== undefined || scope === 'proxy' ? stateCommonDir(cwd) : null;
   const file = archiveFile(scope, common, agentId, opts.sessionId);
 
   let queue: Promise<unknown> = Promise.resolve();

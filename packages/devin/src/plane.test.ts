@@ -7,6 +7,7 @@ import {
   linkSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -807,6 +808,28 @@ describe('listDevinSessions', () => {
     const child = spawnDevinCli({ BRO_AGENT_ID: 'native-xyz' });
     if (!child.pid) throw new Error('spawn failed to create child process');
     try {
+      // /proc/<pid>/environ only shows the WORKER's own env once execve
+      // lands — inside spawn's fork window it still reads the parent's
+      // (no badge), and a lock written that early classifies the pid a
+      // non-worker. Wait for the child's badge to be visible.
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        try {
+          if (
+            readFileSync(join('/proc', String(child.pid), 'environ'), 'utf8').includes(
+              'BRO_AGENT_ID=native-xyz'
+            )
+          ) {
+            break;
+          }
+        } catch {
+          // /proc entry not populated yet — keep waiting
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`child ${child.pid} environ never showed the badge`);
+        }
+        await new Promise(r => setTimeout(r, 10));
+      }
       withLockDir(dir => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid));
         const rows = listDevinSessions([dir]);

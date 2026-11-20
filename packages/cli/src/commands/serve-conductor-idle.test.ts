@@ -2,11 +2,19 @@
  *  serves nothing must not hold a concurrent Devin lane. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import type { ProviderEntry } from '@broject/core';
 import { acpLinkPool, conductorProxy } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
+
+// bro-eajeu — cfg.cwd is this checkout (realistic), but a worktree's
+// common resolves the operator's live .git/bro: the pin redirects the
+// serve-turns journal + turn-plane archives into a sandbox.
+process.env.BRO_STATE_DIR = mkdtempSync(join(tmpdir(), 'bro-idle-state-'));
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 

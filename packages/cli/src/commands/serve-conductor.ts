@@ -29,7 +29,6 @@ import type { ProviderEntry } from '@broject/core';
 import {
   admitSessionStartAsync,
   estimateTokens,
-  gitCommonDir,
   isIntegerIndexKey,
   loadConfig,
   LockTimeout,
@@ -39,6 +38,7 @@ import {
   reserveSessionStart,
   sessionCapViews,
   SpawnError,
+  stateCommonDir,
   type SessionStartAdmission,
 } from '@broject/core';
 import type {
@@ -64,6 +64,7 @@ import {
   armWallFromError,
   otelEvent,
   otelJournal,
+  otelJournalPath,
   otelParent,
   otelSpan,
   toolPayload,
@@ -5119,6 +5120,12 @@ function laneTerminals(lanes: Map<string, ProviderLane>): TerminalRegistry | und
   };
 }
 
+/** The journal path THIS module last pinned — the otel journal is
+ *  process-global, so a state-disabled conductor needs to know whether
+ *  the live pin is still its own before clearing (a harness's manual
+ *  otelJournal() call must survive). */
+let conductorJournalPin: string | undefined;
+
 /** `(req, res)` handler for `/v1/*` — the conductor's answer when
  *  `BRO_PROVIDER_BACKEND` resolves an acp provider. Same raw-stream
  *  seat as the byte proxy — Messages bodies exceed the envelope cap. */
@@ -5134,9 +5141,21 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   };
   // the store-side evidence trail — every conductor.* event lands as a
   // JSONL row next to serve.json so a dogfood analyst can read routing,
-  // model pin and session reuse without an OTLP collector
-  const common = gitCommonDir(cfg.cwd);
-  if (common !== null) otelJournal(join(common, 'bro', 'serve-turns.jsonl'));
+  // model pin and session reuse without an OTLP collector. The pin is
+  // module-global, so a conductor that can't resolve a state root must
+  // not keep appending into an EARLIER conductor's file — clear it, but
+  // only when the global still holds OUR pin: a harness's own
+  // otelJournal() call owns the slot then (the test seam).
+  const common = stateCommonDir(cfg.cwd);
+  if (common !== null) {
+    conductorJournalPin = join(common, 'bro', 'serve-turns.jsonl');
+    otelJournal(conductorJournalPin);
+  } else {
+    if (conductorJournalPin !== undefined && otelJournalPath() === conductorJournalPin) {
+      otelJournal(undefined);
+    }
+    conductorJournalPin = undefined;
+  }
   // one lane per served ENTRY — the default backend plus every exposed
   // one. Each lane owns its acp pool, its model pin and its
   // conversations: a request rides exactly one lane, chosen by the route

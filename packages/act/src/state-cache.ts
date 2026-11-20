@@ -31,9 +31,9 @@ import { join } from 'node:path';
 import {
   acquireFileLock,
   GIT_SYNC_PROBE_TIMEOUT_MS,
-  gitCommonDir,
   LockTimeout,
   type PrTarget,
+  stateCommonDir,
 } from '@broject/core';
 import type { PrActState } from './types.ts';
 
@@ -133,7 +133,7 @@ export function prStateCache(
   dir: string,
   opts?: { ttlMs?: number; lockWaitMs?: number }
 ): PrStateCache | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   if (common === null) {
     return null;
   }

@@ -38,25 +38,48 @@ export function logStem(entry: AgentEntry | undefined): string | undefined {
   return typeof entry?.log === 'string' ? basename(entry.log).replace(/\.log$/, '') : undefined;
 }
 
+/** The bases a lookup walks — one home, or a fallback CHAIN in
+ *  authority order: the first home holding the id wins, so a bound
+ *  journal's own home stays authoritative over the real common a
+ *  later fallback names (a BRO_STATE_DIR pin parks the journal under
+ *  the pin while agents.json stays on the real common — the pinned
+ *  home reads empty and the real common answers). */
+const homesOf = (base: string | readonly string[]): readonly string[] =>
+  typeof base === 'string' ? [base] : base;
+
 /** One registry entry — undefined when the id or the file is absent.
  *  The id matches a registry KEY first, then an entry's archive stem
  *  (its log basename minus `.log`) — pane argv carries the journal
  *  stem `native-<hash>` while the registry keys on the run id. */
-export function agentEntry(base: string, id: string | undefined): AgentEntry | undefined {
+export function agentEntry(
+  base: string | readonly string[],
+  id: string | undefined
+): AgentEntry | undefined {
   if (id === undefined) return undefined;
-  const reg = agentsJson(base);
-  return reg[id] ?? Object.values(reg).find(e => logStem(e) === id);
+  for (const b of homesOf(base)) {
+    const reg = agentsJson(b);
+    const entry = reg[id] ?? Object.values(reg).find(e => logStem(e) === id);
+    if (entry !== undefined) return entry;
+  }
+  return undefined;
 }
 
 /** The registry KEY for an id — the readable run id (`bro-2bv6q`)
  *  the pane reports as its agent name instead of the archive stem
  *  (`native-ab656051`, cryptic in the agents view). Same lookup
  *  contract as agentEntry: key first, then the log stem. */
-export function agentKey(base: string, id: string | undefined): string | undefined {
+export function agentKey(
+  base: string | readonly string[],
+  id: string | undefined
+): string | undefined {
   if (id === undefined) return undefined;
-  const reg = agentsJson(base);
-  if (reg[id] !== undefined) return id;
-  return Object.keys(reg).find(k => logStem(reg[k]) === id);
+  for (const b of homesOf(base)) {
+    const reg = agentsJson(b);
+    if (reg[id] !== undefined) return id;
+    const key = Object.keys(reg).find(k => logStem(reg[k]) === id);
+    if (key !== undefined) return key;
+  }
+  return undefined;
 }
 
 /** The pane's display agent — the TRUE agent name, the registry
@@ -65,12 +88,21 @@ export function agentKey(base: string, id: string | undefined): string | undefin
  *  when the spawn carried no provider; a registry-known agent's
  *  archive stem (`native-<hash>`) is never the surface — only an id
  *  the registry has never seen returns verbatim. */
-export function displayAgentOf(base: string, id: string | undefined): string | undefined {
+export function displayAgentOf(
+  base: string | readonly string[],
+  id: string | undefined
+): string | undefined {
   if (id === undefined) return undefined;
-  // the registry is an unvalidated JSON boundary — only a non-empty
-  // string provider is a display name; anything else falls through
-  const provider = agentEntry(base, id)?.provider;
-  return (typeof provider === 'string' && provider) || agentKey(base, id) || id;
+  for (const b of homesOf(base)) {
+    // the registry is an unvalidated JSON boundary — only a non-empty
+    // string provider is a display name; anything else falls through
+    // to the readable run key at the same home, then the next home
+    const provider = agentEntry(b, id)?.provider;
+    if (typeof provider === 'string' && provider) return provider;
+    const key = agentKey(b, id);
+    if (key !== undefined) return key;
+  }
+  return id;
 }
 
 /** Is the pid live? `start` (the recorded /proc start stamp) tightens

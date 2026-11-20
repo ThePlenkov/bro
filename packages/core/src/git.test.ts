@@ -14,6 +14,8 @@ import { dirname, join } from 'node:path';
 import {
   gitCommonDir,
   gitCommonDirAsync,
+  stateCommonDir,
+  stateCommonDirAsync,
   gitDriftRef,
   gitIsAncestor,
   gitIsShallow,
@@ -268,6 +270,66 @@ describe('gitCommonDirAsync', () => {
       if (previousMarker === undefined) delete process.env.BRO_GIT_COMMON_DIR_MARKER;
       else process.env.BRO_GIT_COMMON_DIR_MARKER = previousMarker;
       rmSync(bin, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('stateCommonDir — the BRO_STATE_DIR pin (bro-eajeu)', () => {
+  const pinEnv = (v: string | undefined): (() => void) => {
+    const prev = process.env.BRO_STATE_DIR;
+    if (v === undefined) delete process.env.BRO_STATE_DIR;
+    else process.env.BRO_STATE_DIR = v;
+    return () => {
+      if (prev === undefined) delete process.env.BRO_STATE_DIR;
+      else process.env.BRO_STATE_DIR = prev;
+    };
+  };
+
+  test('the pin stands in for the common dir — inside AND outside a repo', async () => {
+    const dir = makeRepo();
+    const pin = mkdtempSync(join(tmpdir(), 'bro-state-pin-'));
+    const restore = pinEnv(pin);
+    try {
+      assert.equal(stateCommonDir(dir), pin);
+      assert.equal(await stateCommonDirAsync(dir), pin);
+      // a non-repo dir resolves the pin too — "state goes here", never a probe
+      const bare = mkdtempSync(join(tmpdir(), 'bro-state-bare-'));
+      try {
+        assert.equal(stateCommonDir(bare), pin);
+      } finally {
+        rmSync(bare, { recursive: true, force: true });
+      }
+    } finally {
+      restore();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(pin, { recursive: true, force: true });
+    }
+  });
+
+  test("'0' answers no-repo — every caller's state-off branch", async () => {
+    const dir = makeRepo();
+    const restore = pinEnv('0');
+    try {
+      assert.equal(stateCommonDir(dir), null);
+      assert.equal(await stateCommonDirAsync(dir), null);
+    } finally {
+      restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('unset falls through to gitCommonDir — linked worktree resolves the main common', async () => {
+    const dir = makeRepo();
+    const linked = mkdtempSync(join(tmpdir(), 'bro-state-linked-'));
+    const restore = pinEnv(undefined);
+    try {
+      git(dir, ['worktree', 'add', '-q', linked, '-b', 'work/state']);
+      assert.equal(stateCommonDir(linked), gitCommonDir(dir));
+      assert.equal(await stateCommonDirAsync(linked), gitCommonDir(dir));
+    } finally {
+      restore();
+      rmSync(linked, { recursive: true, force: true });
       rmSync(dir, { recursive: true, force: true });
     }
   });
