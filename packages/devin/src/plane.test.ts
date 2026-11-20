@@ -7,6 +7,7 @@ import {
   linkSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -51,6 +52,23 @@ const withLockDir = (fn: (dir: string) => void): void => {
     fn(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+/** spawn() resolves at fork — until execve lands, /proc/<pid>/environ
+ *  still reads the PARENT's env, so a badge assertion raced under load.
+ *  Poll the real environ until the child's env lands (or the deadline
+ *  passes and the assert below fails loud with the honest count). */
+const awaitEnviron = async (pid: number, needle: string, timeoutMs = 3000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      if (readFileSync(`/proc/${pid}/environ`).includes(needle)) return;
+    } catch {
+      /* pid gone or unreadable — let the assert report it */
+    }
+    if (Date.now() >= deadline) return;
+    await new Promise(r => setTimeout(r, 10));
   }
 };
 
@@ -681,6 +699,7 @@ describe('countDevinWorkers', () => {
     const child = spawnDevinCli({ BRO_AGENT_ID: 'native-test' });
     if (!child.pid) throw new Error('spawn failed to create child process');
     try {
+      await awaitEnviron(child.pid, 'BRO_AGENT_ID=native-test');
       withLockDir(dir => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid));
         assert.equal(countDevinWorkers([dir]), 1);
@@ -807,6 +826,7 @@ describe('listDevinSessions', () => {
     const child = spawnDevinCli({ BRO_AGENT_ID: 'native-xyz' });
     if (!child.pid) throw new Error('spawn failed to create child process');
     try {
+      await awaitEnviron(child.pid, 'BRO_AGENT_ID=native-xyz');
       withLockDir(dir => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid));
         const rows = listDevinSessions([dir]);
