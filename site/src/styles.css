@@ -256,7 +256,7 @@ section.how, section.self, section.not, section.vocab { padding: 64px 0 0; }
 
 /* Toolkit surfaces share the landing palette; docs keep their own layout. */
 .toolkit-page { max-width: 1100px; }
-.toolkit-page .hero { padding: 80px 0 56px; }
+.toolkit-page .hero { padding: 64px 0 32px; }
 .hub-hero { background: radial-gradient(ellipse at top, #14342255, transparent 65%); }
 .toolkit-page .lede { max-width: 680px; }
 .live-dot { display: inline-block; width: 7px; height: 7px; background: var(--accent); border-radius: 50%; margin-right: 8px; }
@@ -291,6 +291,16 @@ section.how, section.self, section.not, section.vocab { padding: 64px 0 0; }
 .feature-section h2 { font-size: 28px; line-height: 1.3; margin: 16px 0; }
 .feature-section p { max-width: 800px; color: var(--dim); }
 .feature-section > a { color: var(--accent); font: 13px var(--mono); }
+.feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; padding: 40px 0 48px; }
+.feature-grid .feature-section { display: flex; flex-direction: column; padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); min-width: 0; }
+.feature-grid .feature-section h2 { font-size: 20px; margin: 0 0 12px; }
+.feature-grid .feature-section p { margin: 0 0 12px; }
+.feature-grid .feature-section > a { margin-top: auto; padding-top: 8px; }
+.toolkit-page .how { padding: 24px 0 0; }
+.install-section { text-align: center; padding: 56px 0; }
+.install-section p { margin: 0 auto 24px; }
+.install-section .code-block { display: inline-block; text-align: left; margin: 0 0 16px; }
+.install-section .install { max-width: 640px; margin: 0 auto 24px; }
 .planned-panel { background: linear-gradient(110deg, #221d1155, transparent); padding-left: 24px; border-left: 2px solid #6d542b; }
 .status { display: inline-block; padding: 3px 8px; border-radius: 4px; font: 10px/1.5 var(--mono); border: 1px solid #3f5147; color: #a9d7bc; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
 .status.planned { border-color: #68512b; color: var(--warn); background: #251f13; }
