@@ -445,8 +445,9 @@ describe('bro loop e2e', () => {
       assert.equal(stdout.match(/disk below floor/g)?.length, 1);
       assert.match(stdout, /disk below floor .* pushes held/);
       // the heartbeat names the wait — a disk-stuck run is a named
-      // stall, never a silent one
-      assert.match(stderr, /loop: alive — idle \(disk floor\)/);
+      // stall, never a silent one (and since bro-v96mp it may also
+      // name the filler: `idle (disk floor — <top consumers>)`)
+      assert.match(stderr, /loop: alive — idle \(disk floor/);
       // nothing claimed, nothing parked, nothing minted
       assert.equal(bead(f.db, 'fx-a')?.status, 'open');
       assert.equal(existsSync(f.worktree), false);

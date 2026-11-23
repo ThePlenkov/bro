@@ -4,7 +4,7 @@
  *  internals now, and the member/queue describes drive the policy
  *  through a scripted `LoopDeps` — no CLI imports, no `process.exit`. */
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -15,6 +15,7 @@ import {
   freshLoopQueue,
   loopPolicy,
   loopWatch,
+  topFillers,
   wallWaitUntil,
   type LoopCtx,
   type LoopDeps,
@@ -253,5 +254,124 @@ describe('loopPolicy.serviceMember — cadence and wall waits', () => {
     assert.equal(v, 'kept');
     // the backoff stamp survives — the member re-polls AT it, not before
     assert.equal(m.nextPollAt, NOW + 30_000);
+  });
+});
+
+// --- topFillers — the breach edge's "what filled it" report (spec bro-v96mp) --
+
+describe('topFillers — the filler report on a breach edge (bro-v96mp)', () => {
+  const withDir = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-fillers-'));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('prefix-groups top consumers — tmp-* ×N names the leak family', () => {
+    withDir(dir => {
+      for (const n of ['tmp-11-aa', 'tmp-22-bb']) {
+        mkdirSync(join(dir, n));
+        writeFileSync(join(dir, n, 'blob'), Buffer.alloc(2 * 1024 * 1024));
+      }
+      mkdirSync(join(dir, 'node-compile-cache'));
+      writeFileSync(join(dir, 'node-compile-cache', 'x'), Buffer.alloc(512 * 1024));
+      const out = topFillers(dir);
+      assert.match(out, /tmp-\* ×2 4M/);
+      assert.match(out, /node-\* 1M/);
+    });
+  });
+
+  test('nested sizes count toward the top-level group', () => {
+    withDir(dir => {
+      mkdirSync(join(dir, 'big', 'nested', 'deep'), { recursive: true });
+      writeFileSync(join(dir, 'big', 'nested', 'deep', 'f'), Buffer.alloc(3 * 1024 * 1024));
+      mkdirSync(join(dir, 'small'));
+      writeFileSync(join(dir, 'small', 'f'), Buffer.alloc(1024));
+      const out = topFillers(dir);
+      assert.match(out, /^big 3M/);
+      assert.match(out, /small 1M/);
+    });
+  });
+
+  test('top 3 plus +more; an unlistable root answers empty', () => {
+    withDir(dir => {
+      for (const n of ['a-', 'b-', 'c-', 'd-']) {
+        mkdirSync(join(dir, `${n}x`));
+        writeFileSync(join(dir, `${n}x`, 'f'), Buffer.alloc(1024));
+      }
+      const out = topFillers(dir);
+      assert.match(out, /\+more/);
+    });
+    assert.equal(topFillers('/nonexistent/bro-fillers'), '');
+  });
+
+  test('a tiny node budget truncates and says so', () => {
+    withDir(dir => {
+      mkdirSync(join(dir, 'deep', 'deeper'), { recursive: true });
+      writeFileSync(join(dir, 'deep', 'deeper', 'f'), Buffer.alloc(1024));
+      const out = topFillers(dir, { nodes: 1, ms: 60_000 });
+      assert.match(out, /…/);
+    });
+  });
+
+  test('the top-level listing itself is budget-bounded — a fat dir stops early', () => {
+    withDir(dir => {
+      // 40 same-family dirs; a 5-node budget must stop the enumeration
+      // long before all 40 are even listed (the streamed opendir read
+      // charges nodes as it goes — a readdirSync would see all 40 first)
+      for (let i = 0; i < 40; i++) {
+        mkdirSync(join(dir, `z-${String(i).padStart(3, '0')}`));
+      }
+      const out = topFillers(dir, { nodes: 5, ms: 60_000 });
+      const m = /z-\* ×(\d+)/.exec(out);
+      assert.ok(m !== null, `expected a z-* group, got: ${out}`);
+      assert.ok(Number(m[1]) < 40, `listing ran past the budget: ${out}`);
+      assert.match(out, /…/);
+    });
+  });
+
+  test('a mount point on another device is neither descended nor counted', () => {
+    withDir(dir => {
+      // mnt/ is a top-level mount, big/inner a nested one — the stat
+      // seam fakes a foreign st_dev for both subtrees (a real
+      // bind-mount needs privileges the test doesn't have)
+      mkdirSync(join(dir, 'mnt'));
+      writeFileSync(join(dir, 'mnt', 'blob'), Buffer.alloc(3 * 1024 * 1024));
+      mkdirSync(join(dir, 'big', 'inner'), { recursive: true });
+      writeFileSync(join(dir, 'big', 'f'), Buffer.alloc(1024 * 1024));
+      writeFileSync(join(dir, 'big', 'inner', 'x'), Buffer.alloc(5 * 1024 * 1024));
+      const foreignRoots = [join(dir, 'mnt'), join(dir, 'big', 'inner')];
+      const foreignStat = (p: string) => {
+        const s = statSync(p);
+        return foreignRoots.some(r => p === r || p.startsWith(`${r}/`))
+          ? { dev: s.dev + 1, size: s.size }
+          : s;
+      };
+      const out = topFillers(dir, { nodes: 60_000, ms: 1500 }, foreignStat);
+      // big keeps only its own device's bytes — not inner's 5M
+      assert.match(out, /^big 1M/);
+      // and the mount root leaves the report entirely
+      assert.doesNotMatch(out, /mnt/);
+    });
+  });
+
+  test('a measured prefix survives truncation — partial sizes, not zeros', () => {
+    withDir(dir => {
+      // one dir of 2M files under a tiny budget: an eager listing burns
+      // the nodes on enumeration and the measurer's first spent() check
+      // would discard every streamed entry — the group then reports 0
+      // ('big 1M'). Entries measured as they stream keep what they read
+      mkdirSync(join(dir, 'big'));
+      for (let i = 0; i < 10; i++) {
+        writeFileSync(join(dir, 'big', `f${i}`), Buffer.alloc(2 * 1024 * 1024));
+      }
+      const out = topFillers(dir, { nodes: 5, ms: 60_000 });
+      const m = /big (\d+(?:\.\d+)?)M/.exec(out);
+      assert.ok(m !== null, `expected a big group, got: ${out}`);
+      assert.ok(Number(m[1]) > 1, `expected partial bytes, got: ${out}`);
+      assert.match(out, /…/);
+    });
   });
 });

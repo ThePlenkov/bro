@@ -849,6 +849,16 @@ export function readAgentRegistry(dir: string): Record<string, AgentRegistryEntr
   if (!path) {
     return {};
   }
+  return readAgentRegistryFile(path);
+}
+
+/** Read the registry at a KNOWN path — no git probe. Callers that
+ *  already resolved (or must distinguish) the path use this: an
+ *  unresolvable agentRegistryPath can then answer "unverifiable"
+ *  instead of being flattened into the empty registry a failed probe
+ *  would fake (the tmp sweep's orphan verdict needs the difference —
+ *  'unknown' keeps a live worker's pinned root, 'free' rmdir's it). */
+export function readAgentRegistryFile(path: string): Record<string, AgentRegistryEntry> {
   try {
     const v = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {

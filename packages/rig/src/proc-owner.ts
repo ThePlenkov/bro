@@ -20,6 +20,7 @@ import {
   DARWIN_SCAN_BUDGET_MS,
   entryRunId,
   gitTry,
+  groupMemberAlive,
   handleOwner,
   markerLive,
   pidAlive,
@@ -939,7 +940,12 @@ export function registryEntryState(home: string | null, e: AgentRegistryEntry): 
   // '' pidStart is unverified identity, not reuse proof — pidAlive('')
   // can never match a real starttime and would read a live agent dead
   const start = typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined;
-  if (pid !== undefined && pidAlive(pid, start)) {
+  // the recorded pid's liveness is the connector's own rule
+  // (nativeIsRunning): the wrapper OR its surviving process group — a
+  // payload that outlives its wrapper still owns the claim, and a
+  // verdict that reaps its scratch dir under it is worse than a
+  // false-live entry
+  if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
     return 'running';
   }
   if (e.stopped === true) {

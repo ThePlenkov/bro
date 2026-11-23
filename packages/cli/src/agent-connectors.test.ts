@@ -2148,6 +2148,66 @@ describe('native telemetry identity pins (bro-xgejl.1)', () => {
   });
 });
 
+/** The worker tmpdir pin (spec bro-v96mp): a killed worker cannot scrub
+ *  its own os.tmpdir() litter — the nx daemon's ~73M `nx@latest` probe
+ *  install per workspace — so the connector pins TMPDIR into the
+ *  worktree's own git dir, where `git worktree remove` owns it. Native
+ *  only: it is the backend that can assert the spawned process's
+ *  actual environ. */
+describe('native worker tmpdir pin (bro-v96mp)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const payload =
+    "require('fs').writeFileSync('env.out', [process.env.TMPDIR ?? '', process.env.TMP ?? '', process.env.TEMP ?? ''].join('|'))";
+
+  test('TMPDIR/TMP/TEMP pin <gitdir>/bro-tmp/<agentId> — ambient + spec.env cannot re-aim it', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    const prevTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = '/tmp';
+    try {
+      const c = conn(f);
+      const a = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', payload),
+        env: { TMPDIR: '/forged' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const want = join(f.main, '.git', 'bro-tmp', a.id);
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `${want}|${want}|${want}`);
+      // the spawn created the pin dir — the litter it catches lands
+      // inside the worktree's own git dir, not the tmpfs
+      assert.ok(existsSync(want));
+      assert.equal(statSync(want).mode & 0o777, 0o700);
+      await c.stop(a.id);
+    } finally {
+      if (prevTmpdir === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = prevTmpdir;
+      }
+      cleanup(f);
+    }
+  });
+
+  test('the pin lands under strictEnv — the allowlist owns ambient, not connector pins', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME'],
+      };
+      const c = conn(f);
+      const a = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const want = join(f.main, '.git', 'bro-tmp', a.id);
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `${want}|${want}|${want}`);
+      await c.stop(a.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+});
+
 /** The spawn-handshake crash windows (spec bro-l8c4f.5): deterministic
  *  failpoints leave the exact half-state a dead launcher leaves —
  *  reservation only, live self-publishing child, or a published pid
@@ -2793,6 +2853,31 @@ describe('docker connector', () => {
         assert.notEqual(u, -1);
         assert.equal(argv[u + 1], `${process.getuid()}:${process.getgid!()}`);
       }
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a caller TMPDIR in spec.env reaches the container — docker pins no replacement', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      // docker injects no workerTmpDir pin (a container's /tmp is not
+      // the host's), so an explicit caller value must pass like any
+      // other spec.env key — silently dropping it loses the operator's
+      // scratch-dir choice for nothing (spec bro-v96mp review)
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', process.env.TMPDIR ?? 'UNSET')"
+        ),
+        env: { TMPDIR: '/custom-scratch' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '/custom-scratch');
       await c.stop(info.id);
     } finally {
       cleanup(f);
