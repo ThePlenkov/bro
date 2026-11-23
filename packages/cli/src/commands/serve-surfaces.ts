@@ -55,7 +55,8 @@ export const SURFACE_ENDPOINTS: Record<ApiSurface, readonly string[]> = {
 /** Is this path a provider-plane path? The flat '/v1/…' and every
  *  mounted '/<surface>/v1/…' are. */
 export function isProviderPath(pathname: string): boolean {
-  return resolveSurface(pathname).path.startsWith('/v1/');
+  const { surface, path } = resolveSurface(pathname);
+  return path.startsWith('/v1/') && (surface === undefined || surface === 'anthropic' || surface === 'openai');
 }
 
 /** The path the wire's own endpoint sits at, under its mount — the

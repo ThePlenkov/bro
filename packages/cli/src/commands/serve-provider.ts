@@ -252,7 +252,10 @@ async function forwardUpstream(
   opts: ForwardOptions = {}
 ): Promise<void> {
   const method = req.method ?? 'GET';
-  const [rawPath = '/', query] = (req.url ?? '/').split('?');
+  const rawUrl = req.url ?? '/';
+  const queryAt = rawUrl.indexOf('?');
+  const rawPath = queryAt < 0 ? rawUrl : rawUrl.slice(0, queryAt);
+  const query = queryAt < 0 ? undefined : rawUrl.slice(queryAt + 1);
   const { path } = resolveSurface(rawPath);
   const target = `${cfg.upstream}${path}${query === undefined ? '' : `?${query}`}`;
   const lane = laneAbort(res, opts.timeoutMs);
