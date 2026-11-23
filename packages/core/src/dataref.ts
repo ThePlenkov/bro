@@ -247,14 +247,14 @@ export function dataRefPull(
   remote: string = 'origin',
   ref: string = DATA_REF
 ): number {
-  const probe = gitTry(['-C', root, 'ls-remote', remote, ref]);
+  const probe = gitTry(['-C', root, 'ls-remote', '--', remote, ref]);
   if (probe.code !== 0) {
     return -2;
   }
   if (probe.out.trim() === '') {
     return -1;
   }
-  if (gitTry(['-C', root, 'fetch', remote, ref]).code !== 0) {
+  if (gitTry(['-C', root, 'fetch', '--', remote, ref]).code !== 0) {
     return -2;
   }
   const theirs = g(root, ['rev-parse', 'FETCH_HEAD']);
