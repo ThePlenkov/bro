@@ -47,6 +47,38 @@ code nobody edits by hand.
   unit of work. bro's occupancy plane already skips session-owned
   worktrees; a review bot pushing into an occupied branch is the same
   conflict from a third lane.
+- A conflict resolution that picks a whole side —
+  `git checkout --ours/--theirs <file>` or pasting one side's file
+  over the conflicted one — is **major**: it silently reverts whatever
+  the other side changed in the same file, and the reverted work is
+  invisible in the PR diff (it lives on the base branch). `rebase -X
+  theirs` is not the same smell — it picks a side only inside
+  conflicting hunks and still merges the other side's nonconflicting
+  changes; flag it only when the reverted hunks held real concurrent
+  work. Resolve hunks, then diff the resolved file against the
+  current base tip (`git diff <base-tip> -- <file>`) — a merge-base
+  comparison hides post-fork edits. Confirm every removed line belongs
+  to the PR's own changes; a removal of code the PR never touched is
+  dropped concurrent work, not a clean resolution, while retained
+  concurrent edits are correct and must not be flagged.
+- Reading a raw `options` value where a merged defaults object exists
+  (`{...DEFAULTS, ...options}`) is **major**: an unset option arrives
+  as `undefined` instead of its default and lands in output paths
+  (`undefined@latest`, `bin/undefined`). Effective-value reads go
+  through the merged object. Raw-`options` reads for caller intent —
+  `'x' in options`, presence checks that must distinguish "explicitly
+  passed" from "defaulted" — are legitimate and not a finding.
+- Round-tripping a user-editable config file through
+  `JSON.parse`+`JSON.stringify` is **major**: `.jsonc` files users
+  hand-edit (nx.json, tsconfig, `.vscode/*.json`) may carry comments
+  and custom formatting that a re-serialize destroys, and a bare
+  `JSON.parse` throws on legal comments. Parse with `jsonc-parser`
+  (declared as a direct dependency of the importing package), collect
+  its errors and throw on any, and write via `modify`/`applyEdits` so
+  untouched text survives verbatim. Manifest and lock files
+  (`package.json`, lockfiles) are strict JSON — comments are illegal
+  there, so `JSON.parse` is correct and adding comments is itself a
+  finding.
 - `packages/core` is vendor-neutral: it holds contracts, registries, and
   generic mechanics only (`agents.<kind>` knob bags, `sessionPlanes`,
   `connectors.*` seam). An import, path, identifier, or hard-coded state

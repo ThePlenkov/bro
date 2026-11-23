@@ -6,48 +6,50 @@
  * an unanswered wtf blocks, so the agent cannot self-declare the apology
  * done. beads IS the memory system — no sidecar files.
  */
-import { execFileSync } from 'node:child_process'
-import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core'
-import type { BeadRow, RecordResult, RetroPlan } from './types.ts'
+import { bd, bdJson, evidenceKind, gitTry, refKind, taskStore } from '@broject/core';
+import type { BeadRow, RecordResult, RetroPlan } from './types.ts';
 
-const WTF_LABEL = 'wtf'
-const RETRO_LABEL = 'retro'
-const PREVENTION_LABEL = 'prevention'
+const WTF_LABEL = 'wtf';
+const RETRO_LABEL = 'retro';
+const PREVENTION_LABEL = 'prevention';
 
-const isOpen = (row: BeadRow): boolean => row.status !== 'closed' && row.status !== 'done'
+const isOpen = (row: BeadRow): boolean => row.status !== 'closed' && row.status !== 'done';
 
 function listByLabel(label: string): BeadRow[] {
-  return taskStore().list<BeadRow>({ labels: [label], all: true, limit: 0 })
+  return taskStore().list<BeadRow>({ labels: [label], all: true, limit: 0 });
 }
 
 export function listWtf(): BeadRow[] {
-  return listByLabel(WTF_LABEL)
+  return listByLabel(WTF_LABEL);
 }
 
 export function openWtf(): BeadRow[] {
-  return listWtf().filter(isOpen)
+  return listWtf().filter(isOpen);
 }
 
 export function listRetros(): BeadRow[] {
-  return listByLabel(RETRO_LABEL)
+  return listByLabel(RETRO_LABEL);
 }
 
 export function openPreventions(): BeadRow[] {
-  return listByLabel(PREVENTION_LABEL).filter(isOpen)
+  return listByLabel(PREVENTION_LABEL).filter(isOpen);
 }
 
 function shorten(text: string): string {
-  return text.length > 72 ? `${text.slice(0, 71)}…` : text
+  return text.length > 72 ? `${text.slice(0, 71)}…` : text;
 }
 
 /** Best-effort provenance for the capture — tolerate non-git directories. */
 function gitSnapshot(): string[] {
   try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim() // NOSONAR — argv array, no shell; PATH lookup is the contract
-    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() // NOSONAR — argv array, no shell
-    return [`git: ${branch}@${sha}`]
+    // gitTry spawns argv directly — no shell, fixed binary semantics;
+    // a non-git dir is a non-zero code, not a throw
+    const branch = gitTry(['rev-parse', '--abbrev-ref', 'HEAD']);
+    const sha = gitTry(['rev-parse', '--short', 'HEAD']);
+    if (branch.code !== 0 || sha.code !== 0) return [];
+    return [`git: ${branch.out.trim()}@${sha.out.trim()}`];
   } catch {
-    return []
+    return [];
   }
 }
 
@@ -57,7 +59,7 @@ function gitSnapshot(): string[] {
  */
 export function captureWtf(complaint: string): BeadRow {
   if (!complaint.trim()) {
-    throw new Error('wtf capture requires the complaint — quote the user verbatim')
+    throw new Error('wtf capture requires the complaint — quote the user verbatim');
   }
   // the quote is evidence — the description keeps it byte-for-byte;
   // only the title is normalized
@@ -67,34 +69,41 @@ export function captureWtf(complaint: string): BeadRow {
     `captured: ${new Date().toISOString()}`,
     `cwd: ${process.cwd()}`,
     ...gitSnapshot(),
-  ].join('\n')
-  const first = complaint.trim().split('\n')[0] ?? ''
-  const title = `wtf: ${shorten(first)}`
+  ].join('\n');
+  const first = complaint.trim().split('\n')[0] ?? '';
+  const title = `wtf: ${shorten(first)}`;
   return taskStore().create<BeadRow>({
     title,
     labels: [WTF_LABEL],
     description,
-  })
+  });
 }
 
 function requireOpenWtf(id: string): BeadRow {
-  const row = taskStore().get<BeadRow>(id)
+  const row = taskStore().get<BeadRow>(id);
   if (!row || !(row.labels?.includes(WTF_LABEL) ?? false) || !isOpen(row)) {
-    throw new Error(`wtf ${id} is not an open wtf bead`)
+    throw new Error(`wtf ${id} is not an open wtf bead`);
   }
-  return row
+  return row;
 }
 
 /** No explicit wtf? The single open wtf bead is the obvious answer;
  * ambiguity is the caller's problem to resolve. */
 function resolveSingleWtf(): BeadRow | undefined {
-  const open = openWtf()
+  const open = openWtf();
   if (open.length > 1) {
     throw new Error(
       `${open.length} open wtf beads — set retro.wtf in the plan or pass --wtf to pick one`
-    )
+    );
   }
-  return open[0]
+  return open[0];
+}
+
+/** The plan's wtf binding: explicit `null` answers none — absent resolves
+ *  the single open wtf, so callers must opt out, not just omit. */
+function resolvePlanWtf(plan: RetroPlan): BeadRow | undefined {
+  if (plan.wtf === null) return undefined;
+  return plan.wtf ? requireOpenWtf(plan.wtf) : resolveSingleWtf();
 }
 
 /**
@@ -103,7 +112,7 @@ function resolveSingleWtf(): BeadRow | undefined {
  * open prevention bead the executor routes by its `sink:` label.
  */
 export function recordRetro(plan: RetroPlan): RecordResult {
-  const wtf = plan.wtf ? requireOpenWtf(plan.wtf) : resolveSingleWtf()
+  const wtf = resolvePlanWtf(plan);
 
   const memo = [
     '## What',
@@ -115,9 +124,9 @@ export function recordRetro(plan: RetroPlan): RecordResult {
     plan.why,
     '',
     `scope: ${plan.scope}`,
-  ].join('\n')
-  const first = plan.what.split('\n')[0] ?? ''
-  const title = `retro: ${shorten(first)}`
+  ].join('\n');
+  const first = plan.what.split('\n')[0] ?? '';
+  const title = `retro: ${shorten(first)}`;
   const retro = taskStore().create<BeadRow>({
     title,
     labels: [RETRO_LABEL],
@@ -125,12 +134,12 @@ export function recordRetro(plan: RetroPlan): RecordResult {
     // discovered-from, not --parent: the wtf is the trigger evidence,
     // and a child would block its close.
     ...(wtf ? { deps: [`discovered:${wtf.id}`], noInheritLabels: true } : {}),
-  })
+  });
 
   // bd has no transactions — if anything after the create fails, delete
   // what we created so a retry can't duplicate beads.
-  const created = [retro.id]
-  const actionIds: string[] = []
+  const created = [retro.id];
+  const actionIds: string[] = [];
   try {
     for (const action of plan.actions) {
       const detail = [
@@ -141,16 +150,16 @@ export function recordRetro(plan: RetroPlan): RecordResult {
         `retro: ${retro.id}`,
       ]
         .join('\n')
-        .trim()
+        .trim();
       const row = taskStore().create<BeadRow>({
         title: action.title,
         labels: [PREVENTION_LABEL, `sink:${action.sink}`],
         noInheritLabels: true,
         deps: [`discovered:${retro.id}`],
         description: detail,
-      })
-      actionIds.push(row.id)
-      created.push(row.id)
+      });
+      actionIds.push(row.id);
+      created.push(row.id);
     }
 
     for (const ref of plan.evidence) {
@@ -167,24 +176,24 @@ export function recordRetro(plan: RetroPlan): RecordResult {
         ref,
         '--ref-kind',
         refKind(ref),
-      ])
+      ]);
     }
 
     // retro closes before the wtf — if the wtf close fails, compensation
     // deletes the created beads and the still-open wtf lets a retry land
-    taskStore().close(retro.id, 'retrospect recorded')
+    taskStore().close(retro.id, 'retrospect recorded');
     if (wtf) {
-      taskStore().close(wtf.id, `answered by retro ${retro.id}`)
+      taskStore().close(wtf.id, `answered by retro ${retro.id}`);
     }
   } catch (err) {
     for (const id of created) {
       try {
-        taskStore().remove(id)
+        taskStore().remove(id);
       } catch {
         // best effort — report the original failure either way
       }
     }
-    throw err
+    throw err;
   }
-  return { retroId: retro.id, actionIds, closedWtf: wtf?.id }
+  return { retroId: retro.id, actionIds, closedWtf: wtf?.id };
 }
