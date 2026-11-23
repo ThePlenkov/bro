@@ -31,8 +31,10 @@
  * so anything it cannot prove keeps the dir.
  */
 import {
+  type Dir,
   type Dirent,
   lstatSync,
+  opendirSync,
   readdirSync,
   readlinkSync,
   realpathSync,
@@ -453,12 +455,13 @@ function logKeep(fullPath: string, reason: string, quietKeeps: boolean): void {
   }
 }
 
-/** `.dev` probe for the pre-delete mount scan — lstat, not stat: rm
- *  unlinks a symlink in place, so only an entry's OWN device can sit
- *  on a mount boundary. Injectable so a test can fake a second
- *  filesystem without a privileged mount (the seam topFillers set —
- *  spec bro-v96mp). */
-export type DevProbe = (p: string) => Pick<Stats, 'dev'>;
+/** The pre-delete mount scan's probe — lstat, not stat: rm unlinks a
+ *  symlink in place, so only an entry's OWN device can sit on a mount
+ *  boundary, and `isSymbolicLink` is what proves a candidate root is
+ *  such a link (vacuously clean — its target is never descended).
+ *  Injectable so a test can fake a second filesystem without a
+ *  privileged mount (the seam topFillers set — spec bro-v96mp). */
+export type DevProbe = (p: string) => Pick<Stats, 'dev' | 'isSymbolicLink'>;
 
 /** The mount scan's verdict (spec bro-wb8wf). Only 'clean' permits rm
  *  — deletion fails CLOSED: 'mount' (a device boundary, `at` names it)
@@ -473,12 +476,15 @@ export type MountVerdict =
 /** Bounded pre-delete mount scan: prove a 'delete' candidate's whole
  *  tree sits on ONE device before rmSync(recursive) — a filesystem
  *  mounted inside a stale tmp dir would be descended and its content
- *  deleted. The root itself is checked against its parent (a mount AT
- *  the candidate empties the mounted fs identically), then every
- *  entry's dev against the root's — files included: a bind-mounted
- *  file carries the source fs's dev and unlinking it removes the name
- *  off that device. The bound (topFillers' own 60k nodes / 1.5s) keeps
- *  a pathological tree from stalling the sweep; a spent bound is
+ *  deleted. A candidate that IS a symlink is vacuously clean: rm
+ *  unlinks the link in place, the target is never descended — a stale
+ *  `tmp-*` link onto another fs is litter to unlink, not a mount to
+ *  keep. A real root is checked against its parent (a mount AT the
+ *  candidate empties the mounted fs identically), then every entry's
+ *  dev against the root's — files included: a bind-mounted file
+ *  carries the source fs's dev and unlinking it removes the name off
+ *  that device. The bound (topFillers' own 60k nodes / 1.5s) keeps a
+ *  pathological tree from stalling the sweep; a spent bound is
  *  'uncertain', never waved through as 'clean'. */
 export function mountVerdict(
   root: string,
@@ -488,22 +494,79 @@ export function mountVerdict(
   const budget = opts.budget ?? { nodes: 60_000, ms: 1500 };
   const t0 = Date.now();
   let nodes = 0;
+  const spent = (): boolean => nodes > budget.nodes || Date.now() - t0 > budget.ms;
 
-  let rootDev: number;
+  let rootSt: Pick<Stats, 'dev' | 'isSymbolicLink'>;
   try {
-    rootDev = lstat(root).dev;
-    if (rootDev !== lstat(dirname(root)).dev) {
-      return { verdict: 'mount', at: root };
-    }
+    rootSt = lstat(root);
   } catch {
     return { verdict: 'uncertain', reason: `cannot stat ${root}` };
   }
+  if (rootSt.isSymbolicLink()) {
+    return { verdict: 'clean' };
+  }
+  const rootDev = rootSt.dev;
+  const parent = dirname(root);
+  try {
+    if (rootDev !== lstat(parent).dev) {
+      return { verdict: 'mount', at: root };
+    }
+  } catch {
+    return { verdict: 'uncertain', reason: `cannot stat ${parent}` };
+  }
+
+  /** One dir's entries, streamed through opendir so a huge listing is
+   *  charged against the bound AS it enumerates — an eager readdirSync
+   *  materializes the whole dirent array before the first spent()
+   *  check, so one wide dir could out-cost the whole walk in time and
+   *  memory (topFillers' lazy-listing precedent, spec bro-v96mp). The
+   *  bound check runs before each dirent yields; a consumer's early
+   *  exit closes the handle through the finally. Errors propagate out
+   *  of the iteration — the caller maps vanished-vs-unproven. */
+  const dirEntries = function* (dir: string): Generator<Dirent> {
+    let d: Dir | undefined;
+    try {
+      d = opendirSync(dir);
+      for (let e = d.readSync(); e !== null; e = d.readSync()) {
+        if (spent()) {
+          return;
+        }
+        nodes += 1;
+        yield e;
+      }
+    } finally {
+      try {
+        d?.closeSync();
+      } catch {
+        // already closed — nothing to leak
+      }
+    }
+  };
 
   const stack: string[] = [root];
   for (let dir = stack.pop(); dir !== undefined; dir = stack.pop()) {
-    let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      for (const e of dirEntries(dir)) {
+        const p = join(dir, e.name);
+        let dev: number;
+        try {
+          dev = lstat(p).dev;
+        } catch (err) {
+          // vanished mid-walk is no boundary; anything else is unproven
+          if (!isVanished(err)) {
+            return { verdict: 'uncertain', reason: `cannot stat ${p}` };
+          }
+          continue;
+        }
+        if (dev !== rootDev) {
+          return { verdict: 'mount', at: p };
+        }
+        // symlinks are not followed — their dirent reads isSymbolicLink,
+        // never isDirectory, and rm unlinks them in place the same way
+        if (e.isDirectory()) {
+          stack.push(p);
+        }
+      }
     } catch (err) {
       // a dir that vanished mid-walk holds nothing to descend; an
       // unlistable-yet-present dir hides whatever it holds — unproven
@@ -512,30 +575,10 @@ export function mountVerdict(
       }
       continue;
     }
-    for (const e of entries) {
-      nodes += 1;
-      if (nodes > budget.nodes || Date.now() - t0 > budget.ms) {
-        return { verdict: 'uncertain', reason: 'scan bound reached' };
-      }
-      const p = join(dir, e.name);
-      let dev: number;
-      try {
-        dev = lstat(p).dev;
-      } catch (err) {
-        // vanished mid-walk is no boundary; anything else is unproven
-        if (!isVanished(err)) {
-          return { verdict: 'uncertain', reason: `cannot stat ${p}` };
-        }
-        continue;
-      }
-      if (dev !== rootDev) {
-        return { verdict: 'mount', at: p };
-      }
-      // symlinks are not followed — their dirent reads isSymbolicLink,
-      // never isDirectory, and rm unlinks them in place the same way
-      if (e.isDirectory()) {
-        stack.push(p);
-      }
+    // the generator also stops yielding at the bound — a cut listing
+    // leaves the proof unfinished, never clean
+    if (spent()) {
+      return { verdict: 'uncertain', reason: 'scan bound reached' };
     }
   }
   return { verdict: 'clean' };
@@ -614,6 +657,17 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
     // mounted fs and deletes foreign-device content (spec bro-wb8wf).
     // Fails closed — an unproven scan keeps, warned on stderr so the
     // surviving litter stays explainable even under quietKeeps.
+    // Ordering: the in-use re-verify runs FIRST so the mount proof is
+    // the last check before rm — the verdict→delete window narrows to
+    // the rmSync call itself (the /proc rescan no longer sits between
+    // them). A mount landing inside that syscall gap is the accepted
+    // residual: no userspace primitive makes a recursive delete atomic
+    // against mount(2), so proof-then-immediate-rm is the strongest
+    // bound available — the same one tmpwatch/systemd-tmpfiles carry.
+    if (!ctx.dryRun && isPathInUse(fullPath)) {
+      logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
+      return false;
+    }
     const mount = mountVerdict(fullPath, { lstat: ctx.lstat });
     if (mount.verdict !== 'clean') {
       console.error(`  keep ${fullPath} (${mountKeepReason(mount)})`);
@@ -622,11 +676,6 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
     if (ctx.dryRun) {
       console.log(`  would delete ${fullPath}`);
       return true;
-    }
-    // re-verify before rm — narrows the check-then-delete race to the syscall
-    if (isPathInUse(fullPath)) {
-      logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
-      return false;
     }
     return removeEntry(fullPath, ctx);
   } catch {

@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { testGit } from '@broject/core';
 import {
   cleanupTmpDirs,
@@ -303,6 +303,30 @@ describe('cleanupTmpDirs', () => {
     });
   });
 
+  test('a stale tmp-* symlink unlinks in place — the target is never descended (bro-wb8wf)', () => {
+    withTmp(dir => {
+      const target = mkdtempSync(join(tmpdir(), 'bro-sweep-target-'));
+      try {
+        writeFileSync(join(target, 'precious'), 'x');
+        const link = join(dir, 'tmp-stalelink');
+        symlinkSync(target, link, 'dir');
+        // the verdict stats THROUGH the link (statSync follows), so the
+        // target's mtime is what must read stale — aging it ages the
+        // candidate the sweep sees
+        ageDir(target, HOUR + 60_000);
+        const out = lines(() => cleanupTmpDirs(false));
+        assert.equal(existsSync(link), false, 'the link itself is litter');
+        assert.ok(existsSync(join(target, 'precious')), 'the target is untouched');
+        assert.ok(
+          out.some(l => l.includes('deleted')),
+          `expected a delete line, got: ${out}`
+        );
+      } finally {
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('a missing extraRoots dir warns and skips — never fatal like tmpdir', () => {
     withTmp(dir => {
       const errs: string[] = [];
@@ -494,13 +518,18 @@ describe('extra-root rmdir guard (bro-v96mp)', () => {
 
 /** A dev probe faking a mounted filesystem: `mountPath` (and anything
  *  under it) answers a foreign st_dev; every other path gets the real
- *  lstat. Unprivileged tests cannot create real mounts — the seam
- *  stands in (topFillers' precedent, spec bro-v96mp). */
+ *  lstat. The dev is mutated on the real Stats — a `{ dev }` literal
+ *  would drop `isSymbolicLink` the probe contract carries.
+ *  Unprivileged tests cannot create real mounts — the seam stands in
+ *  (topFillers' precedent, spec bro-v96mp). */
 const fakeMount =
   (mountPath: string): DevProbe =>
   (p: string) => {
     const st = lstatSync(p);
-    return p === mountPath || p.startsWith(`${mountPath}/`) ? { dev: st.dev + 1 } : st;
+    if (p === mountPath || p.startsWith(`${mountPath}/`)) {
+      st.dev += 1;
+    }
+    return st;
   };
 
 describe('mountVerdict (bro-wb8wf)', () => {
@@ -564,7 +593,10 @@ describe('mountVerdict (bro-wb8wf)', () => {
         const link = join(root, 'link');
         const lstat: DevProbe = p => {
           const st = lstatSync(p);
-          return p === target || p.startsWith(`${link}/`) ? { dev: st.dev + 1 } : st;
+          if (p === target || p.startsWith(`${link}/`)) {
+            st.dev += 1;
+          }
+          return st;
         };
         assert.deepEqual(mountVerdict(root, { lstat }), { verdict: 'clean' });
       } finally {
@@ -607,6 +639,61 @@ describe('mountVerdict (bro-wb8wf)', () => {
       writeFileSync(join(root, 'f'), 'x');
       const r = mountVerdict(root, { budget: { nodes: 0, ms: 60_000 } });
       assert.equal(r.verdict, 'uncertain');
+    });
+  });
+
+  test('a listing cut mid-dir by the bound is uncertain — enumeration itself is budgeted', () => {
+    withTree(root => {
+      // a wide dir proves the bound stops the enumeration, not just the
+      // walk: an eager listing would scan all 8 before the first check
+      for (let i = 0; i < 8; i += 1) {
+        writeFileSync(join(root, `f${i}`), 'x');
+      }
+      const r = mountVerdict(root, { budget: { nodes: 3, ms: 60_000 } });
+      assert.equal(r.verdict, 'uncertain');
+    });
+  });
+
+  test('an unstat-able parent is uncertain — the reason names the parent, not the root', () => {
+    withTree(root => {
+      // lstat(root) succeeded but dirname(root) cannot be read: the
+      // partial failure used to blame the root. The reason must point
+      // at what actually failed so the keep-warning debugs true.
+      const parent = dirname(root);
+      const lstat: DevProbe = p => {
+        if (p === parent) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        return lstatSync(p);
+      };
+      assert.deepEqual(mountVerdict(root, { lstat }), {
+        verdict: 'uncertain',
+        reason: `cannot stat ${parent}`,
+      });
+    });
+  });
+
+  test('a symlinked candidate is clean — rm unlinks the link, the target is never descended', () => {
+    withTree(root => {
+      const target = mkdtempSync(join(tmpdir(), 'bro-mountscan-t-'));
+      try {
+        writeFileSync(join(target, 'precious'), 'x');
+        const link = join(root, 'tmp-stale-link');
+        symlinkSync(target, link, 'dir');
+        // the probe fails if anything at-or-under the link (or the
+        // target) is statted — 'clean' proves the scan looks at the
+        // link itself and no further
+        const lstat: DevProbe = p => {
+          assert.ok(
+            p !== target && !p.startsWith(`${link}/`),
+            `the scan must not reach past the link: ${p}`
+          );
+          return lstatSync(p);
+        };
+        assert.deepEqual(mountVerdict(link, { lstat }), { verdict: 'clean' });
+      } finally {
+        rmSync(target, { recursive: true, force: true });
+      }
     });
   });
 });
@@ -697,9 +784,11 @@ describe('mount-bearing candidates keep (bro-wb8wf)', () => {
       ageDir(mounted, GRACE + 60_000);
       const out: string[] = [];
       const orig = console.log;
-      console.log = (...args: unknown[]) => out.push(args.join(' '));
-      const errs = errLines(() => cleanupTmpDirs(true, { lstat: fakeMount(mnt) }));
       try {
+        // the override sits inside the try — a throw from errLines must
+        // still restore console.log for the rest of the suite
+        console.log = (...args: unknown[]) => out.push(args.join(' '));
+        const errs = errLines(() => cleanupTmpDirs(true, { lstat: fakeMount(mnt) }));
         assert.ok(
           !out.some(l => l.includes('would delete') && l.includes(mounted)),
           `dry-run must not promise the delete: ${out}`
