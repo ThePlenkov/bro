@@ -56,12 +56,14 @@ fill only what no layer supplies.
 # 1) Claim work from your task store
 npx @broject/bro next
 BEAD="<bead-id>"  # replace <bead-id> with the ID from the claimed work order
+git switch -c "work/$BEAD"  # bro next does not cut a branch — create one before committing
 
 # 2) Implement and open a PR for the claimed work
 git add -A
+git diff --cached  # skim what's staged — intended changes only, no secrets
 git commit -m "$BEAD: <summary>"
 git push -u origin HEAD
-gh pr create --fill  # open a PR for the current branch; the review gate inspects it
+gh pr create --fill  # GitHub; GitLab remotes: glab mr create — the gate inspects either
 
 # 3) Drive the PR through the review gate
 npx @broject/bro act status        # verdict: threads/ci/reviewers/sast/mergeable
@@ -71,7 +73,7 @@ npx @broject/bro act threads       # work unresolved threads
 #    then re-check with `bro act status` until it is green.
 npx @broject/bro act merge --bead "$BEAD"  # merge only when green; pass the claimed bead to close it
 
-# 4) Sweep merged threads into debt
+# 4) Sweep leftovers from earlier merged PRs into debt
 npx @broject/bro debt prs          # merged PRs nobody processed yet
 npx @broject/bro debt collect      # harvest threads → .agents/review-debt/ + labels
 npx @broject/bro debt status       # what's left
