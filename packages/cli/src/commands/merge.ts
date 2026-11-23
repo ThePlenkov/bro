@@ -275,7 +275,9 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
     kind: 'merge',
     pr: ctx.t.pr,
     to: 'merged',
-    detail: { via: 'merge', sha: res.state.headSha },
+    // the landed SHA, not the gate-green one — auto-merge and merge
+    // queues land a head the gate never saw
+    detail: { via: 'merge', sha: landed.headSha },
   });
   emitVerdict(gateVerdict(ctx, res), 'merged', res, argv);
 
@@ -333,6 +335,7 @@ function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult): void {
         `pr: ${link}`,
         `head: ${state.headSha}`,
         `threads at start: ${threadsAtStart.length ? threadsAtStart.join(', ') : 'none'}`,
+        `threads at land: ${state.threads.length ? state.threads.map(t => t.id).join(', ') : 'none'}`,
         `fix rounds: ${state.fixRounds}`,
         `wall time: ${minutes}m`,
       ],
