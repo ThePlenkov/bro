@@ -2,18 +2,23 @@ import asyncio
 import glob
 import json
 import os
-import subprocess
+
+
+def is_bro_checkout(path):
+    return path and os.path.isfile(
+        os.path.join(path, "packages", "cli", "dist", "index.js")
+    ) and os.path.isdir(os.path.join(path, ".agents", "review-debt"))
 
 
 def find_repo():
     """Locate the bro checkout: $BRO_DIR, cwd, then ~/repos/*."""
-    candidates = [os.environ.get("BRO_DIR", ""), os.getcwd()]
+    candidates = [os.environ.get("BRO_DIR"), os.getcwd()]
     candidates += sorted(glob.glob(os.path.expanduser("~/repos/*")))
-    for c in candidates:
-        if c and os.path.isdir(os.path.join(c, ".agents", "review-debt")) and \
-           os.path.isfile(os.path.join(c, "packages", "cli", "dist", "index.js")):
-            return os.path.abspath(c)
-    raise RuntimeError("bro checkout not found (set BRO_DIR)")
+    found = next((c for c in candidates if is_bro_checkout(c)), None)
+    if not found:
+        raise RuntimeError("bro checkout not found (set BRO_DIR)")
+    return os.path.abspath(found)
+
 
 REPO_DIR = find_repo()
 REPO = "github.com/ThePlenkov/bro"
@@ -84,34 +89,35 @@ LAND_SCHEMA = {
 }
 
 
-def load_rows():
+def open_rows_in(path):
     rows = []
+    for line in open(path):
+        line = line.strip()
+        if line and json.loads(line).get("status") == "open":
+            rows.append(json.loads(line))
+    return rows
+
+
+def load_rows():
+    seen = {}
     for path in sorted(glob.glob(os.path.join(HARVEST_DIR, "*.jsonl"))):
-        for line in open(path):
-            line = line.strip()
-            if line and json.loads(line).get("status") == "open":
-                rows.append(json.loads(line))
-    # dedupe by thread_id
-    seen, out = set(), []
-    for r in rows:
-        if r["thread_id"] not in seen:
-            seen.add(r["thread_id"])
-            out.append(r)
-    return out
+        for r in open_rows_in(path):
+            seen.setdefault(r["thread_id"], r)
+    return list(seen.values())
+
+
+def fmt_row(r):
+    body = (r.get("body") or r.get("body_preview") or "")[:1800]
+    return (
+        f"- thread_id: {r['thread_id']}\n"
+        f"  thread_url: {r.get('thread_url', '')}\n"
+        f"  location: {r.get('path') or ''}:{r.get('line') or ''}\n"
+        f"  body:\n{body}"
+    )
 
 
 def fmt_rows(rows):
-    out = []
-    for r in rows:
-        body = (r.get("body") or r.get("body_preview") or "")[:1800]
-        loc = f"{r.get('path') or ''}:{r.get('line') or ''}"
-        out.append(
-            f"- thread_id: {r['thread_id']}\n"
-            f"  thread_url: {r.get('thread_url', '')}\n"
-            f"  location: {loc}\n"
-            f"  body:\n{body}"
-        )
-    return "\n".join(out)
+    return "\n".join(fmt_row(r) for r in rows)
 
 
 FIX_COMMON = f"""
@@ -148,38 +154,30 @@ Structured output: branch, pr_url, fixed_ids[], skipped_ids[], verification
 (commands + result), notes.
 """
 
+# (slug, row predicate, findings-section header). Rows matching the predicate
+# form one fix group on FIX_COMMON.
+GROUP_DEFS = [
+    ("site", lambda r: r["area"].startswith("site/"),
+     "site/src/routes/backlog.tsx and nearby site files"),
+    ("infra", lambda r: r.get("source", "threads") == "threads" and not r["area"].startswith("site/"),
+     "scripts/ and packages/cli paths"),
+    ("security", lambda r: r.get("source") == "code-scanning",
+     "CodeQL alerts; fix the pattern, not the alert. Inspect each alert's data flow end to end; "
+     "if user input truly reaches exec/log output, sanitize at the boundary."),
+]
 
-def build_groups(rows):
-    """Group rows into (slug, prompt) fix groups + the stale triage set."""
-    site = [r for r in rows if r["area"].startswith("site/")]
-    infra = [r for r in rows if r.get("source", "threads") == "threads" and not r["area"].startswith("site/")]
-    codeql = [r for r in rows if r.get("source") == "code-scanning"]
-    dependabot = [r for r in rows if r.get("source") == "dependabot"]
-    stale = [r for r in rows if r.get("source") == "stale-prs"]
 
-    groups = {}
-    if site:
-        groups["site"] = (
-            FIX_COMMON.replace("{slug}", "site")
-            + f"\nFindings ({len(site)}) — site/src/routes/backlog.tsx and nearby site files:\n"
-            + fmt_rows(site)
-        )
-    if infra:
-        groups["infra"] = (
-            FIX_COMMON.replace("{slug}", "infra")
-            + f"\nFindings ({len(infra)}) — scripts/ and packages/cli paths:\n"
-            + fmt_rows(infra)
-        )
-    if codeql:
-        groups["security"] = (
-            FIX_COMMON.replace("{slug}", "security")
-            + f"\nFindings ({len(codeql)}) — CodeQL alerts; fix the pattern, not the alert:\n"
-            + fmt_rows(codeql)
-            + "\nInspect each alert's data flow end to end; if user input truly reaches exec/log output, sanitize at the boundary."
-        )
-    if dependabot:
-        groups["deps"] = (
-            f"""
+def fix_prompt(slug, header, rows):
+    return (
+        FIX_COMMON.replace("{slug}", slug)
+        + f"\nFindings ({len(rows)}) — {header}:\n"
+        + fmt_rows(rows)
+    )
+
+
+def deps_prompt(rows):
+    return (
+        f"""
 Repo: {REPO}, cloned at {REPO_DIR} on THIS machine (shared VM). Dependency fixer.
 Work ONLY inside your own worktree:
   cd {REPO_DIR} && git fetch origin
@@ -188,8 +186,8 @@ Work ONLY inside your own worktree:
 
 Close these Dependabot alerts:
 """
-            + fmt_rows(dependabot)
-            + """
+        + fmt_rows(rows)
+        + """
 Method: `npm update <pkg>` / targeted version bumps (critical+high first) —
 whatever resolves each alert without breaking the build. `npm run build` +
 test suite; keep lockfile changes minimal. Push the branch, open ONE pull
@@ -197,46 +195,21 @@ request via `gh pr create`, report pr_url and fixed alert ids.
 Structured output: branch, pr_url, fixed_ids[] (dependabot:N), skipped_ids[],
 verification, notes.
 """
-        )
+    )
+
+
+def build_groups(rows):
+    """Group rows into fix-group prompts + the stale triage set."""
+    groups = {}
+    for slug, pred, header in GROUP_DEFS:
+        sel = [r for r in rows if pred(r)]
+        if sel:
+            groups[slug] = fix_prompt(slug, header, sel)
+    deps = [r for r in rows if r.get("source") == "dependabot"]
+    if deps:
+        groups["deps"] = deps_prompt(deps)
+    stale = [r for r in rows if r.get("source") == "stale-prs"]
     return groups, stale
-
-
-async def main():
-    await register_workflow(META)
-    rows = load_rows()
-    groups, stale = build_groups(rows)
-    log(f"open debt rows: {len(rows)} across {len(groups)} fix groups + {len(stale)} stale")
-
-    async def fix(slug):
-        try:
-            return await agent(groups[slug], phase="fix", schema=FIX_SCHEMA,
-                               label=f"fix-{slug}", mode="lite", vm_mode="shared")
-        except WorkflowAgentError as e:
-            log(f"fix-{slug} failed: {e}")
-            return None
-
-    jobs = [(lambda s=s: fix(s)) for s in groups]
-    if stale:
-        jobs.append(lambda: agent(build_triage_prompt(stale), phase="triage",
-                                  schema=TRIAGE_SCHEMA, label="triage-stale",
-                                  mode="lite", vm_mode="shared"))
-
-    results = await parallel(jobs)
-    fix_results = [r for r in results[: len(groups)] if r]
-    if stale:
-        log("stale verdicts: " + json.dumps(results[-1]["verdicts"]))
-
-    prs = [(r["pr_url"], r["fixed_ids"]) for r in fix_results if r.get("pr_url")]
-    for r in fix_results:
-        log(f"fix done: {r['pr_url']} fixed={len(r['fixed_ids'])} skipped={len(r['skipped_ids'])}")
-    if not prs:
-        log("no PRs opened — nothing to land")
-        return
-
-    land = await agent(build_land_prompt(prs), phase="land", schema=LAND_SCHEMA,
-                       label="land-all", mode="lite", vm_mode="shared",
-                       soft_time_limit_minutes=60)
-    log("land: " + json.dumps(land["results"]))
 
 
 def build_triage_prompt(stale):
@@ -273,6 +246,52 @@ For each PR:
    then `node packages/cli/dist/index.js review debt sync`.
 5. Record per-PR status: merged | blocked(reason) | failed(reason).
 Stop and report rather than skipping steps. Structured output: results[]."""
+
+
+async def run_fix(slug, prompt):
+    try:
+        return await agent(prompt, phase="fix", schema=FIX_SCHEMA,
+                           label=f"fix-{slug}", mode="lite", vm_mode="shared")
+    except WorkflowAgentError as e:
+        log(f"fix-{slug} failed: {e}")
+        return None
+
+
+def run_triage(stale):
+    return agent(build_triage_prompt(stale), phase="triage",
+                 schema=TRIAGE_SCHEMA, label="triage-stale",
+                 mode="lite", vm_mode="shared")
+
+
+def report_results(results, groups, stale):
+    fix_results = [r for r in results[: len(groups)] if r]
+    if stale:
+        log("stale verdicts: " + json.dumps(results[-1]["verdicts"]))
+    for r in fix_results:
+        log(f"fix done: {r['pr_url']} fixed={len(r['fixed_ids'])} skipped={len(r['skipped_ids'])}")
+    return [(r["pr_url"], r["fixed_ids"]) for r in fix_results if r.get("pr_url")]
+
+
+async def main():
+    await register_workflow(META)
+    rows = load_rows()
+    groups, stale = build_groups(rows)
+    log(f"open debt rows: {len(rows)} across {len(groups)} fix groups + {len(stale)} stale")
+
+    jobs = [(lambda s=s, p=p: run_fix(s, p)) for s, p in groups.items()]
+    if stale:
+        jobs.append(lambda: run_triage(stale))
+
+    results = await parallel(jobs)
+    prs = report_results(results, groups, stale)
+    if not prs:
+        log("no PRs opened — nothing to land")
+        return
+
+    land = await agent(build_land_prompt(prs), phase="land", schema=LAND_SCHEMA,
+                       label="land-all", mode="lite", vm_mode="shared",
+                       soft_time_limit_minutes=60)
+    log("land: " + json.dumps(land["results"]))
 
 
 asyncio.run(main())
