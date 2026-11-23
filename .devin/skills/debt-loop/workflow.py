@@ -1,3 +1,5 @@
+# flake8: noqa: F821 — agent/parallel/log/register_workflow/WorkflowAgentError
+# are injected by the Devin workflow runtime before this file executes.
 import asyncio
 import glob
 import json
