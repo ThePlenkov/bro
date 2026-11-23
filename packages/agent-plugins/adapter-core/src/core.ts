@@ -307,10 +307,15 @@ export async function callHookDetailed(
   // serialize before spawning: a payload JSON.stringify rejects means the
   // hook can never run — that is its own outage class, not a spawn error
   // and never healthy silence (and this function resolves, never throws)
-  let input: string;
+  let input: string | undefined;
   try {
     input = JSON.stringify(payload);
   } catch {
+    return { control: null, failure: { kind: 'input' } };
+  }
+  // stringify returns undefined (not a throw) for undefined/functions/
+  // symbols — no JSON document exists to hand the child either way
+  if (input === undefined) {
     return { control: null, failure: { kind: 'input' } };
   }
   const { promise, resolve } = Promise.withResolvers<HookResult>();

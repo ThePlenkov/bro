@@ -234,6 +234,11 @@ test('callHookDetailed: an unserializable payload is an outage, not silence', as
   const { control, failure } = await callHookDetailed(stubCmd, 'stop', circular, hookDir, 5_000);
   assert.equal(control, null);
   assert.deepEqual(failure, { kind: 'input' });
+  // stringify returns undefined (not a throw) for undefined/functions/
+  // symbols — same outage class, still no child spawned
+  const undef = await callHookDetailed(stubCmd, 'stop', undefined, hookDir, 5_000);
+  assert.equal(undef.control, null);
+  assert.deepEqual(undef.failure, { kind: 'input' });
 });
 
 test('hookFailureText: every class has a one-line cause', () => {
