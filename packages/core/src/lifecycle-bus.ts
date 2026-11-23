@@ -19,7 +19,7 @@
  * the command that landed the transition never waits on the feed that
  * reports it.
  */
-import { busPublish, busSocketPath, busSocketPathForCommon } from './bus.ts';
+import { busPublish, busRecordedSocketPath, busSocketPath, busSocketPathForCommon } from './bus.ts';
 import type { EventInput } from './events.ts';
 import type { LifecycleEvent } from './lifecycle.ts';
 
@@ -173,7 +173,12 @@ export function publishLifecycleBusEvent(common: string, ev: LifecycleEvent): vo
   try {
     const input = lifecycleBusEvent(ev);
     if (input !== undefined) {
-      void busPublish(busSocketPathForCommon(common), input, { unref: true }).catch(() => {});
+      // the record beats derivation — a worker whose TMPDIR pin re-aims
+      // busSocketBase (spec bro-v96mp) derives a socket that never
+      // existed; bus.json holds the broker's real bind
+      void busPublish(busRecordedSocketPath(common) ?? busSocketPathForCommon(common), input, {
+        unref: true,
+      }).catch(() => {});
     }
   } catch {
     // the feed never makes the transition it reports a failure

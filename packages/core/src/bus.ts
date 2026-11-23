@@ -42,7 +42,7 @@ import {
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import {
   eventMatches,
   isEventInput,
@@ -268,15 +268,39 @@ export function busSocketPathForCommon(common: string): string {
   return join(busSocketBase(), 'bro-bus', `${hash}.sock`);
 }
 
+/** The socket the running broker recorded — `startBusBroker` publishes
+ *  `<common>/bro/bus.json` at bind time so a client never has to
+ *  re-derive the address. The record beats derivation wherever the two
+ *  can disagree: a worker's pinned TMPDIR (spec bro-v96mp) re-aims
+ *  `busSocketBase` at its private `bro-tmp` dir, so a pinned worker's
+ *  derived path names a socket that can never exist while the record
+ *  holds the broker's real bind. Null when no broker ever ran (or the
+ *  record is torn) — derivation then stands as the client answer and a
+ *  dead end fails open like it always did. Only the socketPath field is
+ *  honored; a relative or missing value is no record at all. */
+export function busRecordedSocketPath(common: string): string | null {
+  try {
+    const rec: unknown = JSON.parse(readFileSync(join(common, 'bro', 'bus.json'), 'utf8'));
+    const sock = (rec as { socketPath?: unknown } | null)?.socketPath;
+    return typeof sock === 'string' && isAbsolute(sock) ? sock : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The broker socket for a repo, or null outside a repository.
  *  Resolves on the runtime-state common (`stateCommonDir`) so a
- *  BRO_STATE_DIR-pinned process gets its own socket namespace. */
+ *  BRO_STATE_DIR-pinned process gets its own socket namespace. The
+ *  broker's recorded address wins over derivation — `busSocketBase`
+ *  differs across processes whose TMPDIR differs (a worker's pinned
+ *  `bro-tmp` tmpdir, spec bro-v96mp), and the record is the only base
+ *  that is the same everywhere. */
 export function busSocketPath(dir: string): string | null {
   const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   if (common === null) {
     return null;
   }
-  return busSocketPathForCommon(common);
+  return busRecordedSocketPath(common) ?? busSocketPathForCommon(common);
 }
 
 /** Discovery file — same shape as `serve.json`: how a client learns the
