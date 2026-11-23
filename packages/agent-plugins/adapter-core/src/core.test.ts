@@ -224,8 +224,21 @@ test('callHookDetailed: a child that cannot spawn is its own class', async () =>
   assert.deepEqual(failure, { kind: 'spawn' });
 });
 
+test('callHookDetailed: an unserializable payload is an outage, not silence', async () => {
+  // JSON.stringify throws on circular input — the hook can never run, so
+  // resolving {control:null,failure:null} was the invisible-outage bug:
+  // the class must be named, and no child is spawned for input it could
+  // never receive
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  const { control, failure } = await callHookDetailed(stubCmd, 'stop', circular, hookDir, 5_000);
+  assert.equal(control, null);
+  assert.deepEqual(failure, { kind: 'input' });
+});
+
 test('hookFailureText: every class has a one-line cause', () => {
   assert.equal(hookFailureText({ kind: 'no-cli' }), 'no bro CLI resolved');
+  assert.equal(hookFailureText({ kind: 'input' }), 'the hook payload could not be serialized');
   assert.equal(hookFailureText({ kind: 'spawn' }), 'the hook process failed to spawn');
   assert.match(hookFailureText({ kind: 'timeout', timeoutMs: 50 }), /50ms/);
   assert.equal(hookFailureText({ kind: 'exit', code: 2 }), 'the hook exited 2');

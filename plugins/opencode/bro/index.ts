@@ -286,6 +286,16 @@ function callHook(
   timeoutMs: number
 ): Promise<HookOutcome> {
   return new Promise(resolve => {
+    // serialize before spawning: a payload JSON.stringify rejects means the
+    // hook can never run — its own outage cause, not a spawn error, never
+    // healthy silence, and never a rejection escaping the executor
+    let input: string;
+    try {
+      input = JSON.stringify(payload);
+    } catch {
+      resolve({ control: null, failure: 'the hook payload could not be serialized' });
+      return;
+    }
     let child: ChildProcess;
     try {
       child = spawn(command.cmd, [...command.args, 'hooks', event], {
@@ -340,7 +350,7 @@ function callHook(
     // bro can exit before reading stdin (unrecognized event) — EPIPE here is
     // bro's answer, not a crash
     child.stdin?.on('error', () => {});
-    child.stdin?.end(JSON.stringify(payload));
+    child.stdin?.end(input);
   });
 }
 

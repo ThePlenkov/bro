@@ -234,6 +234,9 @@ export function hookEmitEnv(kind: string, opts: { npxPin?: string } = {}): Recor
 export type HookFailure =
   /** Every CLI ladder rung failed the `bro hooks` capability probe. */
   | { kind: 'no-cli' }
+  /** The payload would not serialize — the hook never ran, and no child
+   *  was even spawned for input it could never receive. */
+  | { kind: 'input' }
   /** spawn threw or the child raised 'error' — the hook never ran. */
   | { kind: 'spawn' }
   /** The kill timer fired; the child's process group was killed. */
@@ -258,6 +261,8 @@ export function hookFailureText(failure: HookFailure): string {
   switch (failure.kind) {
     case 'no-cli':
       return 'no bro CLI resolved';
+    case 'input':
+      return 'the hook payload could not be serialized';
     case 'spawn':
       return 'the hook process failed to spawn';
     case 'timeout':
@@ -299,6 +304,15 @@ export async function callHookDetailed(
   timeoutMs: number,
   extraEnv?: Record<string, string>
 ): Promise<HookResult> {
+  // serialize before spawning: a payload JSON.stringify rejects means the
+  // hook can never run — that is its own outage class, not a spawn error
+  // and never healthy silence (and this function resolves, never throws)
+  let input: string;
+  try {
+    input = JSON.stringify(payload);
+  } catch {
+    return { control: null, failure: { kind: 'input' } };
+  }
   const { promise, resolve } = Promise.withResolvers<HookResult>();
   let child: ChildProcess;
   try {
@@ -348,7 +362,7 @@ export async function callHookDetailed(
     settle({ control, failure: null });
   });
   child.stdin?.on('error', () => {});
-  child.stdin?.end(JSON.stringify(payload));
+  child.stdin?.end(input);
   return promise;
 }
 

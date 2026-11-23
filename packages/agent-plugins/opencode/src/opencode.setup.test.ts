@@ -342,6 +342,37 @@ describe('tool guard', () => {
     assert.deepEqual(event.input, { filePath: 'x' });
     assert.equal(calls()[0]?.event, 'pre-tool');
   });
+
+  test('an unserializable tool input fails open, never vetoes', async () => {
+    // JSON.stringify throws on circular input — the hook can never run.
+    // A throw escaping this callback would VETO the call (a block IS a
+    // throw here), so the outage resolves as a named failure instead:
+    // the guard passes the tool through and the debug line carries why.
+    const { toolHooks } = await makeSetup();
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    const event = {
+      sessionID: 'ses_1',
+      tool: 'bash',
+      input: { command: 'ls', circular },
+    };
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    try {
+      await toolHooks.get('tool:execute.before')?.(event);
+    } finally {
+      console.error = orig;
+    }
+    assert.ok(
+      lines.some(l => /probe failed \(the hook payload could not be serialized\)/.test(l)),
+      `expected a named probe failure, got: ${lines.join(' | ')}`
+    );
+    // no child is spawned for input it could never receive
+    assert.equal(calls().length, 0);
+  });
 });
 
 describe('tool enrichment', () => {

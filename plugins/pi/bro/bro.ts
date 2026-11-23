@@ -148,6 +148,7 @@ function hookEmitEnv(kind, opts = {}) {
 function hookFailureText(failure) {
 	switch (failure.kind) {
 		case "no-cli": return "no bro CLI resolved";
+		case "input": return "the hook payload could not be serialized";
 		case "spawn": return "the hook process failed to spawn";
 		case "timeout": return `the hook timed out after ${failure.timeoutMs}ms`;
 		case "exit": return `the hook exited ${failure.code ?? "with no exit code"}`;
@@ -161,6 +162,15 @@ function hookFailureText(failure) {
 * empty stdout is silence (failure null) — only real outage kinds set it.
 */
 async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
+	let input;
+	try {
+		input = JSON.stringify(payload);
+	} catch {
+		return {
+			control: null,
+			failure: { kind: "input" }
+		};
+	}
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -241,7 +251,7 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 		});
 	});
 	child.stdin?.on("error", () => {});
-	child.stdin?.end(JSON.stringify(payload));
+	child.stdin?.end(input);
 	return promise;
 }
 /**
