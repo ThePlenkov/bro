@@ -115,13 +115,16 @@ import {
   resolveStepClass,
   scanProc,
   SESSION_SLOT_TTL_MS,
+  sessionAdmissionLock,
   sessionCapRefusal,
   sessionCapViews,
   planesStartingSessions,
   providerCapCensus,
+  providerCapHeldRefusal,
   providerCapRefusal,
   providerSlotsDir,
   type SessionPlane,
+  sessionReservationsDir,
   SpawnError,
   type SpawnSpec,
   type SpawnWorker,
@@ -135,6 +138,7 @@ import {
   walkChain,
   wallText,
   withAgentRegistryLock,
+  withFileLock,
   worktreeGitDir,
   writeAgentRegistry,
   writePrivateFileSync,
@@ -145,6 +149,8 @@ import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
 import {
+  commandCliNames,
+  commandWorkerClis,
   devinLogsDir,
   devinPidBead,
   devinPidCwd,
@@ -1773,8 +1779,10 @@ export function fleetOccupancyFor(dir: string, env: AgentConnectorEnv): number {
  *  `agents.<backend>.provider` default, the same resolution
  *  `providerCapLaneOf` gated the spawn on — counted with
  *  `entryOccupies`' fail-closed verdict. Runs inside the provider
- *  mutex; the caller's registry snapshot is already the locked
- *  truth. */
+ *  mutex on a registry read taken inside that same lock — the
+ *  spawn path's locked snapshot, or a fresh `readAgentRegistry`
+ *  where no registry lock is held (the claim→commit handoff
+ *  never gaps, so a locked read never misses both). */
 function providerRegistryCensus(
   dir: string,
   home: string | null,
@@ -2161,18 +2169,19 @@ export function sessionQuotaOf(
 
 /** The provider lane cap this spawn must fit under — `fleet.
  * providerCaps.<provider>` armed in the GLOBAL config layer (spec
- * bro-x601l). The provider is the spawn's RESOLVED route — spec.
- * provider after the chain walk, else the backend's default — and the
- * cap counts the ACCOUNT the provider entry reaches, not the repo's
- * registry: a plane-covered entry counts the kind census (live
- * sessions, retained acp conversations, foreign sessions the plane
- * sees), a plane-less one counts the shared claim ledger. */
+ * bro-x601l). The provider is the spawn's RESOLVED route — the
+ * caller's pick after its own resolution (spec.provider after the
+ * chain walk, else the backend's default, at the registry spawn; the
+ * lane's pick or the spawned command's own provider entry on the
+ * raw-template lane) — and the cap counts the ACCOUNT the provider
+ * entry reaches, not the repo's registry: a plane-covered entry
+ * counts the kind census (live sessions, retained acp conversations,
+ * foreign sessions the plane sees), a plane-less one counts the
+ * shared claim ledger. */
 export function providerCapLaneOf(
   env: AgentConnectorEnv,
-  backend: string,
-  spec: SpawnSpec
+  provider: string | undefined
 ): ProviderCapLane | undefined {
-  const provider = spec.provider ?? backendProvider(env, backend);
   if (provider === undefined) {
     return undefined;
   }
@@ -2181,6 +2190,68 @@ export function providerCapLaneOf(
     return undefined;
   }
   return { provider, cap };
+}
+
+/** The provider entries the spawned command launches — every entry
+ *  whose own command launches one of the clis the spawned command
+ *  does. "Launches" reads the command the way the session planes count
+ *  it (commandCliNames — the same shell grammar `startsSessions` leans
+ *  on): the basename at every segment's command position, assignments
+ *  and wrappers (`env V=1`, `nice`, `timeout`, `nohup`, `sudo`…)
+ *  skipped, a shell's `-c` script recursed into. `sh -c 'devin -p x'`
+ *  therefore resolves a `devin` provider — the plane sees the nested
+ *  start and the gate must see the same entry — while `sh -c 'echo
+ *  devin'` resolves nothing: a provider named only as an argument is
+ *  not a start. Only the entry's WORKER executables match
+ *  (commandWorkerClis): a template's shared setup/teardown helpers
+ *  (`cd`, `echo`, `git pull`) open no provider session, so a raw
+ *  template that shares them alone owes no provider gate. The
+ *  raw-template lane resolves no route — `spec.provider` is
+ *  deliberately empty there — so its provider gate derives from the
+ *  command actually spawning: a template running a provider's own CLI
+ *  draws on that entry's lane, and a command no provider entry claims
+ *  owes no provider gate at all. A compound template can launch
+ *  several providers' clis — each distinct one returns in config
+ *  order; aliased entries on the same cli resolve to the first ARMED
+ *  lane (spec bro-x601l: each can carry a cap over the same shared
+ *  census — an unarmed entry never gates, so it must not shadow the
+ *  cap a later alias declared for the same cli). */
+export function providersForSpawnedCommand(env: AgentConnectorEnv, command: string): string[] {
+  const launched = new Set(commandCliNames(command));
+  const out: string[] = [];
+  const claimed = new Set<string>();
+  for (const [name, entry] of Object.entries(env.providers ?? {})) {
+    if (entry.type === 'api') {
+      continue; // an api entry launches no cli — nothing to match
+    }
+    // the entry's WORKER executables — the clis it exists to wrap,
+    // never the scaffolding (`cd`, `echo`) its template runs around
+    // them: a shared helper command is no provider's identity, so
+    // `devin -p x; echo done` cannot gate `claude -p x; echo done`
+    const matched = commandWorkerClis(entry.command).filter(cli => launched.has(cli));
+    if (matched.length === 0 || providerCapLaneOf(env, name) === undefined) {
+      continue;
+    }
+    // an alias — every matched cli an earlier armed entry already
+    // claimed — resolves to that first lane (spec bro-x601l)
+    if (matched.every(cli => claimed.has(cli))) {
+      continue;
+    }
+    out.push(name);
+    for (const cli of matched) {
+      claimed.add(cli);
+    }
+  }
+  return out;
+}
+
+/** The first armed provider lane the spawned command launches —
+ *  `providersForSpawnedCommand`'s head, kept for single-lane callers. */
+export function providerForSpawnedCommand(
+  env: AgentConnectorEnv,
+  command: string
+): string | undefined {
+  return providersForSpawnedCommand(env, command).at(0);
 }
 
 /** The command a provider entry spawns sessions through — the acp/cli
@@ -2673,7 +2744,7 @@ function releaseSpawnLease(dir: string, lease: Lease): void {
  *  quota layer never armed). A second pass over providerPlaneKinds
  *  claims what the provider pass did not already cover, judged on
  *  the same aggregate census. */
-function admitSpawnedCommandStarts(args: {
+export function admitSpawnedCommandStarts(args: {
   spawnedCommand: string;
   agents: Record<string, Record<string, unknown>> | undefined;
   workerEnv: Record<string, string> | undefined;
@@ -2681,10 +2752,13 @@ function admitSpawnedCommandStarts(args: {
   agentId: string;
   scope: string;
   liveByKind: Map<string, Set<string>>;
+  /** the starts the provider passes already claimed, per kind — the
+   *  union over every provider gate (one start claims once, so the
+   *  gates' counts never overlap) */
   providerClaimedStarts: Map<string, number>;
-  providerPlaneKinds: ReadonlySet<string>;
-  providerCap: ProviderCapLane | undefined;
-  providerCensus: (() => number) | undefined;
+  /** the provider gates this spawn resolved — a cross-kind start on a
+   *  kind one covers still owes that lane's aggregate verdict */
+  providerGates: readonly ProviderGate[];
   /** the spawn's own quota lane — its admit below covers the kind's
    *  full lane; the cross-kind loops must not double-claim it */
   quotaPlaneKind: string | undefined;
@@ -2702,13 +2776,12 @@ function admitSpawnedCommandStarts(args: {
     scope,
     liveByKind,
     providerClaimedStarts,
-    providerPlaneKinds,
-    providerCap,
-    providerCensus,
+    providerGates,
     quotaPlaneKind,
     budgetCharged,
     out,
   } = args;
+  const providerPlaneKinds = new Set(providerGates.flatMap(g => [...g.providerPlaneKinds]));
   // a pre-flight refusal ahead of any claim; the authoritative
   // count re-runs inside each kind's admission mutex below. Starts
   // the provider pass already claimed sit INSIDE the view's live
@@ -2746,11 +2819,11 @@ function admitSpawnedCommandStarts(args: {
         workerEnv,
         scope,
         liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
-        // a kind the provider cap counts still owes the aggregate
+        // a kind a provider gate counts still owes the aggregate
         // verdict — the spawned command can start more of the kind
         // than the provider's own entry did, and the excess claims
         // land on the SAME provider-counted ledger
-        ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
+        ...providerGatePayload(providerGates, view.kind),
         ...(budgetCharged === undefined ? {} : { budgetCharged }),
       });
       if (claimed !== undefined) {
@@ -2775,8 +2848,7 @@ function admitSpawnedCommandStarts(args: {
         workerEnv,
         scope,
         liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
-        providerCap,
-        providerCensus,
+        ...providerGatePayload(providerGates, kind),
         ...(budgetCharged === undefined ? {} : { budgetCharged }),
       });
       if (claimed !== undefined) {
@@ -2784,6 +2856,384 @@ function admitSpawnedCommandStarts(args: {
       }
     }
   }
+}
+
+/** The provider gate a session kind claims under — the first gate
+ *  whose provider planes cover the kind (config order: the lane the
+ *  kind's starts were attributed to). */
+export function providerGateForKind(
+  gates: readonly ProviderGate[],
+  kind: string
+): ProviderGate | undefined {
+  return gates.find(gate => gate.providerPlaneKinds.has(kind));
+}
+
+/** The provider verdict a cross-kind claim carries — the FIRST
+ *  covering gate's lane and aggregate census (config order: the lane
+ *  the kind's starts were attributed to — it also drives the claim's
+ *  census dir), plus every OTHER gate covering the same kind. A kind
+ *  two lanes share claims once but each account lane still owes ITS
+ *  cap a verdict on the post-claim count — forwarding only the first
+ *  gate would let a second lane's cap sit unjudged while the start
+ *  lands (spec bro-x601l). Nothing when no gate claims the kind. */
+export function providerGatePayload(
+  gates: readonly ProviderGate[],
+  kind: string
+):
+  | {
+      providerCap: ProviderCapLane;
+      providerCensus: (() => number) | undefined;
+      /** every OTHER covering gate's verdict — judged inside the same
+       *  locked section, after the claim landed */
+      extraProviderVerdicts: {
+        providerCap: ProviderCapLane;
+        providerCensus: (() => number) | undefined;
+      }[];
+    }
+  | Record<string, never> {
+  const covering = gates.filter(gate => gate.providerPlaneKinds.has(kind));
+  const gate = covering.at(0);
+  return gate === undefined
+    ? {}
+    : {
+        providerCap: gate.providerCap,
+        providerCensus: gate.providerCensus,
+        extraProviderVerdicts: covering.slice(1).map(g => ({
+          providerCap: g.providerCap,
+          providerCensus: g.providerCensus,
+        })),
+      };
+}
+
+/** The provider lane a spawn must fit under — `fleet.providerCaps`
+ *  resolved to its planes, aggregate census and pre-flight verdict
+ *  (spec bro-x601l). ONE shape for every spawn path — the registry's
+ *  prepareSpawn and the loop's raw-template lane derive it through
+ *  this same call so the aggregate census cannot drift per call site
+ *  (bro-9f78j). */
+export interface ProviderGate {
+  /** The armed lane — `provider` is the providers.<name> entry key. */
+  providerCap: ProviderCapLane;
+  /** The command the provider entry spawns sessions through — '' for
+   *  an api entry (no plane can claim its lane). */
+  providerCommand: string;
+  /** Every plane the provider command starts sessions on — a
+   *  multi-plane command draws one session per plane on the same
+   *  account lane. */
+  providerPlanes: readonly SessionPlane[];
+  /** The lane's AGGREGATE census — the combined count over every
+   *  plane the provider's command claims. Runs INSIDE each plane's
+   *  locked section, after its claim landed, so earlier claims sit
+   *  inside the count. undefined when the lane is plane-less (its
+   *  census is the registry's occupants plus the provider-namespaced
+   *  claim ledger). */
+  providerCensus: (() => number) | undefined;
+  /** The kinds whose census dirs the provider cap counts — a
+   *  cross-kind claim on one still owes the aggregate verdict. */
+  providerPlaneKinds: ReadonlySet<string>;
+  /** The spawn's quota lane kind — the provider pass skips it (the
+   *  quota admit carries the verdict instead of claiming twice). */
+  quotaPlaneKind: string | undefined;
+  /** True when the provider's own session plane IS the quota lane's —
+   *  the verdict then rides the quota admit instead of claiming the
+   *  lane twice. */
+  quotaCoversProvider: boolean;
+}
+
+/** The sessions a command will start on a provider gate's planes —
+ *  the count the gate judges and the pass claims. A plane-less
+ *  provider admits one session (its ledger has no plane starts to
+ *  count), but a plane-backed count is the planes' own answer — a
+ *  command the planes say starts NOTHING (`devin models; other-cli x`
+ *  matched the provider's cli but opens no session of it) owes the
+ *  lane zero, not a phantom one-start charge. */
+function providerGateStarts(
+  providerPlanes: readonly SessionPlane[],
+  startsCommand: string | undefined
+): number {
+  if (providerPlanes.length === 0 || startsCommand === undefined) {
+    return 1;
+  }
+  return providerPlanes.reduce(
+    (sum, plane) => sum + (plane.startsSessions?.(startsCommand) ?? 1),
+    0
+  );
+}
+
+/** The starts a provider gate counted on the spawn's QUOTA plane — the
+ *  claims the quota loop owes while it owns that kind's lane. The
+ *  provider pass skips the quota plane so its verdict rides the quota
+ *  admit, but the admit's own view counts the SPAWNED command — a
+ *  command whose provider starts hide behind an argv driver's
+ *  `--command` (`bro acp-worker`) reads zero there and would claim one
+ *  where the entry opens several. 0 when no provider plane is the
+ *  quota lane — the quota loop then claims only what the spawned
+ *  command itself starts. */
+export function providerGateQuotaStarts(
+  gate: ProviderGate,
+  startsCommand: string | undefined
+): number {
+  let starts = 0;
+  for (const plane of gate.providerPlanes) {
+    if (plane.kind !== gate.quotaPlaneKind) {
+      continue;
+    }
+    starts += plane.startsSessions?.(startsCommand ?? gate.providerCommand) ?? 1;
+  }
+  return starts;
+}
+
+/** Resolve the provider lane and judge its pre-flight — the OUTER gate
+ *  (spec bro-x601l): the account's lane cap judges before any kind
+ *  lane, on the census the provider's own command resolves. Returns
+ *  undefined when no `fleet.providerCaps.<provider>` lane covers the
+ *  resolved route (spec.provider after the chain walk, else the
+ *  backend's default). Throws SpawnError('cap', 'provider_cap') when
+ *  the lane cannot seat the spawn — read-only: the authoritative count
+ *  re-runs inside each claim's locked section after the claims land
+ *  (claim-first, count-after, so a burst can over-refuse but never
+ *  over-admit). */
+export function providerGateOf(args: {
+  dir: string;
+  registry: Record<string, AgentRegistryEntry>;
+  env: AgentConnectorEnv;
+  /** The spawn's RESOLVED provider — `spec.provider ?? backendProvider`
+   *  at the registry spawn (the backend default IS that lane's
+   *  standing pick); the lane's own provider or the provider entry
+   *  its spawned command launches on the raw-template lane — never a
+   *  default that lane bypassed. undefined → no provider gate. */
+  provider: string | undefined;
+  /** The connector's agents home for the plane-less census —
+   *  prepareSpawn's `home` (entryOccupies probes the entries' own
+   *  artifacts there). Defaults to `agentsHome(dir)` — the loop
+   *  lane's registry lives under the same common dir. */
+  home?: string | null;
+  /** The `agents` bags the census counts from — the connector env's. */
+  agents: Record<string, Record<string, unknown>> | undefined;
+  /** The env the planes' own counts read (spec.env at the registry
+   *  spawn; the constructed worker env on the loop lane). */
+  workerEnv: Record<string, string> | undefined;
+  /** The spawn's own quota lane kind — its admit covers that lane. */
+  quotaPlaneKind: string | undefined;
+  /** The command whose starts this spawn admits — the provider gate
+   *  then judges the count the start pass will actually claim (a
+   *  compound template starting several of this provider's sessions
+   *  seats them all or refuses them all). Default: the provider's own
+   *  entry command — the spawn whose command line only DRIVES the
+   *  provider's (`bro acp-worker --command 'devin acp'` hides `devin`
+   *  behind an argument the planes' grammar cannot see) opens the
+   *  sessions the entry command starts. */
+  startsCommand?: string;
+}): ProviderGate | undefined {
+  const { env, agents, workerEnv } = args;
+  const providerCap = providerCapLaneOf(env, args.provider);
+  if (providerCap === undefined) {
+    return undefined;
+  }
+  const censusHome = args.home === undefined ? agentsHome(args.dir) : args.home;
+  const providerCommand = providerEntryCommand(env, providerCap.provider);
+  const providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
+  const providerPlaneKinds = new Set<string>();
+  let providerCensus: (() => number) | undefined;
+  if (providerPlanes.length > 0) {
+    const planes = providerPlanes;
+    const lane = providerCap;
+    providerCensus = () => providerCapCensus(planes, agents, workerEnv, lane);
+    for (const plane of planes) {
+      providerPlaneKinds.add(plane.kind);
+    }
+  }
+  const quotaCoversProvider = providerPlanes.some(p => p.kind === args.quotaPlaneKind);
+  // the OUTER gate's read-only pre-flight: when the provider verdict
+  // would defer to the quota lane's own admit (its only plane IS that
+  // lane), a full kind lane would otherwise refuse first and name the
+  // wrong constraint. The authoritative count still re-runs inside
+  // each plane's locked section after the claims land.
+  const providerLive =
+    providerPlanes.length > 0
+      ? (providerCensus as () => number)()
+      : providerRegistryCensus(args.dir, censusHome, args.registry, env, providerCap.provider) +
+        countSessionReservations(
+          providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
+        );
+  const providerStarts = providerGateStarts(providerPlanes, args.startsCommand ?? providerCommand);
+  const providerRefusal = providerCapRefusal(providerCap, providerLive, providerStarts);
+  if (providerRefusal !== undefined) {
+    throw new SpawnError(providerRefusal, 'cap', 'provider_cap');
+  }
+  return {
+    providerCap,
+    providerCommand,
+    providerPlanes,
+    providerCensus,
+    providerPlaneKinds,
+    quotaPlaneKind: args.quotaPlaneKind,
+    quotaCoversProvider,
+  };
+}
+
+/** The provider lane's claims — every session the provider's own
+ *  command starts draws on the lane: one claim per plane per start,
+ *  each judged inside the kind's mutex with the aggregate verdict
+ *  riding (spec bro-x601l). The quota lane's kind is skipped — the
+ *  quota admit covers its full lane (a second claim would count one
+ *  session twice). Per-plane claims land on `out`; a plane-less
+ *  provider's namespaced ledger claims land on `ledgerOut` — custody
+ *  is the caller's (the registry spawn releases them when the
+ *  committed row takes over the count; an awaited spawn holds them
+ *  for the run). Returns the per-kind start counts this pass claimed
+ *  — the cross-kind pass subtracts them so one session's claims never
+ *  read as two. */
+export function admitProviderGateStarts(
+  gate: ProviderGate,
+  args: {
+    /** The repo the plane-less census reads — the registry's live
+     *  occupants on this provider entry, re-read INSIDE the provider
+     *  mutex (the namespaced claim ledger is counted inside the
+     *  locked section itself). */
+    dir: string;
+    /** The connector's agents home the census probes — prepareSpawn's
+     *  `home`. Defaults to `agentsHome(dir)`. */
+    home?: string | null;
+    env: AgentConnectorEnv;
+    agents: Record<string, Record<string, unknown>> | undefined;
+    workerEnv: Record<string, string> | undefined;
+    molStep: string | undefined;
+    key: string;
+    scope: string;
+    liveByKind: Map<string, Set<string>>;
+    /** reports a work-budget segment an admit just opened — the caller
+     *  refunds them all when a later refusal unwinds the spawn */
+    budgetCharged?: (kind: string) => void;
+    /** The command whose starts this spawn admits — the spawn's own
+     *  template when a command line launches the provider's sessions;
+     *  the provider's own command when unset (a spawn whose command
+     *  line only DRIVES the provider's — `bro acp-worker --command
+     *  'devin acp'` hides `devin` behind an argument the planes'
+     *  grammar cannot see — opens the sessions the entry command
+     *  starts). */
+    startsCommand?: string;
+    /** Starts an earlier provider pass already claimed for this
+     *  spawn, per kind — a gate whose plane an earlier gate covers
+     *  shares that gate's claims: the sessions sit inside this lane's
+     *  aggregate census, so this lane's cap still judges them, but no
+     *  second slot lands (one session claimed twice reads as two
+     *  starts — valid work refused or headroom burned). */
+    claimedStarts?: ReadonlyMap<string, number>;
+    /** per-plane claims — the caller's rollback/custody set */
+    out: string[];
+    /** plane-less ledger claims — the caller owns their custody */
+    ledgerOut: string[];
+  }
+): Map<string, number> {
+  const providerClaimedStarts = new Map<string, number>();
+  // a covered plane whose every start an earlier pass claimed: no new
+  // claim of ours carries this lane's verdict on those starts, so the
+  // cap is re-judged bare below — inside the same locked section a
+  // claim's post-claim census takes, minus the claim
+  let sharedPlane: SessionPlane | undefined;
+  for (const plane of gate.providerPlanes) {
+    if (plane.kind === gate.quotaPlaneKind) {
+      continue;
+    }
+    // every session this spawn's command would start draws on the lane
+    // — a multi-start command claims one slot per start, each judged
+    // inside the kind's mutex like the cross-kind pass. Starts an
+    // earlier provider pass already claimed on this kind are shared,
+    // not re-claimed — their sessions still count in this lane's
+    // aggregate census through the claims that already sit there.
+    const starts = plane.startsSessions?.(args.startsCommand ?? gate.providerCommand) ?? 1;
+    const already =
+      (args.claimedStarts?.get(plane.kind) ?? 0) + (providerClaimedStarts.get(plane.kind) ?? 0);
+    const pending = Math.max(0, starts - already);
+    if (pending < starts) {
+      sharedPlane ??= plane;
+    }
+    for (let i = 0; i < pending; i++) {
+      const claimed = admitSessionSlot(plane, args.agents, {
+        key: args.key,
+        molStep: args.molStep,
+        workerEnv: args.workerEnv,
+        scope: args.scope,
+        liveKeys: args.liveByKind.get(plane.kind) ?? EMPTY_KEYS,
+        providerCap: gate.providerCap,
+        providerCensus: gate.providerCensus,
+        ...(args.budgetCharged === undefined ? {} : { budgetCharged: args.budgetCharged }),
+      });
+      if (claimed !== undefined) {
+        args.out.push(claimed);
+        providerClaimedStarts.set(plane.kind, (providerClaimedStarts.get(plane.kind) ?? 0) + 1);
+      }
+    }
+  }
+  const providerCensus = gate.providerCensus;
+  if (
+    sharedPlane !== undefined &&
+    providerClaimedStarts.size === 0 &&
+    providerCensus !== undefined
+  ) {
+    // every start this lane covers was claimed by an earlier pass, so
+    // no claim of ours ran the verdict — re-judge this lane's cap on
+    // the census the shared claims already sit in, inside a covered
+    // plane's admission mutex (the lock that serializes every other
+    // contender's claim against the same count)
+    const resDir =
+      gate.providerCap.reservationsDir ?? sessionReservationsDir(sharedPlane.kind, args.agents);
+    withFileLock(
+      sessionAdmissionLock(sharedPlane.kind, resDir),
+      () => {
+        const refusal = providerCapHeldRefusal(gate.providerCap, providerCensus());
+        if (refusal !== undefined) {
+          throw new SpawnError(refusal, 'cap', 'provider_cap');
+        }
+      },
+      { label: `${sharedPlane.kind} provider lane re-check` }
+    );
+  }
+  if (gate.providerPlanes.length === 0) {
+    // no plane counts this provider's command — the census is the
+    // registry's live occupants on this provider entry plus the
+    // provider-namespaced claim ledger (spec bro-x601l: the registry
+    // fallback, the callback judged INSIDE the mutex). The registry
+    // is re-read INSIDE the lock: a concurrent spawn's claim→commit
+    // handoff never gaps (claims release only after the row lands),
+    // so a snapshot taken before admission would see neither the
+    // claim nor the row and admit past the cap.
+    //
+    // LOCK ORDER: the census reaches the registry lock through the
+    // marker/handle sweeps (entryOccupies → nativeState →
+    // dropWorkMarker). A spawn inside prepareSpawn arrives holding the
+    // registry lock already (re-entrant below); the loop lane holds
+    // nothing — so the registry lock is taken BEFORE the provider
+    // mutex here, making every path registry → provider. Without it
+    // the orders invert (loop holds provider, spawn holds registry)
+    // and the two waits outlast only on LOCK_WAIT_MS.
+    const censusHome = args.home === undefined ? agentsHome(args.dir) : args.home;
+    const admission = withAgentRegistryLock(args.dir, () =>
+      admitProviderSlot(
+        gate.providerCap,
+        () =>
+          providerRegistryCensus(
+            args.dir,
+            censusHome,
+            readAgentRegistry(args.dir),
+            args.env,
+            gate.providerCap.provider
+          ),
+        {
+          key: args.key,
+          lane: isBatchSpawn(args.workerEnv) ? 'batch' : 'interactive',
+        }
+      )
+    );
+    if (admission !== undefined) {
+      if (admission.refusal !== undefined) {
+        throw new SpawnError(admission.refusal, 'cap', admission.capCause);
+      }
+      args.ledgerOut.push(...admission.paths);
+    }
+  }
+  return providerClaimedStarts;
 }
 
 function prepareSpawn(
@@ -2981,128 +3431,77 @@ function prepareSpawn(
     // the live-keys map lets each admission close budget segments
     // whose workers the registry says already ended
     const liveByKind = liveSessionKeysByKind(registry);
+    // provider-cap admission — the OUTER gate (spec bro-x601l): the
+    // account's lane cap judges before any kind lane, on the census the
+    // provider's own command resolves. providerGateOf resolves the lane
+    // and judges its read-only pre-flight; admitProviderGateStarts lands
+    // the lane's claims — a plane-covered entry admits through the
+    // kind's mutex with the provider verdict riding the same locked
+    // section (shared claim, no double slot); a plane-less entry admits
+    // on the provider-namespaced claim ledger. The loop's raw-template
+    // lane runs the same pair — one wiring, no drift (bro-9f78j).
+    //
+    // An argv worker's spawned command is the acp DRIVER (`bro
+    // acp-worker --command 'devin acp'`) — the provider executable sits
+    // behind the driver's --command argument where the planes' grammar
+    // reads zero starts, so the provider pass would claim nothing while
+    // the quota lane still seats its one session. The sessions the
+    // worker opens are the provider ENTRY command's own — left unset,
+    // the gate counts those (the startsCommand default).
+    const providerStartsCommand = spec.worker?.kind === 'argv' ? undefined : spawnedCommand;
+    const providerGate = providerGateOf({
+      dir,
+      registry,
+      env,
+      // the registry spawn's resolved route — spec.provider after the
+      // chain walk, else the backend's standing default
+      provider: spec.provider ?? backendProvider(env, backend),
+      home,
+      agents,
+      workerEnv: spec.env,
+      quotaPlaneKind: sessionQuota?.plane.kind,
+      startsCommand: providerStartsCommand,
+    });
+    const providerGates = providerGate === undefined ? [] : [providerGate];
+    const providerCap = providerGate?.providerCap;
+    const providerCensus = providerGate?.providerCensus;
     // true when the provider's own session plane IS the quota lane's —
     // the verdict then rides sessionQuota's admitSessionSlot (below)
     // instead of claiming a second slot for one session
-    let quotaCoversProvider = false;
-    // provider-cap admission — the OUTER gate (spec bro-x601l): the
-    // account's lane cap judges before any kind lane, on the census the
-    // provider's own command resolves. A plane-covered entry admits
-    // through the kind's mutex with the provider verdict riding the
-    // same locked section (shared claim, no double slot); a plane-less
-    // entry admits on the provider-namespaced claim ledger — every
-    // claim lands in crossKindReservations so the failure paths hand
-    // it back untouched.
-    const providerCap = providerCapLaneOf(env, backend, spec);
-    // the provider lane's AGGREGATE census — the combined count over
-    // every plane the provider's command claims (spec bro-x601l): a
-    // multi-plane command draws one session per plane on the same
-    // account lane, and a per-plane census admits each in isolation.
-    // The closure runs inside each plane's locked section — after its
-    // claim landed — so earlier planes' claims sit inside the count.
-    let providerCensus: (() => number) | undefined;
-    // starts the provider-cap pass already claimed per kind — the
-    // cross-kind pass below re-counts these kinds and must skip the
-    // starts this pass covered, or one session's claims read as two
-    const providerClaimedStarts = new Map<string, number>();
-    // the kinds whose census dirs the provider cap counts — a cross-kind
-    // claim that outlasts the provider pass's own claims still lands on
-    // the provider lane's ledger, so its admit rides the aggregate too
-    const providerPlaneKinds = new Set<string>();
+    const quotaCoversProvider = providerGate?.quotaCoversProvider ?? false;
     // every budget segment an admit opens registers on
     // budgetChargedKinds (hoisted above the try) — a LATER refusal
     // hands them all back in the catch
     const budgetCharged = (kind: string): void => {
       budgetChargedKinds.push(kind);
     };
-    let providerCommand = '';
-    let providerPlanes: SessionPlane[] = [];
-    if (providerCap !== undefined) {
-      providerCommand = providerEntryCommand(env, providerCap.provider);
-      providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
-      if (providerPlanes.length > 0) {
-        const planes = providerPlanes;
-        const lane = providerCap;
-        providerCensus = () => providerCapCensus(planes, agents, spec.env, lane);
-        for (const plane of planes) {
-          providerPlaneKinds.add(plane.kind);
-        }
-      }
-      // the provider session the quota lane already claims — passing
-      // the verdict to sessionQuota's own call keeps one claim for the
-      // one session (a double claim would count the lane twice)
-      quotaCoversProvider = providerPlanes.some(p => p.kind === sessionQuota?.plane.kind);
-      // the OUTER gate's read-only pre-flight — judged BEFORE the
-      // repo-local fleet cap: when the provider verdict would defer to
-      // the quota lane's own admit (its only plane IS that lane), a
-      // full fleet would otherwise refuse first and name the wrong
-      // constraint. The authoritative count still re-runs inside each
-      // plane's locked section after the claims land.
-      const providerLive =
-        providerPlanes.length > 0
-          ? (providerCensus as () => number)()
-          : providerRegistryCensus(dir, home, registry, env, providerCap.provider) +
-            countSessionReservations(
-              providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
-            );
-      const providerRefusal = providerCapRefusal(providerCap, providerLive, 1);
-      if (providerRefusal !== undefined) {
-        throw new SpawnError(providerRefusal, 'cap', 'provider_cap');
-      }
-    }
     // the provider verdict judged — the repo-local fleet cap is the
     // INNER gate (spec bro-x601l: an account-lane refusal must not be
     // masked by a repo-local count); still before the registry write,
     // and before ANY claim or budget segment lands, so a refusal here
     // leaves no half-spawned state to hand back
     enforceFleetCap(dir, home, registry, spec, opts.cap);
-    if (providerCap !== undefined) {
-      for (const plane of providerPlanes) {
-        if (plane.kind === sessionQuota?.plane.kind) {
-          continue;
-        }
-        // every session the provider's command would start draws on
-        // the lane — a multi-start command claims one slot per start,
-        // each judged inside the kind's mutex like the cross-kind pass
-        const starts = plane.startsSessions?.(providerCommand) ?? 1;
-        for (let i = 0; i < starts; i++) {
-          const claimed = admitSessionSlot(plane, agents, {
-            key: agentId,
-            molStep: spec.molStep,
+    // starts the provider-cap pass already claimed per kind — the
+    // cross-kind pass below re-counts these kinds and must skip the
+    // starts this pass covered, or one session's claims read as two
+    const providerClaimedStarts =
+      providerGate === undefined
+        ? new Map<string, number>()
+        : admitProviderGateStarts(providerGate, {
+            dir,
+            home,
+            env,
+            agents,
             workerEnv: spec.env,
-            scope,
-            liveKeys: liveByKind.get(plane.kind) ?? EMPTY_KEYS,
-            providerCap,
-            providerCensus,
-            budgetCharged,
-          });
-          if (claimed !== undefined) {
-            crossKindReservations.push(claimed);
-            providerClaimedStarts.set(plane.kind, (providerClaimedStarts.get(plane.kind) ?? 0) + 1);
-          }
-        }
-      }
-      if (providerPlanes.length === 0) {
-        // no plane counts this provider's command — the census is the
-        // registry's live occupants on this provider entry plus the
-        // provider-namespaced claim ledger (spec bro-x601l: the
-        // registry fallback, the callback judged INSIDE the mutex)
-        const admission = admitProviderSlot(
-          providerCap,
-          () => providerRegistryCensus(dir, home, registry, env, providerCap.provider),
-          {
+            molStep: spec.molStep,
             key: agentId,
-            lane: isBatchSpawn(spec.env) ? 'batch' : 'interactive',
-          }
-        );
-        if (admission !== undefined) {
-          if (admission.refusal !== undefined) {
-            throw new SpawnError(admission.refusal, 'cap', admission.capCause);
-          }
-          providerReservations.push(...admission.paths);
-        }
-      }
-    }
+            scope,
+            liveByKind,
+            budgetCharged,
+            startsCommand: providerStartsCommand,
+            out: crossKindReservations,
+            ledgerOut: providerReservations,
+          });
     if (spawnedCommand !== '') {
       admitSpawnedCommandStarts({
         spawnedCommand,
@@ -3113,9 +3512,7 @@ function prepareSpawn(
         scope,
         liveByKind,
         providerClaimedStarts,
-        providerPlaneKinds,
-        providerCap,
-        providerCensus,
+        providerGates,
         quotaPlaneKind: sessionQuota?.plane.kind,
         budgetCharged,
         out: crossKindReservations,
@@ -3133,7 +3530,13 @@ function prepareSpawn(
       );
       const quotaStarts = Math.max(
         1,
-        quotaView?.starts ?? sessionQuota.plane.startsSessions?.(spawnedCommand) ?? 1
+        quotaView?.starts ?? sessionQuota.plane.startsSessions?.(spawnedCommand) ?? 1,
+        // the provider pass skipped this plane — its entry-command
+        // count is the quota loop's truth when the spawned command
+        // reads zero there (an argv driver's hidden starts)
+        providerGate === undefined
+          ? 0
+          : providerGateQuotaStarts(providerGate, providerStartsCommand)
       );
       for (let i = 0; i < quotaStarts; i++) {
         const claimed = admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {

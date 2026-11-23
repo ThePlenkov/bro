@@ -11,7 +11,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { compactBacklog, type BeadRow } from '../packages/core/src/backlog.ts';
+import { type BeadRow, compactBacklog } from '../packages/core/src/backlog.ts';
 
 const [, , doltDir, outFile] = process.argv;
 if (!doltDir || !outFile) {

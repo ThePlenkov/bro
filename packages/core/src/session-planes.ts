@@ -1088,9 +1088,16 @@ function checkSessionLanes(
       return {
         counts: {
           // the provider cap counts the same census the session lane
-          // does — the plane's host-wide sweep plus the claims held
+          // does — the plane's host-wide sweep plus the claims held.
+          // An extra verdict that carries no census of its own falls
+          // back to `sessions + reservations`, so it owes the live
+          // count even when no primary providerCap or kind quota does
           sessions:
-            maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0,
+            maxSessions > 0 ||
+            providerCap !== undefined ||
+            (opts.extraProviderVerdicts ?? []).some(v => v.providerCensus === undefined)
+              ? plane.countLive(bag, opts.workerEnv)
+              : 0,
           workers:
             maxWorkers > 0 && plane.countWorkers !== undefined
               ? plane.countWorkers(bag, opts.workerEnv)
@@ -1120,13 +1127,23 @@ function checkSessionLanes(
   // constraint (spec bro-x601l). `providerCensus` supplies the
   // combined count over EVERY plane the provider's command claims —
   // a multi-plane command draws one session per plane on the same
-  // lane, and a per-plane census would admit each in isolation.
-  if (providerCap !== undefined && providerCap.cap > 0) {
-    const live = opts.providerCensus?.() ?? sessions + reservations;
-    if (live > providerCap.cap) {
+  // lane, and a per-plane census would admit each in isolation. Every
+  // OTHER lane covering the kind judges the post-claim census too —
+  // a shared kind claims once but each lane's cap is its own verdict.
+  const providerVerdicts = [
+    ...(providerCap === undefined ? [] : [{ providerCap, providerCensus: opts.providerCensus }]),
+    ...(opts.extraProviderVerdicts ?? []),
+  ];
+  for (const verdict of providerVerdicts) {
+    const cap = verdict.providerCap;
+    if (cap.cap <= 0) {
+      continue;
+    }
+    const live = verdict.providerCensus?.() ?? sessions + reservations;
+    if (live > cap.cap) {
       throw new SpawnError(
-        `provider '${providerCap.provider}' lane cap reached — ${live}/${providerCap.cap} live lanes ` +
-          `(fleet.providerCaps.${providerCap.provider} in the global bro config) ` +
+        `provider '${cap.provider}' lane cap reached — ${live}/${cap.cap} live lanes ` +
+          `(fleet.providerCaps.${cap.provider} in the global bro config) ` +
           `— cause: provider_cap` +
           refused,
         'cap',
@@ -1180,6 +1197,15 @@ interface SessionLaneOpts {
    *  `sessions + reservations` when the caller does not supply one
    *  (a single-plane command needs no wider count). */
   providerCensus?: () => number;
+  /** The OTHER provider lanes whose planes cover this kind — a kind
+   *  two provider entries share claims once, but every covering lane
+   *  owes ITS cap a verdict on the post-claim census: forwarding only
+   *  the first gate would let the second lane's cap sit unjudged while
+   *  the start lands (spec bro-x601l). */
+  extraProviderVerdicts?: readonly {
+    providerCap: ProviderCapLane;
+    providerCensus: (() => number) | undefined;
+  }[];
   /** Called when a work-budget segment just opened for `key` on this
    *  plane's kind — the spawn path records them so a LATER refusal
    *  (fleet cap, a sibling plane's verdict) can refund the segment

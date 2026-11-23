@@ -29,8 +29,9 @@ export {
   devinTranscriptsDir,
   listDevinSessions,
   renderDevinTranscript,
-} from './plane.ts'
-export { countDevinSessionStarts } from './starts.ts'
+} from './plane.ts';
+export { countDevinSessionStarts } from './starts.ts';
+export { commandCliNames, commandWorkerClis } from './shell.ts';
 export {
   devinStorePath,
   devinUsageStatePath,
@@ -38,10 +39,10 @@ export {
   readDevinUsageState,
   sampleDevinUsage,
   writeDevinUsageState,
-} from './usage.ts'
+} from './usage.ts';
 export type {
   DevinLaneCounts,
   DevinModelUsage,
   DevinUsageSample,
   DevinUsageState,
-} from './usage.ts'
+} from './usage.ts';
