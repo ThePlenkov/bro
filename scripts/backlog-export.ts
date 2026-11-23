@@ -11,7 +11,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { compactBacklog, type BeadRow } from '../packages/core/src/backlog.ts';
+import { type BeadRow, compactBacklog } from '../packages/core/src/backlog.ts';
 
 const [, , doltDir, outFile] = process.argv;
 if (!doltDir || !outFile) {
@@ -19,14 +19,12 @@ if (!doltDir || !outFile) {
   process.exit(1);
 }
 
+// literal argv, no shell; operator-supplied paths are the script's contract
+const DOLT_OPTS = { cwd: '', encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 } as const;
+
 function sql<T>(query: string): T[] {
-  // literal argv, PATH-resolved binary (same contract as gh)
-  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], {
-    // NOSONAR
-    cwd: doltDir,
-    encoding: 'utf8',
-    maxBuffer: 256 * 1024 * 1024,
-  });
+  const opts = { ...DOLT_OPTS, cwd: doltDir };
+  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], opts); // NOSONAR
   // dolt wraps rows as {rows: [...]}; NULL columns are omitted per row
   return (JSON.parse(out) as { rows: T[] }).rows;
 }
