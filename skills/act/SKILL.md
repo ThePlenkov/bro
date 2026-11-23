@@ -82,7 +82,9 @@ default store, so standard installs already have it).
   exclusion in `.codacy.yml`, a `.markdownlint.json` option — so the
   same false never reappears in any file, never a one-site suppression.
   A recurring pattern belongs in AGENTS.md or the relevant skill so the
-  next code is born clean.
+  next code is born clean — the "Green on first write" shape list in
+  AGENTS.md is the catalog; a finding class it doesn't name yet gets a
+  new entry there, not just a fix here.
 - **Exhaust findings locally before pushing.** A push that flies blind on
   what remote engines will say is the wave generator — each push
   re-triggers reviewers whose next annotations were already computable.

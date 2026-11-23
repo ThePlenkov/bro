@@ -93,6 +93,14 @@ code nobody edits by hand.
 
 ## Verification expectations
 
+- Gate-shaped new code is a **minor** finding even before the scanners
+  report it — a reviewer who sees a >4-positional-arg signature, a
+  discriminator if/else that could be a handler map, a loop carrying
+  inner conditionals, N near-identical JSX blocks, index-as-key, or
+  `A && B || C` in shell should flag the shape in the diff. The full
+  anti-pattern ↔ pattern list lives in AGENTS.md ("Green on first
+  write"); review catches it so the gate never has to.
+
 - `hooks/run.sh` changes: must terminate for relative, nonexistent, and
   unset plugin roots (fixed-point break + absolute-path validation).
 - Shell fallbacks: a failed candidate must fall through to the next —
