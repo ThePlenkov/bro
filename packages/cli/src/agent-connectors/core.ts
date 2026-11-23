@@ -92,6 +92,7 @@ import {
   ProviderSurfaceError,
   type ProviderWall,
   patchAgentRegistry,
+  patchAgentRegistryIf,
   pidAlive,
   projectId,
   probeStep,
@@ -4776,6 +4777,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // reservation back like any other spawn failure, not strand it.
         let fd: number | undefined;
         let errFd: number | undefined;
+        // whether any spawnWorker produced a child — read by the catch
+        // to tell a pre-launch throw (no child, the row is dead weight)
+        // from a post-spawn one (a live child can still publish its
+        // handle, and the handoff grace window owns the row)
+        let childPid: number | undefined;
         let spawned: AgentRegistryEntry;
         try {
           fd = openPrivateAppendSync(log);
@@ -4896,11 +4902,15 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             );
           };
           let child = spawnWorker(scoped);
+          childPid = child.pid;
           if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
             // refused — the payload never ran: dead pid, no handle, no
             // .exit; left alone the row would read 'lost' with no record
             // and the reservation would idle out its TTL. Retry the plain
-            // spawn over the same attempt artifacts.
+            // spawn over the same attempt artifacts. The refused child is
+            // proven dead, so it does not block the catch's row stamp —
+            // only the retry's own pid may
+            childPid = undefined;
             if (stderrLog !== undefined) {
               appendPrivateFileSync(
                 stderrLog,
@@ -4918,6 +4928,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               /* the retry owns the verdict now — swallow the loser's */
             });
             child = spawnWorker(false);
+            childPid = child.pid;
           }
           // an unhandled 'error' event would take the whole CLI down —
           // a failed exec records itself on the entry and reads 'lost'
@@ -4980,6 +4991,31 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           }
           releaseSessionStart(crossKindReservations);
           releaseSpawnLease(dir, lease);
+          // a pre-launch throw leaves the row prepareSpawn committed
+          // pid-less: inside the handoff TTL it reads 'spawned' and the
+          // retry is refused 'spawn handoff in flight' over a child that
+          // never ran. Stamp this attempt terminal — matched by
+          // agentId+runId under the lock — so the retry re-picks. A
+          // produced child pid skips the stamp: that attempt can still
+          // publish its handle and the grace window owns its row (spec
+          // bro-l8c4f.5).
+          try {
+            patchAgentRegistryIf(
+              dir,
+              spec.molStep,
+              {
+                stopped: true,
+                spawnError: err instanceof Error ? err.message : String(err),
+              },
+              cur =>
+                cur?.agentId === agentId &&
+                cur?.runId === runId &&
+                cur?.pid === undefined &&
+                childPid === undefined
+            );
+          } catch {
+            // a registry write failure must not mask the launch error
+          }
           throw err;
         } finally {
           if (fd !== undefined) {
@@ -5467,7 +5503,13 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             // bro-tmp is how this fires, spec bro-v96mp). The rethrow
             // still reaches the outer catch, whose lease release is
             // the existing fourth leg of this cleanup.
-            rmSync(envFile, { force: true });
+            try {
+              rmSync(envFile, { force: true });
+            } catch {
+              // a cleanup failure (an envFile that is a directory
+              // needs recursive; EACCES) must not mask the setup
+              // error or skip the releases below
+            }
             if (reservation !== undefined) {
               releaseSessionSlot(reservation);
             }
@@ -7083,7 +7125,13 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // registry entry already landed; the spawnError fields it,
           // and the env file (ambient secrets included) goes too.
           dockerRun(['rm', '-f', name]);
-          rmSync(envFile, { force: true });
+          try {
+            rmSync(envFile, { force: true });
+          } catch {
+            // a cleanup failure must not mask the launch error or
+            // skip the slot/lease releases below — same guard the
+            // tmux catch carries
+          }
           if (reservation !== undefined) {
             releaseSessionSlot(reservation);
           }

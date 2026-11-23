@@ -268,13 +268,23 @@ export interface TmpSweepOptions {
 }
 
 /** Direct child directory names, [] on any listing failure — a sweep
- *  helper never dies on a vanished tree. */
+ *  helper never dies on a vanished tree. A missing base is routine
+ *  (most worktrees grow no bro-tmp, and an absent `worktrees/` dir is
+ *  the common case), so ENOENT stays quiet; a real failure — EACCES,
+ *  EIO — silently skipping a base would hide worker roots from the
+ *  sweep entirely, so it warns the same way an unlistable root does
+ *  and the remaining bases still sweep. */
 function listDirs(dir: string): string[] {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter(e => e.isDirectory())
       .map(e => e.name);
-  } catch {
+  } catch (err) {
+    if (!isVanished(err)) {
+      console.error(
+        `cleanup: cannot list ${dir} (${err instanceof Error ? err.message : err}) — skipped`
+      );
+    }
     return [];
   }
 }
@@ -381,6 +391,20 @@ function rmdirRootIfOrphaned(root: string, ctx: RootCtx): void {
     return; // contention or no registry to lock — nothing proven, keep
   }
   try {
+    // re-prove staleness inside the lock — the early check sampled
+    // mtime BEFORE the lock wait (up to 2s of contention), and a root
+    // that filled and drained in between carries a fresh mtime the
+    // stale sample can't see; rmdir'ing on it strands the very writes
+    // that refreshed it
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(root).mtimeMs;
+    } catch {
+      return; // vanished or unreadable under the lock — nothing to remove
+    }
+    if (ctx.now - mtimeMs < STALE_MS) {
+      return;
+    }
     if (rootOwnerVerdict(root, regPath) === 'free') {
       rmdirIfEmpty(root);
     }

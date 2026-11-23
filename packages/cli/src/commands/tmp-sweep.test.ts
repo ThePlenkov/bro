@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { testGit } from '@broject/core';
 import {
   cleanupTmpDirs,
   isPathInUse,
@@ -313,10 +314,12 @@ describe('cleanupTmpDirs', () => {
 
 describe('workerTmpRoots (bro-v96mp)', () => {
   /** A real `git init` — gitCommonDir answers via rev-parse, so a .git
-   *  shape alone is not enough. */
+   *  shape alone is not enough. testGit scrubs the ambient repo pins
+   *  (a GIT_DIR from a hook/CI harness would redirect init) and throws
+   *  on a non-zero init, so a fixture that never landed fails here. */
   const withRepo = (fn: (root: string) => void): void => {
     const root = mkdtempSync(join(tmpdir(), 'bro-sweep-repo-'));
-    spawnSync('git', ['init', '-q', root]);
+    testGit(['init', '-q', root]);
     try {
       fn(root);
     } finally {
@@ -358,7 +361,7 @@ describe('extra-root rmdir guard (bro-v96mp)', () => {
    *  sweeps the real /tmp. */
   const withRepo = (fn: (root: string, common: string) => void): void => {
     const root = mkdtempSync(join(tmpdir(), 'bro-sweep-rmdir-'));
-    spawnSync('git', ['init', '-q', root]);
+    testGit(['init', '-q', root]); // scrubbed env + throw on non-zero
     const common = join(root, '.git');
     const tmp = join(root, 'faketmp');
     mkdirSync(tmp);
@@ -453,8 +456,14 @@ describe('extra-root rmdir guard (bro-v96mp)', () => {
   test('a stale shell outside any repo keeps — the registry path cannot resolve', () => {
     // agentRegistryPath answers null off-repo: 'unknown', never the
     // empty-registry 'free' a failed probe would fake — the pinned
-    // TMPDIR of a worker whose registry can't be read is not litter
+    // TMPDIR of a worker whose registry can't be read is not litter.
+    // TMPDIR redirects to an empty fixture — the os.tmpdir() leg runs
+    // first and with deletion on would sweep the REAL /tmp otherwise
     const norepo = mkdtempSync(join(tmpdir(), 'bro-sweep-norepo-'));
+    const emptyTmp = join(norepo, 'tmp');
+    mkdirSync(emptyTmp);
+    const prevTmp = process.env.TMPDIR;
+    process.env.TMPDIR = emptyTmp;
     try {
       const shell = join(norepo, 'bro-tmp', 'agent-offrepo');
       mkdirSync(shell, { recursive: true, mode: 0o700 });
@@ -462,6 +471,11 @@ describe('extra-root rmdir guard (bro-v96mp)', () => {
       cleanupTmpDirs(false, { extraRoots: [shell] });
       assert.ok(existsSync(shell));
     } finally {
+      if (prevTmp === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = prevTmp;
+      }
       rmSync(norepo, { recursive: true, force: true });
     }
   });

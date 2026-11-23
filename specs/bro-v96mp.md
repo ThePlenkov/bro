@@ -101,11 +101,13 @@ truncation marks `…`.
 
 ## Acceptance
 
-- A killed-by-rate-limit worker leaves no `/tmp/tmp-*` behind — the
-  litter lands under `<worktree gitdir>/bro-tmp/` and dies with
-  `git worktree remove`.
-- `/tmp` idles near half-free during a cap-2 run — nothing
-  worker-owned writes there, and the loop holds new claims once free
+- A killed-by-rate-limit worker whose pin resolved leaves no
+  `/tmp/tmp-*` behind — the litter lands under `<worktree
+  gitdir>/bro-tmp/` and dies with `git worktree remove`. (A repo-less
+  native spawn keeps its ambient tmpdir — §1 — so this criterion
+  covers pinned workers only.)
+- `/tmp` idles near half-free during a cap-2 run — nothing a pinned
+  worker owns writes there, and the loop holds new claims once free
   space falls below the effective floor. The floor is an admission
   threshold, not a usage cap: workers already running may write below
   it.

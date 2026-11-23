@@ -828,6 +828,7 @@ export {
   busMatches,
   busProbe,
   busPublish,
+  busRecordedSocketPath,
   busSocketPath,
   busSocketPathForCommon,
   busStatePath,
