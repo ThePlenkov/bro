@@ -35,12 +35,25 @@ const SEPARATORS = new Set([';', '&', '|', '\n']);
 const QUOTES = new Set(['"', "'"]);
 
 /** The shell segments of a command — the split happens OUTSIDE quotes,
- *  the way a shell would. */
+ *  the way a shell would. An unquoted `#` that STARTS a word opens a
+ *  shell comment: the rest of the line is text, not a command (`devin
+ *  a # note; devin b` runs `devin a` alone — the `;` inside the
+ *  comment splits nothing). A `#` inside a word or a quote stays text
+ *  (`devin -p '#tag'`, `a#b`). */
 export function segments(command: string): string[] {
   const out: string[] = [];
   let current = '';
   let quote: string | null = null;
+  let comment = false;
   for (const ch of command) {
+    if (comment) {
+      // the comment runs to the newline — which is itself a
+      // separator, so scanning resumes as if it were never written
+      if (ch !== '\n') {
+        continue;
+      }
+      comment = false;
+    }
     if (quote !== null) {
       current += ch;
       if (ch === quote) {
@@ -51,6 +64,10 @@ export function segments(command: string): string[] {
     if (QUOTES.has(ch)) {
       quote = ch;
       current += ch;
+      continue;
+    }
+    if (ch === '#' && (current === '' || /\s/.test(current.charAt(current.length - 1)))) {
+      comment = true;
       continue;
     }
     if (SEPARATORS.has(ch)) {
@@ -65,18 +82,26 @@ export function segments(command: string): string[] {
 }
 
 /** The tokens of a shell segment, quotes honoured — a quoted run is ONE
- *  token. */
+ *  token. A `\"` inside a double-quoted run is an escape — the quote
+ *  stays inside the string (`sh -c "sh -c \"devin\""` carries one
+ *  script). */
 export function tokens(segment: string): Token[] {
   const out: Token[] = [];
   let current = '';
   let quoted = false;
   let quote: string | null = null;
-  for (const ch of segment) {
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment.charAt(i);
     if (quote !== null) {
       // only the MATCHING quote closes the run — an apostrophe inside
       // a double-quoted run is text
       if (ch === quote) {
         quote = null;
+        continue;
+      }
+      if (quote === '"' && ch === '\\' && i + 1 < segment.length) {
+        // the escaped char is literal text — the backslash consumed
+        current += segment.charAt(++i);
         continue;
       }
       current += ch;
@@ -240,19 +265,45 @@ function isShellCommandFlag(flag: string | undefined): boolean {
   return letters.includes('c') && /^[a-z]+$/.test(letters);
 }
 
+/** The shell options that consume the NEXT token as their value —
+ *  the value is the option's operand, never the script (`bash -o
+ *  errexit -c 'x'`). A combined short flag ENDING in o/O takes one
+ *  too (`bash -lo errexit -c 'x'`). */
+const SHELL_VALUE_OPTION = /^[-+][a-zA-Z]*[oO]$/;
+
 /** The command a shell wrapper runs: `sh -c 'devin -p x'` — the string
- *  is a command of its own, so its own reading applies. */
+ *  is a command of its own, so its own reading applies. Options ahead
+ *  of `-c` scan as options (`bash -l -c 'x'` reads like `bash -lc
+ *  'x'`); the first bare operand ends them — `bash script.sh` runs a
+ *  FILE, not a command line, and a `-c` after it is the script's own
+ *  argument. The `-c` operand itself reads bare or quoted (`bash -c
+ *  devin` runs `devin`) — later positionals stay the script's $0/args,
+ *  never part of it. */
 export function wrappedCommand(toks: Token[]): string | undefined {
   const at = commandIndex(toks);
   const shell = toks.at(at);
   if (shell === undefined || !COMMAND_SHELLS.has(base(shell))) {
     return undefined;
   }
-  if (!isShellCommandFlag(toks.at(at + 1)?.text)) {
-    return undefined;
+  for (let i = at + 1; i < toks.length; i++) {
+    const flag = toks.at(i)?.text ?? '';
+    if (isShellCommandFlag(flag)) {
+      // the -c operand, bare or quoted — later positionals are its args
+      return toks.at(i + 1)?.text;
+    }
+    if (flag === '--') {
+      return undefined; // options end — what follows is a file operand
+    }
+    if (SHELL_VALUE_OPTION.test(flag)) {
+      i++; // the option's own value — not the command
+      continue;
+    }
+    if (flag.length > 1 && (flag.startsWith('-') || flag.startsWith('+'))) {
+      continue; // a flag that carries no separate value — keep scanning
+    }
+    return undefined; // the first operand — a file, not a -c script
   }
-  const script = toks.at(at + 2);
-  return script?.quoted ? script.text : undefined;
+  return undefined;
 }
 
 /** How many `-c` layers a reader unwraps — deeper nesting is a string
@@ -282,4 +333,109 @@ export function commandCliNames(command: string, depth = 0): string[] {
     out.push(base(word));
   }
   return out;
+}
+
+/** The commands a template's scaffolding runs — POSIX builtins and the
+ *  everyday utilities a spawn line's setup and teardown carry (`cd`,
+ *  `echo`, `git pull`). One at a segment's command position is
+ *  plumbing, never the tool a cap or a provider lane names itself by:
+ *  `devin -p x; echo done` and `claude -p x; echo done` share `echo`,
+ *  but `echo` opens no provider session. */
+const SCAFFOLD_COMMANDS = new Set([
+  // POSIX shell builtins
+  '.',
+  ':',
+  '[',
+  'alias',
+  'bg',
+  'cd',
+  'command',
+  'echo',
+  'eval',
+  'exec',
+  'exit',
+  'export',
+  'false',
+  'fc',
+  'fg',
+  'getopts',
+  'hash',
+  'jobs',
+  'kill',
+  'newgrp',
+  'printf',
+  'pwd',
+  'read',
+  'readonly',
+  'return',
+  'set',
+  'shift',
+  'source',
+  'test',
+  'times',
+  'trap',
+  'true',
+  'type',
+  'ulimit',
+  'umask',
+  'unalias',
+  'unset',
+  'wait',
+  // the everyday utilities of setup/teardown
+  'awk',
+  'basename',
+  'cat',
+  'chmod',
+  'chown',
+  'cp',
+  'cut',
+  'date',
+  'df',
+  'dirname',
+  'du',
+  'find',
+  'git',
+  'grep',
+  'gunzip',
+  'gzip',
+  'head',
+  'hostname',
+  'ln',
+  'ls',
+  'make',
+  'mkdir',
+  'mktemp',
+  'mv',
+  'ps',
+  'readlink',
+  'realpath',
+  'rm',
+  'rmdir',
+  'rsync',
+  'scp',
+  'sed',
+  'sleep',
+  'sort',
+  'ssh',
+  'tail',
+  'tar',
+  'tee',
+  'touch',
+  'tr',
+  'uname',
+  'uniq',
+  'wc',
+  'which',
+  'whoami',
+]);
+
+/** The cli names a command's WORK launches — `commandCliNames` minus
+ *  the scaffolding commands a template runs around its worker. A
+ *  command whose every cli is scaffolding keeps its full list — an
+ *  exotic worker named like a builtin (`test`, `make`) still
+ *  identifies itself. */
+export function commandWorkerClis(command: string): string[] {
+  const clis = commandCliNames(command);
+  const workers = clis.filter(cli => !SCAFFOLD_COMMANDS.has(cli));
+  return workers.length > 0 ? workers : clis;
 }

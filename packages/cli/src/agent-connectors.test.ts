@@ -75,6 +75,7 @@ import {
   makeTmuxConnector,
   pidAlive,
   providerForSpawnedCommand,
+  providersForSpawnedCommand,
   registerAgentConnector,
   resolveAgentConnector,
   resolveSpawnProvider,
@@ -1012,7 +1013,9 @@ function connectorContract(b: BackendCase): void {
         // two planes claim the provider's entry — alpha once, beta
         // twice. Every kind lane has headroom of its own, so a
         // per-plane census admits each claim in isolation; only the
-        // AGGREGATE sees 1+2 = 3 over the cap of 2
+        // AGGREGATE sees 1+2 = 3 over the cap of 2. The pre-flight
+        // already seats the spawn's real start count — '0 live + 3
+        // starting' — or the locked per-start judge produces '3/2'
         registerSessionPlane({
           kind: 'alpha',
           detectsCli: cli => cli === 'alpha-cli',
@@ -1044,7 +1047,9 @@ function connectorContract(b: BackendCase): void {
           (err: unknown) =>
             err instanceof SpawnError &&
             err.kind === 'cap' &&
-            /provider 'prov' lane cap reached — 3\/2 live lanes.*provider_cap/.test(err.message)
+            /provider 'prov' lane cap reached — (3\/2 live lanes|0 live \+ 3 starting > 2)/.test(
+              err.message
+            )
         );
         assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
         // the refused spawn handed every claim back
@@ -1088,15 +1093,18 @@ function connectorContract(b: BackendCase): void {
           fleet: { maxConcurrent: 0, providerCaps: { prov: 1 } },
         };
         const c = b.make({ dir: f.main }, env);
-        // the provider pass claims 1/1 — at the cap; the cross-kind
-        // pass's extra alpha claim pushes the aggregate to 2 > 1 and
-        // is refused — unjudged it would over-admit the lane
+        // the spawn starts 2 alpha sessions on a cap of 1 — the
+        // pre-flight seats the real count ('0 live + 2 starting'), or
+        // the provider pass's claim plus the cross-kind pass's extra
+        // alpha claim pushes the aggregate to 2 > 1 inside the lock
         await assert.rejects(
           c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
           (err: unknown) =>
             err instanceof SpawnError &&
             err.kind === 'cap' &&
-            /provider 'prov' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+            /provider 'prov' lane cap reached — (2\/1 live lanes|0 live \+ 2 starting > 1)/.test(
+              err.message
+            )
         );
         assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
         assert.equal(countSessionReservations(dirA), 0);
@@ -1149,16 +1157,19 @@ function connectorContract(b: BackendCase): void {
           fleet: { maxConcurrent: 0, providerCaps: { prov: 2 } },
         };
         const c = b.make({ dir: f.main }, env);
-        // the provider pass claims alpha×1 + beta×1 = 2/2 — the spawned
-        // command's SECOND beta start claims a third slot and the
-        // aggregate verdict refuses it; unclaimed it would draw on the
-        // lane unjudged
+        // the spawn's starts are alpha×1 + beta×2 = 3 on a cap of 2 —
+        // the pre-flight seats the real count ('0 live + 3 starting'),
+        // or the provider pass claims 2/2 and the spawned command's
+        // SECOND beta start claims a third slot the aggregate verdict
+        // refuses inside the lock
         await assert.rejects(
           c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
           (err: unknown) =>
             err instanceof SpawnError &&
             err.kind === 'cap' &&
-            /provider 'prov' lane cap reached — 3\/2 live lanes.*provider_cap/.test(err.message)
+            /provider 'prov' lane cap reached — (3\/2 live lanes|0 live \+ 3 starting > 2)/.test(
+              err.message
+            )
         );
         assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
         // the refused spawn handed every claim back
@@ -1203,12 +1214,17 @@ function connectorContract(b: BackendCase): void {
           fleet: { maxConcurrent: 0, providerCaps: { prov: 1 } },
         };
         const c = b.make({ dir: f.main }, env);
+        // 2 starts on a cap of 1 — the pre-flight seats the real count
+        // ('0 live + 2 starting'), or the quota lane's per-start admits
+        // push the aggregate to 2/1 inside the locked section
         await assert.rejects(
           c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
           (err: unknown) =>
             err instanceof SpawnError &&
             err.kind === 'cap' &&
-            /provider 'prov' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+            /provider 'prov' lane cap reached — (2\/1 live lanes|0 live \+ 2 starting > 1)/.test(
+              err.message
+            )
         );
         assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
         // every claim the refused spawn briefly held went back
@@ -3905,6 +3921,72 @@ describe('providerForSpawnedCommand', () => {
       { prov: 1, nice2: 1 }
     );
     assert.equal(providerForSpawnedCommand(env, 'devin -p x'), 'prov');
+  });
+
+  test('shell options ahead of -c still launch the script cli', () => {
+    const env = envOf({ prov: cli('devin -p {promptFile}') }, { prov: 1 });
+    assert.equal(providerForSpawnedCommand(env, "bash -l -c 'devin -p x'"), 'prov');
+    assert.equal(providerForSpawnedCommand(env, 'bash -c devin'), 'prov');
+  });
+
+  test('shared scaffolding never identifies a provider (greptile/coderabbit PR #1094)', () => {
+    // the entry's WORKER is the cli it exists to wrap — `cd`, `echo`,
+    // `git` in its template are plumbing every template shares: a raw
+    // command matching only those launches no provider's session
+    const env = envOf(
+      {
+        devinProv: cli('cd /tmp/work && devin -p {promptFile}; echo done'),
+        claudeProv: cli('cd /tmp/work && claude -p {promptFile}; echo done'),
+      },
+      { devinProv: 1, claudeProv: 1 }
+    );
+    assert.equal(
+      providerForSpawnedCommand(env, 'cd /tmp/work && devin -p x; echo done'),
+      'devinProv'
+    );
+    assert.equal(
+      providerForSpawnedCommand(env, 'cd /tmp/work && claude -p x; echo done'),
+      'claudeProv'
+    );
+    // the shared helpers alone — every segment scaffolding, no worker
+    // — would have matched through cd/echo before the worker-cli read
+    assert.equal(providerForSpawnedCommand(env, 'cd /tmp/work && git pull'), undefined);
+    assert.equal(providerForSpawnedCommand(env, 'echo done'), undefined);
+    // a third provider's raw template must not gate on devinProv's
+    // shared `echo done`/`cd` — the other provider's WORKER differs
+    const other = envOf({ devinProv: cli('devin -p {promptFile}; echo done') }, { devinProv: 1 });
+    assert.equal(providerForSpawnedCommand(other, 'claude -p x; echo done'), undefined);
+  });
+
+  test('every provider a compound template launches resolves', () => {
+    // `devin a; claude b` opens sessions on BOTH providers — the caps
+    // each judge their lane (the singular head keeps config order)
+    const env = envOf(
+      {
+        devinProv: cli('devin -p {promptFile}'),
+        claudeProv: cli('claude -p {promptFile}'),
+      },
+      { devinProv: 1, claudeProv: 1 }
+    );
+    assert.deepEqual(providersForSpawnedCommand(env, 'devin a; claude b'), [
+      'devinProv',
+      'claudeProv',
+    ]);
+    assert.deepEqual(providersForSpawnedCommand(env, 'claude a; devin b'), [
+      'devinProv',
+      'claudeProv',
+    ]);
+    // an unarmed alias on a shared cli never claims it, and one cli is
+    // never billed to two lanes
+    const aliased = envOf(
+      {
+        open: cli('devin -p x'),
+        prov: cli('devin acp'),
+        provToo: cli('env F=1 devin run'),
+      },
+      { prov: 1, provToo: 1 }
+    );
+    assert.deepEqual(providersForSpawnedCommand(aliased, 'devin -p x'), ['prov']);
   });
 });
 

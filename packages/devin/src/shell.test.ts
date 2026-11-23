@@ -4,7 +4,7 @@
  *  drift from what the caps enforce. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commandCliNames } from './shell.ts';
+import { commandCliNames, commandWorkerClis } from './shell.ts';
 
 describe('commandCliNames', () => {
   test('the bare command is its own cli', () => {
@@ -57,5 +57,49 @@ describe('commandCliNames', () => {
 
   test('a separator inside a quoted argument does not split', () => {
     assert.deepEqual(commandCliNames('devin -p "run devin later; then stop"'), ['devin']);
+  });
+
+  test('shell options ahead of -c still reach the script', () => {
+    assert.deepEqual(commandCliNames("bash -l -c 'devin -p a'"), ['devin']);
+    assert.deepEqual(commandCliNames("bash -e -c 'devin -p a'"), ['devin']);
+    // -o/-O take the NEXT token as the option's value — it is not the script
+    assert.deepEqual(commandCliNames("bash -o errexit -c 'devin -p a'"), ['devin']);
+    assert.deepEqual(commandCliNames("bash -lo errexit -c 'devin -p a'"), ['devin']);
+    // the first operand is a FILE the shell runs — a -c behind it is
+    // the script's own argument, not a command line
+    assert.deepEqual(commandCliNames("bash setup.sh -c 'devin -p a'"), ['bash']);
+  });
+
+  test('an unquoted -c operand is still the command — its positionals are not', () => {
+    assert.deepEqual(commandCliNames('bash -c devin'), ['devin']);
+    assert.deepEqual(commandCliNames('sh -c devin'), ['devin']);
+    // later positionals are the script's $0/args — never part of it
+    assert.deepEqual(commandCliNames('bash -c devin argv0 --x'), ['devin']);
+  });
+
+  test('a # outside quotes comments the rest of the line out', () => {
+    // the ; inside the comment splits nothing — claude never runs
+    assert.deepEqual(commandCliNames('devin a # note; claude b'), ['devin']);
+    // the comment ends at the newline — which itself separates
+    assert.deepEqual(commandCliNames('devin a # note\nclaude b'), ['devin', 'claude']);
+    // inside a word or a quote the # is text
+    assert.deepEqual(commandCliNames('devin -p "#tag"'), ['devin']);
+    assert.deepEqual(commandCliNames('x#y -p a'), ['x#y']);
+  });
+});
+
+describe('commandWorkerClis', () => {
+  test('the scaffolding around the worker drops out', () => {
+    assert.deepEqual(commandWorkerClis('cd /tmp && devin -p a'), ['devin']);
+    assert.deepEqual(commandWorkerClis('devin -p a; echo done'), ['devin']);
+    assert.deepEqual(commandWorkerClis('git pull && devin -p a | tee log'), ['devin']);
+    assert.deepEqual(commandWorkerClis('cd /tmp && env F=1 devin -p a; echo done'), ['devin']);
+  });
+
+  test('a command whose every cli is scaffolding keeps them all', () => {
+    // an exotic worker named like a builtin still identifies itself —
+    // dropping everything would make the worker unnamable
+    assert.deepEqual(commandWorkerClis('cd /tmp && test -f x'), ['cd', 'test']);
+    assert.deepEqual(commandWorkerClis(''), []);
   });
 });

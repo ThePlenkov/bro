@@ -20,8 +20,9 @@ if (!doltDir || !outFile) {
 }
 
 function sql<T>(query: string): T[] {
+  // literal argv, PATH-resolved binary (same contract as gh)
   const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], {
-    // NOSONAR — literal argv, PATH-resolved binary (same contract as gh)
+    // NOSONAR
     cwd: doltDir,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,

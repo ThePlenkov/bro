@@ -122,8 +122,10 @@ import {
   type MatrixLanePick,
   matrixLanePick,
   profileModelFor,
-  providerForSpawnedCommand,
+  type ProviderGate,
   providerGateOf,
+  providerGatePayload,
+  providersForSpawnedCommand,
   providerWallsFor,
   resolveAgentConnector,
   resolveSpawnProvider,
@@ -1241,36 +1243,55 @@ export function admitLaneSessions(
     budgetChargedKinds.push(kind);
   };
   try {
-    // the provider lane resolved + pre-flighted before ANY claim lands
-    // — a full account lane refuses before a kind claim can hold a
-    // slot against it. The lane's provider is its own pick or the
-    // provider entry the spawned command launches — never the
-    // agents.native.provider default a template escape bypassed.
-    const providerGate = providerGateOf({
-      dir: ctx.root,
-      registry,
-      env: ctx.env,
-      provider: lane.provider ?? providerForSpawnedCommand(ctx.env, spawnedCmd),
-      agents: ctx.env.agents,
-      workerEnv,
-      quotaPlaneKind: templateQuota?.plane.kind,
-    });
-    const providerClaimedStarts =
-      providerGate === undefined
-        ? new Map<string, number>()
-        : admitProviderGateStarts(providerGate, {
-            dir: ctx.root,
-            env: ctx.env,
-            agents: ctx.env.agents,
-            workerEnv,
-            molStep: spec.molStep,
-            key,
-            scope,
-            liveByKind,
-            budgetCharged,
-            out: crossKind,
-            ledgerOut: crossKind,
-          });
+    // the provider lanes resolved + pre-flighted before ANY claim
+    // lands — a full account lane refuses before a kind claim can hold
+    // a slot against it. The lane's provider is its own pick or every
+    // armed provider entry the spawned command launches (a compound
+    // template can open sessions on several lanes — each judges) —
+    // never the agents.native.provider default a template escape
+    // bypassed.
+    const laneProviders =
+      lane.provider !== undefined
+        ? [lane.provider]
+        : providersForSpawnedCommand(ctx.env, spawnedCmd);
+    const providerGates: ProviderGate[] = [];
+    for (const provider of laneProviders) {
+      const gate = providerGateOf({
+        dir: ctx.root,
+        registry,
+        env: ctx.env,
+        provider,
+        agents: ctx.env.agents,
+        workerEnv,
+        quotaPlaneKind: templateQuota?.plane.kind,
+        startsCommand: spawnedCmd,
+      });
+      if (gate !== undefined) {
+        providerGates.push(gate);
+      }
+    }
+    // starts the provider-cap passes claimed per kind — the union over
+    // every gate (a start claims once, so the counts never overlap);
+    // the cross-kind pass subtracts them or one session reads as two
+    const providerClaimedStarts = new Map<string, number>();
+    for (const providerGate of providerGates) {
+      for (const [kind, n] of admitProviderGateStarts(providerGate, {
+        dir: ctx.root,
+        env: ctx.env,
+        agents: ctx.env.agents,
+        workerEnv,
+        molStep: spec.molStep,
+        key,
+        scope,
+        liveByKind,
+        budgetCharged,
+        startsCommand: spawnedCmd,
+        out: crossKind,
+        ledgerOut: crossKind,
+      })) {
+        providerClaimedStarts.set(kind, (providerClaimedStarts.get(kind) ?? 0) + n);
+      }
+    }
     if (spawnedCmd !== '') {
       admitSpawnedCommandStarts({
         spawnedCommand: spawnedCmd,
@@ -1281,9 +1302,7 @@ export function admitLaneSessions(
         scope,
         liveByKind,
         providerClaimedStarts,
-        providerPlaneKinds: providerGate?.providerPlaneKinds ?? EMPTY_KEYS,
-        providerCap: providerGate?.providerCap,
-        providerCensus: providerGate?.providerCensus,
+        providerGates,
         quotaPlaneKind: templateQuota?.plane.kind,
         budgetCharged,
         out: crossKind,
@@ -1310,15 +1329,10 @@ export function admitLaneSessions(
           workerEnv,
           scope,
           liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
-          // the provider's own session plane IS this lane's — the
-          // verdict rides the quota admit instead of claiming the
+          // a provider gate whose own session plane IS this lane's —
+          // its verdict rides the quota admit instead of claiming the
           // lane twice (spec bro-x601l)
-          ...(providerGate?.quotaCoversProvider === true
-            ? {
-                providerCap: providerGate.providerCap,
-                providerCensus: providerGate.providerCensus,
-              }
-            : {}),
+          ...providerGatePayload(providerGates, templateQuota.plane.kind),
           budgetCharged,
         });
         if (i === 0) {

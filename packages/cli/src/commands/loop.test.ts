@@ -866,7 +866,9 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
               err instanceof SpawnError &&
               err.kind === 'cap' &&
               err.capCause === 'provider_cap' &&
-              /provider 'prov' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+              /provider 'prov' lane cap reached — (2\/1 live lanes|0 live \+ 2 starting > 1)/.test(
+                err.message
+              )
           );
           // every claim the refused admission briefly held went back
           assert.equal(countSessionReservations(dirA), 0);

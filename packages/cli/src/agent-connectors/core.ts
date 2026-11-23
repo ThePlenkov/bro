@@ -146,6 +146,7 @@ import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // same surface
 import {
   commandCliNames,
+  commandWorkerClis,
   devinLogsDir,
   devinPidBead,
   devinPidCwd,
@@ -2175,39 +2176,66 @@ export function providerCapLaneOf(
   return { provider, cap };
 }
 
-/** The provider entry the spawned command launches — the entry whose
- *  own command launches one of the clis the spawned command does.
- *  "Launches" reads the command the way the session planes count it
- *  (commandCliNames — the same shell grammar `startsSessions` leans
+/** The provider entries the spawned command launches — every entry
+ *  whose own command launches one of the clis the spawned command
+ *  does. "Launches" reads the command the way the session planes count
+ *  it (commandCliNames — the same shell grammar `startsSessions` leans
  *  on): the basename at every segment's command position, assignments
  *  and wrappers (`env V=1`, `nice`, `timeout`, `nohup`, `sudo`…)
  *  skipped, a shell's `-c` script recursed into. `sh -c 'devin -p x'`
  *  therefore resolves a `devin` provider — the plane sees the nested
  *  start and the gate must see the same entry — while `sh -c 'echo
  *  devin'` resolves nothing: a provider named only as an argument is
- *  not a start. The raw-template lane resolves no route —
- *  `spec.provider` is deliberately empty there — so its provider gate
- *  derives from the command actually spawning: a template running a
- *  provider's own CLI draws on that entry's lane, and a command no
- *  provider entry claims owes no provider gate at all. Aliased
- *  entries on one cli resolve to the first ARMED lane in config order
- *  (spec bro-x601l: each can carry a cap over the same shared census —
- *  an unarmed entry never gates, so it must not shadow the cap a
- *  later alias declared for the same cli). */
+ *  not a start. Only the entry's WORKER executables match
+ *  (commandWorkerClis): a template's shared setup/teardown helpers
+ *  (`cd`, `echo`, `git pull`) open no provider session, so a raw
+ *  template that shares them alone owes no provider gate. The
+ *  raw-template lane resolves no route — `spec.provider` is
+ *  deliberately empty there — so its provider gate derives from the
+ *  command actually spawning: a template running a provider's own CLI
+ *  draws on that entry's lane, and a command no provider entry claims
+ *  owes no provider gate at all. A compound template can launch
+ *  several providers' clis — each distinct one returns in config
+ *  order; aliased entries on the same cli resolve to the first ARMED
+ *  lane (spec bro-x601l: each can carry a cap over the same shared
+ *  census — an unarmed entry never gates, so it must not shadow the
+ *  cap a later alias declared for the same cli). */
+export function providersForSpawnedCommand(env: AgentConnectorEnv, command: string): string[] {
+  const launched = new Set(commandCliNames(command));
+  const out: string[] = [];
+  const claimed = new Set<string>();
+  for (const [name, entry] of Object.entries(env.providers ?? {})) {
+    if (entry.type === 'api') {
+      continue; // an api entry launches no cli — nothing to match
+    }
+    // the entry's WORKER executables — the clis it exists to wrap,
+    // never the scaffolding (`cd`, `echo`) its template runs around
+    // them: a shared helper command is no provider's identity, so
+    // `devin -p x; echo done` cannot gate `claude -p x; echo done`
+    const matched = commandWorkerClis(entry.command).filter(cli => launched.has(cli));
+    if (matched.length === 0 || providerCapLaneOf(env, name) === undefined) {
+      continue;
+    }
+    // an alias — every matched cli an earlier armed entry already
+    // claimed — resolves to that first lane (spec bro-x601l)
+    if (matched.every(cli => claimed.has(cli))) {
+      continue;
+    }
+    out.push(name);
+    for (const cli of matched) {
+      claimed.add(cli);
+    }
+  }
+  return out;
+}
+
+/** The first armed provider lane the spawned command launches —
+ *  `providersForSpawnedCommand`'s head, kept for single-lane callers. */
 export function providerForSpawnedCommand(
   env: AgentConnectorEnv,
   command: string
 ): string | undefined {
-  const launched = new Set(commandCliNames(command));
-  for (const [name, entry] of Object.entries(env.providers ?? {})) {
-    if (entry.type === 'api' || !commandCliNames(entry.command).some(cli => launched.has(cli))) {
-      continue; // an api entry launches no cli — nothing to match
-    }
-    if (providerCapLaneOf(env, name) !== undefined) {
-      return name;
-    }
-  }
-  return undefined;
+  return providersForSpawnedCommand(env, command).at(0);
 }
 
 /** The command a provider entry spawns sessions through — the acp/cli
@@ -2708,10 +2736,13 @@ export function admitSpawnedCommandStarts(args: {
   agentId: string;
   scope: string;
   liveByKind: Map<string, Set<string>>;
+  /** the starts the provider passes already claimed, per kind — the
+   *  union over every provider gate (one start claims once, so the
+   *  gates' counts never overlap) */
   providerClaimedStarts: Map<string, number>;
-  providerPlaneKinds: ReadonlySet<string>;
-  providerCap: ProviderCapLane | undefined;
-  providerCensus: (() => number) | undefined;
+  /** the provider gates this spawn resolved — a cross-kind start on a
+   *  kind one covers still owes that lane's aggregate verdict */
+  providerGates: readonly ProviderGate[];
   /** the spawn's own quota lane — its admit below covers the kind's
    *  full lane; the cross-kind loops must not double-claim it */
   quotaPlaneKind: string | undefined;
@@ -2729,13 +2760,12 @@ export function admitSpawnedCommandStarts(args: {
     scope,
     liveByKind,
     providerClaimedStarts,
-    providerPlaneKinds,
-    providerCap,
-    providerCensus,
+    providerGates,
     quotaPlaneKind,
     budgetCharged,
     out,
   } = args;
+  const providerPlaneKinds = new Set(providerGates.flatMap(g => [...g.providerPlaneKinds]));
   // a pre-flight refusal ahead of any claim; the authoritative
   // count re-runs inside each kind's admission mutex below. Starts
   // the provider pass already claimed sit INSIDE the view's live
@@ -2773,11 +2803,11 @@ export function admitSpawnedCommandStarts(args: {
         workerEnv,
         scope,
         liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
-        // a kind the provider cap counts still owes the aggregate
+        // a kind a provider gate counts still owes the aggregate
         // verdict — the spawned command can start more of the kind
         // than the provider's own entry did, and the excess claims
         // land on the SAME provider-counted ledger
-        ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
+        ...providerGatePayload(providerGates, view.kind),
         ...(budgetCharged === undefined ? {} : { budgetCharged }),
       });
       if (claimed !== undefined) {
@@ -2802,8 +2832,7 @@ export function admitSpawnedCommandStarts(args: {
         workerEnv,
         scope,
         liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
-        providerCap,
-        providerCensus,
+        ...providerGatePayload(providerGates, kind),
         ...(budgetCharged === undefined ? {} : { budgetCharged }),
       });
       if (claimed !== undefined) {
@@ -2811,6 +2840,31 @@ export function admitSpawnedCommandStarts(args: {
       }
     }
   }
+}
+
+/** The provider gate a session kind claims under — the first gate
+ *  whose provider planes cover the kind (config order: the lane the
+ *  kind's starts were attributed to). */
+export function providerGateForKind(
+  gates: readonly ProviderGate[],
+  kind: string
+): ProviderGate | undefined {
+  return gates.find(gate => gate.providerPlaneKinds.has(kind));
+}
+
+/** The provider verdict a cross-kind claim carries — the covering
+ *  gate's lane and aggregate census, or nothing when no gate claims
+ *  the kind. */
+export function providerGatePayload(
+  gates: readonly ProviderGate[],
+  kind: string
+):
+  | { providerCap: ProviderCapLane; providerCensus: (() => number) | undefined }
+  | Record<string, never> {
+  const gate = providerGateForKind(gates, kind);
+  return gate === undefined
+    ? {}
+    : { providerCap: gate.providerCap, providerCensus: gate.providerCensus };
 }
 
 /** The provider lane a spawn must fit under — `fleet.providerCaps`
@@ -2848,6 +2902,23 @@ export interface ProviderGate {
   quotaCoversProvider: boolean;
 }
 
+/** The sessions a command will start on a provider gate's planes —
+ *  the count the gate judges and the pass claims. A plane-less
+ *  provider admits one session (its ledger has no plane starts to
+ *  count). */
+function providerGateStarts(
+  providerPlanes: readonly SessionPlane[],
+  startsCommand: string | undefined
+): number {
+  if (providerPlanes.length === 0 || startsCommand === undefined) {
+    return 1;
+  }
+  return Math.max(
+    1,
+    providerPlanes.reduce((sum, plane) => sum + (plane.startsSessions?.(startsCommand) ?? 1), 0)
+  );
+}
+
 /** Resolve the provider lane and judge its pre-flight — the OUTER gate
  *  (spec bro-x601l): the account's lane cap judges before any kind
  *  lane, on the census the provider's own command resolves. Returns
@@ -2880,6 +2951,12 @@ export function providerGateOf(args: {
   workerEnv: Record<string, string> | undefined;
   /** The spawn's own quota lane kind — its admit covers that lane. */
   quotaPlaneKind: string | undefined;
+  /** The command whose starts this spawn admits — the provider gate
+   *  then judges the count the start pass will actually claim (a
+   *  compound template starting several of this provider's sessions
+   *  seats them all or refuses them all). Default 1 — the registry
+   *  spawn's one worker. */
+  startsCommand?: string;
 }): ProviderGate | undefined {
   const { env, agents, workerEnv } = args;
   const providerCap = providerCapLaneOf(env, args.provider);
@@ -2912,7 +2989,8 @@ export function providerGateOf(args: {
         countSessionReservations(
           providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
         );
-  const providerRefusal = providerCapRefusal(providerCap, providerLive, 1);
+  const providerStarts = providerGateStarts(providerPlanes, args.startsCommand);
+  const providerRefusal = providerCapRefusal(providerCap, providerLive, providerStarts);
   if (providerRefusal !== undefined) {
     throw new SpawnError(providerRefusal, 'cap', 'provider_cap');
   }
@@ -2960,6 +3038,11 @@ export function admitProviderGateStarts(
     /** reports a work-budget segment an admit just opened — the caller
      *  refunds them all when a later refusal unwinds the spawn */
     budgetCharged?: (kind: string) => void;
+    /** The command whose starts this spawn admits — the spawn's own
+     *  template when a command line launches the provider's sessions;
+     *  the provider's own command when unset (the registry spawn's one
+     *  worker opens the sessions its provider command starts). */
+    startsCommand?: string;
     /** per-plane claims — the caller's rollback/custody set */
     out: string[];
     /** plane-less ledger claims — the caller owns their custody */
@@ -2971,10 +3054,10 @@ export function admitProviderGateStarts(
     if (plane.kind === gate.quotaPlaneKind) {
       continue;
     }
-    // every session the provider's command would start draws on the
-    // lane — a multi-start command claims one slot per start, each
-    // judged inside the kind's mutex like the cross-kind pass
-    const starts = plane.startsSessions?.(gate.providerCommand) ?? 1;
+    // every session this spawn's command would start draws on the lane
+    // — a multi-start command claims one slot per start, each judged
+    // inside the kind's mutex like the cross-kind pass
+    const starts = plane.startsSessions?.(args.startsCommand ?? gate.providerCommand) ?? 1;
     for (let i = 0; i < starts; i++) {
       const claimed = admitSessionSlot(plane, args.agents, {
         key: args.key,
@@ -3001,21 +3084,32 @@ export function admitProviderGateStarts(
     // handoff never gaps (claims release only after the row lands),
     // so a snapshot taken before admission would see neither the
     // claim nor the row and admit past the cap.
+    //
+    // LOCK ORDER: the census reaches the registry lock through the
+    // marker/handle sweeps (entryOccupies → nativeState →
+    // dropWorkMarker). A spawn inside prepareSpawn arrives holding the
+    // registry lock already (re-entrant below); the loop lane holds
+    // nothing — so the registry lock is taken BEFORE the provider
+    // mutex here, making every path registry → provider. Without it
+    // the orders invert (loop holds provider, spawn holds registry)
+    // and the two waits outlast only on LOCK_WAIT_MS.
     const censusHome = args.home === undefined ? agentsHome(args.dir) : args.home;
-    const admission = admitProviderSlot(
-      gate.providerCap,
-      () =>
-        providerRegistryCensus(
-          args.dir,
-          censusHome,
-          readAgentRegistry(args.dir),
-          args.env,
-          gate.providerCap.provider
-        ),
-      {
-        key: args.key,
-        lane: isBatchSpawn(args.workerEnv) ? 'batch' : 'interactive',
-      }
+    const admission = withAgentRegistryLock(args.dir, () =>
+      admitProviderSlot(
+        gate.providerCap,
+        () =>
+          providerRegistryCensus(
+            args.dir,
+            censusHome,
+            readAgentRegistry(args.dir),
+            args.env,
+            gate.providerCap.provider
+          ),
+        {
+          key: args.key,
+          lane: isBatchSpawn(args.workerEnv) ? 'batch' : 'interactive',
+        }
+      )
     );
     if (admission !== undefined) {
       if (admission.refusal !== undefined) {
@@ -3242,10 +3336,11 @@ function prepareSpawn(
       agents,
       workerEnv: spec.env,
       quotaPlaneKind: sessionQuota?.plane.kind,
+      startsCommand: spawnedCommand,
     });
+    const providerGates = providerGate === undefined ? [] : [providerGate];
     const providerCap = providerGate?.providerCap;
     const providerCensus = providerGate?.providerCensus;
-    const providerPlaneKinds = providerGate?.providerPlaneKinds ?? EMPTY_KEYS;
     // true when the provider's own session plane IS the quota lane's —
     // the verdict then rides sessionQuota's admitSessionSlot (below)
     // instead of claiming a second slot for one session
@@ -3279,6 +3374,7 @@ function prepareSpawn(
             scope,
             liveByKind,
             budgetCharged,
+            startsCommand: spawnedCommand,
             out: crossKindReservations,
             ledgerOut: providerReservations,
           });
@@ -3292,9 +3388,7 @@ function prepareSpawn(
         scope,
         liveByKind,
         providerClaimedStarts,
-        providerPlaneKinds,
-        providerCap,
-        providerCensus,
+        providerGates,
         quotaPlaneKind: sessionQuota?.plane.kind,
         budgetCharged,
         out: crossKindReservations,

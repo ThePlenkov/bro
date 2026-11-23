@@ -31,7 +31,7 @@ export {
   renderDevinTranscript,
 } from './plane.ts';
 export { countDevinSessionStarts } from './starts.ts';
-export { commandCliNames } from './shell.ts';
+export { commandCliNames, commandWorkerClis } from './shell.ts';
 export {
   devinStorePath,
   devinUsageStatePath,
