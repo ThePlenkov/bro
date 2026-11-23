@@ -3955,15 +3955,12 @@ async function parseDialect<T>(
   }
   try {
     return { rreq, body: translate(rreq) };
-  } catch (err) {
+  } catch {
     // translation rejects loudly — a remote image, a shape the
-    // dialect can't carry; the client fixes the request
-    openaiError(
-      res,
-      400,
-      'invalid_request_error',
-      err instanceof Error ? err.message : String(err)
-    );
+    // dialect can't carry. Do not reflect the exception: translation
+    // errors may include user-controlled payloads or implementation
+    // details, and this is already a client-shape failure.
+    openaiError(res, 400, 'invalid_request_error', 'request could not be translated');
     return undefined;
   }
 }
