@@ -15,6 +15,7 @@ export interface BeadRow {
   created_at: string;
   closed_at?: string | null;
   assignee?: string | null;
+  description?: string | null;
   labels?: Array<string | { label?: string; name?: string }>;
   dependencies?: Array<{ type: string; depends_on_id?: string; depends_on_issue_id?: string }>;
 }
@@ -28,6 +29,7 @@ export interface BacklogIssue {
   created_at: string;
   parent?: string;
   assignee?: string;
+  description?: string;
   labels: string[];
   blocks: string[];
   blocked_by: string[];
@@ -111,6 +113,9 @@ function toIssue(r: BeadRow, e: Edges): BacklogIssue {
     created_at: r.created_at,
     parent: e.parentOf.get(r.id),
     assignee: r.assignee ?? undefined,
+    // descriptions ship capped — a snapshot stays a page-load payload,
+    // not the full issue archive
+    description: r.description ? String(r.description).slice(0, 4000) : undefined,
     labels: (r.labels ?? []).map(labelName),
     blocks: e.blocks.get(r.id) ?? [],
     blocked_by: e.blockedBy.get(r.id) ?? [],

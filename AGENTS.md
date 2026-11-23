@@ -74,14 +74,68 @@ Developing bro itself: see CONTRIBUTING.md.
   scanner flags → per-line `// NOSONAR` with the reason (the repo's
   convention — file-level exclusions are not honored); a test on a real
   spawned process → poll for the exec'd identity before asserting
-  (`spawn` resolves at fork; `/proc` reads the parent's env first).
+  (`spawn` resolves at fork; `/proc` reads the parent's env first);
+  a computed key used to call a function (`SORTS[k](a,b)`, `MAP[t](x)`)
+  → `Object.getOwnPropertyDescriptor(map, k)?.value?.(...)` — the
+  dynamic-call SAST rule fires on plain `obj[k](...)`, and the
+  descriptor read also neutralizes prototype keys like `__proto__`
+  (call it with the map as receiver and treat a missing or
+  non-callable value as a failed dispatch — `undefined` is not a
+  result);
+  interactive viewport state (zoom/pan/drag) → a `useViewport` hook +
+  a render-only `*Svg`/`*Canvas` component, not all inside the parent.
+
+  Reviewer bots flag a second class — semantics, not shape. Learned
+  the same way, same contract (write the right side first): enum-like
+  facets (status/type/priority) → derive the universe from the data,
+  a hard-coded list silently hides legal values; a fallible fetch →
+  throw or degrade with an explicit flag, `res.ok ? data : []` makes
+  an outage look like an empty queue (and cache fallback belongs to
+  the caller, or cached data reads as live); a list endpoint →
+  paginate, `per_page=100` is a cap not a promise; a caller-supplied
+  path → never `rm -rf` it on failure, fall back to a scratch dir;
+  a publish push to a shared ref → retry by re-parenting onto the
+  latest tip; `fetch` ≠ `pull` (fetch updates remote refs, pull
+  advances the working set — pick the verb that reaches the read
+  path); plumbing commits → export a git identity first; a
+  caller-supplied repo ref → normalize URL/ssh/slug before use; a
+  workflow that runs `.ts` directly → pin `setup-node` (the runner
+  default is older than unflagged type stripping); an exported
+  snapshot → write it AFTER the replication it mirrors, not before;
+  an external numeric field → `Number.isInteger` + a defined
+  fallback, bare `Number()` leaks NaN; a file that must ride an
+  `ls-files -i` artifact sync → it must be gitignored or it never
+  ships; a direction-bearing relation (blocks/parent) → verify the
+  dep semantics against real data before encoding `a.blocks = [b]`;
+  a render-scoped `Date.now()` (or any per-render value) feeding a
+  `useMemo` dep → freeze it per mount (`useState(() => Date.now())`)
+  only when the value is meant to stay mount-stable — an unstable dep
+  recomputes the memo every render; inputs derived from changing
+  props/state keep their real deps, and a value that must age wants
+  a recompute at that cadence, not a mount freeze; a React `key`
+  from display text → a semantic slot id (label keys collide across
+  slots, index keys trip S6479); one `git push` carrying refs of
+  different criticality → separate pushes, a rejected best-effort
+  mirror must never re-enter the critical ref's retry loop; a
+  `// NOSONAR` comment → it must sit on the exact line the scanner
+  attributes (the call's first line), and formatters reflow comments
+  — keep the flagged construct on one ≤width line so a trailing
+  NOSONAR sticks; rendered untrusted text → mark the node
+  "never dangerouslySetInnerHTML" — the comment is the guard the next
+  refactor reads.
 - **Loop with retro** — when a gate or check fails, iterate until it is
   green and learn from each failure: after every red round, name the
   concrete finding (which rule, which function), the shape that caused
   it, and the pattern that would have avoided it, then carry that
   pattern into the next write. A failure that teaches nothing produces
   the same failure again next PR — the retro is what makes the loop
-  converge instead of bouncing between flags.
+  converge instead of bouncing between flags. Review threads follow
+  the same loop: a fixed finding resolves silently, a rejected one
+  gets a one-line rationale in the thread, and a finding class the
+  lists above don't name yet becomes a new entry there — not just a
+  fix here. And never iterate by pushing and waiting for the App's
+  verdict: `npm run check:codescene` runs the same `cs delta` locally
+  and lists every finding in one pass — fix them all, then push once.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).

@@ -84,6 +84,7 @@ import { runJudgeCommand } from './commands/judge.ts';
 import { runLearnCommand } from './commands/learn.ts';
 import { runLoopCommand } from './commands/loop.ts';
 import { runMcpCommand } from './commands/mcp.ts';
+import { runMergeCommand } from './commands/merge.ts';
 import { runMeshCommand } from './commands/mesh.ts';
 import { runModeCommand } from './commands/mode.ts';
 import { runMsgCommand } from './commands/msg.ts';
@@ -244,6 +245,24 @@ export const PLUGINS: BroPlugin[] = [
     planSchema: (doc, source) => parseActPlan(doc, source),
     planVersion: ACT_PLAN_VERSION,
     runPlan: plan => applyActPlan(plan as ActPlan),
+  }),
+  definePlugin({
+    name: 'merge',
+    group: 'review',
+    summary: 'Full merge cycle as one verb: ready → gate → automerge → retro [--bead|--no-retro]',
+    run: runMergeCommand,
+    skill: 'act',
+    contract: {
+      flags: {
+        '--bead <id>': 'beads the merge discharges on MERGED',
+        '--no-retro': 'skip the post-merge retro record',
+      },
+      exits: {
+        0: 'MERGED — cycle complete',
+        1: 'blocked gate, closed-unmerged PR, timeout, or merge failure',
+        2: 'usage',
+      },
+    },
   }),
   definePlugin({
     name: 'convoy',

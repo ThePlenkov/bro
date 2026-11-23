@@ -11,15 +11,17 @@ const GITHUB = 'https://github.com/ThePlenkov/bro';
 const BASE_URL = import.meta.env.BASE_URL;
 const DOCS = `${BASE_URL}docs`;
 
-// Same channel as /debt: beads has no HTTP surface (its store is dolt
-// chunks on refs/dolt/data), so a merge-to-main workflow (and `bro sync`
-// locally) exports a compact backlog.json onto the data ref and the page
-// reads it by sha off raw.githubusercontent. GitHub issues and open PRs
+// Beads have no HTTP surface (the store is dolt chunks on refs/dolt/data),
+// so `bro sync` and the merge-to-main workflow export a compact
+// backlog.json onto refs/bro/data — and mirror the same commit onto the
+// heads twin `bro-data`, which raw.githubusercontent serves without the
+// API quota the ref-resolution call costs. GitHub issues and open PRs
 // come live from the REST API in the same request wave.
+const BRANCH = 'bro-data';
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
-const SNAPSHOT_KEY = 'bro:backlog:snapshot:v1';
+const SNAPSHOT_KEY = 'bro:backlog:snapshot:v2';
 const BACKLOG_PATH = '.agents/backlog.json';
 
 interface Bead {
@@ -35,6 +37,8 @@ interface Bead {
   blocked_by: string[];
   closed_children: number;
   open_children: number;
+  description?: string;
+  assignee?: string;
 }
 
 interface Snapshot {
@@ -49,6 +53,7 @@ interface GhItem {
   kind: 'issue' | 'pr';
   created_at: string;
   url: string;
+  body?: string;
   labels: string[];
 }
 
@@ -119,6 +124,7 @@ interface GhRaw {
   html_url: string;
   created_at: string;
   pull_request?: unknown;
+  body?: string | null;
   labels?: Array<{ name?: string } | string>;
 }
 
@@ -128,6 +134,7 @@ const toGh = (i: GhRaw): GhItem => ({
   kind: i.pull_request ? 'pr' : 'issue',
   created_at: i.created_at,
   url: i.html_url,
+  body: i.body ?? undefined,
   labels: (i.labels ?? []).map(l => (typeof l === 'string' ? l : (l.name ?? ''))),
 });
 
@@ -146,32 +153,31 @@ async function fetchGh(): Promise<GhItem[]> {
   return out;
 }
 
-// Beads are required (the whole point of the page); the github feed
-// degrades to a flagged empty list — beads stay live either way.
-// Cache fallback lives in the hook's catch, so cached data never
-// gets marked as fresh.
-async function load(): Promise<Data> {
+// The heads twin costs no API quota — the ref-resolution path stays as
+// the fallback until the branch exists (pre-migration snapshots).
+async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
+  const branch = await fetch(`${RAW}/${BRANCH}/${BACKLOG_PATH}`);
+  if (branch.ok) {
+    return { snapshot: (await branch.json()) as Snapshot, sha: BRANCH };
+  }
   const sha = await resolveSha();
-  const [backlogRes, gh] = await Promise.all([
-    fetch(`${RAW}/${sha}/${BACKLOG_PATH}`),
-    fetchGh().catch(() => null),
-  ]);
-  if (!backlogRes.ok) throw new Error(`backlog.json not on refs/bro/data (${backlogRes.status})`);
-  const snapshot = (await backlogRes.json()) as Snapshot;
+  const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`);
+  if (!res.ok) throw new Error(`backlog.json not on refs/bro/data (${res.status})`);
+  return { snapshot: (await res.json()) as Snapshot, sha };
+}
 
-  const data: Data = {
+// Beads are required (the whole point of the page) — the snapshot
+// paints alone, the github queue streams in after. A slow or
+// rate-limited api must never gate the beads: cached gh rows show in
+// the meantime, the verdict arrives as ghUnavailable.
+async function load(): Promise<Data> {
+  const { snapshot, sha } = await fetchSnapshot();
+  return {
     snapshot,
-    gh: gh ?? readCache()?.gh ?? [],
+    gh: readCache()?.gh ?? [],
     sha,
     fetchedAt: new Date().toISOString(),
-    ghUnavailable: gh === null,
   };
-  try {
-    window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
-  } catch {
-    /* quota — live next load instead */
-  }
-  return data;
 }
 
 function ageDays(iso: string, now: number): number {
@@ -201,6 +207,7 @@ function normalizeGh(g: GhItem): Bead {
     blocked_by: [],
     closed_children: 0,
     open_children: 0,
+    description: g.body?.slice(0, 4000),
   };
 }
 
@@ -509,35 +516,57 @@ function RelRow({
   );
 }
 
-// Detail meta lines are data too — each row is {when, text|element}.
+// The detail panel is where a bead becomes readable: badges for what it
+// is, the description for what it says, and every relation a jump away
 function Detail({
   b,
+  kids,
   onClose,
   onJump,
-}: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
+}: Readonly<{ b: Bead; kids: string[]; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
-  const parent = b.parent ? ` · parent ${b.parent}` : '';
-  const meta: string[] = [
-    `${b.type} · P${b.priority || '—'} · ${b.status}${parent}`,
-    ...(b.labels.length ? [`labels: ${b.labels.join(', ')}`] : []),
-    ...(b.open_children + b.closed_children
-      ? [`children: ${b.open_children} open / ${b.closed_children} closed`]
-      : []),
+  const badges: Array<[id: string, label: string, color: string | undefined]> = [
+    ['type', b.type, TYPE_COLOR[b.type]],
+    ['status', b.status, b.status === 'open' ? undefined : '#d8b56a'],
+    ['priority', `P${b.priority || '—'}`, undefined],
+    ...(isGh ? [['source', 'github', undefined] as [string, string, undefined]] : []),
   ];
   return (
     <aside className="bl-detail">
       <div className="bl-detail-head">
         <code>{b.id}</code>
-        <button type="button" onClick={onClose}>
+        <button type="button" onClick={onClose} aria-label="close">
           ✕
         </button>
       </div>
+      <p className="bl-detail-badges">
+        {badges.map(([id, label, color]) => (
+          <span key={id} className="bl-badge" style={color ? { borderColor: color } : undefined}>
+            {label}
+          </span>
+        ))}
+      </p>
       <p className="bl-detail-title">{b.title}</p>
-      {meta.map(m => (
-        <p key={m} className="bl-detail-meta">
-          {m}
+      <p className="bl-detail-meta">
+        opened {b.created_at.slice(0, 10)}
+        {b.assignee ? ` · ${b.assignee}` : ''}
+      </p>
+      {b.labels.length > 0 && (
+        <p className="bl-detail-badges">
+          {b.labels.map(l => (
+            <span key={l} className="bl-badge dim">
+              {l}
+            </span>
+          ))}
         </p>
-      ))}
+      )}
+      {/* untrusted plain text — never switch this to dangerouslySetInnerHTML */}
+      {b.description && <div className="bl-detail-desc">{b.description}</div>}
+      {b.open_children + b.closed_children > 0 && (
+        <p className="bl-detail-meta">
+          children: {b.open_children} open / {b.closed_children} closed
+        </p>
+      )}
       {isGh && (
         <p>
           <a href={`${GITHUB}/${b.id.startsWith('pr-') ? 'pull' : 'issues'}/${b.id.split('-')[1]}`}>
@@ -545,6 +574,8 @@ function Detail({
           </a>
         </p>
       )}
+      {b.parent && <RelRow label="parent" ids={[b.parent]} onJump={onJump} />}
+      <RelRow label="children" ids={kids} onJump={onJump} />
       <RelRow label="blocks" ids={b.blocks} onJump={onJump} />
       <RelRow label="blocked by" ids={b.blocked_by} onJump={onJump} />
     </aside>
@@ -595,7 +626,30 @@ function useBacklog(): LoadState {
   useEffect(() => {
     let alive = true;
     load()
-      .then(data => alive && setState({ kind: 'ready', data, cached: false }))
+      .then(data => {
+        if (!alive) return;
+        setState({ kind: 'ready', data, cached: false });
+        fetchGh()
+          .then(items => {
+            if (!alive) return;
+            try {
+              window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ ...data, gh: items }));
+            } catch {
+              /* quota — live next load instead */
+            }
+            setState(s =>
+              s.kind === 'ready'
+                ? { ...s, data: { ...s.data, gh: items, ghUnavailable: false } }
+                : s
+            );
+          })
+          .catch(() => {
+            if (!alive) return;
+            setState(s =>
+              s.kind === 'ready' ? { ...s, data: { ...s.data, ghUnavailable: true } } : s
+            );
+          });
+      })
       .catch(err => {
         const cached = readCache();
         if (alive) {
@@ -732,73 +786,178 @@ function ListView({ rows, onPick }: Readonly<{ rows: Row[]; onPick: (b: Bead) =>
   );
 }
 
+// A chip without a group name is a guess; a value without a count hides
+// the shape of the backlog — facets render as labeled fieldsets, each
+// option carrying its row count
+function FacetGroup({ legend, chips }: Readonly<{ legend: string; chips: ChipItem[] }>) {
+  return (
+    <fieldset className="bl-facet">
+      <legend>{legend}</legend>
+      {chips.map(c => (
+        <Chip key={c.v} active={c.active} label={c.label} onClick={c.onClick} />
+      ))}
+    </fieldset>
+  );
+}
+
+// per-facet counts over the source-filtered rows — "how many of each
+// kind exist here", independent of the other facets' selection
+function facetCounts(rows: Row[]) {
+  const c = {
+    status: new Map<string, number>(),
+    type: new Map<string, number>(),
+    priority: new Map<number, number>(),
+  };
+  for (const r of rows) {
+    c.status.set(r.b.status, (c.status.get(r.b.status) ?? 0) + 1);
+    c.type.set(r.b.type, (c.type.get(r.b.type) ?? 0) + 1);
+    c.priority.set(r.b.priority, (c.priority.get(r.b.priority) ?? 0) + 1);
+  }
+  return c;
+}
+
+function facetCount<T>(m: Map<T, number>, k: T): string {
+  return ` · ${m.get(k) ?? 0}`;
+}
+
 function FilterControls({
   f,
   setF,
   view,
   setView,
   uni,
+  srcRows,
+  nBeads,
+  nGh,
 }: Readonly<{
   f: Filters;
   setF: React.Dispatch<React.SetStateAction<Filters>>;
   view: 'list' | 'graph';
   setView: (v: 'list' | 'graph') => void;
   uni: { status: string[]; type: string[]; priority: number[] };
+  srcRows: Row[];
+  nBeads: number;
+  nGh: number;
 }>) {
   const set = <K extends keyof Filters>(k: K, v: Filters[K]) => setF(p => ({ ...p, [k]: v }));
   const toggle = (k: 'status' | 'type' | 'priority', v: string | number) =>
     setF(p => ({ ...p, [k]: toggleSet(p[k] as Set<string | number>, v) }));
-  const groups: ChipItem[][] = [
-    (['all', 'beads', 'github'] as const).map(s => ({
-      v: s,
-      label: s,
-      active: f.source === s,
-      onClick: () => set('source', s),
-    })),
-    uni.status.map(s => ({
-      v: s,
-      label: s,
-      active: f.status.has(s),
-      onClick: () => toggle('status', s),
-    })),
-    uni.type.map(t => ({
-      v: t,
-      label: t,
-      active: f.type.has(t),
-      onClick: () => toggle('type', t),
-    })),
-    uni.priority.map(p => ({
-      v: `p${p}`,
-      label: `P${p}`,
-      active: f.priority.has(p),
-      onClick: () => toggle('priority', p),
-    })),
+  const clear = () =>
+    setF({
+      q: '',
+      status: new Set(uni.status),
+      type: new Set(uni.type),
+      priority: new Set(uni.priority),
+      source: 'all',
+      orphansOnly: false,
+    });
+  const counts = facetCounts(srcRows);
+  const narrowed =
+    f.q !== '' ||
+    f.source !== 'all' ||
+    f.orphansOnly ||
+    f.status.size !== uni.status.length ||
+    f.type.size !== uni.type.length ||
+    f.priority.size !== uni.priority.length;
+
+  const facets: Array<[string, ChipItem[]]> = [
     [
-      {
-        v: 'orphans',
-        label: 'orphans only',
-        active: f.orphansOnly,
-        onClick: () => set('orphansOnly', !f.orphansOnly),
-      },
+      'source',
+      [
+        {
+          v: 'all',
+          label: `all · ${nBeads + nGh}`,
+          active: f.source === 'all',
+          onClick: () => set('source', 'all'),
+        },
+        {
+          v: 'beads',
+          label: `beads · ${nBeads}`,
+          active: f.source === 'beads',
+          onClick: () => set('source', 'beads'),
+        },
+        {
+          v: 'github',
+          label: `github · ${nGh}`,
+          active: f.source === 'github',
+          onClick: () => set('source', 'github'),
+        },
+      ],
     ],
-    (['list', 'graph'] as const).map(v => ({
-      v,
-      label: v,
-      active: view === v,
-      onClick: () => setView(v),
-    })),
+    [
+      'status',
+      uni.status.map(s => ({
+        v: s,
+        label: `${s}${facetCount(counts.status, s)}`,
+        active: f.status.has(s),
+        onClick: () => toggle('status', s),
+      })),
+    ],
+    [
+      'type',
+      uni.type.map(t => ({
+        v: t,
+        label: `${t}${facetCount(counts.type, t)}`,
+        active: f.type.has(t),
+        onClick: () => toggle('type', t),
+      })),
+    ],
+    [
+      'priority',
+      uni.priority.map(p => ({
+        v: `p${p}`,
+        label: `P${p}${facetCount(counts.priority, p)}`,
+        active: f.priority.has(p),
+        onClick: () => toggle('priority', p),
+      })),
+    ],
+    [
+      'scope',
+      [
+        {
+          v: 'orphans',
+          label: 'orphans only',
+          active: f.orphansOnly,
+          onClick: () => set('orphansOnly', !f.orphansOnly),
+        },
+      ],
+    ],
+    [
+      'view',
+      (['list', 'graph'] as const).map(v => ({
+        v,
+        label: v,
+        active: view === v,
+        onClick: () => setView(v),
+      })),
+    ],
   ];
 
   return (
     <section className="bl-controls">
-      <input
-        type="search"
-        placeholder="filter by id / title / label…"
-        value={f.q}
-        onChange={e => set('q', e.target.value)}
-        className="bl-search"
-      />
-      <ChipRow groups={groups} />
+      <div className="bl-controls-top">
+        <input
+          type="search"
+          placeholder="filter by id / title / label…"
+          value={f.q}
+          onChange={e => set('q', e.target.value)}
+          className="bl-search"
+        />
+        <button
+          type="button"
+          className="bl-chip"
+          onClick={clear}
+          disabled={!narrowed}
+          title="reset every filter"
+        >
+          clear filters
+        </button>
+      </div>
+      <div className="bl-facets">
+        {facets.map(([legend, chips]) => (
+          <FacetGroup key={legend} legend={legend} chips={chips} />
+        ))}
+      </div>
     </section>
   );
 }
@@ -808,7 +967,7 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   const [picked, setPicked] = useState<Bead | null>(null);
 
   const beads = data.snapshot.issues;
-  const now = Date.now();
+  const [now] = useState(() => Date.now());
   const uni = useMemo(() => universes([...beads, ...data.gh.map(normalizeGh)]), [beads, data.gh]);
   const [f, setF] = useState<Filters>({
     q: '',
@@ -819,8 +978,33 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
     orphansOnly: false,
   });
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPicked(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // rows after the source facet — the population the facet counts describe
+  const srcRows = useMemo(() => {
+    const rows = [
+      ...beads.map(b => toRow(b, 'beads' as const, now)),
+      ...data.gh.map(g => toRow(normalizeGh(g), 'github' as const, now)),
+    ];
+    return f.source === 'all' ? rows : rows.filter(r => r.src === f.source);
+  }, [beads, data.gh, f.source, now]);
+
   const filtered = useMemo(() => applyFilters(beads, data.gh, f, now), [beads, data.gh, f, now]);
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
+  // children are derivable from the parent column — no extra export field
+  const childIds = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const b of beads) {
+      if (b.parent) (m.get(b.parent) ?? m.set(b.parent, []).get(b.parent)!).push(b.id);
+    }
+    return m;
+  }, [beads]);
   const pick = (id: string) => {
     const t = byId.get(id);
     if (t) setPicked(t);
@@ -839,7 +1023,16 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
         </section>
       )}
       <Stats data={data} gh={data.gh} inView={filtered.length} />
-      <FilterControls f={f} setF={setF} view={view} setView={setView} uni={uni} />
+      <FilterControls
+        f={f}
+        setF={setF}
+        view={view}
+        setView={setView}
+        uni={uni}
+        srcRows={srcRows}
+        nBeads={beads.length}
+        nGh={data.gh.length}
+      />
 
       {view === 'list' && <ListView rows={filtered} onPick={setPicked} />}
       {view === 'graph' && (
@@ -847,7 +1040,14 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
           <Graph items={filtered.filter(x => x.src === 'beads').map(x => x.b)} onPick={setPicked} />
         </section>
       )}
-      {picked && <Detail b={picked} onClose={() => setPicked(null)} onJump={pick} />}
+      {picked && (
+        <Detail
+          b={picked}
+          kids={childIds.get(picked.id) ?? []}
+          onClose={() => setPicked(null)}
+          onJump={pick}
+        />
+      )}
     </>
   );
 }
