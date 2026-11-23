@@ -104,7 +104,8 @@ function toIssue(r: BeadRow, e: Edges): BacklogIssue {
     id: r.id,
     title: r.title,
     status: r.status.replaceAll('_', '-'),
-    priority: Number(r.priority),
+    // reject non-integer input instead of letting NaN slip into the page
+    priority: Number.isInteger(Number(r.priority)) ? Number(r.priority) : 4,
     type: r.issue_type,
     created_at: r.created_at,
     parent: e.parentOf.get(r.id),
