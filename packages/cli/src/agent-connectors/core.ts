@@ -1328,14 +1328,28 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_WORKTREE',
   'BRO_BRANCH',
   'BRO_REPO',
-  // the worker's private tmpdir is connector-owned too (spec
-  // bro-v96mp) — an ambient or spec.env TMPDIR would re-aim os.tmpdir()
-  // litter (an nx daemon's ~73M `nx@latest` probe install per
-  // workspace) at the tmpfs the pin exists to keep it off
-  'TMPDIR',
-  'TMP',
-  'TEMP',
 ]);
+
+/** The worker's private tmpdir triple (spec bro-v96mp) — kept OUT of
+ *  AGENT_PIN_KEYS because a pin is only a boundary where the connector
+ *  injects a replacement. Where it does (native env / tmux -e with a
+ *  resolved workerTmpDir), a caller-supplied TMPDIR would re-aim
+ *  os.tmpdir() litter (an nx daemon's ~73M `nx@latest` probe install
+ *  per workspace) at the tmpfs the pin exists to keep it off, so the
+ *  caller copy drops. Where no replacement rides — docker (a
+ *  container's /tmp is not the host's; ambient copies already drop via
+ *  DOCKER_HOST_ENV), gascity (the env table is the caller's only
+ *  channel), or a repo-less spawn whose workerTmpDir resolved
+ *  undefined — stripping the value guards nothing and silently loses
+ *  an explicit operator choice. */
+const TMP_ENV_KEYS = new Set(['TMPDIR', 'TMP', 'TEMP']);
+
+/** The env-build drop predicate: identity pins drop on every backend
+ *  (the connector injects its own); the tmpdir triple drops only when
+ *  `tmpPinned` — this spawn actually injects the workerTmpDir pin — so
+ *  a caller/ambient TMPDIR survives wherever no replacement exists. */
+const envKeyDropped = (key: string, tmpPinned: boolean): boolean =>
+  AGENT_PIN_KEYS.has(key) || (tmpPinned && TMP_ENV_KEYS.has(key));
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
 function getCredentialScope(env: AgentConnectorEnv, backend: string) {
@@ -4833,7 +4847,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               const ambient = Object.fromEntries(
                 Object.entries(process.env).filter((e): e is [string, string] => {
                   if (e[1] === undefined) return false;
-                  if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                  // the tmpdir triple drops only when a pin replaces
+                  // it — a repo-less spawn keeps the ambient tmpdir
+                  if (envKeyDropped(e[0], workerTmp !== undefined)) return false;
+                  if (GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
                   // ambient BRO_BATCH is stripped, not passed — the
                   // marker reaches the worker only via spec.env below
                   return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
@@ -4842,7 +4859,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               const fromSpec = Object.fromEntries(
                 Object.entries(spec.env ?? {}).filter((e): e is [string, string] => {
                   if (e[1] === undefined) return false;
-                  if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                  if (envKeyDropped(e[0], workerTmp !== undefined)) return false;
+                  if (GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
                   return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
                 })
               );
@@ -5358,6 +5376,10 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           });
           spawnLease = lease;
           const session = `bro-${agentId}`;
+          // resolved once for both consumers — the envFile filter drops
+          // TMP* only when the pin rides -e below, and the mkdir runs
+          // inside the failure guard (spec bro-v96mp)
+          const workerTmp = workerTmpDir(spec.repoRoot, agentId);
           // a leftover session with our name (crash between entry and
           // kill, a respawn over a zombie) would make new-session fail
           // 'duplicate' — clear it; kill-session on a missing target is
@@ -5370,83 +5392,94 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           // -e; they're also filtered OUT of the file so sourcing can
           // never redirect the claim store or re-badge the worker
           const envFile = join(home, `${agentId}.env`);
-          // the same credential-scope policy native/docker enforce (spec
-          // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
-          // ambient env the allowlist excludes, and the ambient BRO_BATCH
-          // marker is stripped the same way (only spec.env supplies it)
-          const policy = getCredentialScope(env, 'tmux');
-          const ambient = Object.entries({ ...process.env, ...spec.env })
-            .filter(
-              (e): e is [string, string] =>
-                e[1] !== undefined &&
-                /^[A-Za-z_]\w*$/.test(e[0]) &&
-                !AGENT_PIN_KEYS.has(e[0]) &&
-                !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-                isAllowedByEnvPolicy(
-                  e[0],
-                  e[1],
-                  'tmux',
-                  spec,
-                  env,
-                  policy,
-                  Object.hasOwn(spec.env ?? {}, e[0])
-                )
-            )
-            .map(([k, v]) => `export ${k}=${shQuote(v)}`)
-            .join('\n');
-          writePrivateFileSync(envFile, `${ambient}\n`);
-          const worker = workerWithResume(spec.worker, resumeSessionId);
-          const cliBadge = workerCliBadge(worker, command);
-          const workerTmp = workerTmpDir(spec.repoRoot, agentId);
-          const envArgs = [
-            ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol),
-            // the tmpdir pin (spec bro-v96mp) — non-secret path, -e is
-            // where tmux pins ride
-            ...workerTmpEnvPins(workerTmp),
-          ].flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-          ensureWorkerTmpDir(workerTmp);
-          // the pane sources the ambient env and drops the file, then runs
-          // the agent; $? lands in the .exit file before the pipeline
-          // drains, tee keeps a log the way native's fd redirect does.
-          // Session dies with the pane → has-session IS liveness. tmux
-          // runs the command through the user's default-shell — a
-          // non-POSIX one (fish) would eat the braces, so sh -c pins the
-          // dialect the same way native's spawn does.
-          // Worker payloads (spec bro-5hx1.1): a 'template' command
-          // substitutes wholesale; an 'argv' worker becomes an exec line
-          // with every element single-quoted — the provider argv never
-          // re-parses into a different program.
-          warnNoPromptFile(worker, command);
-          const runLine = workerRunLine(worker, command);
-          // stderr splits into its own capture when the backend records
-          // one; without a capture it folds into the stdout tee so the
-          // worker's noise still lands in the .log (docker does the same)
-          const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
-          const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
-          const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
-          const res = tmuxRun(socket, [
-            'new-session',
-            '-d',
-            '-s',
-            session,
-            '-c',
-            spec.repoRoot,
-            ...envArgs,
-            paneCmd,
-          ]);
-          if (res.code !== 0) {
-            rmSync(envFile, { force: true }); // a failed spawn must not leave ambient env on disk
+          try {
+            // the same credential-scope policy native/docker enforce (spec
+            // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
+            // ambient env the allowlist excludes, and the ambient BRO_BATCH
+            // marker is stripped the same way (only spec.env supplies it)
+            const policy = getCredentialScope(env, 'tmux');
+            const ambient = Object.entries({ ...process.env, ...spec.env })
+              .filter(
+                (e): e is [string, string] =>
+                  e[1] !== undefined &&
+                  /^[A-Za-z_]\w*$/.test(e[0]) &&
+                  !envKeyDropped(e[0], workerTmp !== undefined) &&
+                  !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+                  isAllowedByEnvPolicy(
+                    e[0],
+                    e[1],
+                    'tmux',
+                    spec,
+                    env,
+                    policy,
+                    Object.hasOwn(spec.env ?? {}, e[0])
+                  )
+              )
+              .map(([k, v]) => `export ${k}=${shQuote(v)}`)
+              .join('\n');
+            writePrivateFileSync(envFile, `${ambient}\n`);
+            const worker = workerWithResume(spec.worker, resumeSessionId);
+            const cliBadge = workerCliBadge(worker, command);
+            const envArgs = [
+              ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol),
+              // the tmpdir pin (spec bro-v96mp) — non-secret path, -e is
+              // where tmux pins ride
+              ...workerTmpEnvPins(workerTmp),
+            ].flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+            ensureWorkerTmpDir(workerTmp);
+            // the pane sources the ambient env and drops the file, then runs
+            // the agent; $? lands in the .exit file before the pipeline
+            // drains, tee keeps a log the way native's fd redirect does.
+            // Session dies with the pane → has-session IS liveness. tmux
+            // runs the command through the user's default-shell — a
+            // non-POSIX one (fish) would eat the braces, so sh -c pins the
+            // dialect the same way native's spawn does.
+            // Worker payloads (spec bro-5hx1.1): a 'template' command
+            // substitutes wholesale; an 'argv' worker becomes an exec line
+            // with every element single-quoted — the provider argv never
+            // re-parses into a different program.
+            warnNoPromptFile(worker, command);
+            const runLine = workerRunLine(worker, command);
+            // stderr splits into its own capture when the backend records
+            // one; without a capture it folds into the stdout tee so the
+            // worker's noise still lands in the .log (docker does the same)
+            const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
+            const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
+            const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
+            const res = tmuxRun(socket, [
+              'new-session',
+              '-d',
+              '-s',
+              session,
+              '-c',
+              spec.repoRoot,
+              ...envArgs,
+              paneCmd,
+            ]);
+            if (res.code !== 0) {
+              throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+            }
+          } catch (err) {
+            // ANY setup failure after the reservation hands its slots
+            // and env file back — a stranded slot starves the quota
+            // until its TTL lapses, and the ambient-secret env file
+            // must not outlive the failed launch (an unwritable
+            // bro-tmp is how this fires, spec bro-v96mp). The rethrow
+            // still reaches the outer catch, whose lease release is
+            // the existing fourth leg of this cleanup.
+            rmSync(envFile, { force: true });
             if (reservation !== undefined) {
               releaseSessionSlot(reservation);
             }
             releaseSessionStart(crossKindReservations);
-            releaseSpawnLease(dir, lease);
             try {
-              patchAgentRegistry(dir, spec.molStep, { spawnError: res.err });
+              patchAgentRegistry(dir, spec.molStep, {
+                spawnError: err instanceof Error ? err.message : String(err),
+              });
             } catch {
               // the entry landed already — the SpawnError still reports
             }
-            throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+            throw err;
           }
           // pane pid — a display handle like native's child pid, not the
           // liveness signal (has-session is); pidStart pins its identity
@@ -5912,8 +5945,10 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // identity pins are connector-owned — a caller value for
       // BEADS_DIR/BRO_BEAD_ID/... would redirect bead ops or re-badge
       // the worker, so the env table filters them out and re-injects
-      // the connector's own below
-      ([k]) => /^[A-Za-z_]\w*$/.test(k) && !AGENT_PIN_KEYS.has(k) && !GIT_REPOSITORY_ENV_KEYS.has(k)
+      // the connector's own below. gc injects no tmpdir pin — a caller
+      // TMPDIR is the caller's to keep (envKeyDropped's unpinned leg)
+      ([k]) =>
+        /^[A-Za-z_]\w*$/.test(k) && !envKeyDropped(k, false) && !GIT_REPOSITORY_ENV_KEYS.has(k)
     );
     // caller env plus the connector-owned identity pins — pins always
     // render so the table exists even when spec.env is empty
@@ -6829,7 +6864,11 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnect
       if (
         e[1] === undefined ||
         !/^[A-Za-z_]\w*$/.test(e[0]) ||
-        AGENT_PIN_KEYS.has(e[0]) ||
+        // no tmpdir pin rides into a container (its /tmp is not the
+        // host's), so an explicit spec.env TMPDIR passes — ambient TMP*
+        // still drop via DOCKER_HOST_ENV above, they would shadow the
+        // image's own tmpdir
+        envKeyDropped(e[0], false) ||
         GIT_REPOSITORY_ENV_KEYS.has(e[0])
       ) {
         return false;

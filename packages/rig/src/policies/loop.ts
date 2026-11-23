@@ -3173,20 +3173,24 @@ export function topFillers(
     }
     return false;
   };
-  /** One dir's entries, budget-charged as they stream — stops reading
-   *  once either budget is spent, so the listing itself can never
-   *  out-cost the walk. [] on any listing failure. */
-  const listEntries = (dir: string): Dirent[] => {
-    const out: Dirent[] = [];
+  /** One dir's entries, budget-charged as they stream — a lazy
+   *  generator so the CONSUMER measures each entry before the next
+   *  dirent reads: an eager listing would burn the whole budget on
+   *  enumeration and the measurer's first spent() check would discard
+   *  every entry that streamed (the '…' marker would then report a
+   *  filler at 0 bytes). Stops reading once either budget is spent, so
+   *  the listing itself can never out-cost the walk. An unlistable dir
+   *  yields nothing. */
+  function* listEntries(dir: string): Generator<Dirent> {
     let d: Dir | undefined;
     try {
       d = opendirSync(dir);
       for (let e = d.readSync(); e !== null; e = d.readSync()) {
         if (spent()) {
-          break;
+          return;
         }
         nodes += 1;
-        out.push(e);
+        yield e;
       }
     } catch {
       // unreadable or vanished mid-listing — what streamed still counts
@@ -3197,8 +3201,7 @@ export function topFillers(
         // already closed — nothing to leak
       }
     }
-    return out;
-  };
+  }
   const dirSize = (dir: string): number => {
     let total = 0;
     for (const e of listEntries(dir)) {
@@ -3221,13 +3224,15 @@ export function topFillers(
     return total;
   };
   // an unlistable root streams nothing — groups stays empty and the
-  // top3 check below answers '' exactly like the old early return. The
-  // listing itself charged its entries against the budget, so what
-  // streamed back is always processed — a spent check here would
-  // report '' the moment the listing alone filled the budget, hiding
-  // the very '…' report the truncation exists to print
-  const top = listEntries(path);
-  for (const e of top) {
+  // top3 check below answers '' exactly like the old early return.
+  // Entries interleave with their measurement now, so a spent check
+  // inside the loop retains the measured prefix (plus the '…' marker)
+  // instead of hiding it — and stops the stat/dirSize calls the moment
+  // the budget is gone rather than paying one per streamed entry
+  for (const e of listEntries(path)) {
+    if (spent()) {
+      break;
+    }
     const p = join(path, e.name);
     let bytes = 0;
     try {

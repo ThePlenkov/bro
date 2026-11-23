@@ -23,8 +23,8 @@ never land on the tmpfs at all.
 (`worktreeGitDir` = `<common>/worktrees/<n>` on a linked worktree,
 `<repo>/.git` on the main checkout). The native backend sets
 `TMPDIR`/`TMP`/`TEMP` in the spawned env; the tmux backend sends the
-same pins as `-e` flags (its ambient env file drops them via
-`AGENT_PIN_KEYS`). `mkdirSync(dir, {mode:0o700})` runs inside the
+same pins as `-e` flags (its ambient env file drops them only when
+the pin rides). `mkdirSync(dir, {mode:0o700})` runs inside the
 spawn guard — mkdtemp needs the parent.
 
 Why here and not in the working tree: a tmpdir in the checkout is a
@@ -34,11 +34,15 @@ remove` deletes the whole admin dir — so the litter dies with the
 worktree the reaper was already removing. Nothing new needs to reap
 the common case.
 
-`TMPDIR`/`TMP`/`TEMP` join `AGENT_PIN_KEYS`: ambient and spec.env
-copies are stripped on every backend the way identity pins are — a
-caller-supplied TMPDIR would re-aim the leak at the tmpfs. Docker is
-unaffected (`DOCKER_HOST_ENV` already dropped them; a container's /tmp
-is not the host's).
+`TMPDIR`/`TMP`/`TEMP` drop only where the backend injects the pin —
+an ambient or spec.env TMPDIR would re-aim the leak at the tmpfs the
+pin exists to keep it off. Where no replacement rides, the caller's
+value keeps: docker injects no pin (a container's /tmp is not the
+host's; ambient TMP* still drop via `DOCKER_HOST_ENV` so they cannot
+shadow the image's own tmpdir), gascity's env table is the caller's
+only channel, and a repo-less spawn whose `workerTmpDir` resolved
+undefined keeps the ambient tmpdir rather than losing it to a filter
+that guards nothing.
 
 What this covers: the worker process and everything it spawns — the
 agent CLI, `npm test`/`npm run build`, the nx daemon those start, the
@@ -54,8 +58,11 @@ the same verdict (owner liveness for `tmp-<pid>-*`, TTL+in-use
 otherwise). `workerTmpRoots(dir)` resolves them:
 `<common>/bro-tmp/<agentId>` (main checkout) plus
 `<common>/worktrees/*/bro-tmp/<agentId>` (linked worktrees whose admin
-dirs outlive a manual rm). An emptied root is `rmdir`'d with its
-contents; an unlistable root warns and skips, never fatal. `bro work
+dirs outlive a manual rm). An emptied root is `rmdir`'d only once it
+is provably orphaned — stale past the TTL AND no live registry claim
+names its agentId — under the same registry lock a spawn holds, so a
+claim landing mid-reap cannot lose its pinned TMPDIR; an unlistable
+root warns and skips, never fatal. `bro work
 prune` and `bro cleanup` both pass `workerTmpRoots(cwd)`.
 
 ### 3. The disk floor alarms earlier and names the filler
@@ -97,5 +104,8 @@ truncation marks `…`.
 - A killed-by-rate-limit worker leaves no `/tmp/tmp-*` behind — the
   litter lands under `<worktree gitdir>/bro-tmp/` and dies with
   `git worktree remove`.
-- `/tmp` stays <50% during a cap-2 run — nothing worker-owned writes
-  there, and the floor holds at 50% used regardless.
+- `/tmp` idles near half-free during a cap-2 run — nothing
+  worker-owned writes there, and the loop holds new claims once free
+  space falls below the effective floor. The floor is an admission
+  threshold, not a usage cap: workers already running may write below
+  it.

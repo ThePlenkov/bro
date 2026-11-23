@@ -331,4 +331,22 @@ describe('topFillers — the filler report on a breach edge (bro-v96mp)', () => 
       assert.match(out, /…/);
     });
   });
+
+  test('a measured prefix survives truncation — partial sizes, not zeros', () => {
+    withDir(dir => {
+      // one dir of 2M files under a tiny budget: an eager listing burns
+      // the nodes on enumeration and the measurer's first spent() check
+      // would discard every streamed entry — the group then reports 0
+      // ('big 1M'). Entries measured as they stream keep what they read
+      mkdirSync(join(dir, 'big'));
+      for (let i = 0; i < 10; i++) {
+        writeFileSync(join(dir, 'big', `f${i}`), Buffer.alloc(2 * 1024 * 1024));
+      }
+      const out = topFillers(dir, { nodes: 5, ms: 60_000 });
+      const m = /big (\d+(?:\.\d+)?)M/.exec(out);
+      assert.ok(m !== null, `expected a big group, got: ${out}`);
+      assert.ok(Number(m[1]) > 1, `expected partial bytes, got: ${out}`);
+      assert.match(out, /…/);
+    });
+  });
 });

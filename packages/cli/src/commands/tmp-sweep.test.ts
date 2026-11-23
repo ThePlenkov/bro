@@ -437,4 +437,32 @@ describe('extra-root rmdir guard (bro-v96mp)', () => {
       assert.equal(existsSync(shell), false);
     });
   });
+
+  test('a stale shell whose registry is corrupt keeps — unknown is not orphan proof', () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-corrupt');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      mkdirSync(join(common, 'bro'), { recursive: true });
+      writeFileSync(join(common, 'bro', 'agents.json'), '{torn write — never valid json');
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    });
+  });
+
+  test('a stale shell outside any repo keeps — the registry path cannot resolve', () => {
+    // agentRegistryPath answers null off-repo: 'unknown', never the
+    // empty-registry 'free' a failed probe would fake — the pinned
+    // TMPDIR of a worker whose registry can't be read is not litter
+    const norepo = mkdtempSync(join(tmpdir(), 'bro-sweep-norepo-'));
+    try {
+      const shell = join(norepo, 'bro-tmp', 'agent-offrepo');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    } finally {
+      rmSync(norepo, { recursive: true, force: true });
+    }
+  });
 });

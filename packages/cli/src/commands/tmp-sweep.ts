@@ -27,7 +27,14 @@
 import { readdirSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { type AgentRegistryEntry, gitCommonDir, pidAlive, readAgentRegistry } from '@broject/core';
+import {
+  acquireAgentRegistryLock,
+  type AgentRegistryEntry,
+  agentRegistryPath,
+  gitCommonDir,
+  pidAlive,
+  readAgentRegistryFile,
+} from '@broject/core';
 import { registryEntryHoldsClaim } from '@broject/rig';
 
 const STALE_MS = 60 * 60 * 1000; // 1 hour
@@ -315,22 +322,21 @@ function rmdirIfEmpty(dir: string): void {
  *  worse than the litter the shell held. 'live' — a registry agent
  *  still holding its claim owns the shell; 'free' — the registry
  *  proves no owner (or none exists — orphan litter); 'unknown' —
- *  nothing could be proved, the fail-open verdict. */
-function rootOwnerVerdict(root: string): 'live' | 'free' | 'unknown' {
-  const gitdir = dirname(dirname(root));
-  const common = gitCommonDir(gitdir);
-  if (common === null) {
-    return 'unknown';
-  }
+ *  nothing could be proved, the fail-open verdict. `regPath` is the
+ *  agents.json the caller resolved — passed in so a failed git probe
+ *  can answer 'unknown' instead of masquerading as an empty registry
+ *  (readAgentRegistry answers {} on a probe failure — 'free' over a
+ *  live worker's shell is exactly the ENOENT race above). */
+function rootOwnerVerdict(root: string, regPath: string): 'live' | 'free' | 'unknown' {
   let reg: Record<string, AgentRegistryEntry>;
   try {
-    reg = readAgentRegistry(gitdir);
+    reg = readAgentRegistryFile(regPath);
   } catch {
     // a corrupt/unreadable registry can't prove orphan — keep
     return 'unknown';
   }
   const agentId = basename(root);
-  const home = join(common, 'bro', 'agents');
+  const home = join(dirname(regPath), 'agents');
   for (const e of Object.values(reg)) {
     if (e.agentId === agentId && registryEntryHoldsClaim(home, e)) {
       return 'live';
@@ -354,10 +360,33 @@ function rmdirRootIfOrphaned(root: string, ctx: RootCtx): void {
   } catch {
     return; // vanished or unreadable — nothing to prove against
   }
-  if (rootOwnerVerdict(root) !== 'free') {
+  const gitdir = dirname(dirname(root));
+  // the registry path resolves BEFORE the lock — a probe that cannot
+  // answer is 'unknown' (keep), never the empty-registry 'free' a
+  // failed read would fake; and a stalled git must not hold the
+  // spawn-side lock a probe would sit inside
+  const regPath = agentRegistryPath(gitdir);
+  if (regPath === null) {
     return;
   }
-  rmdirIfEmpty(root);
+  // verdict + rmdir under the same registry lock a spawn holds: a claim
+  // that lands between 'free' and the rmdir would pin TMPDIR at a shell
+  // the sweep then deletes — the worker's next mkdtemp dies ENOENT.
+  // A lock failure keeps the root — an unreaped empty shell is cheaper
+  // than a dead worker.
+  let release: (() => void) | undefined;
+  try {
+    release = acquireAgentRegistryLock(gitdir, { waitMs: 2_000 });
+  } catch {
+    return; // contention or no registry to lock — nothing proven, keep
+  }
+  try {
+    if (rootOwnerVerdict(root, regPath) === 'free') {
+      rmdirIfEmpty(root);
+    }
+  } finally {
+    release();
+  }
 }
 
 /** Shared sweep context — everything a per-entry decision needs that

@@ -2858,6 +2858,31 @@ describe('docker connector', () => {
     }
   });
 
+  test('a caller TMPDIR in spec.env reaches the container — docker pins no replacement', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      // docker injects no workerTmpDir pin (a container's /tmp is not
+      // the host's), so an explicit caller value must pass like any
+      // other spec.env key — silently dropping it loses the operator's
+      // scratch-dir choice for nothing (spec bro-v96mp review)
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', process.env.TMPDIR ?? 'UNSET')"
+        ),
+        env: { TMPDIR: '/custom-scratch' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '/custom-scratch');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('operator runArgs cannot shadow the contract name/workdir', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
     try {

@@ -641,6 +641,7 @@ export {
   RATE_BACKOFF_CAP_MS,
   rateDeathBackoff,
   readAgentRegistry,
+  readAgentRegistryFile,
   removeAgentRegistryEntries,
   agentRegistryLockDepth,
   rebindStep,
