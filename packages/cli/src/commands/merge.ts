@@ -78,6 +78,7 @@ interface MergeCtx {
   fetcher: ReturnType<typeof gateStateFetcher>;
   opts: Parameters<typeof waitForGate>[1];
   started: number;
+  cache: ReturnType<typeof prStateCache>;
   /** Thread ids the cycle opened on — the retro's evidence. */
   threadsAtStart: string[];
   /** Why the host still owns the landing on a settle timeout. */
@@ -152,6 +153,7 @@ function setupCycle(argv: string[]): MergeCtx {
     fetcher: gateStateFetcher(rev, t, cfg.act, cache, resolveLedger(process.cwd())),
     opts: waitOpts(rev, t, argv, parseTiming(argv), cache, 'merge wait'),
     started: Date.now(),
+    cache,
     threadsAtStart: [],
   };
 }
@@ -162,6 +164,9 @@ function setupCycle(argv: string[]): MergeCtx {
 async function readyPhase(ctx: MergeCtx, first: Awaited<ReturnType<MergeCtx['fetcher']>>) {
   if (first.state.state !== 'OPEN' || !first.state.isDraft) return;
   markReady(ctx.t);
+  // the ready flip obsoletes the feed entry — the gate must fetch the
+  // post-ready state, not re-serve the draft snapshot it blocked on
+  ctx.cache?.invalidate(ctx.t);
   console.log(`merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} marked ready`);
   emitLifecycle(process.cwd(), {
     kind: 'gate',
