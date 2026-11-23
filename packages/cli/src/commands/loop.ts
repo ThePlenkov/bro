@@ -896,6 +896,20 @@ async function resolveBeadLane(
 const shRender = (s: string): string =>
   /[\s'"\\]/.test(s) ? `'${s.replaceAll("'", String.raw`'\''`)}'` : s;
 
+/** Does this process GROUP still hold a live member? `detached: true`
+ *  makes a spawn's leader pid its group id — the group lives while any
+ *  descendant runs (a template's `worker >log 2>&1 &` survives the `sh
+ *  -c` leader's own exit). EPERM answers "yes" — the group exists but
+ *  refuses our signal; ESRCH is gone. */
+export function processGroupLive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin) — or off `base` when a stack already picked
  *  the fork point. An existing dir is reused as-is. */
@@ -1013,6 +1027,16 @@ function spawnAgent(
       say(ctx, `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${logNote}`);
     }
     ctx.stage = `worker pid=${child.pid ?? '?'}`;
+    // The run is over when the spawn's PROCESS GROUP empties, not when
+    // the `sh -c` leader exits — `detached: true` makes the leader's
+    // pid the group id, and a template that backgrounds its worker
+    // (`worker >log 2>&1 &`) frees the leader while the worker still
+    // runs. Resolving earlier would release the admission's claims
+    // while work still stands — the provider cap's ledger would seat
+    // a second start over a live one (coderabbit PR #1094). A worker
+    // that double-forks out of the group escapes this watch by
+    // construction — nothing left names it.
+    const groupLive = (): boolean => child.pid !== undefined && processGroupLive(child.pid);
     const settle = (code: number | null): void => {
       // custody returns to the loop process — the worker is gone but the
       // claim isn't: findPr and the member's watchBegin still stand
@@ -1045,10 +1069,19 @@ function spawnAgent(
     child.on('exit', (code, signal) => {
       if (code === null) {
         console.error(`loop: agent died on signal ${signal ?? '?'}`);
-        settle(null);
-        return;
       }
-      settle(code);
+      // the leader is gone — the verdict lands when the GROUP is empty:
+      // a detached worker still running holds the claims it was
+      // admitted under
+      const drain = (): void => {
+        if (!groupLive()) {
+          settle(code);
+          return;
+        }
+        const timer = setTimeout(drain, 1000);
+        timer.unref();
+      };
+      drain();
     });
   });
 }
@@ -1253,14 +1286,20 @@ export function admitLaneSessions(
   try {
     // the provider lanes resolved + pre-flighted before ANY claim
     // lands — a full account lane refuses before a kind claim can hold
-    // a slot against it. The lane's provider is its own pick or every
-    // armed provider entry the spawned command launches (a compound
-    // template can open sessions on several lanes — each judges) —
+    // a slot against it. The lane's provider is its own pick PLUS
+    // every OTHER armed provider entry the spawned command launches —
+    // a named `combo` template opening sessions on a second account
+    // lane still owes that lane's cap (the explicit pick heads the
+    // list for alias resolution; discovery adds the rest). With no
+    // named provider the spawned command's launches alone decide —
     // never the agents.native.provider default a template escape
     // bypassed.
     const laneProviders =
       lane.provider !== undefined
-        ? [lane.provider]
+        ? [
+            lane.provider,
+            ...providersForSpawnedCommand(ctx.env, spawnedCmd).filter(p => p !== lane.provider),
+          ]
         : providersForSpawnedCommand(ctx.env, spawnedCmd);
     const providerGates: ProviderGate[] = [];
     for (const provider of laneProviders) {

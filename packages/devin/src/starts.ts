@@ -16,11 +16,13 @@ import {
   atCommandPosition,
   base,
   MAX_WRAPPED_COMMAND_DEPTH,
+  readsStdinScript,
   redirectIndexes,
-  segments,
+  type Segment,
+  scanSegments,
+  type Token,
   tokens,
   wrappedCommand,
-  type Token,
 } from './shell.ts';
 
 /** The devin CLI's subcommands that never open a session: they read or
@@ -106,8 +108,8 @@ function devinCommandPositions(toks: Token[]): number[] {
 }
 
 /** The starts one shell segment opens. */
-function countSegmentStarts(segment: string, depth: number): number {
-  const toks = tokens(segment);
+function countSegmentStarts(segment: Segment, depth: number): number {
+  const toks = tokens(segment.text);
   let count = 0;
   for (const at of devinCommandPositions(toks)) {
     if (invocationStartsSession(toks, at)) {
@@ -117,6 +119,16 @@ function countSegmentStarts(segment: string, depth: number): number {
   const wrapped = depth < MAX_WRAPPED_COMMAND_DEPTH ? wrappedCommand(toks) : undefined;
   if (wrapped !== undefined) {
     count += countDevinSessionStarts(wrapped, depth + 1);
+    return count;
+  }
+  // a here-document feeding a shell is the shell's PROGRAM — `sh
+  // <<EOF`␤`devin -p x`␤`EOF` opens a devin session the way `sh -c
+  // 'devin -p x'` does (feeding `cat` it stays data). The body draws
+  // on the same depth budget as a -c layer.
+  if (segment.bodies.length > 0 && depth < MAX_WRAPPED_COMMAND_DEPTH && readsStdinScript(toks)) {
+    for (const body of segment.bodies) {
+      count += countDevinSessionStarts(body, depth + 1);
+    }
   }
   return count;
 }
@@ -124,7 +136,7 @@ function countSegmentStarts(segment: string, depth: number): number {
 /** How many devin sessions would this command open? */
 export function countDevinSessionStarts(command: string, depth = 0): number {
   let count = 0;
-  for (const segment of segments(command)) {
+  for (const segment of scanSegments(command)) {
     count += countSegmentStarts(segment, depth);
   }
   return count;

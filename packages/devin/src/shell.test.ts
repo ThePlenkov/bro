@@ -200,6 +200,96 @@ describe('commandCliNames', () => {
     assert.deepEqual(commandCliNames("devin -p ''"), ['devin']);
     assert.deepEqual(commandCliNames("'' devin"), []);
   });
+
+  test('a here-document feeding a shell is the program (greptile PR #1094)', () => {
+    // `sh <<EOF` reads its SCRIPT from stdin — the body launches what
+    // it names, the way `sh -c '…'` does
+    assert.deepEqual(commandCliNames("sh <<'EOF'\ndevin -p x\nEOF"), ['devin']);
+    assert.deepEqual(commandCliNames('sh <<EOF\ndevin -p x\nother-cli b\nEOF'), [
+      'devin',
+      'other-cli',
+    ]);
+    // scanning resumes after the delimiter — claude is real
+    assert.deepEqual(commandCliNames('sh <<EOF\ndevin -p x\nEOF\nclaude b'), ['devin', 'claude']);
+    // `sh -s` still reads stdin — operands after it are positional
+    assert.deepEqual(commandCliNames('sh -s x <<EOF\ndevin -p a\nEOF'), ['devin']);
+    // feeding anything else the body is DATA — cat swallows it, a file
+    // operand makes it the script's own stdin, and a -c operand wins
+    assert.deepEqual(commandCliNames('cat <<EOF\ndevin -p x\nEOF'), ['cat']);
+    assert.deepEqual(commandCliNames('bash setup.sh <<EOF\ndevin -p x\nEOF'), ['bash']);
+    assert.deepEqual(commandCliNames("sh -c 'echo hi' <<EOF\ndevin -p x\nEOF"), ['echo']);
+    // the `<<` binds the segment it sits in — the heredoc feeds cat's
+    // stdin while sh runs on the pipe (cat is no shell — data stays data)
+    assert.deepEqual(commandCliNames('cat <<EOF | sh\ndevin -p x\nEOF'), ['cat', 'sh']);
+  });
+
+  test('unquoted subshell parens bound commands (coderabbit PR #1094)', () => {
+    // `(…) &` is a backgrounded subshell — the commands inside run
+    assert.deepEqual(commandCliNames('(devin -p x) & wait'), ['devin', 'wait']);
+    assert.deepEqual(commandCliNames('(devin -p a; claude b)'), ['devin', 'claude']);
+    // a command substitution runs its innards too
+    assert.deepEqual(commandCliNames('x=$(devin -p a)'), ['devin']);
+    // quoted or escaped parens are word text
+    assert.deepEqual(commandCliNames("echo '(devin -p x)'"), ['echo']);
+    assert.deepEqual(commandCliNames('devin -p \\(x\\)'), ['devin']);
+    // `if`/`while`/`!` precede the command the shell runs — they are
+    // keywords, not the launch
+    assert.deepEqual(commandCliNames('if devin -p x; then echo ok; fi'), ['devin', 'echo']);
+    assert.deepEqual(commandCliNames('! devin -p x'), ['devin']);
+    assert.deepEqual(commandCliNames('while devin -p x; do echo ok; done'), ['devin', 'echo']);
+  });
+
+  test('a redirection glued to a word still splits (coderabbit PR #1094)', () => {
+    // `worker-cli>run.log` runs `worker-cli` — the angle needs no
+    // whitespace ahead of it
+    assert.deepEqual(commandCliNames('worker-cli>run.log run'), ['worker-cli']);
+    assert.deepEqual(commandCliNames('devin>log -p x'), ['devin']);
+    assert.deepEqual(commandCliNames('devin -p x>log'), ['devin']);
+    // `&>` glued to the command word too
+    assert.deepEqual(commandCliNames('worker-cli&>run.log run'), ['worker-cli']);
+    // a bare digit run ahead of the angle is the op's fd prefix, not a
+    // word — `2>err` rebinds stderr and still names the command
+    assert.deepEqual(commandCliNames('devin 2>err -p x'), ['devin']);
+    assert.deepEqual(commandCliNames('2>err worker-cli run'), ['worker-cli']);
+    // two redirects glued together split at each op
+    assert.deepEqual(commandCliNames('worker-cli>out>err run'), ['worker-cli']);
+    // an escaped or quoted angle stays word text
+    assert.deepEqual(commandCliNames('worker-cli\\>log run'), ['worker-cli>log']);
+    assert.deepEqual(commandCliNames("'devin>x' -p a"), ['devin>x']);
+  });
+
+  test('an empty attached here-string operand keeps the next word (coderabbit PR #1094)', () => {
+    // `<<<''` carries an EMPTY quoted operand — `list` is devin's
+    // argument, not the here-string: both spellings read alike
+    assert.deepEqual(commandCliNames("devin <<<'' list"), ['devin']);
+    assert.deepEqual(commandCliNames("devin <<< '' list"), ['devin']);
+    // a detached op still takes its word from the next token
+    assert.deepEqual(commandCliNames('devin <<< list'), ['devin']);
+  });
+
+  test('wrapper option reading sees through redirects (coderabbit PR #1094)', () => {
+    // `command >log -v devin` is a LOOKUP — `>log` is plumbing, `-v`
+    // is the flag; nothing launches
+    assert.deepEqual(commandCliNames('command >log -v devin'), ['command']);
+    // the runner form still resolves past the redirect
+    assert.deepEqual(commandCliNames('command >log devin -p x'), ['devin']);
+    // `--` ends option parsing — what follows is the command even
+    // when it reads like a flag
+    assert.deepEqual(commandCliNames('sudo -- devin -p x'), ['devin']);
+    assert.deepEqual(commandCliNames('command -- devin -p x'), ['devin']);
+  });
+
+  test('escaped quotes inside a heredoc delimiter decode (coderabbit PR #1094)', () => {
+    // `<<"E\"OF"` delimits on E"OF — the escaped quote does not close
+    // the run, so the body below it stays body and the devin AFTER
+    // the delimiter is the real launch
+    assert.deepEqual(commandCliNames('cat <<"E\\"OF"\ndevin -p x\nE"OF\ndevin real'), [
+      'cat',
+      'devin',
+    ]);
+    // a single-quoted run decodes nothing — `\` stays literal
+    assert.deepEqual(commandCliNames("cat <<'E\\OF'\nx\nE\\OF\ndevin -p a"), ['cat', 'devin']);
+  });
 });
 
 describe('commandWorkerClis', () => {

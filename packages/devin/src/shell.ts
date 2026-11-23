@@ -25,8 +25,25 @@ export function base(token: Token): string {
 }
 
 /** The shell keywords that sit where a command sits (`then devin …`) —
- *  they are not commands themselves. */
-const SHELL_KEYWORDS = new Set(['do', 'done', 'else', 'elif', 'fi', 'then', '{', '}']);
+ *  they are not commands themselves. `if`/`while`/`until`/`!` belong:
+ *  their follower is a command the shell RUNS (the condition — `if
+ *  devin; then …` launches devin). `for`/`case`/`in`/`[[` do not —
+ *  their follower is a variable or a pattern, and naming the keyword
+ *  itself (inert) beats misreading the word behind it as a command. */
+const SHELL_KEYWORDS = new Set([
+  '!',
+  'do',
+  'done',
+  'else',
+  'elif',
+  'fi',
+  'if',
+  'then',
+  'until',
+  'while',
+  '{',
+  '}',
+]);
 
 /** Is this token an environment assignment (`FOO=bar`)? The `=` must be
  *  raw — `FOO\=bar` is a word named `FOO=bar`, not an assignment — and
@@ -41,8 +58,12 @@ export function isAssignment(token: Token): boolean {
   return token.literalAt === undefined || token.literalAt > match[0].length - 1;
 }
 
-/** The characters that end a shell segment. */
-const SEPARATORS = new Set([';', '&', '|', '\n']);
+/** The characters that end a shell segment. `(`/`)` are operators too —
+ *  `(devin -p x) & wait` runs devin inside the subshell group, and the
+ *  split costs nothing elsewhere: `$(…)`/`<(…)` substitutions DO run
+ *  their innards, and arithmetic/`case`-pattern residue is an inert
+ *  cli name. Quoted or escaped parens stay word text. */
+const SEPARATORS = new Set([';', '&', '|', '\n', '(', ')']);
 
 /** Is the character at `i` escaped — preceded by an ODD run of
  *  backslashes (`\>` is literal text; `\\>` is a backslash then a real
@@ -118,14 +139,39 @@ function heredocAt(command: string, i: number): { hd: Heredoc; end: number } | u
     started = true;
     if (QUOTES.has(c)) {
       // a quoted run inside the delimiter — the quotes are NOT part of
-      // the word the body lines must equal
-      const close = command.indexOf(c, j + 1);
-      if (close === -1) {
+      // the word the body lines must equal. Inside DOUBLE quotes bash's
+      // own escapes still decode (`\"` is a literal quote, never the
+      // close — `<<"E\"OF"` delimits on E"OF, not E\); a single-quoted
+      // run decodes nothing. An unterminated run eats the rest — the
+      // shell itself refuses it, nothing to queue.
+      let k = j + 1;
+      let closed = false;
+      while (k < command.length) {
+        const d = command.charAt(k);
+        if (d === c) {
+          closed = true;
+          break;
+        }
+        if (c === '"' && d === '\\' && k + 1 < command.length) {
+          const e = command.charAt(k + 1);
+          if (e === '"' || e === '\\' || e === '$' || e === '`') {
+            delimiter += e;
+            k += 2;
+            continue;
+          }
+          if (e === '\n') {
+            k += 2; // a continuation — the pair vanishes
+            continue;
+          }
+        }
+        delimiter += d;
+        k++;
+      }
+      if (!closed) {
         j = command.length;
         break;
       }
-      delimiter += command.slice(j + 1, close);
-      j = close;
+      j = k;
       continue;
     }
     if (c === '\\' && j + 1 < command.length) {
@@ -138,23 +184,24 @@ function heredocAt(command: string, i: number): { hd: Heredoc; end: number } | u
 }
 
 /** One heredoc's body — lines until the delimiter line (tabs folded
- *  for `<<-`). Returns the index of the newline that ENDS the
- *  delimiter line, or the input's end when the body never terminates. */
-function skipHeredocBody(command: string, from: number, hd: Heredoc): number {
+ *  for `<<-`). Returns the body text plus the index of the newline
+ *  that ENDS the delimiter line, or the input's end when the body
+ *  never terminates. */
+function heredocBody(command: string, from: number, hd: Heredoc): { body: string; end: number } {
   let i = from;
   while (i < command.length) {
     const nl = command.indexOf('\n', i);
     const end = nl === -1 ? command.length : nl;
     const line = command.slice(i, end);
     if ((hd.stripTabs ? line.replace(/^\t+/, '') : line) === hd.delimiter) {
-      return end;
+      return { body: command.slice(from, i), end };
     }
     if (nl === -1) {
-      return command.length;
+      return { body: command.slice(from), end: command.length };
     }
     i = nl + 1;
   }
-  return i;
+  return { body: command.slice(from), end: i };
 }
 
 /** The shell segments of a command — the split happens OUTSIDE quotes,
@@ -165,16 +212,26 @@ function skipHeredocBody(command: string, from: number, hd: Heredoc): number {
  *  (`devin -p '#tag'`, `a#b`) — and so does a `#` behind an ESCAPE: an
  *  escaped char is word text wherever it lands, so `\ ` keeps the word
  *  open and `echo \ #; devin x` still runs `devin`. The lines a
- *  here-document redirects are its command's DATA, not segments —
- *  `cat <<EOF`␤`devin -p x`␤`EOF` launches `cat`, never `devin`. */
-export function segments(command: string): string[] {
-  const out: string[] = [];
+ *  here-document redirects never scan as segments — they are their
+ *  command's own stdin (data to `cat <<EOF`, the PROGRAM to `sh
+ *  <<EOF`), so each body stays attached to the segment whose `<<`
+ *  wrote it and the caller tells the two apart. */
+export interface Segment {
+  text: string;
+  /** The here-document bodies queued on this segment's command — in
+   *  op order when one line queues several (`cat <<A <<B`). */
+  bodies: string[];
+}
+
+export function scanSegments(command: string): Segment[] {
+  const out: Segment[] = [];
   let current = '';
   let quote: string | null = null;
   let comment = false;
   // the heredoc ops this line queued — their bodies arrive AFTER the
-  // line's newline, in op order, and scan as no command
-  const heredocs: Heredoc[] = [];
+  // line's newline, in op order, each owned by the segment index its
+  // `<<` sits in (`current` lands at out.length when next pushed)
+  const heredocs: { hd: Heredoc; seg: number }[] = [];
   // mid-word: a `#` opens a comment only at a word's START — after
   // whitespace, a separator, or nothing. An escaped char is word text
   // even when it IS whitespace (`\ ` continues the word).
@@ -237,21 +294,27 @@ export function segments(command: string): string[] {
     ) {
       const found = heredocAt(command, i);
       if (found !== undefined) {
-        heredocs.push(found.hd);
+        heredocs.push({ hd: found.hd, seg: out.length });
         current += command.slice(i, found.end);
         i = found.end - 1;
         continue;
       }
     }
     if (SEPARATORS.has(ch) && !isOperatorGlue(command, i)) {
-      out.push(current);
+      out.push({ text: current, bodies: [] });
       current = '';
       inWord = false;
       if (ch === '\n' && heredocs.length > 0) {
-        // the queued bodies are this line's stdin — data lines, never
-        // commands; scanning resumes after the LAST delimiter
-        for (const hd of heredocs) {
-          i = skipHeredocBody(command, i + 1, hd);
+        // the queued bodies are this line's stdin — never segments of
+        // their own; scanning resumes after the LAST delimiter. Each
+        // lands on the segment its `<<` sat in — the push above made
+        // every one of them already exist.
+        let at = i + 1;
+        for (const { hd, seg } of heredocs) {
+          const got = heredocBody(command, at, hd);
+          out.at(seg)?.bodies.push(got.body);
+          at = got.end + 1;
+          i = got.end;
         }
         heredocs.length = 0;
       }
@@ -260,8 +323,14 @@ export function segments(command: string): string[] {
     current += ch;
     inWord = !/\s/.test(ch);
   }
-  out.push(current);
-  return out.map(s => s.trim()).filter(s => s !== '');
+  out.push({ text: current, bodies: [] });
+  return out.map(s => ({ text: s.text.trim(), bodies: s.bodies })).filter(s => s.text !== '');
+}
+
+/** The segment texts alone — the pre-bodies shape kept for callers
+ *  that never read a heredoc's payload. */
+export function segments(command: string): string[] {
+  return scanSegments(command).map(s => s.text);
 }
 
 /** The tokens of a shell segment, quotes honoured — a quoted run is ONE
@@ -338,6 +407,29 @@ export function tokens(segment: string): Token[] {
       literalAt = undefined;
       continue;
     }
+    if (ch === '<' || ch === '>' || (ch === '&' && segment.charAt(i + 1) === '>')) {
+      // an unquoted redirection starts mid-word too — `worker-cli>log
+      // run` launches `worker-cli`. The word ends here UNLESS the
+      // char continues an op run (`>>`, `&>` — the tail stays glued
+      // only while it stayed raw) or the word so far is a bare fd
+      // number (`2>err` rebinds fd 2 — `2` is the op's own prefix,
+      // not a word). Quoted and escaped angles never reach this
+      // branch — they are word text above.
+      const tail = current.length - 1;
+      const continuesOp =
+        tail >= 0 &&
+        /[<>&]/.test(current.charAt(tail)) &&
+        (literalAt === undefined || literalAt > tail);
+      const fdPrefix = literalAt === undefined && /^\d+$/.test(current);
+      if (current !== '' && !continuesOp && !fdPrefix) {
+        out.push(...token(current, quoted, literalAt));
+        current = '';
+        quoted = false;
+        literalAt = undefined;
+      }
+      current += ch;
+      continue;
+    }
     current += ch;
   }
   out.push(...token(current, quoted, literalAt));
@@ -408,9 +500,12 @@ export function redirectIndexes(toks: Token[]): Set<number> {
       continue;
     }
     skip.add(i);
-    if (match[0].length === t.text.length) {
+    if (match[0].length === t.text.length && t.literalAt === undefined) {
       // the op's word sits in the next token — it is spent on the
-      // target (file, fd, heredoc delimiter), never re-examined
+      // target (file, fd, heredoc delimiter), never re-examined. A
+      // literal run glued to the op IS the operand already — `<<<''`
+      // carries an empty here-string (`literalAt` marks where it
+      // starts), so `devin <<<'' list` keeps `list` an argument.
       skip.add(++i);
     }
   }
@@ -435,7 +530,7 @@ export function commandIndex(toks: Token[]): number {
     if (!WRAPPERS.has(name)) {
       return i;
     }
-    if (isLookup(toks, i)) {
+    if (isLookup(toks, i, skip)) {
       // `command -v devin` LOOKS the binary up — it does not run it
       return i;
     }
@@ -450,12 +545,18 @@ function isSkipped(token: Token): boolean {
   return isAssignment(token) || SHELL_KEYWORDS.has(token.text);
 }
 
-/** Is this wrapper a lookup (`command -v X`) rather than a runner? */
-function isLookup(toks: Token[], at: number): boolean {
+/** Is this wrapper a lookup (`command -v X`) rather than a runner?
+ *  Redirects interleave freely — `command >log -v devin` still looks
+ *  `devin` up, it runs nothing. */
+function isLookup(toks: Token[], at: number, skip: ReadonlySet<number>): boolean {
   if (base(toks.at(at) as Token) !== 'command') {
     return false;
   }
-  const flag = toks.at(at + 1)?.text;
+  let flagAt = at + 1;
+  while (skip.has(flagAt)) {
+    flagAt++;
+  }
+  const flag = toks.at(flagAt)?.text;
   return flag === '-v' || flag === '-V';
 }
 
@@ -471,6 +572,7 @@ function skipWrapperArgs(
 ): number {
   let i = from;
   let operands = WRAPPER_OPERANDS.has(base(wrapper)) ? 1 : 0;
+  let optionsDone = false;
   while (i < toks.length) {
     if (skip.has(i)) {
       i++;
@@ -480,7 +582,13 @@ function skipWrapperArgs(
     if (next === undefined) {
       break;
     }
-    if (next.text.startsWith('-')) {
+    if (!optionsDone && next.text === '--') {
+      // options end — a `-…` word behind `--` is the operand/command
+      optionsDone = true;
+      i++;
+      continue;
+    }
+    if (!optionsDone && next.text.startsWith('-')) {
       i = skipOption(toks, i, next);
       continue;
     }
@@ -591,6 +699,54 @@ export function wrappedCommand(toks: Token[]): string | undefined {
   return undefined;
 }
 
+/** Is this shell's program its stdin? `sh <<EOF` runs the here-
+ *  document body as a script where `cat <<EOF` swallows it as data —
+ *  the heredoc's lines are commands only when a command-shell reads
+ *  its program from stdin. A `-c` operand or a file operand supplies
+ *  the program instead (the body is then the script's own stdin —
+ *  data, like cat's), `-s` names the stdin program explicitly
+ *  (operands after it are its $0/args), and `-`/`--` end the options
+ *  — what follows is the script FILE. */
+export function readsStdinScript(toks: Token[]): boolean {
+  const at = commandIndex(toks);
+  const shell = toks.at(at);
+  if (shell === undefined || !COMMAND_SHELLS.has(base(shell))) {
+    return false;
+  }
+  // a redirect is the shell's own plumbing, not an operand — the
+  // `<<EOF` that queues the body sits in this skip set itself
+  const skip = redirectIndexes(toks);
+  let stdin = false; // `-s` passed — operands behind it are positional
+  let optionsDone = false;
+  for (let i = at + 1; i < toks.length; i++) {
+    if (skip.has(i)) {
+      continue;
+    }
+    const flag = toks.at(i)?.text ?? '';
+    if (!optionsDone && (flag === '--' || flag === '-')) {
+      optionsDone = true;
+      continue;
+    }
+    if (!optionsDone && isShellCommandFlag(flag)) {
+      return false; // a -c operand supplies the program
+    }
+    if (!optionsDone && SHELL_VALUE_OPTION.test(flag)) {
+      i++; // the option's own value — not the program
+      while (skip.has(i)) {
+        i++;
+      }
+      continue;
+    }
+    if (!optionsDone && flag.length > 1 && (flag.startsWith('-') || flag.startsWith('+'))) {
+      stdin ||= flag.includes('s');
+      continue;
+    }
+    // a bare operand is the script FILE — the body is its stdin data
+    return stdin;
+  }
+  return true;
+}
+
 /** How many `-c` layers a reader unwraps — deeper nesting is a string
  *  a prompt carries, not a wrapper a spawn wrote. */
 export const MAX_WRAPPED_COMMAND_DEPTH = 2;
@@ -604,8 +760,8 @@ export const MAX_WRAPPED_COMMAND_DEPTH = 2;
  *  start. */
 export function commandCliNames(command: string, depth = 0): string[] {
   const out: string[] = [];
-  for (const segment of segments(command)) {
-    const toks = tokens(segment);
+  for (const segment of scanSegments(command)) {
+    const toks = tokens(segment.text);
     const word = toks.at(commandIndex(toks));
     if (word === undefined || word.text === '') {
       // a quoted EMPTY command (`'' devin`) launches nothing a lane
@@ -615,6 +771,17 @@ export function commandCliNames(command: string, depth = 0): string[] {
     const wrapped = depth < MAX_WRAPPED_COMMAND_DEPTH ? wrappedCommand(toks) : undefined;
     if (wrapped !== undefined) {
       out.push(...commandCliNames(wrapped, depth + 1));
+      continue;
+    }
+    // a here-document feeding a shell IS the program — `sh <<EOF`
+    // reads its commands from the body. Feeding anything else it is
+    // data (`cat <<EOF`) the launch count never sees. The body counts
+    // against the same depth budget as a -c script — it is the same
+    // class of wrap.
+    if (segment.bodies.length > 0 && depth < MAX_WRAPPED_COMMAND_DEPTH && readsStdinScript(toks)) {
+      for (const body of segment.bodies) {
+        out.push(...commandCliNames(body, depth + 1));
+      }
       continue;
     }
     out.push(base(word));

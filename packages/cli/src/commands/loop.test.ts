@@ -30,6 +30,7 @@ import {
   claimAuthorityNote,
   declaredClaimCapability,
   loopRefTails,
+  processGroupLive,
   resolveBeadsDir,
   resolveLoopLane,
   resumeSessionFor,
@@ -1338,6 +1339,67 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
       else process.env.XDG_DATA_HOME = prevXdg;
     }
   });
+
+  test('a named provider lane still owes every OTHER provider its template launches (coderabbit PR #1094)', () => {
+    // lane.provider names 'prov' — but the combo template also
+    // launches beta-cli: with beta's lane full the spawn must refuse
+    // on 'provB', not sail through on the named lane alone
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const dirB = tmpDir('bro-beta-resv-');
+    const cliStarts = (cli: string) => (cmd: string) =>
+      commandCliNames(cmd).filter(c => c === cli).length;
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('alpha-cli'),
+        },
+        {
+          kind: 'beta',
+          detectsCli: c => c === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('beta-cli'),
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA }, beta: { reservationsDir: dirB } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              provB: { type: 'cli', command: 'beta-cli b' },
+            },
+            { prov: 9, provB: 1 }
+          );
+          const lane = templateLane('alpha-cli a; beta-cli b', 'prov');
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // the discovered beta lane claimed its start too — both
+            // census dirs hold a row
+            assert.equal(countSessionReservations(dirA), 1);
+            assert.equal(countSessionReservations(dirB), 1);
+            // the second spawn refuses on the FULL beta lane even
+            // though the named 'prov' lane has headroom left
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'provB' lane cap reached/.test(err.message)
+            );
+            assert.equal(countSessionReservations(dirB), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
 });
 
 // --- admitLaneSessions — the raw-template lane claims one slot per start ---
@@ -1615,5 +1677,39 @@ describe('admitLaneSessions — a multi-start command owes the lane every start 
       clearSessionPlanes();
       for (const plane of prior) registerSessionPlane(plane);
     }
+  });
+});
+
+// --- processGroupLive — a detached worker holds the group past the leader exit ---
+
+describe('processGroupLive (coderabbit PR #1094)', () => {
+  test('a backgrounded worker keeps the spawn group live after `sh -c` exits', async () => {
+    // `detached: true` makes the leader's pid the group id; `sleep … &`
+    // frees the leader while the sleeper still runs — the group must
+    // read live until the sleeper itself is gone
+    const { spawn } = await import('node:child_process');
+    const { once } = await import('node:events');
+    const child = spawn('sh', ['-c', 'sleep 0.6 & exit 0'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    await once(child, 'exit');
+    const pid = child.pid;
+    assert.notEqual(pid, undefined);
+    assert.equal(processGroupLive(pid as number), true);
+    // the sleeper ends — the group drains and reads gone
+    const deadline = Date.now() + 5000;
+    while (processGroupLive(pid as number) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(processGroupLive(pid as number), false);
+  });
+
+  test('a finished spawn reads gone', async () => {
+    const { spawn } = await import('node:child_process');
+    const { once } = await import('node:events');
+    const child = spawn('sh', ['-c', 'exit 0'], { detached: true, stdio: 'ignore' });
+    await once(child, 'exit');
+    assert.equal(processGroupLive(child.pid as number), false);
   });
 });

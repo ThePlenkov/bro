@@ -150,4 +150,50 @@ describe('countDevinSessionStarts', () => {
     assert.equal(countDevinSessionStarts('devin -p "run devin later; then stop"'), 1);
     assert.equal(countDevinSessionStarts('devin -p "a && devin b"'), 1);
   });
+
+  test('a here-document feeding a shell runs its lines (greptile PR #1094)', () => {
+    // `sh <<EOF` reads the body as its program — the devin inside
+    // starts a session the way `sh -c 'devin -p x'` would
+    assert.equal(countDevinSessionStarts("sh <<'EOF'\ndevin -p x\nEOF"), 1);
+    assert.equal(countDevinSessionStarts('sh <<EOF\ndevin -p x\ndevin acp\nEOF'), 2);
+    // feeding a non-shell the same body is data — cat never launches
+    assert.equal(countDevinSessionStarts('cat <<EOF\ndevin -p x\nEOF'), 0);
+    // a file operand or a -c script supplies the program instead —
+    // the body is then the script's own stdin
+    assert.equal(countDevinSessionStarts('bash setup.sh <<EOF\ndevin -p x\nEOF'), 0);
+    assert.equal(countDevinSessionStarts("sh -c 'true' <<EOF\ndevin -p x\nEOF"), 0);
+    // the body's verbs read like a command line's — `devin list`
+    // opens nothing wherever it runs
+    assert.equal(countDevinSessionStarts('sh <<EOF\ndevin list\nEOF'), 0);
+  });
+
+  test('a backgrounded subshell group still counts (coderabbit PR #1094)', () => {
+    assert.equal(countDevinSessionStarts('(devin -p x) & wait'), 1);
+    assert.equal(countDevinSessionStarts('(devin -p a; devin -p b) & wait'), 2);
+    assert.equal(countDevinSessionStarts('x=$(devin -p a)'), 1);
+    // quoted parens are word text — no command hides in them
+    assert.equal(countDevinSessionStarts("echo '(devin -p x)'"), 0);
+  });
+
+  test('a redirection glued to a word still splits (coderabbit PR #1094)', () => {
+    assert.equal(countDevinSessionStarts('devin>log -p x'), 1);
+    assert.equal(countDevinSessionStarts('devin -p x>log'), 1);
+    assert.equal(countDevinSessionStarts('devin&>log -p x'), 1);
+    // the fd prefix stays glued to its op — `2>err` is plumbing
+    assert.equal(countDevinSessionStarts('devin 2>err -p x'), 1);
+  });
+
+  test('an empty attached here-string operand keeps the verb (coderabbit PR #1094)', () => {
+    // `<<<''` carries the empty operand itself — `list` is devin's
+    // verb, a read-only one: attached and spaced spellings agree
+    assert.equal(countDevinSessionStarts("devin <<<'' list"), 0);
+    assert.equal(countDevinSessionStarts("devin <<< '' list"), 0);
+    assert.equal(countDevinSessionStarts("devin <<<'' -p x"), 1);
+  });
+
+  test('a lookup behind a redirect is still a lookup (coderabbit PR #1094)', () => {
+    assert.equal(countDevinSessionStarts('command >log -v devin'), 0);
+    assert.equal(countDevinSessionStarts('command >log devin -p x'), 1);
+    assert.equal(countDevinSessionStarts('sudo -- devin -p x'), 1);
+  });
 });
