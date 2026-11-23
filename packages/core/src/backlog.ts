@@ -88,8 +88,9 @@ function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
   for (const r of rows) {
     for (const d of r.dependencies ?? []) {
       const tgt = d.depends_on_id ?? d.depends_on_issue_id;
-      // hasOwn — a prototype key like `__proto__` must not reach the map
-      if (tgt && Object.hasOwn(DEP_HANDLERS, d.type)) DEP_HANDLERS[d.type](r.id, tgt, ctx);
+      // descriptor read — a computed key never reaches a plain obj[k]
+      // call, and a prototype key like `__proto__` yields no handler
+      if (tgt) Object.getOwnPropertyDescriptor(DEP_HANDLERS, d.type)?.value?.(r.id, tgt, ctx);
     }
   }
   return ctx.e;

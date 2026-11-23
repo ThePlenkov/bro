@@ -401,47 +401,82 @@ function GraphNode({ n, onPick }: Readonly<{ n: GNode; onPick: (b: Bead | null) 
   );
 }
 
-function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | null) => void }>) {
-  const [flat, setFlat] = useState(false);
+// zoom/pan/drag is interaction state — it lives in a hook, not inside
+// the component that renders the toolbar
+function useViewport() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const drag = useRef<{ x: number; y: number } | null>(null);
+  return {
+    zoom,
+    pan,
+    drag,
+    setPan,
+    zoomIn: () => setZoom(z => Math.min(4, z * 1.25)),
+    zoomOut: () => setZoom(z => Math.max(0.15, z / 1.25)),
+    reset: () => {
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+    },
+  };
+}
+
+type Viewport = ReturnType<typeof useViewport>;
+
+function GraphSvg({
+  g,
+  view,
+  onPick,
+}: Readonly<{ g: ReturnType<typeof layout>; view: Viewport; onPick: (b: Bead | null) => void }>) {
+  const onDrag = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!view.drag.current) return;
+    const k = g.w / e.currentTarget.getBoundingClientRect().width / view.zoom;
+    view.setPan(p => ({
+      x: p.x + (e.clientX - view.drag.current!.x) * k,
+      y: p.y + (e.clientY - view.drag.current!.y) * k,
+    }));
+    view.drag.current = { x: e.clientX, y: e.clientY };
+  };
+  return (
+    <svg
+      role="img"
+      viewBox={`0 0 ${g.w} ${g.h}`}
+      style={{
+        width: '100%',
+        height: 'auto',
+        display: 'block',
+        background: '#0e1410',
+        cursor: 'grab',
+      }}
+      onMouseDown={e => (view.drag.current = { x: e.clientX, y: e.clientY })}
+      onMouseUp={() => (view.drag.current = null)}
+      onMouseLeave={() => (view.drag.current = null)}
+      onMouseMove={onDrag}
+    >
+      <title>backlog dependency graph</title>
+      <g transform={`translate(${view.pan.x},${view.pan.y}) scale(${view.zoom})`}>
+        {g.edges.map(e => (
+          <EdgeLine key={`${e.kind}${e.x1},${e.y1},${e.x2},${e.y2}`} e={e} />
+        ))}
+        {g.nodes.map(n => (
+          <GraphNode key={n.bead.id} n={n} onPick={onPick} />
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | null) => void }>) {
+  const [flat, setFlat] = useState(false);
+  const view = useViewport();
   const g = useMemo(() => layout(items, flat), [items, flat]);
 
   const tools: ChipItem[] = [
     { v: 'flat', label: 'include flat roots', active: flat, onClick: () => setFlat(f => !f) },
-    {
-      v: 'zout',
-      label: 'zoom −',
-      active: false,
-      onClick: () => setZoom(z => Math.max(0.15, z / 1.25)),
-    },
-    {
-      v: 'zin',
-      label: 'zoom +',
-      active: false,
-      onClick: () => setZoom(z => Math.min(4, z * 1.25)),
-    },
-    {
-      v: 'reset',
-      label: 'reset',
-      active: false,
-      onClick: () => {
-        setZoom(1);
-        setPan({ x: 0, y: 0 });
-      },
-    },
+    { v: 'zout', label: 'zoom −', active: false, onClick: view.zoomOut },
+    { v: 'zin', label: 'zoom +', active: false, onClick: view.zoomIn },
+    { v: 'reset', label: 'reset', active: false, onClick: view.reset },
   ];
-
-  const onDrag = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!drag.current) return;
-    const k = g.w / e.currentTarget.getBoundingClientRect().width / zoom;
-    setPan(p => ({
-      x: p.x + (e.clientX - drag.current!.x) * k,
-      y: p.y + (e.clientY - drag.current!.y) * k,
-    }));
-    drag.current = { x: e.clientX, y: e.clientY };
-  };
 
   return (
     <div className="bl-graphwrap">
@@ -451,31 +486,7 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
           drag to pan · click node for details · red edge = blocks
         </span>
       </div>
-      <svg
-        role="img"
-        viewBox={`0 0 ${g.w} ${g.h}`}
-        style={{
-          width: '100%',
-          height: 'auto',
-          display: 'block',
-          background: '#0e1410',
-          cursor: 'grab',
-        }}
-        onMouseDown={e => (drag.current = { x: e.clientX, y: e.clientY })}
-        onMouseUp={() => (drag.current = null)}
-        onMouseLeave={() => (drag.current = null)}
-        onMouseMove={onDrag}
-      >
-        <title>backlog dependency graph</title>
-        <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-          {g.edges.map(e => (
-            <EdgeLine key={`${e.kind}${e.x1},${e.y1},${e.x2},${e.y2}`} e={e} />
-          ))}
-          {g.nodes.map(n => (
-            <GraphNode key={n.bead.id} n={n} onPick={onPick} />
-          ))}
-        </g>
-      </svg>
+      <GraphSvg g={g} view={view} onPick={onPick} />
     </div>
   );
 }
@@ -650,6 +661,8 @@ interface Sort {
   dir: 1 | -1;
 }
 const toggleSort = (s: Sort, k: string): Sort => ({ k, dir: s.k === k ? (-s.dir as 1 | -1) : 1 });
+// descriptor read — a computed key must never reach a plain obj[k] call
+const sortCmp = (k: string) => Object.getOwnPropertyDescriptor(SORTS, k)?.value ?? SORTS.title;
 
 function SortTh({
   k,
@@ -684,7 +697,7 @@ function ListView({ rows, onPick }: Readonly<{ rows: Row[]; onPick: (b: Bead) =>
   const CAP = 400;
   const [sort, setSort] = useState<Sort>({ k: 'age', dir: 1 });
   const sorted = useMemo(
-    () => [...rows].sort((a, b) => SORTS[sort.k](a, b) * sort.dir),
+    () => [...rows].sort((a, b) => sortCmp(sort.k)(a, b) * sort.dir),
     [rows, sort]
   );
   return (
