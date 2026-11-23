@@ -190,5 +190,12 @@ export function runSyncCommand(argv: string[]): void {
     console.error(`warning: could not push ${ref} to ${remote} — check network and remote access`);
   } else if (hasRef) {
     console.log(`bro sync: ${ref} pushed to ${remote}`);
+    // mirror the tip onto its heads twin — raw.githubusercontent serves
+    // branches without the API quota the ref call costs every page load.
+    // Best-effort: a rejected mirror never fails the sync.
+    const tip = gitTry(['-C', root, 'rev-parse', ref]);
+    if (tip.code === 0) {
+      gitTry(['-C', root, 'push', remote, `${tip.out.trim()}:refs/heads/bro-data`]);
+    }
   }
 }
