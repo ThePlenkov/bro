@@ -3955,12 +3955,22 @@ async function parseDialect<T>(
   }
   try {
     return { rreq, body: translate(rreq) };
-  } catch {
+  } catch (err) {
     // translation rejects loudly — a remote image, a shape the
     // dialect can't carry. Do not reflect the exception: translation
     // errors may include user-controlled payloads or implementation
     // details, and this is already a client-shape failure.
-    openaiError(res, 400, 'invalid_request_error', 'request could not be translated');
+    const message = err instanceof Error ? err.message : String(err);
+    const inputError =
+      /only data: URLs|unsupported (?:input part|content part) type|support text content|requires the tool's name|must be a string|is required/.test(
+        message
+      );
+    if (inputError) {
+      openaiError(res, 400, 'invalid_request_error', 'request could not be translated');
+    } else {
+      console.error('bro conductor: dialect translation failed', err);
+      openaiError(res, 500, 'server_error', 'internal server error');
+    }
     return undefined;
   }
 }
@@ -4023,7 +4033,7 @@ function openaiFail(
   // Provider and runtime failures are server-side details. Never reflect
   // their raw message (which may contain a stack or filesystem paths) over
   // the remote protocol; request-shape errors remain actionable below.
-  const publicMessage = kind.status >= 500 ? 'internal server error' : msg;
+  const publicMessage = kind.status >= 429 ? 'internal server error' : msg;
   if (live !== undefined) {
     live.fail(kind.stream, `bro conductor: ${publicMessage}`);
     res.end();
