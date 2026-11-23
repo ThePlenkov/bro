@@ -90,9 +90,9 @@ host — see the [capability matrix](/docs/integrations#capability-matrix):
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
 | Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
 | Cursor | `/add-plugin https://github.com/ThePlenkov/bro`, then install `bro` |
-| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro plugins install opencode` |
-| Kilo | `bro plugins install kilo` |
-| pi | `bro plugins install pi` |
+| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro clients install opencode` |
+| Kilo | `bro clients install kilo` |
+| pi | `bro clients install pi` |
 
 The shell adapters ship session rehydration, the review-gate stop hook,
 and self-approve for `bro`/`bd` — wired through `hooks/run.sh`, always

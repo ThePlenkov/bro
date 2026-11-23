@@ -99,6 +99,7 @@ import { runOtelCommand } from './commands/otel.ts';
 import { runPipelineCommand } from './commands/pipeline.ts';
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts';
 import { runPluginsCommand } from './commands/plugins.ts';
+import { runClientsCommand } from './commands/clients.ts';
 import { freshnessSection } from './commands/postmerge.ts';
 import { runProviderCommand } from './commands/provider.ts';
 import { runProvidersCommand } from './commands/providers.ts';
@@ -1279,8 +1280,13 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'plugins',
-    summary: 'Plugin registry + client adapters: install|uninstall|list <client>',
+    summary: 'The BroPlugin registry — plugins for bro (commands, skills, config)',
     run: argv => runPluginsCommand(argv, PLUGINS),
+  }),
+  definePlugin({
+    name: 'clients',
+    summary: 'Agents that use bro — install matrix + adapters: list|install|uninstall <client>',
+    run: argv => runClientsCommand(argv),
   }),
   definePlugin({
     // consumer surface (agents/transports), not an operator one —
