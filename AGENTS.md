@@ -78,7 +78,10 @@ Developing bro itself: see CONTRIBUTING.md.
   a computed key used to call a function (`SORTS[k](a,b)`, `MAP[t](x)`)
   → `Object.getOwnPropertyDescriptor(map, k)?.value?.(...)` — the
   dynamic-call SAST rule fires on plain `obj[k](...)`, and the
-  descriptor read also neutralizes prototype keys like `__proto__`;
+  descriptor read also neutralizes prototype keys like `__proto__`
+  (call it with the map as receiver and treat a missing or
+  non-callable value as a failed dispatch — `undefined` is not a
+  result);
   interactive viewport state (zoom/pan/drag) → a `useViewport` hook +
   a render-only `*Svg`/`*Canvas` component, not all inside the parent.
 
@@ -105,8 +108,11 @@ Developing bro itself: see CONTRIBUTING.md.
   ships; a direction-bearing relation (blocks/parent) → verify the
   dep semantics against real data before encoding `a.blocks = [b]`;
   a render-scoped `Date.now()` (or any per-render value) feeding a
-  `useMemo` dep → freeze it per mount (`useState(() => Date.now())`),
-  an unstable dep recomputes the memo every render; a React `key`
+  `useMemo` dep → freeze it per mount (`useState(() => Date.now())`)
+  only when the value is meant to stay mount-stable — an unstable dep
+  recomputes the memo every render; inputs derived from changing
+  props/state keep their real deps, and a value that must age wants
+  a recompute at that cadence, not a mount freeze; a React `key`
   from display text → a semantic slot id (label keys collide across
   slots, index keys trip S6479); one `git push` carrying refs of
   different criticality → separate pushes, a rejected best-effort
