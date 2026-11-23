@@ -42,10 +42,12 @@ function shorten(text: string): string {
 /** Best-effort provenance for the capture — tolerate non-git directories. */
 function gitSnapshot(): string[] {
   try {
-    // gitTry spawns argv directly — no shell, fixed binary semantics
-    const branch = gitTry(['rev-parse', '--abbrev-ref', 'HEAD']).out.trim();
-    const sha = gitTry(['rev-parse', '--short', 'HEAD']).out.trim();
-    return [`git: ${branch}@${sha}`];
+    // gitTry spawns argv directly — no shell, fixed binary semantics;
+    // a non-git dir is a non-zero code, not a throw
+    const branch = gitTry(['rev-parse', '--abbrev-ref', 'HEAD']);
+    const sha = gitTry(['rev-parse', '--short', 'HEAD']);
+    if (branch.code !== 0 || sha.code !== 0) return [];
+    return [`git: ${branch.out.trim()}@${sha.out.trim()}`];
   } catch {
     return [];
   }
