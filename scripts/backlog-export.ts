@@ -24,7 +24,7 @@ const DOLT_OPTS = { cwd: '', encoding: 'utf8', maxBuffer: 256 << 20 } as const;
 
 function sql<T>(query: string): T[] {
   const opts = { ...DOLT_OPTS, cwd: doltDir };
-  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], opts); // NOSONAR
+  const out = execFileSync('dolt', ['sql', '-q', query, '-r', 'json'], opts); // NOSONAR — literal argv and operator-named cwd are the script contract
   // dolt wraps rows as {rows: [...]}; NULL columns are omitted per row
   return (JSON.parse(out) as { rows: T[] }).rows;
 }
