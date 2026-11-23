@@ -774,6 +774,43 @@ describe('mount-bearing candidates keep (bro-wb8wf)', () => {
     });
   });
 
+  test('a process entering mid-walk keeps the dir — the post-walk re-check sees it', () => {
+    withTmp(dir => {
+      const victim = join(dir, 'bro-published-midwalk');
+      mkdirSync(victim, { recursive: true, mode: 0o700 });
+      writeFileSync(join(victim, 'marker'), 'x');
+      ageDir(victim, HOUR + 60_000);
+      // the lstat seam flips `entered` once the mount walk starts —
+      // every in-use consult before it (verdict + pre-walk) reads
+      // 'free', so only the post-walk re-verify can catch the arrival
+      let entered = false;
+      const lstat: DevProbe = p => {
+        entered = true;
+        return lstatSync(p);
+      };
+      let consulted = 0;
+      const inUse = (): boolean => {
+        consulted += 1;
+        return entered;
+      };
+      const out: string[] = [];
+      const orig = console.log;
+      console.log = (...args: unknown[]) => out.push(args.join(' '));
+      try {
+        cleanupTmpDirs(false, { lstat, inUse });
+      } finally {
+        console.log = orig;
+      }
+      assert.ok(existsSync(victim), 'a dir entered during the walk must be kept');
+      // verdict + pre-walk + post-walk — the last consult is what kept it
+      assert.ok(consulted >= 3, `expected ≥3 in-use consults, got ${consulted}`);
+      assert.ok(
+        out.some(l => l.includes(victim) && l.includes('in use')),
+        `expected an in-use keep line, got: ${out}`
+      );
+    });
+  });
+
   test('dry-run reports the mount keep, never "would delete"', () => {
     const pid = deadPid();
     assert.ok(pid > 0);

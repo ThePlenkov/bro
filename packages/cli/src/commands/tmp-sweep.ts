@@ -287,6 +287,10 @@ export interface TmpSweepOptions {
    *  mounts need privileges a test lacks; faking one path's st_dev
    *  simulates the boundary. */
   lstat?: DevProbe;
+  /** in-use probe — test seam only (spec bro-wb8wf). A real /proc
+   *  scan can't be scheduled mid-walk; a scripted probe can flip
+   *  between the pre- and post-walk checks. */
+  inUse?: (path: string) => boolean;
 }
 
 /** Direct child directory names, [] on any listing failure — a sweep
@@ -447,6 +451,9 @@ interface SweepCtx {
   /** mount-scan dev probe — the test seam for faking a second
    *  filesystem; production leaves it undefined (lstatSync). */
   lstat?: DevProbe;
+  /** in-use probe — resolved once from opts.inUse ?? isPathInUse so
+   *  every consult in a run reads the same seam. */
+  inUse: (path: string) => boolean;
 }
 
 function logKeep(fullPath: string, reason: string, quietKeeps: boolean): void {
@@ -600,7 +607,7 @@ function removeEntry(fullPath: string, ctx: SweepCtx): boolean {
     console.log(`  deleted ${fullPath}`);
     return true;
   } catch (err) {
-    if (isPathInUse(fullPath)) {
+    if (ctx.inUse(fullPath)) {
       logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
       return false;
     }
@@ -643,7 +650,7 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
       ageMs: ctx.now - (st.mtimeMs || st.mtime.getTime()),
       ownerPid,
       ownerAlive,
-      inUse: () => isPathInUse(fullPath),
+      inUse: () => ctx.inUse(fullPath),
     });
     if (verdict === 'skip') {
       return false;
@@ -657,14 +664,19 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
     // mounted fs and deletes foreign-device content (spec bro-wb8wf).
     // Fails closed — an unproven scan keeps, warned on stderr so the
     // surviving litter stays explainable even under quietKeeps.
-    // Ordering: the in-use re-verify runs FIRST so the mount proof is
-    // the last check before rm — the verdict→delete window narrows to
-    // the rmSync call itself (the /proc rescan no longer sits between
-    // them). A mount landing inside that syscall gap is the accepted
-    // residual: no userspace primitive makes a recursive delete atomic
-    // against mount(2), so proof-then-immediate-rm is the strongest
-    // bound available — the same one tmpwatch/systemd-tmpfiles carry.
-    if (!ctx.dryRun && isPathInUse(fullPath)) {
+    // Ordering: in-use re-verifies BRACKET the mount walk. The walk
+    // can run ~1.5s under the bound — long enough for a process to
+    // enter a pid-less stale dir mid-scan — so the post-walk check is
+    // the last gate before rm and the in-use window narrows to the
+    // rmSync call itself. The mount proof pays for that ordering: its
+    // verdict→rm window grows from ~0 to one /proc rescan (~ms). The
+    // trade favors in-use-last on probability — a process cd'ing into
+    // a stale dir is unprivileged and common, a mount(2) landing inside
+    // the rescan gap is privileged and rare — and no userspace
+    // primitive makes a recursive delete atomic against either race,
+    // so the strongest bound available is minimizing the likelier one
+    // (the same residual tmpwatch/systemd-tmpfiles carry).
+    if (!ctx.dryRun && ctx.inUse(fullPath)) {
       logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
       return false;
     }
@@ -676,6 +688,14 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
     if (ctx.dryRun) {
       console.log(`  would delete ${fullPath}`);
       return true;
+    }
+    // post-walk re-verify — a process that entered during the mount
+    // scan is invisible to the pre-walk check; deleting on its stale
+    // 'free' would rm live files. Dry-run never reaches here: its
+    // 'would delete' verdict-time read is already reported above.
+    if (ctx.inUse(fullPath)) {
+      logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
+      return false;
     }
     return removeEntry(fullPath, ctx);
   } catch {
@@ -742,6 +762,7 @@ export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): voi
     quietKeeps: opts.quietKeeps === true,
     inUseMessage: process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use',
     lstat: opts.lstat,
+    inUse: opts.inUse ?? isPathInUse,
   };
 
   let deleted = sweepEntries(tmp, entries, ctx);
