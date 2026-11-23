@@ -435,9 +435,7 @@ export function waitOpts(
           );
           // the pushed head obsoletes this PR's feed entry — the next
           // poll must fetch it, not re-serve the pre-update state
-          if (ok) {
-            cache?.invalidate(t);
-          }
+          if (ok) cache?.invalidate(t);
           emitLifecycle(process.cwd(), {
             kind: 'gate',
             pr: t.pr,

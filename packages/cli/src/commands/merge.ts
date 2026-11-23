@@ -78,6 +78,10 @@ interface MergeCtx {
   fetcher: ReturnType<typeof gateStateFetcher>;
   opts: Parameters<typeof waitForGate>[1];
   started: number;
+  /** Thread ids the cycle opened on — the retro's evidence. */
+  threadsAtStart: string[];
+  /** Why the host still owns the landing on a settle timeout. */
+  armedNote?: string;
 }
 
 /** mark-ready is a host mutation the facade doesn't expose — `gh pr
@@ -93,7 +97,8 @@ function markReady(t: PrTarget): void {
 /** Enable the host's auto-merge for the chosen strategy. Returns false
  *  when the host refuses (auto-merge disabled, unsupported host) — the
  *  caller falls back to the pinned direct merge. */
-function enableAutoMerge(t: PrTarget, method: string): boolean {
+function enableAutoMerge(ctx: MergeCtx): boolean {
+  const { t, method } = ctx;
   const r = ghTry(['pr', 'merge', String(t.pr), `--${method}`, '--auto', '-R', t.repo]);
   if (r.code === 0) return true;
   const err = r.err || r.out;
@@ -147,6 +152,7 @@ function setupCycle(argv: string[]): MergeCtx {
     fetcher: gateStateFetcher(rev, t, cfg.act, cache, resolveLedger(process.cwd())),
     opts: waitOpts(rev, t, argv, parseTiming(argv), cache, 'merge wait'),
     started: Date.now(),
+    threadsAtStart: [],
   };
 }
 
@@ -167,22 +173,18 @@ async function readyPhase(ctx: MergeCtx, first: Awaited<ReturnType<MergeCtx['fet
 
 /** The settle poll after a merge was armed or enqueued — one shape for
  *  both paths. Returns the landed state or reports and exits. */
-async function settlePhase(
-  ctx: MergeCtx,
-  res: GateWaitResult,
-  armedNote?: string
-): Promise<PrActState | undefined> {
+async function settlePhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   const follow = await waitForGate(ctx.fetcher, ctx.opts);
   if (follow.state.state === 'MERGED') return follow.state;
   emitVerdict(
-    gateVerdict(ctx.rev, ctx.t, res),
+    gateVerdict(ctx, res),
     follow.state.state === 'CLOSED' ? 'closed' : 'timeout',
     follow,
     ctx.argv
   );
-  if (armedNote !== undefined) {
+  if (ctx.armedNote !== undefined) {
     console.error(
-      `merge: ${armedNote} on ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — poll timed out; ` +
+      `merge: ${ctx.armedNote} on ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — poll timed out; ` +
         'the host still owns the merge'
     );
   }
@@ -194,7 +196,7 @@ async function settlePhase(
  *  merge / external queue. Returns the landed state or exits. */
 async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   warnHumanOwned(ctx.rev, ctx.t);
-  if (enableAutoMerge(ctx.t, ctx.method)) {
+  if (enableAutoMerge(ctx)) {
     console.log(
       `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — auto-merge armed (${ctx.method})`
     );
@@ -204,7 +206,8 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
       to: 'automerge',
       detail: { via: 'merge', sha: res.state.headSha, method: ctx.method },
     });
-    return settlePhase(ctx, res, 'auto-merge armed');
+    ctx.armedNote = 'auto-merge armed';
+    return settlePhase(ctx, res);
   }
   const head = landPr(
     ctx.rev,
@@ -215,7 +218,7 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
   );
   if (head !== undefined) return res.state;
   if (process.exitCode === 1) {
-    emitVerdict(gateVerdict(ctx.rev, ctx.t, res), 'merge-failed', res, ctx.argv);
+    emitVerdict(gateVerdict(ctx, res), 'merge-failed', res, ctx.argv);
     return undefined;
   }
   // enqueued on an external merge queue — settle is still a poll
@@ -227,7 +230,7 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
  *  — re-entry resumes, finished phases no-op. */
 async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
   const res = await waitForGate(ctx.fetcher, ctx.opts);
-  const verdict = gateVerdict(ctx.rev, ctx.t, res);
+  const verdict = gateVerdict(ctx, res);
   if (!res.gate.ok && res.state.state === 'OPEN') {
     for (const b of res.gate.blockers) {
       console.error(`  blocker: ${b}`);
@@ -259,7 +262,7 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
   }
 
   const first = await ctx.fetcher();
-  const threadsAtStart = first.state.threads.map(th => th.id);
+  ctx.threadsAtStart = first.state.threads.map(th => th.id);
   await readyPhase(ctx, first);
 
   const res = await gatePhase(ctx);
@@ -274,7 +277,7 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
     to: 'merged',
     detail: { via: 'merge', sha: res.state.headSha },
   });
-  emitVerdict(gateVerdict(ctx.rev, ctx.t, res), 'merged', res, argv);
+  emitVerdict(gateVerdict(ctx, res), 'merged', res, argv);
 
   const bead = flag(argv, '--bead');
   if (bead !== undefined) {
@@ -284,13 +287,13 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
 
   // —— phase: retro ——
   if (!argv.includes('--no-retro')) {
-    recordCycleRetro(ctx.rev, ctx.t, res.state, threadsAtStart, ctx.started);
+    recordCycleRetro(ctx, res);
   }
 }
 
-function gateVerdict(rev: ReviewFacade, t: PrTarget, res: GateWaitResult): Record<string, unknown> {
+function gateVerdict(ctx: MergeCtx, res: GateWaitResult): Record<string, unknown> {
   return {
-    pr: rev.prLink(t.repo, t.pr),
+    pr: ctx.rev.prLink(ctx.t.repo, ctx.t.pr),
     open_threads: res.gate.open_threads,
     fix_rounds: res.gate.fix_rounds,
     polls: res.polls,
@@ -316,17 +319,13 @@ function emitVerdict(
  *  the run saw, fix rounds, wall time — plus one backlog action that
  *  turns the raw findings into prevention work. A failed retro write
  *  warns; it never un-merges (spec: infra failures don't block). */
-function recordCycleRetro(
-  rev: ReviewFacade,
-  t: PrTarget,
-  state: PrActState,
-  threadsAtStart: string[],
-  started: number
-): void {
-  const link = rev.prLink(t.repo, t.pr);
+function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult): void {
+  const { state } = res;
+  const { threadsAtStart, started } = ctx;
+  const link = ctx.rev.prLink(ctx.t.repo, ctx.t.pr);
   const minutes = Math.round((Date.now() - started) / 60_000);
   try {
-    const res = recordRetro({
+    const retro = recordRetro({
       what: `merge cycle for ${link}: ${threadsAtStart.length} thread(s) at start, ${state.fixRounds} fix round(s), ${minutes}m wall`,
       why: 'full MR cycle retro — `bro merge` records what the gate and reviewers surfaced so prevention lands where the finding lives',
       scope: 'project',
@@ -348,7 +347,7 @@ function recordCycleRetro(
         },
       ],
     });
-    console.log(`merge: retro recorded as ${res.retroId}`);
+    console.log(`merge: retro recorded as ${retro.retroId}`);
   } catch (err) {
     console.error(
       `merge: retro record failed — ${err instanceof Error ? err.message : String(err)}`
