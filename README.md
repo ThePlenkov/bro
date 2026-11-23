@@ -10,8 +10,7 @@
 > **Landing:** [broject.dev](https://broject.dev) · **Docs:** [broject.dev/docs](https://broject.dev/docs/)
 
 **ICP:** maintainers and small teams with existing agents, a task store, and PR/CI.  
-**JTBD:** deterministic lifecycle closure — take work from `task → agent → PR → gate → debt`, close it without gaps, and sweep what remains.
-
+**JTBD:** deterministic lifecycle closure — `task → agent → PR → gate → debt`.  
 **Wedge:** portable `task → agent → PR → gate → debt` contract. Start with the review gate and debt ledger — no fleet, no model-gateway required. Orchestration (fleet/convoy/loop) is optional and progressive, not a replacement runtime.
 
 ```bash
@@ -19,6 +18,36 @@ npx @broject/bro act status             # review gate verdict
 npx @broject/bro debt prs               # unprocessed merged PRs not yet swept into the ledger
 npx @broject/bro debt collect           # sweep threads into the ledger
 npx @broject/bro debt status            # what's left
+```
+
+## End-to-end scenario (no fleet/model gateway required)
+
+```bash
+# 1) Claim work from your task store
+npx @broject/bro next
+BEAD="<bead-id>"  # replace <bead-id> with the ID from the claimed work order
+git switch -c "work/$BEAD"  # bro next does not cut a branch — create one before committing
+
+# 2) Implement and open a PR for the claimed work
+git add -A
+git diff --cached  # skim what's staged — intended changes only, no secrets
+git commit -m "$BEAD: <summary>"
+git push -u origin HEAD
+gh pr create --fill  # GitHub; GitLab remotes: glab mr create — the gate inspects either
+
+# 3) Drive the PR through the review gate
+npx @broject/bro act status        # verdict: threads/ci/reviewers/sast/mergeable
+npx @broject/bro act threads       # work unresolved threads
+#    Must resolve all listed threads before merging (the gate blocks until clean).
+#    Work and resolve every listed thread (e.g. via `bro act resolve`/replies),
+#    then re-check with `bro act status` until it is green.
+npx @broject/bro act merge --bead "$BEAD"  # merge only when green; pass the claimed bead to close it
+
+# 4) Sweep leftovers from earlier merged PRs into debt
+npx @broject/bro debt prs          # merged PRs nobody processed yet
+npx @broject/bro debt collect      # harvest threads -> .agents/review-debt/ + labels
+npx @broject/bro debt status       # what's left
+npx @broject/bro debt next         # top open finding
 ```
 
 ## What's the deal
