@@ -67,6 +67,8 @@ import {
   gitTry,
   hasHelpFlag,
   holdRoleLease,
+  laneBudgetKey,
+  laneBudgetRefund,
   type Lease,
   type LeaseStore,
   localLeaseStore,
@@ -1190,7 +1192,8 @@ function laneSpawnedCommand(lane: LoopLane, fallback: string): string {
  *  skipped: admitSessionSlot covers its full lane, and claiming it
  *  twice would double-reserve one spawn against the same plane.
  *  Claimed paths append to `out` — a refusal mid-way is the caller's
- *  rollback set. */
+ *  rollback set. `budgetCharged` reports each work-budget segment a
+ *  claim just opened so the same rollback can refund them. */
 function admitCrossKindSessions(
   agents: Record<string, Record<string, unknown>>,
   spawnedCmd: string,
@@ -1200,7 +1203,8 @@ function admitCrossKindSessions(
   workerEnv: Record<string, string>,
   out: string[],
   scope: string,
-  liveByKind: Map<string, Set<string>>
+  liveByKind: Map<string, Set<string>>,
+  budgetCharged: (kind: string) => void
 ): void {
   // a pre-flight refusal ahead of any claim; the authoritative count
   // re-runs inside each kind's admission mutex below
@@ -1223,6 +1227,7 @@ function admitCrossKindSessions(
         workerEnv,
         scope,
         liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
+        budgetCharged,
       });
       if (claimed !== undefined) {
         out.push(claimed);
@@ -1234,9 +1239,10 @@ function admitCrossKindSessions(
 /** Raw-template session admission — the same quota the registry spawn
  *  enforces: the lane's own kind via its quota lane, plus every other
  *  session kind the spawned command starts. A refusal hands back every
- *  cross-kind claim already taken; a success leaves the caller holding
- *  the primary reservation + the cross-kind paths to release when the
- *  spawn's verdict lands. */
+ *  cross-kind claim already taken and refunds every work-budget segment
+ *  the claims charged; a success leaves the caller holding the primary
+ *  reservation + the cross-kind paths to release when the spawn's
+ *  verdict lands. */
 export function admitLaneSessions(
   ctx: { agent: string; env: AgentConnectorEnv; beadsDir?: string; root: string },
   lane: LoopLane,
@@ -1270,6 +1276,14 @@ export function admitLaneSessions(
   const liveByKind = liveSessionKeysByKind(readAgentRegistry(ctx.root));
   const spawnedCmd = laneSpawnedCommand(lane, templateCommand);
   let reservation: string | undefined;
+  // every work-budget segment an admit opens registers on
+  // budgetChargedKinds — a LATER refusal hands them all back in the
+  // catch so a spawn that never ran never meters (the prepareSpawn
+  // convention, spec bro-x601l)
+  const budgetChargedKinds: string[] = [];
+  const budgetCharged = (kind: string): void => {
+    budgetChargedKinds.push(kind);
+  };
   try {
     admitCrossKindSessions(
       ctx.env.agents,
@@ -1280,7 +1294,8 @@ export function admitLaneSessions(
       workerEnv,
       crossKind,
       scope,
-      liveByKind
+      liveByKind,
+      budgetCharged
     );
     if (templateQuota !== undefined) {
       // every session the spawned command opens on the quota kind owes
@@ -1302,6 +1317,7 @@ export function admitLaneSessions(
           workerEnv,
           scope,
           liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
+          budgetCharged,
         });
         if (i === 0) {
           reservation = claimed;
@@ -1319,6 +1335,15 @@ export function admitLaneSessions(
       releaseSessionSlot(reservation);
     }
     releaseSessionStart(crossKind);
+    // the work-budget segments the released claims opened refund too —
+    // a spawn that never ran must not meter worker-minutes
+    for (const kind of budgetChargedKinds) {
+      try {
+        laneBudgetRefund(kind, laneBudgetKey(scope, key));
+      } catch {
+        // best-effort — a missed refund closes on the next budget scan
+      }
+    }
     throw err;
   }
 }

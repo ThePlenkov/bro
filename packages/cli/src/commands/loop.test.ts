@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
@@ -8,6 +8,7 @@ import {
   clearSessionPlanes,
   countSessionReservations,
   type FleetProfile,
+  laneBudgetDir,
   type Lease,
   type ProviderEntry,
   patchAgentRegistry,
@@ -734,6 +735,74 @@ describe('admitLaneSessions — a multi-start command owes the lane every start 
         assert.equal(countSessionReservations(dirA), 0);
       });
     } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test('a mid-admission refusal refunds the work-budget segments its claims opened', () => {
+    // alpha's admit opens a work-budget segment per claimed start; the
+    // second start's census refuses — the first claim's segment must go
+    // back or a spawn that never ran bills worker-minutes until the
+    // next budget scan closes it (bro-znkki)
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    // the budget ledger is host-shared — isolate it so the real state
+    // dir never sees the test's segments
+    const prevXdg = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = tmpDir('bro-loop-xdg-');
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        // live turns 1 once a claim exists — the post-claim census on
+        // the second start is what refuses, so the first claim's
+        // segment is already charged when the verdict lands
+        countLive: () => (countSessionReservations(dirA) > 0 ? 1 : 0),
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        assert.throws(
+          () =>
+            admitLaneSessions(
+              admitCtx(main, {
+                native: { sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, workBudgetMinutes: 30, reservationsDir: dirA },
+              }),
+              templateLane('alpha-cli alpha-run alpha-run'),
+              admitSpec(main),
+              'loop-fx-1'
+            ),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /alpha session quota reached/.test(err.message)
+        );
+        assert.equal(countSessionReservations(dirA), 0);
+        // the ledger exists — an admit really charged it — and no OPEN
+        // segment survives: the refund removes them outright (the
+        // registry-path test convention, agent-connectors.test.ts)
+        const ledgerPath = join(laneBudgetDir(), 'alpha.json');
+        assert.equal(existsSync(ledgerPath), true, 'the budget ledger was never charged');
+        const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as {
+          workers: Record<string, { segments: Array<{ e?: number }> }>;
+        };
+        for (const worker of Object.values(ledger.workers)) {
+          assert.equal(
+            worker.segments.every(seg => seg.e !== undefined),
+            true,
+            'an open work-budget segment survived the refused admission'
+          );
+        }
+      });
+    } finally {
+      if (prevXdg === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = prevXdg;
+      }
       clearSessionPlanes();
       for (const plane of prior) registerSessionPlane(plane);
     }
