@@ -121,6 +121,7 @@ import {
   type MatrixLanePick,
   matrixLanePick,
   profileModelFor,
+  providerForSpawnedCommand,
   providerGateOf,
   providerWallsFor,
   resolveAgentConnector,
@@ -1241,13 +1242,14 @@ export function admitLaneSessions(
   try {
     // the provider lane resolved + pre-flighted before ANY claim lands
     // — a full account lane refuses before a kind claim can hold a
-    // slot against it
+    // slot against it. The lane's provider is its own pick or the
+    // provider entry the spawned command launches — never the
+    // agents.native.provider default a template escape bypassed.
     const providerGate = providerGateOf({
       dir: ctx.root,
       registry,
       env: ctx.env,
-      backend: 'native',
-      spec: laneSpec,
+      provider: lane.provider ?? providerForSpawnedCommand(ctx.env, spawnedCmd),
       agents: ctx.env.agents,
       workerEnv,
       quotaPlaneKind: templateQuota?.plane.kind,
@@ -1257,7 +1259,6 @@ export function admitLaneSessions(
         ? new Map<string, number>()
         : admitProviderGateStarts(providerGate, {
             dir: ctx.root,
-            registry,
             env: ctx.env,
             agents: ctx.env.agents,
             workerEnv,

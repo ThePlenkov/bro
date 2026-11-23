@@ -1709,8 +1709,10 @@ export function fleetOccupancyFor(dir: string, env: AgentConnectorEnv): number {
  *  `agents.<backend>.provider` default, the same resolution
  *  `providerCapLaneOf` gated the spawn on — counted with
  *  `entryOccupies`' fail-closed verdict. Runs inside the provider
- *  mutex; the caller's registry snapshot is already the locked
- *  truth. */
+ *  mutex on a registry read taken inside that same lock — the
+ *  spawn path's locked snapshot, or a fresh `readAgentRegistry`
+ *  where no registry lock is held (the claim→commit handoff
+ *  never gaps, so a locked read never misses both). */
 function providerRegistryCensus(
   dir: string,
   home: string | null,
@@ -2085,18 +2087,19 @@ export function sessionQuotaOf(
 
 /** The provider lane cap this spawn must fit under — `fleet.
  * providerCaps.<provider>` armed in the GLOBAL config layer (spec
- * bro-x601l). The provider is the spawn's RESOLVED route — spec.
- * provider after the chain walk, else the backend's default — and the
- * cap counts the ACCOUNT the provider entry reaches, not the repo's
- * registry: a plane-covered entry counts the kind census (live
- * sessions, retained acp conversations, foreign sessions the plane
- * sees), a plane-less one counts the shared claim ledger. */
+ * bro-x601l). The provider is the spawn's RESOLVED route — the
+ * caller's pick after its own resolution (spec.provider after the
+ * chain walk, else the backend's default, at the registry spawn; the
+ * lane's pick or the spawned command's own provider entry on the
+ * raw-template lane) — and the cap counts the ACCOUNT the provider
+ * entry reaches, not the repo's registry: a plane-covered entry
+ * counts the kind census (live sessions, retained acp conversations,
+ * foreign sessions the plane sees), a plane-less one counts the
+ * shared claim ledger. */
 export function providerCapLaneOf(
   env: AgentConnectorEnv,
-  backend: string,
-  spec: SpawnSpec
+  provider: string | undefined
 ): ProviderCapLane | undefined {
-  const provider = spec.provider ?? backendProvider(env, backend);
   if (provider === undefined) {
     return undefined;
   }
@@ -2105,6 +2108,33 @@ export function providerCapLaneOf(
     return undefined;
   }
   return { provider, cap };
+}
+
+/** The provider entry the spawned command launches — the entry whose
+ *  own command shares the spawned command's cli identity (first-token
+ *  basename, commandCliName). The raw-template lane resolves no route
+ *  — `spec.provider` is deliberately empty there — so its provider
+ *  gate derives from the command actually spawning: a template
+ *  running a provider's own CLI draws on that entry's lane, and a
+ *  command no provider entry claims owes no provider gate at all.
+ *  Aliased entries on one cli resolve to the first ARMED lane in
+ *  config order (spec bro-x601l: each can carry a cap over the same
+ *  shared census — an unarmed entry never gates, so it must not
+ *  shadow the cap a later alias declared for the same cli). */
+export function providerForSpawnedCommand(
+  env: AgentConnectorEnv,
+  command: string
+): string | undefined {
+  const cli = commandCliName(command);
+  for (const [name, entry] of Object.entries(env.providers ?? {})) {
+    if (entry.type === 'api' || commandCliName(entry.command) !== cli) {
+      continue; // an api entry launches no cli — nothing to match
+    }
+    if (providerCapLaneOf(env, name) !== undefined) {
+      return name;
+    }
+  }
+  return undefined;
 }
 
 /** The command a provider entry spawns sessions through — the acp/cli
@@ -2759,8 +2789,17 @@ export function providerGateOf(args: {
   dir: string;
   registry: Record<string, AgentRegistryEntry>;
   env: AgentConnectorEnv;
-  backend: string;
-  spec: SpawnSpec;
+  /** The spawn's RESOLVED provider — `spec.provider ?? backendProvider`
+   *  at the registry spawn (the backend default IS that lane's
+   *  standing pick); the lane's own provider or the provider entry
+   *  its spawned command launches on the raw-template lane — never a
+   *  default that lane bypassed. undefined → no provider gate. */
+  provider: string | undefined;
+  /** The connector's agents home for the plane-less census —
+   *  prepareSpawn's `home` (entryOccupies probes the entries' own
+   *  artifacts there). Defaults to `agentsHome(dir)` — the loop
+   *  lane's registry lives under the same common dir. */
+  home?: string | null;
   /** The `agents` bags the census counts from — the connector env's. */
   agents: Record<string, Record<string, unknown>> | undefined;
   /** The env the planes' own counts read (spec.env at the registry
@@ -2769,11 +2808,12 @@ export function providerGateOf(args: {
   /** The spawn's own quota lane kind — its admit covers that lane. */
   quotaPlaneKind: string | undefined;
 }): ProviderGate | undefined {
-  const { env, backend, spec, agents, workerEnv } = args;
-  const providerCap = providerCapLaneOf(env, backend, spec);
+  const { env, agents, workerEnv } = args;
+  const providerCap = providerCapLaneOf(env, args.provider);
   if (providerCap === undefined) {
     return undefined;
   }
+  const censusHome = args.home === undefined ? agentsHome(args.dir) : args.home;
   const providerCommand = providerEntryCommand(env, providerCap.provider);
   const providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
   const providerPlaneKinds = new Set<string>();
@@ -2795,13 +2835,7 @@ export function providerGateOf(args: {
   const providerLive =
     providerPlanes.length > 0
       ? (providerCensus as () => number)()
-      : providerRegistryCensus(
-          args.dir,
-          agentsHome(args.dir),
-          args.registry,
-          env,
-          providerCap.provider
-        ) +
+      : providerRegistryCensus(args.dir, censusHome, args.registry, env, providerCap.provider) +
         countSessionReservations(
           providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
         );
@@ -2835,11 +2869,14 @@ export function providerGateOf(args: {
 export function admitProviderGateStarts(
   gate: ProviderGate,
   args: {
-    /** Repo facts for the plane-less census — the registry's live
-     *  occupants on this provider entry (the namespaced claim ledger
-     *  is counted inside the locked section itself). */
+    /** The repo the plane-less census reads — the registry's live
+     *  occupants on this provider entry, re-read INSIDE the provider
+     *  mutex (the namespaced claim ledger is counted inside the
+     *  locked section itself). */
     dir: string;
-    registry: Record<string, AgentRegistryEntry>;
+    /** The connector's agents home the census probes — prepareSpawn's
+     *  `home`. Defaults to `agentsHome(dir)`. */
+    home?: string | null;
     env: AgentConnectorEnv;
     agents: Record<string, Record<string, unknown>> | undefined;
     workerEnv: Record<string, string> | undefined;
@@ -2886,14 +2923,19 @@ export function admitProviderGateStarts(
     // no plane counts this provider's command — the census is the
     // registry's live occupants on this provider entry plus the
     // provider-namespaced claim ledger (spec bro-x601l: the registry
-    // fallback, the callback judged INSIDE the mutex)
+    // fallback, the callback judged INSIDE the mutex). The registry
+    // is re-read INSIDE the lock: a concurrent spawn's claim→commit
+    // handoff never gaps (claims release only after the row lands),
+    // so a snapshot taken before admission would see neither the
+    // claim nor the row and admit past the cap.
+    const censusHome = args.home === undefined ? agentsHome(args.dir) : args.home;
     const admission = admitProviderSlot(
       gate.providerCap,
       () =>
         providerRegistryCensus(
           args.dir,
-          agentsHome(args.dir),
-          args.registry,
+          censusHome,
+          readAgentRegistry(args.dir),
           args.env,
           gate.providerCap.provider
         ),
@@ -3120,8 +3162,10 @@ function prepareSpawn(
       dir,
       registry,
       env,
-      backend,
-      spec,
+      // the registry spawn's resolved route — spec.provider after the
+      // chain walk, else the backend's standing default
+      provider: spec.provider ?? backendProvider(env, backend),
+      home,
       agents,
       workerEnv: spec.env,
       quotaPlaneKind: sessionQuota?.plane.kind,
@@ -3153,7 +3197,7 @@ function prepareSpawn(
         ? new Map<string, number>()
         : admitProviderGateStarts(providerGate, {
             dir,
-            registry,
+            home,
             env,
             agents,
             workerEnv: spec.env,

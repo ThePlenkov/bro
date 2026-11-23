@@ -868,6 +868,95 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
       }
     );
   });
+
+  test('a full provider lane refuses the quota admit with provider_cap', () => {
+    // alpha's kind lane has headroom — only the provider verdict can
+    // refuse here, so an admit that dropped providerCap/providerCensus
+    // would wave the spawn through (the assert proves the pair rides
+    // the quota admit, not just that one claim exists)
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      // live turns 1 only once a claim exists — the pre-flight census
+      // reads 0 and passes; the quota admit's post-claim census is
+      // what sees 1 live + 1 held > cap 1
+      alphaPlane(() => (countSessionReservations(dirA) > 0 ? 1 : 0)),
+      () => {
+        inside(main, root, () => {
+          assert.throws(
+            () =>
+              admitLaneSessions(
+                admitCtx(
+                  main,
+                  {
+                    native: { sessionKind: 'alpha' },
+                    alpha: { maxSessions: 9, reservationsDir: dirA },
+                  },
+                  { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+                  { prov: 1 }
+                ),
+                templateLane('alpha-cli alpha-run'),
+                admitSpec(main),
+                'loop-fx-1'
+              ),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              err.capCause === 'provider_cap' &&
+              /provider 'prov' lane cap reached.*provider_cap/.test(err.message)
+          );
+          // the refused admission held nothing
+          assert.equal(countSessionReservations(dirA), 0);
+        });
+      }
+    );
+  });
+
+  test('a raw template is not refused by the backend-default provider it never launches', () => {
+    // the --agent escape deliberately bypasses agents.native.provider —
+    // the lane's provider resolves from the spawned command's own cli,
+    // so a full 'prov' lane (which the command never names) must not
+    // park the worker
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          // a live registry occupant on 'prov' fills the plane-less lane
+          // to cap — the same stamp prepareSpawn's commit would land
+          patchAgentRegistry(main, 'occ-1', {
+            agentId: 'occ-1',
+            backend: 'otherbackend',
+            provider: 'prov',
+            spawnedAt: new Date().toISOString(),
+          });
+          const admit = admitLaneSessions(
+            admitCtx(
+              main,
+              {
+                native: { provider: 'prov', sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, reservationsDir: dirA },
+              },
+              // prov's entry command is a DIFFERENT cli — the template's
+              // 'alpha-cli' never launches it, so its cap does not gate
+              { prov: { type: 'cli', command: 'other-cli other-run' } },
+              { prov: 1 }
+            ),
+            templateLane('alpha-cli alpha-run'),
+            admitSpec(main),
+            'loop-fx-1'
+          );
+          try {
+            assert.ok(admit.reservation !== undefined);
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(admit);
+          }
+        });
+      }
+    );
+  });
 });
 
 // --- admitLaneSessions — the raw-template lane claims one slot per start ---
