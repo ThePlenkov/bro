@@ -147,7 +147,7 @@ async function fetchGh(): Promise<GhItem[]> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 15_000);
   try {
-    for (let page = 1; page <= 5; page++) {
+    for (let page = 1; ; page++) {
       const res = await fetch(`${ISSUES_API}&page=${page}`, { signal: controller.signal });
       if (!res.ok) throw new Error(`github api ${res.status}`);
       const items = (await res.json()) as GhRaw[];
@@ -169,8 +169,8 @@ async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
       const branchSha = ((await branchRef.json()) as { object: { sha: string } }).object.sha;
       const dataSha = ((await dataRef.json()) as { object: { sha: string } }).object.sha;
       if (branchSha === dataSha) {
-        const branch = await fetch(`${RAW}/${BRANCH}/${BACKLOG_PATH}`);
-        if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: BRANCH };
+        const branch = await fetch(`${RAW}/${dataSha}/${BACKLOG_PATH}`);
+        if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: dataSha };
       }
     }
   } catch {
