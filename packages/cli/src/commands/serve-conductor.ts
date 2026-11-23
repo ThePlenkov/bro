@@ -3957,20 +3957,11 @@ async function parseDialect<T>(
     return { rreq, body: translate(rreq) };
   } catch (err) {
     // translation rejects loudly — a remote image, a shape the
-    // dialect can't carry. Do not reflect the exception: translation
-    // errors may include user-controlled payloads or implementation
-    // details, and this is already a client-shape failure.
-    const message = err instanceof Error ? err.message : String(err);
-    const inputError =
-      /only data: URLs|unsupported (?:input part|content part) type|support text content|requires the tool's name|must be a string|is required/.test(
-        message
-      );
-    if (inputError) {
-      openaiError(res, 400, 'invalid_request_error', 'request could not be translated');
-    } else {
-      console.error('bro conductor: dialect translation failed', err);
-      openaiError(res, 500, 'server_error', 'internal server error');
-    }
+    // dialect can't carry; the client fixes the request. Never reflect
+    // the exception (it may quote user-controlled payloads or internals):
+    // the wire sees a generic 400, the real error goes to the server log.
+    console.error('bro conductor: dialect translation failed', err);
+    openaiError(res, 400, 'invalid_request_error', 'request could not be translated');
     return undefined;
   }
 }
