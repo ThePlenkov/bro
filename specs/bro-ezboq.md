@@ -84,7 +84,7 @@ drains.
 ### Charge points — where spend is certain
 
 | Point | Charge | Why there |
-|---|---|---|
+| --- | --- | --- |
 | `continuationTurn` before `live.prompt` | `turnCost` | a warm-session turn still spends provider requests; replay returns BEFORE this line and pays nothing |
 | `freshTurn` before `acpSessionRetain` | `spawnCost` | the session/new + discovery burn; refunded if the retain throws (no session, no spend) |
 | `freshTurn` before `live.prompt` | `turnCost` | the retained session's first turn |
