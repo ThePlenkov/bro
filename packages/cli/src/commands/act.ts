@@ -1001,7 +1001,7 @@ async function mergeIfAsked(argv: string[], pr: number): Promise<string | undefi
 /** Merge strategy validation — returns null (caller errors out) on
  *  conflicting flags. Runs before the slot so a doomed request never
  *  occupies the critical section. */
-function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
+export function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
   const strategies = ['--squash', '--merge', '--rebase'].filter(f => argv.includes(f));
   if (strategies.length > 1) {
     console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`);
@@ -1034,7 +1034,7 @@ function dropActState(t?: PrTarget): void {
  *  configured — its connector's `enqueue` replaces mergePr outright:
  *  'enqueued' parks the PR (undefined → deferred cleanup), 'merged'
  *  hands the head to cleanup same as a direct merge. */
-function landPr(
+export function landPr(
   rev: ReviewFacade,
   t: PrTarget,
   opts: { method: 'squash' | 'merge' | 'rebase'; admin: boolean },
@@ -1124,7 +1124,7 @@ function landPr(
  *  rather than blocks. A failed labels read skips the warning:
  *  unknown is not absence, and a best-effort stamp that never landed
  *  must not make bro's own PR cry wolf on every merge. */
-function warnHumanOwned(rev: ReviewFacade, t: PrTarget): void {
+export function warnHumanOwned(rev: ReviewFacade, t: PrTarget): void {
   try {
     if (prOwnership(rev.labels(t)) === 'human') {
       console.error(
@@ -1276,7 +1276,7 @@ async function cmdMerge(argv: string[]): Promise<string | undefined> {
  *  (bro-q6ppv). Best-effort: a missing row, an already-closed verdict,
  *  or an unreachable store reports and the merge result stands. stderr
  *  keeps it out of a --json stdout stream. */
-function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
+export function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   const link = rev.prLink(t.repo, t.pr);
   const ids = bead
     .split(',')
@@ -1400,7 +1400,7 @@ function clumpBranchLog(rev: ReviewFacade, t: PrTarget): string {
  *  verdict never waits on the router. `rounds` counts act rounds —
  *  fixRounds+1, so a clean first-round merge reports 1 (the
  *  merged_first_round predicate's success shape). */
-async function reportActOutcome(
+export async function reportActOutcome(
   argv: string[],
   t: PrTarget,
   state: PrActState | undefined,
