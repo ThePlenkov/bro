@@ -2647,7 +2647,7 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
 
   test('a client EOF while the c→a pump is paused still ends the wire — the stall cannot hide it', async () => {
     const [clientSide, proxyUp] = streamPair();
-    const [proxyDown, agentSide] = streamPair();
+    const [proxyDown] = streamPair();
     const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
     const clientW = clientSide.writable.getWriter();
     // exactly the high-water mark: the pump routes every one, then
@@ -2656,15 +2656,21 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     // precisely so this close resolves it)
     fire(clientW, 'session/prompt', { sessionId: 'none', prompt: [] }, ACP_PROXY_WRITE_HIGH_WATER);
     await settle(80);
-    await clientW.close().catch(() => {});
+    // the deadline arms BEFORE the close: a regression that parks the
+    // pump's reads would queue close() behind the un-consumed writes
+    // and outwait the stall — guard close+verdict as one op and never
+    // await the close itself (the abort is the cleanup that can't
+    // block on it)
+    const verdict = hangGuard(proxyDone);
+    void clientW.close().catch(() => {});
     // 'up' verdict — and the stalled down leg's close is abandoned at
     // its flush grace rather than pended on
-    assert.equal(await hangGuard(proxyDone), 0);
+    assert.equal(await verdict, 0);
   });
 
   test('a client EOF behind held intake still ends the wire — buffered messages cannot hide the close', async () => {
     const [clientSide, proxyUp] = streamPair();
-    const [proxyDown, agentSide] = streamPair();
+    const [proxyDown] = streamPair();
     const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
     const clientW = clientSide.writable.getWriter();
     // past the mark AND then some — the pump holds consumed intake it
@@ -2678,13 +2684,16 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
       ACP_PROXY_WRITE_HIGH_WATER + 5
     );
     await settle(80);
-    await clientW.close().catch(() => {});
-    assert.equal(await hangGuard(proxyDone), 0);
+    // deadline first, close unawaited — a parked pump would hold the
+    // close behind the unread writes and outwait the guard
+    const verdict = hangGuard(proxyDone);
+    void clientW.close().catch(() => {});
+    assert.equal(await verdict, 0);
   });
 
   test('a leg with no write progress is declared dead — the in-flight prompts sweep upstream, verdict 1', async () => {
     const [clientSide, proxyUp] = streamPair();
-    const [proxyDown, agentSide] = streamPair();
+    const [proxyDown] = streamPair();
     const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {}, writeStallMs: 150 });
     const clientW = clientSide.writable.getWriter();
     const clientR = clientSide.readable.getReader();
@@ -2736,20 +2745,24 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     collect(clientR, got);
     // flood past BOTH marks — the transform's own backpressure keeps a
     // write() pending until the proxy's reader takes it, so a resolved
-    // write IS a consumed message: the count the intake must bound
+    // write IS a consumed message: the count the intake must bound.
+    // The ids land in a set — the teardown assertion compares them
+    // against the error ids, so a request can't silently vanish
+    // between consumption and its answer
     const total = ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 10;
-    let consumed = 0;
+    const consumed = new Set<unknown>();
     for (let i = 0; i < total; i++) {
+      const id = i + 1;
       void clientW
         .write({
           jsonrpc: '2.0',
-          id: i + 1,
+          id,
           method: 'session/prompt',
           params: { sessionId: 'none', prompt: [] },
         } as AnyMessage)
         .then(
           () => {
-            consumed++;
+            consumed.add(id);
           },
           () => {}
         );
@@ -2759,10 +2772,13 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     // in-flight read — without the read bound the whole flood would
     // already be consumed into `held`
     assert.ok(
-      consumed <= ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 2,
-      `intake outran the read bound — consumed ${consumed} of ${total}`
+      consumed.size <= ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 2,
+      `intake outran the read bound — consumed ${consumed.size} of ${total}`
     );
-    assert.ok(consumed >= ACP_PROXY_WRITE_HIGH_WATER, `nothing routed — consumed ${consumed}`);
+    assert.ok(
+      consumed.size >= ACP_PROXY_WRITE_HIGH_WATER,
+      `nothing routed — consumed ${consumed.size}`
+    );
     // agent death runs the 'down' sweep — every message the pump DID
     // accept (routed or held) earns its error; the paused tail dies
     // with the stream it was never read from
@@ -2772,10 +2788,12 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
       .catch(() => {});
     assert.equal(await hangGuard(proxyDone), 1);
     await settle(30);
-    assert.ok(
-      got.filter(m => errorOf(m) !== undefined).length >= ACP_PROXY_WRITE_HIGH_WATER,
-      'the accepted prefix was not answered'
-    );
+    // every consumed id earned an error — including the prefetched
+    // read that resolved during shutdown; only a write the transform
+    // rejected without the proxy consuming it may go unanswered
+    const errIds = new Set(got.filter(m => errorOf(m) !== undefined).map(m => idOf(m)));
+    const missing = [...consumed].filter(id => !errIds.has(id));
+    assert.deepEqual(missing, [], `${missing.length} consumed requests went unanswered`);
     await clientW.abort().catch(() => {});
   });
 
@@ -2791,24 +2809,23 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     // Alternating data with control was the amplifier: every cancel
     // used to dump the whole hold into the ledger, the read refilled
     // it, the next cancel flushed again — the pair stream outran the
-    // bound for as long as the client kept alternating.
+    // bound for as long as the client kept alternating. Each cancel
+    // here targets the data request written one iteration back: early
+    // ones find it already routed (forwarded, harmless), late ones
+    // find it parked in the hold — and the upstream `cancelled`
+    // answer is the bypass's OBSERVABLE effect, not just proof a
+    // write was consumed.
     const total = ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 10;
     let consumedData = 0;
-    let consumedCtrl = 0;
     for (let i = 0; i < total; i++) {
       if (i % 8 === 0) {
         void clientW
           .write({
             jsonrpc: '2.0',
             method: '$/cancel_request',
-            params: { id: 'no-such-request' },
+            params: { id: i },
           } as AnyMessage)
-          .then(
-            () => {
-              consumedCtrl++;
-            },
-            () => {}
-          );
+          .catch(() => {});
       }
       void clientW
         .write({
@@ -2825,8 +2842,7 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
         );
     }
     await settle(80);
-    // data intake bounded exactly like the plain flood — while the
-    // control messages themselves still routed past the gate
+    // data intake bounded exactly like the plain flood
     assert.ok(
       consumedData <= ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 2,
       `control flushes let intake outrun the bound — consumed ${consumedData} data of ${total}`
@@ -2835,7 +2851,13 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
       consumedData >= ACP_PROXY_WRITE_HIGH_WATER,
       `nothing routed — consumed ${consumedData}`
     );
-    assert.ok(consumedCtrl >= 1, 'a control message never routed');
+    // a cancel bypassed the saturated ledger and settled a held
+    // prompt — only the route-side sweep produces a 'cancelled'
+    // outcome (teardown answers are -32603s)
+    assert.ok(
+      got.some(m => (m as { result?: { stopReason?: string } }).result?.stopReason === 'cancelled'),
+      'no held request was settled by a bypassing cancel — the bypass never reached the hold'
+    );
     // agent death runs the 'down' sweep — every accepted message earns
     // its error, the paused tail dies with the stream
     await agentSide.writable
@@ -3255,7 +3277,9 @@ describe('acpProxy — held-ask ledger slots (bro-0w2tg)', () => {
       );
       // the parked evals finish before close — their own releases are
       // no-ops now, never a double-free
-      evalResolvers.splice(0).forEach(res => res());
+      evalResolvers.splice(0).forEach(res => {
+        res();
+      });
     } finally {
       assert.equal(await close(r), 0);
     }
@@ -3315,14 +3339,18 @@ describe('acpProxy — held-ask ledger slots (bro-0w2tg)', () => {
       // wave1 evals finish: their releases must be no-ops. Had the
       // settle-time release double-fired, the ledger would read room
       // at the mark and the marker would already have crossed
-      evalResolvers.splice(0, ACP_PROXY_WRITE_HIGH_WATER).forEach(res => res());
+      evalResolvers.splice(0, ACP_PROXY_WRITE_HIGH_WATER).forEach(res => {
+        res();
+      });
       await settle(60);
       assert.equal(evals, 2 * ACP_PROXY_WRITE_HIGH_WATER);
       assert.equal(updateTexts(r.updates).includes('w2-marker'), false);
       await r.acp.notify('session/cancel', { sessionId: 'sess-1' });
       await until(() => updateTexts(r.updates).includes('w2-marker'));
       assert.equal(updateTexts(r.updates).includes('w2-marker'), true);
-      evalResolvers.splice(0).forEach(res => res());
+      evalResolvers.splice(0).forEach(res => {
+        res();
+      });
       assert.equal((await promptP).stopReason, 'end_turn');
       assert.deepEqual(
         (r.fake.probeResult as Array<{ outcome?: string }>).map(o => o?.outcome),

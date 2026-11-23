@@ -255,8 +255,18 @@ interface PendingRequest {
    *  keeps the ledger full forever (holds never arm the stall clock),
    *  and a full leg stalls every sibling session's intake. The
    *  release is idempotent — the queued cross's own exit still runs
-   *  it safely. */
-  prompt?: { sessionId: string; span: OtelSpan; first?: boolean; release?: () => void };
+   *  it safely. `detach` drops the queued cross's payload cell — a
+   *  prompt settled while still queued behind a stuck writeQ must
+   *  not pin its message and params for the life of the wait (the
+   *  chain itself can't be unlinked, but the payload it would act
+   *  on can go). */
+  prompt?: {
+    sessionId: string;
+    span: OtelSpan;
+    first?: boolean;
+    release?: () => void;
+    detach?: () => void;
+  };
   /** session/new|load|fork bookkeeping — the cwd/sessionId to stamp
    *  onto the response's session id. `cwd` stays undefined when the
    *  params carried none — never the proxy's own cwd. */
@@ -445,6 +455,14 @@ interface Outbound {
    *  or immediately when the leg is already dead: a stalled leg's
    *  verdict belongs to the teardown race, never a sleeping pump. */
   room(): Promise<void>;
+  /** Resolves on the leg's NEXT write settle — FIFO one-shot: each
+   *  caller's wait ends on exactly one settle, in the order writes
+   *  land. The intake bypass count decays on it — a bypassed
+   *  control's charge is ordinary depth once its write issues, so
+   *  holding the charge until room() returns would park the read
+   *  behind ledger holds the bypass no longer represents. A dead
+   *  leg releases every waiter. */
+  nextSettle(): Promise<void>;
   /** The last write progress — teardown's close grace resets on it. */
   lastProgressAt(): number;
 }
@@ -457,8 +475,9 @@ const outbound = (
   let depth = 0;
   let holds = 0;
   let lastProgress = Date.now();
-  let stall: ReturnType<typeof setInterval> | undefined;
+  let stall: ReturnType<typeof setTimeout> | undefined;
   const waiters = new Set<() => void>();
+  const settleWaiters: Array<() => void> = [];
   const full = (): boolean => !dead.fired && depth + holds >= ACP_PROXY_WRITE_HIGH_WATER;
   const release = (): void => {
     for (const w of waiters) w();
@@ -466,40 +485,69 @@ const outbound = (
   };
   const disarm = (): void => {
     if (stall !== undefined) {
-      clearInterval(stall);
+      clearTimeout(stall);
       stall = undefined;
     }
   };
   /** The stall bound lives only while depth is nonzero — a leg with
    *  unsettled writes but no settle for stallMs is dead (the peer
-   *  stopped reading); any settle is progress and resets the clock.
-   *  Interval, not per-write timers: under a healthy flood each write
-   *  settles, and a per-write deadline would misread queue wait as
-   *  peer death. Holds never arm it — accepted-but-unwritten work is
-   *  not evidence the peer stopped reading. */
+   *  stopped reading); any settle is progress and moves the deadline.
+   *  ONE deadline rearmed from the last progress — not an interval:
+   *  an interval's tick alignment lets silence run nearly a whole
+   *  extra period past the mark before a tick even looks. And not a
+   *  per-write deadline: under a healthy flood each write settles
+   *  behind the queue, so the deadline rides the LAST progress and a
+   *  busy leg only pushes it out. Holds never arm it —
+   *  accepted-but-unwritten work is not evidence the peer stopped
+   *  reading. */
+  const rearm = (): void => {
+    if (dead.fired || depth === 0) {
+      return;
+    }
+    if (stall !== undefined) {
+      clearTimeout(stall);
+      stall = undefined;
+    }
+    stall = setTimeout(
+      () => {
+        stall = undefined;
+        if (dead.fired || depth === 0) {
+          return;
+        }
+        if (Date.now() - lastProgress >= stallMs) {
+          dead.fire();
+        } else {
+          rearm(); // the clock moved backwards — measure the remainder
+        }
+      },
+      Math.max(stallMs - (Date.now() - lastProgress), 1)
+    );
+    stall.unref();
+  };
   const arm = (): void => {
     if (stall !== undefined || dead.fired || depth === 0) {
       return;
     }
     lastProgress = Date.now();
-    stall = setInterval(() => {
-      if (depth > 0 && Date.now() - lastProgress >= stallMs) {
-        dead.fire();
-      }
-    }, stallMs);
-    stall.unref();
+    rearm();
   };
   // a dead leg releases every waiter and never measures stalls again
   void dead.promise.then(() => {
     disarm();
     release();
+    for (const w of settleWaiters.splice(0)) {
+      w();
+    }
   });
   const settled = (): void => {
     depth--;
     lastProgress = Date.now();
     if (depth === 0) {
       disarm();
+    } else {
+      rearm();
     }
+    settleWaiters.shift()?.();
     if (!full()) {
       release();
     }
@@ -529,6 +577,15 @@ const outbound = (
           release();
         }
       };
+    },
+    nextSettle() {
+      // pends even with depth 0 — the caller's own write is usually
+      // the settle it waits for; a dead leg drains every waiter
+      return dead.fired
+        ? Promise.resolve()
+        : new Promise<void>(r => {
+            settleWaiters.push(r);
+          });
     },
     spare() {
       return !full();
@@ -568,9 +625,10 @@ export async function acpProxy(
    *  so the route layer can settle what a leapfrogged control
    *  overtook: the c2a hold is read by the session/cancel and
    *  $/cancel_request sweeps for work queued ahead of the cancel
-   *  that must still not cross. The a2c hold gets no outside reader —
-   *  a response overtaking queued agent traffic is a benign reorder
-   *  with nothing to settle. */
+   *  that must still not cross; the a2c hold is read by the cancel's
+   *  intake-ask sweep (a parked ask still settles cancelled) and by
+   *  the pump's own ordering pull — a response must not overtake
+   *  held messages of the session it ends. */
   const heldC2A: AnyMessage[] = [];
   const heldA2C: AnyMessage[] = [];
   const downDead = latch();
@@ -797,19 +855,46 @@ export async function acpProxy(
     // prompt while it still waits in the writeQ frees the slot at
     // settle (abortHeld), not whenever the seam ahead of it returns.
     const release = downOut.hold();
+    // the queued cross reads its payload through a cell the settle
+    // path clears via `detach` — a prompt cancelled while still
+    // queued behind a stuck writeQ is discharged from `pending`, and
+    // without the detach its message and params would stay retained
+    // by this closure for the life of the queue (the chain itself
+    // can't be unlinked, the payload it would act on can)
+    const cell: { m?: AnyMessage; params?: Record<string, unknown> } = {
+      m,
+      params: target.params,
+    };
     const entry: PendingRequest = {
       method: 'session/prompt',
-      prompt: { sessionId: target.sessionId, span: turn, release },
+      prompt: {
+        sessionId: target.sessionId,
+        span: turn,
+        release,
+        detach: () => {
+          cell.m = undefined;
+          cell.params = undefined;
+        },
+      },
     };
     pending.set(id, entry);
     target.ses.held.add(id);
+    const { sessionId, ses } = target;
     // the entry is captured AT ENQUEUE — if a cancel discharges the
     // id and a new request reuses it before this queued write runs,
     // `pending.get(id)` inside crossPrompt would return the NEW
     // request's entry and every identity check would pass for the
     // stale turn. Both then-arms dispatch so a writeQ rejection can
     // never strand the charged slot
-    const queued = (): Promise<void> => crossPrompt({ m, id, own: entry, release, ...target });
+    const queued = (): Promise<void> => {
+      const cm = cell.m;
+      const cp = cell.params;
+      cell.m = undefined;
+      cell.params = undefined;
+      return cm === undefined || cp === undefined
+        ? Promise.resolve()
+        : crossPrompt({ m: cm, id, own: entry, release, params: cp, sessionId, ses });
+    };
     target.ses.writeQ = target.ses.writeQ.then(queued, queued);
   };
 
@@ -821,6 +906,20 @@ export async function acpProxy(
    *  window. */
   const crossable = (id: JsonRpcId, own: PendingRequest): boolean =>
     pending.get(id) === own && !downDead.fired && !wireDone;
+
+  /** Up-leg room for a LOCAL turn's answer — the c2a intake bound
+   *  watches the DOWN leg only, so a client that keeps prompting but
+   *  stops reading replies would let local results queue on upOut
+   *  past the mark until the stall bound declared the leg dead (the
+   *  stall limits duration, not count). Parking the answer inside the
+   *  session's writeQ IS the intake pause: cancellation and reply
+   *  processing stay live — a session/cancel answers the entry
+   *  upstream through abortHeld and the discharged entry fails the
+   *  post-wait recheck — and a dead leg or shutdown releases the
+   *  wait outright. (Mid-turn `emit` writes keep their
+   *  fire-and-forget depth charge — one turn's emit volume is the
+   *  residual the stall bound still owns.) */
+  const upRoom = (): Promise<unknown> => Promise.race([upOut.room(), wireDoneLatch.promise]);
 
   /** The held write, run inside the session's writeQ: "first prompt" =
    *  first to actually CROSS, decided here under the serialized queue —
@@ -886,34 +985,45 @@ export async function acpProxy(
         if (threw) {
           // a crashed handler is a -32603 upstream — never a fake
           // success; a cancel that already answered wins the race, and
-          // a reused id belongs to its new request
+          // a reused id belongs to its new request. The answer gates
+          // on up-leg room like any local result
           if (pending.get(id) === own) {
-            // the held marker this request owns goes with its
-            // discharge — dropping pending first would orphan it
-            // (every later cancel would walk a dead id forever)
-            ses.held.delete(id);
-            pending.delete(id);
-            own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
-            writeUp({
-              jsonrpc: '2.0',
-              id,
-              error: {
-                code: -32603,
-                message: `acp agent: local turn failed — ${failure instanceof Error ? failure.message : String(failure)}`,
-              },
-            } as AnyMessage);
+            await upRoom();
+            if (pending.get(id) === own) {
+              // the held marker this request owns goes with its
+              // discharge — dropping pending first would orphan it
+              // (every later cancel would walk a dead id forever)
+              ses.held.delete(id);
+              pending.delete(id);
+              own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
+              writeUp({
+                jsonrpc: '2.0',
+                id,
+                error: {
+                  code: -32603,
+                  message: `acp agent: local turn failed — ${failure instanceof Error ? failure.message : String(failure)}`,
+                },
+              } as AnyMessage);
+            }
           }
           return;
         }
         if (result !== undefined) {
           if (pending.get(id) === own) {
-            ses.held.delete(id);
-            pending.delete(id);
-            own.prompt?.span.end({
-              'acp.proxy.local': true,
-              'acp.stop_reason': result.stopReason,
-            });
-            answerUpstream(id, result);
+            // the local result is an upstream write the c2a bound
+            // can't see — admit it only once the up leg has room so
+            // a client that stopped reading throttles local intake
+            // instead of being found by the stall bound
+            await upRoom();
+            if (pending.get(id) === own) {
+              ses.held.delete(id);
+              pending.delete(id);
+              own.prompt?.span.end({
+                'acp.proxy.local': true,
+                'acp.stop_reason': result.stopReason,
+              });
+              answerUpstream(id, result);
+            }
           }
           return;
         }
@@ -971,6 +1081,10 @@ export async function acpProxy(
       // (and every sibling session's intake with it) for dead work.
       // Idempotent — the queued cross's own exit release is a no-op
       pr.release?.();
+      // the queued cross's payload goes with the settle — a prompt
+      // still parked behind a stuck queue must not pin its message
+      // for the life of the wait
+      pr.detach?.();
       // agent mode: a local turn in flight dies with its answer — the
       // SIGTERM lands before `cancelled` crosses
       req?.abort?.();
@@ -1021,6 +1135,41 @@ export async function acpProxy(
     return aborted;
   };
 
+  /** Answer every INTAKE-held permission ask of the session
+   *  downstream `cancelled` — an ask still parked in heldA2C behind
+   *  a full upstream ledger never reached pendingA2C, so
+   *  abortHeldAsks cannot see it: a cancel that overtook the hold
+   *  must pull it here or the eval would later show the client a
+   *  permission prompt for a turn it already cancelled. Other
+   *  sessions' asks stay in order; asks already forwarded upstream
+   *  keep their relay — same rule as the held prompts, one
+   *  direction over. Returns the count. */
+  const abortIntakeAsks = (sessionId: string, reason: string): number => {
+    let aborted = 0;
+    for (let i = heldA2C.length - 1; i >= 0; i--) {
+      const m = heldA2C[i] as AnyMessage;
+      if (wire(m).method !== PERMISSION_METHOD || wire(m).id === undefined) {
+        continue;
+      }
+      if (sessionIdOf(m) !== sessionId) {
+        continue;
+      }
+      heldA2C.splice(i, 1);
+      const tc = paramsOf(m)?.['toolCall'];
+      const toolCall = isRecord(tc) ? tc : undefined;
+      aborted++;
+      notePermission(sessions.get(sessionId), {
+        title: str(toolCall?.['title']) ?? str(toolCall?.['toolCallId']) ?? 'permission request',
+        toolCallId: str(toolCall?.['toolCallId']),
+        decidedBy: 'proxy',
+        verdict: 'cancelled',
+        reason,
+      });
+      answerPermission(wire(m).id as JsonRpcId, { outcome: 'cancelled' });
+    }
+    return aborted;
+  };
+
   /** Release a session — held prompts answered, state dropped, span
    *  ended, plane drained. Runs on a successful session/close response
    *  (a failed close leaves the session live — the close never took). */
@@ -1028,6 +1177,7 @@ export async function acpProxy(
     abortHeld(ses, sessionId);
     abortGateHeld(sessionId);
     abortHeldAsks(sessionId, 'session closed while the policy evaluated');
+    abortIntakeAsks(sessionId, 'session closed before the ask crossed');
     sessions.delete(sessionId);
     ses.span?.end({ 'acp.proxy.close': true });
     void ses.plane?.drain().then(undefined, () => {});
@@ -1056,12 +1206,14 @@ export async function acpProxy(
     // a cancel settles the client's request 'cancelled' and the gate
     // eval (or the gate turn's late response) lands on an empty slot.
     // Held permission asks settle downstream the same way — the wire
-    // never shows an ask after its cancel either
+    // never shows an ask after its cancel either — including asks
+    // still parked in the a2c intake hold (no pending entry yet)
     const aborted =
       intakeAborted +
       abortHeld(ses, sessionId) +
       abortGateHeld(sessionId) +
-      abortHeldAsks(sessionId, 'session cancelled while the policy evaluated');
+      abortHeldAsks(sessionId, 'session cancelled while the policy evaluated') +
+      abortIntakeAsks(sessionId, 'session cancelled before the ask crossed');
     if (aborted === 0) {
       return true;
     }
@@ -1915,7 +2067,8 @@ export async function acpProxy(
     tag: string,
     out: Outbound,
     ctrl: (m: AnyMessage) => boolean,
-    held: AnyMessage[]
+    held: AnyMessage[],
+    precede?: (heldMsg: AnyMessage, ctrl: AnyMessage) => boolean
   ): Promise<void> => {
     const reader = stream.readable.getReader();
     const wakes = new Set<() => void>();
@@ -1955,16 +2108,40 @@ export async function acpProxy(
     };
     let read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined = reader.read();
     let eof = false;
+    /** Intake paused at the read bound with NO read outstanding — the
+     *  prefetched one already landed in the hold. Distinct from EOF:
+     *  the loop still owes the room wait, just no second read. */
+    let intakePaused = false;
+    /** A pre-done read — where a wait still needs a promise while the
+     *  intake is paused or spent, this resolves immediately so the
+     *  loop falls through to its own break conditions. */
+    const READ_DONE = Promise.resolve<ReadableStreamReadResult<AnyMessage>>({
+      value: undefined,
+      done: true,
+    });
     /** Controls routed past a FULL ledger — accepted in-flight work
      *  neither `held` nor the ledger's own hold count sees. Enough of
      *  them pause the read side exactly like a saturated hold: a
      *  cancel or response flood meets the wire's bound instead of
      *  writing past it without limit (local cancellation never blocks
      *  — every consumed control still settles the instant it routes;
-     *  the bound gates only consuming MORE). The count stands until
-     *  the ledger next has room — bypassed writes are ordinary depth
-     *  by then. */
+     *  the bound gates only consuming MORE). The charge decays on the
+     *  leg's NEXT write settle, not on room(): bypassed work is
+     *  ordinary depth once issued, and holds can keep the ledger
+     *  "full" while the wire drains fine — counting until room would
+     *  park the read behind work the charge no longer represents
+     *  (the exact deadlock this bound exists to prevent). */
     let bypassed = 0;
+    const bypass = (): void => {
+      bypassed++;
+      // FIFO one-shot — the oldest outstanding charge ends on each
+      // settle; a bypass whose route wrote nothing decays on whatever
+      // lands next, which errs toward holding the bound, never
+      // toward unbounded intake
+      void out.nextSettle().then(() => {
+        bypassed = Math.max(0, bypassed - 1);
+      });
+    };
     /** ONE outstanding room() subscription at a time — the parked wait
      *  re-arms on every intake result, and a waiter that loses the
      *  race stays registered until the next release, so re-arming per
@@ -1997,10 +2174,33 @@ export async function acpProxy(
       while (held.length > 0 && out.spare()) {
         deliver(held.shift() as AnyMessage);
       }
+      if (out.spare()) {
+        bypassed = 0;
+        deliver(m);
+        return;
+      }
+      // routed past a saturated ledger — first pull whatever ordering
+      // owes ahead of this control: a response must not overtake held
+      // messages of the session it ends. The pulled writes ISSUE
+      // first — still a bypass, never awaited — so the control's
+      // liveness is untouched and only the wire order is repaired
+      if (precede !== undefined) {
+        let keep = 0;
+        for (let i = 0; i < held.length; i++) {
+          const h = held[i] as AnyMessage;
+          if (precede(h, m)) {
+            bypass();
+            deliver(h);
+          } else {
+            held[keep++] = h;
+          }
+        }
+        held.length = keep;
+      }
       // routed past a saturated ledger — count it: the hold and the
       // bypass together are the intake in flight, and their sum is
       // the read-side bound below
-      bypassed = out.spare() ? 0 : bypassed + 1;
+      bypass();
       deliver(m);
     };
     for (;;) {
@@ -2009,23 +2209,50 @@ export async function acpProxy(
       while (held.length > 0 && out.spare()) {
         deliver(held.shift() as AnyMessage);
       }
-      if (wireDone || eof || read === undefined) {
+      if (wireDone || eof || (read === undefined && !intakePaused)) {
         break;
       }
       // the hold AND the bypassed controls are the intake in flight —
-      // a saturated SUM pauses the read side on room alone: a new
-      // read has nowhere to go (a dead leg's release doubles as the
-      // wake), and room absorbing the bypassed writes resets the count
+      // a saturated SUM pauses the read side. While a read is still
+      // outstanding the wait is room OR that read: a read issued
+      // before the pause is accepted work in flight, so its
+      // rejection must be handled inside the wait (a parked promise
+      // with no handler is an unhandled rejection that outlives the
+      // pump), and its EOF or message is already on the wire — the
+      // bound spends the ONE prefetch slot for exactly this. Once it
+      // lands the intake pauses outright: a paused pump issues no
+      // new read until room re-opens it.
       if (held.length + bypassed >= ACP_PROXY_READ_HIGH_WATER) {
-        const r = await untilStop(roomReady());
+        const r: 'room' | { readonly read: ReadableStreamReadResult<AnyMessage> } | undefined =
+          read === undefined
+            ? await untilStop(roomReady())
+            : await untilStop(Promise.race([roomReady(), read.then(v => ({ read: v }) as const)]));
         if (r === undefined) break;
-        bypassed = 0;
+        if (r === 'room') {
+          bypassed = 0;
+          intakePaused = false;
+          // intake re-opens — the one prefetch read goes back out so
+          // an EOF queued behind the flood still surfaces early
+          read ??= reader.read();
+          continue;
+        }
+        // the prefetch landed while saturated — accepted work joins
+        // the hold, and the intake pauses (no new read) until room
+        read = undefined;
+        intakePaused = true;
+        if (r.read.done) {
+          eof = true;
+        } else {
+          accept(r.read.value);
+        }
         continue;
       }
       if (held.length === 0) {
         // nothing to route — the intake read is the only wait worth
         // taking (room opening would find an empty hold anyway)
-        const r: ReadableStreamReadResult<AnyMessage> | undefined = await untilStop(read);
+        const r: ReadableStreamReadResult<AnyMessage> | undefined = await untilStop(
+          read ?? READ_DONE
+        );
         if (r === undefined) break;
         read = r.done ? undefined : reader.read();
         if (r.done) {
@@ -2038,7 +2265,7 @@ export async function acpProxy(
       // parked with a hold to drain — room, more input, or shutdown,
       // whichever moves first; intake keeps running either way
       const r = await untilStop(
-        Promise.race([roomReady(), read.then(v => ({ read: v }) as const)])
+        Promise.race([roomReady(), (read ?? READ_DONE).then(v => ({ read: v }) as const)])
       );
       if (r === undefined) break;
       if (r === 'room') continue;
@@ -2096,8 +2323,22 @@ export async function acpProxy(
       (wire(m).method === 'session/cancel' || wire(m).method === '$/cancel_request'));
   const a2cCtrl = (m: AnyMessage): boolean => isResponse(m);
 
+  /** a2c ordering — a response bypassing the route gate must not
+   *  overtake held messages of its OWN session: the turn's updates
+   *  reach the client before the response that ends it (other
+   *  sessions' held traffic it may pass — no ordering owed). The
+   *  response's session comes from the pending entry it discharges —
+   *  a prompt's sessionId or a close's target; a response with no
+   *  entry can't be ordered and jumps alone. */
+  const a2cPrecede = (heldMsg: AnyMessage, ctrlMsg: AnyMessage): boolean => {
+    const id = wire(ctrlMsg).id;
+    const req = id === undefined ? undefined : pending.get(id);
+    const sessionId = req?.prompt?.sessionId ?? req?.close;
+    return sessionId !== undefined && sessionIdOf(heldMsg) === sessionId;
+  };
+
   const pumpUp = pump(upstream, routeC2A, 'c→a', downOut, c2aCtrl, heldC2A);
-  const pumpDown = pump(downstream, routeA2C, 'a→c', upOut, a2cCtrl, heldA2C);
+  const pumpDown = pump(downstream, routeA2C, 'a→c', upOut, a2cCtrl, heldA2C, a2cPrecede);
   const verdict = await Promise.race([
     pumpUp.then(
       () => 'up' as const, // client closed its side of the wire
@@ -2130,6 +2371,22 @@ export async function acpProxy(
   // so a request the wire accepted is answered, never dropped silently
   await Promise.allSettled([pumpUp, pumpDown]);
 
+  // a leg already declared dead aborts NOW — before the sweeps queue
+  // their answers on the live leg: a dead writer left writable through
+  // the live leg's close grace lets a peer that resumes mid-teardown
+  // execute writes whose callers already ate the sweep's error. The
+  // close loop still skips the dead leg's close handling; the abort
+  // is idempotent there (an in-flight write may still complete —
+  // abort() does not cancel a write the sink already took)
+  for (const { w, dead } of [
+    { w: upWriter, dead: upDead },
+    { w: downWriter, dead: downDead },
+  ]) {
+    if (dead.fired) {
+      void w.abort().catch(() => {});
+    }
+  }
+
   // downstream dead → every request still in flight fails visibly on
   // the upstream wire; a dead agent never silently eats a prompt
   if (verdict === 'down') {
@@ -2138,8 +2395,10 @@ export async function acpProxy(
         continue; // already discharged — a gate pair's client half
       }
       // a still-held prompt's charged slot frees with the sweep — the
-      // queued cross's own release would wait on the seam ahead of it
+      // queued cross's own release would wait on the seam ahead of it;
+      // its payload goes too — the wire ended before it crossed
       req.prompt?.release?.();
+      req.prompt?.detach?.();
       if (req.gateFor !== undefined) {
         // the gate re-prompt's id is proxy-originated — the owed
         // upstream answer lands under the CLIENT's id, and the held
