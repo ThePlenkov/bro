@@ -206,5 +206,10 @@ function pushDataRef(root: string, remote: string, ref: string): void {
 // branches without the API quota the ref call costs every page load.
 // Best-effort: a rejected mirror never fails the sync.
 function mirrorDataBranch(root: string, remote: string, tip: string): void {
-  gitTry(['-C', root, 'push', remote, `${tip}:refs/heads/bro-data`]);
+  const result = gitTry(['-C', root, 'push', remote, `${tip}:refs/heads/bro-data`]);
+  if (result.code !== 0) {
+    console.error(
+      `warning: could not mirror ${tip.slice(0, 8)} to bro-data — check network and remote access`
+    );
+  }
 }
