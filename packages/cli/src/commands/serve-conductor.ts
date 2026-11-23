@@ -548,6 +548,7 @@ interface ImageBlock {
 
 interface MessagesRequest {
   model?: string;
+  metadata?: { user_id?: string };
   system?: string | { text?: string }[];
   messages?: { role?: string; content?: string | InBlock[] }[];
   /** `role:'system'` turns lifted out of `messages` — context the client
@@ -945,6 +946,10 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
     // client-supplied f: verbatim would let a caller inject into the
     // fingerprint namespace and collide with another conversation
     return `h:${named.slice(0, 200)}`;
+  }
+  const native = body.metadata?.user_id?.trim();
+  if (native !== undefined && native !== '') {
+    return `h:${native.slice(0, 200)}`;
   }
   const first = body.messages?.[0];
   if (first === undefined) {
@@ -5594,6 +5599,14 @@ async function refreshCatalog(wire: WireCtx): Promise<CatalogSnapshot> {
   return { models: cache.rows?.length ?? 0, fetchedAtMs: cache.fetchedAtMs, failures };
 }
 
+/** Explicit operator reload bypasses each lane's read cache. */
+function invalidateCatalog(wire: WireCtx): void {
+  for (const lane of wire.lanes.values()) {
+    lane.catalogCache = undefined;
+  }
+  wire.catalog.rows = undefined;
+}
+
 /** The cached rows — read them ONCE if nobody has yet. A burst of
  *  clients waits on the SAME read; none of them spends its own. */
 async function ensureCatalog(wire: WireCtx): Promise<void> {
@@ -5910,7 +5923,10 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   };
   return Object.assign(conductorDispatch(wire, chains, cfg), {
     terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
-    reloadCatalog: (): Promise<CatalogSnapshot> => refreshCatalog(wire),
+    reloadCatalog: (): Promise<CatalogSnapshot> => {
+      invalidateCatalog(wire);
+      return refreshCatalog(wire);
+    },
     // the warm read runs in the background: a failed enumeration leaves
     // the cache empty and the next client read retries it
     warmCatalog: (): void => {
@@ -5944,7 +5960,7 @@ function conductorDispatch(
         404,
         'not_found_error',
         `bro conductor: the ${surface} surface has no ${method} ${path} — ` +
-          `use ${SURFACE_ENDPOINTS[surface].map((endpoint) => endpoint.split(' ')[1]).join(', ')}`
+          `use ${SURFACE_ENDPOINTS[surface].map(endpoint => endpoint.split(' ')[1]).join(', ')}`
       );
       return;
     }

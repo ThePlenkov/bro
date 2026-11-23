@@ -527,7 +527,6 @@ describe('parseSpawnBody', () => {
   test('maps a valid body into StepSpawnRequest', () => {
     const req = parseSpawnBody(
       JSON.stringify({ molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native' })
-
     );
     assert.deepEqual(req, {
       lane: 'interactive',
@@ -545,27 +544,6 @@ describe('parseSpawnBody', () => {
       resumeSessionId: undefined,
     });
   });
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-    )
-    assert.deepEqual(req, { molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native', promptFile: undefined, beadsDir: undefined, provider: undefined, model: undefined, profile: undefined, class: undefined, autoApprove: undefined })
-  })
-
-    );
-    assert.deepEqual(req, {
-      molStep: 'fx-1',
-      worktree: '/w',
-      prompt: 'p',
-      connector: 'native',
-      promptFile: undefined,
-      beadsDir: undefined,
-      provider: undefined,
-      model: undefined,
-      profile: undefined,
-      class: undefined,
-      autoApprove: undefined,
-    });
-  });
-
 
   test('the provider vocabulary rides the body — strings plus boolean autoApprove', () => {
     const req = parseSpawnBody(
@@ -1115,7 +1093,6 @@ describe('serve handler over a real socket', () => {
     let live: { data(chunk: string): void; exit(status: unknown): void } | undefined;
     // past the backlog cap as one JSON frame — a follower that reads
     // must still get it all, sliced through the drain loop
-
     const BIG = `${'x'.repeat(1_500_000)}\r\nend\n`;
     // surrogate-pair slicing cases (bro-5wv4b) — a 65 536-code-unit
     // slice must not split an astral char: every emitted frame has to
@@ -1131,26 +1108,15 @@ describe('serve handler over a real socket', () => {
       // astral char at offset 0 of a snapshot under one slice
       ['term-lead', '😀lead\n'],
     ]);
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-    const BIG = `${'x'.repeat(1_500_000)}\r\nend\n`
-
-    const BIG = `${'x'.repeat(1_500_000)}\r\nend\n`;
-
     const fakeReg = {
       snapshot: (id: string) => {
         if (id === 'term-done')
           return { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } };
         if (id === 'term-big')
-
           return { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } };
         const surrOut = SURR.get(id);
         if (surrOut !== undefined)
           return { output: surrOut, truncated: false, exitStatus: { exitCode: 3, signal: null } };
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-          return { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } }
-
-          return { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } };
-
         if (id === 'term-gap')
           // exited but not closed — the pipe still owes its last bytes
           return { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } };
@@ -1175,23 +1141,10 @@ describe('serve handler over a real socket', () => {
             snapshot: { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } },
             completed: true,
             stop: () => {},
-
           };
         const surrOut = SURR.get(id);
         if (surrOut !== undefined)
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-          }
-        if (id === 'term-boom') throw new Error('registry exploded')
-        if (id === 'term-gap') {
-          live = l
-
-          };
-        if (id === 'term-boom') throw new Error('registry exploded');
-        if (id === 'term-gap') {
-          live = l;
-
           return {
-
             snapshot: {
               output: surrOut,
               truncated: false,
@@ -1209,15 +1162,6 @@ describe('serve handler over a real socket', () => {
               truncated: false,
               exitStatus: { exitCode: 0, signal: null },
             },
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-            snapshot: { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
-
-            snapshot: {
-              output: 'head\n',
-              truncated: false,
-              exitStatus: { exitCode: 0, signal: null },
-            },
-
             completed: false,
             stop: () => {},
           };
@@ -1371,7 +1315,6 @@ describe('serve handler over a real socket', () => {
           if (dm !== null) rebuilt += JSON.parse(dm[1]!) as string;
         }
       }
-
       assert.equal(rebuilt, BIG, 'sliced data frames reassemble byte-exact');
       assert.match(bigExit, /exitCode":7/);
 
@@ -1405,13 +1348,6 @@ describe('serve handler over a real socket', () => {
         }
         assert.equal(surrRebuilt, want, `${id}: frames reassemble byte-exact`);
       }
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-      assert.equal(rebuilt, BIG, 'sliced data frames reassemble byte-exact')
-      assert.match(bigExit, /exitCode":7/)
-
-      assert.equal(rebuilt, BIG, 'sliced data frames reassemble byte-exact');
-      assert.match(bigExit, /exitCode":7/);
-
 
       // a snapshot with exitStatus but pending 'close' keeps streaming —
       // ending on exitStatus alone would drop bytes still on the pipe
@@ -1691,38 +1627,5 @@ describe('serve — webhook routes', () => {
     } finally {
       await new Promise(r => server.close(r));
     }
-
   });
 });
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-  })
-})
-
-  });
-});
-
-describe('serve — the catalog reload', () => {
-  test('POST /api/v1/models/reload re-reads the cached catalog', async () => {
-    let reads = 0;
-    const d = deps({
-      reloadCatalog: async () => {
-        reads += 1;
-        return { models: 545, fetchedAtMs: 1, failures: [] };
-      },
-    });
-    const r = await route('POST', '/api/v1/models/reload', undefined, d);
-    assert.equal(r.status, 200);
-    assert.deepEqual(r.body, { models: 545, fetchedAtMs: 1, failures: [] });
-    assert.equal(reads, 1);
-    // a GET is not a refresh — the catalog is read at start and on demand
-    const g = await route('GET', '/api/v1/models/reload', undefined, d);
-    assert.equal(g.status, 405);
-    assert.equal(reads, 1);
-  });
-
-  test('an unwired gateway has no reload route', async () => {
-    const r = await route('POST', '/api/v1/models/reload');
-    assert.equal(r.status, 404);
-  });
-});
-

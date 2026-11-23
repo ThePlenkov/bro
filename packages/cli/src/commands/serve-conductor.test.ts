@@ -3240,7 +3240,6 @@ describe('serve /v1/* — the bridge keeps the answer honest', () => {
   });
 });
 
-
 // --- the fast lane (bro-6asnu) ------------------------------------------
 // A classifier-shaped /v1/messages call byte-forwards to the direct
 // upstream instead of paying session/new.
@@ -3870,8 +3869,6 @@ describe("the conductor's un-locked cap fallback", () => {
     });
   });
 });
-||||||| parent of 363e40a3 (feat(serve): the catalog is read once, not per request (bro-rjc93))
-
 
 describe('the catalog cache — one provider read, not one per request', () => {
   test('a second read costs no provider round trip', async () => {
@@ -3929,4 +3926,3 @@ describe('the catalog cache — one provider read, not one per request', () => {
     }
   });
 });
-
