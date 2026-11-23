@@ -14,9 +14,9 @@
  *  attribution from the live process tree. */
 
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 
 /** Endpoint resolution: process env first, else the bro provider env
@@ -281,8 +281,25 @@ export function postDetached(
  *  collector required. Independent of BRO_TELEMETRY: the journal is
  *  the store's own record, not telemetry. */
 let journalPath: string | undefined;
+/** The currently pinned journal — a caller that must not clobber a
+ *  FOREIGN pin (a harness's own otelJournal call) checks this before
+ *  clearing. */
+export function otelJournalPath(): string | undefined {
+  return journalPath;
+}
 export function otelJournal(path: string | undefined): void {
   journalPath = path;
+  // create the parent at pin time — a fresh BRO_STATE_DIR (or any new
+  // state root) has no `bro/` subtree, and the per-event append swallows
+  // ENOENT silently, so a missing dir means events vanish without a
+  // trace. Fail-open like the append: a bad path just loses the rows.
+  if (path !== undefined) {
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+    } catch {
+      // the append's own catch reports nothing either — fail-open
+    }
+  }
 }
 
 function journal(name: string, a: Record<string, AttrValue>): void {

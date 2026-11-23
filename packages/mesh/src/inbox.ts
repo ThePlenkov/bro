@@ -258,9 +258,10 @@ function scanWastelandPeer(
   peer: MeshPeer,
   selfRig: string | undefined,
   out: PeerRecord[],
-  errors: string[]
+  errors: string[],
+  timeoutMs?: number
 ): void {
-  const board = browseWanted(peer.remote);
+  const board = browseWanted(peer.remote, timeoutMs);
   if (board.error !== undefined) {
     errors.push(`${peer.alias}: ${board.error}`);
     return;
@@ -384,7 +385,7 @@ function scanPeer(
     return;
   }
   if (peer.transport === 'wasteland') {
-    scanWastelandPeer(peer, ctx.selfRig, out, errors);
+    scanWastelandPeer(peer, ctx.selfRig, out, errors, ctx.timeoutMs);
     return;
   }
   if (ctx.pull === false) {

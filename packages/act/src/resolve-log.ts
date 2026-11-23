@@ -26,101 +26,101 @@
  * reads as "no resolve recorded" — never a crash, never a false
  * block.
  */
-import { appendFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { gitCommonDir, withFileLock } from '@broject/core'
-import { compactLedger, parseLedger } from './ledger.ts'
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { stateCommonDir, withFileLock } from '@broject/core';
+import { compactLedger, parseLedger } from './ledger.ts';
 
 export interface ResolveEvent {
   /** Epoch ms — when the resolve happened. */
-  ts: number
+  ts: number;
   /** owner/repo — the PR's repo. */
-  repo: string
+  repo: string;
   /** PR number. */
-  pr: number
+  pr: number;
   /** The thread id (host-native). */
-  thread: string
+  thread: string;
 }
 
 export interface ResolveLedger {
   /** Record a resolve. Idempotent per (repo, pr, thread) inside one
    *  window — a repeated resolve of the same thread does not append a
    *  second line. */
-  record(ev: Omit<ResolveEvent, 'ts'>): void
+  record(ev: Omit<ResolveEvent, 'ts'>): void;
   /** Was this thread resolved before? True when any record for it
    *  exists. */
-  wasResolved(repo: string, pr: number, thread: string): boolean
+  wasResolved(repo: string, pr: number, thread: string): boolean;
 }
 
-/** The ledger file — `<git-common>/bro/act-resolves.jsonl`. */
+/** The ledger file — `<git-common>/bro/act-resolves.jsonl`. Resolves
+ *  the state root, so a BRO_STATE_DIR pin keeps resolves in the
+ *  sandbox too. */
 export function resolveLogPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = stateCommonDir(dir);
   if (common === null) {
-    return null
+    return null;
   }
-  return join(common, 'bro', 'act-resolves.jsonl')
+  return join(common, 'bro', 'act-resolves.jsonl');
 }
 
 function parseEvents(file: string): ResolveEvent[] {
-  return parseLedger(file, isResolveEvent)
+  return parseLedger(file, isResolveEvent);
 }
 
 /** A well-formed ledger row — every field present and of the right
  *  type. A malformed row is skipped, not fatal. */
 function isResolveEvent(e: unknown): e is ResolveEvent {
   if (typeof e !== 'object' || e === null) {
-    return false
+    return false;
   }
-  const o = e as Partial<ResolveEvent>
+  const o = e as Partial<ResolveEvent>;
   if (typeof o.ts !== 'number' || !Number.isFinite(o.ts)) {
-    return false
+    return false;
   }
   if (typeof o.repo !== 'string' || typeof o.thread !== 'string') {
-    return false
+    return false;
   }
-  return typeof o.pr === 'number'
+  return typeof o.pr === 'number';
 }
 
 export function fileResolveLog(file: string): ResolveLedger {
   return {
     record(ev) {
       try {
-        mkdirSync(dirname(file), { recursive: true })
-        const existing = parseEvents(file)
+        mkdirSync(dirname(file), { recursive: true });
+        const existing = parseEvents(file);
         const already = existing.some(
-          (e) => e.repo === ev.repo && e.pr === ev.pr && e.thread === ev.thread
-        )
+          e => e.repo === ev.repo && e.pr === ev.pr && e.thread === ev.thread
+        );
         if (already) {
-          return
+          return;
         }
-        const line = JSON.stringify({ ts: Date.now(), ...ev })
+        const line = JSON.stringify({ ts: Date.now(), ...ev });
         withFileLock(
           `${file}.lock`,
           () => {
-            appendFileSync(file, `${line}\n`, 'utf8')
+            appendFileSync(file, `${line}\n`, 'utf8');
           },
           { label: 'act-resolve-ledger' }
-        )
-        compactLedger(file)
+        );
+        compactLedger(file);
       } catch {
         // recording is best-effort — a failed write means the reopen
         // is not detected, never a crash
       }
     },
     wasResolved(repo, pr, thread) {
-      return parseEvents(file).some(
-        (e) => e.repo === repo && e.pr === pr && e.thread === thread
-      )
+      return parseEvents(file).some(e => e.repo === repo && e.pr === pr && e.thread === thread);
     },
-  }
+  };
 }
 
 /** The ledger for a directory — null when there is no git dir (the
  *  caller then has no ledger and detects nothing). */
 export function resolveLedger(dir: string): ResolveLedger | null {
-  const file = resolveLogPath(dir)
+  const file = resolveLogPath(dir);
   if (file === null) {
-    return null
+    return null;
   }
-  return fileResolveLog(file)
+  return fileResolveLog(file);
 }

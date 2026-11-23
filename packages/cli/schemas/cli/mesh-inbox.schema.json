@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/mesh-inbox.schema.json",
+  "title": "bro mesh inbox --json",
+  "description": "Inbox rows — cmdInbox spreads each pending request's MeshEnvelope into the row: {peer, bead, ...envelope, mismatch?, unbound?} (packages/cli/src/commands/mesh.ts over packages/mesh/src/inbox.ts's InboundRequest). kind is always 'request' — the pending filter is structural. mismatch/unbound keys ride only when true (|| undefined drops them); peer is the provenance binding alias ('self' for own-store deliveries).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "peer",
+      "bead",
+      "v",
+      "id",
+      "kind",
+      "thread",
+      "from",
+      "to",
+      "title",
+      "body",
+      "refs",
+      "terms",
+      "evidence"
+    ],
+    "properties": {
+      "peer": { "type": "string" },
+      "bead": { "type": "string" },
+      "v": { "const": "mesh/1" },
+      "id": { "type": "string" },
+      "kind": { "const": "request" },
+      "thread": { "type": "string" },
+      "from": { "type": "string" },
+      "to": { "type": "string" },
+      "title": { "type": "string" },
+      "body": { "type": "string" },
+      "refs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref"],
+          "properties": {
+            "kind": { "enum": ["bead", "url", "pr"] },
+            "ref": { "type": "string" }
+          }
+        }
+      },
+      "terms": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "priority": { "type": "string" },
+          "deadline": { "type": ["string", "null"] }
+        }
+      },
+      "evidence": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref"],
+          "properties": {
+            "kind": { "enum": ["bead", "url", "pr"] },
+            "ref": { "type": "string" }
+          }
+        }
+      },
+      "mismatch": {
+        "type": "boolean",
+        "description": "envelope.from ≠ the peer binding's declared rig — flagged, never trusted"
+      },
+      "unbound": {
+        "type": "boolean",
+        "description": "record's author matched no peer binding — surfaced flagged"
+      }
+    }
+  }
+}

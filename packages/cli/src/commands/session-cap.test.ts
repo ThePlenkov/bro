@@ -2,6 +2,7 @@
  *  bro-bww9v): the guard plane's veto and the ACP surface's refusal. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import {
   clearSessionPlanes,
   registerSessionPlane,
   sessionCapViews,
+  sessionClaimName,
   type PreToolVerdict,
   type SessionPlane,
 } from '@broject/core';
@@ -54,6 +56,14 @@ const withPlane = (plane: SessionPlane, fn: () => void): void => {
     clearSessionPlanes();
   }
 };
+
+/** The claim key's sanitization, mirrored from `keyPart` — the tests
+ *  seed the on-disk filename formats, which are the source's contract. */
+const keyPartForTest = (raw: string): string =>
+  `${raw
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/\.{2,}/g, '_')
+    .slice(0, 48)}-${createHash('sha256').update(raw, 'utf16le').digest('hex').slice(0, 24)}`;
 
 /** A scratch reservations dir — the claim files live here, never in the
  *  developer's real data home (a claim that outlives the test would
@@ -188,10 +198,84 @@ describe('sessionCapVerdict', () => {
           bags
         );
         assert.deepEqual(verdicts, []);
-        // the claim migrated to the new key — one file, not two
+        // the claim migrated to the new key — one file, not two, in
+        // the current kind-prefixed claim format (kind and key encoded
+        // as separate components, so a `-` in either never collides)
+        const key = `guard-${keyPartForTest('sess-1')}-id-${keyPartForTest('call-9')}`;
+        const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
+        assert.deepEqual(files, [`${sessionClaimName('upg', key, 0)}.slot`]);
+      });
+    });
+  });
+
+  test('a claim under the previous raw-key name migrates — the upgrade window counts the call once', () => {
+    withReservations(dir => {
+      withPlane(testPlane('upg2', { live: 0 }), () => {
+        const bags = { upg2: { maxSessions: 1, reservationsDir: dir } };
+        // the format ONE release back — this call's CURRENT key
+        // (`guard-<safe session>-id-<safe id>-<digest>`) plus the -<i>
+        // tail, before the kind prefix existed. Mirrors `keyPart`'s
+        // safe+digest shape; the seeds are simple so the safe half is
+        // the raw string.
+        const rawKey = `guard-${keyPartForTest('sess-1')}-id-${keyPartForTest('call-8')}`;
+        writeFileSync(join(dir, `${rawKey}-0.slot`), String(Date.now()));
+        // the updated binary's event for the SAME call must see the
+        // held slot — at cap 1 an unrecognized claim plus the new one
+        // would refuse the call its own continuation
+        const verdicts = sessionCapVerdict(
+          { dir: process.cwd(), sessionId: 'sess-1', toolUseId: 'call-8' } as never,
+          { tool: 'bash', input: { command: 'upg2-run --now' } },
+          bags
+        );
+        assert.deepEqual(verdicts, []);
         const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
         assert.equal(files.length, 1);
-        assert.ok(files[0]!.startsWith('guard-sess-1-'));
+        assert.ok(files[0]!.startsWith('upg2-'));
+      });
+    });
+  });
+
+  test('two identical commands without a tool-use id are TWO calls — the second refuses at cap', () => {
+    withReservations(dir => {
+      withPlane(testPlane('dup', { live: 0 }), () => {
+        const bags = { dup: { maxSessions: 1, reservationsDir: dir } };
+        // no toolUseId: there is no per-call identity — the command
+        // text is not one (bro-4bx61). Each event is a DISTINCT call
+        // and must claim its own slot.
+        const call = () => verdictFor('dup-run --now', bags);
+        assert.deepEqual(call(), []);
+        const second = call();
+        assert.equal(second.length, 1);
+        assert.match(second[0]!.block ?? '', /dup session quota reached/);
+      });
+    });
+  });
+
+  test("a tool-less call does not adopt a legacy command-hash claim — it may be a stranger's", () => {
+    withReservations(dir => {
+      withPlane(testPlane('lgc', { live: 0 }), () => {
+        const bags = { lgc: { maxSessions: 1, reservationsDir: dir } };
+        const command = 'lgc-run --now';
+        // the pre-sanitization, tool-less key was the command's hash —
+        // every identical command in the session shared it, so this
+        // file can belong to a DIFFERENT call still starting its
+        // session (an old binary's claim, fresh inside the TTL)
+        const hash = createHash('sha1').update(command).digest('hex').slice(0, 12);
+        writeFileSync(join(dir, `guard-sess-1-${hash}-0.slot`), String(Date.now()));
+        // the new event is a DISTINCT call: it must claim its own
+        // slot, and at cap 1 the stranger's claim fills the budget —
+        // the call is refused. Adopting the file as its own reads
+        // fresh=false/starts=0 and walks it past the cap (bro-4bx61).
+        const verdicts = verdictFor(command, bags);
+        assert.equal(verdicts.length, 1);
+        assert.match(verdicts[0]!.block ?? '', /lgc session quota reached/);
+        // the stranger's claim is untouched — it still covers its own
+        // start until the TTL expires it, and the refused call leaves
+        // nothing behind
+        assert.deepEqual(
+          readdirSync(dir).filter(n => n.endsWith('.slot')),
+          [`guard-sess-1-${hash}-0.slot`]
+        );
       });
     });
   });

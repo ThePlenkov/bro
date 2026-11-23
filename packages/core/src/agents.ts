@@ -681,9 +681,17 @@ export class SpawnError extends Error {
   /** assigned in the body — parameter properties don't survive node's
    *  strip-only TS mode, and this file is spawned as a subprocess */
   readonly kind: SpawnErrorKind;
-  constructor(message: string, kind: SpawnErrorKind = 'conflict') {
+  /** Which cap lane refused when kind === 'cap' — 'provider_cap' for
+   *  the account-wide provider lane (spec bro-x601l), absent on the
+   *  repo-local kind/worker/budget lanes. The same token the message
+   *  carries, as a FIELD: a classifier branches on structure instead
+   *  of re-parsing the formatted text. The message keeps the token for
+   *  the string-only surfaces (the wire's rate class, hook verdicts). */
+  readonly capCause?: 'provider_cap';
+  constructor(message: string, kind: SpawnErrorKind = 'conflict', capCause?: 'provider_cap') {
     super(message);
     this.kind = kind;
+    this.capCause = capCause;
   }
 }
 

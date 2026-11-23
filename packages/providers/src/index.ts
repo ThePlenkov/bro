@@ -51,6 +51,7 @@ export {
   otelEvent,
   otelHeader,
   otelJournal,
+  otelJournalPath,
   otelParent,
   otelSpan,
   postDetached,

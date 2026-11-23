@@ -4,6 +4,9 @@
  *  `createHttpStream` client downstream — the whole wire is real). */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { client, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
   ClientContext,
@@ -429,4 +432,96 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       await bare.close();
     }
   });
+
+  // bro-x601l — fleet.providerCaps: the brokered session/new draws on
+  // the same account-wide lane budget every other surface does. The
+  // provider ledger lives under XDG_DATA_HOME — isolate it so a held
+  // claim never leaks into the host's real census.
+  const withXdg = async (fn: () => Promise<void>): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acpcap-xdg-'));
+    const prev = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = dir;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('a capped lane refuses session/new with -32005 — the park class (spec bro-x601l)', () =>
+    withXdg(async () => {
+      const fake = fakeAcpAgent({});
+      const { url, close } = await listen(
+        deps({
+          acp: acpTransport(
+            { ...CFG, providerCaps: { 'dv-acp': 1 } },
+            {
+              acp: { peer: fake.app },
+            }
+          ),
+        })
+      );
+      const c = openClient(url);
+      try {
+        await c.agent.request('initialize', INIT_PARAMS);
+        const s = (await c.agent.request('session/new', {
+          cwd: '/w',
+          mcpServers: [],
+        })) as { sessionId: string };
+        assert.equal(s.sessionId, 'sess-1');
+        // the retained brokered session fills the one lane — the next
+        // open answers the dedicated retryable cap code, not a
+        // transport failure
+        await assert.rejects(
+          c.agent.request('session/new', { cwd: '/w', mcpServers: [] }),
+          (e: unknown) =>
+            e instanceof RequestError &&
+            e.code === -32005 &&
+            /provider 'dv-acp' lane cap reached.*provider_cap/.test(e.message)
+        );
+        assert.equal(fake.sessions.length, 1, 'the refused open reached nothing upstream');
+      } finally {
+        await c.conn.close();
+        await close();
+      }
+    }));
+
+  test('a closed session hands its lane back — the next open admits', () =>
+    withXdg(async () => {
+      const fake = fakeAcpAgent({});
+      const { url, close } = await listen(
+        deps({
+          acp: acpTransport(
+            { ...CFG, providerCaps: { 'dv-acp': 1 } },
+            {
+              acp: { peer: fake.app },
+            }
+          ),
+        })
+      );
+      const c = openClient(url);
+      try {
+        await c.agent.request('initialize', INIT_PARAMS);
+        await c.agent.request('session/new', { cwd: '/w', mcpServers: [] });
+        // the client goes away — the brokered session closes upstream
+        // and its cap claim releases with it
+        await c.conn.close();
+        await until(() => fake.closes.includes('sess-1'), 'upstream session/close');
+        const c2 = openClient(url);
+        try {
+          await c2.agent.request('initialize', INIT_PARAMS);
+          const s = (await c2.agent.request('session/new', {
+            cwd: '/w',
+            mcpServers: [],
+          })) as { sessionId: string };
+          assert.ok(s.sessionId !== '');
+        } finally {
+          await c2.conn.close();
+        }
+      } finally {
+        await close();
+      }
+    }));
 });

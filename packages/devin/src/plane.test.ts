@@ -55,23 +55,6 @@ const withLockDir = (fn: (dir: string) => void): void => {
   }
 };
 
-/** spawn() resolves at fork — until execve lands, /proc/<pid>/environ
- *  still reads the PARENT's env, so a badge assertion raced under load.
- *  Poll the real environ until the child's env lands (or the deadline
- *  passes and the assert below fails loud with the honest count). */
-const awaitEnviron = async (pid: number, needle: string, timeoutMs = 3000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      if (readFileSync(`/proc/${pid}/environ`).includes(needle)) return;
-    } catch {
-      /* pid gone or unreadable — let the assert report it */
-    }
-    if (Date.now() >= deadline) return;
-    await new Promise(r => setTimeout(r, 10));
-  }
-};
-
 /** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
  *  scripts them; absent files read as "no data" like on macOS. `tty`
  *  (a controlling-terminal device number) additionally scripts
@@ -150,12 +133,40 @@ const withDevinProc = (fn: (procDir: string) => void): void => {
 
 /** A live process that reads as the devin cli — the live-session
  *  count checks the process identity (argv[0]), so the fixture must BE
- *  named devin: a lock's pid must still be the cli that wrote it. */
+ *  named devin: a lock's pid must still be the cli that wrote it. The
+ *  exec'd binary is bash, not sleep — a multicall coreutils binary
+ *  (cargo-coreutils on some hosts) refuses a foreign argv[0] and the
+ *  child exits before the count ever sees it. */
 const spawnDevinCli = (env: Record<string, string> = {}): ChildProcess => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-devin-bin-'));
   const bin = join(dir, 'devin');
-  symlinkSync('/bin/sleep', bin);
-  return spawn(bin, ['30'], { stdio: 'ignore', env: { ...process.env, ...env } });
+  symlinkSync('/bin/bash', bin);
+  // `sleep 30 & wait` — NOT a bare `sleep 30`: bash execs a lone
+  // last command, the argv[0] becomes 'sleep', and the identity check
+  // reads a non-devin process. The & + wait keeps bash itself (the
+  // 'devin' argv[0]) alive for the count's whole window — and puts
+  // `sleep` in the fixture's own process group, so `detached` lets
+  // killDevinCli reap BOTH: killing bash alone leaves the sleep to
+  // run its timer out.
+  return spawn(bin, ['-c', 'sleep 30 & wait'], {
+    stdio: 'ignore',
+    detached: true,
+    env: { ...process.env, ...env },
+  });
+};
+
+/** Stop the whole fixture group — `detached` made the child a group
+ *  leader and `sleep` shares that group, so a -pid kill stops both;
+ *  a lone-child kill orphans the sleep for its whole timer. */
+const killDevinCli = (child: ChildProcess): void => {
+  if (child.pid === undefined) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
 };
 
 /** An `lstart=,command=` row as ps prints it — `day mon dd hh:mm:ss
@@ -699,13 +710,34 @@ describe('countDevinWorkers', () => {
     const child = spawnDevinCli({ BRO_AGENT_ID: 'native-test' });
     if (!child.pid) throw new Error('spawn failed to create child process');
     try {
-      await awaitEnviron(child.pid, 'BRO_AGENT_ID=native-test');
+      // spawn() resolves at fork — until execve lands, /proc/<pid>/{environ,
+      // cmdline} still read the PARENT (the flake the scripted-proc test
+      // below names). Wait for the exec'd identity AND the badge to be
+      // visible before counting.
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        let cmdline = '';
+        let env = '';
+        try {
+          cmdline = readFileSync(`/proc/${child.pid}/cmdline`, 'utf8');
+          env = readFileSync(`/proc/${child.pid}/environ`, 'utf8');
+        } catch {
+          // a pid not yet exec'd can be unreadable — keep waiting
+        }
+        if (
+          cmdline.split('\0')[0]?.endsWith('devin') === true &&
+          env.includes('BRO_AGENT_ID=native-test')
+        ) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, 10));
+      }
       withLockDir(dir => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid));
         assert.equal(countDevinWorkers([dir]), 1);
       });
     } finally {
-      child.kill('SIGKILL');
+      killDevinCli(child);
     }
   });
 
@@ -826,7 +858,28 @@ describe('listDevinSessions', () => {
     const child = spawnDevinCli({ BRO_AGENT_ID: 'native-xyz' });
     if (!child.pid) throw new Error('spawn failed to create child process');
     try {
-      await awaitEnviron(child.pid, 'BRO_AGENT_ID=native-xyz');
+      // /proc/<pid>/environ only shows the WORKER's own env once execve
+      // lands — inside spawn's fork window it still reads the parent's
+      // (no badge), and a lock written that early classifies the pid a
+      // non-worker. Wait for the child's badge to be visible.
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        try {
+          if (
+            readFileSync(join('/proc', String(child.pid), 'environ'), 'utf8').includes(
+              'BRO_AGENT_ID=native-xyz'
+            )
+          ) {
+            break;
+          }
+        } catch {
+          // /proc entry not populated yet — keep waiting
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`child ${child.pid} environ never showed the badge`);
+        }
+        await new Promise(r => setTimeout(r, 10));
+      }
       withLockDir(dir => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid));
         const rows = listDevinSessions([dir]);
@@ -835,7 +888,7 @@ describe('listDevinSessions', () => {
         assert.equal(rows[0]!.agentId, 'native-xyz');
       });
     } finally {
-      child.kill('SIGKILL');
+      killDevinCli(child);
     }
   });
 

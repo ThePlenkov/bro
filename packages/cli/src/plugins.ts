@@ -6,126 +6,128 @@
 import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { ACT_PLAN_VERSION, type ActPlan, parseActPlan } from '@broject/act';
+import { CONVOY_PLAN_VERSION, type ConvoyPlan, parseConvoyPlan } from '@broject/convoy';
 import {
-  CommandError,
-  EXIT,
   actSection,
   agentsSection,
+  type BroPlugin,
   beadsSection,
+  CommandError,
+  type ConfigLayerName,
+  type ConfigSection,
+  type Connector,
+  type ConnectorHooks,
   checkBeads,
   configDiagnostics,
-  configPolicyErrors,
+  type DocType,
   debtSection,
   definePlugin,
+  EXIT,
+  type FacadeMap,
   hasHelpFlag,
+  isMode,
   loadConfig,
-  printUsage,
-  registerConnector,
   meshSection,
+  printUsage,
   querySection,
+  registerConnector,
+  type Scope,
   sddSection,
   serveSection,
   stackSection,
   sweepSection,
   syncSection,
-  type BroPlugin,
-  type ConfigDiagnostic,
-  type ConfigLayerName,
-  type ConfigSection,
-  type DocType,
-  type FacadeMap,
 } from '@broject/core';
-import { ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
-import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
-import { DEBT_PLAN_VERSION, parseDebtPlan, type DebtPlan } from '@broject/debt';
-import { DRILL_PLAN_VERSION, drillSection, parseDrillPlan, type DrillPlan } from '@broject/drill';
-import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro';
+import { DEBT_PLAN_VERSION, type DebtPlan, parseDebtPlan } from '@broject/debt';
+import { DRILL_PLAN_VERSION, type DrillPlan, drillSection, parseDrillPlan } from '@broject/drill';
+import { guardSection } from '@broject/guard';
+import { judgeSection } from '@broject/judge';
 import { learnSection } from '@broject/learn';
 import { loopSection } from '@broject/loop';
+import { otelSection } from '@broject/otel';
 import {
   applyQueryPlan,
   parseQueryPlan,
   PLAN_VERSION as QUERY_PLAN_VERSION,
   type QueryPlan,
 } from '@broject/query';
-import { guardSection } from '@broject/guard';
-import { judgeSection } from '@broject/judge';
+import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro';
 import { runAcpCommand } from './commands/acp.ts';
 import { runAcpWorkerCommand } from './commands/acp-worker.ts';
 import { applyActPlan, runActCommand } from './commands/act.ts';
+import { runAgentsCommand } from './commands/agents.ts';
+import { runStampCommand } from './commands/buildstamp.ts';
 import { runBusCommand } from './commands/bus.ts';
-import { checkSection } from './commands/check-config.ts';
 import { runCheckCommand } from './commands/check.ts';
-import { runCleanupCommand } from './commands/cleanup.ts';
-import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts';
-import { runLoopCommand } from './commands/loop.ts';
-import { applyNextPlan, runNextCommand } from './commands/next.ts';
-import { runMsgCommand } from './commands/msg.ts';
-import { runNotifyCommand } from './commands/notify.ts';
-import { runOtelCommand } from './commands/otel.ts';
-import { otelSection } from '@broject/otel';
-import { rigSection } from './commands/rig-config.ts';
-import { runRigCommand } from './commands/rig.ts';
-import { runSinksCommand } from './commands/sinks.ts';
-import { runQueryCommand } from './commands/query.ts';
-import {
-  parseNextPlan,
-  PLAN_VERSION as NEXT_PLAN_VERSION,
-  type NextPlan,
-} from './commands/next-plan.ts';
-import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts';
-import { runPipelineCommand } from './commands/pipeline.ts';
-import { runPluginsCommand } from './commands/plugins.ts';
-import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
-import { runDoctorCommand } from './commands/doctor.ts';
-import { driveSection } from './commands/drive-config.ts';
-import { runDaemonCommand } from './commands/daemon.ts';
-import { runResumeCommand } from './commands/resume.ts';
-import { runDriveCommand } from './commands/drive.ts';
-import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
-import { runFleetCommand } from './commands/fleet.ts';
+import { checkSection } from './commands/check-config.ts';
 import { runClaimCommand } from './commands/claim.ts';
-import { runModeCommand } from './commands/mode.ts';
-import { runSessionsCommand } from './commands/sessions.ts';
+import { runCleanupCommand } from './commands/cleanup.ts';
+import { runContractCommand } from './commands/contract.ts';
+import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts';
+import { runDaemonCommand } from './commands/daemon.ts';
+import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
+import { runDoctorCommand } from './commands/doctor.ts';
+import { runBenchmarkCommand, runDogfoodCommand } from './commands/dogfood.ts';
+import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
+import { runDriveCommand } from './commands/drive.ts';
+import { driveSection } from './commands/drive-config.ts';
+import { runExecCommand } from './commands/exec.ts';
+import { runFleetCommand } from './commands/fleet.ts';
 import { runGoalCommand } from './commands/goal.ts';
-import { runDogfoodCommand, runBenchmarkCommand } from './commands/dogfood.ts';
 import { goalSection } from './commands/goal-config.ts';
 import { runGuardCommand } from './commands/guard.ts';
 import { runHerdrCommand } from './commands/herdr.ts';
 import { runHooksCommand } from './commands/hooks.ts';
-import { freshnessSection } from './commands/postmerge.ts';
 import { runJudgeCommand } from './commands/judge.ts';
-import { runQueueCommand } from './commands/queue.ts';
 import { runLearnCommand } from './commands/learn.ts';
+import { runLoopCommand } from './commands/loop.ts';
+import { runMcpCommand } from './commands/mcp.ts';
+import { runMeshCommand } from './commands/mesh.ts';
+import { runModeCommand } from './commands/mode.ts';
+import { runMsgCommand } from './commands/msg.ts';
+import { applyNextPlan, runNextCommand } from './commands/next.ts';
+import {
+  PLAN_VERSION as NEXT_PLAN_VERSION,
+  type NextPlan,
+  parseNextPlan,
+} from './commands/next-plan.ts';
+import { runNotifyCommand } from './commands/notify.ts';
+import { runOtelCommand } from './commands/otel.ts';
+import { runPipelineCommand } from './commands/pipeline.ts';
+import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts';
+import { runPluginsCommand } from './commands/plugins.ts';
+import { freshnessSection } from './commands/postmerge.ts';
+import { runProviderCommand } from './commands/provider.ts';
+import { runProvidersCommand } from './commands/providers.ts';
+import { runPulseCommand } from './commands/pulse.ts';
+import { runQueryCommand } from './commands/query.ts';
+import { runQueueCommand } from './commands/queue.ts';
+import { runRequestCommand } from './commands/request.ts';
+import { runResumeCommand } from './commands/resume.ts';
+import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
+import { runRigCommand } from './commands/rig.ts';
+import { rigSection } from './commands/rig-config.ts';
+import { runRouterCommand } from './commands/router.ts';
+import { runServeCommand } from './commands/serve.ts';
+import { runSessionsCommand } from './commands/sessions.ts';
+import { runSetupCommand } from './commands/setup.ts';
+import { runSinksCommand } from './commands/sinks.ts';
 import { runSkillsCommand } from './commands/skills.ts';
 import { skillsSection } from './commands/skills-config.ts';
-import { runMcpCommand } from './commands/mcp.ts';
-import { runPulseCommand } from './commands/pulse.ts';
-import { runWatchCommand } from './commands/watch.ts';
-import { watchSection } from './commands/watch-config.ts';
-import { runWatchdogCommand } from './commands/watchdog.ts';
-import { runAgentsCommand } from './commands/agents.ts';
-import { runStatusCommand } from './commands/status.ts';
-import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
-import { runServeCommand } from './commands/serve.ts';
-import { runProviderCommand } from './commands/provider.ts';
-import { runSetupCommand } from './commands/setup.ts';
-import { runMeshCommand } from './commands/mesh.ts';
-import { runRequestCommand } from './commands/request.ts';
-import { runWaitCommand } from './commands/wait.ts';
-import { runProvidersCommand } from './commands/providers.ts';
-import { runRouterCommand } from './commands/router.ts';
 import { runSpecCommand } from './commands/spec.ts';
-import { runExecCommand } from './commands/exec.ts';
 import { runStackCommand } from './commands/stack.ts';
-import { runStampCommand } from './commands/buildstamp.ts';
+import { runStatusCommand } from './commands/status.ts';
 import { runSweepCommand } from './commands/sweep.ts';
 import { runSyncCommand } from './commands/sync.ts';
 import { runTraceCommand } from './commands/trace.ts';
 import { telemetrySection } from './commands/trace-config.ts';
+import { runWaitCommand } from './commands/wait.ts';
+import { runWatchCommand } from './commands/watch.ts';
+import { watchSection } from './commands/watch-config.ts';
+import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runWorkCommand } from './commands/work.ts';
-import { runContractCommand } from './commands/contract.ts';
 // Built-in connector registration lives in connectors.ts — shared with
 // the slim hook entry (dist/hooks.js) so `bro hooks` never needs this
 // registry's import graph. Side-effect import: order is the contract.
@@ -142,7 +144,10 @@ export const PLUGINS: BroPlugin[] = [
   // drift). --json emitters deliberately NOT schema'd — action reports,
   // acks, diagnostics, passthroughs, producer streams — are tabulated in
   // specs/bro-6ptci.2.md §4 (e.g. otel/doctor/guard/check/pulse/delegate,
-  // act wait, convoy run, agents prune, pipeline, telemetry).
+  // act wait, convoy run, agents prune, pipeline, telemetry); the §4
+  // deferred agent-facing reads are wired by specs/bro-6ptci.3.md
+  // (convoy next, wait, mesh wait/inbox — sessions resume has no --json
+  // by design and stays flags/exits-only).
   definePlugin({
     name: 'debt',
     group: 'review',
@@ -246,6 +251,24 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Convoy execution over beads molecules: status|next|done|pour|list|run',
     run: runConvoyCommand,
     skill: 'convoy',
+    contract: {
+      subs: {
+        next: {
+          flags: {
+            '[mol]': 'the molecule — default: the single open molecule in the store',
+            '--mol <id>': 'same molecule, flag spelling',
+          },
+          // no --json flag: `next` emits ConvoyNext as JSON
+          // unconditionally — the flag is rejected as an unknown option
+          json: 'schemas/cli/convoy-next.schema.json',
+          exits: {
+            0: 'next-step JSON emitted — state step|gate|blocked|complete',
+            1: 'molecule resolution failed — none open, ambiguous, or unreadable',
+            2: 'usage — unknown option',
+          },
+        },
+      },
+    },
     planSchema: (doc, source) => parseConvoyPlan(doc, source),
     planVersion: CONVOY_PLAN_VERSION,
     runPlan: plan => applyConvoyPlan(plan as ConvoyPlan),
@@ -455,6 +478,27 @@ export const PLUGINS: BroPlugin[] = [
         0: 'sessions printed',
         1: 'ledger unavailable',
         2: 'usage',
+      },
+      subs: {
+        resume: {
+          flags: {
+            '<id>': 'session key, sid (exact or unique prefix), or agentId',
+            '--print': 'render the resume argv without spawning it',
+            '--last': 'the most recently seen session',
+            '--pick': 'interactive picker — needs a TTY',
+          },
+          // no `json` ref: resume takes --print|--last|--pick only — it
+          // has no --json flag, so there is no schema to pin (the
+          // exclusion is documented in specs/bro-6ptci.3.md)
+          exits: {
+            // an unsupported host is reported, never guessed — the
+            // launchResume resumeArgv===null arm returns normally, so
+            // it is an exit-0 outcome like --print or a cancelled pick
+            0: 'argv printed (--print), picker cancelled, host has no resume command, or the host resume ran',
+            1: 'no sessions in the ledger, spawn failed, or the resume exited nonzero',
+            2: 'usage — missing/ambiguous target, --pick without a TTY',
+          },
+        },
       },
     },
   }),
@@ -1128,6 +1172,36 @@ export const PLUGINS: BroPlugin[] = [
     run: runMeshCommand,
     skill: 'mesh',
     configKey: 'mesh',
+    contract: {
+      subs: {
+        inbox: {
+          flags: {
+            '--json':
+              '[{peer, bead, …envelope, mismatch?, unbound?}] — pending requests addressed to this rig',
+            '--no-pull': 'serve replica stores as they stand — skip the sync leg',
+          },
+          json: 'schemas/cli/mesh-inbox.schema.json',
+          exits: {
+            0: 'inbox rows printed (human table or --json)',
+            2: 'not inside a git repository / rig unaddressed / usage',
+          },
+        },
+        wait: {
+          flags: {
+            '<thread>': 'the request/thread id — `bro mesh request` and lifecycle verbs print it',
+            '--json':
+              '{thread, stage?, turn?, envelopes} — stage/turn keys absent when the reduction has none',
+            '--no-pull': 'serve replica stores as they stand — skip the sync leg',
+          },
+          json: 'schemas/cli/mesh-wait.schema.json',
+          exits: {
+            0: 'thread state printed — --json always takes this arm',
+            1: 'no request visible for the thread (human mode only)',
+            2: 'not inside a git repository / rig unaddressed / usage',
+          },
+        },
+      },
+    },
     configSchema: meshSection,
   }),
   definePlugin({
@@ -1145,6 +1219,22 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Dep-plane watcher — `bro wait external:<rig>:<id>` polls the dep stores, verdict = exit code (specs/cross-repo)',
     run: runWaitCommand,
+    contract: {
+      flags: {
+        'external:<rig>:<id>…': 'one or more dep refs — `bro request` prints the one it wired',
+        '--json': '{verdict, refs, unsettled?} — the exit code IS the verdict',
+        '--every <sec>': 'poll interval — default 30s',
+        '--timeout <sec>': 'the bound — default 2700s (45m); 0 waits unbounded',
+      },
+      json: 'schemas/cli/wait.schema.json',
+      exits: {
+        0: 'free — every watched dep shipped',
+        1: 'unreadable — a store failed 3 polls running',
+        2: 'unresolved — a ref is absent on its posting store (usage also exits 2)',
+        3: 'actionable — rejected or closed-unshipped; a human must move',
+        4: 'timeout — the bound held with refs still open',
+      },
+    },
   }),
   definePlugin({
     name: 'run',
@@ -1263,97 +1353,162 @@ export function broConfigDiagnostics(cwd: string = process.cwd()) {
 // import without the TDZ cycle back into this registry. The merged
 // section list is registered here at init so assertMutableConfig sees
 // plugin configKeys, not just core's.
-export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts';
+export { assertMutableConfig, ConfigPolicyError } from './config-policy.ts';
+
 import { registerPolicySections } from './config-policy.ts';
+
 registerPolicySections(pluginConfigSections);
 
-function hasPluginRequiredShape(o: unknown): boolean {
-  const p = o as BroPlugin;
-  if (!p || typeof p !== 'object') {
+/** `field "…" <expectation>` — the rejection reason a skipped-export
+ *  warning prints. The path names the offending key so the author
+ *  fixes it instead of bisecting the export (spec bro-l8c4f.1). */
+const field = (path: string, why: string): string => `field "${path}" ${why}`;
+
+/** Optional keys of T — the fields an author may set or omit; the
+ *  coverage asserts below require a runtime check row for each. */
+type OptionalKeysOf<T> = {
+  [K in keyof T]-?: undefined extends T[K] ? K : never;
+}[keyof T];
+
+/** Function-typed optional keys — a present-but-wrong value becomes a
+ *  delayed TypeError at dispatch, so each must sit in
+ *  CONNECTOR_FUNCTION_KEYS. */
+type FunctionKeysOf<T> = {
+  [K in keyof T]-?: T[K] extends ((...args: never[]) => unknown) | undefined ? K : never;
+}[keyof T];
+
+/** Compile-time coverage pin — `assertNever<Exclude<…>>` fails
+ *  typecheck when the set difference is non-empty, i.e. when a type
+ *  grows a field nobody validates at runtime. `_proof` only exists so
+ *  T sits in the signature (lint counts bare type params unused). */
+function assertNever<T extends never>(_proof?: T): void {}
+
+function isFunction(v: unknown): boolean {
+  return typeof v === 'function';
+}
+function isString(v: unknown): boolean {
+  return typeof v === 'string';
+}
+function isBoolean(v: unknown): boolean {
+  return typeof v === 'boolean';
+}
+function isPlanVersion(v: unknown): boolean {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1;
+}
+/** Dense element check — index reads, the same iteration the
+ *  docs/connectors/optInFacades loops use. `every()` skips sparse
+ *  holes (a hole must read `undefined` and fail the predicate), and an
+ *  enumerable-key count conflates the two ways `keys ≠ indices`: a
+ *  hole plus an extra prop nets the right count, and a dense list
+ *  carrying a non-index prop gets rejected though dispatch only ever
+ *  reads indices 0..length-1 (spread/includes/index access). */
+function isDenseArray(v: unknown, ok: (item: unknown) => boolean): boolean {
+  if (!Array.isArray(v)) {
     return false;
   }
-  if (typeof p.name !== 'string' || p.name === '') {
-    return false;
-  }
-  if (typeof p.summary !== 'string') {
-    return false;
-  }
-  if (typeof p.run !== 'function') {
-    return false;
+  for (let i = 0; i < v.length; i++) {
+    if (!ok(v[i])) {
+      return false;
+    }
   }
   return true;
 }
+function isDenseStringArray(v: unknown): boolean {
+  return isDenseArray(v, item => typeof item === 'string');
+}
+/** DocType scopes — `satisfies` keeps every element a Scope; the
+ *  `Exclude<Scope, …>` pin in the coverage block fails typecheck when
+ *  core's union grows a value this list doesn't know. */
+const SCOPES = ['project', 'global'] as const satisfies readonly Scope[];
+function isScope(v: unknown): boolean {
+  return SCOPES.includes(v as Scope);
+}
+function isScopeArray(v: unknown): boolean {
+  return isDenseArray(v, isScope);
+}
 
-function hasPluginOptionalFields(o: unknown): boolean {
-  const p = o as Record<string, unknown>;
-  for (const [key, ok] of PLUGIN_FIELD_CHECKS) {
+/** Table row — a present-but-wrong optional field answers the
+ *  field-named rejection reason; absent or well-typed answers
+ *  undefined. Table form keeps pluginExportProblem flat as fields
+ *  grow, and the `as const` keys feed the coverage asserts below. */
+const check = <K extends keyof BroPlugin>(
+  key: K,
+  why: string,
+  ok: (v: unknown) => boolean
+): readonly [K, (v: unknown) => string | undefined] => [
+  key,
+  v => (ok(v) ? undefined : field(key, why)),
+];
+
+const PLUGIN_FIELD_CHECKS = [
+  check('configSchema', 'must be a function', isFunction),
+  check('planSchema', 'must be a function', isFunction),
+  check('planVersion', 'must be an integer ≥ 1', isPlanVersion),
+  check('runPlan', 'must be a function', isFunction),
+  check('skill', 'must be a string', isString),
+  check('deprecated', 'must be a string', isString),
+  check('flatDeprecated', 'must be a string', isString),
+  check('configKey', 'must be a string', isString),
+  check('argvPrefix', 'must be an array of strings', isDenseStringArray),
+  ['docs', docsProblem],
+  ['connectors', connectorsProblem],
+  check('contract', 'must be a CliContract (flags/exits/subs maps)', isCliContract),
+  check('group', 'must be a string', isString),
+  check('aliasOf', 'must be a string', isString),
+  check('hidden', 'must be a boolean', isBoolean),
+  check('external', 'must be a boolean', isBoolean),
+] as const satisfies ReadonlyArray<readonly [keyof BroPlugin, (v: unknown) => string | undefined]>;
+
+/** Validate one config-loaded export — undefined = valid; a string is
+ *  the rejection reason naming the offending field. Every malformed
+ *  shape the registry would later call or iterate rejects here, before
+ *  PLUGINS.push/registerConnector, so dispatch never meets it. */
+export function pluginExportProblem(p: unknown): string | undefined {
+  if (!isObject(p)) {
+    return 'export must be an object';
+  }
+  if (!isNonEmptyString(p.name)) {
+    return field('name', 'must be a non-empty string');
+  }
+  if (typeof p.summary !== 'string') {
+    return field('summary', 'must be a string');
+  }
+  if (!isFunction(p.run)) {
+    return field('run', 'must be a function');
+  }
+  for (const [key, problem] of PLUGIN_FIELD_CHECKS) {
     const v = p[key as string];
     if (v === undefined) {
       continue;
     }
-    if (!ok(v)) {
-      return false;
+    const why = problem(v);
+    if (why !== undefined) {
+      return why;
     }
   }
-  return true;
+  return pluginPairProblem(p);
 }
 
-function hasPluginPairedFields(o: unknown): boolean {
-  const p = o as Record<string, unknown>;
+/** Schema/executor pairs — configKey↔configSchema and
+ *  planSchema↔runPlan arrive together or the config/plan layer crashes
+ *  on the missing half later. */
+function pluginPairProblem(p: Record<string, unknown>): string | undefined {
   const hasConfigKey = p.configKey !== undefined;
-  const hasConfigSchema = p.configSchema !== undefined;
-  if (hasConfigKey !== hasConfigSchema) {
-    return false;
+  if (hasConfigKey !== (p.configSchema !== undefined)) {
+    return field(
+      hasConfigKey ? 'configSchema' : 'configKey',
+      'is required — configKey and configSchema come in pairs'
+    );
   }
   const hasPlanSchema = p.planSchema !== undefined;
-  const hasRunPlan = p.runPlan !== undefined;
-  if (hasPlanSchema !== hasRunPlan) {
-    return false;
+  if (hasPlanSchema !== (p.runPlan !== undefined)) {
+    return field(
+      hasPlanSchema ? 'runPlan' : 'planSchema',
+      'is required — planSchema and runPlan come in pairs'
+    );
   }
-  return true;
+  return undefined;
 }
-
-function isPlugin(p: unknown): p is BroPlugin {
-  return hasPluginRequiredShape(p) && hasPluginOptionalFields(p) && hasPluginPairedFields(p);
-}
-
-/** Present-but-wrong optional fields — each predicate runs only when
- *  the field is defined. Table form keeps isPlugin flat as fields grow. */
-function isDenseStringArray(v: unknown): boolean {
-  if (!Array.isArray(v)) {
-    return false;
-  }
-  if (Object.keys(v).length !== v.length) {
-    return false;
-  }
-  for (const item of v) {
-    if (typeof item !== 'string') {
-      return false;
-    }
-  }
-  return true;
-}
-
-const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boolean]> = [
-  ['configSchema', v => typeof v === 'function'],
-  ['planSchema', v => typeof v === 'function'],
-  [
-    'planVersion',
-    v => typeof v === 'number' && Number.isInteger(v as number) && (v as number) >= 1,
-  ],
-  ['runPlan', v => typeof v === 'function'],
-  ['skill', v => typeof v === 'string'],
-  ['deprecated', v => typeof v === 'string'],
-  ['flatDeprecated', v => typeof v === 'string'],
-  ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', isDenseStringArray],
-  ['docs', v => Array.isArray(v) && v.every(isDocType)],
-  ['connectors', v => Array.isArray(v) && v.every(isConnector)],
-  ['contract', isCliContract],
-  ['group', v => typeof v === 'string'],
-  ['aliasOf', v => typeof v === 'string'],
-  ['hidden', v => typeof v === 'boolean'],
-];
 
 /** `contract` must be the declared shape at every level — a malformed
  *  nested map (flags: 5, subs: "x") would otherwise reach the
@@ -1378,7 +1533,7 @@ function isCliContract(v: unknown): boolean {
   );
 }
 
-const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
+const FACADE_KEYS = new Set([
   'tasks',
   'tasksAsync',
   'reviews',
@@ -1390,9 +1545,13 @@ const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
   'stacks',
   'ledger',
   'claims',
-]);
+] as const satisfies ReadonlyArray<keyof FacadeMap>);
 
-const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
+/** The literal key union inside FACADE_KEYS — the coverage assert
+ *  consumes it; `ReadonlySet<keyof FacadeMap>` alone would infer away. */
+type FacadeKey = typeof FACADE_KEYS extends ReadonlySet<infer F> ? F : never;
+
+const CONNECTOR_FUNCTION_KEYS = [
   'matchRemote',
   'matchDir',
   'auth',
@@ -1409,7 +1568,17 @@ const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
   'claims',
   'hooks',
   'guards',
-];
+] as const satisfies ReadonlyArray<FunctionKeysOf<Connector>>;
+
+const CONNECTOR_HOOK_KEYS = [
+  'sessionStart',
+  'parallelWork',
+  'promptSubmit',
+  'postTool',
+  'stopGate',
+  'preTool',
+  'taskFinish',
+] as const satisfies ReadonlyArray<keyof ConnectorHooks>;
 
 const isObject = (o: unknown): o is Record<string, unknown> => !!o && typeof o === 'object';
 
@@ -1419,65 +1588,178 @@ function isNonEmptyString(v: unknown): boolean {
   return typeof v === 'string' && v !== '';
 }
 
-function hasValidConnectorName(c: unknown): boolean {
-  return isObject(c) && isNonEmptyString(c.name);
-}
-
-function hasValidConnectorFunctions(c: unknown): boolean {
-  if (!isObject(c)) {
-    return false;
-  }
-  for (const key of CONNECTOR_FUNCTION_KEYS) {
-    const v = c[key];
-    if (v !== undefined && typeof v !== 'function') {
-      return false;
-    }
-  }
-  return true;
-}
-
 function isValidFacadeKey(f: unknown): boolean {
   return typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap);
 }
 
-function hasValidConnectorFlags(c: unknown): boolean {
+function optInFacadesProblem(v: unknown, path: string): string | undefined {
+  if (v === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(v)) {
+    return field(path, 'must be an array of facade names');
+  }
+  for (let i = 0; i < v.length; i++) {
+    if (!isValidFacadeKey(v[i])) {
+      return field(`${path}[${i}]`, 'is not a facade name');
+    }
+  }
+  return undefined;
+}
+
+/** One activeIn value — absent or the dense Mode list
+ *  connectorHookActive's `modes.includes(mode)` walks. */
+const isModeList = (v: unknown): boolean => v === undefined || isDenseArray(v, isMode);
+
+/** activeIn own keys — a name outside ConnectorHooks is a typo'd kind
+ *  that would silently never match in hook dispatch. */
+function activeInKindProblem(v: Record<string, unknown>, path: string): string | undefined {
+  const bad = Object.keys(v).find(
+    kind => !(CONNECTOR_HOOK_KEYS as readonly string[]).includes(kind)
+  );
+  return bad === undefined ? undefined : field(`${path}.${bad}`, 'is not a hook kind');
+}
+
+/** activeIn values — the pass reads `v[kind]`, the same prototype-chain
+ *  read dispatch makes, so an inherited `stopGate: 5` cannot slip past
+ *  `Object.keys`/`entries` (own keys only). */
+function activeInModesProblem(v: Record<string, unknown>, path: string): string | undefined {
+  const bad = CONNECTOR_HOOK_KEYS.find(kind => !isModeList(v[kind]));
+  return bad === undefined ? undefined : field(`${path}.${bad}`, 'must be an array of modes');
+}
+
+/** activeIn — `Partial<Record<keyof ConnectorHooks, readonly Mode[]>>`;
+ *  a wrong value reaches connectorHookActive's `modes.includes(mode)`
+ *  as a delayed TypeError in hook dispatch (spec bro-l8c4f.1). Key and
+ *  value passes stay in named helpers so this gate remains flat. */
+function activeInProblem(v: unknown, path: string): string | undefined {
+  if (v === undefined) {
+    return undefined;
+  }
+  if (!isRecord(v)) {
+    return field(path, 'must map hook kinds to mode lists');
+  }
+  return activeInKindProblem(v, path) ?? activeInModesProblem(v, path);
+}
+
+/** Function-typed optional connector fields — a present-but-wrong
+ *  value is a delayed TypeError at facade/hook dispatch. */
+function connectorFunctionProblem(c: Record<string, unknown>, path: string): string | undefined {
+  for (const key of CONNECTOR_FUNCTION_KEYS) {
+    const v = c[key];
+    if (v !== undefined && typeof v !== 'function') {
+      return field(`${path}.${key}`, 'must be a function');
+    }
+  }
+  return undefined;
+}
+
+function optInProblem(v: unknown, path: string): string | undefined {
+  return v !== undefined && typeof v !== 'boolean'
+    ? field(`${path}.optIn`, 'must be a boolean')
+    : undefined;
+}
+
+/** One connectors entry — undefined = valid; a string names the
+ *  offending field + expectation (`path` lets the caller point at
+ *  `connectors[i]` so the warning lands on the entry). Field-group
+ *  helpers keep this gate flat as the Connector type grows. */
+export function connectorProblem(c: unknown, path: string): string | undefined {
   if (!isObject(c)) {
-    return false;
+    return field(path, 'must be an object');
   }
-  if (c.optIn !== undefined && typeof c.optIn !== 'boolean') {
-    return false;
-  }
-  if (c.optInFacades === undefined) {
-    return true;
+  if (!isNonEmptyString(c.name)) {
+    return field(`${path}.name`, 'must be a non-empty string');
   }
   return (
-    Array.isArray(c.optInFacades) &&
-    !c.optInFacades.includes(undefined) &&
-    c.optInFacades.every(f => isValidFacadeKey(f))
+    connectorFunctionProblem(c, path) ??
+    optInProblem(c.optIn, path) ??
+    optInFacadesProblem(c.optInFacades, `${path}.optInFacades`) ??
+    activeInProblem(c.activeIn, `${path}.activeIn`)
   );
 }
 
-function isConnector(c: unknown): boolean {
-  return (
-    isObject(c) &&
-    hasValidConnectorName(c) &&
-    hasValidConnectorFunctions(c) &&
-    hasValidConnectorFlags(c)
-  );
+/** The `connectors` plugin field — an array whose every entry passes
+ *  connectorProblem; the first failure's path already reads
+ *  `connectors[i].<field>`. */
+function connectorsProblem(v: unknown): string | undefined {
+  if (!Array.isArray(v)) {
+    return field('connectors', 'must be an array');
+  }
+  for (let i = 0; i < v.length; i++) {
+    const why = connectorProblem(v[i], `connectors[${i}]`);
+    if (why !== undefined) {
+      return why;
+    }
+  }
+  return undefined;
 }
 
-/** A docs entry must be a DocType — name + adapter factory — else it
- *  would crash docVerbs/docTypes deep in dispatch or --help. */
-function isDocType(d: unknown): d is DocType {
-  const o = d as DocType;
-  return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    typeof o.adapter === 'function'
-  );
+/** Optional DocType fields — the same present-but-wrong contract as
+ *  the plugin table: registration spreads `aliases` verbatim and
+ *  dispatch reads `scopes`/`idPrefix`/`render`/`describe` by name, so
+ *  a malformed one crashes docTypes/docVerbs or this loader. */
+const DOCTYPE_FIELD_CHECKS = [
+  ['aliases', 'must be an array of strings', isDenseStringArray],
+  ['scopes', 'must be an array of scopes ("project" | "global")', isScopeArray],
+  ['idPrefix', 'must be a string', isString],
+  ['render', 'must be a function', isFunction],
+  ['describe', 'must be a function', isFunction],
+] as const satisfies ReadonlyArray<readonly [keyof DocType, string, (v: unknown) => boolean]>;
+
+/** One docs entry — a DocType is name + adapter factory plus
+ *  well-typed optionals; anything less crashes dispatch or the
+ *  reserved-name sweep below. `path` lands the warning on `docs[i]`. */
+function docTypeProblem(d: unknown, path: string): string | undefined {
+  if (!isObject(d)) {
+    return field(path, 'must be a DocType object');
+  }
+  if (!isNonEmptyString(d.name)) {
+    return field(`${path}.name`, 'must be a non-empty string');
+  }
+  if (!isFunction(d.adapter)) {
+    return field(`${path}.adapter`, 'must be a function');
+  }
+  for (const [key, why, ok] of DOCTYPE_FIELD_CHECKS) {
+    const v = d[key];
+    if (v !== undefined && !ok(v)) {
+      return field(`${path}.${key}`, why);
+    }
+  }
+  return undefined;
 }
+
+/** The `docs` plugin field — index reads keep the diagnostic at
+ *  `docs[i].<field>`; a sparse hole reads `undefined` and the entry
+ *  check rejects it by name (same contract as `connectors`). */
+function docsProblem(v: unknown): string | undefined {
+  if (!Array.isArray(v)) {
+    return field('docs', 'must be an array');
+  }
+  for (let i = 0; i < v.length; i++) {
+    const why = docTypeProblem(v[i], `docs[${i}]`);
+    if (why !== undefined) {
+      return why;
+    }
+  }
+  return undefined;
+}
+
+// TypeScript↔runtime coverage (spec bro-l8c4f.1 acceptance) — every
+// optional field an author can set has a check row above; a type that
+// grows an unchecked field fails `npm run typecheck`, which is CI.
+assertNever<Exclude<OptionalKeysOf<BroPlugin>, (typeof PLUGIN_FIELD_CHECKS)[number][0]>>();
+assertNever<
+  Exclude<
+    OptionalKeysOf<Connector>,
+    (typeof CONNECTOR_FUNCTION_KEYS)[number] | 'optIn' | 'optInFacades' | 'activeIn'
+  >
+>();
+assertNever<Exclude<FunctionKeysOf<Connector>, (typeof CONNECTOR_FUNCTION_KEYS)[number]>>();
+assertNever<Exclude<keyof FacadeMap, FacadeKey>>();
+assertNever<Exclude<keyof ConnectorHooks, (typeof CONNECTOR_HOOK_KEYS)[number]>>();
+assertNever<Exclude<OptionalKeysOf<DocType>, (typeof DOCTYPE_FIELD_CHECKS)[number][0]>>();
+assertNever<Exclude<Scope, (typeof SCOPES)[number]>>();
 
 /** Imports one specifier → exported candidate entries, or undefined on
  *  failure (warned). Relative specs must resolve inside the repo root —
@@ -1511,23 +1793,27 @@ function registerExternal(
   spec: string,
   reserved?: ReadonlySet<string>
 ): BroPlugin | undefined {
-  if (!isPlugin(entry)) {
-    console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`);
+  const shapeProblem = pluginExportProblem(entry);
+  if (shapeProblem !== undefined) {
+    console.error(`warning: plugin "${spec}" ${shapeProblem} — skipped`);
     return undefined;
   }
+  // undefined problem IS the BroPlugin guarantee — narrow once for the
+  // name/registry checks below
+  const pluginEntry = entry as BroPlugin;
   // plugin lookup wins argv[0] — a plugin named like a doc verb would
   // shadow `bro list`/`bro show`/`bro init` for every doc type
-  if (reserved?.has(entry.name)) {
+  if (reserved?.has(pluginEntry.name)) {
     console.error(
-      `warning: plugin "${spec}" name "${entry.name}" is a reserved doc noun/verb — skipped`
+      `warning: plugin "${spec}" name "${pluginEntry.name}" is a reserved doc noun/verb — skipped`
     );
     return undefined;
   }
-  if (PLUGINS.some(p => p.name === entry.name)) {
-    console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`);
+  if (PLUGINS.some(p => p.name === pluginEntry.name)) {
+    console.error(`warning: plugin "${spec}" name "${pluginEntry.name}" is taken — skipped`);
     return undefined;
   }
-  const plugin: BroPlugin = { ...entry, external: true };
+  const plugin: BroPlugin = { ...pluginEntry, external: true };
   // a registered configKey is owned — an external plugin must not
   // shadow a builtin (or earlier external) section schema
   if (plugin.configKey && PLUGINS.some(p => p.configKey === plugin.configKey)) {

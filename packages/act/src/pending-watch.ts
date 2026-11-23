@@ -28,10 +28,10 @@ import {
 import { basename, dirname, join } from 'node:path';
 import {
   GIT_SYNC_PROBE_TIMEOUT_MS,
-  gitCommonDir,
-  gitCommonDirAsync,
   pidAlive,
   procStat,
+  stateCommonDir,
+  stateCommonDirAsync,
 } from '@broject/core';
 
 export interface PendingWatch {
@@ -92,7 +92,7 @@ function watchTtlMs(w: PendingWatch): number {
  *  canonical bounded probe — a hung git fails open instead of stalling
  *  a wait start or the session-start hook. */
 function watchesDir(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = stateCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'watches');
 }
 
@@ -100,7 +100,7 @@ function watchesDir(dir: string): string | null {
  *  rev-parse under the sync form is a spawnSync that freezes a
  *  parallel hook sweep. */
 async function watchesDirAsync(dir: string): Promise<string | null> {
-  const common = await gitCommonDirAsync(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = await stateCommonDirAsync(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'watches');
 }
 

@@ -319,6 +319,15 @@ export interface TaskStore {
   /** the claimable queue — backend applies its own ordering/filters */
   ready<T extends TaskRow = TaskRow>(filter?: TaskFilter): T[];
   get<T extends TaskRow = TaskRow>(id: string): T | undefined;
+  /** Bounded variants of get/list — a caller holding a deadline
+   *  (bro wait's remaining poll budget) hands its slice in instead of
+   *  accepting the backend's per-call default; the same miss/throw
+   *  contract as the unbounded read (getWithTimeout answers `null`
+   *  where `get` answers `undefined`). OPTIONAL capability — a
+   *  backend that can't bound a call omits the member; callers fall
+   *  back to the plain read, never to a fake bound. */
+  getWithTimeout?<T extends TaskRow = TaskRow>(id: string, timeoutMs: number): T | null;
+  listWithTimeout?<T extends TaskRow = TaskRow>(filter: TaskFilter, timeoutMs: number): T[];
   /** rows for `ids` — one backend call where the backend batches
    *  (beads: `bd show id…`). Missing ids are absent from the result —
    *  the same miss semantics as `get`, per id; ordering is the
@@ -695,6 +704,42 @@ function makeStore(x: StoreExec): TaskStore {
       }
       // bd show answers an array; empty/undefined = no such task
       return taskRow(Array.isArray(r) ? r[0] : r, 'show') as never;
+    },
+    getWithTimeout: (id, ms) => {
+      // the deadline-aware get — a sub-millisecond slice still runs
+      // (clamped to 1ms): a spent budget reports a killed call, never
+      // a silent unbounded spawn (spawnSync timeout:0 = no kill)
+      const r = x.probe(['show', id, '--json'], Math.max(1, Math.floor(ms)));
+      if (r.code !== 0) {
+        if (isBdNotFound({ message: r.err, stderr: r.err, stdout: r.out })) {
+          return null;
+        }
+        throw new Error(`bd show ${id} failed (${r.code}): ${r.err}`);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(r.out);
+      } catch (err) {
+        throw new Error(
+          `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return (showRows<TaskRow>(parsed)[0] ?? null) as never;
+    },
+    listWithTimeout: (f, ms) => {
+      const r = x.probe(['list', '--json', ...filterArgs(f)], Math.max(1, Math.floor(ms)));
+      if (r.code !== 0) {
+        throw new Error(`bd list failed (${r.code}): ${r.err}`);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(r.out);
+      } catch (err) {
+        throw new Error(
+          `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return taskRows(parsed, 'list') as never;
     },
     getMany: ids => {
       // bare `bd show` answers a usage-error envelope, not rows — an
