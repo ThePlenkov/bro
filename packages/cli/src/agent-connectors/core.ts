@@ -31,6 +31,7 @@ import {
   AgentNotFound,
   type AgentRegistryEntry,
   type AgentState,
+  admitProviderSlot,
   admitSessionSlot,
   agentEntryBlocked,
   agentExitFileName,
@@ -47,6 +48,7 @@ import {
   classifyExitCauseParts,
   cliCommandModel,
   commandCliName,
+  countSessionReservations,
   DEFAULT_CONFIG,
   type DiscoveredSession,
   deriveAccountWalls,
@@ -65,6 +67,8 @@ import {
   handleOwner,
   isAgentCause,
   isAgentLearnCheck,
+  laneBudgetKey,
+  laneBudgetRefund,
   rateDeathBackoff,
   isBatchSpawn,
   isQualifiedRouteId,
@@ -83,6 +87,7 @@ import {
   mkdirPrivateSync,
   openPrivateAppendSync,
   type ProcEntry,
+  type ProviderCapLane,
   type ProviderEntry,
   ProviderSurfaceError,
   type ProviderWall,
@@ -103,13 +108,18 @@ import {
   rebindStep,
   releaseSessionSlot,
   releaseSessionStart,
+  retagSessionSlots,
   requireProviderSurface,
   resolveModelRoute,
   resolveStepClass,
   scanProc,
   SESSION_SLOT_TTL_MS,
-  sessionCapRefusalFor,
+  sessionCapRefusal,
   sessionCapViews,
+  planesStartingSessions,
+  providerCapCensus,
+  providerCapRefusal,
+  providerSlotsDir,
   type SessionPlane,
   SpawnError,
   type SpawnSpec,
@@ -278,6 +288,9 @@ export interface AgentConnectorEnv {
     leases?: FleetLeaseTtls;
     router?: FleetRouter;
     matrix?: FleetMatrix;
+    /** `fleet.providerCaps.<provider>` — the GLOBAL config layer's
+     *  account-wide lane caps (spec bro-x601l). */
+    providerCaps?: Record<string, number>;
   };
   /** The named provider registry — spawn resolution reads entries by
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
@@ -377,6 +390,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       leases?: FleetLeaseTtls;
       router?: FleetRouter;
       matrix?: FleetMatrix;
+      providerCaps?: Record<string, number>;
     };
     providers?: Record<string, ProviderEntry>;
     spawn?: { externalBlock: boolean; externalIdleSec: number };
@@ -1738,6 +1752,32 @@ export function fleetOccupancyFor(dir: string, env: AgentConnectorEnv): number {
   return fleetOccupancy(dir, agentsHome(dir), readAgentRegistry(dir), env);
 }
 
+/** The plane-less provider census (spec bro-x601l): this repo's
+ *  registry rows whose EFFECTIVE provider is the capped entry — the
+ *  recorded provenance when there is some, else the backend's own
+ *  `agents.<backend>.provider` default, the same resolution
+ *  `providerCapLaneOf` gated the spawn on — counted with
+ *  `entryOccupies`' fail-closed verdict. Runs inside the provider
+ *  mutex; the caller's registry snapshot is already the locked
+ *  truth. */
+function providerRegistryCensus(
+  dir: string,
+  home: string | null,
+  registry: Record<string, AgentRegistryEntry>,
+  env: AgentConnectorEnv,
+  provider: string
+): number {
+  const probes = occupancyProbes(dir, env);
+  let n = 0;
+  for (const [molStep, entry] of Object.entries(registry)) {
+    const effective = entry.provider ?? backendProvider(env, entry.backend);
+    if (effective === provider && entryOccupies(dir, home, molStep, entry, probes)) {
+      n++;
+    }
+  }
+  return n;
+}
+
 // --- budget observability -----------------------------------------------------
 // specs/bro-7xgk.3.md — a local proxy for the provider's hourly budget:
 // the wall is only actionable when it's visible before it lands. bro
@@ -2090,6 +2130,42 @@ export function sessionQuotaOf(
   }
 
   return { plane, agents: env.agents };
+}
+
+/** The provider lane cap this spawn must fit under — `fleet.
+ * providerCaps.<provider>` armed in the GLOBAL config layer (spec
+ * bro-x601l). The provider is the spawn's RESOLVED route — spec.
+ * provider after the chain walk, else the backend's default — and the
+ * cap counts the ACCOUNT the provider entry reaches, not the repo's
+ * registry: a plane-covered entry counts the kind census (live
+ * sessions, retained acp conversations, foreign sessions the plane
+ * sees), a plane-less one counts the shared claim ledger. */
+export function providerCapLaneOf(
+  env: AgentConnectorEnv,
+  backend: string,
+  spec: SpawnSpec
+): ProviderCapLane | undefined {
+  const provider = spec.provider ?? backendProvider(env, backend);
+  if (provider === undefined) {
+    return undefined;
+  }
+  const cap = env.fleet?.providerCaps?.[provider];
+  if (typeof cap !== 'number' || !Number.isInteger(cap) || cap <= 0) {
+    return undefined;
+  }
+  return { provider, cap };
+}
+
+/** The command a provider entry spawns sessions through — the acp/cli
+ *  template whose first token the session planes match. An api entry
+ *  opens no session of its own: no planes claim it, its lane's census
+ *  is the claim ledger alone. */
+function providerEntryCommand(env: AgentConnectorEnv, provider: string): string {
+  const entry = env.providers?.[provider];
+  if (entry === undefined || entry.type === 'api') {
+    return '';
+  }
+  return entry.command;
 }
 
 /** sessionKind → live agentIds in the caller's registry — the work
@@ -2555,6 +2631,134 @@ function releaseSpawnLease(dir: string, lease: Lease): void {
   }
 }
 
+/** The spawned command's cross-kind session claims — every session
+ *  kind the command starts BEYOND the spawn's own quota lane (that
+ *  lane's admit rides sessionQuota's admitSessionSlot itself). Each
+ *  kind claims through its OWN admission mutex — the same lock
+ *  admitSessionSlot holds — so a check-then-reserve cannot race a
+ *  parallel start past the cap, and every claim lands on `out` so a
+ *  refusal's rollback drops it with the rest (spec bro-x601l).
+ *
+ *  A provider-covered kind the spawned command starts WITHOUT a kind
+ *  quota produces no sessionCapViews row, so the views loop never
+ *  sees its starts — but every session it opens still draws on the
+ *  provider lane (a provider cap of 1 must refuse a second start the
+ *  quota layer never armed). A second pass over providerPlaneKinds
+ *  claims what the provider pass did not already cover, judged on
+ *  the same aggregate census. */
+function admitSpawnedCommandStarts(args: {
+  spawnedCommand: string;
+  agents: Record<string, Record<string, unknown>> | undefined;
+  workerEnv: Record<string, string> | undefined;
+  molStep: string | undefined;
+  agentId: string;
+  scope: string;
+  liveByKind: Map<string, Set<string>>;
+  providerClaimedStarts: Map<string, number>;
+  providerPlaneKinds: ReadonlySet<string>;
+  providerCap: ProviderCapLane | undefined;
+  providerCensus: (() => number) | undefined;
+  /** the spawn's own quota lane — its admit below covers the kind's
+   *  full lane; the cross-kind loops must not double-claim it */
+  quotaPlaneKind: string | undefined;
+  /** reports a work-budget segment an admit just opened — the caller
+   *  refunds them all when a later refusal unwinds the spawn */
+  budgetCharged?: (kind: string) => void;
+  out: string[];
+}): void {
+  const {
+    spawnedCommand,
+    agents,
+    workerEnv,
+    molStep,
+    agentId,
+    scope,
+    liveByKind,
+    providerClaimedStarts,
+    providerPlaneKinds,
+    providerCap,
+    providerCensus,
+    quotaPlaneKind,
+    budgetCharged,
+    out,
+  } = args;
+  // a pre-flight refusal ahead of any claim; the authoritative
+  // count re-runs inside each kind's admission mutex below. Starts
+  // the provider pass already claimed sit INSIDE the view's live
+  // count — the pending starts are what is left, or one session's
+  // claims read as two and a rightful first spawn refuses.
+  for (const view of sessionCapViews(spawnedCommand, agents, workerEnv)) {
+    const pending = Math.max(0, view.starts - (providerClaimedStarts.get(view.kind) ?? 0));
+    const crossRefusal = sessionCapRefusal({ ...view, starts: pending });
+    if (crossRefusal !== undefined) {
+      throw new SpawnError(crossRefusal, 'cap');
+    }
+  }
+  const coveredKinds = new Set<string>();
+  for (const view of sessionCapViews(spawnedCommand, agents, workerEnv)) {
+    if (view.kind === quotaPlaneKind) {
+      continue; // admitSessionSlot below covers this kind's full lane
+    }
+    coveredKinds.add(view.kind);
+    const plane = sessionPlane(view.kind);
+    if (plane === undefined) {
+      continue;
+    }
+    // Admit through the kind's OWN admission mutex — the same lock
+    // admitSessionSlot holds — so a check-then-reserve here cannot
+    // race a parallel start into overshooting the cap. A kind's
+    // multi-start view claims one serialized slot per start; a
+    // refusal mid-way is rolled back by the catch below. Starts the
+    // provider pass already admitted are skipped — their claims
+    // already ride crossKindReservations.
+    const pending = view.starts - (providerClaimedStarts.get(view.kind) ?? 0);
+    for (let i = 0; i < pending; i++) {
+      const claimed = admitSessionSlot(plane, agents, {
+        key: agentId,
+        molStep,
+        workerEnv,
+        scope,
+        liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
+        // a kind the provider cap counts still owes the aggregate
+        // verdict — the spawned command can start more of the kind
+        // than the provider's own entry did, and the excess claims
+        // land on the SAME provider-counted ledger
+        ...(providerPlaneKinds.has(view.kind) ? { providerCap, providerCensus } : {}),
+        ...(budgetCharged === undefined ? {} : { budgetCharged }),
+      });
+      if (claimed !== undefined) {
+        out.push(claimed);
+      }
+    }
+  }
+  for (const kind of providerPlaneKinds) {
+    if (coveredKinds.has(kind) || kind === quotaPlaneKind) {
+      continue;
+    }
+    const plane = sessionPlane(kind);
+    if (plane === undefined) {
+      continue;
+    }
+    const starts = plane.startsSessions?.(spawnedCommand) ?? 0;
+    const pending = starts - (providerClaimedStarts.get(kind) ?? 0);
+    for (let i = 0; i < pending; i++) {
+      const claimed = admitSessionSlot(plane, agents, {
+        key: agentId,
+        molStep,
+        workerEnv,
+        scope,
+        liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
+        providerCap,
+        providerCensus,
+        ...(budgetCharged === undefined ? {} : { budgetCharged }),
+      });
+      if (claimed !== undefined) {
+        out.push(claimed);
+      }
+    }
+  }
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -2696,9 +2900,6 @@ function prepareSpawn(
   // cheap) and before fleet admission: a refusal here leaves no
   // half-spawned state, and no reservation is claimed on the way out
   enforceExternalGuard(dir, spec, opts.external);
-  // fleet admission — before the registry write + claim land, so a
-  // refusal leaves no half-spawned state
-  enforceFleetCap(dir, home, registry, spec, opts.cap);
   // a reused id must stay filename-safe — a tampered entry gets a fresh
   // mint, not a path escape into <home>/
   const agentId =
@@ -2722,6 +2923,18 @@ function prepareSpawn(
     typeof opts.sessionQuota === 'function' ? opts.sessionQuota() : opts.sessionQuota;
   let reservation: string | undefined;
   const crossKindReservations: string[] = [];
+  // the provider-namespaced ledger claims — released when commitSpawn
+  // lands the row that takes over the count (the registry census
+  // replaces the slot, exactly like a plane's own mark retiring a
+  // kind slot inside its sweep)
+  const providerReservations: string[] = [];
+  // the work-budget ledger's own facts (spec bro-tdndq): the repo
+  // scope keys this rig's segments in the host-shared ledger, and
+  // work-budget segments this spawn's admits opened sit in
+  // budgetChargedKinds — both catches hand them back so a refused
+  // spawn never meters minutes for a worker that never ran
+  const scope = projectId(dir);
+  const budgetChargedKinds: string[] = [];
   try {
     // Cross-kind admission: judge every session kind the spawned command
     // starts — a native/template worker running e.g. `devin -p …` consumes
@@ -2738,60 +2951,204 @@ function prepareSpawn(
       return typeof opts.spawnCommand === 'string' ? opts.spawnCommand : '';
     })();
     const agents = opts.env?.agents ?? sessionQuota?.agents ?? {};
-    // the work-budget ledger's own facts (spec bro-tdndq): the repo
-    // scope keys this rig's segments in the host-shared ledger, and the
-    // live-keys map lets each admission close segments whose workers
-    // the registry says already ended
-    const scope = projectId(dir);
+    // the live-keys map lets each admission close budget segments
+    // whose workers the registry says already ended
     const liveByKind = liveSessionKeysByKind(registry);
-    if (spawnedCommand !== '') {
-      // a pre-flight refusal ahead of any claim; the authoritative
-      // count re-runs inside each kind's admission mutex below
-      const crossRefusal = sessionCapRefusalFor(spawnedCommand, agents, spec.env);
-      if (crossRefusal !== undefined) {
-        throw new SpawnError(crossRefusal, 'cap');
-      }
-      for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
-        if (view.kind === sessionQuota?.plane.kind) {
-          continue; // admitSessionSlot below covers this kind's full lane
+    // true when the provider's own session plane IS the quota lane's —
+    // the verdict then rides sessionQuota's admitSessionSlot (below)
+    // instead of claiming a second slot for one session
+    let quotaCoversProvider = false;
+    // provider-cap admission — the OUTER gate (spec bro-x601l): the
+    // account's lane cap judges before any kind lane, on the census the
+    // provider's own command resolves. A plane-covered entry admits
+    // through the kind's mutex with the provider verdict riding the
+    // same locked section (shared claim, no double slot); a plane-less
+    // entry admits on the provider-namespaced claim ledger — every
+    // claim lands in crossKindReservations so the failure paths hand
+    // it back untouched.
+    const providerCap = providerCapLaneOf(env, backend, spec);
+    // the provider lane's AGGREGATE census — the combined count over
+    // every plane the provider's command claims (spec bro-x601l): a
+    // multi-plane command draws one session per plane on the same
+    // account lane, and a per-plane census admits each in isolation.
+    // The closure runs inside each plane's locked section — after its
+    // claim landed — so earlier planes' claims sit inside the count.
+    let providerCensus: (() => number) | undefined;
+    // starts the provider-cap pass already claimed per kind — the
+    // cross-kind pass below re-counts these kinds and must skip the
+    // starts this pass covered, or one session's claims read as two
+    const providerClaimedStarts = new Map<string, number>();
+    // the kinds whose census dirs the provider cap counts — a cross-kind
+    // claim that outlasts the provider pass's own claims still lands on
+    // the provider lane's ledger, so its admit rides the aggregate too
+    const providerPlaneKinds = new Set<string>();
+    // every budget segment an admit opens registers on
+    // budgetChargedKinds (hoisted above the try) — a LATER refusal
+    // hands them all back in the catch
+    const budgetCharged = (kind: string): void => {
+      budgetChargedKinds.push(kind);
+    };
+    let providerCommand = '';
+    let providerPlanes: SessionPlane[] = [];
+    if (providerCap !== undefined) {
+      providerCommand = providerEntryCommand(env, providerCap.provider);
+      providerPlanes = providerCommand === '' ? [] : planesStartingSessions(providerCommand);
+      if (providerPlanes.length > 0) {
+        const planes = providerPlanes;
+        const lane = providerCap;
+        providerCensus = () => providerCapCensus(planes, agents, spec.env, lane);
+        for (const plane of planes) {
+          providerPlaneKinds.add(plane.kind);
         }
-        const plane = sessionPlane(view.kind);
-        if (plane === undefined) {
+      }
+      // the provider session the quota lane already claims — passing
+      // the verdict to sessionQuota's own call keeps one claim for the
+      // one session (a double claim would count the lane twice)
+      quotaCoversProvider = providerPlanes.some(p => p.kind === sessionQuota?.plane.kind);
+      // the OUTER gate's read-only pre-flight — judged BEFORE the
+      // repo-local fleet cap: when the provider verdict would defer to
+      // the quota lane's own admit (its only plane IS that lane), a
+      // full fleet would otherwise refuse first and name the wrong
+      // constraint. The authoritative count still re-runs inside each
+      // plane's locked section after the claims land.
+      const providerLive =
+        providerPlanes.length > 0
+          ? (providerCensus as () => number)()
+          : providerRegistryCensus(dir, home, registry, env, providerCap.provider) +
+            countSessionReservations(
+              providerSlotsDir(providerCap.provider, providerCap.reservationsDir)
+            );
+      const providerRefusal = providerCapRefusal(providerCap, providerLive, 1);
+      if (providerRefusal !== undefined) {
+        throw new SpawnError(providerRefusal, 'cap', 'provider_cap');
+      }
+    }
+    // the provider verdict judged — the repo-local fleet cap is the
+    // INNER gate (spec bro-x601l: an account-lane refusal must not be
+    // masked by a repo-local count); still before the registry write,
+    // and before ANY claim or budget segment lands, so a refusal here
+    // leaves no half-spawned state to hand back
+    enforceFleetCap(dir, home, registry, spec, opts.cap);
+    if (providerCap !== undefined) {
+      for (const plane of providerPlanes) {
+        if (plane.kind === sessionQuota?.plane.kind) {
           continue;
         }
-        // Admit through the kind's OWN admission mutex — the same lock
-        // admitSessionSlot holds — so a check-then-reserve here cannot
-        // race a parallel start into overshooting the cap. A kind's
-        // multi-start view claims one serialized slot per start; a
-        // refusal mid-way is rolled back by the catch below.
-        for (let i = 0; i < view.starts; i++) {
+        // every session the provider's command would start draws on
+        // the lane — a multi-start command claims one slot per start,
+        // each judged inside the kind's mutex like the cross-kind pass
+        const starts = plane.startsSessions?.(providerCommand) ?? 1;
+        for (let i = 0; i < starts; i++) {
           const claimed = admitSessionSlot(plane, agents, {
             key: agentId,
             molStep: spec.molStep,
             workerEnv: spec.env,
             scope,
-            liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
+            liveKeys: liveByKind.get(plane.kind) ?? EMPTY_KEYS,
+            providerCap,
+            providerCensus,
+            budgetCharged,
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);
+            providerClaimedStarts.set(plane.kind, (providerClaimedStarts.get(plane.kind) ?? 0) + 1);
           }
         }
       }
-    }
-    reservation =
-      sessionQuota === undefined
-        ? undefined
-        : admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
+      if (providerPlanes.length === 0) {
+        // no plane counts this provider's command — the census is the
+        // registry's live occupants on this provider entry plus the
+        // provider-namespaced claim ledger (spec bro-x601l: the
+        // registry fallback, the callback judged INSIDE the mutex)
+        const admission = admitProviderSlot(
+          providerCap,
+          () => providerRegistryCensus(dir, home, registry, env, providerCap.provider),
+          {
             key: agentId,
-            molStep: spec.molStep,
-            workerEnv: spec.env,
-            scope,
-            liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
-          });
+            lane: isBatchSpawn(spec.env) ? 'batch' : 'interactive',
+          }
+        );
+        if (admission !== undefined) {
+          if (admission.refusal !== undefined) {
+            throw new SpawnError(admission.refusal, 'cap', admission.capCause);
+          }
+          providerReservations.push(...admission.paths);
+        }
+      }
+    }
+    if (spawnedCommand !== '') {
+      admitSpawnedCommandStarts({
+        spawnedCommand,
+        agents,
+        workerEnv: spec.env,
+        molStep: spec.molStep,
+        agentId,
+        scope,
+        liveByKind,
+        providerClaimedStarts,
+        providerPlaneKinds,
+        providerCap,
+        providerCensus,
+        quotaPlaneKind: sessionQuota?.plane.kind,
+        budgetCharged,
+        out: crossKindReservations,
+      });
+    }
+    if (sessionQuota !== undefined) {
+      // every session the spawned command opens on the quota kind owes
+      // the lane a claim — a multi-start command judged once but
+      // claimed once would read one session where two land, and the
+      // provider census would admit on a slot count that under-counts
+      // the lane. Each admit re-judges post-claim: the Nth claim trips
+      // the refusal exactly when headroom cannot seat N.
+      const quotaView = sessionCapViews(spawnedCommand, agents, spec.env).find(
+        v => v.kind === sessionQuota.plane.kind
+      );
+      const quotaStarts = Math.max(
+        1,
+        quotaView?.starts ?? sessionQuota.plane.startsSessions?.(spawnedCommand) ?? 1
+      );
+      for (let i = 0; i < quotaStarts; i++) {
+        const claimed = admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
+          key: agentId,
+          molStep: spec.molStep,
+          workerEnv: spec.env,
+          scope,
+          liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
+          ...(quotaCoversProvider ? { providerCap, providerCensus } : {}),
+          budgetCharged,
+        });
+        if (i === 0) {
+          reservation = claimed;
+        } else if (claimed !== undefined) {
+          crossKindReservations.push(claimed);
+        }
+      }
+    }
   } catch (err) {
-    // every claim this spawn holds goes back — the caller never saw them
+    // every claim this spawn holds goes back — the caller never saw
+    // them, and every budget segment the claims charged refunds: a
+    // refused spawn never ran a worker to spend them on
+    if (reservation !== undefined) {
+      // the quota lane's own claims land per-start — an early one can
+      // be held when a later start's verdict refuses; the first catch
+      // owns it just like the second
+      releaseSessionSlot(reservation);
+      reservation = undefined;
+    }
     releaseSessionStart(crossKindReservations);
     crossKindReservations.length = 0;
+    releaseSessionStart(providerReservations);
+    providerReservations.length = 0;
+    for (const kind of budgetChargedKinds) {
+      try {
+        laneBudgetRefund(kind, laneBudgetKey(scope, agentId));
+      } catch {
+        // the refund is best-effort — a failed one charges the residue
+        // the next scan closes, the pre-refund behavior
+      }
+    }
+    budgetChargedKinds.length = 0;
     releaseSpawnLease(dir, workLease.lease);
     // a 'cap' refusal can be the work budget parking the lane (spec
     // bro-tdndq): the spend in flight must stop too — the same freeze
@@ -2827,24 +3184,31 @@ function prepareSpawn(
     // failure also hands the session-quota reservation back via the
     // catch below
     enterSpawnTree(spec);
+    const written = commitSpawn(
+      dir,
+      home,
+      backend,
+      spec,
+      { ...opts, sessionQuota },
+      {
+        agentId,
+        claimed,
+        actor,
+        phantom,
+        previousAssignee,
+        existing,
+        lease: workLease.lease,
+      }
+    );
+    // the committed row now counts the lane itself — the in-flight
+    // provider claims hand the census to the registry (spec bro-x601l:
+    // the registry fallback counts occupants, and keeping the slot
+    // too would count one worker twice)
+    releaseSessionStart(providerReservations);
+    providerReservations.length = 0;
     return {
       agentId,
-      ...commitSpawn(
-        dir,
-        home,
-        backend,
-        spec,
-        { ...opts, sessionQuota },
-        {
-          agentId,
-          claimed,
-          actor,
-          phantom,
-          previousAssignee,
-          existing,
-          lease: workLease.lease,
-        }
-      ),
+      ...written,
       lease: workLease.lease,
       reservation,
       resumeSessionId: effectiveResumeSessionId,
@@ -2857,6 +3221,17 @@ function prepareSpawn(
       releaseSessionSlot(reservation);
     }
     releaseSessionStart(crossKindReservations);
+    releaseSessionStart(providerReservations);
+    // the work-budget segments the released claims opened refund too —
+    // a spawn that never ran must not meter minutes (spec bro-x601l)
+    for (const kind of budgetChargedKinds) {
+      try {
+        laneBudgetRefund(kind, laneBudgetKey(scope, agentId));
+      } catch {
+        // best-effort — a missed refund closes on the next budget scan
+      }
+    }
+    budgetChargedKinds.length = 0;
     // the same door for the charge: everything still inside this try
     // precedes launch, so a spawn that never ran gives its tokens back
     if (charged !== undefined) {
@@ -4566,6 +4941,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // lease to local governance so a dead worker frees the key
           // without waiting out the TTL
           rebindSpawnLease(dir, lease, { host: hostname(), pid: child.pid });
+          // the slot claims follow the lane's real holder — a spawning
+          // CLI exits but the session's lane lives with the child
+          // (spec bro-x601l); a swept claim retags to nothing
+          if (child.pid !== undefined) {
+            retagSessionSlots([reservation, ...crossKindReservations], child.pid);
+          }
           writeWorkMarker(dir, agentId, spec.molStep, child.pid);
           // died after publishing the handle — pid+marker are durable,
           // the worker's admission stamp never lands
@@ -5085,6 +5466,11 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           // its foreign host and the TTL backs it while the pane may still
           // be live
           rebindSpawnLease(dir, lease, hasPanePid ? { host: hostname(), pid: panePid } : {});
+          // the slot claims follow the lane's holder — the pane lives
+          // exactly as long as the session it hosts (spec bro-x601l)
+          if (hasPanePid) {
+            retagSessionSlots([reservation, ...crossKindReservations], panePid);
+          }
           writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined);
           return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
         });
@@ -6687,6 +7073,12 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // local governance — a remote daemon's pid names its own host,
         // and an empty patch keeps the foreign stamp
         rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {});
+        // the slot claims follow the lane's holder — a local container
+        // pid is probeable like native's child (spec bro-x601l); a
+        // remote daemon's pid names its own host and retags nothing
+        if (dockerPidIsLocal && insp.pid !== undefined) {
+          retagSessionSlots([reservation, ...crossKindReservations], insp.pid);
+        }
         writeWorkMarker(dir, agentId, spec.molStep, insp.pid);
         return toDockerInfo(dir, home, spec.molStep, spawned);
       });

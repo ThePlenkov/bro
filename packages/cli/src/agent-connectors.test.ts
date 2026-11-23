@@ -31,11 +31,15 @@ import {
   BATCH_MARKER_ENV,
   deriveProviderWalls,
   handleOwner,
+  laneBudgetDir,
   localLeaseStore,
   projectId,
   readLedgerWalls,
   recordWall,
   registerExternalPlane,
+  registerSessionPlane,
+  clearSessionPlanes,
+  sessionPlanes,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -292,6 +296,11 @@ interface Fixture {
   db: string;
   env: AgentConnectorEnv;
   prevPath: string;
+  /** XDG_DATA_HOME before the fixture overwrote it — restored, never
+   *  deleted: the session-slot ledgers live under it, and one host dir
+   *  shared across tests is cross-test census pollution (spec
+   *  bro-x601l's provider caps count it machine-wide). */
+  prevXdgDataHome?: string;
   /** TMUX_FAKE_HOME before the fixture overwrote it — restored, never
    *  deleted, so a pre-set runner env survives the test. */
   prevTmuxFakeHome?: string;
@@ -343,6 +352,10 @@ function fixture(
     agents['docker'] = { command, image: 'img:test' };
   }
   const prevPath = process.env.PATH ?? '';
+  // the session-slot census dir — per-fixture so held claims never
+  // leak between tests (or into the operator's own slots dir)
+  const prevXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(root, 'xdg');
   const prevFakeBdDb = process.env.FAKE_BD_DB;
   const prevBeadsActor = process.env.BEADS_ACTOR;
   // ambient repo/store pins (GIT_DIR, BEADS_DIR, BRO_*) would redirect
@@ -368,6 +381,7 @@ function fixture(
     db,
     env: { agents, connectors: {}, spawn: { externalBlock: false, externalIdleSec: 480 } },
     prevPath,
+    prevXdgDataHome,
     prevTmuxFakeHome,
     prevDockerFakeHome,
     prevFakeBdDb,
@@ -399,6 +413,11 @@ function cleanup(fx: Fixture): void {
     // no readable registry — nothing spawned
   }
   process.env.PATH = fx.prevPath;
+  if (fx.prevXdgDataHome === undefined) {
+    delete process.env.XDG_DATA_HOME;
+  } else {
+    process.env.XDG_DATA_HOME = fx.prevXdgDataHome;
+  }
   if (fx.prevTmuxFakeHome === undefined) {
     delete process.env.TMUX_FAKE_HOME;
   } else {
@@ -700,7 +719,7 @@ function connectorContract(b: BackendCase): void {
       const c = b.make({ dir: f.main }, env);
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
-        /devin session quota reached — 1\/1 live sessions.*fx-1/
+        /devin session quota reached — 2\/1 live sessions.*fx-1/
       );
       // a refused spawn leaves no claim and no registry entry
       assert.equal(f.dbRows().find(r => r.id === 'fx-1')!.status, 'open');
@@ -744,7 +763,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(countSessionReservations(reservationsDir), 1);
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
-        /devin session quota reached — 2\/2 live sessions.*fx-2/
+        /devin session quota reached — 3\/2 live sessions.*fx-2/
       );
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
       await c.stop(first.id);
@@ -781,7 +800,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(first.state, 'running');
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
-        /devin worker quota reached — 1\/1 live workers.*fx-2/
+        /devin worker quota reached — 2\/1 live workers.*fx-2/
       );
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
       await c.stop(first.id);
@@ -815,6 +834,523 @@ function connectorContract(b: BackendCase): void {
       cleanup(f);
     }
   });
+
+  test('fleet.providerCaps refuses a spawn at the provider lane ceiling — registry census (spec bro-x601l)', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    // 'local' is a cli provider whose command no session plane counts —
+    // the provider census falls back to the registry's live occupants
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        [b.name]: { ...f.env.agents[b.name], provider: 'local' },
+      },
+      providers: { local: { type: 'cli' as const, command: 'node {promptFile}' } },
+      fleet: { maxConcurrent: 0, providerCaps: { local: 1 } },
+    };
+    try {
+      const c = b.make({ dir: f.main }, env);
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(first.state, 'running');
+      // the running worker holds the provider's one lane — the next
+      // spawn refuses 'cap' (a park, never an error-burn) and names
+      // provider_cap as the cause
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          /provider 'local' lane cap reached.*fleet\.providerCaps\.local.*provider_cap/.test(
+            err.message
+          )
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
+      await c.stop(first.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test("fleet.providerCaps counts the provider's kind census — a plane-covered entry (spec bro-x601l)", async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'));
+    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'));
+    const procDir = devinProc();
+    // one live devin lane on the host — 'devacp' rides the devin CLI,
+    // so its provider cap counts the devin census: session, worker,
+    // acp peer — the plane sees them all
+    writeFileSync(join(lockDir, 'other.lock'), String(process.pid));
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        [b.name]: { ...f.env.agents[b.name], provider: 'devacp' },
+        devin: { lockDir, procDir, reservationsDir },
+      },
+      providers: { devacp: { type: 'acp' as const, command: 'devin acp' } },
+      fleet: { maxConcurrent: 0, providerCaps: { devacp: 1 } },
+    };
+    try {
+      const c = b.make({ dir: f.main }, env);
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          // the outer gate's pre-flight — the pre-claim phrasing: the
+          // one live lane plus this starting one over the cap of 1
+          /provider 'devacp' lane cap reached — 1 live \+ 1 starting > 1.*provider_cap/.test(
+            err.message
+          )
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true });
+      rmSync(reservationsDir, { recursive: true, force: true });
+      rmSync(procDir, { recursive: true, force: true });
+      cleanup(f);
+    }
+  });
+
+  test('a provider cap below the ceiling admits and its slot joins the census', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    // cap 2 on a plane-less provider: the landed worker's registry row
+    // counts 1, so a second spawn fits — a third would not
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        [b.name]: { ...f.env.agents[b.name], provider: 'local' },
+      },
+      providers: { local: { type: 'cli' as const, command: 'node {promptFile}' } },
+      fleet: { maxConcurrent: 0, providerCaps: { local: 2 } },
+    };
+    try {
+      const c = b.make({ dir: f.main }, env);
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)'));
+      assert.equal(first.state, 'running');
+      assert.equal(second.state, 'running');
+      await c.stop(first.id);
+      await c.stop(second.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  if (b.name === 'native') {
+    test('a provider cap claims each started kind once — starts shared with the spawned command are never double-counted (spec bro-x601l)', async () => {
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        // two scripted kinds — the provider's entry command AND the
+        // spawned command both start them (alpha once, beta twice), so
+        // the provider pass claims 1+2 slots and the cross-kind pass
+        // must skip exactly those starts
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.includes('alpha-run') ? 1 : 0),
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.includes('beta-run') ? 2 : 0),
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { maxSessions: 1, reservationsDir: dirA },
+            beta: { maxSessions: 2, reservationsDir: dirB },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run beta-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 3 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        // before the fix the cross-kind pass re-counted the provider
+        // pass's claims as fresh starts — alpha's 1+1 > cap 1 refused a
+        // rightful spawn (and re-claiming would double-count the lane)
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        assert.equal(info.state, 'running');
+        // one claim per START — alpha's single, beta's pair — never
+        // one per plane and never two passes over the same start
+        assert.equal(countSessionReservations(dirA), 1);
+        assert.equal(countSessionReservations(dirB), 2);
+        await c.stop(info.id);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a provider cap judges the aggregate across planes — per-plane headroom never admits past it (spec bro-x601l)', async () => {
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        // two planes claim the provider's entry — alpha once, beta
+        // twice. Every kind lane has headroom of its own, so a
+        // per-plane census admits each claim in isolation; only the
+        // AGGREGATE sees 1+2 = 3 over the cap of 2
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.includes('alpha-run') ? 1 : 0),
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.includes('beta-run') ? 2 : 0),
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { maxSessions: 9, reservationsDir: dirA },
+            beta: { maxSessions: 9, reservationsDir: dirB },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run beta-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 2 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached — 3\/2 live lanes.*provider_cap/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+        // the refused spawn handed every claim back
+        assert.equal(countSessionReservations(dirA), 0);
+        assert.equal(countSessionReservations(dirB), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test("a cross-kind start beyond the provider command's own still rides the provider cap (spec bro-x601l)", async () => {
+      // the provider's entry starts one 'alpha' session; the spawned
+      // command itself starts a SECOND one the provider entry never
+      // claimed — its slot lands on the same provider-counted ledger,
+      // so the aggregate verdict must see it too
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run alpha-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { maxSessions: 5, reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 1 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        // the provider pass claims 1/1 — at the cap; the cross-kind
+        // pass's extra alpha claim pushes the aggregate to 2 > 1 and
+        // is refused — unjudged it would over-admit the lane
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+        assert.equal(countSessionReservations(dirA), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a provider-covered kind with NO kind quota still draws judged slots (spec bro-x601l)', async () => {
+      // neither kind carries maxSessions — sessionCapViews yields no
+      // row for either, so the spawned command's starts would escape
+      // the provider lane entirely without the provider-covered-kind
+      // pass: beta's second session must claim (and refuse) like any
+      // other draw on the 'prov' lane
+      const f = fixture(
+        [{ id: 'fx-1', status: 'open' }],
+        'node {promptFile} alpha-run beta-run beta-run'
+      );
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/beta-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { reservationsDir: dirA },
+            beta: { reservationsDir: dirB },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run beta-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 2 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        // the provider pass claims alpha×1 + beta×1 = 2/2 — the spawned
+        // command's SECOND beta start claims a third slot and the
+        // aggregate verdict refuses it; unclaimed it would draw on the
+        // lane unjudged
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached — 3\/2 live lanes.*provider_cap/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+        // the refused spawn handed every claim back
+        assert.equal(countSessionReservations(dirA), 0);
+        assert.equal(countSessionReservations(dirB), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a multi-start command on the quota plane owes the provider lane every start (spec bro-x601l)', async () => {
+      // alpha IS the spawn's quota lane — the provider pass defers its
+      // verdict to the quota admit. A single claim there would judge
+      // 1/1 and admit a command that opens TWO alpha sessions on a cap
+      // of 1; the per-start admit lands the second claim inside the
+      // same locked section and the aggregate verdict sees it
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run alpha-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov', sessionKind: 'alpha' },
+            alpha: { maxSessions: 3, reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 1 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached — 2\/1 live lanes.*provider_cap/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+        // every claim the refused spawn briefly held went back
+        assert.equal(countSessionReservations(dirA), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('the provider verdict precedes the fleet cap — a full lane is never masked as repo-local (spec bro-x601l)', async () => {
+      // provider cap AND fleet cap both full: the account lane is the
+      // outer gate, so the refusal names provider_cap, not the fleet
+      // count — a masked provider refusal parks the wrong budget
+      const f = fixture(
+        [
+          { id: 'fx-1', status: 'open' },
+          { id: 'fx-2', status: 'open' },
+        ],
+        'node {promptFile} alpha-run'
+      );
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov', sessionKind: 'alpha' },
+            alpha: { maxSessions: 3, reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'cli' as const, command: 'node {promptFile} alpha-run' },
+          },
+          fleet: { maxConcurrent: 1, providerCaps: { prov: 1 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        assert.equal(first.state, 'running');
+        // fleet 1/1 AND provider 1/1 — the refusal must name the lane
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /provider 'prov' lane cap reached.*provider_cap/.test(err.message) &&
+            !/fleet cap reached/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
+        await c.stop(first.id);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a refused spawn refunds the work-budget segment its earlier claims opened (spec bro-x601l)', async () => {
+      // a batch spawn: alpha's admit opens a work-budget segment; beta's
+      // lane reads full only inside its own locked section (its live
+      // count turns 1 once alpha's claim exists). The refusal must hand
+      // the segment back — an open one charges worker-minutes for a
+      // worker that never ran
+      const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
+      const budgetLedger = join(laneBudgetDir(), 'alpha.json');
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        registerSessionPlane({
+          kind: 'beta',
+          detectsCli: cli => cli === 'beta-cli',
+          // live turns 1 only once alpha's claim exists — the pre-flight
+          // admits on 0+1 and the post-claim census is what refuses, so
+          // the segment is real when the verdict lands
+          countLive: () => (countSessionReservations(dirA) > 0 ? 1 : 0),
+          startsSessions: cmd => (cmd.match(/beta-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            alpha: { maxSessions: 5, workBudgetMinutes: 30, reservationsDir: dirA },
+            beta: { maxSessions: 1, reservationsDir: dirB },
+          },
+          fleet: { maxConcurrent: 0 },
+        };
+        const c = b.make({ dir: f.main }, env);
+        await assert.rejects(
+          c.spawn({
+            ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+            env: { BRO_BATCH: '1' },
+          }),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /beta session quota reached/.test(err.message)
+        );
+        assert.equal(countSessionReservations(dirA), 0);
+        assert.equal(countSessionReservations(dirB), 0);
+        // the refunded segment leaves no open charge — the ledger may
+        // keep an empty record, never an un-closed segment
+        if (existsSync(budgetLedger)) {
+          const ledger = JSON.parse(readFileSync(budgetLedger, 'utf8')) as {
+            workers: Record<string, { segments: Array<{ e?: number }> }>;
+          };
+          for (const worker of Object.values(ledger.workers)) {
+            assert.equal(
+              worker.segments.every(seg => seg.e !== undefined),
+              true,
+              'an open segment survived the refused spawn'
+            );
+          }
+        }
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+        rmSync(budgetLedger, { force: true });
+        cleanup(f);
+      }
+    });
+  }
 
   test('sessionKindOf — declared override beats argv detection', () => {
     const spec = SPEC('/r', '/b', 'fx-1', 'p');

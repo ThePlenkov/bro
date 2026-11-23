@@ -786,7 +786,15 @@ async function spawnFixerAgent(ctx: DriveCtx, pr: number, s: FixerSpawn): Promis
       return {
         pr,
         link,
-        verdict: err instanceof SpawnError ? 'spawn-refused' : 'spawn-failed',
+        verdict:
+          err instanceof SpawnError
+            ? // a cap refusal is a park, never a refusal the operator
+              // must hear about — the lane frees on its own cadence
+              // (spec bro-x601l: provider lane caps land here too)
+              err.kind === 'cap'
+              ? 'occupied'
+              : 'spawn-refused'
+            : 'spawn-failed',
         detail: errText(err),
       };
     }
