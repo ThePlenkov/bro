@@ -183,19 +183,27 @@ export function runSyncCommand(argv: string[]): void {
       console.log(`bro sync: ${dir} → ${ref} @ ${head.slice(0, 8)}`);
     }
   }
-  // push whenever a local data ref exists — an earlier sync may have left
-  // one even when this checkout has no artifact dirs to commit
+  pushDataRef(root, remote, ref);
+}
+
+// Push whenever a local data ref exists — an earlier sync may have left
+// one even when this checkout has no artifact dirs to commit.
+function pushDataRef(root: string, remote: string, ref: string): void {
   const hasRef = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', ref]).code === 0;
-  if (hasRef && !dataRefPush(root, remote, ref)) {
+  if (!hasRef) return;
+  if (!dataRefPush(root, remote, ref)) {
     console.error(`warning: could not push ${ref} to ${remote} — check network and remote access`);
-  } else if (hasRef) {
-    console.log(`bro sync: ${ref} pushed to ${remote}`);
-    // mirror the tip onto its heads twin — raw.githubusercontent serves
-    // branches without the API quota the ref call costs every page load.
-    // Best-effort: a rejected mirror never fails the sync.
-    const tip = gitTry(['-C', root, 'rev-parse', ref]);
-    if (tip.code === 0) {
-      gitTry(['-C', root, 'push', remote, `${tip.out.trim()}:refs/heads/bro-data`]);
-    }
+    return;
   }
+  console.log(`bro sync: ${ref} pushed to ${remote}`);
+  mirrorDataBranch(root, remote, ref);
+}
+
+// Mirror the tip onto its heads twin — raw.githubusercontent serves
+// branches without the API quota the ref call costs every page load.
+// Best-effort: a rejected mirror never fails the sync.
+function mirrorDataBranch(root: string, remote: string, ref: string): void {
+  const tip = gitTry(['-C', root, 'rev-parse', ref]);
+  if (tip.code !== 0) return;
+  gitTry(['-C', root, 'push', remote, `${tip.out.trim()}:refs/heads/bro-data`]);
 }
