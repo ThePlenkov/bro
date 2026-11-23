@@ -208,8 +208,7 @@ export function hookOutcome(result: SpawnResult): HookOutcome {
 /** Run a bro hook, passing the event payload on stdin. The outcome
  *  carries the failure cause — "bro had nothing to say" and "bro could
  *  not answer" both fail open, but the second must not be invisible. */
-async function runBroHook(event: string, input: unknown): Promise<HookOutcome> {
-  const argv = broArgs(event);
+async function runBroHook(argv: string[], input: unknown): Promise<HookOutcome> {
   let payload: string | undefined;
   try {
     payload = JSON.stringify(input);
@@ -253,7 +252,15 @@ const SAFE_CMD = [
   /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/,
 ];
 
-const BroPlugin: Plugin = async ({ directory, client }) => {
+const BroPlugin: Plugin = async input => {
+  const { directory, client } = input;
+  /** The hook's argv — the CLI ladder by default, a pinned command when
+   *  a test injects `broArgv` (the field rides loose on the input so
+   *  the Plugin type stays satisfied; the host never sends it). */
+  const broArgv = (input as { broArgv?: string[] }).broArgv;
+  const hookArgv = (event: string): string[] =>
+    broArgv === undefined ? broArgs(event) : [...broArgv, 'hooks', event];
+
   // --- tools: bro subcommands the model can call directly -------------------
 
   const run = (sub: string, args: string[]) => {
@@ -284,7 +291,7 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   const hydrate = async (sessionKey: string): Promise<void> => {
     const token = ++hydrationToken;
     hydratedContexts.set(sessionKey, { token, context: null });
-    const out = await runBroHook('session-start', { session_id: sessionKey });
+    const out = await runBroHook(hookArgv('session-start'), { session_id: sessionKey });
     if (Object.is(hydratedContexts.get(sessionKey)?.token, token)) {
       hydratedContexts.set(sessionKey, { token, context: hookContext(out.control) });
     }
@@ -340,6 +347,18 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
     }
   };
 
+  /** One warn that the gate never ran. Fire-and-forget on purpose: the
+   *  diagnostic's own contract is "never break the gate" — a rejecting
+   *  or hanging log must not reach the event callback, exactly like
+   *  adapter-core's gateDiag. */
+  const diagWarn = (message: string): void => {
+    try {
+      void client.app.log({ body: { service: 'bro', level: 'warn', message } }).catch(() => {});
+    } catch {
+      // a throwing log must not turn fail-open into fail-closed
+    }
+  };
+
   /** session.idle is Kilo's Stop-equivalent: bro's stop gate decides
    *  (decision: "block" when this session armed an aspect and left
    *  unfinished business) and the plugin surfaces the verdict as a
@@ -348,18 +367,14 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
    *  per interval that the gate never ran, then stays quiet: fail-open
    *  must not become spam-open on a broken install. */
   const idleGate = async (sessionID: unknown): Promise<void> => {
-    const { control: out, failure } = await runBroHook('stop', { session_id: sessionID });
+    const { control: out, failure } = await runBroHook(hookArgv('stop'), {
+      session_id: sessionID,
+    });
     if (failure !== null) {
       const now = Date.now();
       if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
         stopGateDiagAt = now;
-        await client.app.log({
-          body: {
-            service: 'bro',
-            level: 'warn',
-            message: `bro stop gate did not run (${failure}) — the stop is unguarded`,
-          },
-        });
+        diagWarn(`bro stop gate did not run (${failure}) — the stop is unguarded`);
       }
       return;
     }

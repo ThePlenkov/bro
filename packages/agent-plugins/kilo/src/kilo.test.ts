@@ -5,7 +5,7 @@
  * interval and quiet after.
  */
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -88,6 +88,17 @@ test('hookOutcome: a JSON scalar or array line is chatter, not control', () => {
 const dir = mkdtempSync(join(tmpdir(), 'bro-kilo-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
+// the stub stands in for `bro hooks <event>` — it swallows stdin and
+// exits with the code pinned as argv[2], so the plugin tests never
+// touch a real CLI or the ambient PATH
+const stub = join(dir, 'stub.mjs');
+writeFileSync(
+  stub,
+  `process.stdin.on('data', () => {}).on('end', () => {})
+process.exit(Number(process.argv[2] ?? '0'))
+`
+);
+
 interface Logged {
   level: string;
   message: string;
@@ -97,11 +108,14 @@ interface IdleEvent {
   event: { type: string; properties: Record<string, unknown> };
 }
 
-type Server = (input: { directory: string; client: unknown }) => Promise<{
+type Server = (input: { directory: string; client: unknown; broArgv?: string[] }) => Promise<{
   event: (e: IdleEvent) => Promise<void>;
 }>;
 
-function makePlugin(directory: string): {
+function makePlugin(
+  directory: string,
+  broArgv?: string[]
+): {
   logs: Logged[];
   idle: (sessionID: string) => Promise<void>;
 } {
@@ -113,7 +127,7 @@ function makePlugin(directory: string): {
       },
     },
   };
-  const ready = (plugin.server as Server)({ directory, client });
+  const ready = (plugin.server as Server)({ directory, client, broArgv });
   return {
     logs,
     idle: async sessionID => {
@@ -124,26 +138,21 @@ function makePlugin(directory: string): {
 }
 
 test('a dead stop probe warns once, then stays quiet inside the window', async () => {
-  // an empty PATH makes every hook spawn ENOENT — each idle takes the
-  // failure path deterministically, no real CLI involved
-  const realPath = process.env.PATH;
-  process.env.PATH = '';
-  try {
-    const { logs, idle } = makePlugin(dir);
-    await idle('s1');
-    await idle('s1');
-    const warns = logs.filter(l => l.level === 'warn');
-    assert.equal(warns.length, 1);
-    assert.match(warns[0]?.message ?? '', /stop gate did not run/);
-  } finally {
-    process.env.PATH = realPath;
-  }
+  // the stub exits 2 — every idle takes the failure path
+  // deterministically, no real CLI or PATH mutation involved
+  const { logs, idle } = makePlugin(dir, [process.execPath, stub, '2']);
+  await idle('s1');
+  await idle('s1');
+  const warns = logs.filter(l => l.level === 'warn');
+  assert.equal(warns.length, 1);
+  assert.match(warns[0]?.message ?? '', /stop gate did not run/);
+  assert.match(warns[0]?.message ?? '', /exited 2/);
 });
 
-test('a silent probe in a non-bro dir is health, never a warning', async () => {
-  // the real CLI answers session.idle in a non-bro directory: a clean
-  // exit with empty stdout — the gate is open by choice, no diagnostic
-  const { logs, idle } = makePlugin(dir);
+test('a clean-exit probe with empty stdout is health, never a warning', async () => {
+  // the stub answers a clean exit with nothing to say — the gate is
+  // open by choice, not outage, so no diagnostic fires
+  const { logs, idle } = makePlugin(dir, [process.execPath, stub, '0']);
   await idle('s1');
   assert.equal(logs.filter(l => l.level === 'warn').length, 0);
 });
@@ -152,7 +161,7 @@ test('an unserializable payload is an outage, never healthy silence', async () =
   // JSON.stringify throws on circular input — the hook never ran, and
   // mapping that to silence was the invisible-outage bug: the warning
   // must fire instead
-  const { logs, idle } = makePlugin(dir);
+  const { logs, idle } = makePlugin(dir, [process.execPath, stub, '0']);
   const circular: { self?: unknown } = {};
   circular.self = circular;
   await idle(circular as unknown as string);
