@@ -2778,6 +2778,142 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     );
     await clientW.abort().catch(() => {});
   });
+
+  test('alternating data and $/cancel_request cannot flush the hold — the intake bound holds', async () => {
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const clientW = clientSide.writable.getWriter();
+    const clientR = clientSide.readable.getReader();
+    const got: AnyMessage[] = [];
+    collect(clientR, got);
+    // nobody reads agentSide — the down ledger fills and stays full.
+    // Alternating data with control was the amplifier: every cancel
+    // used to dump the whole hold into the ledger, the read refilled
+    // it, the next cancel flushed again — the pair stream outran the
+    // bound for as long as the client kept alternating.
+    const total = ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 10;
+    let consumedData = 0;
+    let consumedCtrl = 0;
+    for (let i = 0; i < total; i++) {
+      if (i % 8 === 0) {
+        void clientW
+          .write({
+            jsonrpc: '2.0',
+            method: '$/cancel_request',
+            params: { id: 'no-such-request' },
+          } as AnyMessage)
+          .then(
+            () => {
+              consumedCtrl++;
+            },
+            () => {}
+          );
+      }
+      void clientW
+        .write({
+          jsonrpc: '2.0',
+          id: i + 1,
+          method: 'session/prompt',
+          params: { sessionId: 'none', prompt: [] },
+        } as AnyMessage)
+        .then(
+          () => {
+            consumedData++;
+          },
+          () => {}
+        );
+    }
+    await settle(80);
+    // data intake bounded exactly like the plain flood — while the
+    // control messages themselves still routed past the gate
+    assert.ok(
+      consumedData <= ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 2,
+      `control flushes let intake outrun the bound — consumed ${consumedData} data of ${total}`
+    );
+    assert.ok(
+      consumedData >= ACP_PROXY_WRITE_HIGH_WATER,
+      `nothing routed — consumed ${consumedData}`
+    );
+    assert.ok(consumedCtrl >= 1, 'a control message never routed');
+    // agent death runs the 'down' sweep — every accepted message earns
+    // its error, the paused tail dies with the stream
+    await agentSide.writable
+      .getWriter()
+      .close()
+      .catch(() => {});
+    assert.equal(await hangGuard(proxyDone), 1);
+    await settle(30);
+    assert.ok(
+      got.filter(m => errorOf(m) !== undefined).length >= ACP_PROXY_WRITE_HIGH_WATER,
+      'the accepted prefix was not answered'
+    );
+    await clientW.abort().catch(() => {});
+  });
+
+  test('a $/cancel_request settles a held request out of the intake — answered cancelled, never crossed', async () => {
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const clientW = clientSide.writable.getWriter();
+    const clientR = clientSide.readable.getReader();
+    const got: AnyMessage[] = [];
+    collect(clientR, got);
+    const total = ACP_PROXY_WRITE_HIGH_WATER + 10;
+    fire(clientW, 'session/prompt', { sessionId: 'none', prompt: [] }, total - 2);
+    // awaited writes: resolution IS consumption — once they land, the
+    // pair sits consumed in the pump's held tail (ids 73, 74 > 64)
+    await clientW
+      .write({
+        jsonrpc: '2.0',
+        id: total - 1,
+        method: 'fs/read_text_file',
+        params: { sessionId: 'none', path: '/x' },
+      } as AnyMessage)
+      .catch(() => {});
+    await clientW
+      .write({
+        jsonrpc: '2.0',
+        id: total,
+        method: 'session/prompt',
+        params: { sessionId: 'none', prompt: [] },
+      } as AnyMessage)
+      .catch(() => {});
+    // a leapfrogged cancel must still reach the requests queued ahead
+    // of it — the wire never shows work after its cancel
+    void clientW
+      .write({
+        jsonrpc: '2.0',
+        method: '$/cancel_request',
+        params: { id: total - 1 },
+      } as AnyMessage)
+      .catch(() => {});
+    void clientW
+      .write({ jsonrpc: '2.0', method: '$/cancel_request', params: { id: total } } as AnyMessage)
+      .catch(() => {});
+    await settle(60);
+    // a prompt gets the wire's cancelled outcome; any other request
+    // gets the JSON-RPC -32800 the SDK's own abort path emits
+    const fsAnswer = got.find(m => idOf(m) === total - 1);
+    assert.ok(fsAnswer !== undefined, 'the held fs request was never answered');
+    assert.equal((fsAnswer as { error?: { code?: number } }).error?.code, -32800);
+    const promptAnswer = got.find(m => idOf(m) === total);
+    assert.ok(promptAnswer !== undefined, 'the held prompt was never answered');
+    assert.equal(
+      (promptAnswer as { result?: { stopReason?: string } }).result?.stopReason,
+      'cancelled'
+    );
+    // the cancelled pair left the hold already — teardown answers
+    // every remaining accepted message exactly once
+    await agentSide.writable
+      .getWriter()
+      .close()
+      .catch(() => {});
+    assert.equal(await hangGuard(proxyDone), 1);
+    await settle(30);
+    assert.equal(got.length, total, `expected exactly ${total} answers, got ${got.length}`);
+    await clientW.abort().catch(() => {});
+  });
 });
 
 describe('acpProxy — control plane bypass (bro-0w2tg)', () => {
@@ -2881,6 +3017,173 @@ describe('acpProxy — control plane bypass (bro-0w2tg)', () => {
       await assert.rejects(hangGuard(ask), RequestError);
       releaseTurn();
       await Promise.allSettled(prompts);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+});
+
+describe('acpProxy — held-ask ledger slots (bro-0w2tg)', () => {
+  const settle = (ms: number): Promise<void> => new Promise(r2 => setTimeout(r2, ms));
+
+  /** Poll a live condition — counts that only grow (routed evals,
+   *  landed updates) settle faster than any fixed sleep guesses. */
+  const until = async (pred: () => boolean, ms = 2000): Promise<void> => {
+    const start = Date.now();
+    while (!pred()) {
+      if (Date.now() - start > ms) return;
+      await settle(10);
+    }
+  };
+
+  const ALLOW_ONCE = [{ optionId: 'allow-once', kind: 'allow_once', name: 'allow' }];
+
+  /** Marker text carried by a session/update — the client's verbatim
+   *  notifications land here as `{sessionId, update}` params. */
+  const updateTexts = (updates: unknown[]): string[] =>
+    updates.map(u => {
+      const upd = (u as { update?: { content?: { text?: unknown } } }).update;
+      return typeof upd?.content?.text === 'string' ? upd.content.text : '';
+    });
+
+  test('a cancelled held ask frees its ledger slot at settle — the parked a2c pump resumes and held traffic crosses', async () => {
+    const evalResolvers: Array<() => void> = [];
+    const r = rig(
+      {
+        replyText: 'ok',
+        probeClient: (client, sid) => {
+          const asks = Array.from(
+            { length: ACP_PROXY_WRITE_HIGH_WATER },
+            (_v, i) =>
+              client.request('session/request_permission', {
+                sessionId: sid,
+                toolCall: { toolCallId: `tc-${i}`, title: `call ${i}` },
+                options: ALLOW_ONCE,
+              }) as Promise<{ outcome?: { outcome?: string } }>
+          );
+          // queued BEHIND the asks on the a2c stream — it reaches the
+          // client only if the cancelled asks' slots actually freed:
+          // under the old code the holds outlived their asks and the
+          // parked pump never found room for it
+          void client.notify('session/update', {
+            sessionId: sid,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'after-asks' },
+            },
+          });
+          return Promise.all(asks).then(rs => rs.map(a => a.outcome));
+        },
+      },
+      {
+        // a stuck policy — every ask parks mid-eval, holding its slot
+        permission: async () => {
+          await new Promise<void>(res => {
+            evalResolvers.push(res);
+          });
+          return { verdict: 'ask' as const };
+        },
+      }
+    );
+    try {
+      await openSession(r.acp);
+      const promptP = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      await until(() => evalResolvers.length === ACP_PROXY_WRITE_HIGH_WATER);
+      assert.equal(evalResolvers.length, ACP_PROXY_WRITE_HIGH_WATER);
+      // the asks fill the up leg's ledger with held-eval slots — the
+      // marker sits behind them in the a2c intake hold
+      await settle(40);
+      assert.equal(updateTexts(r.updates).includes('after-asks'), false);
+      await r.acp.notify('session/cancel', { sessionId: 'sess-1' });
+      // every ask settled cancelled AND released — the parked pump
+      // found room and the held marker crossed
+      await until(() => updateTexts(r.updates).includes('after-asks'));
+      assert.equal(updateTexts(r.updates).includes('after-asks'), true);
+      // the cancelled asks' outcomes still reached the agent — the
+      // settle itself was never in question, the slot was
+      assert.equal((await promptP).stopReason, 'end_turn');
+      assert.deepEqual(
+        (r.fake.probeResult as Array<{ outcome?: string }>).map(o => o?.outcome),
+        Array.from({ length: ACP_PROXY_WRITE_HIGH_WATER }, () => 'cancelled')
+      );
+      // the parked evals finish before close — their own releases are
+      // no-ops now, never a double-free
+      evalResolvers.splice(0).forEach(res => res());
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('the slot frees exactly once — a refilled ledger parks at the same mark', async () => {
+    const evalResolvers: Array<() => void> = [];
+    let evals = 0;
+    const r = rig(
+      {
+        replyText: 'ok',
+        probeClient: async (client, sid) => {
+          const asks = (tag: string) =>
+            Array.from(
+              { length: ACP_PROXY_WRITE_HIGH_WATER },
+              (_v, i) =>
+                client.request('session/request_permission', {
+                  sessionId: sid,
+                  toolCall: { toolCallId: `${tag}-${i}`, title: `${tag} ${i}` },
+                  options: ALLOW_ONCE,
+                }) as Promise<{ outcome?: { outcome?: string } }>
+            );
+          const wave1 = asks('w1');
+          await Promise.all(wave1); // resolves at the first cancel
+          const wave2 = asks('w2');
+          void client.notify('session/update', {
+            sessionId: sid,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'w2-marker' },
+            },
+          });
+          const outcomes = await Promise.all(wave2);
+          return outcomes.map(o => o.outcome);
+        },
+      },
+      {
+        permission: async () => {
+          evals++;
+          await new Promise<void>(res => {
+            evalResolvers.push(res);
+          });
+          return { verdict: 'ask' as const };
+        },
+      }
+    );
+    try {
+      await openSession(r.acp);
+      const promptP = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      await until(() => evals === ACP_PROXY_WRITE_HIGH_WATER);
+      await r.acp.notify('session/cancel', { sessionId: 'sess-1' });
+      await until(() => evals === 2 * ACP_PROXY_WRITE_HIGH_WATER);
+      // wave1's asks settled and wave2's re-charged — now the parked
+      // wave1 evals finish: their releases must be no-ops. Had the
+      // settle-time release double-fired, the ledger would read room
+      // at the mark and the marker would already have crossed
+      evalResolvers.splice(0, ACP_PROXY_WRITE_HIGH_WATER).forEach(res => res());
+      await settle(60);
+      assert.equal(evals, 2 * ACP_PROXY_WRITE_HIGH_WATER);
+      assert.equal(updateTexts(r.updates).includes('w2-marker'), false);
+      await r.acp.notify('session/cancel', { sessionId: 'sess-1' });
+      await until(() => updateTexts(r.updates).includes('w2-marker'));
+      assert.equal(updateTexts(r.updates).includes('w2-marker'), true);
+      evalResolvers.splice(0).forEach(res => res());
+      assert.equal((await promptP).stopReason, 'end_turn');
+      assert.deepEqual(
+        (r.fake.probeResult as Array<{ outcome?: string }>).map(o => o?.outcome),
+        Array.from({ length: ACP_PROXY_WRITE_HIGH_WATER }, () => 'cancelled')
+      );
     } finally {
       assert.equal(await close(r), 0);
     }

@@ -26,9 +26,11 @@
  * peer ends in the normal verdict/teardown path, not a memory climb.
  * Intake is bounded the same way — a pump whose consumed-but-unrouted
  * hold reaches its own mark stops reading — while liveness traffic
- * (request answers, session/cancel) bypasses the gate entirely: a
- * full queue must never sit between a peer and the message that
- * frees it.
+ * (request answers, session/cancel) still routes past a full queue:
+ * the gate must never sit between a peer and the message that frees
+ * it. The bypass moves the control message only — the queued data it
+ * overtakes keeps its bound, and a cancel still settles the work it
+ * jumped straight out of the hold.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -287,6 +289,13 @@ interface PendingRequest {
 interface PendingA2C {
   method: string;
   sessionId?: string;
+  /** The bound slot a held ask's policy eval occupies — kept on the
+   *  entry so a cancel/close settling the ask mid-eval frees the slot
+   *  AT SETTLE, not whenever a stuck policy returns: parked evals
+   *  otherwise keep the ledger full forever (holds never arm the
+   *  stall clock, so nothing would recover the leg). The release is
+   *  idempotent — the eval's own exit still runs it safely. */
+  release?: () => void;
   /** Permission-ask bookkeeping — present only on
    *  `session/request_permission` entries. */
   permission?: {
@@ -547,6 +556,15 @@ export async function acpProxy(
    *  crosses upstream; a permission ask registers BEFORE its eval so
    *  a cancel/close/teardown racing the eval settles it. */
   const pendingA2C = new Map<JsonRpcId, PendingA2C>();
+  /** The pumps' intake holds — caller-owned arrays (not pump-private)
+   *  so the route layer can settle what a leapfrogged control
+   *  overtook: the c2a hold is read by the session/cancel and
+   *  $/cancel_request sweeps for work queued ahead of the cancel
+   *  that must still not cross. The a2c hold gets no outside reader —
+   *  a response overtaking queued agent traffic is a benign reorder
+   *  with nothing to settle. */
+  const heldC2A: AnyMessage[] = [];
+  const heldA2C: AnyMessage[] = [];
   const downDead = latch();
   const upDead = latch();
   const downWriter = downstream.writable.getWriter();
@@ -962,6 +980,29 @@ export async function acpProxy(
     return aborted;
   };
 
+  /** Answer every INTAKE-held session/prompt of the session upstream
+   *  `stopReason:'cancelled'` — a control message that overtook the
+   *  c2a pump's hold must still reach the prompts queued ahead of it:
+   *  they never routed, so there is no pending entry, span, or
+   *  writeQ slot to discharge — the settle is the same upstream
+   *  answer the writeQ-held prompts get, minus the bookkeeping.
+   *  Pulling them out of the hold keeps the wire's own rule: never a
+   *  prompt after its cancel. Returns the count — the pulls count as
+   *  proxy-handled exactly like the writeQ-held ones. */
+  const abortIntakePrompts = (sessionId: string): number => {
+    let aborted = 0;
+    for (let i = heldC2A.length - 1; i >= 0; i--) {
+      const m = heldC2A[i] as AnyMessage;
+      if (wire(m).method !== 'session/prompt' || sessionIdOf(m) !== sessionId) {
+        continue;
+      }
+      heldC2A.splice(i, 1);
+      aborted++;
+      answerUpstream(wire(m).id as JsonRpcId, { stopReason: 'cancelled' });
+    }
+    return aborted;
+  };
+
   /** Release a session — held prompts answered, state dropped, span
    *  ended, plane drained. Runs on a successful session/close response
    *  (a failed close leaves the session live — the close never took). */
@@ -984,6 +1025,11 @@ export async function acpProxy(
    *  show a cancel without its prompt. */
   const cancelCrosses = (m: AnyMessage): boolean => {
     const sessionId = sessionIdOf(m);
+    // intake-held prompts first — a cancel that overtook the pump's
+    // hold still reaches the prompts queued ahead of it, and the pull
+    // counts as proxy-handled exactly like the writeQ-held settle
+    // below (their whole target set never crossed either)
+    const intakeAborted = sessionId === undefined ? 0 : abortIntakePrompts(sessionId);
     const ses = sessionId === undefined ? undefined : sessions.get(sessionId);
     if (ses === undefined || sessionId === undefined) {
       return true;
@@ -994,6 +1040,7 @@ export async function acpProxy(
     // Held permission asks settle downstream the same way — the wire
     // never shows an ask after its cancel either
     const aborted =
+      intakeAborted +
       abortHeld(ses, sessionId) +
       abortGateHeld(sessionId) +
       abortHeldAsks(sessionId, 'session cancelled while the policy evaluated');
@@ -1003,8 +1050,41 @@ export async function acpProxy(
     return [...pending.values()].some(p => p.prompt?.sessionId === sessionId);
   };
 
-  /** c2a notification — verbatim modulo the cancel check. */
+  /** A $/cancel_request whose TARGET still sits in the c2a intake
+   *  hold settles it right there — a control message that overtook
+   *  the hold must still reach the request queued ahead of it. The
+   *  request never crossed, so the proxy answers it upstream itself:
+   *  a prompt gets the wire's own cancelled outcome, anything else
+   *  the JSON-RPC -32800 the SDK's abort path emits for a cancelled
+   *  request. The notification still forwards verbatim — a target
+   *  that already crossed is the agent's to cancel. */
+  const settleIntakeCancel = (m: AnyMessage): void => {
+    const target = paramsOf(m)?.['id'];
+    if (target === undefined) {
+      return;
+    }
+    const idx = heldC2A.findIndex(h => wire(h).id === target);
+    if (idx < 0) {
+      return;
+    }
+    const req = heldC2A.splice(idx, 1)[0] as AnyMessage;
+    const id = wire(req).id as JsonRpcId;
+    if (wire(req).method === 'session/prompt') {
+      answerUpstream(id, { stopReason: 'cancelled' });
+      return;
+    }
+    writeUp({
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32800, message: 'request cancelled' },
+    } as AnyMessage);
+  };
+
+  /** c2a notification — verbatim modulo the cancel checks. */
   const onClientNotification = (m: AnyMessage): void => {
+    if (wire(m).method === '$/cancel_request') {
+      settleIntakeCancel(m);
+    }
     if (wire(m).method !== 'session/cancel' || cancelCrosses(m)) {
       const sid = sessionIdOf(m);
       // a gate turn in flight is the cancel's real target — queueing
@@ -1283,7 +1363,8 @@ export async function acpProxy(
       held: true,
       options: permissionOptionsOf(params),
     };
-    pendingA2C.set(id, { method: PERMISSION_METHOD, sessionId, permission: perm });
+    const entry: PendingA2C = { method: PERMISSION_METHOD, sessionId, permission: perm };
+    pendingA2C.set(id, entry);
     const fn = opts.seam?.permission;
     const cwd = ses?.cwd;
     if (
@@ -1308,8 +1389,12 @@ export async function acpProxy(
     };
     // charge the up leg's bound AT ACCEPT — a held ask mid-eval has no
     // wire depth yet, so without the hold an ask flood parks nothing
-    // while pendingA2C entries and detached evals grow past the mark
+    // while pendingA2C entries and detached evals grow past the mark.
+    // The slot lives on the entry so a settle that lands mid-eval —
+    // cancel, close, teardown — frees it at settle time instead of
+    // whenever the policy returns
     const release = upOut.hold();
+    entry.release = release;
     void (async () => {
       try {
         let outcome: AcpProxyPermissionVerdict | undefined;
@@ -1359,6 +1444,11 @@ export async function acpProxy(
         continue;
       }
       pendingA2C.delete(id);
+      // the charged slot frees WITH the settle — a policy eval still
+      // parked after its ask was cancelled must not keep the ledger
+      // full (the idempotent release makes the eval's own exit a
+      // no-op, never a double-free)
+      req.release?.();
       aborted++;
       notePermission(sessions.get(sessionId), {
         title: req.permission.title ?? req.permission.toolCallId ?? 'permission request',
@@ -1397,6 +1487,10 @@ export async function acpProxy(
       return;
     }
     pendingA2C.delete(id);
+    // a response can land for a still-held ask (a raced/forged client
+    // reply — a held ask never crossed, so no legit client could
+    // answer it): the early discharge frees its slot the same way
+    req.release?.();
     if (req.permission !== undefined) {
       const ses = req.sessionId === undefined ? undefined : sessions.get(req.sessionId);
       const result = wire(m).result;
@@ -1766,14 +1860,22 @@ export async function acpProxy(
    *  to stop or finish work the wire already accepted. A full ledger
    *  must never sit between a peer and the message that frees it:
    *  the local turn a session/cancel aborts can be the very thing
-   *  the ledger is full OF, so a control message flushes the hold
-   *  ahead of it (the queued messages precede it in the stream —
-   *  routing them first IS the wire's own order, and exactly what
-   *  lets a cancel abort the prompts written before it) and routes
-   *  immediately, pause or not. The one residual a single FIFO
-   *  cannot fix: control queued BEHIND a saturated hold is
-   *  unreachable until drain — jumping it ahead means reading the
-   *  data first, which is the memory this bound refuses to spend.
+   *  the ledger is full OF, so a control message routes immediately,
+   *  pause or not — but the hold it passes is NOT flushed on its
+   *  account. What room allows drains in stream order ahead of it;
+   *  under saturation it simply overtakes the rest (flushing the
+   *  hold regardless turned every control into an intake amplifier —
+   *  the hold drained, the read refilled it, the next control
+   *  flushed again, and queued writes grew without bound until the
+   *  stall). `held` is a caller-owned array for exactly this: the
+   *  route layer can still settle what a leapfrogged control
+   *  overtook — a session/cancel pulls that session's held prompts
+   *  and answers them cancelled upstream, a $/cancel_request pulls
+   *  its named request — so the wire keeps its rule that no work
+   *  shows after its cancel. The one residual a single FIFO cannot
+   *  fix: control queued BEHIND a saturated hold is unreachable
+   *  until drain — jumping it ahead means reading the data first,
+   *  which is the memory this bound refuses to spend.
    *
    *  Shutdown wakes every wait below through ONE latch subscription —
    *  each wait parks a removable resolver in `wakes`, never a
@@ -1785,7 +1887,8 @@ export async function acpProxy(
     route: (m: AnyMessage) => void,
     tag: string,
     out: Outbound,
-    ctrl: (m: AnyMessage) => boolean
+    ctrl: (m: AnyMessage) => boolean,
+    held: AnyMessage[]
   ): Promise<void> => {
     const reader = stream.readable.getReader();
     const wakes = new Set<() => void>();
@@ -1823,7 +1926,6 @@ export async function acpProxy(
         log(`acp proxy: dropped ${tag} ${wire(m).method ?? 'message'}: ${errText(e)}`);
       }
     };
-    const held: AnyMessage[] = [];
     let read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined = reader.read();
     let eof = false;
     /** ONE outstanding room() subscription at a time — the parked wait
@@ -1844,15 +1946,18 @@ export async function acpProxy(
     /** Route one consumed message — data intake joins the hold; a
      *  control message routes NOW: it only ever stops or finishes
      *  work the wire already accepted, so parking it behind the gate
-     *  could deadlock the release it carries. Flushing the hold first
-     *  keeps stream order — the control lands after the messages the
-     *  peer wrote before it, charged as the accepts they are. */
+     *  could deadlock the release it carries. The hold drains ahead
+     *  of it only as far as the ledger's own gate allows — flushing
+     *  the whole hold on every control is the amplifier that let a
+     *  data/cancel alternation outrun the bound. Past the gate the
+     *  control overtakes the queue, and the route-side sweeps settle
+     *  its targets out of the hold it jumped. */
     const accept = (m: AnyMessage): void => {
       if (!ctrl(m)) {
         held.push(m);
         return;
       }
-      while (held.length > 0) {
+      while (held.length > 0 && out.spare()) {
         deliver(held.shift() as AnyMessage);
       }
       deliver(m);
@@ -1931,8 +2036,8 @@ export async function acpProxy(
       (wire(m).method === 'session/cancel' || wire(m).method === '$/cancel_request'));
   const a2cCtrl = (m: AnyMessage): boolean => isResponse(m);
 
-  const pumpUp = pump(upstream, routeC2A, 'c→a', downOut, c2aCtrl);
-  const pumpDown = pump(downstream, routeA2C, 'a→c', upOut, a2cCtrl);
+  const pumpUp = pump(upstream, routeC2A, 'c→a', downOut, c2aCtrl, heldC2A);
+  const pumpDown = pump(downstream, routeA2C, 'a→c', upOut, a2cCtrl, heldA2C);
   const verdict = await Promise.race([
     pumpUp.then(
       () => 'up' as const, // client closed its side of the wire
@@ -2012,6 +2117,7 @@ export async function acpProxy(
   if (verdict === 'up') {
     for (const [id, req] of [...pendingA2C]) {
       pendingA2C.delete(id);
+      req.release?.();
       if (req.permission !== undefined) {
         notePermission(req.sessionId === undefined ? undefined : sessions.get(req.sessionId), {
           title: req.permission.title ?? req.permission.toolCallId ?? 'permission request',
