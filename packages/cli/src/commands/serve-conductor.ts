@@ -4023,13 +4023,17 @@ function openaiFail(
 ): void {
   const msg = err instanceof Error ? err.message : String(err);
   const kind = openaiFailKind(err, msg);
+  // Provider and runtime failures are server-side details. Never reflect
+  // their raw message (which may contain a stack or filesystem paths) over
+  // the remote protocol; request-shape errors remain actionable below.
+  const publicMessage = kind.status >= 500 ? 'internal server error' : msg;
   if (live !== undefined) {
-    live.fail(kind.stream, `bro conductor: ${msg}`);
+    live.fail(kind.stream, `bro conductor: ${publicMessage}`);
     res.end();
     return;
   }
   if (kind.retryAfter !== undefined) res.setHeader('retry-after', kind.retryAfter);
-  openaiError(res, kind.status, kind.wire, `bro conductor: ${msg}`);
+  openaiError(res, kind.status, kind.wire, `bro conductor: ${publicMessage}`);
 }
 
 /** The SSE response preamble — identical across dialects. */

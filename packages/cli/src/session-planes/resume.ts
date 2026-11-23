@@ -13,8 +13,10 @@
  *  A minimal plane is deliberately degenerate: `detectsCli` never
  *  claims a command and `countLive` throws SpawnError('unavailable')
  *  — it exists ONLY to carry resumeArgv. The quota paths can never
- *  reach it: sessionKindOf resolves a kind through detectsCli (never
- *  matches) or an explicit `agents.<backend>.sessionKind` declaration,
+ *  reach it: sessionKindOf resolves a kind through the command
+ *  detection paths (detectsCli / startsSessions — a minimal plane
+ *  answers neither) or an explicit `agents.<backend>.sessionKind`
+ *  declaration,
  *  and a declared kind armed with `agents.<kind>.max*` fails closed on
  *  the 'unavailable' count — the same refusal an unregistered kind
  *  gives, never a silent unguard. `listLive`/`countWorkers`/
