@@ -1,7 +1,9 @@
 /**
  * `bro merge <PR>` — the full merge cycle as one verb (spec:
  * specs/bro-merge.md). Composes the act verbs: ready → the act exit-gate
- * poll → automerge (pinned direct merge when the host has none) →
+ * poll → a pinned direct merge on the head the gate just verified
+ * (host auto-merge is only the refusal fallback — an armed --auto
+ * merge would land blind to threads posted after arming, bro-gqn54) →
  * settle poll → retrospect record → bead close. Re-entrant: every
  * finished phase is a no-op on re-run, so `bro merge` after fixing a
  * blocker resumes where it left off.
@@ -53,7 +55,8 @@ The full merge cycle as one verb — ready → gate → automerge → retro.
 Phases (each idempotent — a finished phase is a no-op on re-run):
   ready      draft PR → mark-ready on the host
   gate       the act exit-gate poll (threads/CI/SAST/conflict/BEHIND)
-  automerge  green → enable the host's auto-merge (pinned merge fallback)
+  land       pinned merge on the verified head (auto-merge is the
+             refusal fallback; post-arm threads disarm + re-enter gate)
   settle     poll until MERGED / CLOSED / timeout
   retro      MERGED → record the cycle's findings as a retro bead
   bead       --bead discharges the claimed bead on MERGED
@@ -91,6 +94,9 @@ interface MergeCtx {
   armedNote?: string;
   /** landPr emits its own merged event — the run's emit must not double it. */
   mergedEventEmitted?: boolean;
+  /** Settle disarmed auto-merge on post-arm threads — the outer loop
+   *  re-enters the gate instead of ending the run. */
+  reenterGate?: boolean;
 }
 
 /** Status chatter: stderr under --json so stdout stays one verdict line. */
@@ -252,6 +258,20 @@ async function settlePoll(
   const follow = await fetchBounded(ctx);
   if (follow.state.state === 'MERGED') return follow.state;
   if (follow.state.state !== 'OPEN') return settleFail(ctx, res, 'closed', follow.state);
+  // threads that landed after arming reopen the gate — an armed --auto
+  // merge lands blind to them (bro-gqn54): disarm and let the outer
+  // loop re-verify before anything lands. An external merge queue owns
+  // the landing outright and can't be disarmed from here.
+  if (ctx.armedNote === 'auto-merge armed' && follow.state.openThreads > 0) {
+    note(
+      ctx,
+      `merge: ${follow.state.openThreads} new unresolved thread(s) post-arm — ` +
+        'disarming auto-merge, re-entering the gate'
+    );
+    disarmAutoMerge(ctx);
+    ctx.reenterGate = true;
+    return undefined;
+  }
   const remain = deadline - Date.now();
   if (remain <= 0) {
     return settleFail(ctx, res, ctx.armedNote ? 'armed-timeout' : 'timeout', follow.state);
@@ -290,6 +310,17 @@ async function gateDrifted(ctx: MergeCtx, res: GateWaitResult): Promise<boolean>
   return fresh.state.headSha !== res.state.headSha || !fresh.gate.ok;
 }
 
+/** Disarm the host's auto-merge — post-arm threads reopen the gate, so
+ *  whatever the host was about to land must be re-verified first. */
+function disarmAutoMerge(ctx: MergeCtx): void {
+  if (ctx.host !== 'github') return;
+  const r = ghTry(['pr', 'merge', String(ctx.t.pr), '--disable-auto', '-R', ctx.t.repo]);
+  if (r.code !== 0) {
+    console.error(`merge: --disable-auto refused (${r.err || r.out})`);
+  }
+  ctx.armedNote = undefined;
+}
+
 /** The armed path — gh --auto hands landing to the host; settle watches. */
 function armedSettle(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — auto-merge armed (${ctx.method})`);
@@ -326,8 +357,52 @@ function pinnedLand(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | un
   return settlePhase(ctx, res);
 }
 
-/** Gate green: arm the host's auto-merge, or fall back to the pinned
- *  merge / external queue. Returns the landed state or exits. */
+/** Direct merge while the just-verified gate snapshot is fresh — the
+ *  sha pin lands exactly the head the gate saw, leaving no window for
+ *  post-arm threads (bro-gqn54). 'refused' hands off to the armed
+ *  fallback; a non-MERGED answer means a merge queue owns the landing. */
+function tryDirectLand(ctx: MergeCtx, res: GateWaitResult): 'landed' | 'queued' | 'refused' {
+  try {
+    const after = ctx.rev.mergePr(ctx.t, {
+      method: ctx.method,
+      expectedHeadSha: res.state.headSha,
+      deleteBranch: true,
+      admin: ctx.argv.includes('--admin'),
+    });
+    if (after === 'MERGED') {
+      note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} merged (${ctx.method})`);
+      ctx.mergedEventEmitted = true;
+      emitLifecycle(process.cwd(), {
+        kind: 'merge',
+        pr: ctx.t.pr,
+        to: 'merged',
+        detail: { via: 'merge', sha: res.state.headSha, method: ctx.method },
+      });
+      return 'landed';
+    }
+    note(
+      ctx,
+      `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} accepted but state=${after} — ` +
+        'a merge queue owns the landing'
+    );
+    emitLifecycle(process.cwd(), {
+      kind: 'merge',
+      pr: ctx.t.pr,
+      to: 'enqueued',
+      detail: { via: 'merge', sha: res.state.headSha, state: after },
+    });
+    return 'queued';
+  } catch (err) {
+    console.error(
+      `merge: direct merge refused — ${err instanceof Error ? err.message : String(err)}; ` +
+        'trying auto-merge'
+    );
+    return 'refused';
+  }
+}
+
+/** Gate green: land the verified head directly, or fall back to armed
+ *  auto-merge / the external queue. Returns the landed state or exits. */
 async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   warnHumanOwned(ctx.rev, ctx.t);
   if (await gateDrifted(ctx, res)) {
@@ -335,8 +410,16 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
     const again = await gatePhase(ctx);
     return again === undefined ? undefined : landPhase(ctx, again);
   }
-  // a configured merge queue owns landing — gh --auto would bypass it
-  if (!ctx.queue && enableAutoMerge(ctx)) return armedSettle(ctx, res);
+  // a configured merge queue owns landing — direct or armed, gh can't
+  // bypass it
+  if (ctx.queue) return pinnedLand(ctx, res);
+  const direct = tryDirectLand(ctx, res);
+  if (direct === 'landed') return res.state;
+  if (direct === 'queued') {
+    ctx.armedNote ??= 'merge queued';
+    return settlePhase(ctx, res);
+  }
+  if (enableAutoMerge(ctx)) return armedSettle(ctx, res);
   return pinnedLand(ctx, res);
 }
 
@@ -387,11 +470,24 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
   if (await alreadyLanded(ctx, first)) return;
   if (!readyPhase(ctx, first)) return;
 
-  const res = await gatePhase(ctx);
-  if (res === undefined) return;
-  const landed = res.state.state === 'MERGED' ? res.state : await landPhase(ctx, res);
-  if (landed === undefined) return;
-  await finishCycle(ctx, res, landed);
+  await landCycle(ctx);
+}
+
+/** gate → land, looping while settle re-opens the gate: post-arm
+ *  threads disarm --auto and the gate re-verifies before the next
+ *  landing attempt — finished phases stay no-ops. */
+async function landCycle(ctx: MergeCtx): Promise<void> {
+  for (;;) {
+    const res = await gatePhase(ctx);
+    if (res === undefined) return;
+    ctx.reenterGate = false;
+    const landed = res.state.state === 'MERGED' ? res.state : await landPhase(ctx, res);
+    if (landed !== undefined) {
+      await finishCycle(ctx, res, landed);
+      return;
+    }
+    if (!ctx.reenterGate) return;
+  }
 }
 
 /** Re-entry on a landed PR: phases all no-op — report the record, never
