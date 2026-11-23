@@ -11,6 +11,8 @@
  * the command — offline must not block local work.
  */
 import {
+  bd,
+  compactBacklog,
   dataRefCommit,
   dataRefPull,
   dataRefPush,
@@ -24,8 +26,9 @@ import {
   type TaskStore,
 } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 /** Task-state replication is a connector capability — `store.sync()`
  *  runs whatever cycle that backend owns (beads: the dolt-refs
@@ -72,6 +75,36 @@ function syncStores(root: string, prefer: Record<string, string>): number {
     }
   }
   return failed;
+}
+
+/** `.agents/backlog.json` — the compact backlog the site `/backlog` page
+ *  reads off the data ref. `bd export` refreshes the raw jsonl, then the
+ *  shared `compactBacklog` transforms it; the file rides the `.agents`
+ *  push below, so every `bro sync` publishes the current backlog with
+ *  zero CI. Best-effort like everything else here — a bd failure warns
+ *  and skips the publish, never breaks the sync. */
+function writeBacklogSnapshot(root: string): void {
+  if (!existsSync(join(root, '.agents'))) {
+    return; // no synced dir to land the snapshot in
+  }
+  const tmp = mkdtempSync(join(tmpdir(), 'bro-backlog-'));
+  try {
+    const jsonl = join(tmp, 'issues.jsonl');
+    bd(['export', '-o', jsonl], root);
+    const rows = readFileSync(jsonl, 'utf8')
+      .split('\n')
+      .filter(l => l.trim() !== '')
+      .map(l => JSON.parse(l));
+    const snap = compactBacklog(rows);
+    writeFileSync(join(root, '.agents', 'backlog.json'), JSON.stringify(snap));
+    console.log(`bro sync: backlog snapshot — ${snap.total_open} open → .agents/backlog.json`);
+  } catch (err) {
+    console.error(
+      `warning: backlog snapshot skipped — ${err instanceof Error ? err.message : String(err)}`
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 function artifactDirs(root: string): string[] {
@@ -132,6 +165,12 @@ export function runSyncCommand(argv: string[]): void {
     return;
   }
 
+  // replicate first — the snapshot must carry post-pull state, not the
+  // pre-sync backlog (a stale export would publish over newer remote data)
+  if (beads) {
+    syncStores(root, cfg.connectors);
+  }
+  writeBacklogSnapshot(root);
   const dirs = artifactDirs(root);
   if (dirs.length === 0) {
     console.log('bro sync: no artifact dirs (.agents/, debt dir)');
@@ -144,16 +183,33 @@ export function runSyncCommand(argv: string[]): void {
       console.log(`bro sync: ${dir} → ${ref} @ ${head.slice(0, 8)}`);
     }
   }
-  // push whenever a local data ref exists — an earlier sync may have left
-  // one even when this checkout has no artifact dirs to commit
+  pushDataRef(root, remote, ref);
+}
+
+// Push whenever a local data ref exists — an earlier sync may have left
+// one even when this checkout has no artifact dirs to commit.
+function pushDataRef(root: string, remote: string, ref: string): void {
   const hasRef = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', ref]).code === 0;
-  if (hasRef && !dataRefPush(root, remote, ref)) {
+  if (!hasRef) return;
+  const pushedTip = dataRefPush(root, remote, ref);
+  if (!pushedTip) {
     console.error(`warning: could not push ${ref} to ${remote} — check network and remote access`);
-  } else if (hasRef) {
-    console.log(`bro sync: ${ref} pushed to ${remote}`);
+    return;
   }
-  // the store has its own transport — independent of artifact outcome
-  if (beads) {
-    syncStores(root, cfg.connectors);
+  console.log(`bro sync: ${ref} pushed to ${remote}`);
+  if (ref === 'refs/bro/data') {
+    mirrorDataBranch(root, remote, pushedTip);
+  }
+}
+
+// Mirror the tip onto its heads twin — raw.githubusercontent serves
+// branches without the API quota the ref call costs every page load.
+// Best-effort: a rejected mirror never fails the sync.
+function mirrorDataBranch(root: string, remote: string, tip: string): void {
+  const result = gitTry(['-C', root, 'push', remote, `${tip}:refs/heads/bro-data`]);
+  if (result.code !== 0) {
+    console.error(
+      `warning: could not mirror ${tip.slice(0, 8)} to bro-data — check network and remote access`
+    );
   }
 }

@@ -2,13 +2,16 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { connectors } from '@broject/core';
 import { tmpDir } from './commands/testrepo.ts';
 import {
   assertMutableConfig,
   ConfigPolicyError,
+  connectorProblem,
   loadExternalPlugins,
   PLUGINS,
   pluginConfigSections,
+  pluginExportProblem,
   pluginGroups,
   runPlanFile,
 } from './plugins.ts';
@@ -43,6 +46,26 @@ async function expectRejected(source: string): Promise<void> {
   const dir = repoWith(source, ['./my.ts']);
   const loaded = await loadExternalPlugins(dir);
   assert.equal(loaded.length, 0);
+}
+
+/** Rejection must be actionable — the warning names the failing field
+ *  so the author fixes it instead of bisecting the export. Captures
+ *  console.error for the load duration only. */
+async function expectRejectedNaming(source: string, fieldPattern: RegExp): Promise<void> {
+  const dir = repoWith(source, ['./my.ts']);
+  const warnings: string[] = [];
+  const orig = console.error;
+  console.error = (msg: unknown) => warnings.push(String(msg));
+  try {
+    const loaded = await loadExternalPlugins(dir);
+    assert.equal(loaded.length, 0);
+  } finally {
+    console.error = orig;
+  }
+  assert.ok(
+    warnings.some(w => fieldPattern.test(w)),
+    `expected a rejection warning matching ${fieldPattern}, got: ${warnings.join(' | ') || '(none)'}`
+  );
 }
 
 describe('plugin registry', () => {
@@ -80,7 +103,7 @@ describe('plugin registry', () => {
     // `router` is a NAMESPACE HOST, not a capability member — it
     // mounts the brouter sub-CLI (models|clients|client|ask|acp) as
     // one plugin, so it has no members of its own to group (bro-3bplj)
-    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'wait', 'router']);
+    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'clients', 'wait', 'router']);
     const groups = pluginGroups();
     for (const p of PLUGINS) {
       if (p.hidden || p.external) continue;
@@ -470,11 +493,119 @@ describe('external plugin/connector validation', () => {
       'sparse optInFacades holes rejected',
       `export default { name: 'bad12', summary: 'x', run: () => {}, connectors: [{ name: 'c12', optInFacades: [,'tasks'] }] }`,
     ],
+    [
+      'connector activeIn must be a hook→modes record',
+      `export default { name: 'bad13', summary: 'x', run: () => {}, connectors: [{ name: 'c13', activeIn: 5 }] }`,
+    ],
+    [
+      'connector activeIn values must be mode lists',
+      `export default { name: 'bad14', summary: 'x', run: () => {}, connectors: [{ name: 'c14', activeIn: { stopGate: 5 } }] }`,
+    ],
+    [
+      'connector activeIn keys must be hook kinds',
+      `export default { name: 'bad15', summary: 'x', run: () => {}, connectors: [{ name: 'c15', activeIn: { notAHook: ['code'] } }] }`,
+    ],
+    [
+      'connector activeIn elements must be modes',
+      `export default { name: 'bad16', summary: 'x', run: () => {}, connectors: [{ name: 'c16', activeIn: { stopGate: ['bogus'] } }] }`,
+    ],
+    [
+      'sparse connector activeIn mode list rejected',
+      `export default { name: 'bad17', summary: 'x', run: () => {}, connectors: [{ name: 'c17', activeIn: { stopGate: [,'code'] } }] }`,
+    ],
+    [
+      'plugin external must be a boolean',
+      `export default { name: 'bad18', summary: 'x', run: () => {}, external: 'yes' }`,
+    ],
+    [
+      'sparse docs array holes rejected',
+      `export default { name: 'bad19', summary: 'x', run: () => {}, docs: [, { name: 't', adapter: () => ({}) }] }`,
+    ],
+    [
+      'inherited activeIn value is read the way dispatch reads it',
+      `export default { name: 'bad20', summary: 'x', run: () => {}, connectors: [{ name: 'c20', activeIn: Object.create({ stopGate: 5 }) }] }`,
+    ],
+    [
+      'docType aliases must be a string array',
+      `export default { name: 'bad21', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), aliases: 5 }] }`,
+    ],
+    [
+      'docType scopes must be known scopes',
+      `export default { name: 'bad22', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), scopes: ['bogus'] }] }`,
+    ],
+    [
+      'docType render must be a function',
+      `export default { name: 'bad23', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), render: 'x' }] }`,
+    ],
+    // the enumerable-key-count blind spot: a sparse hole plus an extra
+    // own prop nets `keys.length === length`, and every() skips the
+    // hole — each isDenseArray consumer gets the same regression case
+    [
+      'sparse argvPrefix hole hidden by an extra prop rejected',
+      `export default { name: 'bad24', summary: 'x', run: () => {}, argvPrefix: Object.assign([,'ok'], { label: 'x' }) }`,
+    ],
+    [
+      'sparse activeIn mode list hidden by an extra prop rejected',
+      `export default { name: 'bad25', summary: 'x', run: () => {}, connectors: [{ name: 'c25', activeIn: { stopGate: Object.assign([,'code'], { label: 'x' }) } }] }`,
+    ],
+    [
+      'sparse docType aliases hole hidden by an extra prop rejected',
+      `export default { name: 'bad26', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), aliases: Object.assign([,'al'], { tag: 1 }) }] }`,
+    ],
+    [
+      'sparse docType scopes hole hidden by an extra prop rejected',
+      `export default { name: 'bad27', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), scopes: Object.assign([,'project'], { tag: 1 }) }] }`,
+    ],
   ];
 
   for (const [title, source] of rejectionCases) {
     test(title, async () => {
       await expectRejected(source);
+    });
+  }
+
+  // field-naming diagnostics — the rejection tells the author WHICH
+  // field failed, not just that the export "is not a BroPlugin"
+  const namingCases: Array<[string, string, RegExp]> = [
+    [
+      'rejection names connector matchDir',
+      `export default { name: 'diag1', summary: 'x', run: () => {}, connectors: [{ name: 'd1', matchDir: 1 }] }`,
+      /connectors\[0\]\.matchDir/,
+    ],
+    [
+      'rejection names connector optInFacades',
+      `export default { name: 'diag2', summary: 'x', run: () => {}, connectors: [{ name: 'd2', optInFacades: 4 }] }`,
+      /connectors\[0\]\.optInFacades/,
+    ],
+    [
+      'rejection names argvPrefix',
+      `export default { name: 'diag3', summary: 'x', run: () => {}, argvPrefix: [1] }`,
+      /argvPrefix/,
+    ],
+    [
+      'rejection names the missing half of a schema pair',
+      `export default { name: 'diag4', summary: 'x', run: () => {}, configKey: 'x' }`,
+      /configSchema/,
+    ],
+    [
+      'rejection names connector activeIn',
+      `export default { name: 'diag5', summary: 'x', run: () => {}, connectors: [{ name: 'd5', activeIn: { stopGate: 5 } }] }`,
+      /connectors\[0\]\.activeIn\.stopGate/,
+    ],
+    [
+      'rejection names the docs index and field',
+      `export default { name: 'diag6', summary: 'x', run: () => {}, docs: [{ name: 't', adapter: () => ({}), aliases: 5 }] }`,
+      /docs\[0\]\.aliases/,
+    ],
+    [
+      'rejection names the inherited activeIn key dispatch would read',
+      `export default { name: 'diag7', summary: 'x', run: () => {}, connectors: [{ name: 'd7', activeIn: Object.create({ stopGate: 5 }) }] }`,
+      /connectors\[0\]\.activeIn\.stopGate/,
+    ],
+  ];
+  for (const [title, source, pattern] of namingCases) {
+    test(title, async () => {
+      await expectRejectedNaming(source, pattern);
     });
   }
 
@@ -489,6 +620,84 @@ describe('external plugin/connector validation', () => {
       assert.equal(loaded[0].name, 'good1');
     } finally {
       unload(loaded);
+    }
+  });
+
+  test('connector declaring optInFacades + activeIn registers', async () => {
+    const dir = repoWith(
+      `export default { name: 'good2', summary: 'x', run: () => {}, connectors: [{ name: 'gc2', optIn: true, optInFacades: ['tasks', 'ledger'], activeIn: { stopGate: ['code', 'review'], sessionStart: ['observe'] } }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good2');
+    } finally {
+      unload(loaded);
+    }
+  });
+
+  test('a plugin carrying a valid doc type registers', async () => {
+    const dir = repoWith(
+      `export default { name: 'good4', summary: 'x', run: () => {}, docs: [{ name: 'dcs', aliases: ['dc'], scopes: ['project'], adapter: () => ({}) }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].docs?.[0]?.name, 'dcs');
+    } finally {
+      unload(loaded);
+    }
+  });
+
+  test('a null-prototype activeIn map still registers', async () => {
+    const dir = repoWith(
+      `const ai = Object.create(null); ai.stopGate = ['code']; export default { name: 'good5', summary: 'x', run: () => {}, connectors: [{ name: 'gc5', activeIn: ai }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good5');
+    } finally {
+      unload(loaded);
+    }
+  });
+
+  test('dense arrays carrying extra non-index props still register', async () => {
+    // extra own props are not elements — dispatch only ever reads
+    // indices (spread/includes/index access), the same contract the
+    // docs/connectors/optInFacades loops already hold
+    const dir = repoWith(
+      `export default { name: 'good6', summary: 'x', run: () => {}, argvPrefix: Object.assign(['pfx'], { label: 'x' }), connectors: [{ name: 'gc6', activeIn: { stopGate: Object.assign(['code'], { tag: 1 }) } }], docs: [{ name: 'dt6', aliases: Object.assign(['a6'], { tag: 1 }), scopes: ['project'], adapter: () => ({}) }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good6');
+      assert.equal(loaded[0].argvPrefix?.[0], 'pfx');
+    } finally {
+      unload(loaded);
+    }
+  });
+});
+
+describe('TypeScript↔runtime consistency (spec bro-l8c4f.1)', () => {
+  // the runtime half of the contract: objects TypeScript accepts
+  // (every built-in plugin/connector IS a typed BroPlugin/Connector)
+  // must produce no validation problem — the checks reject malformed
+  // shapes, never valid ones
+  test('every built-in plugin passes external validation', () => {
+    for (const p of PLUGINS) {
+      assert.equal(pluginExportProblem(p), undefined, `plugin "${p.name}"`);
+    }
+  });
+
+  test('every registered connector passes validation', () => {
+    for (const c of connectors()) {
+      assert.equal(connectorProblem(c, `connector "${c.name}"`), undefined);
     }
   });
 });

@@ -72,6 +72,13 @@ const HOOK_TIMEOUT_MS = 15_000;
  *  prompt instead of serializing after it. */
 const REHYDRATION_TIMEOUT_MS = 45_000;
 
+/** How often a dead stop probe may warn. The gate is fail-open by
+ *  contract — a missing CLI or a broken hook must be LOUD once (the
+ *  operator cannot otherwise tell "nothing armed" from "the gate never
+ *  ran"), then quiet: a persistently-broken install cannot spam a
+ *  warning at every idle event. */
+const GATE_DIAG_INTERVAL_MS = 15 * 60_000;
+
 const MAX_OUTPUT = 1 << 20;
 
 /** The runtime that executes the sibling CLI.
@@ -254,9 +261,19 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
   return null;
 }
 
-/** Run one bro hook event. Resolves null for every failure mode, including
- * "bro isn't there" — the caller's only question is whether a valid control
- * object came back.
+/** One hook call's verdict — the control object bro answered, or the
+ *  cause it could not answer with. `failure` is null for health: a
+ *  control object, or bro's silence-as-no-opinion (clean exit, empty
+ *  stdout). Every set failure is a real outage the stop gate must not
+ *  let pass invisibly. */
+interface HookOutcome {
+  control: HookControl | null;
+  failure: string | null;
+}
+
+/** Run one bro hook event. Healthy silence resolves `{control:null,
+ * failure:null}` — "bro had nothing to say" is not an outage. Every
+ * failure mode names its cause instead, including "bro isn't there".
  *
  *  Async spawn, not spawnSync: opencode runs plugin hooks on the server's event
  *  loop, so a synchronous child would freeze the whole session — and bro's
@@ -267,8 +284,24 @@ function callHook(
   payload: unknown,
   directory: string,
   timeoutMs: number
-): Promise<HookControl | null> {
+): Promise<HookOutcome> {
   return new Promise(resolve => {
+    // serialize before spawning: a payload JSON.stringify rejects means the
+    // hook can never run — its own outage cause, not a spawn error, never
+    // healthy silence, and never a rejection escaping the executor
+    let input: string | undefined;
+    try {
+      input = JSON.stringify(payload);
+    } catch {
+      resolve({ control: null, failure: 'the hook payload could not be serialized' });
+      return;
+    }
+    // stringify returns undefined (not a throw) for undefined/functions/
+    // symbols — no JSON document exists to hand the child either way
+    if (input === undefined) {
+      resolve({ control: null, failure: 'the hook payload could not be serialized' });
+      return;
+    }
     let child: ChildProcess;
     try {
       child = spawn(command.cmd, [...command.args, 'hooks', event], {
@@ -280,17 +313,19 @@ function callHook(
         detached: process.platform !== 'win32',
       });
     } catch {
-      resolve(null);
+      resolve({ control: null, failure: 'the hook process failed to spawn' });
       return;
     }
     let settled = false;
-    const settle = (value: HookControl | null): void => {
+    const settle = (outcome: HookOutcome): void => {
       if (!settled) {
         settled = true;
-        resolve(value);
+        resolve(outcome);
       }
     };
-    const timer = killAfter(child, timeoutMs, () => settle(null));
+    const timer = killAfter(child, timeoutMs, () =>
+      settle({ control: null, failure: `the hook timed out after ${timeoutMs}ms` })
+    );
     let out = '';
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
@@ -301,18 +336,27 @@ function callHook(
     });
     child.on('error', () => {
       clearTimeout(timer);
-      settle(null);
+      settle({ control: null, failure: 'the hook process failed to spawn' });
     });
     child.on('close', code => {
       clearTimeout(timer);
       // `bro hooks` always exits 0; anything else means the run failed, and a
       // failed run's stdout is not a control object even if it parses
-      settle(code === 0 ? parseControl(out) : null);
+      if (code !== 0) {
+        settle({ control: null, failure: `the hook exited ${code ?? 'with no exit code'}` });
+        return;
+      }
+      const control = parseControl(out);
+      if (control === null && out.trim() !== '') {
+        settle({ control: null, failure: 'the hook answered with no control object' });
+        return;
+      }
+      settle({ control, failure: null });
     });
     // bro can exit before reading stdin (unrecognized event) — EPIPE here is
     // bro's answer, not a crash
     child.stdin?.on('error', () => {});
-    child.stdin?.end(JSON.stringify(payload));
+    child.stdin?.end(input);
   });
 }
 
@@ -398,6 +442,25 @@ function makeCore(input: BroCoreInput) {
     log(level, message).catch(() => {});
   };
 
+  /** The stop gate's diagnostic budget. A failed stop probe is
+   *  indistinguishable from "nothing armed" — the gate is fail-open by
+   *  contract, so it must say once that it never ran, then stay quiet:
+   *  in-memory on purpose (the diagnostic itself cannot be allowed to
+   *  fail), one warn per interval for the plugin instance. */
+  let stopDiagAt = 0;
+  const probeFailed = (event: string, cause: string): void => {
+    notify('debug', `bro probe failed (${cause}) for event=${event}`);
+    if (event !== 'stop') {
+      return;
+    }
+    const now = Date.now();
+    if (now - stopDiagAt < GATE_DIAG_INTERVAL_MS) {
+      return;
+    }
+    stopDiagAt = now;
+    notify('warn', `bro stop gate did not run (${cause}) — the stop is unguarded`);
+  };
+
   const probe = async (
     event: string,
     payload: unknown,
@@ -406,14 +469,16 @@ function makeCore(input: BroCoreInput) {
     command ??= resolveCommand(options);
     const resolved = await command;
     if (!resolved) {
-      notify('debug', `bro probe skipped (no cli) for event=${event}`);
+      probeFailed(event, 'no bro CLI resolved');
       return null;
     }
-    const result = await callHook(resolved, event, payload, directory, timeoutMs);
-    if (result === null) {
+    const { control, failure } = await callHook(resolved, event, payload, directory, timeoutMs);
+    if (failure !== null) {
+      probeFailed(event, failure);
+    } else if (control === null) {
       notify('debug', `bro probe returned null for event=${event}`);
     }
-    return result;
+    return control;
   };
 
   /** Spawn `<bro> args` and capture stdout — the read-verb path tool

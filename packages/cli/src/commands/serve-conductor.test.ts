@@ -2,7 +2,15 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -15,10 +23,30 @@ import {
 } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { AcpLaneCooldown, otelJournal, type AcpTerminals } from '@broject/providers';
-import { conductorConfig, conductorProxy, parseReply, sweepSessions } from './serve-conductor.ts';
+import {
+  admitLaneCap,
+  admitLaneCapUnlocked,
+  conductorConfig,
+  conductorProxy,
+  parseReply,
+  sweepSessions,
+} from './serve-conductor.ts';
 import type { ConductorConfig, ConvSession } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
-import { scrubEnv } from '@broject/core';
+import {
+  clearSessionPlanes,
+  commandCliName,
+  countSessionReservations,
+  providerSlotsDir,
+  registerSessionPlane,
+  scrubEnv,
+  sessionPlanes,
+  sessionReservationsDir,
+  SpawnError,
+  testGit,
+  testRepoInit,
+  type SessionPlane,
+} from '@broject/core';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -3417,6 +3445,482 @@ describe('conductor fast lane (bro-6asnu)', () => {
       assert.match(r.headers.get('content-type') ?? '', /text\/event-stream/);
       assert.equal(fake.sessions.length, 1);
       await r.text(); // drain the stream so the server can close
+    } finally {
+      await close();
+    }
+  });
+});
+
+// bro-x601l — `fleet.providerCaps`: the account-wide lane cap the
+// conductor shares with every other session-opening surface. The
+// provider namespaced claim ledger lives under XDG_DATA_HOME, so every
+// test isolates it — a held claim must never leak into the host's real
+// census.
+describe('the provider lane cap (spec bro-x601l)', () => {
+  const withXdg = async (fn: () => Promise<void>): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-provcap-xdg-'));
+    const prev = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = dir;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  /** The cap refusal verdict — SpawnError('cap') carrying the
+   *  provider_cap cause the wire's park classifier reads. The semantic
+   *  check is the structured capCause field, never a message parse. */
+  const providerCapRefusal = (e: unknown): e is SpawnError =>
+    e instanceof SpawnError && e.kind === 'cap' && e.capCause === 'provider_cap';
+
+  test('fleet.providerCaps reaches ConductorConfig — the global layer only', () => {
+    const xdg = mkdtempSync(join(tmpdir(), 'bro-provcap-cfg-'));
+    const prev = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      mkdirSync(join(xdg, 'bro'), { recursive: true });
+      writeFileSync(
+        join(xdg, 'bro', 'config.json'),
+        JSON.stringify({ fleet: { providerCaps: { 'dv-acp': 4 } } })
+      );
+      const cfg = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+      });
+      assert.equal(cfg?.providerCaps?.['dv-acp'], 4);
+    } finally {
+      if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prev;
+      rmSync(xdg, { recursive: true, force: true });
+    }
+  });
+
+  test('a capped lane parks the next open; the release frees it', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const release = await admitLaneCap(cfg, 'req-1');
+      // the held claim fills the lane — the next open refuses 'cap'
+      // with the account cause, a park verdict, never a burned attempt
+      await assert.rejects(
+        admitLaneCap(cfg, 'req-2'),
+        (e: unknown) =>
+          providerCapRefusal(e) &&
+          /provider 'dv-acp' lane cap reached — \d+ live( \+ \d+ starting)? > 1 \(fleet\.providerCaps\.dv-acp/.test(
+            e.message
+          )
+      );
+      release();
+      // the freed claim admits again — no TTL wait, no stale count
+      const second = await admitLaneCap(cfg, 'req-3');
+      second();
+    }));
+
+  test('the contention fallback sees the same claims — locked and unlocked share one budget', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const release = await admitLaneCap(cfg, 'req-1');
+      assert.throws(() => admitLaneCapUnlocked(cfg, 'req-2'), providerCapRefusal);
+      // and the fallback's own claim fills the lane for the locked path
+      release();
+      const unlockedRelease = admitLaneCapUnlocked(cfg, 'req-3');
+      await assert.rejects(admitLaneCap(cfg, 'req-4'), providerCapRefusal);
+      unlockedRelease();
+    }));
+
+  test('a plane-covered provider command counts the kind census', () =>
+    withXdg(async () => {
+      // a scripted plane claiming the entry's command — the provider
+      // cap then judges on ITS host census, not the namespaced ledger
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 1,
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+        // the plane's one live lane already fills the cap — the open
+        // refuses before any claim
+        await assert.rejects(admitLaneCap(cfg, 'req-1'), providerCapRefusal);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
+  test("the lane's own shared peer is never charged for its lock row", () =>
+    withXdg(async () => {
+      // the coderabbit scenario: a pooled `dv acp` peer drops one lock
+      // row the plane dedupes to 1 — the request's own claim on top
+      // reads 2 against a cap of 1, so the lane would refuse its FIRST
+      // open. The peer's sessions are claim-covered one-for-one, so its
+      // lock row never joins the census.
+      const PEER = 4242;
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 1,
+        listLive: () => [{ pid: PEER }],
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+        // the caller-owned pid comes out of the count — the open's own
+        // claim is the lane's whole tally
+        const release = await admitLaneCap(cfg, 'req-1', new Set([PEER]));
+        release();
+        // the un-locked fallback applies the same accounting
+        const second = admitLaneCapUnlocked(cfg, 'req-2', new Set([PEER]));
+        second();
+        // a pid the caller does NOT own still charges — the same lock
+        // belonging to a foreign lane fills the cap and the open refuses
+        await assert.rejects(admitLaneCap(cfg, 'req-3'), providerCapRefusal);
+        assert.throws(() => admitLaneCapUnlocked(cfg, 'req-4'), providerCapRefusal);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
+  test('a mid-compound failure hands the earlier planes claims back', () =>
+    withXdg(async () => {
+      // two planes claim the entry's command; the second cannot count —
+      // the admission throws through, and the first plane's claim must
+      // not strand against the cap until the holder dies
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 0,
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      // dv2's census fails only once ITS OWN claim exists — the earlier
+      // (dv) admit has already returned then, so the claim dir holds
+      // dv's slot at the failure point. An unconditional throw fires
+      // during dv's aggregate census instead: dv2 never claims, and the
+      // dir assertions below pass even if the conductor's rollback is
+      // removed entirely.
+      let dvHeldAtFailure = -1;
+      registerSessionPlane({
+        kind: 'dv2',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => {
+          if (countSessionReservations(sessionReservationsDir('dv2', CFG.agents)) === 0) {
+            return 0;
+          }
+          dvHeldAtFailure = countSessionReservations(sessionReservationsDir('dv', CFG.agents));
+          throw new SpawnError('cannot count dv2', 'unavailable');
+        },
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 4 } };
+        await assert.rejects(
+          admitLaneCap(cfg, 'req-1'),
+          (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
+        );
+        // dv's claim WAS held when dv2's admit failed — the clean dirs
+        // are the rollback's work, not a claim that never landed
+        assert.equal(dvHeldAtFailure, 1);
+        assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 0);
+        assert.equal(countSessionReservations(sessionReservationsDir('dv2', cfg.agents)), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
+  test('the fallback claims every plane a provider cap arms, and a refusal hands them back', () =>
+    withXdg(async () => {
+      const prior = sessionPlanes();
+      const plane = (kind: string) => ({
+        kind,
+        detectsCli: (cli: string) => cli === 'dv',
+        countLive: () => 0,
+        startsSessions: (cmd: string) => (commandCliName(cmd) === 'dv' ? 1 : 0),
+      });
+      registerSessionPlane(plane('dv'));
+      registerSessionPlane(plane('dv2'));
+      try {
+        const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+        // cap 1 < the 2 claims a two-plane command lands — the
+        // claim-first fallback must refuse AND hand both claims back:
+        // a stranded slot would count against the lane until its
+        // holder dies
+        assert.throws(
+          () => admitLaneCapUnlocked(cfg, 'req-1'),
+          (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+        );
+        assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 0);
+        assert.equal(countSessionReservations(sessionReservationsDir('dv2', cfg.agents)), 0);
+      } finally {
+        clearSessionPlanes();
+        for (const p of prior) registerSessionPlane(p);
+      }
+    }));
+
+  test('the fallback can never over-admit — a refused caller hands its claim back', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const release = await admitLaneCap(cfg, 'req-1');
+      const dir = providerSlotsDir('dv-acp');
+      assert.equal(countSessionReservations(dir), 1);
+      // the fallback's claim lands BEFORE its count — a burst can
+      // over-refuse, never over-admit: this caller refuses and the
+      // claim it briefly held goes back with the verdict
+      assert.throws(
+        () => admitLaneCapUnlocked(cfg, 'req-2'),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+      );
+      assert.equal(countSessionReservations(dir), 1);
+      release();
+    }));
+
+  test('the fallback judges a repeat event once — its claim is already inside the count', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const first = admitLaneCapUnlocked(cfg, 'req-1');
+      // a retry of the same event claims no second slot — its earlier
+      // claim sits inside the count, so judging starts again would
+      // refuse a rightful admit
+      const second = admitLaneCapUnlocked(cfg, 'req-1');
+      assert.equal(countSessionReservations(providerSlotsDir('dv-acp')), 1);
+      second();
+      first();
+      assert.equal(countSessionReservations(providerSlotsDir('dv-acp')), 0);
+    }));
+
+  test('a capped lane answers 429 — a retained session holds the lane', () =>
+    withXdg(async () => {
+      const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+      // the proxy outlives the listener — close() stops the HTTP side
+      // but leaves the pooled peer and conversation A's retained
+      // session claiming the ledger, so dispose runs first while the
+      // xdg ledger still stands
+      const proxy = conductorProxy(cfg, { acp: { peer: fake.app } });
+      const { url, close } = await listen(deps({ provider: proxy }));
+      try {
+        const post = (key: string) =>
+          fetch(`${url}/v1/messages`, {
+            method: 'POST',
+            headers: { ...auth, 'content-type': 'application/json', 'x-bro-session': key },
+            body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+          });
+        // conversation A lands and RETAINS — its claim is the census
+        // row the cap counts (pid governance: the conductor's own
+        // held slot, not a second bookkeeping layer)
+        const a = await post('a');
+        assert.equal(a.status, 200);
+        assert.equal(fake.sessions.length, 1);
+        // conversation B needs a second lane — the account is full,
+        // so the wire answers the park class: 429 + retry-after +
+        // the provider_cap cause
+        const b = await post('b');
+        assert.equal(b.status, 429);
+        assert.ok(Number(b.headers.get('retry-after')) > 0);
+        assert.match(await b.text(), /— cause: provider_cap/);
+        assert.equal(fake.sessions.length, 1, 'the refused open opened nothing');
+      } finally {
+        // dispose BEFORE the ledger is removed — the pooled peer and
+        // the retained session release their claims back onto it
+        proxy.dispose();
+        await close();
+      }
+    }));
+});
+
+describe('BRO_STATE_DIR — the serve-turns journal redirects (bro-eajeu)', () => {
+  /** The reported leak: a conductor cfg.cwd inside a linked worktree
+   *  resolved the main checkout's .git, so `npm test` in a worktree
+   *  appended every conductor.* row to the live serve-turns journal.
+   *  Under the pin the same cwd journals into a sandbox and the real
+   *  common dir never grows a `bro/` tree. */
+  test('a worktree cwd journals under the pin — the real common stays untouched', async () => {
+    const main = mkdtempSync(join(tmpdir(), 'bro-journal-main-'));
+    testRepoInit(main);
+    const linkRoot = mkdtempSync(join(tmpdir(), 'bro-journal-link-'));
+    const linked = join(linkRoot, 'linked');
+    testGit(['-C', main, 'worktree', 'add', '-q', linked, '-b', 'work/journal']);
+    const pin = mkdtempSync(join(tmpdir(), 'bro-journal-pin-'));
+    mkdirSync(join(pin, 'bro'), { recursive: true });
+    const prev = process.env.BRO_STATE_DIR;
+    process.env.BRO_STATE_DIR = pin;
+    try {
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+      const { post, close } = await boot(fake, { ...CFG, cwd: linked });
+      try {
+        const r = await post({ messages: [{ role: 'user', content: 'x' }], stream: false });
+        assert.equal(r.status, 200);
+      } finally {
+        await close();
+      }
+      const journal = join(pin, 'bro', 'serve-turns.jsonl');
+      assert.ok(existsSync(journal), 'the journal lands under the pin');
+      const rows = readFileSync(journal, 'utf8')
+        .split('\n')
+        .filter(l => l !== '')
+        .map(l => JSON.parse(l) as { event: string });
+      assert.ok(
+        rows.some(row => row.event === 'conductor.turn'),
+        `expected a conductor.turn row, got: ${rows.map(row => row.event).join()}`
+      );
+      assert.equal(existsSync(join(main, '.git', 'bro')), false);
+    } finally {
+      if (prev === undefined) delete process.env.BRO_STATE_DIR;
+      else process.env.BRO_STATE_DIR = prev;
+      // the journal pin is module-global — drop it so later tests in
+      // this process do not append into the sandbox
+      otelJournal(undefined);
+      rmSync(main, { recursive: true, force: true });
+      rmSync(linkRoot, { recursive: true, force: true });
+      rmSync(pin, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the conductor's un-locked cap fallback", () => {
+  /** A scratch reservations dir — the claim files live here, never in
+   *  the developer's real data home. */
+  const withReservations = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-cap-race-'));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const withPlane = (plane: SessionPlane, fn: () => void): void => {
+    clearSessionPlanes();
+    try {
+      registerSessionPlane(plane);
+      fn();
+    } finally {
+      clearSessionPlanes();
+    }
+  };
+
+  /** The lane cfg the fallback races — same shape `capEnv` carried on
+   *  the SessionCapCallSite: under pid-governed claims the retained /
+   *  pending-opens bookkeeping it keyed on lives inside the held
+   *  claims themselves, so the fallback reads the conductor config
+   *  alone (spec bro-x601l). */
+  const capCfg = (dir: string, cap = 1): ConductorConfig => ({
+    ...CFG,
+    entry: { ...CFG.entry, command: 'fake-run --now' },
+    agents: { fake: { maxSessions: cap, reservationsDir: dir } },
+  });
+
+  test('a session landing between the check and the claim is refused — the recount sees it', () => {
+    withReservations(dir => {
+      // countLive's scripted answers stand in for a racer: the first
+      // count is the pre-claim read, the second the recount — a
+      // session that landed between them is INSIDE the recount, where
+      // the old check-then-claim order never saw it (bro-4bx61)
+      const counts = [0, 1];
+      withPlane(
+        {
+          kind: 'fake',
+          detectsCli: () => false,
+          startsSessions: command => (command.includes('fake-run') ? 1 : 0),
+          countLive: () => counts.shift() ?? 1,
+        },
+        () => {
+          assert.throws(
+            () => admitLaneCapUnlocked(capCfg(dir), 'conductor-test-race'),
+            /fake session quota reached/
+          );
+          // the refused call leaves no claim behind
+          assert.equal(readdirSync(dir).filter(n => n.endsWith('.slot')).length, 0);
+        }
+      );
+    });
+  });
+
+  test('an admitted claim holds its slot — the next start refuses', () => {
+    withReservations(dir => {
+      withPlane(
+        {
+          kind: 'fake',
+          detectsCli: () => false,
+          startsSessions: command => (command.includes('fake-run') ? 1 : 0),
+          countLive: () => 0,
+        },
+        () => {
+          const cfg = capCfg(dir);
+          const release = admitLaneCapUnlocked(cfg, 'conductor-test-1');
+          // the first claim is inside the recount the second start
+          // runs — one budget, no second slot
+          assert.throws(
+            () => admitLaneCapUnlocked(cfg, 'conductor-test-2'),
+            /fake session quota reached/
+          );
+          release();
+          // the slot goes back — a start after the release fits again
+          const second = admitLaneCapUnlocked(cfg, 'conductor-test-3');
+          second();
+        }
+      );
+    });
+  });
+});
+
+describe('the catalog cache — one provider read, not one per request', () => {
+  test('a second read costs no provider round trip', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const first = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(first.status, 200);
+      const read = fake.sessions.length;
+      assert.ok(read > 0, 'the first read enumerates the lanes');
+      // the second read is served from the cache — no lane is asked again
+      const second = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(second.status, 200);
+      assert.equal(fake.sessions.length, read, 'the cache must not re-read the lanes');
+      // and the answer says when the rows were read
+      assert.equal(
+        second.headers.get('x-bro-catalog-fetched-at'),
+        first.headers.get('x-bro-catalog-fetched-at')
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  test('a reload re-reads the lanes', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const conductor = conductorProxy(CFG, { acp: { peer: fake.app } });
+    const { url, close } = await listen(deps({ provider: conductor }));
+    try {
+      await fetch(`${url}/v1/models`, { headers: auth });
+      const read = fake.sessions.length;
+      const snapshot = await conductor.reloadCatalog();
+      assert.equal(snapshot.models, 2);
+      assert.deepEqual(snapshot.failures, []);
+      assert.ok(fake.sessions.length > read, 'the reload reads the lanes again');
+    } finally {
+      await close();
+    }
+  });
+
+  test('the warm read fills the cache before any client asks', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const conductor = conductorProxy(CFG, { acp: { peer: fake.app } });
+    conductor.warmCatalog();
+    const { url, close } = await listen(deps({ provider: conductor }));
+    try {
+      const r = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(r.status, 200);
+      const ids = ((await r.json()) as { data: { id: string }[] }).data.map(x => x.id);
+      assert.deepEqual(ids, ['dv-acp/swe-x', 'dv-acp/swe-y']);
     } finally {
       await close();
     }

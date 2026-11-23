@@ -6,13 +6,20 @@
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // node --test runs each file in its own process — keep the telemetry
 // endpoint off so spans never POST to a real collector mid-test
 process.env.BRO_TELEMETRY = '0';
+
+// bro-eajeu — the e2e opens sessions with cwd = this checkout, which is
+// REALISTIC (a client's session cwd is its repo) but must never touch
+// the checkout's live <git-common>/bro: the pin redirects every
+// runtime-state surface (proxy archive, bus socket) into a sandbox.
+const STATE_DIR = mkdtempSync(join(tmpdir(), 'bro-acp-state-'));
+process.env.BRO_STATE_DIR = STATE_DIR;
 
 import { client, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 import type {
@@ -547,6 +554,12 @@ describe('bro acp — agent mode e2e (specs/bro-tegz2.md §acceptance)', () => {
       })) as { stopReason: string };
       assert.equal(res.stopReason, 'end_turn');
       assert.deepEqual(r.fake.prompts, ['hello agent']);
+      // the proxy-scope archive journals under the state pin — the
+      // session's real cwd (this checkout) keeps a pristine bro/ tree
+      const proxyFiles = readdirSync(join(STATE_DIR, 'bro', 'proxy')).filter(f =>
+        f.startsWith(`acp-${sessionId}-`)
+      );
+      assert.equal(proxyFiles.length, 1, 'the proxy archive lands under BRO_STATE_DIR');
       assert.equal(
         r.updates.some(
           u => updateKind(u) === 'agent_message_chunk' && chunkText(u) === 'AGENT-SAYS-HI'

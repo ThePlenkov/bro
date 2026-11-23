@@ -90,7 +90,7 @@ import {
   type ProcHit,
 } from '@broject/rig';
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
-import { cleanupTmpDirs } from './tmp-sweep.ts';
+import { cleanupTmpDirs, workerTmpRoots } from './tmp-sweep.ts';
 export { LIVE_MARKER_MS };
 // The worktree-claim reads moved to @broject/rig (bro-jamp7) — re-exported
 // here so existing importers (status, herdr-projector, drive, tests)
@@ -1018,7 +1018,12 @@ async function cmdPrune(argv: string[]): Promise<void> {
   // stale OS temp dirs ride the same prune — `drive`'s periodic
   // `work prune --loop` child is the sweeper's cadence (spec bro-d9znu).
   // quietKeeps: kept lines are the sweep's noise floor at pass cadence.
-  cleanupTmpDirs(argv.includes('--dry-run'), { quietKeeps: true });
+  // extraRoots: the per-worker `bro-tmp` dirs under the git dirs, where
+  // the connector's TMPDIR pin moved this litter (spec bro-v96mp).
+  cleanupTmpDirs(argv.includes('--dry-run'), {
+    quietKeeps: true,
+    extraRoots: workerTmpRoots(process.cwd()),
+  });
   if (!argv.includes('--loop')) {
     return;
   }

@@ -15,7 +15,10 @@ it.
 
 The loop is model work; `bro watchdog` owns the facts. Never quote a
 remembered number — baselines are measured at launch and re-measured every
-tick.
+tick. Role-wise this is a bounded **observer** (spec bro-wb3yc) — the
+canonical liveness mechanisms stay `bro fleet daemon` (owner), `bro
+pulse` (wake), `bro fleet rig next` (re-entry); the watchdog is read-only
+policy over them, never an owner itself.
 
 ## Launch
 

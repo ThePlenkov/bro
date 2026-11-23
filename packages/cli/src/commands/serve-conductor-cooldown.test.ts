@@ -5,11 +5,19 @@
  *  the account on 2026-11-10 cannot happen again. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { AcpLaneCooldown } from '@broject/providers';
 import { conductorProxy } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
+
+// bro-eajeu — CFG.cwd is this checkout (realistic), but a worktree's
+// common resolves the operator's live .git/bro: the pin redirects the
+// serve-turns journal + turn-plane archives into a sandbox.
+process.env.BRO_STATE_DIR = mkdtempSync(join(tmpdir(), 'bro-cooldown-state-'));
 
 const BODY = { messages: [{ role: 'user', content: 'x' }], stream: false };
 

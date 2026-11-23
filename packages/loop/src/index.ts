@@ -7,7 +7,7 @@ export {
   SOLO_LABEL,
   type BatchableBead,
 } from './batch.ts';
-export { diskFloorBreach, diskFloorBytes, MB, type DiskProbe } from './capacity.ts';
+export { diskFloorBreach, diskFloorBytes, diskFloorFor, MB, type DiskProbe } from './capacity.ts';
 export {
   beadForHead,
   ceilingHeld,

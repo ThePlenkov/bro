@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/wait.schema.json",
+  "title": "bro wait --json",
+  "description": "{verdict, refs, unsettled?} — the dep-plane watcher's terminal document (emit() in packages/cli/src/commands/wait.ts). Top-level verdict is the exit code word; `unsettled` rides only on the timeout arm. Each refs entry carries the settled verdict plus annotation — `source` is always present (derived from the plane, not the settle); `waiting` marks a ref still open at timeout.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "refs"],
+  "properties": {
+    "verdict": { "enum": ["free", "actionable", "unresolved", "unreadable", "timeout"] },
+    "refs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["verdict", "source"],
+        "properties": {
+          "verdict": {
+            "enum": ["waiting", "free", "actionable", "unresolved", "unreadable"]
+          },
+          "source": { "enum": ["live", "replica"] },
+          "reason": { "type": "string" },
+          "stage": {
+            "enum": ["posted", "claimed", "submitted", "accepted", "rejected"]
+          },
+          "turn": { "enum": ["requester", "worker"] },
+          "replicaAgeMs": { "type": "number" }
+        }
+      }
+    },
+    "unsettled": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "the still-open ref args — emitted only when the bound held (verdict: timeout)"
+    }
+  }
+}

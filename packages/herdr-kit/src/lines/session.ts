@@ -20,7 +20,7 @@ import {
   tailWindow,
   utf8End,
 } from '@broject/acp-session';
-import { gitCommonDir, type ProviderEntry } from '@broject/core';
+import { gitCommonDir, stateCommonDir, type ProviderEntry } from '@broject/core';
 import type {
   AcpRenderer as AcpRendererT,
   AcpSessionViewResult,
@@ -258,7 +258,16 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     const more = readTailSlice(a.eventsPath, a.eventsOffset ?? 0);
     if (more === undefined) return;
     const end = completePart(more.buf);
-    if (end === 0) return;
+    if (end === 0) {
+      // nothing complete to consume — either a torn tail row still
+      // being written (offset already sits on a line boundary, the
+      // min is a no-op) or the archive self-capped under us and the
+      // saved offset now points past the new EOF: resync so the rows
+      // appended after the cap reach the pane instead of being
+      // skipped forever (spec bro-9ti7h; pumpLog's own posture)
+      a.eventsOffset = Math.min(a.eventsOffset ?? 0, more.size);
+      return;
+    }
     a.eventsOffset = (a.eventsOffset ?? 0) + end;
     for (const row of parseArchiveRows(more.buf.subarray(0, end).toString('utf8'))) {
       eventRow(a, row, t);
@@ -460,19 +469,38 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   // mid-turn must read 'blocked' and a silent-for-days journal
   // 'idle', not a working lie frozen at arm time.
   const bound = ctx.events !== undefined || ctx.agent !== undefined;
-  // the registry home: the worktree's git common dir, else the bound
-  // journal's own <git-common>/bro/agents location — a '.' worktree
-  // (the worktree-less live view) must not blind the worker floor
-  const base =
+  // the registry homes, in authority order: the bound journal's own
+  // <git-common>/bro/agents location first, then the worktree's real
+  // common dir, the bare worktree last — a '.' worktree (the
+  // worktree-less live view) must not blind the worker floor: a later
+  // home only answers what an earlier one missed, so an unrelated
+  // checkout's common can never override the bound journal's home.
+  // The real common stays in the chain because agents.json lives on
+  // it — the spawn-side registry writers don't resolve the state pin,
+  // so a BRO_STATE_DIR-pinned journal derives the PIN as its home and
+  // every registry read there comes back empty.
+  const registryHomes = [
+    ...new Set(
+      [
+        ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined,
+        gitCommonDir(ctx.worktree),
+        ctx.worktree,
+      ].filter((h): h is string => h !== undefined && h !== null)
+    ),
+  ];
+  // the archive root: the .events.jsonl writers resolve stateCommonDir,
+  // so a BRO_STATE_DIR-pinned worker's journal lives under the pin —
+  // derive the read side identically or a pinned rig's pane goes blind
+  const eventsBase =
     (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
-    gitCommonDir(ctx.worktree) ??
+    stateCommonDir(ctx.worktree) ??
     ctx.worktree;
   /** The bound worker's registry entry — `--agent` first; a
    *  journal-only bind (`--events` alone) still names its worker by
    *  the file's own stem, or a provable crash reads 'unknown'. */
   const entryOf = (): AgentEntry | undefined =>
     agentEntry(
-      base,
+      registryHomes,
       ctx.agent ??
         (ctx.events !== undefined
           ? basename(ctx.events).replace(/\.events\.jsonl$/, '')
@@ -486,7 +514,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   const eventsPathOf = (): string | undefined => {
     if (ctx.events !== undefined) return ctx.events;
     if (ctx.agent === undefined) return undefined;
-    return eventsFile(base, logStem(entryOf()) ?? ctx.agent);
+    return eventsFile(eventsBase, logStem(entryOf()) ?? ctx.agent);
   };
   /** The worker floor with its reason stamped — a blocked worker
    *  reports WHEN it exited (the journal's last write), an idle one
@@ -516,7 +544,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       // the display agent is the true provider name — the same label
       // the OpenTUI path resolves — never the registry run key
       ...(ctx.agent !== undefined
-        ? { agent: displayAgentOf(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
+        ? { agent: displayAgentOf(registryHomes, ctx.agent) ?? ctx.agent, slug: ctx.agent }
         : {}),
       // the native log rides along — an events-render failure tails
       // it instead of ending on a bare note

@@ -211,23 +211,24 @@ export function dataRefPush(
   root: string,
   remote: string = 'origin',
   ref: string = DATA_REF
-): boolean {
+): string | false {
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (gitTry(['-C', root, 'push', remote, `${ref}:${ref}`]).code === 0) {
-      return true;
+    const ours = refSha(root, ref);
+    if (ours && gitTry(['-C', root, 'push', '--', remote, `${ours}:${ref}`]).code === 0) {
+      return ours;
     }
-    const fetch = gitTry(['-C', root, 'fetch', remote, ref]);
+    const fetch = gitTry(['-C', root, 'fetch', '--', remote, ref]);
     if (fetch.code !== 0) {
       return false; // remote has no data ref (or offline) and push still failed
     }
     const theirs = g(root, ['rev-parse', 'FETCH_HEAD']);
-    const ours = refSha(root, ref);
-    if (ours === null) {
+    const current = refSha(root, ref);
+    if (current === null) {
       return false;
     }
     // They may already be contained in ours (spurious reject) — retry push.
-    if (gitTry(['-C', root, 'merge-base', '--is-ancestor', theirs, ours]).code !== 0) {
-      mergeDataHeads(root, ref, ours, theirs);
+    if (gitTry(['-C', root, 'merge-base', '--is-ancestor', theirs, current]).code !== 0) {
+      mergeDataHeads(root, ref, current, theirs);
     }
   }
   return false;
@@ -247,14 +248,14 @@ export function dataRefPull(
   remote: string = 'origin',
   ref: string = DATA_REF
 ): number {
-  const probe = gitTry(['-C', root, 'ls-remote', remote, ref]);
+  const probe = gitTry(['-C', root, 'ls-remote', '--', remote, ref]);
   if (probe.code !== 0) {
     return -2;
   }
   if (probe.out.trim() === '') {
     return -1;
   }
-  if (gitTry(['-C', root, 'fetch', remote, ref]).code !== 0) {
+  if (gitTry(['-C', root, 'fetch', '--', remote, ref]).code !== 0) {
     return -2;
   }
   const theirs = g(root, ['rev-parse', 'FETCH_HEAD']);

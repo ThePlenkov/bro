@@ -3,7 +3,7 @@
   "groups": {
     "review": {
       "summary": "PR review loop — gates, threads, debt",
-      "members": ["debt", "act", "watch", "drive", "cleanup"]
+      "members": ["debt", "act", "merge", "watch", "drive", "cleanup"]
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
@@ -176,6 +176,28 @@
       },
       "external": false
     },
+    "merge": {
+      "name": "merge",
+      "group": "review",
+      "summary": "Full merge cycle as one verb: ready → gate → automerge → retro [--bead|--no-retro]",
+      "spellings": ["merge", "review merge"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "act",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--bead <id>": "beads the merge discharges on MERGED",
+          "--no-retro": "skip the post-merge retro record"
+        },
+        "exits": {
+          "0": "MERGED — cycle complete",
+          "1": "blocked gate, closed-unmerged PR, timeout, or merge failure",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
     "convoy": {
       "name": "convoy",
       "group": "flow",
@@ -187,6 +209,22 @@
       "plan": true,
       "planVersion": 1,
       "planSchema": "schemas/plans/convoy.schema.json",
+      "contract": {
+        "subs": {
+          "next": {
+            "flags": {
+              "[mol]": "the molecule — default: the single open molecule in the store",
+              "--mol <id>": "same molecule, flag spelling"
+            },
+            "json": "schemas/cli/convoy-next.schema.json",
+            "exits": {
+              "0": "next-step JSON emitted — state step|gate|blocked|complete",
+              "1": "molecule resolution failed — none open, ambiguous, or unreadable",
+              "2": "usage — unknown option"
+            }
+          }
+        }
+      },
       "external": false
     },
     "next": {
@@ -398,6 +436,21 @@
           "0": "sessions printed",
           "1": "ledger unavailable",
           "2": "usage"
+        },
+        "subs": {
+          "resume": {
+            "flags": {
+              "<id>": "session key, sid (exact or unique prefix), or agentId",
+              "--print": "render the resume argv without spawning it",
+              "--last": "the most recently seen session",
+              "--pick": "interactive picker — needs a TTY"
+            },
+            "exits": {
+              "0": "argv printed (--print), picker cancelled, host has no resume command, or the host resume ran",
+              "1": "no sessions in the ledger, spawn failed, or the resume exited nonzero",
+              "2": "usage — missing/ambiguous target, --pick without a TTY"
+            }
+          }
         }
       },
       "external": false
@@ -1213,6 +1266,34 @@
       "skill": "mesh",
       "configKey": "mesh",
       "plan": false,
+      "contract": {
+        "subs": {
+          "inbox": {
+            "flags": {
+              "--json": "[{peer, bead, …envelope, mismatch?, unbound?}] — pending requests addressed to this rig",
+              "--no-pull": "serve replica stores as they stand — skip the sync leg"
+            },
+            "json": "schemas/cli/mesh-inbox.schema.json",
+            "exits": {
+              "0": "inbox rows printed (human table or --json)",
+              "2": "not inside a git repository / rig unaddressed / usage"
+            }
+          },
+          "wait": {
+            "flags": {
+              "<thread>": "the request/thread id — `bro mesh request` and lifecycle verbs print it",
+              "--json": "{thread, stage?, turn?, envelopes} — stage/turn keys absent when the reduction has none",
+              "--no-pull": "serve replica stores as they stand — skip the sync leg"
+            },
+            "json": "schemas/cli/mesh-wait.schema.json",
+            "exits": {
+              "0": "thread state printed — --json always takes this arm",
+              "1": "no request visible for the thread (human mode only)",
+              "2": "not inside a git repository / rig unaddressed / usage"
+            }
+          }
+        }
+      },
       "external": false
     },
     "request": {
@@ -1232,6 +1313,22 @@
       "aliases": [],
       "hidden": false,
       "plan": false,
+      "contract": {
+        "flags": {
+          "external:<rig>:<id>…": "one or more dep refs — `bro request` prints the one it wired",
+          "--json": "{verdict, refs, unsettled?} — the exit code IS the verdict",
+          "--every <sec>": "poll interval — default 30s",
+          "--timeout <sec>": "the bound — default 2700s (45m); 0 waits unbounded"
+        },
+        "json": "schemas/cli/wait.schema.json",
+        "exits": {
+          "0": "free — every watched dep shipped",
+          "1": "unreadable — a store failed 3 polls running",
+          "2": "unresolved — a ref is absent on its posting store (usage also exits 2)",
+          "3": "actionable — rejected or closed-unshipped; a human must move",
+          "4": "timeout — the bound held with refs still open"
+        }
+      },
       "external": false
     },
     "run": {
@@ -1272,10 +1369,20 @@
     },
     "plugins": {
       "name": "plugins",
-      "summary": "Plugin registry + client adapters: install|uninstall|list <client>",
+      "summary": "The BroPlugin registry — plugins for bro (commands, skills, config)",
       "spellings": ["plugins"],
       "aliases": [],
       "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "clients": {
+      "name": "clients",
+      "summary": "Agents that use bro — install matrix + adapters: list|install|uninstall <client>",
+      "spellings": ["clients"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "clients",
       "plan": false,
       "external": false
     },

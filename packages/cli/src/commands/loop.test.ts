@@ -1,32 +1,43 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
   agentRegistryPath,
   bdTry,
+  clearSessionPlanes,
+  countSessionReservations,
   type FleetProfile,
+  laneBudgetDir,
   type Lease,
   type ProviderEntry,
   patchAgentRegistry,
+  providerSlotsDir,
+  registerSessionPlane,
+  releaseSessionStart,
   type RoutingTable,
   resolveStepClass,
+  sessionPlanes,
   SpawnError,
   type SpawnWorker,
 } from '@broject/core';
+import { commandCliNames } from '@broject/devin';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop';
+import type { LoopLane } from '@broject/rig';
 import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import {
+  admitLaneSessions,
   claimAuthorityNote,
   declaredClaimCapability,
   loopRefTails,
+  processGroupLive,
   resolveBeadsDir,
   resolveLoopLane,
   resumeSessionFor,
   skipLeasedBeads,
   syncAfterAudit,
 } from './loop.ts';
-import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
+import { bdStoreBlocker, git, initRepo, inside, tmpDir } from './testrepo.ts';
 
 test('loop picker skips live bead leases held by another process', () => {
   const lease: Lease = {
@@ -635,5 +646,1070 @@ describe("resumeSessionFor — the coder's own session rides again (bro-5qsnr)",
       writeFileSync(reg, '{not json');
       assert.equal(resumeSessionFor({ root: main }, 'bro-x1', argvLane), undefined);
     });
+  });
+});
+
+// --- admitLaneSessions — the raw-template lane rides the provider cap ---------
+//
+// spec bro-x601l: `fleet.providerCaps.<provider>` is the account-wide
+// OUTER gate — the registry spawn (prepareSpawn) judges it on the
+// aggregate census over every plane the provider's entry command
+// claims. The raw-template lane derives the SAME gate through the
+// shared providerGateOf/admitProviderGateStarts pair (bro-9f78j), so a
+// loop-spawned worker counts on the provider aggregate exactly like a
+// registry spawn's.
+
+describe('admitLaneSessions — the provider cap reaches the raw-template lane (bro-9f78j)', () => {
+  const admitCtx = (
+    root: string,
+    agents: Record<string, Record<string, unknown>>,
+    providers: Record<string, ProviderEntry> = {},
+    providerCaps: Record<string, number> = {}
+  ) => ({
+    agent: 'alpha-cli alpha-run',
+    env: {
+      agents,
+      connectors: {},
+      fleet: { maxConcurrent: 0, providerCaps },
+      providers,
+    } as AgentConnectorEnv,
+    root,
+  });
+  const admitSpec = (root: string) => ({ molStep: 'fx-1', prompt: 'p', repoRoot: root });
+  const templateLane = (command: string, provider?: string): LoopLane => ({
+    worker: { kind: 'template', command },
+    ...(provider === undefined ? {} : { provider }),
+  });
+  const alphaPlane = (live: () => number) => ({
+    kind: 'alpha',
+    detectsCli: (cli: string) => cli === 'alpha-cli',
+    countLive: live,
+    startsSessions: (cmd: string) => (cmd.match(/alpha-run/g) ?? []).length,
+  });
+  const release = (admit: { reservation: string | undefined; crossKind: string[] }): void =>
+    releaseSessionStart(
+      [admit.reservation, ...admit.crossKind].filter((p): p is string => p !== undefined)
+    );
+  // planes are process-global — swap in the fixture's set, put the real
+  // registry back no matter how the test lands
+  const withPlanes = (
+    planes: Parameters<typeof registerSessionPlane>[0][],
+    fn: () => void
+  ): void => {
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      for (const plane of planes) {
+        registerSessionPlane(plane);
+      }
+      fn();
+    } finally {
+      clearSessionPlanes();
+      for (const p of prior) {
+        registerSessionPlane(p);
+      }
+    }
+  };
+  const withAlphaPlane = (
+    plane: Parameters<typeof registerSessionPlane>[0],
+    fn: () => void
+  ): void => withPlanes([plane], fn);
+
+  test('a held loop claim counts on the provider aggregate — the next spawn refuses provider_cap', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          // the provider's entry starts one alpha session; the lane runs
+          // that same command — providerCaps.prov: 1 seats exactly one
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+            { prov: 1 }
+          );
+          const first = admitLaneSessions(
+            ctx,
+            templateLane('alpha-cli alpha-run', 'prov'),
+            admitSpec(main),
+            'loop-fx-1'
+          );
+          try {
+            // the provider pass's claim sits on alpha's census dir — the
+            // SAME ledger the registry spawn's claims would land on
+            assert.equal(countSessionReservations(dirA), 1);
+            // the aggregate census sees the held claim: a second spawn
+            // draws 1+1 over the lane cap and names provider_cap
+            assert.throws(
+              () =>
+                admitLaneSessions(
+                  ctx,
+                  templateLane('alpha-cli alpha-run', 'prov'),
+                  admitSpec(main),
+                  'loop-fx-2'
+                ),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'prov' lane cap reached.*provider_cap/.test(err.message)
+            );
+            // the refused spawn claimed nothing — the held claim is the
+            // first admission's alone
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+
+  test('a shell-wrapped template resolves the provider lane its command launches', () => {
+    // `sh -c '…'` resolved 'sh' under first-token reading — the
+    // provider gate returned undefined and a providerCaps-only config
+    // admitted workers past the account cap while the plane counted
+    // the nested start (greptile PR #1094)
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+            { prov: 1 }
+          );
+          const lane = templateLane("sh -c 'alpha-cli alpha-run'");
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // the provider pass claimed one slot on alpha's census dir —
+            // the nested start is what the lane's cap seats
+            assert.equal(countSessionReservations(dirA), 1);
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'prov' lane cap reached.*provider_cap/.test(err.message)
+            );
+            // the refused spawn claimed nothing — the held claim is the
+            // first admission's alone
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+
+  test('the per-kind cap still refuses under provider headroom', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    // alpha IS the spawn's quota lane (sessionKind resolves from the
+    // template cli) — the provider verdict rides the quota admit
+    // instead of claiming the lane twice
+    withAlphaPlane(
+      alphaPlane(() => 1),
+      () => {
+        inside(main, root, () => {
+          assert.throws(
+            () =>
+              admitLaneSessions(
+                admitCtx(
+                  main,
+                  { alpha: { maxSessions: 1, reservationsDir: dirA } },
+                  { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+                  { prov: 9 }
+                ),
+                templateLane('alpha-cli alpha-run', 'prov'),
+                admitSpec(main),
+                'loop-fx-1'
+              ),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              err.capCause === undefined &&
+              /alpha session quota reached/.test(err.message)
+          );
+          // the refused admission held nothing
+          assert.equal(countSessionReservations(dirA), 0);
+        });
+      }
+    );
+  });
+
+  test("a provider-covered kind's extra starts still ride the provider cap", () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    // alpha carries no kind quota — sessionCapViews yields no row, so
+    // without the provider-covered-kind pass its second start would
+    // draw on the 'prov' lane unjudged
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          // the provider's entry starts ONE alpha session; the template
+          // starts TWO — the provider pass claims 1/1 (at cap), the
+          // second start pushes the aggregate to 2 > 1 and is refused
+          assert.throws(
+            () =>
+              admitLaneSessions(
+                admitCtx(
+                  main,
+                  { alpha: { reservationsDir: dirA } },
+                  { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+                  { prov: 1 }
+                ),
+                templateLane('alpha-cli alpha-run alpha-run', 'prov'),
+                admitSpec(main),
+                'loop-fx-1'
+              ),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              err.capCause === 'provider_cap' &&
+              /provider 'prov' lane cap reached — (2\/1 live lanes|0 live \+ 2 starting > 1)/.test(
+                err.message
+              )
+          );
+          // every claim the refused admission briefly held went back
+          assert.equal(countSessionReservations(dirA), 0);
+        });
+      }
+    );
+  });
+
+  test('a spawn that fits seats on the quota lane carrying the provider verdict', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          const admit = admitLaneSessions(
+            admitCtx(
+              main,
+              {
+                native: { provider: 'prov', sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, reservationsDir: dirA },
+              },
+              { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+              { prov: 1 }
+            ),
+            templateLane('alpha-cli alpha-run'),
+            admitSpec(main),
+            'loop-fx-1'
+          );
+          try {
+            // one claim on alpha's ledger — the provider's own session
+            // plane IS the quota lane's, so the verdict rode the quota
+            // admit and nothing claimed twice
+            assert.ok(admit.reservation !== undefined);
+            assert.equal(admit.crossKind.length, 0);
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(admit);
+          }
+        });
+      }
+    );
+  });
+
+  test('a full provider lane refuses the quota admit with provider_cap', () => {
+    // alpha's kind lane has headroom — only the provider verdict can
+    // refuse here, so an admit that dropped providerCap/providerCensus
+    // would wave the spawn through (the assert proves the pair rides
+    // the quota admit, not just that one claim exists)
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      // live turns 1 only once a claim exists — the pre-flight census
+      // reads 0 and passes; the quota admit's post-claim census is
+      // what sees 1 live + 1 held > cap 1
+      alphaPlane(() => (countSessionReservations(dirA) > 0 ? 1 : 0)),
+      () => {
+        inside(main, root, () => {
+          assert.throws(
+            () =>
+              admitLaneSessions(
+                admitCtx(
+                  main,
+                  {
+                    native: { sessionKind: 'alpha' },
+                    alpha: { maxSessions: 9, reservationsDir: dirA },
+                  },
+                  { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+                  { prov: 1 }
+                ),
+                templateLane('alpha-cli alpha-run'),
+                admitSpec(main),
+                'loop-fx-1'
+              ),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              err.capCause === 'provider_cap' &&
+              /provider 'prov' lane cap reached.*provider_cap/.test(err.message)
+          );
+          // the refused admission held nothing
+          assert.equal(countSessionReservations(dirA), 0);
+        });
+      }
+    );
+  });
+
+  test('a raw template is not refused by the backend-default provider it never launches', () => {
+    // the --agent escape deliberately bypasses agents.native.provider —
+    // the lane's provider resolves from the spawned command's own cli,
+    // so a full 'prov' lane (which the command never names) must not
+    // park the worker
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          // a live registry occupant on 'prov' fills the plane-less lane
+          // to cap — the same stamp prepareSpawn's commit would land
+          patchAgentRegistry(main, 'occ-1', {
+            agentId: 'occ-1',
+            backend: 'otherbackend',
+            provider: 'prov',
+            spawnedAt: new Date().toISOString(),
+          });
+          const admit = admitLaneSessions(
+            admitCtx(
+              main,
+              {
+                native: { provider: 'prov', sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, reservationsDir: dirA },
+              },
+              // prov's entry command is a DIFFERENT cli — the template's
+              // 'alpha-cli' never launches it, so its cap does not gate
+              { prov: { type: 'cli', command: 'other-cli other-run' } },
+              { prov: 1 }
+            ),
+            templateLane('alpha-cli alpha-run'),
+            admitSpec(main),
+            'loop-fx-1'
+          );
+          try {
+            assert.ok(admit.reservation !== undefined);
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(admit);
+          }
+        });
+      }
+    );
+  });
+
+  test('an argv lane reserves on the provider ENTRY command — the acp driver hides its starts (greptile PR #1094)', () => {
+    // `bro acp-worker --command 'alpha-cli alpha-run'` reads zero alpha
+    // starts on a positional grammar — the provider executable sits
+    // inside the driver's --command argument. The gate counts the
+    // provider ENTRY command's sessions instead
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          // command positions, like the real planes — a cli named
+          // inside --command's argument is not a start
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            { prov: { type: 'acp', command: 'alpha-cli alpha-run' } },
+            { prov: 1 }
+          );
+          const lane: LoopLane = {
+            provider: 'prov',
+            worker: {
+              kind: 'argv',
+              argv: ['bro', 'acp-worker', '--command', 'alpha-cli alpha-run'],
+              cliName: 'alpha-cli',
+            },
+          };
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // the one session the provider command opens — claimed on
+            // alpha's ledger like any other start
+            assert.equal(countSessionReservations(dirA), 1);
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError && err.kind === 'cap' && err.capCause === 'provider_cap'
+            );
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+
+  test('an argv lane claims the provider-entry start count on the quota plane it owns (coderabbit PR #1094)', () => {
+    // `bro acp-worker --command …` hides the provider's starts behind
+    // the driver's --command argument — the spawned command reads one
+    // alpha-cli (the ;-tail of the joined argv) where the provider
+    // ENTRY opens two. The provider pass skips the quota plane, so the
+    // quota loop owes the entry's count: one claim for two sessions
+    // would under-reserve the lane
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { maxSessions: 5, reservationsDir: dirA } },
+            { prov: { type: 'acp', command: 'alpha-cli a; alpha-cli a' } },
+            { prov: 5 }
+          );
+          const lane: LoopLane = {
+            provider: 'prov',
+            worker: {
+              kind: 'argv',
+              argv: ['bro', 'acp-worker', '--command', 'alpha-cli a; alpha-cli a'],
+              cliName: 'alpha-cli',
+            },
+          };
+          const admit = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // two claims — one per session the provider entry opens
+            assert.equal(countSessionReservations(dirA), 2);
+          } finally {
+            release(admit);
+          }
+          // and the single-start argv lane still claims exactly one —
+          // the provider count only raises the floor, never adds
+          const single = admitLaneSessions(
+            admitCtx(
+              main,
+              { alpha: { maxSessions: 5, reservationsDir: dirA } },
+              { prov: { type: 'acp', command: 'alpha-cli a' } },
+              { prov: 5 }
+            ),
+            {
+              provider: 'prov',
+              worker: {
+                kind: 'argv',
+                argv: ['bro', 'acp-worker', '--command', 'alpha-cli a'],
+                cliName: 'alpha-cli',
+              },
+            },
+            admitSpec(main),
+            'loop-fx-2'
+          );
+          try {
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(single);
+          }
+        });
+      }
+    );
+  });
+
+  test('overlapping provider entries share claims — one session, one slot (greptile PR #1094)', () => {
+    // 'prov' covers alpha alone; 'prov2' covers alpha+beta — the
+    // template's alpha starts match BOTH commands, so each provider
+    // gate claimed them before the fix (4 alpha slots for 2 sessions).
+    // A gate shares claims an earlier gate already landed on the same
+    // kind — its cap still judges them through the aggregate census
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const dirB = tmpDir('bro-beta-resv-');
+    const cliStarts = (cli: string) => (cmd: string) =>
+      commandCliNames(cmd).filter(c => c === cli).length;
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('alpha-cli'),
+        },
+        {
+          kind: 'beta',
+          detectsCli: c => c === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('beta-cli'),
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA }, beta: { reservationsDir: dirB } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              prov2: { type: 'cli', command: 'alpha-cli a; beta-cli b' },
+            },
+            { prov: 9, prov2: 9 }
+          );
+          const admit = admitLaneSessions(
+            ctx,
+            templateLane('alpha-cli a; alpha-cli a; beta-cli b'),
+            admitSpec(main),
+            'loop-fx-1'
+          );
+          try {
+            // 2 alpha + 1 beta starts = 3 slots — never 4+1
+            assert.equal(countSessionReservations(dirA), 2);
+            assert.equal(countSessionReservations(dirB), 1);
+          } finally {
+            release(admit);
+          }
+        });
+      }
+    );
+  });
+
+  test('a fully shared provider lane still judges its cap on the shared claims (greptile PR #1094)', () => {
+    // 'prov2' adds a cli no plane counts, so every plane it covers is
+    // already claimed by 'prov' — it lands no slot of its own, but its
+    // cap must still re-judge the census the shared claims sit in
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              prov2: { type: 'cli', command: 'alpha-cli a; no-plane-cli b' },
+            },
+            { prov: 9, prov2: 1 }
+          );
+          const lane = templateLane('alpha-cli a; no-plane-cli b');
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // prov claimed the alpha start; prov2's lane seats exactly
+            // it — one claim total, not one per gate
+            assert.equal(countSessionReservations(dirA), 1);
+            // a second start pushes the shared census to 2 — prov2's
+            // cap refuses it even though it would claim nothing itself
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'prov2' lane cap reached/.test(err.message)
+            );
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+
+  test('the shared-claim re-check is what refuses — a session landing between preflight and claim trips prov2 (greptile PR #1094)', () => {
+    // Alpha's live count mirrors the claim ledger — prov2's read-only
+    // preflight sees 0 + 1 starting ≤ cap 1, but inside the locked
+    // re-check prov's claim has landed: 1 live + 1 claim = 2 > 1. A
+    // recheck deleted outright would wave this spawn through
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          // a claim counts as live the moment it lands — the landed
+          // session the mutex exists to see
+          countLive: () => countSessionReservations(dirA),
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              prov2: { type: 'cli', command: 'alpha-cli a; no-plane-cli b' },
+            },
+            { prov: 9, prov2: 1 }
+          );
+          const lane = templateLane('alpha-cli a; no-plane-cli b');
+          assert.throws(
+            () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1'),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              err.capCause === 'provider_cap' &&
+              /provider 'prov2' lane cap reached/.test(err.message)
+          );
+          // rollback hands prov's claim back — nothing stays held
+          assert.equal(countSessionReservations(dirA), 0);
+        });
+      }
+    );
+  });
+
+  test('same-keyed runs on different repos each claim the plane-less provider ledger (greptile PR #1094)', () => {
+    // `loop-<lead>` is repo-scoped — bead ids are — but the provider
+    // ledger is host-shared: a second repo's admission must write its
+    // OWN claim, or releasing the first drops the lane under a running
+    // worker
+    const { root: rootA, main: mainA } = initRepo('bro-loop-admit-a-');
+    const { root: rootB, main: mainB } = initRepo('bro-loop-admit-b-');
+    // the ledger lives under XDG_DATA_HOME — isolate it so the claims
+    // never land in the host's real census dir
+    const prevXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = tmpDir('bro-loop-xdg-');
+    try {
+      // no session planes registered — the provider entry's cli starts
+      // nothing a plane counts, so its lane is the claim ledger alone
+      withPlanes([], () => {
+        inside(mainA, rootA, () => {
+          const lane = templateLane('other-cli run', 'prov');
+          const ctxA = admitCtx(
+            mainA,
+            {},
+            { prov: { type: 'cli', command: 'other-cli run' } },
+            { prov: 2 }
+          );
+          const first = admitLaneSessions(ctxA, lane, admitSpec(mainA), 'loop-same');
+          try {
+            assert.equal(countSessionReservations(providerSlotsDir('prov')), 1);
+            inside(mainB, rootB, () => {
+              const ctxB = admitCtx(
+                mainB,
+                {},
+                { prov: { type: 'cli', command: 'other-cli run' } },
+                { prov: 2 }
+              );
+              const second = admitLaneSessions(ctxB, lane, admitSpec(mainB), 'loop-same');
+              try {
+                // both holds — never one adopted claim
+                assert.equal(countSessionReservations(providerSlotsDir('prov')), 2);
+              } finally {
+                release(second);
+              }
+            });
+            // the second's release dropped only its own claim
+            assert.equal(countSessionReservations(providerSlotsDir('prov')), 1);
+          } finally {
+            release(first);
+          }
+        });
+      });
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdg;
+    }
+  });
+
+  test('a named provider lane still owes every OTHER provider its template launches (coderabbit PR #1094)', () => {
+    // lane.provider names 'prov' — but the combo template also
+    // launches beta-cli: with beta's lane full the spawn must refuse
+    // on 'provB', not sail through on the named lane alone
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const dirB = tmpDir('bro-beta-resv-');
+    const cliStarts = (cli: string) => (cmd: string) =>
+      commandCliNames(cmd).filter(c => c === cli).length;
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('alpha-cli'),
+        },
+        {
+          kind: 'beta',
+          detectsCli: c => c === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('beta-cli'),
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA }, beta: { reservationsDir: dirB } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              provB: { type: 'cli', command: 'beta-cli b' },
+            },
+            { prov: 9, provB: 1 }
+          );
+          const lane = templateLane('alpha-cli a; beta-cli b', 'prov');
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // the discovered beta lane claimed its start too — both
+            // census dirs hold a row
+            assert.equal(countSessionReservations(dirA), 1);
+            assert.equal(countSessionReservations(dirB), 1);
+            // the second spawn refuses on the FULL beta lane even
+            // though the named 'prov' lane has headroom left
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'provB' lane cap reached/.test(err.message)
+            );
+            assert.equal(countSessionReservations(dirB), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+});
+
+// --- admitLaneSessions — the raw-template lane claims one slot per start ---
+
+describe('admitLaneSessions — a multi-start command owes the lane every start (bro-l5ll8)', () => {
+  const admitCtx = (root: string, agents: Record<string, Record<string, unknown>>) => ({
+    agent: 'alpha-cli alpha-run',
+    env: { agents, connectors: {}, fleet: { maxConcurrent: 0 }, providers: {} },
+    root,
+  });
+  const admitSpec = (root: string) => ({ molStep: 'fx-1', prompt: 'p', repoRoot: root });
+  const templateLane = (command: string): LoopLane => ({
+    worker: { kind: 'template', command },
+  });
+
+  test('a multi-start template command holds one slot per start', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        countLive: () => 0,
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        const admit = admitLaneSessions(
+          admitCtx(main, {
+            native: { sessionKind: 'alpha' },
+            alpha: { maxSessions: 2, reservationsDir: dirA },
+          }),
+          templateLane('alpha-cli alpha-run alpha-run'),
+          admitSpec(main),
+          'loop-fx-1'
+        );
+        try {
+          // cap 2 seats both starts — but only when each actually
+          // claimed: one slot for two sessions reads the second free
+          assert.equal(countSessionReservations(dirA), 2);
+          assert.ok(admit.reservation !== undefined);
+          assert.equal(admit.crossKind.length, 1);
+        } finally {
+          releaseSessionStart(
+            [admit.reservation, ...admit.crossKind].filter((p): p is string => p !== undefined)
+          );
+        }
+      });
+    } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test('the start the lane cannot seat refuses — and the earlier claim goes back', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        // live turns 1 once a claim exists — the pre-flight admits on
+        // 0+2 ≤ 2, the locked census is what sees 1+2 > 2. The first
+        // start's slot is already held when the second refuses: a leak
+        // counts it against the budget for its whole TTL
+        countLive: () => (countSessionReservations(dirA) > 0 ? 1 : 0),
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        assert.throws(
+          () =>
+            admitLaneSessions(
+              admitCtx(main, {
+                native: { sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, reservationsDir: dirA },
+              }),
+              templateLane('alpha-cli alpha-run alpha-run'),
+              admitSpec(main),
+              'loop-fx-1'
+            ),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /alpha session quota reached/.test(err.message)
+        );
+        assert.equal(countSessionReservations(dirA), 0);
+      });
+    } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test('a mid-admission refusal refunds the work-budget segments its claims opened', () => {
+    // alpha's admit opens a work-budget segment per claimed start; the
+    // second start's census refuses — the first claim's segment must go
+    // back or a spawn that never ran bills worker-minutes until the
+    // next budget scan closes it (bro-znkki)
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    // the budget ledger is host-shared — isolate it so the real state
+    // dir never sees the test's segments
+    const prevXdg = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = tmpDir('bro-loop-xdg-');
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        // live turns 1 once a claim exists — the post-claim census on
+        // the second start is what refuses, so the first claim's
+        // segment is already charged when the verdict lands
+        countLive: () => (countSessionReservations(dirA) > 0 ? 1 : 0),
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        assert.throws(
+          () =>
+            admitLaneSessions(
+              admitCtx(main, {
+                native: { sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, workBudgetMinutes: 30, reservationsDir: dirA },
+              }),
+              templateLane('alpha-cli alpha-run alpha-run'),
+              admitSpec(main),
+              'loop-fx-1'
+            ),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /alpha session quota reached/.test(err.message)
+        );
+        assert.equal(countSessionReservations(dirA), 0);
+        // the ledger exists — an admit really charged it — and no OPEN
+        // segment survives: the refund removes them outright (the
+        // registry-path test convention, agent-connectors.test.ts)
+        const ledgerPath = join(laneBudgetDir(), 'alpha.json');
+        assert.equal(existsSync(ledgerPath), true, 'the budget ledger was never charged');
+        const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as {
+          workers: Record<string, { segments: Array<{ e?: number }> }>;
+        };
+        for (const worker of Object.values(ledger.workers)) {
+          assert.equal(
+            worker.segments.every(seg => seg.e !== undefined),
+            true,
+            'an open work-budget segment survived the refused admission'
+          );
+        }
+      });
+    } finally {
+      if (prevXdg === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = prevXdg;
+      }
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test('a live session plus two starts over the cap refuses before any claim', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        countLive: () => 1,
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        // 1 live + 2 starting > cap 2 — a single-claim admit would read
+        // only 1 starting and wave the second session past the cap
+        assert.throws(
+          () =>
+            admitLaneSessions(
+              admitCtx(main, {
+                native: { sessionKind: 'alpha' },
+                alpha: { maxSessions: 2, reservationsDir: dirA },
+              }),
+              templateLane('alpha-cli alpha-run alpha-run'),
+              admitSpec(main),
+              'loop-fx-1'
+            ),
+          (err: unknown) => err instanceof SpawnError && err.kind === 'cap'
+        );
+        assert.equal(countSessionReservations(dirA), 0);
+      });
+    } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test('a single-start command still claims exactly one slot', () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        countLive: () => 0,
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        const admit = admitLaneSessions(
+          admitCtx(main, {
+            native: { sessionKind: 'alpha' },
+            alpha: { maxSessions: 1, reservationsDir: dirA },
+          }),
+          templateLane('alpha-cli alpha-run'),
+          admitSpec(main),
+          'loop-fx-1'
+        );
+        try {
+          assert.equal(countSessionReservations(dirA), 1);
+          assert.ok(admit.reservation !== undefined);
+          assert.equal(admit.crossKind.length, 0);
+        } finally {
+          releaseSessionStart(
+            [admit.reservation, ...admit.crossKind].filter((p): p is string => p !== undefined)
+          );
+        }
+      });
+    } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test("a lane armed on workers only still counts the command's starts", () => {
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        countLive: () => 0,
+        countWorkers: () => 0,
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      inside(main, root, () => {
+        // no maxSessions row — sessionCapViews yields nothing for the
+        // kind, so the claim count falls back to the plane's own
+        // startsSessions: a two-session command still owes two slots
+        const admit = admitLaneSessions(
+          admitCtx(main, {
+            native: { sessionKind: 'alpha' },
+            alpha: { maxWorkers: 5, reservationsDir: dirA },
+          }),
+          templateLane('alpha-cli alpha-run alpha-run'),
+          admitSpec(main),
+          'loop-fx-1'
+        );
+        try {
+          assert.equal(countSessionReservations(dirA), 2);
+          assert.equal(admit.crossKind.length, 1);
+        } finally {
+          releaseSessionStart(
+            [admit.reservation, ...admit.crossKind].filter((p): p is string => p !== undefined)
+          );
+        }
+      });
+    } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+});
+
+// --- processGroupLive — a detached worker holds the group past the leader exit ---
+
+describe('processGroupLive (coderabbit PR #1094)', () => {
+  test('a backgrounded worker keeps the spawn group live after `sh -c` exits', async () => {
+    // `detached: true` makes the leader's pid the group id; `sleep … &`
+    // frees the leader while the sleeper still runs — the group must
+    // read live until the sleeper itself is gone
+    const { spawn } = await import('node:child_process');
+    const { once } = await import('node:events');
+    const child = spawn('sh', ['-c', 'sleep 0.6 & exit 0'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    await once(child, 'exit');
+    const pid = child.pid;
+    assert.notEqual(pid, undefined);
+    assert.equal(processGroupLive(pid as number), true);
+    // the sleeper ends — the group drains and reads gone
+    const deadline = Date.now() + 5000;
+    while (processGroupLive(pid as number) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(processGroupLive(pid as number), false);
+  });
+
+  test('a finished spawn reads gone', async () => {
+    const { spawn } = await import('node:child_process');
+    const { once } = await import('node:events');
+    const child = spawn('sh', ['-c', 'exit 0'], { detached: true, stdio: 'ignore' });
+    await once(child, 'exit');
+    assert.equal(processGroupLive(child.pid as number), false);
   });
 });

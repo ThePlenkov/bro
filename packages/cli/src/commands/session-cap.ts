@@ -32,6 +32,7 @@ import {
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
+  sessionClaimName,
   sessionReservationsDir,
   SpawnError,
   type Connector,
@@ -86,15 +87,15 @@ export function sessionCapVerdict(
   // id (the two hook events of one call share it); without one there
   // is no per-call identity at all — see `callKey`.
   const key = `guard-${keyPart(ctx.sessionId ?? 'nosession')}-${callKey(command, ctx)}`;
-  // a pre-update event of THIS call may still hold its slot under the
-  // raw (pre-sanitization) key — move it under the new key BEFORE the
-  // locked count, or the admission reads the same call as a stranger
-  // and refuses it at cap (the upgrade window's double-count)
-  const legacy = legacyKey(command, ctx);
-  if (legacy !== undefined) {
-    for (const plane of planesStartingSessions(command)) {
-      migrateLegacyClaims(plane.kind, bags, legacy, key);
-    }
+  // a pre-update event of THIS call may still hold its slot under a
+  // pre-prefix name — the raw `<key>-<i>` the last release wrote, or
+  // the ID-keyed legacy when the client sent one. Move them under
+  // the kind-prefixed name BEFORE the locked count, or the admission
+  // reads the same call as a stranger and refuses it at cap (the
+  // upgrade window's double-count)
+  const legacy = legacyKey(ctx);
+  for (const plane of planesStartingSessions(command)) {
+    migrateLegacyClaims(plane.kind, bags, key, legacy);
   }
   // the locked check+claim first — the cap serializes on the kind's
   // OWN admission mutex, so a burst of parallel starts shares one
@@ -135,7 +136,7 @@ export function sessionCapVerdict(
     // applies the budget, and its claim-then-count order keeps a
     // racing burst honest (the slot write is atomic, so the recount
     // sees every claim that landed before it)
-    return verdictUnlocked(command, bags, key, legacyKey(command, ctx));
+    return verdictUnlocked(command, bags, key, legacyKey(ctx));
   }
   if (lockedRefusal !== undefined) {
     releaseClaims(admissions);
@@ -277,26 +278,56 @@ function callKey(command: string, ctx: ConnectorCtx): string {
  *  existed. Only an existing file is ever touched, and only inside
  *  the kind's reservations dir; a raw segment that cannot be a plain
  *  file name (`/` or `..` — the very thing `keyPart` now sanitizes)
- *  can never have been claimed, so there is nothing to recognize. */
-function legacyKey(command: string, ctx: ConnectorCtx): string | undefined {
+ *  can never have been claimed, so there is nothing to recognize.
+ *
+ *  A call WITHOUT a client id has no legacy key at all: the old
+ *  format keyed it on the command's hash — an identity every
+ *  identical command in the session shared. A file matching it may
+ *  be a DIFFERENT call's claim, and adopting it under this call's
+ *  key reads fresh=false/starts=0 inside the admission — the very
+ *  conflation the per-event nonce exists to close. The old file just
+ *  expires on its TTL; a stranger's claim is never migrated. */
+function legacyKey(ctx: ConnectorCtx): string | undefined {
   const session = ctx.sessionId ?? 'nosession';
   const id = ctx.toolUseId;
-  const call = id === undefined || id === '' ? commandKey(command) : `id-${id}`;
-  const legacy = `guard-${session}-${call}`;
+  if (id === undefined || id === '') {
+    return undefined;
+  }
+  const legacy = `guard-${session}-id-${id}`;
   return /[/\\]|\.\./.test(legacy) ? undefined : legacy;
 }
 
-/** Move this call's raw-key claims under the sanitized key — a rename
- *  keeps the claim while making the locked count recognize it as OURS.
- *  A target that already exists means the new key holds a slot too —
- *  the dup retires; either way no two files ever count one call. Runs
- *  outside the mutex: the window only ever double-counts the call
- *  against ITSELF (over-count, never past the budget). */
+/** The `<prefix>-<i>` tail a claim's filename carries — the start
+ *  index and lane tag it recorded. Exact match only: `<prefix>-x…`
+ *  for any other x is a stranger's claim, never migrated. */
+function claimTail(name: string, prefix: string): { i: number; batch: boolean } | undefined {
+  if (!name.startsWith(`${prefix}-`) || !name.endsWith('.slot')) {
+    return undefined;
+  }
+  const tail = name.slice(prefix.length + 1);
+  const batch = tail.endsWith('.batch.slot');
+  const idx = batch ? tail.slice(0, -'.batch.slot'.length) : tail.slice(0, -'.slot'.length);
+  if (!/^\d+$/.test(idx)) {
+    return undefined;
+  }
+  return { i: Number(idx), batch };
+}
+
+/** Move this call's pre-prefix claims under the kind-prefixed name —
+ *  a rename keeps the claim while making the locked count recognize
+ *  it as OURS. Two formats upgrade: the immediately previous
+ *  `<key>-<i>` raw-key names (an upgrade with one release between
+ *  leaves them counting as strangers) and the older ID-keyed
+ *  `<legacyKey>-<i>` names. A target that already exists means the
+ *  new key holds a slot too — the dup retires; either way no two
+ *  files ever count one call. Runs outside the mutex: the window
+ *  only ever double-counts the call against ITSELF (over-count,
+ *  never past the budget). */
 function migrateLegacyClaims(
   kind: string,
   bags: Record<string, Record<string, unknown>>,
-  legacyKey: string,
-  key: string
+  key: string,
+  legacyKey: string | undefined
 ): void {
   const dir = sessionReservationsDir(kind, bags);
   let names: string[];
@@ -306,12 +337,19 @@ function migrateLegacyClaims(
     return;
   }
   for (const name of names) {
-    // `<legacyKey>-<i>.slot` — the same naming the claim wrote
-    if (!name.startsWith(`${legacyKey}-`) || !name.endsWith('.slot')) {
+    const tail =
+      claimTail(name, key) ?? (legacyKey === undefined ? undefined : claimTail(name, legacyKey));
+    if (tail === undefined) {
       continue;
     }
     const from = join(dir, name);
-    const to = join(dir, `${key}${name.slice(legacyKey.length)}`);
+    // the rename target is the CURRENT claim format — the kind prefix
+    // `reserveSessionStart` writes (components escaped) so two planes
+    // on a shared census dir never collapse onto one filename
+    const to = join(
+      dir,
+      `${sessionClaimName(kind, key, tail.i)}${tail.batch ? '.batch' : ''}.slot`
+    );
     try {
       if (existsSync(to)) {
         rmSync(from, { force: true });
@@ -359,12 +397,6 @@ function keyPart(raw: string): string {
   // share the 48-char safe prefix from colliding either.
   const digest = createHash('sha256').update(raw, 'utf16le').digest('hex').slice(0, 24);
   return `${safe}-${digest}`;
-}
-
-/** A short digest of a command — the claim's key half. The same
- *  command claims the same slot; a different one claims its own. */
-function commandKey(command: string): string {
-  return createHash('sha1').update(command).digest('hex').slice(0, 12);
 }
 
 /** The refusal for a command, from the hook's point of view.

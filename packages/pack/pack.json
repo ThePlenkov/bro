@@ -14,6 +14,7 @@
     "brouter",
     "check",
     "client-adapters",
+    "clients",
     "convoy",
     "daemon",
     "debt",

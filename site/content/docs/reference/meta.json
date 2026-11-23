@@ -28,6 +28,7 @@
     "---Review---",
     "debt",
     "act",
+    "merge",
     "watch",
     "drive",
     "cleanup",
@@ -73,6 +74,7 @@
     "setup",
     "doctor",
     "wait",
-    "plugins"
+    "plugins",
+    "clients"
   ]
 }

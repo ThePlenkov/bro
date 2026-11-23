@@ -456,6 +456,30 @@ describe('serve /v1/responses — the openai dialect', () => {
     }
   });
 
+  test('translation failures do not echo exception details', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const secret = 'user-controlled-argument';
+    const { r, close } = await postResponses(fake, {
+      input: [
+        {
+          type: 'function_call',
+          name: 'tool',
+          call_id: 'call-1',
+          arguments: `${secret} is not JSON`,
+        },
+      ],
+      stream: false,
+    });
+    try {
+      assert.equal(r.status, 400);
+      const body = (await r.json()) as { error: { message: string } };
+      assert.equal(body.error.message, 'request could not be translated');
+      assert.equal(body.error.message.includes(secret), false);
+    } finally {
+      await close();
+    }
+  });
+
   test('a backend quota wall answers 429 + Retry-After', async () => {
     const fake = fakeAcpAgent({
       configOptions: [MODEL_OPTION],
@@ -664,7 +688,7 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
       assert.equal(r.status, 400);
       const body = await r.json();
       assert.equal(body.error.type, 'invalid_request_error');
-      assert.match(body.error.message, /tool messages support text content only/);
+      assert.equal(body.error.message, 'request could not be translated');
       // and nothing reached the agent — no turn was paid for
       assert.equal(fake.prompts.length, 0);
     } finally {
@@ -711,7 +735,7 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
       assert.equal(r.status, 400);
       const body = await r.json();
       assert.equal(body.error.type, 'invalid_request_error');
-      assert.match(body.error.message, /system\/developer messages support text content only/);
+      assert.equal(body.error.message, 'request could not be translated');
       assert.equal(fake.prompts.length, 0);
     } finally {
       await close();
@@ -1025,7 +1049,7 @@ describe('output caps + loud input failures', () => {
     try {
       assert.equal(r.status, 400);
       const body = await r.json();
-      assert.match(body.error.message, /input_file/);
+      assert.equal(body.error.message, 'request could not be translated');
     } finally {
       await close();
     }
@@ -1055,18 +1079,18 @@ describe('output caps + loud input failures', () => {
         tools: [{ type: 'web_search' }],
       });
       assert.equal(r1.status, 400);
-      assert.match(
+      assert.equal(
         ((await r1.json()) as { error: { message: string } }).error.message,
-        /web_search/
+        'request could not be translated'
       );
       const r2 = await post('/v1/chat/completions', {
         messages: [{ role: 'user', content: 'x' }],
         tools: [{ type: 'web_search_preview' }],
       });
       assert.equal(r2.status, 400);
-      assert.match(
+      assert.equal(
         ((await r2.json()) as { error: { message: string } }).error.message,
-        /web_search_preview/
+        'request could not be translated'
       );
       // and nothing reached the agent — no turn was paid for
       assert.equal(fake.prompts.length, 0);
@@ -1152,7 +1176,7 @@ describe('output caps + loud input failures', () => {
       assert.equal(r.status, 400);
       const body = await r.json();
       assert.equal(body.error.type, 'invalid_request_error');
-      assert.match(body.error.message, /stop/);
+      assert.equal(body.error.message, 'request could not be translated');
     } finally {
       await close();
     }
@@ -1167,9 +1191,9 @@ describe('output caps + loud input failures', () => {
         tool_choice: { type: 'function', function: {} },
       });
       assert.equal(r1.status, 400);
-      assert.match(
+      assert.equal(
         ((await r1.json()) as { error: { message: string } }).error.message,
-        /tool_choice/
+        'request could not be translated'
       );
       const r2 = await post('/v1/responses', {
         input: 'x',

@@ -275,7 +275,9 @@ function gh(call: { args: string[]; input?: string; timeoutMs?: number }): GhRes
     stdio: [call.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     input: call.input,
     encoding: 'utf8',
-    timeout: call.timeoutMs ?? 120_000,
+    // a caller's deadline slice replaces the default; clamped ≥1 — a
+    // 0 here means NO kill to spawnSync, the unbounded footgun
+    timeout: call.timeoutMs === undefined ? 120_000 : Math.max(1, Math.floor(call.timeoutMs)),
     maxBuffer: 32 * 1024 * 1024,
   };
   // PATH lookup is the contract (same as pull.ts's dolt)
@@ -312,8 +314,8 @@ function ghJson<T>(call: { args: string[]; input?: string; timeoutMs?: number })
 
 /** The caller's authenticated github account — the `self` side of the
  *  author check. Absent when gh is missing or unauthenticated. */
-export function selfLogin(): { login?: string; error?: string } {
-  const r = ghJson<{ login?: string }>({ args: ['api', 'user'] });
+export function selfLogin(timeoutMs?: number): { login?: string; error?: string } {
+  const r = ghJson<{ login?: string }>({ args: ['api', 'user'], timeoutMs });
   if (r.error !== undefined) {
     return { error: r.error };
   }
@@ -533,7 +535,7 @@ export function issueComments(
   repo: GithubRepo,
   issue: GhIssue,
   timeoutMs?: number
-): { records: GhRecord[]; errors: string[] } {
+): { records: GhRecord[]; errors: string[]; failed?: boolean } {
   const r = ghJson<(GhCommentRow | GhCommentRow[])[]>({
     args: [
       'api',
@@ -547,6 +549,9 @@ export function issueComments(
     return {
       records: [],
       errors: [`${repo.owner}/${repo.repo}#${issue.number}: comments failed — ${r.error}`],
+      // the read itself never happened — distinct from comments that
+      // read fine but skipped on parse; callers gate verdicts on it
+      failed: true,
     };
   }
   return collectIssueCommentRecords(repo, issue, slurpedRows(r.data));

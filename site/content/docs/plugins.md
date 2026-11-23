@@ -18,15 +18,18 @@ a CLI client over configured agents such as OpenCode and Devin.
 
 ## Client adapters
 
-`bro plugins` also installs bro _into_ agent clients — the native-plugin
+`bro clients` installs bro _into_ agent clients — the native-plugin
 clients ship an adapter module the CLI writes to the client's own plugin
-directory:
+directory. (`bro plugins` is the registry — plugins FOR bro; the agents
+that USE bro live under `bro clients`. The old
+`bro plugins install|uninstall|list` forms still route there with a
+stderr note naming the move.)
 
 | Command                                                                    | What it does                                                                       |
 | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `bro plugins list [--json]`                                                | Client × scope install matrix — `installed`, `stale`, `present`, `absent`          |
-| `bro plugins install <client> [--global\|--local] [--dry-run]`             | Write the adapter module (a current file is a no-op; a differing one is `updated`) |
-| `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove it                                                                          |
+| `bro clients list [--json]`                                                | Client × scope install matrix — `installed`, `stale`, `present`, `absent`          |
+| `bro clients install <client> [--global\|--local] [--dry-run]`             | Write the adapter module (a current file is a no-op; a differing one is `updated`) |
+| `bro clients uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove it                                                                          |
 
 Clients: `opencode` (a plugin _directory_ — global
 `$XDG_CONFIG_HOME/opencode/plugins/bro/`, local `<repo>/.opencode/plugins/bro/`
@@ -37,8 +40,14 @@ RPC contract `rpc.ts`), `kilo` (module plus a `file:///` entry in
 (`<agentDir>/extensions/bro.ts`, or `<repo>/.omp/extensions/`). Every
 adapter carries a `bro-adapter` sentinel comment so detection survives a
 rename.
-Marketplace clients — Devin, Claude Code, Codex, Cursor — install from
-the repo's plugin manifests instead; see
+
+Marketplace clients — Claude Code, Codex, Cursor — consume the repo-root
+plugin through their own marketplace machinery; bro emits no adapter for
+them. The matrix still answers "is it installed" for them via a read-only
+probe (marketplace registration + cached plugin copy, version-compared
+against this bro — `stale` when an update is pending), and
+`bro clients install <client>` refuses with the client's own install
+command. Devin installs from the repo's plugin manifests too; see
 [Getting started](/docs).
 
 The `omp` client has a second, richer form: `plugins/omp/bro` is a

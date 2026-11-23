@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { gitTry, pidAlive } from '@broject/core';
+import { pidAlive, stateCommonDir } from '@broject/core';
 
 /** What the loop records for an in-flight spawn — pid + pidStart are
  *  the liveness pair check-ins read (start disambiguates a recycled
@@ -70,13 +70,14 @@ export interface LoopRunView {
 }
 
 /** `<git-common>/bro/loop` — shared across every linked worktree, same
- *  anchor as agents.json and the stack edges. Null when git can't name
- *  the common dir (a record-less spawn still works — nothing to read
- *  back is the only cost). */
+ *  anchor as agents.json and the stack edges. Resolves the state root:
+ *  a BRO_STATE_DIR pin moves run records into the sandbox with the rest
+ *  of the runtime state. Null when the state dir can't resolve (a
+ *  record-less spawn still works — nothing to read back is the only
+ *  cost). */
 export function loopRunsDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const common = r.code === 0 ? r.out.trim() : '';
-  return common === '' ? null : join(common, 'bro', 'loop');
+  const common = stateCommonDir(dir);
+  return common === null ? null : join(common, 'bro', 'loop');
 }
 
 /** The output log a spawn record names — may not exist yet at read

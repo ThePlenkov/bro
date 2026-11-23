@@ -681,9 +681,17 @@ export class SpawnError extends Error {
   /** assigned in the body — parameter properties don't survive node's
    *  strip-only TS mode, and this file is spawned as a subprocess */
   readonly kind: SpawnErrorKind;
-  constructor(message: string, kind: SpawnErrorKind = 'conflict') {
+  /** Which cap lane refused when kind === 'cap' — 'provider_cap' for
+   *  the account-wide provider lane (spec bro-x601l), absent on the
+   *  repo-local kind/worker/budget lanes. The same token the message
+   *  carries, as a FIELD: a classifier branches on structure instead
+   *  of re-parsing the formatted text. The message keeps the token for
+   *  the string-only surfaces (the wire's rate class, hook verdicts). */
+  readonly capCause?: 'provider_cap';
+  constructor(message: string, kind: SpawnErrorKind = 'conflict', capCause?: 'provider_cap') {
     super(message);
     this.kind = kind;
+    this.capCause = capCause;
   }
 }
 
@@ -841,6 +849,16 @@ export function readAgentRegistry(dir: string): Record<string, AgentRegistryEntr
   if (!path) {
     return {};
   }
+  return readAgentRegistryFile(path);
+}
+
+/** Read the registry at a KNOWN path — no git probe. Callers that
+ *  already resolved (or must distinguish) the path use this: an
+ *  unresolvable agentRegistryPath can then answer "unverifiable"
+ *  instead of being flattened into the empty registry a failed probe
+ *  would fake (the tmp sweep's orphan verdict needs the difference —
+ *  'unknown' keeps a live worker's pinned root, 'free' rmdir's it). */
+export function readAgentRegistryFile(path: string): Record<string, AgentRegistryEntry> {
   try {
     const v = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {

@@ -98,7 +98,7 @@ import {
   readHookSpool,
   resolveHookSpoolPath,
 } from './hook-spool.ts';
-import { pluginRows } from './plugins.ts';
+import { pluginRows } from './clients.ts';
 import { fmtAge } from './sessions.ts';
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';

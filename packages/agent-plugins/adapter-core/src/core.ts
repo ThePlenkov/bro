@@ -228,6 +228,52 @@ export function hookEmitEnv(kind: string, opts: { npxPin?: string } = {}): Recor
   return env;
 }
 
+/** Why one hook call produced no usable answer. Healthy silence is NOT
+ *  a kind: a clean exit with empty stdout is bro's "nothing to say" —
+ *  every kind here is a real outage the caller may need to surface. */
+export type HookFailure =
+  /** Every CLI ladder rung failed the `bro hooks` capability probe. */
+  | { kind: 'no-cli' }
+  /** The payload would not serialize — the hook never ran, and no child
+   *  was even spawned for input it could never receive. */
+  | { kind: 'input' }
+  /** spawn threw or the child raised 'error' — the hook never ran. */
+  | { kind: 'spawn' }
+  /** The kill timer fired; the child's process group was killed. */
+  | { kind: 'timeout'; timeoutMs: number }
+  /** Nonzero (or signal — code null) exit: a failed run's stdout is not
+   *  a control object even when it happens to parse. */
+  | { kind: 'exit'; code: number | null }
+  /** Clean exit but stdout carried chatter and no control line — the
+   *  protocol broke, not a quiet answer. */
+  | { kind: 'output' };
+
+/** One hook call's verdict: the control object bro answered, the
+ *  failure that kept it from answering, or healthy silence — `control`
+ *  and `failure` both null. */
+export interface HookResult {
+  control: HookControl | null;
+  failure: HookFailure | null;
+}
+
+/** The one-line cause a diagnostic surfaces for a failed hook call. */
+export function hookFailureText(failure: HookFailure): string {
+  switch (failure.kind) {
+    case 'no-cli':
+      return 'no bro CLI resolved';
+    case 'input':
+      return 'the hook payload could not be serialized';
+    case 'spawn':
+      return 'the hook process failed to spawn';
+    case 'timeout':
+      return `the hook timed out after ${failure.timeoutMs}ms`;
+    case 'exit':
+      return `the hook exited ${failure.code ?? 'with no exit code'}`;
+    case 'output':
+      return 'the hook answered with no control object';
+  }
+}
+
 /**
  * Run one `bro hooks <event>` with the payload on stdin; resolve null on
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
@@ -241,7 +287,38 @@ export async function callHook(
   timeoutMs: number,
   extraEnv?: Record<string, string>
 ): Promise<HookControl | null> {
-  const { promise, resolve } = Promise.withResolvers<HookControl | null>();
+  return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+}
+
+/**
+ * callHook with the failure class attached. The stop gate needs to tell
+ * "bro had nothing to say" apart from "bro could not answer": both are
+ * fail-open, but the second must not pass invisibly. A clean exit with
+ * empty stdout is silence (failure null) — only real outage kinds set it.
+ */
+export async function callHookDetailed(
+  command: Command,
+  event: string,
+  payload: unknown,
+  cwd: string,
+  timeoutMs: number,
+  extraEnv?: Record<string, string>
+): Promise<HookResult> {
+  // serialize before spawning: a payload JSON.stringify rejects means the
+  // hook can never run — that is its own outage class, not a spawn error
+  // and never healthy silence (and this function resolves, never throws)
+  let input: string | undefined;
+  try {
+    input = JSON.stringify(payload);
+  } catch {
+    return { control: null, failure: { kind: 'input' } };
+  }
+  // stringify returns undefined (not a throw) for undefined/functions/
+  // symbols — no JSON document exists to hand the child either way
+  if (input === undefined) {
+    return { control: null, failure: { kind: 'input' } };
+  }
+  const { promise, resolve } = Promise.withResolvers<HookResult>();
   let child: ChildProcess;
   try {
     child = spawn(command.cmd, [...command.args, 'hooks', event], {
@@ -252,16 +329,18 @@ export async function callHook(
       detached: process.platform !== 'win32',
     });
   } catch {
-    return null;
+    return { control: null, failure: { kind: 'spawn' } };
   }
   let settled = false;
-  const settle = (value: HookControl | null): void => {
+  const settle = (result: HookResult): void => {
     if (!settled) {
       settled = true;
-      resolve(value);
+      resolve(result);
     }
   };
-  const timer = killAfter(child, timeoutMs, () => settle(null));
+  const timer = killAfter(child, timeoutMs, () =>
+    settle({ control: null, failure: { kind: 'timeout', timeoutMs } })
+  );
   let out = '';
   child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {
@@ -272,14 +351,23 @@ export async function callHook(
   });
   child.on('error', () => {
     clearTimeout(timer);
-    settle(null);
+    settle({ control: null, failure: { kind: 'spawn' } });
   });
   child.on('close', code => {
     clearTimeout(timer);
-    settle(code === 0 ? parseControl(out) : null);
+    if (code !== 0) {
+      settle({ control: null, failure: { kind: 'exit', code } });
+      return;
+    }
+    const control = parseControl(out);
+    if (control === null && out.trim() !== '') {
+      settle({ control: null, failure: { kind: 'output' } });
+      return;
+    }
+    settle({ control, failure: null });
   });
   child.stdin?.on('error', () => {});
-  child.stdin?.end(JSON.stringify(payload));
+  child.stdin?.end(input);
   return promise;
 }
 

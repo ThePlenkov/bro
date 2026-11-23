@@ -19,6 +19,8 @@ export {
   gitTryAsync,
   gitCommonDir,
   gitCommonDirAsync,
+  stateCommonDir,
+  stateCommonDirAsync,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitLogPathRecords,
   gitDriftRef,
@@ -36,6 +38,8 @@ export {
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
 export { getJson } from './http.ts';
+export { compactBacklog } from './backlog.ts';
+export type { BeadRow, BacklogIssue, BacklogSnapshot } from './backlog.ts';
 export {
   bd,
   BdCompatError,
@@ -106,6 +110,7 @@ export type {
   IgnoreCheckRule,
   ServeClientConfig,
   ServeClients,
+  ServeLaneLimits,
   SinkDef,
   SinkType,
 } from './config.ts';
@@ -194,6 +199,7 @@ export {
   laneBudgetKey,
   laneBudgetLevel,
   laneBudgetPause,
+  laneBudgetRefund,
   laneBudgetResume,
 } from './lane-budget.ts';
 export type { LaneBudgetLevel, LaneBudgetOpts, LaneWorkBudget } from './lane-budget.ts';
@@ -638,6 +644,7 @@ export {
   RATE_BACKOFF_CAP_MS,
   rateDeathBackoff,
   readAgentRegistry,
+  readAgentRegistryFile,
   removeAgentRegistryEntries,
   agentRegistryLockDepth,
   rebindStep,
@@ -669,21 +676,29 @@ export {
   countSessionReservations,
   isBatchSpawn,
   normalizeHookPayload,
+  planeLiveExcluding,
+  providerCapCensus,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
   reserveSessionSlotOnce,
+  retagSessionSlot,
+  retagSessionSlots,
   SESSION_SLOT_TTL_MS,
   sessionAdmissionLock,
+  sessionClaimName,
+  sessionLaneCensus,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
+  sessionStartCensusDir,
 } from './session-planes.ts';
 export type {
   CanonicalHookEvent,
   DiscoveredSession,
+  ProviderCapLane,
   ReservationLane,
   SessionPlane,
   SessionQuota,
@@ -700,18 +715,26 @@ export type {
   ExternalProbeCtx,
 } from './external-planes.ts';
 export {
+  admitProviderSlot,
+  admitProviderSlotAsync,
   admitSessionStart,
   admitSessionStartAsync,
   planeStartingSessions,
   planesStartingSessions,
+  providerCapHeldRefusal,
+  providerCapRefusal,
+  providerSlotsDir,
+  providerSlotsKind,
   releaseSessionStart,
   reserveSessionStart,
+  sessionCapHeldRefusal,
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
   sessionReservationsDir,
 } from './session-cap.ts';
 export type {
+  ProviderSlotOpts,
   SessionCapView,
   SessionStartAdmission,
   SessionStartAdmissionArgs,
@@ -808,6 +831,7 @@ export {
   busMatches,
   busProbe,
   busPublish,
+  busRecordedSocketPath,
   busSocketPath,
   busSocketPathForCommon,
   busStatePath,
