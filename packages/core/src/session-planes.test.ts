@@ -798,6 +798,49 @@ describe('admitSessionSlot', () => {
     });
   });
 
+  test('an extra verdict without its own census still counts live sessions (coderabbit PR #1094)', () => {
+    withDir(resv => {
+      // the quota is armed by maxWorkers alone — no maxSessions, no
+      // primary providerCap — so `sessions` stayed 0 and the extra
+      // verdict's fallback read only the admit's own claim: 1 ≤ cap 1
+      // admits even with a session live. The verdict owes the plane
+      // count: 1 live + 1 held claim = 2 > 1 refuses
+      const agents = { testkind: { maxWorkers: 5, reservationsDir: resv } };
+      const plane = { ...testPlane('testkind', 1), countWorkers: () => 0 };
+      assert.throws(
+        () =>
+          admitSessionSlot(plane, agents, {
+            key: 'native-x',
+            extraProviderVerdicts: [
+              {
+                providerCap: { provider: 'prov', cap: 1, reservationsDir: resv },
+                providerCensus: undefined,
+              },
+            ],
+          }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /provider_cap/.test(e.message)
+      );
+      // a verdict that supplies its own census keeps the old reading —
+      // the fallback's live count is not its business
+      const claimed = admitSessionSlot(
+        { ...testPlane('testkind', 9), countWorkers: () => 0 },
+        agents,
+        {
+          key: 'native-y',
+          extraProviderVerdicts: [
+            {
+              providerCap: { provider: 'prov', cap: 9, reservationsDir: resv },
+              providerCensus: () => 0,
+            },
+          ],
+        }
+      );
+      assert.ok(claimed !== undefined);
+      releaseSessionSlot(claimed);
+    });
+  });
+
   test('a live mutex holder in ANOTHER process serializes the admit', async () => {
     const resv = mkdtempSync(join(tmpdir(), 'bro-admit-resv-'));
     try {

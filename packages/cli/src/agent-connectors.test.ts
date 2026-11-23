@@ -1191,6 +1191,59 @@ function connectorContract(b: BackendCase): void {
       }
     });
 
+    test('an argv lane on its OWN quota plane claims the provider-entry start count (coderabbit PR #1094)', async () => {
+      // same hidden-starts shape as the test above, but alpha's lane
+      // is the spawn's quota plane — the provider pass skips it, so
+      // the quota loop owes the entry's TWO starts, not the one claim
+      // the driver's own grammar could see
+      const f = fixture([{ id: 'fx-1', status: 'open' }]);
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { maxSessions: 5, reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'acp' as const, command: 'alpha-cli alpha-run alpha-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 3 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        const info = await c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused'),
+          worker: {
+            kind: 'argv',
+            argv: [process.execPath, '-e', 'setTimeout(() => {}, 30000)'],
+            cliName: 'alpha-cli',
+          },
+        });
+        try {
+          assert.equal(info.state, 'running');
+          // two claims — one per session the provider entry opens on
+          // the lane the quota loop owns
+          assert.equal(countSessionReservations(dirA), 2);
+        } finally {
+          await c.stop(info.id);
+        }
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
     test('a provider-covered kind with NO kind quota still draws judged slots (spec bro-x601l)', async () => {
       // neither kind carries maxSessions — sessionCapViews yields no
       // row for either, so the spawned command's starts would escape

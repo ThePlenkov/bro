@@ -1088,9 +1088,16 @@ function checkSessionLanes(
       return {
         counts: {
           // the provider cap counts the same census the session lane
-          // does — the plane's host-wide sweep plus the claims held
+          // does — the plane's host-wide sweep plus the claims held.
+          // An extra verdict that carries no census of its own falls
+          // back to `sessions + reservations`, so it owes the live
+          // count even when no primary providerCap or kind quota does
           sessions:
-            maxSessions > 0 || providerCap !== undefined ? plane.countLive(bag, opts.workerEnv) : 0,
+            maxSessions > 0 ||
+            providerCap !== undefined ||
+            (opts.extraProviderVerdicts ?? []).some(v => v.providerCensus === undefined)
+              ? plane.countLive(bag, opts.workerEnv)
+              : 0,
           workers:
             maxWorkers > 0 && plane.countWorkers !== undefined
               ? plane.countWorkers(bag, opts.workerEnv)

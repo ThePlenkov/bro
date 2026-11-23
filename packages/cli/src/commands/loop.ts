@@ -125,6 +125,7 @@ import {
   type ProviderGate,
   providerGateOf,
   providerGatePayload,
+  providerGateQuotaStarts,
   providersForSpawnedCommand,
   providerWallsFor,
   resolveAgentConnector,
@@ -1332,7 +1333,11 @@ export function admitLaneSessions(
       );
       const quotaStarts = Math.max(
         1,
-        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1
+        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1,
+        // the provider passes skipped this plane — their entry-command
+        // count is the quota loop's truth when the spawned command
+        // reads zero there (an argv driver's hidden starts)
+        ...providerGates.map(g => providerGateQuotaStarts(g, providerStartsCommand))
       );
       for (let i = 0; i < quotaStarts; i++) {
         const claimed = admitSessionSlot(templateQuota.plane, templateQuota.agents, {

@@ -2948,6 +2948,29 @@ function providerGateStarts(
   );
 }
 
+/** The starts a provider gate counted on the spawn's QUOTA plane — the
+ *  claims the quota loop owes while it owns that kind's lane. The
+ *  provider pass skips the quota plane so its verdict rides the quota
+ *  admit, but the admit's own view counts the SPAWNED command — a
+ *  command whose provider starts hide behind an argv driver's
+ *  `--command` (`bro acp-worker`) reads zero there and would claim one
+ *  where the entry opens several. 0 when no provider plane is the
+ *  quota lane — the quota loop then claims only what the spawned
+ *  command itself starts. */
+export function providerGateQuotaStarts(
+  gate: ProviderGate,
+  startsCommand: string | undefined
+): number {
+  let starts = 0;
+  for (const plane of gate.providerPlanes) {
+    if (plane.kind !== gate.quotaPlaneKind) {
+      continue;
+    }
+    starts += plane.startsSessions?.(startsCommand ?? gate.providerCommand) ?? 1;
+  }
+  return starts;
+}
+
 /** Resolve the provider lane and judge its pre-flight — the OUTER gate
  *  (spec bro-x601l): the account's lane cap judges before any kind
  *  lane, on the census the provider's own command resolves. Returns
@@ -3495,7 +3518,13 @@ function prepareSpawn(
       );
       const quotaStarts = Math.max(
         1,
-        quotaView?.starts ?? sessionQuota.plane.startsSessions?.(spawnedCommand) ?? 1
+        quotaView?.starts ?? sessionQuota.plane.startsSessions?.(spawnedCommand) ?? 1,
+        // the provider pass skipped this plane — its entry-command
+        // count is the quota loop's truth when the spawned command
+        // reads zero there (an argv driver's hidden starts)
+        providerGate === undefined
+          ? 0
+          : providerGateQuotaStarts(providerGate, providerStartsCommand)
       );
       for (let i = 0; i < quotaStarts; i++) {
         const claimed = admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {

@@ -1063,6 +1063,77 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
     );
   });
 
+  test('an argv lane claims the provider-entry start count on the quota plane it owns (coderabbit PR #1094)', () => {
+    // `bro acp-worker --command …` hides the provider's starts behind
+    // the driver's --command argument — the spawned command reads one
+    // alpha-cli (the ;-tail of the joined argv) where the provider
+    // ENTRY opens two. The provider pass skips the quota plane, so the
+    // quota loop owes the entry's count: one claim for two sessions
+    // would under-reserve the lane
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { maxSessions: 5, reservationsDir: dirA } },
+            { prov: { type: 'acp', command: 'alpha-cli a; alpha-cli a' } },
+            { prov: 5 }
+          );
+          const lane: LoopLane = {
+            provider: 'prov',
+            worker: {
+              kind: 'argv',
+              argv: ['bro', 'acp-worker', '--command', 'alpha-cli a; alpha-cli a'],
+              cliName: 'alpha-cli',
+            },
+          };
+          const admit = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // two claims — one per session the provider entry opens
+            assert.equal(countSessionReservations(dirA), 2);
+          } finally {
+            release(admit);
+          }
+          // and the single-start argv lane still claims exactly one —
+          // the provider count only raises the floor, never adds
+          const single = admitLaneSessions(
+            admitCtx(
+              main,
+              { alpha: { maxSessions: 5, reservationsDir: dirA } },
+              { prov: { type: 'acp', command: 'alpha-cli a' } },
+              { prov: 5 }
+            ),
+            {
+              provider: 'prov',
+              worker: {
+                kind: 'argv',
+                argv: ['bro', 'acp-worker', '--command', 'alpha-cli a'],
+                cliName: 'alpha-cli',
+              },
+            },
+            admitSpec(main),
+            'loop-fx-2'
+          );
+          try {
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(single);
+          }
+        });
+      }
+    );
+  });
+
   test('overlapping provider entries share claims — one session, one slot (greptile PR #1094)', () => {
     // 'prov' covers alpha alone; 'prov2' covers alpha+beta — the
     // template's alpha starts match BOTH commands, so each provider

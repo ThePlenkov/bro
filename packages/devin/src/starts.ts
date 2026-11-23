@@ -16,6 +16,7 @@ import {
   atCommandPosition,
   base,
   MAX_WRAPPED_COMMAND_DEPTH,
+  redirectIndexes,
   segments,
   tokens,
   wrappedCommand,
@@ -58,9 +59,21 @@ const NON_SESSION_FLAGS = new Set(['-h', '--help', '--version', '-V']);
  *  binary decides: no verb (the bare CLI) opens an interactive session,
  *  a flag (`-p`, `--print`, `--cloud`, `--prompt-file`) opens a
  *  one-shot, `acp` opens a served session, and the read-only verbs
- *  open none. */
+ *  open none. Redirections are the invocation's plumbing, never its
+ *  verb — `devin >log list` is `devin list`, which opens nothing. */
 function invocationStartsSession(toks: Token[], at: number): boolean {
-  const verb = toks.at(at + 1)?.text;
+  const skip = redirectIndexes(toks);
+  // the index of the next argument — redirections are plumbing, not args
+  const nextArg = (from: number): number => {
+    for (let i = from; i < toks.length; i++) {
+      if (!skip.has(i)) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  const verbAt = nextArg(at + 1);
+  const verb = verbAt === -1 ? undefined : toks.at(verbAt)?.text;
   if (verb === undefined) {
     return true;
   }
@@ -68,7 +81,8 @@ function invocationStartsSession(toks: Token[], at: number): boolean {
     return !NON_SESSION_FLAGS.has(verb);
   }
   if (verb === 'cloud') {
-    const sub = toks.at(at + 2)?.text;
+    const subAt = nextArg(verbAt + 1);
+    const sub = subAt === -1 ? undefined : toks.at(subAt)?.text;
     return sub === undefined || !CLOUD_RESOURCE_COMMANDS.has(sub);
   }
   return !NON_SESSION_COMMANDS.has(verb);

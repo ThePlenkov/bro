@@ -124,6 +124,64 @@ describe('commandCliNames', () => {
     assert.deepEqual(commandCliNames('devin a |& tee log'), ['devin', 'tee']);
   });
 
+  test('an ESCAPED angle is text — the & behind it still separates (greptile PR #1094)', () => {
+    // `\>` is a literal `>` in echo's argument — the `&` that follows
+    // is a background separator, so devin runs on its own clause
+    assert.deepEqual(commandCliNames('echo \\>& devin -p x'), ['echo', 'devin']);
+    // `&&` then `>` — the second `&` completes the operator, it does
+    // not open a `&>` fold; `>/dev/null` is the next clause's redirect
+    assert.deepEqual(commandCliNames('true &&>/dev/null devin -p x'), ['true', 'devin']);
+    // `>|` is the noclobber write — the `|` is the op's tail, not a
+    // pipe, and a provider named as its FILE launches nothing
+    assert.deepEqual(commandCliNames('devin -p x >| run.log'), ['devin']);
+    assert.deepEqual(commandCliNames('echo hi >|devin'), ['echo']);
+  });
+
+  test('a leading redirection still names the command (coderabbit PR #1094)', () => {
+    // the shell redirects output and launches worker-cli — `>run.log`
+    // is plumbing, not the executable
+    assert.deepEqual(commandCliNames('>run.log worker-cli run'), ['worker-cli']);
+    assert.deepEqual(commandCliNames('2> err.log worker-cli run'), ['worker-cli']);
+    assert.deepEqual(commandCliNames('worker-cli run > out.log 2>&1'), ['worker-cli']);
+    // interleaved between the command and its args it's still plumbing
+    assert.deepEqual(commandCliNames('worker-cli > out.log run'), ['worker-cli']);
+    // a quoted or escaped angle is a WORD, never an operator
+    assert.deepEqual(commandCliNames("'>' worker-cli"), ['>']);
+    assert.deepEqual(commandCliNames('\\> worker-cli'), ['>']);
+    assert.deepEqual(commandCliNames('worker-cli run > log; devin -p x'), ['worker-cli', 'devin']);
+  });
+
+  test('an escaped space stays inside the -c script operand (coderabbit PR #1094)', () => {
+    // `worker-cli\ run` is ONE operand — the script the inner shell
+    // parses as `worker-cli run`
+    assert.deepEqual(commandCliNames('sh -c worker-cli\\ run'), ['worker-cli']);
+    assert.deepEqual(commandCliNames('bash -c devin\\ -p'), ['devin']);
+    // outside -c the escape glues too — one word, not two
+    assert.deepEqual(commandCliNames('worker-cli\\ run x'), ['worker-cli run']);
+  });
+
+  test('a here-document body is data, not commands (coderabbit PR #1094)', () => {
+    // the body line reads like a launch but feeds cat — `devin` never runs
+    assert.deepEqual(commandCliNames('cat <<EOF\nworker-cli run\nEOF'), ['cat']);
+    assert.deepEqual(commandCliNames("cat <<'EOF'\nworker-cli run\nEOF"), ['cat']);
+    // scanning resumes after the delimiter — the devin below is real
+    assert.deepEqual(commandCliNames("cat <<'EOF'\nworker-cli run\nEOF\ndevin -p x"), [
+      'cat',
+      'devin',
+    ]);
+    // `<<-` folds leading tabs out of the body and the delimiter line
+    assert.deepEqual(commandCliNames('cat <<-EOF\n\tworker-cli run\n\tEOF'), ['cat']);
+    // `<<<` is a herestring — one word of data, no body lines at all
+    assert.deepEqual(commandCliNames('cat <<<"worker-cli"\ndevin -p x'), ['cat', 'devin']);
+    // two heredocs on one line consume their bodies in order
+    assert.deepEqual(commandCliNames('cat <<A <<B\nworker-cli\nA\nother-cli\nB\ndevin -p x'), [
+      'cat',
+      'devin',
+    ]);
+    // a same-line command behind the op still counts
+    assert.deepEqual(commandCliNames('cat <<EOF; devin -p x\nbody\nEOF'), ['cat', 'devin']);
+  });
+
   test('a backslash inside double quotes escapes only the five chars bash says', () => {
     // `\;` inside a double-quoted -c script stays literal — the INNER
     // shell sees `printf %s \; devin -p x` and runs only printf
