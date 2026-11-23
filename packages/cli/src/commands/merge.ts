@@ -104,6 +104,18 @@ function enableAutoMerge(t: PrTarget, method: string): boolean {
   return false;
 }
 
+/** Poll cadence and budget as positive numbers — bad input is a usage
+ *  error, not a silently weird wait. */
+function parseTiming(argv: string[]): { interval: number; timeout: number } {
+  const interval = Number(flag(argv, '--interval') ?? '60');
+  const timeout = Number(flag(argv, '--timeout') ?? '45');
+  if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
+    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
+    process.exit(2);
+  }
+  return { interval, timeout };
+}
+
 /** Flags, auth, hosts — everything before the first poll. */
 function setupCycle(argv: string[]): MergeCtx {
   const cfg = loadBroConfig();
@@ -114,12 +126,6 @@ function setupCycle(argv: string[]): MergeCtx {
     ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors });
   }
   const t = resolvePr(rev, argv, 'strict');
-  const interval = Number(flag(argv, '--interval') ?? '60');
-  const timeout = Number(flag(argv, '--timeout') ?? '45');
-  if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
-    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
-    process.exit(2);
-  }
   const method = mergeMethod(argv);
   if (!method) {
     process.exit(2);
@@ -132,7 +138,7 @@ function setupCycle(argv: string[]): MergeCtx {
     argv,
     method,
     fetcher: gateStateFetcher(rev, t, cfg.act, cache, resolveLedger(process.cwd())),
-    opts: waitOpts(rev, t, argv, { interval, timeout }, cache, 'merge wait'),
+    opts: waitOpts(rev, t, argv, parseTiming(argv), cache, 'merge wait'),
     started: Date.now(),
   };
 }
