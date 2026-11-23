@@ -211,10 +211,10 @@ export function dataRefPush(
   root: string,
   remote: string = 'origin',
   ref: string = DATA_REF
-): boolean {
+): string | false {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (gitTry(['-C', root, 'push', remote, `${ref}:${ref}`]).code === 0) {
-      return true;
+      return refSha(root, ref) ?? false;
     }
     const fetch = gitTry(['-C', root, 'fetch', remote, ref]);
     if (fetch.code !== 0) {

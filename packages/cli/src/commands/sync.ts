@@ -175,34 +175,30 @@ export function runSyncCommand(argv: string[]): void {
   if (dirs.length === 0) {
     console.log('bro sync: no artifact dirs (.agents/, debt dir)');
   }
-  let tip: string | undefined;
   for (const dir of dirs) {
     const head = dataRefCommit(root, dir, `bro data: sync ${dir}`, ref);
     if (head === null) {
       console.log(`bro sync: ${dir} — nothing to sync`);
     } else {
-      tip = head;
       console.log(`bro sync: ${dir} → ${ref} @ ${head.slice(0, 8)}`);
     }
   }
-  pushDataRef(root, remote, ref, tip);
+  pushDataRef(root, remote, ref);
 }
 
 // Push whenever a local data ref exists — an earlier sync may have left
 // one even when this checkout has no artifact dirs to commit.
-function pushDataRef(root: string, remote: string, ref: string, tip?: string): void {
+function pushDataRef(root: string, remote: string, ref: string): void {
   const hasRef = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', ref]).code === 0;
   if (!hasRef) return;
-  if (!dataRefPush(root, remote, ref)) {
+  const pushedTip = dataRefPush(root, remote, ref);
+  if (!pushedTip) {
     console.error(`warning: could not push ${ref} to ${remote} — check network and remote access`);
     return;
   }
   console.log(`bro sync: ${ref} pushed to ${remote}`);
   if (ref === 'refs/bro/data') {
-    const pushedTip = tip ?? gitTry(['-C', root, 'rev-parse', ref]).out.trim();
-    if (pushedTip !== '') {
-      mirrorDataBranch(root, remote, pushedTip);
-    }
+    mirrorDataBranch(root, remote, pushedTip);
   }
 }
 
