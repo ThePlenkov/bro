@@ -341,21 +341,7 @@ async function cmdWait(argv: string[]): Promise<void> {
   const cache = prStateCache(process.cwd());
   const ledger = resolveLedger(process.cwd());
   const res = await waitForGate(
-    async () => {
-      const state = await fetchPrActState(rev, t, {
-        ignoreChecks: act.ignoreChecks,
-        selfCheck: act.selfCheck,
-        checkHistory: checkHistory(process.cwd()),
-        maxRounds: act.maxRounds,
-        docsPaths: act.docsPaths,
-        docsMaxRounds: act.docsMaxRounds,
-        requireApproval: act.requireApproval,
-        approvers: act.approvers,
-        stateCache: cache,
-        resolveLedger: ledger,
-      });
-      return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) };
-    },
+    gateStateFetcher(rev, t, act, cache, ledger),
     waitOpts(rev, t, argv, { interval, timeout }, cache)
   );
   // the settled wait is one gate verdict — timeout, blocked, externally
@@ -397,16 +383,44 @@ async function cmdWait(argv: string[]): Promise<void> {
   await settleWait(argv, rev, t, res, timeout);
 }
 
+/** The fetch+gate closure every poll loop builds on — one place owning
+ *  which act knobs feed fetchPrActState and how the exit gate
+ *  evaluates, so a composing verb never re-types the closure. */
+export function gateStateFetcher(
+  rev: ReviewFacade,
+  t: ResolvedTarget,
+  act: ReturnType<typeof loadBroConfig>['act'],
+  cache: ReturnType<typeof prStateCache>,
+  ledger: ReturnType<typeof resolveLedger>
+): () => Promise<{ state: PrActState; gate: ExitGate }> {
+  return async () => {
+    const state = await fetchPrActState(rev, t, {
+      ignoreChecks: act.ignoreChecks,
+      selfCheck: act.selfCheck,
+      checkHistory: checkHistory(process.cwd()),
+      maxRounds: act.maxRounds,
+      docsPaths: act.docsPaths,
+      docsMaxRounds: act.docsMaxRounds,
+      requireApproval: act.requireApproval,
+      approvers: act.approvers,
+      stateCache: cache,
+      resolveLedger: ledger,
+    });
+    return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) };
+  };
+}
+
 /** The poll loop's knobs — cadence, wake subscription, the session
  *  marker, and the callbacks. `updateBranch` is the "Update branch"
  *  button as a wait step: BEHIND + mergeable is a state to fix, not
  *  to sit on — conflicts still settle for a human. */
-function waitOpts(
+export function waitOpts(
   rev: ReviewFacade,
   t: ResolvedTarget,
   argv: string[],
   timing: { interval: number; timeout: number },
-  cache: ReturnType<typeof prStateCache>
+  cache: ReturnType<typeof prStateCache>,
+  label = 'act wait'
 ): Parameters<typeof waitForGate>[1] {
   // an auto-resolved target never gets the push: the row is a recency
   // guess, and update-branch writes to the PR (strix CWE-862) — the
@@ -417,7 +431,7 @@ function waitOpts(
       : (s: PrActState) => {
           const ok = rev.updateBranch(t, s.headSha);
           console.error(
-            `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+            `${label} ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
           );
           // the pushed head obsoletes this PR's feed entry — the next
           // poll must fetch it, not re-serve the pre-update state
@@ -452,11 +466,11 @@ function waitOpts(
     },
     onPoll: (s, g) =>
       console.error(
-        `act wait ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+        `${label} ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
       ),
     onError: (err, n) =>
       console.error(
-        `act wait ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+        `${label} ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
       ),
     ...(updateBranch ? { updateBranch } : {}),
   };
