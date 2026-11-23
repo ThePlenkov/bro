@@ -632,6 +632,12 @@ describe('manifest client probes', () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0]!.scope, 'global');
     assert.equal(rows[0]!.state, 'installed');
+    // an older manifest at the slot — an update this bro ships is pending
+    const older = tmpDir('bro-clients-cursor-old-');
+    writeCursorManifest(older, { name: 'bro', version: '0.0.9' });
+    rmSync(join(home, 'plugins', 'local', 'bro'));
+    symlinkSync(older, join(home, 'plugins', 'local', 'bro'));
+    assert.equal(pluginRows('.', env).find(r => r.client === 'cursor')!.state, 'stale');
   });
 
   test('cursor: a foreign dir at the slot is present, a dangling symlink is stale', () => {
@@ -686,6 +692,14 @@ describe('manifest client probes', () => {
     mkdirSync(old, { recursive: true });
     writeFileSync(join(old, 'plugin.json'), JSON.stringify({ name: 'bro' }));
     assert.equal(pluginRows('.', staleEnv).find(r => r.client === 'claude')!.state, 'stale');
+    // a cache without the registration — a half install is present,
+    // never stale (stale means an update is pending, not "not wired")
+    const halfHome = tmpDir('bro-clients-claude-');
+    const halfEnv = { ...process.env, CLAUDE_CONFIG_DIR: halfHome };
+    const half = join(halfHome, 'plugins', 'cache', 'bro', 'bro', cliVersion);
+    mkdirSync(half, { recursive: true });
+    writeFileSync(join(half, 'plugin.json'), JSON.stringify({ name: 'bro' }));
+    assert.equal(pluginRows('.', halfEnv).find(r => r.client === 'claude')!.state, 'present');
   });
 
   test('codex: the config.toml registration + cache drive the verdict', () => {

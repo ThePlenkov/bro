@@ -9,7 +9,7 @@ description: "Use when checking which agents have bro installed, installing or r
 **All mechanics live in the `bro` CLI** (`bro clients`), spec
 specs/bro-cl1.md. This skill is policy only.
 
-    10|Two client shapes exist, and the surface treats them differently:
+Two client shapes exist, and the surface treats them differently:
 
 - **Emitted clients** — opencode, kilo, pi, omp: bro materializes an
   adapter module into the client's plugin dirs. `bro clients
@@ -22,7 +22,7 @@ specs/bro-cl1.md. This skill is policy only.
   read-only probe (marketplace registration + cached plugin copy,
   version-compared against this bro).
 
-  20|## Commands
+## Commands
 
 | Command                                                                     | What it does                                                                            |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
@@ -30,7 +30,7 @@ specs/bro-cl1.md. This skill is policy only.
 | `bro clients install <client> [--global] [--local] [--dry-run] [--force]`   | materialize the adapter; neither scope flag = both                                      |
 | `bro clients uninstall <client> [--global] [--local] [--dry-run] [--force]` | remove the materialized module                                                          |
 
-    30|## Policy
+## Policy
 
 - **`bro plugins` is the registry, `bro clients` is the agents.**
   Plugins are FOR bro (the command table); clients are the agents that
@@ -42,7 +42,9 @@ specs/bro-cl1.md. This skill is policy only.
   never hand-edit the cache copy.
 - **`stale` is an update available, not a breakage.** A manifest cache
   older than this bro still works — it just predates the current
-  build. Reinstall through the client's flow to refresh it.
+  build. Reinstall through the client's flow to refresh it. A
+  `present` row is a half install — the cache and the registration
+  disagree, so finish the install through the client's flow.
 - **doctor reads the same probe.** The `plugins` row is informational:
   "not installed" is a choice, never a defect; the row exists so a
   broken install ("I installed it but hooks never fire") has a visible

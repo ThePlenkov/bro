@@ -459,13 +459,20 @@ function newestCachedVersion(cacheDir: string): string | null {
 /** Shared shape for the marketplace+cache clients (claude, codex):
  *  registered in the client's own marketplace config AND a cached plugin
  *  copy at or above this bro's version = installed; a cache older than
- *  this bro = stale; one half only = present. */
+ *  this bro = stale; a cache without the registration — or either half
+ *  alone — is a half install, and a half install is present, never
+ *  stale (stale means "an update is pending", present means "not fully
+ *  wired"). */
 function marketplaceCacheProbe(registered: boolean, cacheDir: string): Omit<PluginRow, 'client'> {
   const ver = newestCachedVersion(cacheDir);
   let state: InstallState = 'absent';
   if (ver !== null) {
-    const current = broVersion();
-    state = registered && (current === null || !newerThan(current, ver)) ? 'installed' : 'stale';
+    if (!registered) {
+      state = 'present';
+    } else {
+      const current = broVersion();
+      state = current === null || !newerThan(current, ver) ? 'installed' : 'stale';
+    }
   } else if (registered) {
     state = 'present';
   }
@@ -497,16 +504,21 @@ function codexProbes(cwd: string, env: NodeJS.ProcessEnv): Array<Omit<PluginRow,
   return [marketplaceCacheProbe(registered, join(home, 'plugins', 'cache', 'bro', 'bro'))];
 }
 
-/** The cursor plugin manifest's name claim — the "is this slot ours"
- *  test, the role isBroAdapter plays for emitted adapters. */
-function cursorManifestName(dir: string): string | null {
+/** The cursor plugin manifest's identity — the "is this slot ours"
+ *  test plus the version the staleness verdict compares, the role
+ *  isBroAdapter plays for emitted adapters. */
+function cursorManifest(dir: string): { name: string | null; version: string | null } {
   try {
     const parsed = JSON.parse(readFileSync(join(dir, '.cursor-plugin', 'plugin.json'), 'utf8')) as {
       name?: string;
+      version?: string;
     };
-    return typeof parsed.name === 'string' ? parsed.name : null;
+    return {
+      name: typeof parsed.name === 'string' ? parsed.name : null,
+      version: typeof parsed.version === 'string' ? parsed.version : null,
+    };
   } catch {
-    return null;
+    return { name: null, version: null };
   }
 }
 
@@ -526,10 +538,16 @@ function cursorPluginStateAt(dir: string): { state: InstallState; path: string }
       return { state: 'stale', path: dir };
     }
   }
-  return {
-    state: cursorManifestName(dir) === 'bro' ? 'installed' : 'present',
-    path: dir,
-  };
+  const manifest = cursorManifest(dir);
+  if (manifest.name !== 'bro') {
+    return { state: 'present', path: dir };
+  }
+  // an older manifest at the slot — an update this bro ships is pending
+  const current = broVersion();
+  if (manifest.version !== null && current !== null && newerThan(current, manifest.version)) {
+    return { state: 'stale', path: dir };
+  }
+  return { state: 'installed', path: dir };
 }
 
 function cursorProbes(cwd: string, env: NodeJS.ProcessEnv): Array<Omit<PluginRow, 'client'>> {

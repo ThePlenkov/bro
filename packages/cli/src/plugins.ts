@@ -1285,6 +1285,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'clients',
+    skill: 'clients',
     summary: 'Agents that use bro — install matrix + adapters: list|install|uninstall <client>',
     run: argv => runClientsCommand(argv),
   }),
