@@ -3,7 +3,7 @@
   "groups": {
     "review": {
       "summary": "PR review loop — gates, threads, debt",
-      "members": ["debt", "act", "watch", "drive", "cleanup"]
+      "members": ["debt", "act", "merge", "watch", "drive", "cleanup"]
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
@@ -172,6 +172,28 @@
               "2": "usage — no PR for the current branch"
             }
           }
+        }
+      },
+      "external": false
+    },
+    "merge": {
+      "name": "merge",
+      "group": "review",
+      "summary": "Full merge cycle as one verb: ready → gate → automerge → retro [--bead|--no-retro]",
+      "spellings": ["merge", "review merge"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "act",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--bead <id>": "beads the merge discharges on MERGED",
+          "--no-retro": "skip the post-merge retro record"
+        },
+        "exits": {
+          "0": "MERGED — cycle complete",
+          "1": "blocked gate, closed-unmerged PR, timeout, or merge failure",
+          "2": "usage"
         }
       },
       "external": false

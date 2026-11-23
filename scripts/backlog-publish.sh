@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# backlog-publish.sh — publish the beads backlog onto refs/bro/data so the
-# site `/backlog` page can read it through the GitHub API at page load.
+# backlog-publish.sh — publish the beads backlog onto refs/bro/data plus
+# its raw-readable heads twin so the site `/backlog` page can read it
+# without the rate-limited GitHub API at page load.
 #
 # Steps: dolt clone (cached) → node scripts/backlog-export.ts → commit
 # backlog.json on top of the data ref tip via plumbing (never touches the
@@ -54,6 +55,9 @@ node "$ROOT/scripts/backlog-export.ts" "$DOLT_DIR" "$WORK/backlog.json"
 INDEX="$WORK/index"
 export GIT_INDEX_FILE="$INDEX"
 DATA_REF="refs/bro/data"
+# heads twin of the same commit — raw.githubusercontent serves branches
+# without the API quota the ref-resolution call costs every page load
+BRANCH_REF="refs/heads/bro-data"
 REMOTE="${REMOTE:-origin}"
 
 # plumbing commits still want an identity — runners may not configure one
@@ -104,6 +108,14 @@ COMMIT="$(publish_commit)"
 for attempt in 1 2 3; do
   if git -C "$ROOT" push "$REMOTE" "$COMMIT:$DATA_REF"; then
     echo "backlog-publish: pushed backlog.json to $DATA_REF ($COMMIT)"
+    # the heads twin is best-effort and pushed separately — a rejected
+    # branch push (protected-branch rules, per-ref policies) must not
+    # re-enter the retry loop and diverge the two refs
+    if git -C "$ROOT" push "$REMOTE" "$COMMIT:$BRANCH_REF"; then
+      echo "backlog-publish: mirrored to $BRANCH_REF"
+    else
+      echo "warning: could not mirror $COMMIT to $BRANCH_REF — raw fallback still reads $DATA_REF" >&2
+    fi
     exit 0
   fi
   if [[ "$attempt" -eq 3 ]]; then
