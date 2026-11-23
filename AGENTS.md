@@ -95,6 +95,20 @@ Developing bro itself: see CONTRIBUTING.md.
   runner; harness differences are real bugs' favorite hiding place.
   Local green ≠ PR green — after every push, `bro review act status` +
   `bro review act threads` are the only verdict.
+- **Resolve conflicts by hunk, never by side** — `git checkout
+  --ours/--theirs` or `rebase -X` silently reverts the other side's
+  concurrent changes in the same file, and the reverted work is
+  invisible in your diff. Resolve the hunks, then audit:
+  `git diff <merge-base> -- <file>` must contain only changes that are
+  yours.
+- **Hand-edited config is JSONC, not JSON** — files users edit
+  (nx.json, tsconfig, package.json) may carry comments and custom
+  formatting. Parse with a jsonc parser (throw on collected errors),
+  write via `modify`/`applyEdits` — a `JSON.parse`+`stringify`
+  round-trip destroys comments and reorders nothing users recognize.
+- **Merged options, never raw** — once `const merged = {...DEFAULTS,
+  ...options}` exists, every read below it goes to `merged`; a raw
+  `options.x` reads `undefined` where callers relied on the default.
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
   (quota, outage, runner flakes) never do. A _failed_ AI-reviewer check

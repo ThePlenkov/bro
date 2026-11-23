@@ -47,6 +47,27 @@ code nobody edits by hand.
   unit of work. bro's occupancy plane already skips session-owned
   worktrees; a review bot pushing into an occupied branch is the same
   conflict from a third lane.
+- A conflict resolution that picks a whole side —
+  `git checkout --ours/--theirs <file>`, `git rebase -X theirs`, or
+  pasting one side's file over the conflicted one — is **major**: it
+  silently reverts whatever the other side changed in the same file,
+  and the reverted work is invisible in the PR diff (it lives on the
+  base branch). Resolve hunks, then diff the resolved file against the
+  base (`git diff <base> -- <file>`) and confirm every remaining change
+  is the PR's own — any hunk that removes code the PR never touched is
+  dropped concurrent work, not a clean resolution.
+- Reading raw `options` where a merged defaults object exists
+  (`{...DEFAULTS, ...options}`) is **major**: an unset option arrives as
+  `undefined` instead of its default and lands in output paths
+  (`undefined@latest`, `bin/undefined`). Destructure the merged object;
+  the raw parameter is off-limits below the merge point.
+- Round-tripping a user-editable config file through
+  `JSON.parse`+`JSON.stringify` is **major**: `.json`/`.jsonc` files
+  users hand-edit (nx.json, tsconfig, package.json comments) may carry
+  comments and custom formatting that a re-serialize destroys, and a
+  bare `JSON.parse` throws on legal comments. Parse with a jsonc parser,
+  collect its errors and throw on any, and write via the parser's edit
+  API (`modify`/`applyEdits`) so untouched text survives verbatim.
 - `packages/core` is vendor-neutral: it holds contracts, registries, and
   generic mechanics only (`agents.<kind>` knob bags, `sessionPlanes`,
   `connectors.*` seam). An import, path, identifier, or hard-coded state
