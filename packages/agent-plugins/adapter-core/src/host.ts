@@ -41,15 +41,19 @@ import {
   REHYDRATION_TIMEOUT_MS,
   boardLines,
   broEnabled,
-  callHook,
+  callHookDetailed,
   contextOf,
   hookEmitEnv,
+  hookFailureText,
   resolveCommand,
   statusCrumb,
   statusJson,
   type BoardStatus,
   type Command,
   type HookControl,
+  type HookFailure,
+  type HookResult,
+  type ResolveOptions,
 } from './core.ts';
 
 /** The board's widget key — one slot, owned by bro. */
@@ -66,6 +70,13 @@ export const RUN_TIMEOUT_MS = 60_000;
  *  re-probing the npx rung on every keystroke would be worse than
  *  the outage. */
 export const RESOLVE_RETRY_MS = 60_000;
+
+/** How often a dead stop probe may warn. The gate is fail-open by
+ *  contract — a missing CLI or a broken hook must be LOUD once (the
+ *  operator cannot otherwise tell "nothing armed" from "the gate never
+ *  ran"), then quiet: a persistently-broken install cannot spam a
+ *  notification at every stop event. */
+export const GATE_DIAG_INTERVAL_MS = 15 * 60_000;
 
 /** The context shape this API lineage shares.
  *
@@ -298,12 +309,22 @@ export interface BroDriver {
   readonly api: unknown;
 }
 
+/** Swappable guts for the driver — tests pin a resolver rather than
+ *  spawning the real CLI ladder. Production callers pass nothing. */
+export interface BroDriverDeps {
+  resolve?(opts: ResolveOptions): Promise<Command | null>;
+}
+
 /**
  * Wire bro into a host. `api` is the host's own extension API — the
  * driver passes it through so the client can register commands and
  * tools without a second channel.
  */
-export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<Ctx>): BroDriver {
+export function createBroDriver<Ctx>(
+  host: BroHostBinding<Ctx>,
+  api: BroHostApi<Ctx>,
+  deps: BroDriverDeps = {}
+): BroDriver {
   let board: BoardStatus | null = null;
   /** Monotonic token — a refresh that finishes after a newer one
    *  started must not overwrite the newer snapshot. */
@@ -341,6 +362,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
    *  whole extension instance. */
   let resolved: Promise<Command | null> | undefined;
   let resolvedFailedAt: number | undefined;
+  const resolve = deps.resolve ?? resolveCommand;
   const command = (): Promise<Command | null> => {
     if (
       resolved !== undefined &&
@@ -349,7 +371,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return resolved;
     }
     resolvedFailedAt = undefined;
-    resolved = resolveCommand({ npxPin: host.npxPin }).then(cmd => {
+    resolved = resolve({ npxPin: host.npxPin }).then(cmd => {
       if (cmd === null) {
         resolvedFailedAt = Date.now();
       }
@@ -358,19 +380,31 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     return resolved;
   };
 
+  /** Probe one bro hook — the verdict plus the failure class when the
+   *  probe could not run. A bro-disabled dir is healthy silence (both
+   *  fields null), never a failure: the repo simply didn't opt in. */
+  const probeResult = async (
+    event: string,
+    payload: unknown,
+    cwd: string,
+    timeoutMs = HOOK_TIMEOUT_MS
+  ): Promise<HookResult> => {
+    if (!broEnabled(cwd)) {
+      return { control: null, failure: null };
+    }
+    const cmd = await command();
+    return cmd === null
+      ? { control: null, failure: { kind: 'no-cli' } }
+      : callHookDetailed(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+  };
+
   /** Probe one bro hook. Fail-open: every failure is "no opinion". */
   const probe = async (
     event: string,
     payload: unknown,
     cwd: string,
     timeoutMs = HOOK_TIMEOUT_MS
-  ): Promise<HookControl | null> => {
-    if (!broEnabled(cwd)) {
-      return null;
-    }
-    const cmd = await command();
-    return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
-  };
+  ): Promise<HookControl | null> => (await probeResult(event, payload, cwd, timeoutMs)).control;
 
   const paint = (ctx: Ctx): void => {
     if (!host.canPaint(ctx)) {
@@ -581,6 +615,29 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     return host.appendToolResult(event, text);
   });
 
+  /** The last gate diagnostic stamp — one warn per interval per driver
+   *  instance. In-process on purpose: the diagnostic's own contract is
+   *  "never break the gate", and in-memory state is the only store that
+   *  cannot itself fail (a marker file could). A driver reload simply
+   *  re-arms the window. */
+  let gateDiagAt = 0;
+  const gateDiag = (ctx: Ctx, failure: HookFailure): void => {
+    const now = Date.now();
+    if (now - gateDiagAt < GATE_DIAG_INTERVAL_MS) {
+      return;
+    }
+    gateDiagAt = now;
+    try {
+      host.notify(
+        ctx,
+        `bro stop gate did not run — ${hookFailureText(failure)}; the stop is unguarded`,
+        'warning'
+      );
+    } catch {
+      // a throwing notify must never turn fail-open into fail-closed
+    }
+  };
+
   // the stop gate: bro decides, the host refuses. The host's own
   // "already refused" flag goes back to bro so bro's one-shot rule
   // applies — the driver never loops the gate itself.
@@ -591,7 +648,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return undefined;
     }
     const already = gatedSession === sessionId || host.stopAlreadyRefused(event);
-    const control = await probe(
+    const { control, failure } = await probeResult(
       'stop',
       {
         session_id: sessionId,
@@ -599,6 +656,13 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       },
       host.cwd(ctx)
     );
+    // a failed probe looks exactly like "nothing armed" — the gate is
+    // fail-open by contract, but the operator must hear once that the
+    // gate never ran
+    if (failure !== null) {
+      gateDiag(ctx, failure);
+      return undefined;
+    }
     if (control?.decision !== 'block') {
       const hint = contextOf(control);
       if (hint !== '') {

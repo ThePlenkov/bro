@@ -1,0 +1,128 @@
+/**
+ * The kilo adapter's stop gate — a failed `bro hooks stop` probe is
+ * indistinguishable from "nothing armed" unless it is named. The gate
+ * is fail-open by contract, so the diagnostic is loud once per
+ * interval and quiet after.
+ */
+import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+import plugin, { hookOutcome } from './kilo.ts';
+
+test('hookOutcome: a spawn or timeout error is its cause', () => {
+  const { control, failure } = hookOutcome({
+    code: null,
+    stdout: '',
+    stderr: '',
+    error: 'spawn bro ENOENT',
+  });
+  assert.equal(control, null);
+  assert.equal(failure, 'spawn bro ENOENT');
+});
+
+test('hookOutcome: a nonzero exit names its code', () => {
+  assert.equal(
+    hookOutcome({ code: 2, stdout: '', stderr: '', error: null }).failure,
+    'the hook exited 2'
+  );
+  assert.equal(
+    hookOutcome({ code: null, stdout: '', stderr: '', error: null }).failure,
+    'the hook exited with no exit code'
+  );
+});
+
+test('hookOutcome: empty stdout on a clean exit is healthy silence', () => {
+  assert.deepEqual(hookOutcome({ code: 0, stdout: '', stderr: '', error: null }), {
+    control: null,
+    failure: null,
+  });
+});
+
+test('hookOutcome: chatter with no control line is broken output', () => {
+  const { control, failure } = hookOutcome({
+    code: 0,
+    stdout: 'loading beads...\ngarbage\n',
+    stderr: '',
+    error: null,
+  });
+  assert.equal(control, null);
+  assert.equal(failure, 'the hook answered with no control object');
+});
+
+test('hookOutcome: the last parseable line wins', () => {
+  const { control, failure } = hookOutcome({
+    code: 0,
+    stdout: 'noise\n{"decision":"block","reason":"dirty"}\n',
+    stderr: '',
+    error: null,
+  });
+  assert.deepEqual(control, { decision: 'block', reason: 'dirty' });
+  assert.equal(failure, null);
+});
+
+// --- the plugin's idle handler: the warn is loud once, then quiet ----
+
+const dir = mkdtempSync(join(tmpdir(), 'bro-kilo-'));
+after(() => rmSync(dir, { recursive: true, force: true }));
+
+interface Logged {
+  level: string;
+  message: string;
+}
+
+interface IdleEvent {
+  event: { type: string; properties: Record<string, unknown> };
+}
+
+type Server = (input: { directory: string; client: unknown }) => Promise<{
+  event: (e: IdleEvent) => Promise<void>;
+}>;
+
+function makePlugin(directory: string): {
+  logs: Logged[];
+  idle: (sessionID: string) => Promise<void>;
+} {
+  const logs: Logged[] = [];
+  const client = {
+    app: {
+      log: async (input: { body: { level: string; message: string } }) => {
+        logs.push(input.body);
+      },
+    },
+  };
+  const ready = (plugin.server as Server)({ directory, client });
+  return {
+    logs,
+    idle: async sessionID => {
+      const hooks = await ready;
+      await hooks.event({ event: { type: 'session.idle', properties: { sessionID } } });
+    },
+  };
+}
+
+test('a dead stop probe warns once, then stays quiet inside the window', async () => {
+  // an empty PATH makes every hook spawn ENOENT — each idle takes the
+  // failure path deterministically, no real CLI involved
+  const realPath = process.env.PATH;
+  process.env.PATH = '';
+  try {
+    const { logs, idle } = makePlugin(dir);
+    await idle('s1');
+    await idle('s1');
+    const warns = logs.filter(l => l.level === 'warn');
+    assert.equal(warns.length, 1);
+    assert.match(warns[0]?.message ?? '', /stop gate did not run/);
+  } finally {
+    process.env.PATH = realPath;
+  }
+});
+
+test('a silent probe in a non-bro dir is health, never a warning', async () => {
+  // the real CLI answers session.idle in a non-bro directory: a clean
+  // exit with empty stdout — the gate is open by choice, no diagnostic
+  const { logs, idle } = makePlugin(dir);
+  await idle('s1');
+  assert.equal(logs.filter(l => l.level === 'warn').length, 0);
+});

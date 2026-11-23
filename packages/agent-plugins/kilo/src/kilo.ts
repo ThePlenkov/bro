@@ -21,6 +21,13 @@ const HOOK_TIMEOUT_MS = 15_000;
 const RUN_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 1 << 20;
 
+/** How often a dead stop probe may warn. The gate is fail-open by
+ *  contract — a missing CLI or a broken hook must be LOUD once (the
+ *  operator cannot otherwise tell "nothing armed" from "the gate never
+ *  ran"), then quiet: a persistently-broken install cannot spam a
+ *  warning at every idle event. */
+const GATE_DIAG_INTERVAL_MS = 15 * 60_000;
+
 function appendOutput(current: string, chunk: string): string {
   const remaining = MAX_OUTPUT - current.length;
   return remaining > 0 ? current + chunk.slice(0, remaining) : current;
@@ -56,7 +63,7 @@ function broArgs(event: string, extra: string[] = []): string[] {
   return ['bro', 'hooks', event, ...extra];
 }
 
-interface SpawnResult {
+export interface SpawnResult {
   code: number | null;
   stdout: string;
   stderr: string;
@@ -157,15 +164,47 @@ function spawnCollect(
   });
 }
 
-/** Run a bro hook, passing the event payload on stdin. Returns the parsed
- *  hook control JSON on stdout, or null on any failure (fail-open). */
-async function runBroHook(event: string, input: unknown): Promise<unknown> {
+/** One hook call's verdict — the parsed control JSON, or the cause it
+ *  could not produce one. `failure` is null for health: a control
+ *  object, or bro's silence-as-no-opinion (clean exit, empty stdout). */
+export interface HookOutcome {
+  control: unknown;
+  failure: string | null;
+}
+
+/** Classify a spawned hook run. Every failure mode names its cause;
+ *  empty stdout on a clean exit is healthy silence, not an outage. */
+export function hookOutcome(result: SpawnResult): HookOutcome {
+  if (result.error !== null) {
+    return { control: null, failure: result.error };
+  }
+  if (result.code !== 0) {
+    return { control: null, failure: `the hook exited ${result.code ?? 'with no exit code'}` };
+  }
+  if (result.stdout === '') {
+    return { control: null, failure: null };
+  }
+  // bro emits one JSON control object per line; take the last parseable one
+  for (const line of result.stdout.split('\n').reverse()) {
+    try {
+      return { control: JSON.parse(line) as unknown, failure: null };
+    } catch {
+      continue;
+    }
+  }
+  return { control: null, failure: 'the hook answered with no control object' };
+}
+
+/** Run a bro hook, passing the event payload on stdin. The outcome
+ *  carries the failure cause — "bro had nothing to say" and "bro could
+ *  not answer" both fail open, but the second must not be invisible. */
+async function runBroHook(event: string, input: unknown): Promise<HookOutcome> {
   const argv = broArgs(event);
   let payload: string | undefined;
   try {
     payload = JSON.stringify(input);
   } catch {
-    return null;
+    return { control: null, failure: null };
   }
   const result = await spawnCollect(argv[0], argv.slice(1), {
     input: payload,
@@ -181,18 +220,7 @@ async function runBroHook(event: string, input: unknown): Promise<unknown> {
     },
     timeoutMs: HOOK_TIMEOUT_MS,
   });
-  if (result.error !== null || result.code !== 0 || !result.stdout) {
-    return null;
-  }
-  // bro emits one JSON control object per line; take the last parseable one
-  for (const line of result.stdout.split('\n').reverse()) {
-    try {
-      return JSON.parse(line) as unknown;
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  return hookOutcome(result);
 }
 
 /** Extract the additionalContext a bro hook wants injected, if any. */
@@ -238,12 +266,15 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   const liveSessions = new Set<string>();
   const hydratedContexts = new Map<string, { token: number; context: string | null }>();
   let hydrationToken = 0;
+  // one warn per interval that the gate never ran — in-memory on
+  // purpose (the diagnostic itself cannot be allowed to fail)
+  let stopGateDiagAt = 0;
   const hydrate = async (sessionKey: string): Promise<void> => {
     const token = ++hydrationToken;
     hydratedContexts.set(sessionKey, { token, context: null });
     const out = await runBroHook('session-start', { session_id: sessionKey });
     if (Object.is(hydratedContexts.get(sessionKey)?.token, token)) {
-      hydratedContexts.set(sessionKey, { token, context: hookContext(out) });
+      hydratedContexts.set(sessionKey, { token, context: hookContext(out.control) });
     }
   };
   const contextForSession = (sessionKey: string): string | null => {
@@ -340,7 +371,26 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       if (event.type !== 'session.idle') {
         return;
       }
-      const out = await runBroHook('stop', { session_id: event.properties.sessionID });
+      const { control: out, failure } = await runBroHook('stop', {
+        session_id: event.properties.sessionID,
+      });
+      if (failure !== null) {
+        // a dead probe is indistinguishable from "nothing armed" — warn
+        // once per interval that the gate never ran, then stay quiet:
+        // fail-open must not become spam-open on a broken install
+        const now = Date.now();
+        if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
+          stopGateDiagAt = now;
+          await client.app.log({
+            body: {
+              service: 'bro',
+              level: 'warn',
+              message: `bro stop gate did not run (${failure}) — the stop is unguarded`,
+            },
+          });
+        }
+        return;
+      }
       if (out && typeof out === 'object' && (out as { decision?: string }).decision === 'block') {
         await client.app.log({
           body: {

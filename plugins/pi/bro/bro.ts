@@ -144,12 +144,23 @@ function hookEmitEnv(kind, opts = {}) {
 	if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
 	return env;
 }
+/** The one-line cause a diagnostic surfaces for a failed hook call. */
+function hookFailureText(failure) {
+	switch (failure.kind) {
+		case "no-cli": return "no bro CLI resolved";
+		case "spawn": return "the hook process failed to spawn";
+		case "timeout": return `the hook timed out after ${failure.timeoutMs}ms`;
+		case "exit": return `the hook exited ${failure.code ?? "with no exit code"}`;
+		case "output": return "the hook answered with no control object";
+	}
+}
 /**
-* Run one `bro hooks <event>` with the payload on stdin; resolve null on
-* every failure mode — spawn error, timeout, nonzero exit, garbage out.
-* `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
+* callHook with the failure class attached. The stop gate needs to tell
+* "bro had nothing to say" apart from "bro could not answer": both are
+* fail-open, but the second must not pass invisibly. A clean exit with
+* empty stdout is silence (failure null) — only real outage kinds set it.
 */
-async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
+async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -172,16 +183,25 @@ async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		return null;
+		return {
+			control: null,
+			failure: { kind: "spawn" }
+		};
 	}
 	let settled = false;
-	const settle = (value) => {
+	const settle = (result) => {
 		if (!settled) {
 			settled = true;
-			resolve(value);
+			resolve(result);
 		}
 	};
-	const timer = killAfter(child, timeoutMs, () => settle(null));
+	const timer = killAfter(child, timeoutMs, () => settle({
+		control: null,
+		failure: {
+			kind: "timeout",
+			timeoutMs
+		}
+	}));
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -190,11 +210,35 @@ async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 	});
 	child.on("error", () => {
 		clearTimeout(timer);
-		settle(null);
+		settle({
+			control: null,
+			failure: { kind: "spawn" }
+		});
 	});
 	child.on("close", (code) => {
 		clearTimeout(timer);
-		settle(code === 0 ? parseControl(out) : null);
+		if (code !== 0) {
+			settle({
+				control: null,
+				failure: {
+					kind: "exit",
+					code
+				}
+			});
+			return;
+		}
+		const control = parseControl(out);
+		if (control === null && out.trim() !== "") {
+			settle({
+				control: null,
+				failure: { kind: "output" }
+			});
+			return;
+		}
+		settle({
+			control,
+			failure: null
+		});
 	});
 	child.stdin?.on("error", () => {});
 	child.stdin?.end(JSON.stringify(payload));
@@ -345,6 +389,12 @@ const RUN_TIMEOUT_MS = 6e4;
 *  re-probing the npx rung on every keystroke would be worse than
 *  the outage. */
 const RESOLVE_RETRY_MS = 6e4;
+/** How often a dead stop probe may warn. The gate is fail-open by
+*  contract — a missing CLI or a broken hook must be LOUD once (the
+*  operator cannot otherwise tell "nothing armed" from "the gate never
+*  ran"), then quiet: a persistently-broken install cannot spam a
+*  notification at every stop event. */
+const GATE_DIAG_INTERVAL_MS = 15 * 6e4;
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -420,7 +470,7 @@ function sharedBinding(host) {
 * driver passes it through so the client can register commands and
 * tools without a second channel.
 */
-function createBroDriver(host, api) {
+function createBroDriver(host, api, deps = {}) {
 	let board = null;
 	/** Monotonic token — a refresh that finishes after a newer one
 	*  started must not overwrite the newer snapshot. */
@@ -456,21 +506,32 @@ function createBroDriver(host, api) {
 	*  whole extension instance. */
 	let resolved;
 	let resolvedFailedAt;
+	const resolve = deps.resolve ?? resolveCommand;
 	const command = () => {
 		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)) return resolved;
 		resolvedFailedAt = void 0;
-		resolved = resolveCommand({ npxPin: host.npxPin }).then((cmd) => {
+		resolved = resolve({ npxPin: host.npxPin }).then((cmd) => {
 			if (cmd === null) resolvedFailedAt = Date.now();
 			return cmd;
 		});
 		return resolved;
 	};
-	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
-	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
-		if (!broEnabled(cwd)) return null;
+	/** Probe one bro hook — the verdict plus the failure class when the
+	*  probe could not run. A bro-disabled dir is healthy silence (both
+	*  fields null), never a failure: the repo simply didn't opt in. */
+	const probeResult = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
+		if (!broEnabled(cwd)) return {
+			control: null,
+			failure: null
+		};
 		const cmd = await command();
-		return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+		return cmd === null ? {
+			control: null,
+			failure: { kind: "no-cli" }
+		} : callHookDetailed(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
 	};
+	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
+	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => (await probeResult(event, payload, cwd, timeoutMs)).control;
 	const paint = (ctx) => {
 		if (!host.canPaint(ctx)) return;
 		if (board === null) {
@@ -603,12 +664,30 @@ function createBroDriver(host, api) {
 		if (text === "") return;
 		return host.appendToolResult(event, text);
 	});
+	/** The last gate diagnostic stamp — one warn per interval per driver
+	*  instance. In-process on purpose: the diagnostic's own contract is
+	*  "never break the gate", and in-memory state is the only store that
+	*  cannot itself fail (a marker file could). A driver reload simply
+	*  re-arms the window. */
+	let gateDiagAt = 0;
+	const gateDiag = (ctx, failure) => {
+		const now = Date.now();
+		if (now - gateDiagAt < GATE_DIAG_INTERVAL_MS) return;
+		gateDiagAt = now;
+		try {
+			host.notify(ctx, `bro stop gate did not run — ${hookFailureText(failure)}; the stop is unguarded`, "warning");
+		} catch {}
+	};
 	const stopGate = async (event, ctx, sessionId) => {
 		if (host.stopAborted?.(event) === true) return;
-		const control = await probe("stop", {
+		const { control, failure } = await probeResult("stop", {
 			session_id: sessionId,
 			stop_hook_active: gatedSession === sessionId || host.stopAlreadyRefused(event)
 		}, host.cwd(ctx));
+		if (failure !== null) {
+			gateDiag(ctx, failure);
+			return;
+		}
 		if (control?.decision !== "block") {
 			const hint = contextOf(control);
 			if (hint !== "") host.notify(ctx, hint, "info");
