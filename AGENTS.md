@@ -81,7 +81,9 @@ Developing bro itself: see CONTRIBUTING.md.
   it, and the pattern that would have avoided it, then carry that
   pattern into the next write. A failure that teaches nothing produces
   the same failure again next PR — the retro is what makes the loop
-  converge instead of bouncing between flags.
+  turn. And never iterate by pushing and waiting for the App's verdict:
+  `npm run check:codescene` runs the same `cs delta` locally and lists
+  every finding in one pass — fix them all, then push once.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).

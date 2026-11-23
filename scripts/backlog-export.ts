@@ -20,7 +20,7 @@ if (!doltDir || !outFile) {
 }
 
 // literal argv, no shell; operator-supplied paths are the script's contract
-const DOLT_OPTS = { cwd: '', encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 } as const;
+const DOLT_OPTS = { cwd: '', encoding: 'utf8', maxBuffer: 256 << 20 } as const;
 
 function sql<T>(query: string): T[] {
   const opts = { ...DOLT_OPTS, cwd: doltDir };
@@ -38,6 +38,7 @@ interface IssueRow {
   created_at: string;
   closed_at?: string;
   assignee?: string;
+  description?: string;
 }
 interface DepRow {
   issue_id: string;
@@ -50,7 +51,7 @@ interface LabelRow {
 }
 
 const issues = sql<IssueRow>(
-  'SELECT id,title,status,priority,issue_type,created_at,closed_at,assignee FROM issues'
+  'SELECT id,title,status,priority,issue_type,created_at,closed_at,assignee,description FROM issues'
 );
 const deps = sql<DepRow>(
   "SELECT issue_id,depends_on_issue_id,type FROM dependencies WHERE type IN ('parent-child','blocks','related')"
