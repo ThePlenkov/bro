@@ -18,10 +18,10 @@ import type { ExitCode } from '@broject/core';
 import {
   emitLifecycle,
   ensureAuth,
+  facadeName,
   ghTry,
   hasHelpFlag,
   mergeQueueHost,
-  type PrTarget,
   printUsage,
   type ReviewFacade,
   reviewHost,
@@ -71,24 +71,40 @@ Flags:
 /** The cycle's carry-through — what a phase hands the next one. */
 interface MergeCtx {
   rev: ReviewFacade;
+  /** Resolved reviews-connector name — host mutations that only gh can
+   *  do (ready, --auto) guard on it instead of mutating the wrong host. */
+  host: string;
   queue: ReturnType<typeof mergeQueueHost>;
   t: ResolvedTarget;
   argv: string[];
+  json: boolean;
   method: NonNullable<ReturnType<typeof mergeMethod>>;
   fetcher: ReturnType<typeof gateStateFetcher>;
-  opts: Parameters<typeof waitForGate>[1];
+  opts: NonNullable<Parameters<typeof waitForGate>[1]>;
   started: number;
   cache: ReturnType<typeof prStateCache>;
   /** Thread ids the cycle opened on — the retro's evidence. */
   threadsAtStart: string[];
   /** Why the host still owns the landing on a settle timeout. */
   armedNote?: string;
+  /** landPr emits its own merged event — the run's emit must not double it. */
+  mergedEventEmitted?: boolean;
+}
+
+/** Status chatter: stderr under --json so stdout stays one verdict line. */
+function note(ctx: MergeCtx, msg: string): void {
+  if (ctx.json) console.error(msg);
+  else console.log(msg);
 }
 
 /** mark-ready is a host mutation the facade doesn't expose — `gh pr
- *  ready` is the GitHub path; other hosts fail loud with their own
- *  error instead of silently merging a draft. */
-function markReady(t: PrTarget): void {
+ *  ready` is the GitHub path; other hosts fail loud instead of gh
+ *  resolving the same owner/repo on the wrong host. */
+function markReady(ctx: MergeCtx): void {
+  const { t } = ctx;
+  if (ctx.host !== 'github') {
+    throw new Error(`mark-ready unsupported on reviews connector "${ctx.host}"`);
+  }
   const r = ghTry(['pr', 'ready', String(t.pr), '-R', t.repo]);
   if (r.code !== 0) {
     throw new Error(`mark-ready failed on ${t.repo}#${t.pr}: ${r.err || r.out}`);
@@ -100,6 +116,7 @@ function markReady(t: PrTarget): void {
  *  caller falls back to the pinned direct merge. */
 function enableAutoMerge(ctx: MergeCtx): boolean {
   const { t, method } = ctx;
+  if (ctx.host !== 'github') return false;
   const r = ghTry(['pr', 'merge', String(t.pr), `--${method}`, '--auto', '-R', t.repo]);
   if (r.code === 0) return true;
   const err = r.err || r.out;
@@ -144,14 +161,20 @@ function setupCycle(argv: string[]): MergeCtx {
     process.exit(2);
   }
   const cache = prStateCache(process.cwd());
+  const json = argv.includes('--json');
+  // every status print (own + shared act helpers) is chatter — under
+  // --json only the verdict line belongs on stdout
+  if (json) console.log = console.error;
   return {
     rev,
+    host: facadeName('reviews', { dir: process.cwd() }, { prefer: cfg.connectors }),
     queue,
     t,
     argv,
+    json,
     method,
     fetcher: gateStateFetcher(rev, t, cfg.act, cache, resolveLedger(process.cwd())),
-    opts: waitOpts(rev, t, argv, parseTiming(argv), cache, 'merge wait'),
+    opts: waitOpts(rev, t, argv, parseTiming(argv), cache, 'merge wait') ?? {},
     started: Date.now(),
     cache,
     threadsAtStart: [],
@@ -161,50 +184,82 @@ function setupCycle(argv: string[]): MergeCtx {
 /** A draft gates nothing — mark ready on the host and refresh the
  *  feed entry. Returns the snapshot the cycle opened on (the retro
  *  reads its thread ids). */
-async function readyPhase(ctx: MergeCtx, first: Awaited<ReturnType<MergeCtx['fetcher']>>) {
-  if (first.state.state !== 'OPEN' || !first.state.isDraft) return;
-  markReady(ctx.t);
+async function readyPhase(
+  ctx: MergeCtx,
+  first: Awaited<ReturnType<MergeCtx['fetcher']>>
+): Promise<boolean> {
+  if (first.state.state !== 'OPEN' || !first.state.isDraft) return true;
+  try {
+    markReady(ctx);
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return false;
+  }
   // the ready flip obsoletes the feed entry — the gate must fetch the
   // post-ready state, not re-serve the draft snapshot it blocked on
   ctx.cache?.invalidate(ctx.t);
-  console.log(`merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} marked ready`);
+  note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} marked ready`);
   emitLifecycle(process.cwd(), {
     kind: 'gate',
     pr: ctx.t.pr,
     to: 'ready',
     detail: { via: 'merge', sha: first.state.headSha },
   });
+  return true;
 }
 
-/** The settle poll after a merge was armed or enqueued — one shape for
- *  both paths. Returns the landed state or reports and exits. */
+/** The settle poll after a merge was armed or enqueued — the gate
+ *  waits for *green*, settle waits for *terminal*: a green-but-still-open
+ *  PR is the host mid-merge, not a timeout. Returns the landed state or
+ *  reports and exits. */
 async function settlePhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
-  const follow = await waitForGate(ctx.fetcher, ctx.opts);
-  if (follow.state.state === 'MERGED') return follow.state;
-  emitVerdict(
-    gateVerdict(ctx, res),
-    follow.state.state === 'CLOSED' ? 'closed' : 'timeout',
-    follow,
-    ctx.argv
-  );
-  if (ctx.armedNote !== undefined) {
-    console.error(
-      `merge: ${ctx.armedNote} on ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — poll timed out; ` +
-        'the host still owns the merge'
-    );
+  const deadline = Date.now() + (ctx.opts.timeoutMs ?? 45 * 60_000);
+  const interval = ctx.opts.intervalMs ?? 60_000;
+  for (;;) {
+    const follow = await ctx.fetcher();
+    if (follow.state.state !== 'OPEN') {
+      if (follow.state.state === 'MERGED') return follow.state;
+      emitVerdict(gateVerdict(ctx, res), 'closed', follow.state, ctx.argv);
+      process.exitCode = 1;
+      return undefined;
+    }
+    if (Date.now() >= deadline) {
+      emitVerdict(
+        gateVerdict(ctx, res),
+        ctx.armedNote ? 'armed-timeout' : 'timeout',
+        follow.state,
+        ctx.argv
+      );
+      if (ctx.armedNote !== undefined) {
+        console.error(
+          `merge: ${ctx.armedNote} on ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — poll timed out; ` +
+            'the host still owns the merge'
+        );
+      }
+      process.exitCode = 1;
+      return undefined;
+    }
+    await new Promise(r => setTimeout(r, interval));
   }
-  process.exitCode = 1;
-  return undefined;
 }
 
 /** Gate green: arm the host's auto-merge, or fall back to the pinned
  *  merge / external queue. Returns the landed state or exits. */
 async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   warnHumanOwned(ctx.rev, ctx.t);
-  if (enableAutoMerge(ctx)) {
-    console.log(
-      `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — auto-merge armed (${ctx.method})`
-    );
+  // the gate's green snapshot may be stale — re-check fresh before any
+  // host mutation, and re-gate when the head or the verdict moved
+  ctx.cache?.invalidate(ctx.t);
+  const fresh = await ctx.fetcher();
+  if (fresh.state.headSha !== res.state.headSha || !fresh.gate.ok) {
+    note(ctx, 'merge: gate state moved since green — re-entering the gate');
+    const again = await gatePhase(ctx);
+    return again === undefined ? undefined : landPhase(ctx, again);
+  }
+  // a configured merge queue owns landing — gh --auto would bypass it
+  if (!ctx.queue && enableAutoMerge(ctx)) {
+    note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — auto-merge armed (${ctx.method})`);
     emitLifecycle(process.cwd(), {
       kind: 'gate',
       pr: ctx.t.pr,
@@ -221,12 +276,16 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
     { ref: res.state.headRef, sha: res.state.headSha },
     ctx.queue
   );
-  if (head !== undefined) return res.state;
+  if (head !== undefined) {
+    ctx.mergedEventEmitted = true; // landPr emitted 'merged' itself
+    return res.state;
+  }
   if (process.exitCode === 1) {
-    emitVerdict(gateVerdict(ctx, res), 'merge-failed', res, ctx.argv);
+    emitVerdict(gateVerdict(ctx, res), 'merge-failed', res.state, ctx.argv);
     return undefined;
   }
   // enqueued on an external merge queue — settle is still a poll
+  ctx.armedNote ??= 'merge queued';
   return settlePhase(ctx, res);
 }
 
@@ -244,17 +303,28 @@ async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
       `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} blocked — fix and re-run; ` +
         'finished phases no-op on re-entry'
     );
-    emitVerdict(verdict, 'blocked', res, ctx.argv);
+    emitVerdict(verdict, 'blocked', res.state, ctx.argv);
     process.exitCode = 1;
     return undefined;
   }
   if (res.state.state === 'CLOSED') {
     console.error(`error: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} is CLOSED — nothing to merge`);
-    emitVerdict(verdict, 'closed', res, ctx.argv);
+    emitVerdict(verdict, 'closed', res.state, ctx.argv);
     process.exitCode = 1;
     return undefined;
   }
   return res;
+}
+
+/** The cycle's first read — a transient host error aborts the run before
+ *  any phase; one retry keeps a hiccup from killing a re-entry. */
+async function firstFetch(ctx: MergeCtx): Promise<Awaited<ReturnType<MergeCtx['fetcher']>>> {
+  try {
+    return await ctx.fetcher();
+  } catch {
+    await new Promise(r => setTimeout(r, 5000));
+    return ctx.fetcher();
+  }
 }
 
 export async function runMergeCommand(argv: string[]): Promise<void> {
@@ -266,25 +336,45 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
     /* housekeeping, never a gate */
   }
 
-  const first = await ctx.fetcher();
+  const first = await firstFetch(ctx);
   ctx.threadsAtStart = first.state.threads.map(th => th.id);
-  await readyPhase(ctx, first);
+
+  // re-entry on a landed PR: phases all no-op — report the record, never
+  // re-record it (retro/bead writes are not replayed)
+  if (first.state.state === 'MERGED') {
+    note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} already MERGED`);
+    emitVerdict(
+      gateVerdict(ctx, { ...first, polls: 0, timedOut: false }),
+      'already-merged',
+      first.state,
+      argv
+    );
+    const bead = flag(argv, '--bead');
+    if (bead !== undefined) {
+      closeLandedBead(ctx.rev, ctx.t, bead);
+    }
+    await reportActOutcome(argv, ctx.t, first.state, 'merged');
+    return;
+  }
+  if (!(await readyPhase(ctx, first))) return;
 
   const res = await gatePhase(ctx);
   if (res === undefined) return;
   const landed = res.state.state === 'MERGED' ? res.state : await landPhase(ctx, res);
   if (landed === undefined) return;
 
-  console.log(`merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} MERGED`);
-  emitLifecycle(process.cwd(), {
-    kind: 'merge',
-    pr: ctx.t.pr,
-    to: 'merged',
-    // the landed SHA, not the gate-green one — auto-merge and merge
-    // queues land a head the gate never saw
-    detail: { via: 'merge', sha: landed.headSha },
-  });
-  emitVerdict(gateVerdict(ctx, res), 'merged', res, argv);
+  note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} MERGED`);
+  if (!ctx.mergedEventEmitted) {
+    emitLifecycle(process.cwd(), {
+      kind: 'merge',
+      pr: ctx.t.pr,
+      to: 'merged',
+      // the landed SHA, not the gate-green one — auto-merge and merge
+      // queues land a head the gate never saw
+      detail: { via: 'merge', sha: landed.headSha },
+    });
+  }
+  emitVerdict(gateVerdict(ctx, res), 'merged', landed, argv);
 
   const bead = flag(argv, '--bead');
   if (bead !== undefined) {
@@ -294,7 +384,7 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
 
   // —— phase: retro ——
   if (!argv.includes('--no-retro')) {
-    recordCycleRetro(ctx, res);
+    recordCycleRetro(ctx, res, landed);
   }
 }
 
@@ -312,11 +402,12 @@ function gateVerdict(ctx: MergeCtx, res: GateWaitResult): Record<string, unknown
 function emitVerdict(
   base: Record<string, unknown>,
   verdict: string,
-  res: GateWaitResult,
+  state: PrActState,
   argv: string[]
 ): void {
   if (argv.includes('--json')) {
-    console.log(JSON.stringify({ ...base, verdict, state: res.state.state }));
+    // console.log is stderr under --json — the verdict is stdout's only line
+    process.stdout.write(`${JSON.stringify({ ...base, verdict, state: state.state })}\n`);
   } else {
     console.log(`merge: verdict=${verdict}`);
   }
@@ -326,7 +417,7 @@ function emitVerdict(
  *  the run saw, fix rounds, wall time — plus one backlog action that
  *  turns the raw findings into prevention work. A failed retro write
  *  warns; it never un-merges (spec: infra failures don't block). */
-function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult): void {
+function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult, landed: PrActState): void {
   const { state } = res;
   const { threadsAtStart, started } = ctx;
   const link = ctx.rev.prLink(ctx.t.repo, ctx.t.pr);
@@ -336,11 +427,17 @@ function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult): void {
       what: `merge cycle for ${link}: ${threadsAtStart.length} thread(s) at start, ${state.fixRounds} fix round(s), ${minutes}m wall`,
       why: 'full MR cycle retro — `bro merge` records what the gate and reviewers surfaced so prevention lands where the finding lives',
       scope: 'project',
+      // a cycle retro answers no wtf — without the explicit null
+      // recordRetro closes whichever single wtf bead happens to be open
+      wtf: null,
       evidence: [
         `pr: ${link}`,
-        `head: ${state.headSha}`,
+        // the landed head, not the gate-green one — the queue may have
+        // landed a commit the gate snapshot predates
+        `head: ${landed.headSha}`,
         `threads at start: ${threadsAtStart.length ? threadsAtStart.join(', ') : 'none'}`,
-        `threads at land: ${state.threads.length ? state.threads.map(t => t.id).join(', ') : 'none'}`,
+        `threads at land: ${landed.threads.length ? landed.threads.map(t => t.id).join(', ') : 'none'}`,
+        `blockers seen: ${res.gate.blockers.length ? res.gate.blockers.join('; ') : 'none'}`,
         `fix rounds: ${state.fixRounds}`,
         `wall time: ${minutes}m`,
       ],

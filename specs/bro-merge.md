@@ -18,7 +18,7 @@ One supervised sequence over the PR the caller points at. It composes the
 existing verbs; it does not re-implement them:
 
 ```text
-bro merge <PR> [--strategy squash|merge|rebase] [--bead ID] [--no-retro]
+bro merge <PR> [--squash|--merge|--rebase] [--bead ID] [--no-retro]
                [--interval S] [--timeout M] [--json]
 ```
 
