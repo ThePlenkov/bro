@@ -18,6 +18,12 @@
  * forward verbatim too — each direction's outbound id space is
  * single-sourced (client-originated on the downstream leg,
  * agent-originated on the upstream leg), so nothing translates.
+ *
+ * Writes carry the peer's own backpressure (bro-0w2tg): a leg whose
+ * sink stops accepting queues outbound writes only to a high-water
+ * mark, pausing the pump that feeds it until drain — and a leg with
+ * no write progress for `writeStallMs` is declared dead, so a stalled
+ * peer ends in the normal verdict/teardown path, not a memory climb.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -170,6 +176,11 @@ export interface AcpProxyOptions {
   /** Agent mode (spec bro-tegz2) — bro's own surface on top of the
    *  verbatim pump: identity, command announcement, local turns. */
   agent?: AcpAgentOverlay;
+  /** Write-stall bound (ms) — a leg whose outbound writes make no
+   *  progress for this long is declared dead: the peer stopped
+   *  reading, and the verdict race/teardown sweep handle it like any
+   *  dead leg. Defaults to ACP_PROXY_WRITE_STALL_MS. */
+  writeStallMs?: number;
   /** Diagnostics — stdout is the wire, so the proxy only ever logs to
    *  stderr. Defaults to console.error. */
   log?: (line: string) => void;
@@ -352,6 +363,121 @@ const promptText = (params: Record<string, unknown>): string =>
     .map(b => (isRecord(b) && b['type'] === 'text' ? (str(b['text']) ?? '') : ''))
     .join('');
 
+/** Outbound backpressure bounds (bro-0w2tg): the per-leg count of
+ *  unsettled writer.write() promises at which the feeding pump pauses
+ *  (HIGH_WATER), and the write-progress silence after which a leg is
+ *  declared dead (STALL_MS — the bound that lets a stalled peer fall
+ *  into the normal verdict/teardown path instead of parking the wire
+ *  forever). */
+export const ACP_PROXY_WRITE_HIGH_WATER = 64;
+export const ACP_PROXY_WRITE_STALL_MS = 30_000;
+
+/** Teardown's flush grace — writer.close() queues behind writes a
+ *  stalled peer can never accept, so a leg gets this long to land
+ *  what was owed before abort() abandons the queue (the verdict has
+ *  already settled — a peer that cannot read the answers cannot miss
+ *  them). */
+const CLOSE_GRACE_MS = 1_000;
+
+/** The never-settling branch of the pump's EOF race — a queued read
+ *  resolves `done:false` on every message, but only `done:true` may
+ *  release the backpressure wait. */
+const NEVER = new Promise<boolean>(() => {});
+
+/** The backpressure ledger for one writable leg (bro-0w2tg): writes
+ *  still issue immediately and in order, but their settle promises
+ *  now feed `depth` — a writer.write() settles only when the peer's
+ *  sink accepts the encoded line, so a peer that stops reading lets
+ *  un-awaited writes queue without bound. Once depth reaches
+ *  ACP_PROXY_WRITE_HIGH_WATER the read pump feeding this leg pauses
+ *  on room() until the queue drains — the peer's own read pace is the
+ *  throttle and no message is ever dropped (a dropped request breaks
+ *  the session's id pairing). Writes produced outside the pump's own
+ *  route — seam answers, abort sweeps, the teardown flush — are
+ *  bounded reactions to messages already received, so they share the
+ *  ledger without needing their own pause. */
+interface Outbound {
+  /** Issue a wire write — order-preserved, fire-and-forget exactly
+   *  like the un-awaited write was: a rejection fires the leg's dead
+   *  latch. */
+  send(m: AnyMessage): void;
+  /** Resolves once unsettled writes drop below the high-water mark —
+   *  or immediately when the leg is already dead: a stalled leg's
+   *  verdict belongs to the teardown race, never a sleeping pump. */
+  room(): Promise<void>;
+}
+
+const outbound = (
+  writer: WritableStreamDefaultWriter<AnyMessage>,
+  dead: ReturnType<typeof latch>,
+  stallMs: number
+): Outbound => {
+  let depth = 0;
+  let lastProgress = Date.now();
+  let stall: ReturnType<typeof setInterval> | undefined;
+  const waiters = new Set<() => void>();
+  const release = (): void => {
+    for (const w of waiters) w();
+    waiters.clear();
+  };
+  const disarm = (): void => {
+    if (stall !== undefined) {
+      clearInterval(stall);
+      stall = undefined;
+    }
+  };
+  /** The stall bound lives only while depth is nonzero — a leg with
+   *  unsettled writes but no settle for stallMs is dead (the peer
+   *  stopped reading); any settle is progress and resets the clock.
+   *  Interval, not per-write timers: under a healthy flood each write
+   *  settles, and a per-write deadline would misread queue wait as
+   *  peer death. */
+  const arm = (): void => {
+    if (stall !== undefined || dead.fired || depth === 0) {
+      return;
+    }
+    lastProgress = Date.now();
+    stall = setInterval(() => {
+      if (depth > 0 && Date.now() - lastProgress >= stallMs) {
+        dead.fire();
+      }
+    }, stallMs);
+    stall.unref();
+  };
+  // a dead leg releases every waiter and never measures stalls again
+  void dead.promise.then(() => {
+    disarm();
+    release();
+  });
+  const settled = (): void => {
+    depth--;
+    lastProgress = Date.now();
+    if (depth === 0) {
+      disarm();
+    }
+    if (depth < ACP_PROXY_WRITE_HIGH_WATER) {
+      release();
+    }
+  };
+  return {
+    send(m) {
+      depth++;
+      arm();
+      writer.write(m).then(settled, () => {
+        settled();
+        dead.fire();
+      });
+    },
+    room() {
+      return depth < ACP_PROXY_WRITE_HIGH_WATER || dead.fired
+        ? Promise.resolve()
+        : new Promise<void>(r => {
+            waiters.add(r);
+          });
+    },
+  };
+};
+
 /**
  * The message pump — runs until either leg closes. Returns the process
  * exit code: 0 when the client ended the wire (clean), 1 when the
@@ -383,19 +509,29 @@ export async function acpProxy(
    *  can never collide with a client's numeric id space. */
   let gateSeq = 0;
 
+  /** Per-leg backpressure ledgers — the pumps pause on room(), the
+   *  writes themselves keep their fire-and-forget shape (order-
+   *  preserved, errors fire the leg's dead latch). */
+  const stallMs = opts.writeStallMs ?? ACP_PROXY_WRITE_STALL_MS;
+  const downOut = outbound(downWriter, downDead, stallMs);
+  const upOut = outbound(upWriter, upDead, stallMs);
   const writeDown = (m: AnyMessage): void => {
-    downWriter.write(m).then(undefined, () => downDead.fire());
+    downOut.send(m);
   };
   const writeUp = (m: AnyMessage): void => {
-    upWriter.write(m).then(undefined, () => upDead.fire());
+    upOut.send(m);
   };
 
   /** Set the moment a pump's EOF/death wins the verdict — BEFORE the
    *  teardown sweep aborts in-flight turns. A prompt still queued in
    *  a session writeQ has no abort armed yet, and on an upstream
    *  close nothing discharges its pending entry: without this flag a
-   *  queued slash command would spawn AFTER the client died. */
+   *  queued slash command would spawn AFTER the client died. The
+   *  latch twin releases a pump parked on outbound backpressure —
+   *  an EOF verdict never touches the dead latches, and a parked pump
+   *  must not linger for the stalled leg's writeStallMs. */
   let wireDone = false;
+  const wireDoneLatch = latch();
 
   /** Answer an upstream request ourselves — only the held-prompt
    *  cancel path uses this; the proxy never synthesizes success. */
@@ -1525,15 +1661,37 @@ export async function acpProxy(
     }
   };
 
-  /** Read `stream` until EOF, routing each message through `route`. */
+  /** Read `stream` until EOF, routing each message through `route`.
+   *  `out` is the writable leg this pump feeds: once its unsettled
+   *  writes reach the high-water mark the pump pauses until drain —
+   *  the peer's own read pace is the throttle, nothing is dropped.
+   *  The read is issued BEFORE the room wait so a peer that closes
+   *  mid-stall still surfaces its EOF: `next` resolves `done` and wins
+   *  the race instead of hanging parked while its own leg's end sits
+   *  unread. */
   const pump = async (
     stream: Stream,
     route: (m: AnyMessage) => void,
-    tag: string
+    tag: string,
+    out: Outbound
   ): Promise<void> => {
     const reader = stream.readable.getReader();
     for (;;) {
-      const { value, done } = await reader.read();
+      const next = reader.read();
+      await Promise.race([
+        out.room(),
+        next.then(({ done }) => (done ? done : NEVER)),
+        wireDoneLatch.promise,
+      ]);
+      if (wireDone) {
+        // the verdict already landed elsewhere — routing now would
+        // write into legs that are closing. Cancelling the reader
+        // also releases the peer's own queued writes, so its writers
+        // learn the wire is gone instead of parking on the stall.
+        await reader.cancel().catch(() => {});
+        return;
+      }
+      const { value, done } = await next;
       if (done) return;
       const m = value;
       try {
@@ -1545,11 +1703,11 @@ export async function acpProxy(
   };
 
   const verdict = await Promise.race([
-    pump(upstream, routeC2A, 'c→a').then(
+    pump(upstream, routeC2A, 'c→a', downOut).then(
       () => 'up' as const, // client closed its side of the wire
       () => 'up' as const
     ),
-    pump(downstream, routeA2C, 'a→c').then(
+    pump(downstream, routeA2C, 'a→c', upOut).then(
       () => 'down' as const, // agent closed its side of the wire
       () => 'down' as const
     ),
@@ -1563,8 +1721,10 @@ export async function acpProxy(
   // child running until its own timeout, holding the CLI open. The
   // flag lands FIRST: a prompt still queued in a session writeQ has
   // no abort armed yet, and without it crossPrompt would start that
-  // queued slash command after the client already died.
+  // queued slash command after the client already died. The latch
+  // twin wakes any pump parked on backpressure for its own cleanup.
   wireDone = true;
+  wireDoneLatch.fire();
   for (const req of pending.values()) {
     req.abort?.();
   }
@@ -1645,12 +1805,29 @@ export async function acpProxy(
     ses.span?.endDetached({ 'acp.proxy.verdict': verdict });
     await ses.plane?.drain();
   }
-  // both legs close — the writer locks release and the streams settle
+  // both legs close — the writer locks release and the streams
+  // settle. close() queues behind pending writes, so a stalled leg
+  // gets CLOSE_GRACE_MS to land what was owed, then teardown stops
+  // waiting: the verdict already settled and a peer that cannot read
+  // the answers cannot miss them. The abandoned close pends harmlessly
+  // behind the stall — a fire-and-forget abort() asks the real sink
+  // to destroy the queue (it settles on Node transports; a pure-JS
+  // stream may leave it pending forever, so it must not be awaited).
   for (const w of [upWriter, downWriter]) {
-    try {
-      await w.close();
-    } catch {
-      /* already closed / broken pipe — teardown is best-effort */
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const flushed = await Promise.race([
+      w.close().then(
+        () => true,
+        () => true // already closed / broken pipe — teardown is best-effort
+      ),
+      new Promise<boolean>(r => {
+        grace = setTimeout(() => r(false), CLOSE_GRACE_MS);
+        grace.unref();
+      }),
+    ]);
+    clearTimeout(grace);
+    if (!flushed) {
+      void w.abort().catch(() => {});
     }
   }
   return verdict === 'up' ? 0 : 1;
