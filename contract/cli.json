@@ -1382,6 +1382,7 @@
       "spellings": ["clients"],
       "aliases": [],
       "hidden": false,
+      "skill": "clients",
       "plan": false,
       "external": false
     },

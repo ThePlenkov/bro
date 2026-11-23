@@ -11,4 +11,5 @@ description: "Agents that use bro — install matrix + adapters: list|install|un
 | --- | --- |
 | group | `utility` |
 | npm latest | unreleased — lands in `0.4.0` |
+| skill | `clients` |
 
