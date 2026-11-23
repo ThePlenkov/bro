@@ -80,6 +80,12 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(s.alerts, []);
   });
 
+  test('a pending Devin Review check blocks even without findings yet', async () => {
+    const s = await fetchPrActState(fakeRev([check('Devin Review', 'pending')], []), target);
+    assert.equal(s.reviewersPending, 1);
+    assert.equal(s.ciPending, 0);
+  });
+
   test('failing with no thread activity alerts — silent reviewer', async () => {
     const s = await fetchPrActState(fakeRev([check('Kilo Code', 'fail')], []), target, {
       ignoreChecks: rules,
