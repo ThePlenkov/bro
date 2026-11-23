@@ -71,7 +71,11 @@
     "toml": "^5.0.1",
     "undici": "8.12.3",
     "zod": "^4.6.6",
-    "ip-address": "^10.7.4"
+    "ip-address": "^10.7.4",
+    "hono": "^4.13.16",
+    "@hono/node-server": "^2.1.6",
+    "effect": "^4.0.0-beta.103",
+    "seroval": "^1.6.10"
   },
   "allowScripts": {
     "nx@23.2.1": true,
