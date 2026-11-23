@@ -77,11 +77,22 @@ issues_blob() { # hash the issues array only — generated_at always differs
   node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.stringify(JSON.parse(s).issues)))" | git -C "$ROOT" hash-object --stdin
 }
 
+mirror_branch() {
+  if git -C "$ROOT" push "$REMOTE" "$1:$BRANCH_REF"; then
+    echo "backlog-publish: mirrored to $BRANCH_REF"
+  else
+    echo "warning: could not mirror $1 to $BRANCH_REF — raw fallback still reads $DATA_REF" >&2
+  fi
+}
+
 fetch_tip
 if [[ -n "$TIP" ]]; then
   NEW_CORE="$(issues_blob < "$WORK/backlog.json")"
   OLD_CORE="$(git -C "$ROOT" show "$TIP:.agents/backlog.json" 2>/dev/null | issues_blob || true)"
   if [[ "$OLD_CORE" == "$NEW_CORE" ]]; then
+    # The data ref may already be current while its best-effort heads twin
+    # is missing or stale from a previous run. Retry that mirror as well.
+    mirror_branch "$TIP"
     echo "backlog-publish: $DATA_REF already carries this backlog — nothing to push"
     exit 0
   fi
@@ -111,11 +122,7 @@ for attempt in 1 2 3; do
     # the heads twin is best-effort and pushed separately — a rejected
     # branch push (protected-branch rules, per-ref policies) must not
     # re-enter the retry loop and diverge the two refs
-    if git -C "$ROOT" push "$REMOTE" "$COMMIT:$BRANCH_REF"; then
-      echo "backlog-publish: mirrored to $BRANCH_REF"
-    else
-      echo "warning: could not mirror $COMMIT to $BRANCH_REF — raw fallback still reads $DATA_REF" >&2
-    fi
+    mirror_branch "$COMMIT"
     exit 0
   fi
   if [[ "$attempt" -eq 3 ]]; then
