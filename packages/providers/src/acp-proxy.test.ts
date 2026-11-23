@@ -2914,6 +2914,99 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     assert.equal(got.length, total, `expected exactly ${total} answers, got ${got.length}`);
     await clientW.abort().catch(() => {});
   });
+
+  test('a $/cancel_request flood meets the bypass bound — consumed controls pause the read side too', async () => {
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const clientW = clientSide.writable.getWriter();
+    // nobody reads agentSide — the down ledger fills on the first
+    // WRITE_HIGH_WATER forwards, and every control past that routes
+    // only through the bypass. Controls never join `held`, so without
+    // the bypass count the whole flood would be consumed while the
+    // queued writes grew without bound until the stall.
+    const total = 3 * ACP_PROXY_READ_HIGH_WATER;
+    let consumed = 0;
+    for (let i = 0; i < total; i++) {
+      void clientW
+        .write({
+          jsonrpc: '2.0',
+          method: '$/cancel_request',
+          params: { id: `req-${i}` },
+        } as AnyMessage)
+        .then(
+          () => {
+            consumed++;
+          },
+          () => {}
+        );
+    }
+    await settle(80);
+    // consumed ≤ ledger-bound bypasses + the reads in flight — the
+    // count that used to run unbounded now parks at the same mark a
+    // saturated hold does
+    assert.ok(
+      consumed <= ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 2,
+      `control flood outran the bypass bound — consumed ${consumed} of ${total}`
+    );
+    assert.ok(consumed >= ACP_PROXY_WRITE_HIGH_WATER, `nothing routed — consumed ${consumed}`);
+    // local cancellation was never blocked — every consumed control
+    // routed; teardown just ends the wire the flood stalled
+    await agentSide.writable
+      .getWriter()
+      .close()
+      .catch(() => {});
+    assert.equal(await hangGuard(proxyDone), 1);
+    await clientW.abort().catch(() => {});
+  });
+
+  test('a read resolved behind a saturated hold still routes at the exit — the accepted request earns its teardown answer', async () => {
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const clientW = clientSide.writable.getWriter();
+    const clientR = clientSide.readable.getReader();
+    const got: AnyMessage[] = [];
+    collect(clientR, got);
+    // exactly one message past the saturated hold — the pump keeps a
+    // read outstanding through the room wait, so the tail message is
+    // consumed into that read's resolution: accepted (the write
+    // completed) but never routed. Old code dropped it with the pump.
+    const total = ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 1;
+    let consumed = 0;
+    for (let i = 0; i < total; i++) {
+      void clientW
+        .write({
+          jsonrpc: '2.0',
+          id: i + 1,
+          method: 'session/prompt',
+          params: { sessionId: 'none', prompt: [] },
+        } as AnyMessage)
+        .then(
+          () => {
+            consumed++;
+          },
+          () => {}
+        );
+    }
+    await settle(80);
+    assert.equal(consumed, total, 'the tail write was never consumed into the pump');
+    // agent death runs the 'down' sweep — the prefetched message
+    // routed into the pending table at the exit first, so it earns
+    // the same teardown answer as everything the hold flushed
+    await agentSide.writable
+      .getWriter()
+      .close()
+      .catch(() => {});
+    assert.equal(await hangGuard(proxyDone), 1);
+    await settle(30);
+    assert.equal(
+      got.filter(m => errorOf(m) !== undefined).length,
+      total,
+      'an accepted request was dropped unrouted'
+    );
+    await clientW.abort().catch(() => {});
+  });
 });
 
 describe('acpProxy — control plane bypass (bro-0w2tg)', () => {
@@ -3017,6 +3110,57 @@ describe('acpProxy — control plane bypass (bro-0w2tg)', () => {
       await assert.rejects(hangGuard(ask), RequestError);
       releaseTurn();
       await Promise.allSettled(prompts);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a cancelled held prompt frees its charged slot at settle — a stuck seam cannot starve sibling intake', async () => {
+    // a promptContext that never returns — the first prompt parks in
+    // its seam wait, so every prompt behind it stays a charged hold
+    // in the writeQ. The old code answered a cancel but kept the
+    // slots until each queued cross ran — i.e. never — and the full
+    // ledger then parked every later request's intake (holds never
+    // arm the stall clock, so nothing would recover the leg)
+    const r = rig(
+      { replyText: 'ok' },
+      { promptContext: () => new Promise<string | undefined>(() => {}) }
+    );
+    try {
+      const sessionId = await openSession(r.acp);
+      const prompts: Promise<{ stopReason: string }>[] = [];
+      const total = ACP_PROXY_WRITE_HIGH_WATER + 10;
+      for (let i = 0; i < total; i++) {
+        prompts.push(
+          r.acp.request<{ stopReason: string }>('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: `/w${i}` }],
+          })
+        );
+      }
+      await settle(60);
+      await r.acp.notify('session/cancel', { sessionId });
+      const answers = await hangGuard(Promise.all(prompts));
+      assert.ok(
+        answers.every(a => a.stopReason === 'cancelled'),
+        'a held prompt answered something other than cancelled'
+      );
+      // every prompt was held behind the stuck seam — nothing crossed
+      assert.deepEqual(r.fake.prompts, []);
+      // the slots freed AT SETTLE — a request arriving behind the
+      // cancelled backlog routes instead of starving on a dead
+      // ledger. The test client serves no fs/* method: the SDK's
+      // -32601 is the crossing proof — it settles only if the request
+      // reached the agent
+      await assert.rejects(
+        hangGuard(
+          r.acp.request('fs/read_text_file', {
+            sessionId: 'none',
+            path: '/x',
+          }) as Promise<unknown>
+        ),
+        RequestError
+      );
     } finally {
       assert.equal(await close(r), 0);
     }

@@ -247,8 +247,16 @@ interface PendingRequest {
   method: string;
   /** session/prompt bookkeeping — the turn span and its session.
    *  `first` stamps at cross time (first prompt to actually write
-   *  downstream) for the span's first_prompt attr. */
-  prompt?: { sessionId: string; span: OtelSpan; first?: boolean };
+   *  downstream) for the span's first_prompt attr. `release` is the
+   *  bound slot the prompt's accept charged — kept on the entry so a
+   *  cancel/close settling the prompt while it still sits in the
+   *  writeQ frees the slot AT SETTLE, not whenever the seam ahead of
+   *  it returns: a cancelled backlog behind a stuck seam otherwise
+   *  keeps the ledger full forever (holds never arm the stall clock),
+   *  and a full leg stalls every sibling session's intake. The
+   *  release is idempotent — the queued cross's own exit still runs
+   *  it safely. */
+  prompt?: { sessionId: string; span: OtelSpan; first?: boolean; release?: () => void };
   /** session/new|load|fork bookkeeping — the cwd/sessionId to stamp
    *  onto the response's session id. `cwd` stays undefined when the
    *  params carried none — never the proxy's own cwd. */
@@ -782,16 +790,19 @@ export async function acpProxy(
       },
       { parent: target.ses.span?.ctx }
     );
+    // charge the down leg's bound AT ACCEPT — a prompt waiting on the
+    // seam has no wire depth yet, so without the hold a prompt flood
+    // parks nothing while pending/writeQ/held grow past the mark.
+    // The slot lives on the entry: a session/cancel settling this
+    // prompt while it still waits in the writeQ frees the slot at
+    // settle (abortHeld), not whenever the seam ahead of it returns.
+    const release = downOut.hold();
     const entry: PendingRequest = {
       method: 'session/prompt',
-      prompt: { sessionId: target.sessionId, span: turn },
+      prompt: { sessionId: target.sessionId, span: turn, release },
     };
     pending.set(id, entry);
     target.ses.held.add(id);
-    // charge the down leg's bound AT ACCEPT — a prompt waiting on the
-    // seam has no wire depth yet, so without the hold a prompt flood
-    // parks nothing while pending/writeQ/held grow past the mark
-    const release = downOut.hold();
     // the entry is captured AT ENQUEUE — if a cancel discharges the
     // id and a new request reuses it before this queued write runs,
     // `pending.get(id)` inside crossPrompt would return the NEW
@@ -953,6 +964,13 @@ export async function acpProxy(
         continue;
       }
       pending.delete(id);
+      // the charged bound slot frees WITH the settle — the queued
+      // cross would hold it until every prompt ahead of it finished
+      // its seam wait, and holds never arm the stall clock: a
+      // cancelled backlog behind a stuck seam would pin the leg full
+      // (and every sibling session's intake with it) for dead work.
+      // Idempotent — the queued cross's own exit release is a no-op
+      pr.release?.();
       // agent mode: a local turn in flight dies with its answer — the
       // SIGTERM lands before `cancelled` crosses
       req?.abort?.();
@@ -1877,11 +1895,20 @@ export async function acpProxy(
    *  until drain — jumping it ahead means reading the data first,
    *  which is the memory this bound refuses to spend.
    *
+   *  The bypass itself is bounded too: controls routed past a full
+   *  ledger are accepted in-flight work the hold cannot see, so they
+   *  count into the same read-side mark — enough bypasses pause the
+   *  read exactly like a saturated hold, and a control flood meets
+   *  the bound instead of writing past the ledger without limit.
+   *
    *  Shutdown wakes every wait below through ONE latch subscription —
    *  each wait parks a removable resolver in `wakes`, never a
    *  per-message callback on the shared latch — and the exit drains
    *  the hold so every accepted message lands in the table the
-   *  teardown sweep answers from. */
+   *  teardown sweep answers from — including the read still
+   *  outstanding at the exit: one that already resolved IS an
+   *  accepted message (its sender's write completed), so it is routed
+   *  into the same table rather than dropped with the pump. */
   const pump = async (
     stream: Stream,
     route: (m: AnyMessage) => void,
@@ -1928,6 +1955,16 @@ export async function acpProxy(
     };
     let read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined = reader.read();
     let eof = false;
+    /** Controls routed past a FULL ledger — accepted in-flight work
+     *  neither `held` nor the ledger's own hold count sees. Enough of
+     *  them pause the read side exactly like a saturated hold: a
+     *  cancel or response flood meets the wire's bound instead of
+     *  writing past it without limit (local cancellation never blocks
+     *  — every consumed control still settles the instant it routes;
+     *  the bound gates only consuming MORE). The count stands until
+     *  the ledger next has room — bypassed writes are ordinary depth
+     *  by then. */
+    let bypassed = 0;
     /** ONE outstanding room() subscription at a time — the parked wait
      *  re-arms on every intake result, and a waiter that loses the
      *  race stays registered until the next release, so re-arming per
@@ -1960,6 +1997,10 @@ export async function acpProxy(
       while (held.length > 0 && out.spare()) {
         deliver(held.shift() as AnyMessage);
       }
+      // routed past a saturated ledger — count it: the hold and the
+      // bypass together are the intake in flight, and their sum is
+      // the read-side bound below
+      bypassed = out.spare() ? 0 : bypassed + 1;
       deliver(m);
     };
     for (;;) {
@@ -1970,6 +2011,16 @@ export async function acpProxy(
       }
       if (wireDone || eof || read === undefined) {
         break;
+      }
+      // the hold AND the bypassed controls are the intake in flight —
+      // a saturated SUM pauses the read side on room alone: a new
+      // read has nowhere to go (a dead leg's release doubles as the
+      // wake), and room absorbing the bypassed writes resets the count
+      if (held.length + bypassed >= ACP_PROXY_READ_HIGH_WATER) {
+        const r = await untilStop(roomReady());
+        if (r === undefined) break;
+        bypassed = 0;
+        continue;
       }
       if (held.length === 0) {
         // nothing to route — the intake read is the only wait worth
@@ -1982,14 +2033,6 @@ export async function acpProxy(
         } else {
           accept(r.value);
         }
-        continue;
-      }
-      if (held.length >= ACP_PROXY_READ_HIGH_WATER) {
-        // the hold is saturated — the read side pauses with the route
-        // side: room() is the only wake worth taking (a new read has
-        // nowhere to go; a dead leg's release doubles as the wake)
-        const r = await untilStop(roomReady());
-        if (r === undefined) break;
         continue;
       }
       // parked with a hold to drain — room, more input, or shutdown,
@@ -2011,6 +2054,23 @@ export async function acpProxy(
     // teardown sweep reads the table it answers from
     while (held.length > 0) {
       deliver(held.shift() as AnyMessage);
+    }
+    // a read issued before the pause may already have RESOLVED — its
+    // message left the transport (the peer's write completed) yet
+    // never routed: skipping it would strand an accepted request
+    // outside the table the teardown sweep answers. The race is a
+    // peek, not a wait — an already-settled read's race subscription
+    // was queued first so it wins; a still-pending read accepted
+    // nothing and loses nothing
+    if (read !== undefined) {
+      const r = await Promise.race([read, Promise.resolve(undefined)]).catch(() => undefined);
+      if (r !== undefined) {
+        if (r.done) {
+          eof = true;
+        } else {
+          deliver(r.value);
+        }
+      }
     }
     // a leg ended by shutdown — never by its own EOF — cancels its
     // reader so the peer's queued writes learn the wire is gone
@@ -2077,6 +2137,9 @@ export async function acpProxy(
       if (!pending.delete(id)) {
         continue; // already discharged — a gate pair's client half
       }
+      // a still-held prompt's charged slot frees with the sweep — the
+      // queued cross's own release would wait on the seam ahead of it
+      req.prompt?.release?.();
       if (req.gateFor !== undefined) {
         // the gate re-prompt's id is proxy-originated — the owed
         // upstream answer lands under the CLIENT's id, and the held
