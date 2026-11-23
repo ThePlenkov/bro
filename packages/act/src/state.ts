@@ -29,7 +29,7 @@ import type { PrActState } from './types.ts';
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
 // "kilometer-tests") is not an AI reviewer.
 const AI_REVIEWER_RE =
-  /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i;
+  /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant|devin\s*review)\b/i;
 
 /** Static-scanner check-name stems — the must-fix set BY DEFAULT. A
  *  scanner's failed job or error annotation is a real project finding,

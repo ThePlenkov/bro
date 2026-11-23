@@ -48,7 +48,7 @@ Claude and Codex install that root. Their extras are a client manifest
 and a hook map (`plugins/claude/bro/hooks/hooks.json`,
 `plugins/codex/bro/hooks/hooks.json`), not a second `skills/`
 tree. Cursor and Devin still add those extras under `plugins/<client>/bro`. OpenCode, Kilo, and pi are
-different: they're native plugins installed by `bro plugins install <client>`
+different: they're native plugins installed by `bro clients install <client>`
 — a self-contained module (`plugins/<client>/bro/bro.ts`) carrying hooks
 inline, with no skills tree beside it.
 

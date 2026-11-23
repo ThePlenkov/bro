@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Clients"
+  short_description: "Agents that use bro — the client install matrix and adapter materializers"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $clients to see which agents have bro installed."
+policy:
+  allow_implicit_invocation: true
