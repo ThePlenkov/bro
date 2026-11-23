@@ -2587,7 +2587,7 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
   const idOf = (m: AnyMessage): unknown => (m as { id?: unknown }).id;
   const errorOf = (m: AnyMessage): unknown => (m as { error?: unknown }).error;
 
-  test('a stalled downstream pauses the c→a pump at the high-water mark — the death sweep answers only what crossed', async () => {
+  test('a stalled downstream pauses the c→a pump at the high-water mark — the death sweep answers everything the wire accepted', async () => {
     const [clientSide, proxyUp] = streamPair();
     const [proxyDown, agentSide] = streamPair();
     const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
@@ -2596,24 +2596,22 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     const got: AnyMessage[] = [];
     collect(clientR, got);
     // nobody reads agentSide.readable — the agent's stdin is stalled.
-    // Flood past the mark; only a bounded prefix may be routed.
-    fire(
-      clientW,
-      'session/prompt',
-      { sessionId: 'none', prompt: [] },
-      ACP_PROXY_WRITE_HIGH_WATER + 10
-    );
+    // Flood past the mark; writes pause at the bound while intake
+    // keeps consuming into the pump's hold — a consumed request is
+    // never dropped unrouted, so the sweep answers all of them
+    const total = ACP_PROXY_WRITE_HIGH_WATER + 10;
+    fire(clientW, 'session/prompt', { sessionId: 'none', prompt: [] }, total);
     await settle(80);
-    // agent death runs the 'down' sweep, which answers exactly the
-    // requests whose pending entries exist — without the pause every
-    // flooded request would be answered here
+    // agent death runs the 'down' sweep over the pending table — the
+    // parked pump drained its hold into it first, so every request
+    // the client wrote earns its error, not just the crossed prefix
     await agentSide.writable
       .getWriter()
       .close()
       .catch(() => {});
     assert.equal(await hangGuard(proxyDone), 1);
     await settle(30);
-    assert.equal(got.filter(m => errorOf(m) !== undefined).length, ACP_PROXY_WRITE_HIGH_WATER);
+    assert.equal(got.filter(m => errorOf(m) !== undefined).length, total);
     await clientW.abort().catch(() => {});
   });
 
@@ -2663,6 +2661,26 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     assert.equal(await hangGuard(proxyDone), 0);
   });
 
+  test('a client EOF behind held intake still ends the wire — buffered messages cannot hide the close', async () => {
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const clientW = clientSide.writable.getWriter();
+    // past the mark AND then some — the pump holds consumed intake it
+    // cannot route yet, and the close sits behind all of it in the
+    // stream queue. Only reading on surfaces it; a verdict by stall
+    // would cost writeStallMs and misreport the clean client end.
+    fire(
+      clientW,
+      'session/prompt',
+      { sessionId: 'none', prompt: [] },
+      ACP_PROXY_WRITE_HIGH_WATER + 5
+    );
+    await settle(80);
+    await clientW.close().catch(() => {});
+    assert.equal(await hangGuard(proxyDone), 0);
+  });
+
   test('a leg with no write progress is declared dead — the in-flight prompts sweep upstream, verdict 1', async () => {
     const [clientSide, proxyUp] = streamPair();
     const [proxyDown, agentSide] = streamPair();
@@ -2681,7 +2699,7 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     await clientW.abort().catch(() => {});
   });
 
-  test('a stalled upstream bounds the a→c intake symmetrically — the up-sweep answers only what crossed', async () => {
+  test('a stalled upstream bounds the a→c intake symmetrically — the up-sweep answers everything the wire accepted', async () => {
     const [clientSide, proxyUp] = streamPair();
     const [proxyDown, agentSide] = streamPair();
     const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
@@ -2690,23 +2708,20 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     const got: AnyMessage[] = [];
     collect(agentR, got);
     // agent floods a2c requests while the client never reads — the up
-    // leg stalls and the a→c pump parks at its own high-water mark
-    fire(
-      agentW,
-      'fs/read_text_file',
-      { sessionId: 'none', path: '/x' },
-      ACP_PROXY_WRITE_HIGH_WATER + 10
-    );
+    // leg stalls and the a→c pump parks at its own high-water mark,
+    // holding (never dropping) the intake it cannot route yet
+    const total = ACP_PROXY_WRITE_HIGH_WATER + 10;
+    fire(agentW, 'fs/read_text_file', { sessionId: 'none', path: '/x' }, total);
     await settle(80);
-    // client death runs the 'up' sweep: every consumed a2c request is
-    // answered downstream — the count is the pause bound, not the flood
+    // client death runs the 'up' sweep: every accepted a2c request is
+    // answered downstream — the hold drained into the table first
     await clientSide.writable
       .getWriter()
       .close()
       .catch(() => {});
     assert.equal(await hangGuard(proxyDone), 0);
     await settle(30);
-    assert.equal(got.filter(m => errorOf(m) !== undefined).length, ACP_PROXY_WRITE_HIGH_WATER);
+    assert.equal(got.filter(m => errorOf(m) !== undefined).length, total);
     await agentW.abort().catch(() => {});
   });
 });
