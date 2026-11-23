@@ -104,14 +104,26 @@ function readCache(): { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt
   if (typeof window === 'undefined') return null;
   try {
     const raw = window.localStorage.getItem(SNAPSHOT_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<Data>;
+    const snapshot = value.snapshot as Partial<Snapshot> | undefined;
+    if (
+      !snapshot ||
+      typeof snapshot.generated_at !== 'string' ||
+      !Array.isArray(snapshot.issues) ||
+      typeof value.fetchedAt !== 'string' ||
+      !Array.isArray(value.gh)
+    ) {
+      return null;
+    }
+    return value as { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt: string };
   } catch {
     return null;
   }
 }
 
 async function resolveSha(): Promise<string> {
-  const refRes = await fetch(REF_API);
+  const refRes = await fetch(REF_API, { signal: AbortSignal.timeout(15_000) });
   if (!refRes.ok) throw new Error(`could not resolve refs/bro/data (${refRes.status})`);
   const { object } = (await refRes.json()) as { object: { sha: string } };
   return object.sha;
@@ -159,10 +171,20 @@ async function fetchGh(): Promise<GhItem[]> {
 }
 
 async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
-  const sha = await resolveSha();
-  const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`);
+  let sha: string;
+  try {
+    sha = await resolveSha();
+  } catch {
+    // The raw branch mirror remains available when the GitHub API is rate-limited.
+    sha = 'bro-data';
+  }
+  const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw new Error(`backlog.json not on refs/bro/data (${res.status})`);
-  return { snapshot: (await res.json()) as Snapshot, sha };
+  const snapshot = (await res.json()) as Partial<Snapshot>;
+  if (typeof snapshot.generated_at !== 'string' || !Array.isArray(snapshot.issues)) {
+    throw new Error('invalid backlog snapshot');
+  }
+  return { snapshot: snapshot as Snapshot, sha };
 }
 
 function cacheSnapshot(data: Data): void {
@@ -170,7 +192,13 @@ function cacheSnapshot(data: Data): void {
     const cached = readCache();
     const cachedAt = cached ? Date.parse(cached.snapshot.generated_at) : Number.NaN;
     const generatedAt = Date.parse(data.snapshot.generated_at);
-    if (!Number.isNaN(generatedAt) && (Number.isNaN(cachedAt) || generatedAt >= cachedAt)) {
+    const cachedFetchedAt = cached ? Date.parse(cached.fetchedAt) : Number.NaN;
+    const fetchedAt = Date.parse(data.fetchedAt);
+    const isNewer =
+      data.gh.length > 0
+        ? Number.isNaN(cachedFetchedAt) || fetchedAt >= cachedFetchedAt
+        : Number.isNaN(cachedAt) || generatedAt >= cachedAt;
+    if (!Number.isNaN(generatedAt) && isNewer) {
       window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
     }
   } catch {
@@ -663,10 +691,11 @@ function useBacklog(): LoadState {
         fetchGh()
           .then(items => {
             if (!alive) return;
-            cacheSnapshot({ ...data, gh: items });
+            const ghData = { ...data, gh: items, fetchedAt: new Date().toISOString() };
+            cacheSnapshot(ghData);
             setState(s =>
               s.kind === 'ready'
-                ? { ...s, data: { ...s.data, gh: items, ghUnavailable: false } }
+                ? { ...s, data: { ...s.data, ...ghData, ghUnavailable: false } }
                 : s
             );
           })
@@ -682,7 +711,7 @@ function useBacklog(): LoadState {
         if (alive) {
           setState(
             cached
-              ? { kind: 'ready', data: cached as Data, cached: true }
+              ? { kind: 'ready', data: cached, cached: true }
               : { kind: 'error', message: err instanceof Error ? err.message : String(err) }
           );
         }
@@ -1008,13 +1037,12 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   useEffect(() => {
     const wasAll = <T,>(selected: Set<T>, previous: T[]) =>
       selected.size === previous.length && previous.every(value => selected.has(value));
+    const previous = previousUni.current;
     setF(current => ({
       ...current,
-      status: wasAll(current.status, previousUni.current.status)
-        ? new Set(uni.status)
-        : current.status,
-      type: wasAll(current.type, previousUni.current.type) ? new Set(uni.type) : current.type,
-      priority: wasAll(current.priority, previousUni.current.priority)
+      status: wasAll(current.status, previous.status) ? new Set(uni.status) : current.status,
+      type: wasAll(current.type, previous.type) ? new Set(uni.type) : current.type,
+      priority: wasAll(current.priority, previous.priority)
         ? new Set(uni.priority)
         : current.priority,
     }));
@@ -1131,7 +1159,7 @@ function BacklogPage() {
             bro backlog, <em>live</em>.
           </h1>
           <p className="lede">
-            Every open bead plus the GitHub queue, read from the <code>bro-data</code> snapshot
+            Every open bead plus the GitHub queue, read from the <code>refs/bro/data</code> snapshot
             branch and the REST API at page load. A publish job refreshes the snapshot on every
             merge to main — what you see is what the store holds now.
           </p>
