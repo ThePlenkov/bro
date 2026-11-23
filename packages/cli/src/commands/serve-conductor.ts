@@ -2124,11 +2124,16 @@ function laneBudgetOf(cfg: ConductorConfig, entry: string): LaneBudget | undefin
   if (limits === undefined) return undefined;
   const gate =
     limits.requestsPerHour !== undefined && limits.spawnCost !== undefined
-      ? {
-          requestsPerHour: limits.requestsPerHour,
-          spawnCost: limits.spawnCost,
-          burst: limits.burst,
-        }
+      ? (() => {
+          const burst = limits.burst ?? limits.requestsPerHour;
+          return burst >= limits.spawnCost
+            ? {
+                requestsPerHour: limits.requestsPerHour,
+                spawnCost: limits.spawnCost,
+                burst: limits.burst,
+              }
+            : undefined;
+        })()
       : undefined;
   return { limits, gate, lane: `serve:${entry}` };
 }
@@ -2668,18 +2673,30 @@ async function oneShotTurn(
   // the turn half of the fused open+prompt — the spawn charge was
   // taken in freshTurn before the cap claim (spec bro-ezboq)
   budgetTake(env, env.budget?.limits.turnCost ?? 1);
-  const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
-    signal: env.signal,
-    by: env.by,
-    requestModel: env.requestModel,
-    parent: env.parent,
-    onUpdate: env.openStream?.(inputTokens),
-    // the churn accounting (spec bro-b961a) — the session this turn
-    // opens is charged to the conversation it belongs to
-    guard: guardCtx(env),
-    stallMs: env.cfg.acpStallMs ?? 300_000,
-  });
-  return { reply, reused: false, inputTokens, replay: false };
+  let opened = false;
+  try {
+    const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
+      signal: env.signal,
+      by: env.by,
+      requestModel: env.requestModel,
+      parent: env.parent,
+      onUpdate: env.openStream?.(inputTokens),
+      // the churn accounting (spec bro-b961a) — the session this turn
+      // opens is charged to the conversation it belongs to
+      guard: guardCtx(env),
+      stallMs: env.cfg.acpStallMs ?? 300_000,
+      onSessionOpened: () => {
+        opened = true;
+      },
+    });
+    return { reply, reused: false, inputTokens, replay: false };
+  } catch (err) {
+    if (!opened) {
+      budgetRefund(env, env.budget?.limits.spawnCost ?? 1);
+      budgetRefund(env, env.budget?.limits.turnCost ?? 1);
+    }
+    throw err;
+  }
 }
 
 async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> {
@@ -2721,7 +2738,6 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       // a budget refusal inside the one-shot happened before the pool
       // call opened anything — the spawn charge goes back (a provider
       // failure inside acpPooledTurn keeps it: the open was attempted)
-      if (err instanceof LaneBudgetError && spawnCharged) budgetRefund(env, spawnCost);
       throw err;
     } finally {
       env.oneShotOpens.delete(shot);

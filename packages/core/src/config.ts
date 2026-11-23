@@ -1137,11 +1137,13 @@ function serveLaneLimits(raw: unknown): ServeLaneLimits | undefined {
   // pace (the rateGate rule, spec bro-y3jvd): capacity is burst ?? rph,
   // and it must cover BOTH the open and a single turn — a gate that
   // refuses every prompt is as dead as one that refuses every spawn
-  const capacity = out.burst ?? out.requestsPerHour;
   if (
     out.requestsPerHour !== undefined &&
     out.spawnCost !== undefined &&
-    (capacity < out.spawnCost || (out.turnCost !== undefined && capacity < out.turnCost))
+    (() => {
+      const capacity = out.burst ?? out.requestsPerHour;
+      return capacity < out.spawnCost + (out.turnCost ?? 1);
+    })()
   ) {
     return undefined;
   }
