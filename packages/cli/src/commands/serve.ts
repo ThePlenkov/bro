@@ -203,6 +203,7 @@ import {
   type EventsStreamBus,
 } from '../planes/stream.ts';
 import { fileProviderConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
+import { isProviderPath } from './serve-surfaces.ts';
 import {
   conductorConfig,
   conductorProxy,
@@ -1297,7 +1298,7 @@ async function routeProvider(
   token: string,
   statePathHint: string
 ): Promise<boolean> {
-  if (!pathname.startsWith('/v1/')) {
+  if (!isProviderPath(pathname)) {
     return false;
   }
   const wantsBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';

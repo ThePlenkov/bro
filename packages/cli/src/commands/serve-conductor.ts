@@ -83,6 +83,7 @@ import {
 } from '@broject/providers';
 import { peerAttrs } from './peer.ts';
 import { type CatalogModel, catalogModels } from './providers.ts';
+import { resolveSurface, SURFACE_ENDPOINTS } from './serve-surfaces.ts';
 import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
 import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
 import { forwardBody, type ProviderConfig, providerConfig } from './serve-provider.ts';
@@ -5842,8 +5843,19 @@ function conductorDispatch(
   cfg: ConductorConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const path = (req.url ?? '/').split('?')[0];
+    const raw = (req.url ?? '/').split('?')[0];
     const method = req.method ?? 'GET';
+    const { surface, path } = resolveSurface(raw);
+    if (surface !== undefined && !SURFACE_ENDPOINTS[surface].includes(`${method} ${path}`)) {
+      apiError(
+        res,
+        404,
+        'not_found_error',
+        `bro conductor: the ${surface} surface has no ${method} ${path} — ` +
+          `use ${SURFACE_ENDPOINTS[surface].map((endpoint) => endpoint.split(' ')[1]).join(', ')}`
+      );
+      return;
+    }
     const httpSpan = httpTap(req, res, cfg, method, path);
     switch (`${method} ${path}`) {
       case 'POST /v1/messages':
