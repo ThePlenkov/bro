@@ -79,13 +79,16 @@ default store, so standard installs already have it).
   a dedicated matcher; `obj[key]` writes → entries/`Object.fromEntries`;
   computed-key reads → `Object.getOwnPropertyDescriptor`. The same
   question applies to the workflow findings reviewers keep flagging:
-  config files rewritten wholesale → jsonc `modify`/`applyEdits` so
-  comments and formatting survive; reads of raw `options` below a
-  defaults merge → merged names only; a conflicted file resolved by
-  picking a side → hunk-level resolution plus a `git diff <base>` audit
-  for dropped concurrent work; formatter gate red after the last
-  commit → run the formatter as the final step (hooks skipped by
-  `--no-verify` still run in CI). For a true
+  config files rewritten wholesale → `jsonc-parser` (declared direct
+  dep) `modify`/`applyEdits` so comments and formatting survive —
+  strict-JSON files (`package.json`, lockfiles) stay on `JSON.parse`
+  and never get comments; reads of raw `options` below a defaults
+  merge → merged names for effective values, raw reads only for
+  caller-intent (`'x' in options`) checks; a conflicted file resolved
+  by picking a side → hunk-level resolution plus a `git diff
+  <base-tip>` audit for dropped concurrent work; formatter gate red
+  after the last commit → run the formatter as the final step (hooks
+  skipped by `--no-verify` still run in CI). For a true
   false positive the fix lives at the rule level — a documented
   exclusion in `.codacy.yml`, a `.markdownlint.json` option — so the
   same false never reappears in any file, never a one-site suppression.
