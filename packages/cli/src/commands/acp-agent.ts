@@ -285,9 +285,13 @@ export async function runSlash(
     let timedOut = false;
     let reported = false;
     const cmd = `\`bro ${argv.slice(1).join(' ')}\``;
+    // Keep shell execution explicitly disabled: slash arguments can contain
+    // arbitrary user text and must remain individual argv values all the way
+    // to the child.
     const child = spawn(bin, argv.slice(1), {
       cwd,
       env: acpChildEnv(),
+      shell: false,
       // own process group — a `bro` child shells out (`exec` → sh -c
       // → descendants) and a signal to the direct child alone never
       // reaches them; a detached group also stops receiving signals

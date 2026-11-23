@@ -213,10 +213,10 @@ export function dataRefPush(
   ref: string = DATA_REF
 ): string | false {
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (gitTry(['-C', root, 'push', remote, `${ref}:${ref}`]).code === 0) {
+    if (gitTry(['-C', root, 'push', '--', remote, `${ref}:${ref}`]).code === 0) {
       return refSha(root, ref) ?? false;
     }
-    const fetch = gitTry(['-C', root, 'fetch', remote, ref]);
+    const fetch = gitTry(['-C', root, 'fetch', '--', remote, ref]);
     if (fetch.code !== 0) {
       return false; // remote has no data ref (or offline) and push still failed
     }
@@ -247,14 +247,14 @@ export function dataRefPull(
   remote: string = 'origin',
   ref: string = DATA_REF
 ): number {
-  const probe = gitTry(['-C', root, 'ls-remote', remote, ref]);
+  const probe = gitTry(['-C', root, 'ls-remote', '--', remote, ref]);
   if (probe.code !== 0) {
     return -2;
   }
   if (probe.out.trim() === '') {
     return -1;
   }
-  if (gitTry(['-C', root, 'fetch', remote, ref]).code !== 0) {
+  if (gitTry(['-C', root, 'fetch', '--', remote, ref]).code !== 0) {
     return -2;
   }
   const theirs = g(root, ['rev-parse', 'FETCH_HEAD']);
