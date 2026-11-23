@@ -209,6 +209,24 @@ async function readyPhase(
   return true;
 }
 
+/** Settle's failure exit — one shape for closed / timeout / armed-timeout. */
+function settleFail(
+  ctx: MergeCtx,
+  res: GateWaitResult,
+  verdict: string,
+  state: PrActState
+): undefined {
+  emitVerdict(gateVerdict(ctx, res), verdict, state, ctx.argv);
+  if (ctx.armedNote !== undefined) {
+    console.error(
+      `merge: ${ctx.armedNote} on ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — poll timed out; ` +
+        'the host still owns the merge'
+    );
+  }
+  process.exitCode = 1;
+  return undefined;
+}
+
 /** The settle poll after a merge was armed or enqueued — the gate
  *  waits for *green*, settle waits for *terminal*: a green-but-still-open
  *  PR is the host mid-merge, not a timeout. Returns the landed state or
@@ -218,57 +236,39 @@ async function settlePhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActSta
   const interval = ctx.opts.intervalMs ?? 60_000;
   for (;;) {
     const follow = await ctx.fetcher();
-    if (follow.state.state !== 'OPEN') {
-      if (follow.state.state === 'MERGED') return follow.state;
-      emitVerdict(gateVerdict(ctx, res), 'closed', follow.state, ctx.argv);
-      process.exitCode = 1;
-      return undefined;
-    }
+    if (follow.state.state === 'MERGED') return follow.state;
+    if (follow.state.state !== 'OPEN') return settleFail(ctx, res, 'closed', follow.state);
     if (Date.now() >= deadline) {
-      emitVerdict(
-        gateVerdict(ctx, res),
-        ctx.armedNote ? 'armed-timeout' : 'timeout',
-        follow.state,
-        ctx.argv
-      );
-      if (ctx.armedNote !== undefined) {
-        console.error(
-          `merge: ${ctx.armedNote} on ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — poll timed out; ` +
-            'the host still owns the merge'
-        );
-      }
-      process.exitCode = 1;
-      return undefined;
+      return settleFail(ctx, res, ctx.armedNote ? 'armed-timeout' : 'timeout', follow.state);
     }
     await new Promise(r => setTimeout(r, interval));
   }
 }
 
-/** Gate green: arm the host's auto-merge, or fall back to the pinned
- *  merge / external queue. Returns the landed state or exits. */
-async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
-  warnHumanOwned(ctx.rev, ctx.t);
-  // the gate's green snapshot may be stale — re-check fresh before any
-  // host mutation, and re-gate when the head or the verdict moved
+/** The gate's green snapshot may be stale — a moved head or a dropped
+ *  verdict re-enters the gate rather than merging unchecked commits. */
+async function gateDrifted(ctx: MergeCtx, res: GateWaitResult): Promise<boolean> {
   ctx.cache?.invalidate(ctx.t);
   const fresh = await ctx.fetcher();
-  if (fresh.state.headSha !== res.state.headSha || !fresh.gate.ok) {
-    note(ctx, 'merge: gate state moved since green — re-entering the gate');
-    const again = await gatePhase(ctx);
-    return again === undefined ? undefined : landPhase(ctx, again);
-  }
-  // a configured merge queue owns landing — gh --auto would bypass it
-  if (!ctx.queue && enableAutoMerge(ctx)) {
-    note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — auto-merge armed (${ctx.method})`);
-    emitLifecycle(process.cwd(), {
-      kind: 'gate',
-      pr: ctx.t.pr,
-      to: 'automerge',
-      detail: { via: 'merge', sha: res.state.headSha, method: ctx.method },
-    });
-    ctx.armedNote = 'auto-merge armed';
-    return settlePhase(ctx, res);
-  }
+  return fresh.state.headSha !== res.state.headSha || !fresh.gate.ok;
+}
+
+/** The armed path — gh --auto hands landing to the host; settle watches. */
+function armedSettle(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
+  note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} — auto-merge armed (${ctx.method})`);
+  emitLifecycle(process.cwd(), {
+    kind: 'gate',
+    pr: ctx.t.pr,
+    to: 'automerge',
+    detail: { via: 'merge', sha: res.state.headSha, method: ctx.method },
+  });
+  ctx.armedNote = 'auto-merge armed';
+  return settlePhase(ctx, res);
+}
+
+/** The pinned path — landPr merges directly or enqueues on the
+ *  configured external queue (which owns the landing from there). */
+function pinnedLand(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   const head = landPr(
     ctx.rev,
     ctx.t,
@@ -278,15 +278,29 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
   );
   if (head !== undefined) {
     ctx.mergedEventEmitted = true; // landPr emitted 'merged' itself
-    return res.state;
+    return Promise.resolve(res.state);
   }
   if (process.exitCode === 1) {
     emitVerdict(gateVerdict(ctx, res), 'merge-failed', res.state, ctx.argv);
-    return undefined;
+    return Promise.resolve(undefined);
   }
   // enqueued on an external merge queue — settle is still a poll
   ctx.armedNote ??= 'merge queued';
   return settlePhase(ctx, res);
+}
+
+/** Gate green: arm the host's auto-merge, or fall back to the pinned
+ *  merge / external queue. Returns the landed state or exits. */
+async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
+  warnHumanOwned(ctx.rev, ctx.t);
+  if (await gateDrifted(ctx, res)) {
+    note(ctx, 'merge: gate state moved since green — re-entering the gate');
+    const again = await gatePhase(ctx);
+    return again === undefined ? undefined : landPhase(ctx, again);
+  }
+  // a configured merge queue owns landing — gh --auto would bypass it
+  if (!ctx.queue && enableAutoMerge(ctx)) return armedSettle(ctx, res);
+  return pinnedLand(ctx, res);
 }
 
 /** The act exit-gate poll, verbatim. A green gate (or a terminal
@@ -338,31 +352,41 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
 
   const first = await firstFetch(ctx);
   ctx.threadsAtStart = first.state.threads.map(th => th.id);
-
-  // re-entry on a landed PR: phases all no-op — report the record, never
-  // re-record it (retro/bead writes are not replayed)
-  if (first.state.state === 'MERGED') {
-    note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} already MERGED`);
-    emitVerdict(
-      gateVerdict(ctx, { ...first, polls: 0, timedOut: false }),
-      'already-merged',
-      first.state,
-      argv
-    );
-    const bead = flag(argv, '--bead');
-    if (bead !== undefined) {
-      closeLandedBead(ctx.rev, ctx.t, bead);
-    }
-    await reportActOutcome(argv, ctx.t, first.state, 'merged');
-    return;
-  }
+  if (await alreadyLanded(ctx, first)) return;
   if (!(await readyPhase(ctx, first))) return;
 
   const res = await gatePhase(ctx);
   if (res === undefined) return;
   const landed = res.state.state === 'MERGED' ? res.state : await landPhase(ctx, res);
   if (landed === undefined) return;
+  await finishCycle(ctx, res, landed);
+}
 
+/** Re-entry on a landed PR: phases all no-op — report the record, never
+ *  re-record it (retro/bead writes don't replay). */
+async function alreadyLanded(
+  ctx: MergeCtx,
+  first: Awaited<ReturnType<MergeCtx['fetcher']>>
+): Promise<boolean> {
+  if (first.state.state !== 'MERGED') return false;
+  note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} already MERGED`);
+  emitVerdict(
+    gateVerdict(ctx, { ...first, polls: 0, timedOut: false }),
+    'already-merged',
+    first.state,
+    ctx.argv
+  );
+  const bead = flag(ctx.argv, '--bead');
+  if (bead !== undefined) {
+    closeLandedBead(ctx.rev, ctx.t, bead);
+  }
+  await reportActOutcome(ctx.argv, ctx.t, first.state, 'merged');
+  return true;
+}
+
+/** The success tail — merged event (unless landPr emitted its own),
+ *  verdict on the LANDED state, bead close, outcome, cycle retro. */
+async function finishCycle(ctx: MergeCtx, res: GateWaitResult, landed: PrActState): Promise<void> {
   note(ctx, `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} MERGED`);
   if (!ctx.mergedEventEmitted) {
     emitLifecycle(process.cwd(), {
@@ -374,16 +398,16 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
       detail: { via: 'merge', sha: landed.headSha },
     });
   }
-  emitVerdict(gateVerdict(ctx, res), 'merged', landed, argv);
+  emitVerdict(gateVerdict(ctx, res), 'merged', landed, ctx.argv);
 
-  const bead = flag(argv, '--bead');
+  const bead = flag(ctx.argv, '--bead');
   if (bead !== undefined) {
     closeLandedBead(ctx.rev, ctx.t, bead);
   }
-  await reportActOutcome(argv, ctx.t, landed, 'merged');
+  await reportActOutcome(ctx.argv, ctx.t, landed, 'merged');
 
   // —— phase: retro ——
-  if (!argv.includes('--no-retro')) {
+  if (!ctx.argv.includes('--no-retro')) {
     recordCycleRetro(ctx, res, landed);
   }
 }

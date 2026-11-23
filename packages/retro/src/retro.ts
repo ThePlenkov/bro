@@ -99,14 +99,20 @@ function resolveSingleWtf(): BeadRow | undefined {
   return open[0];
 }
 
+/** The plan's wtf binding: explicit `null` answers none — absent resolves
+ *  the single open wtf, so callers must opt out, not just omit. */
+function resolvePlanWtf(plan: RetroPlan): BeadRow | undefined {
+  if (plan.wtf === null) return undefined;
+  return plan.wtf ? requireOpenWtf(plan.wtf) : resolveSingleWtf();
+}
+
 /**
  * Record a validated plan: the retro bead carries the analysis memo and is
  * closed immediately — it is a record, not work. Each action lands as an
  * open prevention bead the executor routes by its `sink:` label.
  */
 export function recordRetro(plan: RetroPlan): RecordResult {
-  const wtf =
-    plan.wtf === null ? undefined : plan.wtf ? requireOpenWtf(plan.wtf) : resolveSingleWtf();
+  const wtf = resolvePlanWtf(plan);
 
   const memo = [
     '## What',
