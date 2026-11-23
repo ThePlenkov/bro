@@ -23,8 +23,24 @@
  * 0700 dirs have no such holder. Owner liveness on `tmp-<pid>-*` names
  * is the stronger signal the scan cannot provide — it is what keeps a
  * live nx daemon's `nx@latest` install safe (spec bro-d9znu).
+ *
+ * One more guard sits between the verdict and rm: a 'delete' candidate
+ * must prove its whole tree sits on one device (spec bro-wb8wf).
+ * rmSync(recursive) descends a filesystem mounted inside a stale dir
+ * and deletes foreign-device content — the mount scan fails CLOSED,
+ * so anything it cannot prove keeps the dir.
  */
-import { readdirSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import {
+  type Dirent,
+  lstatSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  type Stats,
+} from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
@@ -265,6 +281,10 @@ export interface TmpSweepOptions {
    *  spawn pins point at (spec bro-v96mp, workerTmpRoots). A root that
    *  cannot be listed warns and is skipped, never fatal like tmpdir. */
   extraRoots?: string[];
+  /** mount-scan dev probe — test seam only (spec bro-wb8wf). Real
+   *  mounts need privileges a test lacks; faking one path's st_dev
+   *  simulates the boundary. */
+  lstat?: DevProbe;
 }
 
 /** Direct child directory names, [] on any listing failure — a sweep
@@ -422,12 +442,109 @@ interface SweepCtx {
   dryRun: boolean;
   quietKeeps: boolean;
   inUseMessage: string;
+  /** mount-scan dev probe — the test seam for faking a second
+   *  filesystem; production leaves it undefined (lstatSync). */
+  lstat?: DevProbe;
 }
 
 function logKeep(fullPath: string, reason: string, quietKeeps: boolean): void {
   if (!quietKeeps) {
     console.log(`  keep ${fullPath} (${reason})`);
   }
+}
+
+/** `.dev` probe for the pre-delete mount scan — lstat, not stat: rm
+ *  unlinks a symlink in place, so only an entry's OWN device can sit
+ *  on a mount boundary. Injectable so a test can fake a second
+ *  filesystem without a privileged mount (the seam topFillers set —
+ *  spec bro-v96mp). */
+export type DevProbe = (p: string) => Pick<Stats, 'dev'>;
+
+/** The mount scan's verdict (spec bro-wb8wf). Only 'clean' permits rm
+ *  — deletion fails CLOSED: 'mount' (a device boundary, `at` names it)
+ *  and 'uncertain' (the proof could not finish — an unstat-able or
+ *  unlistable entry, a spent bound) both keep the dir. Opposite of the
+ *  reporting-side topFillers, where unproven reads fail open. */
+export type MountVerdict =
+  | { verdict: 'clean' }
+  | { verdict: 'mount'; at: string }
+  | { verdict: 'uncertain'; reason: string };
+
+/** Bounded pre-delete mount scan: prove a 'delete' candidate's whole
+ *  tree sits on ONE device before rmSync(recursive) — a filesystem
+ *  mounted inside a stale tmp dir would be descended and its content
+ *  deleted. The root itself is checked against its parent (a mount AT
+ *  the candidate empties the mounted fs identically), then every
+ *  entry's dev against the root's — files included: a bind-mounted
+ *  file carries the source fs's dev and unlinking it removes the name
+ *  off that device. The bound (topFillers' own 60k nodes / 1.5s) keeps
+ *  a pathological tree from stalling the sweep; a spent bound is
+ *  'uncertain', never waved through as 'clean'. */
+export function mountVerdict(
+  root: string,
+  opts: { lstat?: DevProbe; budget?: { nodes: number; ms: number } } = {}
+): MountVerdict {
+  const lstat = opts.lstat ?? lstatSync;
+  const budget = opts.budget ?? { nodes: 60_000, ms: 1500 };
+  const t0 = Date.now();
+  let nodes = 0;
+
+  let rootDev: number;
+  try {
+    rootDev = lstat(root).dev;
+    if (rootDev !== lstat(dirname(root)).dev) {
+      return { verdict: 'mount', at: root };
+    }
+  } catch {
+    return { verdict: 'uncertain', reason: `cannot stat ${root}` };
+  }
+
+  const stack: string[] = [root];
+  for (let dir = stack.pop(); dir !== undefined; dir = stack.pop()) {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      // a dir that vanished mid-walk holds nothing to descend; an
+      // unlistable-yet-present dir hides whatever it holds — unproven
+      if (!isVanished(err)) {
+        return { verdict: 'uncertain', reason: `cannot list ${dir}` };
+      }
+      continue;
+    }
+    for (const e of entries) {
+      nodes += 1;
+      if (nodes > budget.nodes || Date.now() - t0 > budget.ms) {
+        return { verdict: 'uncertain', reason: 'scan bound reached' };
+      }
+      const p = join(dir, e.name);
+      let dev: number;
+      try {
+        dev = lstat(p).dev;
+      } catch (err) {
+        // vanished mid-walk is no boundary; anything else is unproven
+        if (!isVanished(err)) {
+          return { verdict: 'uncertain', reason: `cannot stat ${p}` };
+        }
+        continue;
+      }
+      if (dev !== rootDev) {
+        return { verdict: 'mount', at: p };
+      }
+      // symlinks are not followed — their dirent reads isSymbolicLink,
+      // never isDirectory, and rm unlinks them in place the same way
+      if (e.isDirectory()) {
+        stack.push(p);
+      }
+    }
+  }
+  return { verdict: 'clean' };
+}
+
+/** The keep reason a non-'clean' scan reports — mount paths and
+ *  unproven proofs both surface, never silently. */
+function mountKeepReason(m: Exclude<MountVerdict, { verdict: 'clean' }>): string {
+  return m.verdict === 'mount' ? `mount point inside: ${m.at}` : `mount scan unproven: ${m.reason}`;
 }
 
 /** The delete attempt + its failure taxonomy: a path that came back
@@ -490,6 +607,16 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
     }
     if (verdict === 'keep') {
       logKeep(fullPath, keepReason(ownerPid, ownerAlive, ctx), ctx.quietKeeps);
+      return false;
+    }
+    // 'delete' — before rm (and before a dry-run's report of it) the
+    // tree must prove it holds no mount: rmSync(recursive) descends a
+    // mounted fs and deletes foreign-device content (spec bro-wb8wf).
+    // Fails closed — an unproven scan keeps, warned on stderr so the
+    // surviving litter stays explainable even under quietKeeps.
+    const mount = mountVerdict(fullPath, { lstat: ctx.lstat });
+    if (mount.verdict !== 'clean') {
+      console.error(`  keep ${fullPath} (${mountKeepReason(mount)})`);
       return false;
     }
     if (ctx.dryRun) {
@@ -565,6 +692,7 @@ export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): voi
     dryRun,
     quietKeeps: opts.quietKeeps === true,
     inUseMessage: process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use',
+    lstat: opts.lstat,
   };
 
   let deleted = sweepEntries(tmp, entries, ctx);
