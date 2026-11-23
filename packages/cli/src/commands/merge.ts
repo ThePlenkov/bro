@@ -104,16 +104,23 @@ function enableAutoMerge(t: PrTarget, method: string): boolean {
   return false;
 }
 
-/** Poll cadence and budget as positive numbers — bad input is a usage
- *  error, not a silently weird wait. */
-function parseTiming(argv: string[]): { interval: number; timeout: number } {
-  const interval = Number(flag(argv, '--interval') ?? '60');
-  const timeout = Number(flag(argv, '--timeout') ?? '45');
-  if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
-    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
+/** One numeric flag as a positive number — bad input is a usage error,
+ *  not a silently weird wait. */
+function positiveNum(raw: string | undefined, fallback: string, name: string): number {
+  const n = Number(raw ?? fallback);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`error: ${name} must be a positive number`);
     process.exit(2);
   }
-  return { interval, timeout };
+  return n;
+}
+
+/** Poll cadence (seconds) and budget (minutes). */
+function parseTiming(argv: string[]): { interval: number; timeout: number } {
+  return {
+    interval: positiveNum(flag(argv, '--interval'), '60', '--interval'),
+    timeout: positiveNum(flag(argv, '--timeout'), '45', '--timeout'),
+  };
 }
 
 /** Flags, auth, hosts — everything before the first poll. */
