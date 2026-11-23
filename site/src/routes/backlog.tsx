@@ -12,10 +12,10 @@ const BASE_URL = import.meta.env.BASE_URL;
 const DOCS = `${BASE_URL}docs`;
 
 // Same channel as /debt: beads has no HTTP surface (its store is dolt
-// chunks on refs/dolt/data), so a cron workflow exports a compact
-// backlog.json onto the data ref and the page reads it by sha off
-// raw.githubusercontent. GitHub issues and open PRs come live from the
-// REST API in the same request wave.
+// chunks on refs/dolt/data), so a merge-to-main workflow (and `bro sync`
+// locally) exports a compact backlog.json onto the data ref and the page
+// reads it by sha off raw.githubusercontent. GitHub issues and open PRs
+// come live from the REST API in the same request wave.
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
@@ -57,6 +57,7 @@ interface Data {
   gh: GhItem[];
   sha: string;
   fetchedAt: string;
+  ghUnavailable?: boolean;
 }
 
 type LoadState =
@@ -73,9 +74,27 @@ interface Filters {
   orphansOnly: boolean;
 }
 
-const ALL_STATUS = ['open', 'in-progress', 'blocked'];
-const ALL_TYPE = ['bug', 'task', 'feature', 'epic', 'agent', 'molecule', 'chore'];
-const ALL_PRIORITY = [1, 2, 3, 4];
+// Facet chips derive from the data itself — a hard-coded list would
+// silently hide any bead whose status/type/priority is missing from it
+// (P0 beads, `human`/`gate` types, `deferred` status).
+const STATUS_ORDER = ['open', 'in-progress', 'blocked', 'deferred'];
+const TYPE_ORDER = ['epic', 'feature', 'task', 'bug', 'chore', 'agent', 'molecule', 'issue', 'pr'];
+
+function ordered<T extends string | number>(vals: Iterable<T>, preferred: readonly T[]): T[] {
+  const rank = (v: T) => {
+    const i = preferred.indexOf(v);
+    return i === -1 ? preferred.length : i;
+  };
+  return [...vals].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+function universes(rows: Bead[]): { status: string[]; type: string[]; priority: number[] } {
+  return {
+    status: ordered(new Set(rows.map(b => b.status)), STATUS_ORDER),
+    type: ordered(new Set(rows.map(b => b.type)), TYPE_ORDER),
+    priority: [...new Set(rows.map(b => b.priority))].sort((a, b) => a - b),
+  };
+}
 
 function readCache(): { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt: string } | null {
   if (typeof window === 'undefined') return null;
@@ -112,26 +131,41 @@ const toGh = (i: GhRaw): GhItem => ({
   labels: (i.labels ?? []).map(l => (typeof l === 'string' ? l : (l.name ?? ''))),
 });
 
+// Pages until a short one — the queue outgrew a single page long ago;
+// a non-ok response throws so a failed feed can't masquerade as an
+// empty queue and overwrite the cached one
 async function fetchGh(): Promise<GhItem[]> {
-  const res = await fetch(ISSUES_API);
-  return res.ok ? ((await res.json()) as GhRaw[]).map(toGh) : [];
+  const out: GhItem[] = [];
+  for (let page = 1; page <= 5; page++) {
+    const res = await fetch(`${ISSUES_API}&page=${page}`);
+    if (!res.ok) throw new Error(`github api ${res.status}`);
+    const items = (await res.json()) as GhRaw[];
+    out.push(...items.map(toGh));
+    if (items.length < 100) break;
+  }
+  return out;
 }
 
+// Beads are required (the whole point of the page); the github feed
+// degrades to a flagged empty list — beads stay live either way.
+// Cache fallback lives in the hook's catch, so cached data never
+// gets marked as fresh.
 async function load(): Promise<Data> {
-  let sha: string;
-  try {
-    sha = await resolveSha();
-  } catch {
-    const cached = readCache();
-    if (cached) return { ...cached, fetchedAt: cached.fetchedAt };
-    throw new Error('could not resolve refs/bro/data');
-  }
-
-  const [backlogRes, gh] = await Promise.all([fetch(`${RAW}/${sha}/${BACKLOG_PATH}`), fetchGh()]);
+  const sha = await resolveSha();
+  const [backlogRes, gh] = await Promise.all([
+    fetch(`${RAW}/${sha}/${BACKLOG_PATH}`),
+    fetchGh().catch(() => null),
+  ]);
   if (!backlogRes.ok) throw new Error(`backlog.json not on refs/bro/data (${backlogRes.status})`);
   const snapshot = (await backlogRes.json()) as Snapshot;
 
-  const data = { snapshot, gh, sha, fetchedAt: new Date().toISOString() };
+  const data: Data = {
+    snapshot,
+    gh: gh ?? readCache()?.gh ?? [],
+    sha,
+    fetchedAt: new Date().toISOString(),
+    ghUnavailable: gh === null,
+  };
   try {
     window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
   } catch {
@@ -193,7 +227,10 @@ const ROW_H = 56;
 const COL_W = 220;
 const W_COLS = 5;
 
-function forestRoots(issues: Bead[], includeFlat: boolean): { starts: Bead[]; children: Map<string, Bead[]> } {
+function forestRoots(
+  issues: Bead[],
+  includeFlat: boolean
+): { starts: Bead[]; children: Map<string, Bead[]> } {
   const byId = new Map(issues.map(i => [i.id, i]));
   const children = new Map<string, Bead[]>();
   const roots: Bead[] = [];
@@ -205,14 +242,20 @@ function forestRoots(issues: Bead[], includeFlat: boolean): { starts: Bead[]; ch
   const epics = roots
     .filter(r => r.type === 'epic' || children.has(r.id))
     .sort((a, b) => a.priority - b.priority || b.open_children - a.open_children);
-  const flat = roots.filter(r => !epics.includes(r));
+  const epicSet = new Set(epics);
+  const flat = roots.filter(r => !epicSet.has(r));
   return { starts: includeFlat ? [...epics, ...flat] : epics, children };
 }
 
 // One vertical band per root; each subtree is BFS'd level by level,
 // every level wrapped across W_COLS columns so the whole forest fits a
 // fixed-width strip the page scrolls through.
-function layoutBand(root: Bead, bandY: number, children: Map<string, Bead[]>, pos: Map<string, GNode>): number {
+function layoutBand(
+  root: Bead,
+  bandY: number,
+  children: Map<string, Bead[]>,
+  pos: Map<string, GNode>
+): number {
   let frontier: Bead[] = [root];
   let levelY = bandY + 24;
   let depth = 0;
@@ -235,8 +278,16 @@ function layoutBand(root: Bead, bandY: number, children: Map<string, Bead[]>, po
 }
 
 // One edge kind per relation source — the table drives both loops.
-const EDGE_SOURCES: Array<{ kind: GEdge['kind']; targets: (n: GNode, children: Map<string, Bead[]>) => string[]; yOff: [number, number] }> = [
-  { kind: 'parent', targets: (n, children) => (children.get(n.bead.id) ?? []).map(k => k.id), yOff: [12, -12] },
+const EDGE_SOURCES: Array<{
+  kind: GEdge['kind'];
+  targets: (n: GNode, children: Map<string, Bead[]>) => string[];
+  yOff: [number, number];
+}> = [
+  {
+    kind: 'parent',
+    targets: (n, children) => (children.get(n.bead.id) ?? []).map(k => k.id),
+    yOff: [12, -12],
+  },
   { kind: 'blocks', targets: n => n.bead.blocks, yOff: [0, 0] },
 ];
 
@@ -245,21 +296,37 @@ function collectLayoutEdges(pos: Map<string, GNode>, children: Map<string, Bead[
     EDGE_SOURCES.flatMap(src =>
       src.targets(n, children).flatMap(id => {
         const t = pos.get(id);
-        return t ? [{ x1: n.x, y1: n.y + src.yOff[0], x2: t.x, y2: t.y + src.yOff[1], kind: src.kind }] : [];
-      })));
+        return t
+          ? [{ x1: n.x, y1: n.y + src.yOff[0], x2: t.x, y2: t.y + src.yOff[1], kind: src.kind }]
+          : [];
+      })
+    )
+  );
 }
 
-function layout(issues: Bead[], includeFlat: boolean): { nodes: GNode[]; edges: GEdge[]; w: number; h: number } {
+function layout(
+  issues: Bead[],
+  includeFlat: boolean
+): { nodes: GNode[]; edges: GEdge[]; w: number; h: number } {
   const { starts, children } = forestRoots(issues, includeFlat);
   const pos = new Map<string, GNode>();
   let bandY = 0;
   for (const root of starts) bandY = layoutBand(root, bandY, children, pos);
-  return { nodes: [...pos.values()], edges: collectLayoutEdges(pos, children), w: W_COLS * COL_W, h: bandY + 20 };
+  return {
+    nodes: [...pos.values()],
+    edges: collectLayoutEdges(pos, children),
+    w: W_COLS * COL_W,
+    h: bandY + 20,
+  };
 }
 
 // --- components ---------------------------------------------------------
 
-function Chip({ active, label, onClick }: Readonly<{ active: boolean; label: string; onClick: () => void }>) {
+function Chip({
+  active,
+  label,
+  onClick,
+}: Readonly<{ active: boolean; label: string; onClick: () => void }>) {
   return (
     <button type="button" onClick={onClick} className={`bl-chip${active ? ' on' : ''}`}>
       {label}
@@ -269,7 +336,12 @@ function Chip({ active, label, onClick }: Readonly<{ active: boolean; label: str
 
 // Chip rows are data, not JSX: every filter group is one entry and the
 // controls render it generically — adding a facet is a one-line change.
-interface ChipItem { v: string; label: string; active: boolean; onClick: () => void }
+interface ChipItem {
+  v: string;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}
 
 function ChipRow({ groups }: Readonly<{ groups: ChipItem[][] }>) {
   return (
@@ -277,7 +349,9 @@ function ChipRow({ groups }: Readonly<{ groups: ChipItem[][] }>) {
       {groups.map((g, gi) => (
         <span key={g.map(c => c.v).join('|')} style={{ display: 'contents' }}>
           {gi > 0 && <span className="bl-sep" />}
-          {g.map(c => <Chip key={c.v} active={c.active} label={c.label} onClick={c.onClick} />)}
+          {g.map(c => (
+            <Chip key={c.v} active={c.active} label={c.label} onClick={c.onClick} />
+          ))}
         </span>
       ))}
     </div>
@@ -294,14 +368,28 @@ function EdgeLine({ e }: Readonly<{ e: GEdge }>) {
   return e.kind === 'parent' ? (
     <line x1={e.x1} y1={e.y1 + 12} x2={e.x2} y2={e.y2 - 12} stroke="#3f5147" strokeWidth={1} />
   ) : (
-    <line x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#e0705a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.8} />
+    <line
+      x1={e.x1}
+      y1={e.y1}
+      x2={e.x2}
+      y2={e.y2}
+      stroke="#e0705a"
+      strokeWidth={1.5}
+      strokeDasharray="4 3"
+      opacity={0.8}
+    />
   );
 }
 
 function GraphNode({ n, onPick }: Readonly<{ n: GNode; onPick: (b: Bead | null) => void }>) {
   return (
     <g transform={`translate(${n.x},${n.y})`} onClick={() => onPick(n.bead)} className="bl-node">
-      <rect x={-98} y={-14} width={196} height={28} rx={6}
+      <rect
+        x={-98}
+        y={-14}
+        width={196}
+        height={28}
+        rx={6}
         fill={n.bead.status === 'blocked' ? '#3a2430' : '#172018'}
         stroke={nodeStroke(n.bead)}
         strokeWidth={n.bead.type === 'epic' ? 2 : 1}
@@ -322,15 +410,36 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
 
   const tools: ChipItem[] = [
     { v: 'flat', label: 'include flat roots', active: flat, onClick: () => setFlat(f => !f) },
-    { v: 'zout', label: 'zoom −', active: false, onClick: () => setZoom(z => Math.max(0.15, z / 1.25)) },
-    { v: 'zin', label: 'zoom +', active: false, onClick: () => setZoom(z => Math.min(4, z * 1.25)) },
-    { v: 'reset', label: 'reset', active: false, onClick: () => { setZoom(1); setPan({ x: 0, y: 0 }); } },
+    {
+      v: 'zout',
+      label: 'zoom −',
+      active: false,
+      onClick: () => setZoom(z => Math.max(0.15, z / 1.25)),
+    },
+    {
+      v: 'zin',
+      label: 'zoom +',
+      active: false,
+      onClick: () => setZoom(z => Math.min(4, z * 1.25)),
+    },
+    {
+      v: 'reset',
+      label: 'reset',
+      active: false,
+      onClick: () => {
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+      },
+    },
   ];
 
   const onDrag = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!drag.current) return;
     const k = g.w / e.currentTarget.getBoundingClientRect().width / zoom;
-    setPan(p => ({ x: p.x + (e.clientX - drag.current!.x) * k, y: p.y + (e.clientY - drag.current!.y) * k }));
+    setPan(p => ({
+      x: p.x + (e.clientX - drag.current!.x) * k,
+      y: p.y + (e.clientY - drag.current!.y) * k,
+    }));
     drag.current = { x: e.clientX, y: e.clientY };
   };
 
@@ -338,12 +447,20 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
     <div className="bl-graphwrap">
       <div className="bl-graphtools">
         <ChipRow groups={[tools]} />
-        <span className="bl-graphhint">drag to pan · click node for details · red edge = blocks</span>
+        <span className="bl-graphhint">
+          drag to pan · click node for details · red edge = blocks
+        </span>
       </div>
       <svg
         role="img"
         viewBox={`0 0 ${g.w} ${g.h}`}
-        style={{ width: '100%', height: 'auto', display: 'block', background: '#0e1410', cursor: 'grab' }}
+        style={{
+          width: '100%',
+          height: 'auto',
+          display: 'block',
+          background: '#0e1410',
+          cursor: 'grab',
+        }}
         onMouseDown={e => (drag.current = { x: e.clientX, y: e.clientY })}
         onMouseUp={() => (drag.current = null)}
         onMouseLeave={() => (drag.current = null)}
@@ -351,41 +468,72 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
       >
         <title>backlog dependency graph</title>
         <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-          {g.edges.map(e => <EdgeLine key={`${e.kind}${e.x1},${e.y1},${e.x2},${e.y2}`} e={e} />)}
-          {g.nodes.map(n => <GraphNode key={n.bead.id} n={n} onPick={onPick} />)}
+          {g.edges.map(e => (
+            <EdgeLine key={`${e.kind}${e.x1},${e.y1},${e.x2},${e.y2}`} e={e} />
+          ))}
+          {g.nodes.map(n => (
+            <GraphNode key={n.bead.id} n={n} onPick={onPick} />
+          ))}
         </g>
       </svg>
     </div>
   );
 }
 
-function RelRow({ label, ids, onJump }: Readonly<{ label: string; ids: string[]; onJump: (id: string) => void }>) {
+function RelRow({
+  label,
+  ids,
+  onJump,
+}: Readonly<{ label: string; ids: string[]; onJump: (id: string) => void }>) {
   if (ids.length === 0) return null;
   return (
     <p className="bl-detail-meta">
-      {label}: {ids.map(id => <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">{id} </button>)}
+      {label}:{' '}
+      {ids.map(id => (
+        <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">
+          {id}{' '}
+        </button>
+      ))}
     </p>
   );
 }
 
 // Detail meta lines are data too — each row is {when, text|element}.
-function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
+function Detail({
+  b,
+  onClose,
+  onJump,
+}: Readonly<{ b: Bead; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
   const parent = b.parent ? ` · parent ${b.parent}` : '';
   const meta: string[] = [
     `${b.type} · P${b.priority || '—'} · ${b.status}${parent}`,
     ...(b.labels.length ? [`labels: ${b.labels.join(', ')}`] : []),
-    ...(b.open_children + b.closed_children ? [`children: ${b.open_children} open / ${b.closed_children} closed`] : []),
+    ...(b.open_children + b.closed_children
+      ? [`children: ${b.open_children} open / ${b.closed_children} closed`]
+      : []),
   ];
   return (
     <aside className="bl-detail">
       <div className="bl-detail-head">
         <code>{b.id}</code>
-        <button type="button" onClick={onClose}>✕</button>
+        <button type="button" onClick={onClose}>
+          ✕
+        </button>
       </div>
       <p className="bl-detail-title">{b.title}</p>
-      {meta.map(m => <p key={m} className="bl-detail-meta">{m}</p>)}
-      {isGh && <p><a href={`${GITHUB}/issues/${b.id.split('-')[1]}`}>open on github ↗</a></p>}
+      {meta.map(m => (
+        <p key={m} className="bl-detail-meta">
+          {m}
+        </p>
+      ))}
+      {isGh && (
+        <p>
+          <a href={`${GITHUB}/${b.id.startsWith('pr-') ? 'pull' : 'issues'}/${b.id.split('-')[1]}`}>
+            open on github ↗
+          </a>
+        </p>
+      )}
       <RelRow label="blocks" ids={b.blocks} onJump={onJump} />
       <RelRow label="blocked by" ids={b.blocked_by} onJump={onJump} />
     </aside>
@@ -394,32 +542,39 @@ function Detail({ b, onClose, onJump }: Readonly<{ b: Bead; onClose: () => void;
 
 // --- filtering ------------------------------------------------------------
 
-type Row = { b: Bead; src: 'beads' | 'github' };
-
-const beadPredicates = [
-  (b: Bead, f: Filters) => f.status.has(b.status) && f.type.has(b.type) && f.priority.has(b.priority),
-  (b: Bead, f: Filters) => !f.orphansOnly || !b.parent,
-];
+interface Row {
+  b: Bead;
+  src: 'beads' | 'github';
+  age: number;
+  hay: string;
+}
 
 function haystack(b: Bead): string {
   return `${b.id} ${b.title} ${b.labels.join(' ')}`.toLowerCase();
 }
 
-const ghRows = (gh: GhItem[], q: string): Row[] =>
-  gh.map(normalizeGh)
-    .filter(b => !q || haystack(b).includes(q))
-    .map(b => ({ b, src: 'github' as const }));
+const toRow = (b: Bead, src: Row['src'], now: number): Row => ({
+  b,
+  src,
+  age: ageDays(b.created_at, now),
+  hay: haystack(b),
+});
 
-const beadRows = (beads: Bead[], f: Filters, q: string): Row[] =>
-  beads.filter(b => beadPredicates.every(p => p(b, f)) && (!q || haystack(b).includes(q)))
-    .map(b => ({ b, src: 'beads' as const }));
+// same facet semantics for both sources — github rows carry `open`/`issue`|
+// `pr`/P0, so the chips filter them the same way beads get filtered
+const rowPredicates: Array<(r: Row, f: Filters) => boolean> = [
+  (r, f) => f.source === 'all' || r.src === f.source,
+  (r, f) => f.status.has(r.b.status) && f.type.has(r.b.type) && f.priority.has(r.b.priority),
+  (r, f) => !f.orphansOnly || (r.src === 'beads' && !r.b.parent),
+];
 
-function applyFilters(beads: Bead[], gh: GhItem[], f: Filters): Row[] {
+function applyFilters(beads: Bead[], gh: GhItem[], f: Filters, now: number): Row[] {
   const q = f.q.trim().toLowerCase();
-  return [
-    ...(f.source === 'github' ? [] : beadRows(beads, f, q)),
-    ...(f.source !== 'beads' && !f.orphansOnly ? ghRows(gh, q) : []),
+  const rows = [
+    ...beads.map(b => toRow(b, 'beads', now)),
+    ...gh.map(g => toRow(normalizeGh(g), 'github', now)),
   ];
+  return rows.filter(r => rowPredicates.every(p => p(r, f)) && (q === '' || r.hay.includes(q)));
 }
 
 // --- page -----------------------------------------------------------------
@@ -433,19 +588,24 @@ function useBacklog(): LoadState {
       .catch(err => {
         const cached = readCache();
         if (alive) {
-          setState(cached
-            ? { kind: 'ready', data: cached as Data, cached: true }
-            : { kind: 'error', message: err instanceof Error ? err.message : String(err) });
+          setState(
+            cached
+              ? { kind: 'ready', data: cached as Data, cached: true }
+              : { kind: 'error', message: err instanceof Error ? err.message : String(err) }
+          );
         }
       });
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
   return state;
 }
 
 function toggleSet<T>(s: Set<T>, v: T): Set<T> {
   const next = new Set(s);
-  if (next.has(v)) next.delete(v); else next.add(v);
+  if (next.has(v)) next.delete(v);
+  else next.add(v);
   return next;
 }
 
@@ -459,54 +619,135 @@ function Stats({ data, gh, inView }: Readonly<{ data: Data; gh: GhItem[]; inView
   return (
     <section className="debt-grid">
       {cells.map(([n, l]) => (
-        <div key={l} className="stat"><span className="stat-n">{n}</span><span className="stat-l">{l}</span></div>
+        <div key={l} className="stat">
+          <span className="stat-n">{n}</span>
+          <span className="stat-l">{l}</span>
+        </div>
       ))}
     </section>
   );
 }
 
-function ListView({ rows, now, onPick }: Readonly<{ rows: Row[]; now: number; onPick: (b: Bead) => void }>) {
+// comparators are data — adding a sortable column is a table entry, and
+// the header renders it generically
+const SORTS: Record<string, (a: Row, b: Row) => number> = {
+  id: (a, b) => a.b.id.localeCompare(b.b.id),
+  type: (a, b) => a.b.type.localeCompare(b.b.type),
+  priority: (a, b) => a.b.priority - b.b.priority,
+  age: (a, b) => b.age - a.age,
+  title: (a, b) => a.b.title.localeCompare(b.b.title),
+};
+const HEADERS: Array<[keyof typeof SORTS, string]> = [
+  ['id', 'id'],
+  ['type', 'type'],
+  ['priority', 'P'],
+  ['age', 'age'],
+  ['title', 'title'],
+];
+
+function ListView({ rows, onPick }: Readonly<{ rows: Row[]; onPick: (b: Bead) => void }>) {
   const CAP = 400;
+  const [sort, setSort] = useState<{ k: string; dir: 1 | -1 }>({ k: 'age', dir: 1 });
+  const sorted = useMemo(
+    () => [...rows].sort((a, b) => SORTS[sort.k](a, b) * sort.dir),
+    [rows, sort]
+  );
   return (
     <section className="bl-listwrap">
       <table className="debt-table">
         <thead>
-          <tr><th>id</th><th>type</th><th>P</th><th>age</th><th>title</th></tr>
+          <tr>
+            {HEADERS.map(([k, label]) => (
+              <th
+                key={k}
+                onClick={() => setSort(s => ({ k, dir: s.k === k ? (-s.dir as 1 | -1) : 1 }))}
+              >
+                {label}
+                {sort.k === k ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}
+              </th>
+            ))}
+          </tr>
         </thead>
         <tbody>
-          {rows.slice(0, CAP).map(({ b, src }) => (
+          {sorted.slice(0, CAP).map(({ b, src, age }) => (
             <tr key={b.id} onClick={() => onPick(b)} className="bl-row">
               <td>{b.id}</td>
-              <td>{src === 'github' ? `gh·${b.type}` : b.type}{b.status !== 'open' ? ` (${b.status})` : ''}</td>
+              <td>
+                {src === 'github' ? `gh·${b.type}` : b.type}
+                {b.status !== 'open' ? ` (${b.status})` : ''}
+              </td>
               <td className="num">{b.priority || '—'}</td>
-              <td className="num">{ageDays(b.created_at, now)}d</td>
+              <td className="num">{age}d</td>
               <td>{b.title}</td>
             </tr>
           ))}
         </tbody>
       </table>
-      {rows.length > CAP && <p className="debt-note">showing first {CAP} of {rows.length} — narrow the filters</p>}
+      {rows.length > CAP && (
+        <p className="debt-note">
+          showing first {CAP} of {rows.length} — narrow the filters
+        </p>
+      )}
       {rows.length === 0 && <p className="debt-note">nothing matches — loosen a filter</p>}
     </section>
   );
 }
 
-function FilterControls({ f, setF, view, setView }: Readonly<{
+function FilterControls({
+  f,
+  setF,
+  view,
+  setView,
+  uni,
+}: Readonly<{
   f: Filters;
   setF: React.Dispatch<React.SetStateAction<Filters>>;
   view: 'list' | 'graph';
   setView: (v: 'list' | 'graph') => void;
+  uni: { status: string[]; type: string[]; priority: number[] };
 }>) {
   const set = <K extends keyof Filters>(k: K, v: Filters[K]) => setF(p => ({ ...p, [k]: v }));
   const toggle = (k: 'status' | 'type' | 'priority', v: string | number) =>
     setF(p => ({ ...p, [k]: toggleSet(p[k] as Set<string | number>, v) }));
   const groups: ChipItem[][] = [
-    (['all', 'beads', 'github'] as const).map(s => ({ v: s, label: s, active: f.source === s, onClick: () => set('source', s) })),
-    ALL_STATUS.map(s => ({ v: s, label: s, active: f.status.has(s), onClick: () => toggle('status', s) })),
-    ALL_TYPE.map(t => ({ v: t, label: t, active: f.type.has(t), onClick: () => toggle('type', t) })),
-    ALL_PRIORITY.map(p => ({ v: `p${p}`, label: `P${p}`, active: f.priority.has(p), onClick: () => toggle('priority', p) })),
-    [{ v: 'orphans', label: 'orphans only', active: f.orphansOnly, onClick: () => set('orphansOnly', !f.orphansOnly) }],
-    (['list', 'graph'] as const).map(v => ({ v, label: v, active: view === v, onClick: () => setView(v) })),
+    (['all', 'beads', 'github'] as const).map(s => ({
+      v: s,
+      label: s,
+      active: f.source === s,
+      onClick: () => set('source', s),
+    })),
+    uni.status.map(s => ({
+      v: s,
+      label: s,
+      active: f.status.has(s),
+      onClick: () => toggle('status', s),
+    })),
+    uni.type.map(t => ({
+      v: t,
+      label: t,
+      active: f.type.has(t),
+      onClick: () => toggle('type', t),
+    })),
+    uni.priority.map(p => ({
+      v: `p${p}`,
+      label: `P${p}`,
+      active: f.priority.has(p),
+      onClick: () => toggle('priority', p),
+    })),
+    [
+      {
+        v: 'orphans',
+        label: 'orphans only',
+        active: f.orphansOnly,
+        onClick: () => set('orphansOnly', !f.orphansOnly),
+      },
+    ],
+    (['list', 'graph'] as const).map(v => ({
+      v,
+      label: v,
+      active: view === v,
+      onClick: () => setView(v),
+    })),
   ];
 
   return (
@@ -526,25 +767,42 @@ function FilterControls({ f, setF, view, setView }: Readonly<{
 function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   const [view, setView] = useState<'list' | 'graph'>('list');
   const [picked, setPicked] = useState<Bead | null>(null);
-  const [f, setF] = useState<Filters>({
-    q: '', status: new Set(ALL_STATUS), type: new Set(ALL_TYPE),
-    priority: new Set(ALL_PRIORITY), source: 'all', orphansOnly: false,
-  });
 
   const beads = data.snapshot.issues;
-  const filtered = useMemo(() => applyFilters(beads, data.gh, f), [beads, data.gh, f]);
+  const now = Date.now();
+  const uni = useMemo(() => universes([...beads, ...data.gh.map(normalizeGh)]), [beads, data.gh]);
+  const [f, setF] = useState<Filters>({
+    q: '',
+    status: new Set(uni.status),
+    type: new Set(uni.type),
+    priority: new Set(uni.priority),
+    source: 'all',
+    orphansOnly: false,
+  });
+
+  const filtered = useMemo(() => applyFilters(beads, data.gh, f, now), [beads, data.gh, f, now]);
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
-  const pick = (id: string) => { const t = byId.get(id); if (t) setPicked(t); };
+  const pick = (id: string) => {
+    const t = byId.get(id);
+    if (t) setPicked(t);
+  };
 
   return (
     <>
       {cached && (
-        <section className="debt-empty"><p>showing the last cached snapshot — GitHub API unreachable right now</p></section>
+        <section className="debt-empty">
+          <p>showing the last cached snapshot — GitHub API unreachable right now</p>
+        </section>
+      )}
+      {data.ghUnavailable && !cached && (
+        <section className="debt-empty">
+          <p>github live feed unreachable — beads are live, the gh queue is the last cached one</p>
+        </section>
       )}
       <Stats data={data} gh={data.gh} inView={filtered.length} />
-      <FilterControls f={f} setF={setF} view={view} setView={setView} />
+      <FilterControls f={f} setF={setF} view={view} setView={setView} uni={uni} />
 
-      {view === 'list' && <ListView rows={filtered} now={Date.now()} onPick={setPicked} />}
+      {view === 'list' && <ListView rows={filtered} onPick={setPicked} />}
       {view === 'graph' && (
         <section>
           <Graph items={filtered.filter(x => x.src === 'beads').map(x => x.b)} onPick={setPicked} />
@@ -556,11 +814,22 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
 }
 
 function Gate({ state }: Readonly<{ state: LoadState }>) {
-  if (state.kind === 'loading') return <section className="debt-empty"><p>loading…</p></section>;
+  if (state.kind === 'loading')
+    return (
+      <section className="debt-empty">
+        <p>loading…</p>
+      </section>
+    );
   if (state.kind === 'error') {
     return (
       <section className="debt-empty">
-        <p>⚠ {state.message} — <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated views.</p>
+        <p>
+          ⚠ {state.message} —{' '}
+          <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">
+            GitHub rate limits
+          </a>{' '}
+          apply to unauthenticated views.
+        </p>
       </section>
     );
   }
@@ -574,11 +843,13 @@ function BacklogPage() {
       <main className="bl-main">
         <section className="hero">
           <p className="kicker">the swamp, mapped</p>
-          <h1>bro backlog, <em>live</em>.</h1>
+          <h1>
+            bro backlog, <em>live</em>.
+          </h1>
           <p className="lede">
-            Every open bead plus the GitHub queue, read straight off{' '}
-            <code>refs/bro/data</code> and the REST API at page load. A publish job refreshes the
-            snapshot on every merge to main — what you see is what the store holds now.
+            Every open bead plus the GitHub queue, read straight off <code>refs/bro/data</code> and
+            the REST API at page load. A publish job refreshes the snapshot on every merge to main —
+            what you see is what the store holds now.
           </p>
         </section>
         <Gate state={state} />
@@ -587,7 +858,11 @@ function BacklogPage() {
         <p className="links">
           <a href={BASE_URL}>bro</a> · <a href={DOCS}>docs</a> · <a href={`${GITHUB}`}>github ↗</a>
           {state.kind === 'ready' && (
-            <span className="debt-note"> · snapshot {state.data.sha.slice(0, 8)} · {state.data.snapshot.generated_at.slice(0, 16).replace('T', ' ')}Z</span>
+            <span className="debt-note">
+              {' '}
+              · snapshot {state.data.sha.slice(0, 8)} ·{' '}
+              {state.data.snapshot.generated_at.slice(0, 16).replace('T', ' ')}Z
+            </span>
           )}
         </p>
       </footer>

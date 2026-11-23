@@ -10,6 +10,7 @@ packages/cli/.pack-stash.json
 .agents/review-debt/
 .agents/sweep/
 .agents/skills/
+.agents/backlog.json
 packages/pack/skills/
 packages/pack/formulas/
 .kilo/

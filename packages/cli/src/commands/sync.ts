@@ -165,6 +165,11 @@ export function runSyncCommand(argv: string[]): void {
     return;
   }
 
+  // replicate first — the snapshot must carry post-pull state, not the
+  // pre-sync backlog (a stale export would publish over newer remote data)
+  if (beads) {
+    syncStores(root, cfg.connectors);
+  }
   writeBacklogSnapshot(root);
   const dirs = artifactDirs(root);
   if (dirs.length === 0) {
@@ -185,9 +190,5 @@ export function runSyncCommand(argv: string[]): void {
     console.error(`warning: could not push ${ref} to ${remote} — check network and remote access`);
   } else if (hasRef) {
     console.log(`bro sync: ${ref} pushed to ${remote}`);
-  }
-  // the store has its own transport — independent of artifact outcome
-  if (beads) {
-    syncStores(root, cfg.connectors);
   }
 }

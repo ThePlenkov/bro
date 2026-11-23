@@ -41,7 +41,7 @@ export interface BacklogSnapshot {
   issues: BacklogIssue[];
 }
 
-const OPEN_STATUSES = new Set(['open', 'in_progress', 'in-progress', 'blocked']);
+const OPEN_STATUSES = new Set(['open', 'in_progress', 'in-progress', 'blocked', 'deferred']);
 
 interface Edges {
   parentOf: Map<string, string>;
@@ -68,10 +68,12 @@ const DEP_HANDLERS: Record<string, (src: string, tgt: string, ctx: EdgeCtx) => v
     e.parentOf.set(src, tgt);
     if (!open.has(src)) e.closedChildren.set(tgt, (e.closedChildren.get(tgt) ?? 0) + 1);
   },
+  // a dep row reads "src depends on tgt" — type `blocks` means src is
+  // blocked BY tgt, so the `blocks` edge lands on the target
   blocks: (src, tgt, { open, e }) => {
     if (open.has(src) && open.has(tgt)) {
-      push(e.blocks, src, tgt);
-      push(e.blockedBy, tgt, src);
+      push(e.blockedBy, src, tgt);
+      push(e.blocks, tgt, src);
     }
   },
 };
@@ -86,7 +88,8 @@ function collectEdges(rows: BeadRow[], open: Set<string>): Edges {
   for (const r of rows) {
     for (const d of r.dependencies ?? []) {
       const tgt = d.depends_on_id ?? d.depends_on_issue_id;
-      if (tgt) DEP_HANDLERS[d.type]?.(r.id, tgt, ctx);
+      // hasOwn — a prototype key like `__proto__` must not reach the map
+      if (tgt && Object.hasOwn(DEP_HANDLERS, d.type)) DEP_HANDLERS[d.type](r.id, tgt, ctx);
     }
   }
   return ctx.e;
