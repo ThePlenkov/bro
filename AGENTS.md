@@ -51,6 +51,37 @@ Developing bro itself: see CONTRIBUTING.md.
   still misfires, the exclusion lives in `.codacy.yml` /
   `.markdownlint.json` next to a written justification — pattern-wide,
   never a per-line suppression.
+- **Green on first write** — CodeScene and SonarCloud grade every new
+  file in the delta; write code that passes them the first time, not
+  code that needs a refactor PR after the gates complain. Concretely:
+  cognitive complexity stays ≤15 per function — pick data-driven
+  structure over branching (a table or handler map instead of an
+  if-else chain, a config array rendered generically instead of six
+  near-identical JSX blocks, a predicate list instead of nested
+  guards). When a gate does flag new code, redesign the shape — do not
+  split a long function into five trivial ones to game the metric;
+  that is worse code, not better code.
+  Shapes the gates keep flagging (learned the hard way — write the
+  right side first): a function carrying >4 positional args → take one
+  context object; a discriminator `if/else` or `switch` → a handler map
+  keyed by the tag; a loop with conditionals inside → `filter`/`map`/
+  `flatMap` pipelines, or a table that drives the loop; JSX whose
+  render depends on the owner's state → one component per state branch;
+  N near-identical JSX blocks → one config array rendered generically;
+  index-as-key → a content-derived key; nested template literals →
+  hoist the inner one to a named const; `A && B || C` in shell → a real
+  `if/then/else` (it is NOT if-then-else); a legit argv/env path that a
+  scanner flags → per-line `// NOSONAR` with the reason (the repo's
+  convention — file-level exclusions are not honored); a test on a real
+  spawned process → poll for the exec'd identity before asserting
+  (`spawn` resolves at fork; `/proc` reads the parent's env first).
+- **Loop with retro** — when a gate or check fails, iterate until it is
+  green and learn from each failure: after every red round, name the
+  concrete finding (which rule, which function), the shape that caused
+  it, and the pattern that would have avoided it, then carry that
+  pattern into the next write. A failure that teaches nothing produces
+  the same failure again next PR — the retro is what makes the loop
+  converge instead of bouncing between flags.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).
@@ -95,6 +126,30 @@ Developing bro itself: see CONTRIBUTING.md.
   runner; harness differences are real bugs' favorite hiding place.
   Local green ≠ PR green — after every push, `bro review act status` +
   `bro review act threads` are the only verdict.
+- **Resolve conflicts by hunk, never by side** — `git checkout
+  --ours/--theirs` reverts the other side's concurrent changes in the
+  whole file, and the reverted work is invisible in your diff. (`rebase
+  -X` is narrower — it picks a side only inside conflicting hunks and
+  still merges nonconflicting changes; it is fine when the intent is
+  exactly that.) Resolve the hunks, then audit the resolved file
+  against the current target tip: `git diff <target-tip> -- <file>`
+  must show only your hunks — a removed line the PR never touched is
+  dropped concurrent work.
+- **Hand-edited config is JSONC, not JSON** — files users edit
+  (nx.json, tsconfig, `.vscode/*.json`) may carry comments and custom
+  formatting. Parse with `jsonc-parser` (declared as a direct
+  dependency of the package importing it — never rely on transitive
+  hoisting), throw on collected errors, write via
+  `modify`/`applyEdits` — a `JSON.parse`+`stringify` round-trip
+  destroys comments and formatting. Exception: `package.json` and
+  other manifest/lock files are strict JSON — comments there break npm
+  and repo tooling; use plain `JSON.parse` and never add comments.
+- **Merged options, never raw** — once `const merged = {...DEFAULTS,
+  ...options}` exists, every read of an effective value below it goes
+  to `merged`; a raw `options.x` reads `undefined` where callers
+  relied on the default. Reading raw `options` stays legal only when
+  caller intent itself is the question — `x in options`, presence
+  checks that distinguish "explicitly passed" from "defaulted".
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
   (quota, outage, runner flakes) never do. A _failed_ AI-reviewer check

@@ -10,6 +10,7 @@ packages/cli/.pack-stash.json
 .agents/review-debt/
 .agents/sweep/
 .agents/skills/
+.agents/backlog.json
 packages/pack/skills/
 packages/pack/formulas/
 .kilo/
@@ -22,3 +23,10 @@ drills/
 
 # brouter bench replay output — regenerated each run, evidence lives in dated dirs
 .evidence/brouter-bench/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
