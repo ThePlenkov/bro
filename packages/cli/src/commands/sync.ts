@@ -175,20 +175,22 @@ export function runSyncCommand(argv: string[]): void {
   if (dirs.length === 0) {
     console.log('bro sync: no artifact dirs (.agents/, debt dir)');
   }
+  let tip: string | undefined;
   for (const dir of dirs) {
     const head = dataRefCommit(root, dir, `bro data: sync ${dir}`, ref);
     if (head === null) {
       console.log(`bro sync: ${dir} — nothing to sync`);
     } else {
+      tip = head;
       console.log(`bro sync: ${dir} → ${ref} @ ${head.slice(0, 8)}`);
     }
   }
-  pushDataRef(root, remote, ref);
+  pushDataRef(root, remote, ref, tip);
 }
 
 // Push whenever a local data ref exists — an earlier sync may have left
 // one even when this checkout has no artifact dirs to commit.
-function pushDataRef(root: string, remote: string, ref: string): void {
+function pushDataRef(root: string, remote: string, ref: string, tip?: string): void {
   const hasRef = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', ref]).code === 0;
   if (!hasRef) return;
   if (!dataRefPush(root, remote, ref)) {
@@ -196,14 +198,17 @@ function pushDataRef(root: string, remote: string, ref: string): void {
     return;
   }
   console.log(`bro sync: ${ref} pushed to ${remote}`);
-  mirrorDataBranch(root, remote, ref);
+  if (ref === 'refs/bro/data') {
+    const pushedTip = tip ?? gitTry(['-C', root, 'rev-parse', ref]).out.trim();
+    if (pushedTip !== '') {
+      mirrorDataBranch(root, remote, pushedTip);
+    }
+  }
 }
 
 // Mirror the tip onto its heads twin — raw.githubusercontent serves
 // branches without the API quota the ref call costs every page load.
 // Best-effort: a rejected mirror never fails the sync.
-function mirrorDataBranch(root: string, remote: string, ref: string): void {
-  const tip = gitTry(['-C', root, 'rev-parse', ref]);
-  if (tip.code !== 0) return;
-  gitTry(['-C', root, 'push', remote, `${tip.out.trim()}:refs/heads/bro-data`]);
+function mirrorDataBranch(root: string, remote: string, tip: string): void {
+  gitTry(['-C', root, 'push', remote, `${tip}:refs/heads/bro-data`]);
 }
