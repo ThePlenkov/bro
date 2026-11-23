@@ -215,37 +215,50 @@ async def main():
             log(f"fix-{slug} failed: {e}")
             return None
 
-    thunks = [(lambda s=s: fix(s)) for s in groups]
+    jobs = [(lambda s=s: fix(s)) for s in groups]
     if stale:
-        thunks.append(lambda: agent(
-            f"""Repo: {REPO} (checkout at {REPO_DIR}). Read-only triage of these
-stale PRs — do NOT modify anything (no commits, closes, comments). Verdict per
-PR in {{"close","rebase-and-fix","keep","needs-owner"}} + one-line reason:
-""" + fmt_rows(stale) + """
-Check each PR's state, checks, conflicts, and whether main already absorbed its
-intent. Structured output: verdicts[].""",
-            phase="triage", schema=TRIAGE_SCHEMA, label="triage-stale",
-            mode="lite", vm_mode="shared"))
+        jobs.append(lambda: agent(build_triage_prompt(stale), phase="triage",
+                                  schema=TRIAGE_SCHEMA, label="triage-stale",
+                                  mode="lite", vm_mode="shared"))
 
-    results = await parallel(thunks)
+    results = await parallel(jobs)
     fix_results = [r for r in results[: len(groups)] if r]
-    triage = results[-1] if stale else None
+    if stale:
+        log("stale verdicts: " + json.dumps(results[-1]["verdicts"]))
 
     prs = [(r["pr_url"], r["fixed_ids"]) for r in fix_results if r.get("pr_url")]
     for r in fix_results:
         log(f"fix done: {r['pr_url']} fixed={len(r['fixed_ids'])} skipped={len(r['skipped_ids'])}")
-    if triage:
-        log("stale verdicts: " + json.dumps(triage["verdicts"]))
-
     if not prs:
         log("no PRs opened — nothing to land")
         return
 
-    land = await agent(
-        f"""Repo: {REPO}, checkout at {REPO_DIR} (shared VM; sibling worktrees
+    land = await agent(build_land_prompt(prs), phase="land", schema=LAND_SCHEMA,
+                       label="land-all", mode="lite", vm_mode="shared",
+                       soft_time_limit_minutes=60)
+    log("land: " + json.dumps(land["results"]))
+
+
+def build_triage_prompt(stale):
+    return (
+        f"""Repo: {REPO} (checkout at {REPO_DIR}). Read-only triage of these
+stale PRs — do NOT modify anything (no commits, closes, comments). Verdict per
+PR in {{"close","rebase-and-fix","keep","needs-owner"}} + one-line reason:
+""" + fmt_rows(stale) + """
+Check each PR's state, checks, conflicts, and whether main already absorbed its
+intent. Structured output: verdicts[]."""
+    )
+
+
+def build_land_prompt(prs):
+    pr_lines = "\n".join(
+        f"- {u} (mark these debt rows done on merge: {','.join(ids)})"
+        for u, ids in prs
+    )
+    return f"""Repo: {REPO}, checkout at {REPO_DIR} (shared VM; sibling worktrees
 under {WORKTREES}/ belong to the fixers — use the matching one when pushing a
 fix onto a PR branch). Land each PR through the FULL merge cycle, serially:
-""" + "\n".join(f"- {u} (mark these debt rows done on merge: {','.join(ids)})" for u, ids in prs) + f"""
+{pr_lines}
 
 For each PR:
 1. `npm run build` once in {REPO_DIR}, then `node packages/cli/dist/index.js merge <PR-number>`
@@ -259,11 +272,7 @@ For each PR:
    `node packages/cli/dist/index.js review debt set done --thread-id <ids>`
    then `node packages/cli/dist/index.js review debt sync`.
 5. Record per-PR status: merged | blocked(reason) | failed(reason).
-Stop and report rather than skipping steps. Structured output: results[].""",
-        phase="land", schema=LAND_SCHEMA, label="land-all",
-        mode="lite", vm_mode="shared", soft_time_limit_minutes=60,
-    )
-    log("land: " + json.dumps(land["results"]))
+Stop and report rather than skipping steps. Structured output: results[]."""
 
 
 asyncio.run(main())
