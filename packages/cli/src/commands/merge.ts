@@ -209,6 +209,33 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
   return settlePhase(ctx, res);
 }
 
+/** The act exit-gate poll, verbatim. A green gate (or a terminal
+ *  state) passes through; a settled blocker reports and ends the run
+ *  — re-entry resumes, finished phases no-op. */
+async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
+  const res = await waitForGate(ctx.fetcher, ctx.opts);
+  const verdict = gateVerdict(ctx.rev, ctx.t, res);
+  if (!res.gate.ok && res.state.state === 'OPEN') {
+    for (const b of res.gate.blockers) {
+      console.error(`  blocker: ${b}`);
+    }
+    console.error(
+      `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} blocked — fix and re-run; ` +
+        'finished phases no-op on re-entry'
+    );
+    emitVerdict(verdict, 'blocked', res, ctx.argv);
+    process.exitCode = 1;
+    return undefined;
+  }
+  if (res.state.state === 'CLOSED') {
+    console.error(`error: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} is CLOSED — nothing to merge`);
+    emitVerdict(verdict, 'closed', res, ctx.argv);
+    process.exitCode = 1;
+    return undefined;
+  }
+  return res;
+}
+
 export async function runMergeCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) usage();
   const ctx = setupCycle(argv);
@@ -222,28 +249,8 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
   const threadsAtStart = first.state.threads.map(th => th.id);
   await readyPhase(ctx, first);
 
-  // —— phase: gate ——
-  const res = await waitForGate(ctx.fetcher, ctx.opts);
-  const verdict = gateVerdict(ctx.rev, ctx.t, res);
-  if (!res.gate.ok && res.state.state === 'OPEN') {
-    for (const b of res.gate.blockers) {
-      console.error(`  blocker: ${b}`);
-    }
-    console.error(
-      `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} blocked — fix and re-run; ` +
-        'finished phases no-op on re-entry'
-    );
-    emitVerdict(verdict, 'blocked', res, argv);
-    process.exitCode = 1;
-    return;
-  }
-  if (res.state.state === 'CLOSED') {
-    console.error(`error: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} is CLOSED — nothing to merge`);
-    emitVerdict(verdict, 'closed', res, argv);
-    process.exitCode = 1;
-    return;
-  }
-
+  const res = await gatePhase(ctx);
+  if (res === undefined) return;
   const landed = res.state.state === 'MERGED' ? res.state : await landPhase(ctx, res);
   if (landed === undefined) return;
 
@@ -254,7 +261,7 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
     to: 'merged',
     detail: { via: 'merge', sha: res.state.headSha },
   });
-  emitVerdict(verdict, 'merged', res, argv);
+  emitVerdict(gateVerdict(ctx.rev, ctx.t, res), 'merged', res, argv);
 
   const bead = flag(argv, '--bead');
   if (bead !== undefined) {
