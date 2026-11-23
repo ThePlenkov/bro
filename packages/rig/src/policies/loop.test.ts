@@ -4,7 +4,7 @@
  *  internals now, and the member/queue describes drive the policy
  *  through a scripted `LoopDeps` — no CLI imports, no `process.exit`. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -329,6 +329,31 @@ describe('topFillers — the filler report on a breach edge (bro-v96mp)', () => 
       assert.ok(m !== null, `expected a z-* group, got: ${out}`);
       assert.ok(Number(m[1]) < 40, `listing ran past the budget: ${out}`);
       assert.match(out, /…/);
+    });
+  });
+
+  test('a mount point on another device is neither descended nor counted', () => {
+    withDir(dir => {
+      // mnt/ is a top-level mount, big/inner a nested one — the stat
+      // seam fakes a foreign st_dev for both subtrees (a real
+      // bind-mount needs privileges the test doesn't have)
+      mkdirSync(join(dir, 'mnt'));
+      writeFileSync(join(dir, 'mnt', 'blob'), Buffer.alloc(3 * 1024 * 1024));
+      mkdirSync(join(dir, 'big', 'inner'), { recursive: true });
+      writeFileSync(join(dir, 'big', 'f'), Buffer.alloc(1024 * 1024));
+      writeFileSync(join(dir, 'big', 'inner', 'x'), Buffer.alloc(5 * 1024 * 1024));
+      const foreignRoots = [join(dir, 'mnt'), join(dir, 'big', 'inner')];
+      const foreignStat = (p: string) => {
+        const s = statSync(p);
+        return foreignRoots.some(r => p === r || p.startsWith(`${r}/`))
+          ? { dev: s.dev + 1, size: s.size }
+          : s;
+      };
+      const out = topFillers(dir, { nodes: 60_000, ms: 1500 }, foreignStat);
+      // big keeps only its own device's bytes — not inner's 5M
+      assert.match(out, /^big 1M/);
+      // and the mount root leaves the report entirely
+      assert.doesNotMatch(out, /mnt/);
     });
   });
 

@@ -32,6 +32,7 @@
 import {
   type Dir,
   type Dirent,
+  type Stats,
   existsSync,
   mkdirSync,
   opendirSync,
@@ -3153,10 +3154,13 @@ function fillerKey(name: string): string {
  *  budget stops the enumeration mid-dir — a readdirSync would
  *  materialize the whole dirent array before the loop's first
  *  spent() check ('…' marks the truncation). '' when the root cannot
- *  be listed — the hold line works without it (spec bro-v96mp). */
+ *  be listed — the hold line works without it (spec bro-v96mp).
+ *  `stat` is the dev/size probe — injectable so a test can fake a
+ *  second filesystem without a real mount. */
 export function topFillers(
   path: string,
-  budget: { nodes: number; ms: number } = { nodes: 60_000, ms: 1500 }
+  budget: { nodes: number; ms: number } = { nodes: 60_000, ms: 1500 },
+  stat: (p: string) => Pick<Stats, 'dev' | 'size'> = statSync
 ): string {
   interface Grp {
     bytes: number;
@@ -3202,6 +3206,19 @@ export function topFillers(
       }
     }
   }
+  /** Device of the breached root — a child on another st_dev is a
+   *  mount point: its bytes live on a different filesystem, so
+   *  counting them would send the operator to delete files that free
+   *  nothing on this device. Undefined when the root itself can't be
+   *  stat'd — the listing then almost certainly fails the same way and
+   *  '' answers as before; unfiltered beats blind. */
+  let rootDev: number | undefined;
+  try {
+    rootDev = stat(path).dev;
+  } catch {
+    rootDev = undefined;
+  }
+  const onDevice = (s: Pick<Stats, 'dev'>): boolean => rootDev === undefined || s.dev === rootDev;
   const dirSize = (dir: string): number => {
     let total = 0;
     for (const e of listEntries(dir)) {
@@ -3211,9 +3228,15 @@ export function topFillers(
       const p = join(dir, e.name);
       try {
         if (e.isDirectory()) {
-          total += dirSize(p);
+          // a mounted fs under the breach — neither descend nor count
+          if (onDevice(stat(p))) {
+            total += dirSize(p);
+          }
         } else if (e.isFile()) {
-          total += statSync(p).size;
+          const s = stat(p);
+          if (onDevice(s)) {
+            total += s.size;
+          }
         }
         // symlinks et al. count nothing — the bytes they name live on
         // another fs
@@ -3237,9 +3260,16 @@ export function topFillers(
     let bytes = 0;
     try {
       if (e.isDirectory()) {
+        if (!onDevice(stat(p))) {
+          continue; // a mounted fs — not this device's consumer
+        }
         bytes = dirSize(p);
       } else if (e.isFile()) {
-        bytes = statSync(p).size;
+        const s = stat(p);
+        if (!onDevice(s)) {
+          continue; // a bind-mounted file — foreign bytes
+        }
+        bytes = s.size;
       }
     } catch {
       // vanished mid-listing — count it at 0
