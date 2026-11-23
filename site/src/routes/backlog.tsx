@@ -645,9 +645,44 @@ const HEADERS: Array<[keyof typeof SORTS, string]> = [
   ['title', 'title'],
 ];
 
+interface Sort {
+  k: string;
+  dir: 1 | -1;
+}
+const toggleSort = (s: Sort, k: string): Sort => ({ k, dir: s.k === k ? (-s.dir as 1 | -1) : 1 });
+
+function SortTh({
+  k,
+  label,
+  sort,
+  onSort,
+}: Readonly<{ k: string; label: string; sort: Sort; onSort: (k: string) => void }>) {
+  return (
+    <th onClick={() => onSort(k)}>
+      {label}
+      {sort.k === k ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}
+    </th>
+  );
+}
+
+function ListRow({ r, onPick }: Readonly<{ r: Row; onPick: (b: Bead) => void }>) {
+  return (
+    <tr onClick={() => onPick(r.b)} className="bl-row">
+      <td>{r.b.id}</td>
+      <td>
+        {r.src === 'github' ? `gh·${r.b.type}` : r.b.type}
+        {r.b.status !== 'open' ? ` (${r.b.status})` : ''}
+      </td>
+      <td className="num">{r.b.priority || '—'}</td>
+      <td className="num">{r.age}d</td>
+      <td>{r.b.title}</td>
+    </tr>
+  );
+}
+
 function ListView({ rows, onPick }: Readonly<{ rows: Row[]; onPick: (b: Bead) => void }>) {
   const CAP = 400;
-  const [sort, setSort] = useState<{ k: string; dir: 1 | -1 }>({ k: 'age', dir: 1 });
+  const [sort, setSort] = useState<Sort>({ k: 'age', dir: 1 });
   const sorted = useMemo(
     () => [...rows].sort((a, b) => SORTS[sort.k](a, b) * sort.dir),
     [rows, sort]
@@ -658,28 +693,19 @@ function ListView({ rows, onPick }: Readonly<{ rows: Row[]; onPick: (b: Bead) =>
         <thead>
           <tr>
             {HEADERS.map(([k, label]) => (
-              <th
+              <SortTh
                 key={k}
-                onClick={() => setSort(s => ({ k, dir: s.k === k ? (-s.dir as 1 | -1) : 1 }))}
-              >
-                {label}
-                {sort.k === k ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}
-              </th>
+                k={k}
+                label={label}
+                sort={sort}
+                onSort={k2 => setSort(s => toggleSort(s, k2))}
+              />
             ))}
           </tr>
         </thead>
         <tbody>
-          {sorted.slice(0, CAP).map(({ b, src, age }) => (
-            <tr key={b.id} onClick={() => onPick(b)} className="bl-row">
-              <td>{b.id}</td>
-              <td>
-                {src === 'github' ? `gh·${b.type}` : b.type}
-                {b.status !== 'open' ? ` (${b.status})` : ''}
-              </td>
-              <td className="num">{b.priority || '—'}</td>
-              <td className="num">{age}d</td>
-              <td>{b.title}</td>
-            </tr>
+          {sorted.slice(0, CAP).map(r => (
+            <ListRow key={r.b.id} r={r} onPick={onPick} />
           ))}
         </tbody>
       </table>
