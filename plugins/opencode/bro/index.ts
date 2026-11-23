@@ -289,10 +289,16 @@ function callHook(
     // serialize before spawning: a payload JSON.stringify rejects means the
     // hook can never run — its own outage cause, not a spawn error, never
     // healthy silence, and never a rejection escaping the executor
-    let input: string;
+    let input: string | undefined;
     try {
       input = JSON.stringify(payload);
     } catch {
+      resolve({ control: null, failure: 'the hook payload could not be serialized' });
+      return;
+    }
+    // stringify returns undefined (not a throw) for undefined/functions/
+    // symbols — no JSON document exists to hand the child either way
+    if (input === undefined) {
       resolve({ control: null, failure: 'the hook payload could not be serialized' });
       return;
     }

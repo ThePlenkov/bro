@@ -171,6 +171,10 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 			failure: { kind: "input" }
 		};
 	}
+	if (input === void 0) return {
+		control: null,
+		failure: { kind: "input" }
+	};
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {

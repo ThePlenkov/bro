@@ -217,6 +217,11 @@ async function runBroHook(argv: string[], input: unknown): Promise<HookOutcome> 
     // diagnostic must surface, not healthy silence
     return { control: null, failure: 'the hook payload could not be serialized' };
   }
+  // stringify returns undefined (not a throw) for undefined/functions/
+  // symbols — no JSON document exists to hand the child either way
+  if (payload === undefined) {
+    return { control: null, failure: 'the hook payload could not be serialized' };
+  }
   const result = await spawnCollect(argv[0], argv.slice(1), {
     input: payload,
     env: {
