@@ -37,7 +37,8 @@ if (process.env.BRO_STUB_LOG && at >= 0) {
 }
 const map = process.env.BRO_STUB_MAP ? JSON.parse(process.env.BRO_STUB_MAP) : {}
 if (event in map) process.stdout.write(map[event] ?? '')
-process.exit(Number(process.env.BRO_STUB_STATUS ?? '0'))
+const statuses = process.env.BRO_STUB_STATUS_MAP ? JSON.parse(process.env.BRO_STUB_STATUS_MAP) : {}
+process.exit(Number(statuses[event] ?? process.env.BRO_STUB_STATUS ?? '0'))
 `
 );
 
@@ -239,6 +240,7 @@ afterEach(() => {
   delete process.env.BRO_STUB_LOG;
   delete process.env.BRO_STUB_MAP;
   delete process.env.BRO_STUB_STATUS;
+  delete process.env.BRO_STUB_STATUS_MAP;
 });
 
 describe('session hooks', () => {
@@ -339,6 +341,37 @@ describe('tool guard', () => {
     await toolHooks.get('tool:execute.before')?.(event);
     assert.deepEqual(event.input, { filePath: 'x' });
     assert.equal(calls()[0]?.event, 'pre-tool');
+  });
+
+  test('an unserializable tool input fails open, never vetoes', async () => {
+    // JSON.stringify throws on circular input — the hook can never run.
+    // A throw escaping this callback would VETO the call (a block IS a
+    // throw here), so the outage resolves as a named failure instead:
+    // the guard passes the tool through and the debug line carries why.
+    const { toolHooks } = await makeSetup();
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    const event = {
+      sessionID: 'ses_1',
+      tool: 'bash',
+      input: { command: 'ls', circular },
+    };
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    try {
+      await toolHooks.get('tool:execute.before')?.(event);
+    } finally {
+      console.error = orig;
+    }
+    assert.ok(
+      lines.some(l => /probe failed \(the hook payload could not be serialized\)/.test(l)),
+      `expected a named probe failure, got: ${lines.join(' | ')}`
+    );
+    // no child is spawned for input it could never receive
+    assert.equal(calls().length, 0);
   });
 });
 
@@ -565,6 +598,76 @@ describe('event stream', () => {
     await teardown();
     assert.equal(prompts[1]?.sessionID, 'ses_1');
     assert.equal(prompts[1]?.text, 'dirty');
+  });
+
+  /** The plugin's log channel — v2 dropped ctx.app.log, `log` writes
+   *  `[bro] level: msg` to the plugin's stderr. `lines` is live: waits
+   *  inside `fn` see entries as they land. */
+  const captureBroErr = async (fn: (lines: string[]) => Promise<void>): Promise<string[]> => {
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    try {
+      await fn(lines);
+    } finally {
+      console.error = orig;
+    }
+    return lines;
+  };
+
+  test('a dead stop probe warns once, then stays quiet inside the window', async () => {
+    // per-event status — a global nonzero would also fail the capability
+    // probe and resolve a REAL bro off PATH instead of the stub
+    respond({});
+    process.env.BRO_STUB_STATUS_MAP = '{"stop":2}';
+    const { emit } = await makeSetup();
+    const cleanTurn = (): void => {
+      emit('message.updated', {
+        info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
+      });
+    };
+    const lines = await captureBroErr(async l => {
+      cleanTurn();
+      emit('session.idle', { sessionID: 'ses_1' });
+      await waitFor(() => l.some(line => /stop gate did not run/.test(line)));
+      // a second idle inside the interval must not repeat the warning —
+      // loud once, never a spammer. The debug line is the settle signal:
+      // probeFailed writes it before checking the warn window.
+      cleanTurn();
+      emit('session.idle', { sessionID: 'ses_1' });
+      await waitFor(() => l.filter(line => /probe failed/.test(line)).length >= 2);
+    });
+    const warns = lines.filter(l => l.includes('[bro] warn:'));
+    assert.equal(warns.length, 1);
+    assert.match(warns[0] ?? '', /stop gate did not run \(the hook exited 2\)/);
+  });
+
+  test('chatter without a control object warns; empty output is healthy silence', async () => {
+    respond({ stop: 'loading beads...\ngarbage\n' });
+    const { emit } = await makeSetup();
+    const lines = await captureBroErr(async l => {
+      emit('message.updated', {
+        info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
+      });
+      emit('session.idle', { sessionID: 'ses_1' });
+      await waitFor(() => l.some(line => /no control object/.test(line)));
+    });
+    assert.equal(lines.filter(l => l.includes('[bro] warn:')).length, 1);
+
+    // empty stdout on a clean exit is bro's "nothing to say" — the gate
+    // is open by choice there, and must not warn
+    respond({});
+    const second = await makeSetup();
+    const silent = await captureBroErr(async l => {
+      second.emit('message.updated', {
+        info: { role: 'assistant', sessionID: 'ses_2', time: { completed: 2 } },
+      });
+      second.emit('session.idle', { sessionID: 'ses_2' });
+      await waitFor(() => l.some(line => /probe returned null for event=stop/.test(line)));
+    });
+    assert.equal(silent.filter(l => l.includes('[bro] warn:')).length, 0);
   });
 
   test('teardown disposes registrations and stops the stream', async () => {
