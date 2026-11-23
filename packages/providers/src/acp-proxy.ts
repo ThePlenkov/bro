@@ -24,6 +24,11 @@
  * mark, pausing the pump that feeds it until drain — and a leg with
  * no write progress for `writeStallMs` is declared dead, so a stalled
  * peer ends in the normal verdict/teardown path, not a memory climb.
+ * Intake is bounded the same way — a pump whose consumed-but-unrouted
+ * hold reaches its own mark stops reading — while liveness traffic
+ * (request answers, session/cancel) bypasses the gate entirely: a
+ * full queue must never sit between a peer and the message that
+ * frees it.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -371,6 +376,15 @@ const promptText = (params: Record<string, unknown>): string =>
  *  forever). */
 export const ACP_PROXY_WRITE_HIGH_WATER = 64;
 export const ACP_PROXY_WRITE_STALL_MS = 30_000;
+
+/** Inbound backpressure bound (bro-0w2tg): the count of consumed-but-
+ *  unrouted messages a pump may hold before its READ side pauses too —
+ *  the write mark bounds what the peer owes, this bounds what the
+ *  backlog in between can grow to. A saturated hold makes room only
+ *  when the outbound ledger drains, so a stalled leg caps the wire's
+ *  whole in-flight footprint instead of letting a fast sender outrun
+ *  every timeout the legs carry. */
+export const ACP_PROXY_READ_HIGH_WATER = 64;
 
 /** Teardown's flush grace — writer.close() queues behind writes a
  *  stalled peer can never accept, so a leg gets this long to land
@@ -1740,21 +1754,38 @@ export async function acpProxy(
   /** Read `stream` until EOF or wire shutdown, routing each message
    *  through `route`. `out` is the writable leg this pump feeds: once
    *  its ledger reaches the high-water mark the ROUTE side pauses —
-   *  the read side never does. A parked pump keeps consuming into
-   *  `held`: ndJsonStream already drains its input eagerly, so a
-   *  consumed-but-held message costs nothing the stream queue had not
-   *  already spent, and only reading on surfaces an EOF queued behind
-   *  a flood (a stalled read sees a close only when its own queue
-   *  position arrives). Shutdown wakes every wait below through ONE
-   *  latch subscription — each wait parks a removable resolver in
-   *  `wakes`, never a per-message callback on the shared latch — and
-   *  the exit drains the hold so every accepted message lands in the
-   *  table the teardown sweep answers from. */
+   *  consumed intake waits in `held` — and once `held` reaches its own
+   *  mark the READ side pauses too, so a stalled leg bounds the wire's
+   *  whole in-flight footprint instead of growing a backlog no stall
+   *  clock governs. The already-issued read stays out so an EOF queued
+   *  behind the flood still surfaces the moment drain makes room (a
+   *  stalled read sees a close only when its own queue position
+   *  arrives).
+   *
+   *  `ctrl` names the leg's control plane — intake that exists only
+   *  to stop or finish work the wire already accepted. A full ledger
+   *  must never sit between a peer and the message that frees it:
+   *  the local turn a session/cancel aborts can be the very thing
+   *  the ledger is full OF, so a control message flushes the hold
+   *  ahead of it (the queued messages precede it in the stream —
+   *  routing them first IS the wire's own order, and exactly what
+   *  lets a cancel abort the prompts written before it) and routes
+   *  immediately, pause or not. The one residual a single FIFO
+   *  cannot fix: control queued BEHIND a saturated hold is
+   *  unreachable until drain — jumping it ahead means reading the
+   *  data first, which is the memory this bound refuses to spend.
+   *
+   *  Shutdown wakes every wait below through ONE latch subscription —
+   *  each wait parks a removable resolver in `wakes`, never a
+   *  per-message callback on the shared latch — and the exit drains
+   *  the hold so every accepted message lands in the table the
+   *  teardown sweep answers from. */
   const pump = async (
     stream: Stream,
     route: (m: AnyMessage) => void,
     tag: string,
-    out: Outbound
+    out: Outbound,
+    ctrl: (m: AnyMessage) => boolean
   ): Promise<void> => {
     const reader = stream.readable.getReader();
     const wakes = new Set<() => void>();
@@ -1795,6 +1826,37 @@ export async function acpProxy(
     const held: AnyMessage[] = [];
     let read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined = reader.read();
     let eof = false;
+    /** ONE outstanding room() subscription at a time — the parked wait
+     *  re-arms on every intake result, and a waiter that loses the
+     *  race stays registered until the next release, so re-arming per
+     *  read grew the ledger's waiter set alongside the hold it exists
+     *  to bound. A pending room promise is reused across iterations;
+     *  its own settle clears the slot so a stale resolution can never
+     *  fake room later. */
+    let roomWait: Promise<'room'> | undefined;
+    const roomReady = (): Promise<'room'> => {
+      roomWait ??= out.room().then(() => {
+        roomWait = undefined;
+        return 'room' as const;
+      });
+      return roomWait;
+    };
+    /** Route one consumed message — data intake joins the hold; a
+     *  control message routes NOW: it only ever stops or finishes
+     *  work the wire already accepted, so parking it behind the gate
+     *  could deadlock the release it carries. Flushing the hold first
+     *  keeps stream order — the control lands after the messages the
+     *  peer wrote before it, charged as the accepts they are. */
+    const accept = (m: AnyMessage): void => {
+      if (!ctrl(m)) {
+        held.push(m);
+        return;
+      }
+      while (held.length > 0) {
+        deliver(held.shift() as AnyMessage);
+      }
+      deliver(m);
+    };
     for (;;) {
       // route what room allows — the fast path is a synchronous check;
       // a dead leg reads as room so the hold flushes before the exit
@@ -1813,17 +1875,22 @@ export async function acpProxy(
         if (r.done) {
           eof = true;
         } else {
-          held.push(r.value);
+          accept(r.value);
         }
+        continue;
+      }
+      if (held.length >= ACP_PROXY_READ_HIGH_WATER) {
+        // the hold is saturated — the read side pauses with the route
+        // side: room() is the only wake worth taking (a new read has
+        // nowhere to go; a dead leg's release doubles as the wake)
+        const r = await untilStop(roomReady());
+        if (r === undefined) break;
         continue;
       }
       // parked with a hold to drain — room, more input, or shutdown,
       // whichever moves first; intake keeps running either way
       const r = await untilStop(
-        Promise.race([
-          out.room().then(() => 'room' as const),
-          read.then(v => ({ read: v }) as const),
-        ])
+        Promise.race([roomReady(), read.then(v => ({ read: v }) as const)])
       );
       if (r === undefined) break;
       if (r === 'room') continue;
@@ -1831,7 +1898,7 @@ export async function acpProxy(
       if (r.read.done) {
         eof = true;
       } else {
-        held.push(r.read.value);
+        accept(r.read.value);
       }
     }
     // flush the hold — a message the pump accepted is never dropped
@@ -1850,8 +1917,22 @@ export async function acpProxy(
     }
   };
 
-  const pumpUp = pump(upstream, routeC2A, 'c→a', downOut);
-  const pumpDown = pump(downstream, routeA2C, 'a→c', upOut);
+  /** The control plane each direction's pump bypasses the route gate
+   *  for — intake that only ever stops or finishes work already
+   *  accepted. Responses qualify on BOTH legs: the id-keyed terminal
+   *  half of a request the wire took, owed its discharge however full
+   *  the data path ahead of it is. c2a adds the liveness notifications
+   *  — session/cancel and JSON-RPC's own $/cancel_request — whose
+   *  whole job is ending accepted work, the one message class that
+   *  can release the holds a saturated ledger is made of. */
+  const c2aCtrl = (m: AnyMessage): boolean =>
+    isResponse(m) ||
+    (isNotification(m) &&
+      (wire(m).method === 'session/cancel' || wire(m).method === '$/cancel_request'));
+  const a2cCtrl = (m: AnyMessage): boolean => isResponse(m);
+
+  const pumpUp = pump(upstream, routeC2A, 'c→a', downOut, c2aCtrl);
+  const pumpDown = pump(downstream, routeA2C, 'a→c', upOut, a2cCtrl);
   const verdict = await Promise.race([
     pumpUp.then(
       () => 'up' as const, // client closed its side of the wire

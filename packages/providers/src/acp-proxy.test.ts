@@ -31,6 +31,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { gitCommonDir, testGit } from '@broject/core';
 import {
+  ACP_PROXY_READ_HIGH_WATER,
   ACP_PROXY_WRITE_HIGH_WATER,
   acpProxy,
   type AcpAgentOverlay,
@@ -2723,5 +2724,165 @@ describe('acpProxy — outbound backpressure (bro-0w2tg)', () => {
     await settle(30);
     assert.equal(got.filter(m => errorOf(m) !== undefined).length, total);
     await agentW.abort().catch(() => {});
+  });
+
+  test('a fast sender hits the intake bound — the hold saturates and the read side pauses', async () => {
+    const [clientSide, proxyUp] = streamPair();
+    const [proxyDown, agentSide] = streamPair();
+    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const clientW = clientSide.writable.getWriter();
+    const clientR = clientSide.readable.getReader();
+    const got: AnyMessage[] = [];
+    collect(clientR, got);
+    // flood past BOTH marks — the transform's own backpressure keeps a
+    // write() pending until the proxy's reader takes it, so a resolved
+    // write IS a consumed message: the count the intake must bound
+    const total = ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 10;
+    let consumed = 0;
+    for (let i = 0; i < total; i++) {
+      void clientW
+        .write({
+          jsonrpc: '2.0',
+          id: i + 1,
+          method: 'session/prompt',
+          params: { sessionId: 'none', prompt: [] },
+        } as AnyMessage)
+        .then(
+          () => {
+            consumed++;
+          },
+          () => {}
+        );
+    }
+    await settle(80);
+    // routed ≤ the write mark + held ≤ the read mark + the one
+    // in-flight read — without the read bound the whole flood would
+    // already be consumed into `held`
+    assert.ok(
+      consumed <= ACP_PROXY_WRITE_HIGH_WATER + ACP_PROXY_READ_HIGH_WATER + 2,
+      `intake outran the read bound — consumed ${consumed} of ${total}`
+    );
+    assert.ok(consumed >= ACP_PROXY_WRITE_HIGH_WATER, `nothing routed — consumed ${consumed}`);
+    // agent death runs the 'down' sweep — every message the pump DID
+    // accept (routed or held) earns its error; the paused tail dies
+    // with the stream it was never read from
+    await agentSide.writable
+      .getWriter()
+      .close()
+      .catch(() => {});
+    assert.equal(await hangGuard(proxyDone), 1);
+    await settle(30);
+    assert.ok(
+      got.filter(m => errorOf(m) !== undefined).length >= ACP_PROXY_WRITE_HIGH_WATER,
+      'the accepted prefix was not answered'
+    );
+    await clientW.abort().catch(() => {});
+  });
+});
+
+describe('acpProxy — control plane bypass (bro-0w2tg)', () => {
+  const settle = (ms: number): Promise<void> => new Promise(r2 => setTimeout(r2, ms));
+
+  /** A proxy that never settles must fail the test, not hang the
+   *  runner — a bypass regression IS the deadlock it prevents. */
+  const hangGuard = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<never>((_r, reject) =>
+        setTimeout(() => reject(new Error('control message did not route — the gate held it')), ms)
+      ),
+    ]);
+
+  /** A stamped session plus a first prompt parked in the overlay's
+   *  local turn — the writeQ slot that makes every following prompt a
+   *  charged hold on the down leg. WRITE_HIGH_WATER + slack prompts
+   *  fill the ledger, then spill into the pump's hold — the exact
+   *  queue a gated intake would park a cancel behind. */
+  const floodedLocalTurn = async (
+    overlayPrompt: NonNullable<AcpAgentOverlay['prompt']>
+  ): Promise<{ r: Rig; sessionId: string; prompts: Promise<{ stopReason: string }>[] }> => {
+    const r = rig({ replyText: 'ok' }, undefined, () => {}, { prompt: overlayPrompt });
+    const sessionId = await openSession(r.acp);
+    const prompts: Promise<{ stopReason: string }>[] = [];
+    const total = ACP_PROXY_WRITE_HIGH_WATER + 10;
+    for (let i = 0; i < total; i++) {
+      prompts.push(
+        r.acp.request<{ stopReason: string }>('session/prompt', {
+          sessionId,
+          prompt: [{ type: 'text', text: `/w${i}` }],
+        })
+      );
+    }
+    await settle(60);
+    return { r, sessionId, prompts };
+  };
+
+  test('session/cancel behind a saturated ledger still aborts — every held prompt answers cancelled, the local turn dies', async () => {
+    let aborted = false;
+    const { r, sessionId, prompts } = await floodedLocalTurn(
+      turn =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          // the running local turn ends ONLY on its abort signal —
+          // the deadlock the bypass exists to break: the holds it
+          // backs up can never release while its cancel waits (the
+          // queued siblings' handlers are never invoked — abortHeld
+          // discharges them before their writeQ slot runs)
+          turn.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              resolve({ stopReason: 'end_turn' });
+            },
+            { once: true }
+          );
+        })
+    );
+    try {
+      await r.acp.notify('session/cancel', { sessionId });
+      const answers = await hangGuard(Promise.all(prompts));
+      assert.ok(
+        answers.every(a => a.stopReason === 'cancelled'),
+        'a held prompt answered something other than cancelled'
+      );
+      assert.equal(aborted, true);
+      // every prompt was held — nothing crossed, and the cancel's
+      // whole target set was proxy-answered so it never crossed either
+      assert.deepEqual(r.fake.prompts, []);
+      assert.deepEqual(r.fake.cancels, []);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
+  test('a client response behind a saturated ledger still relays — the agent ask resolves instead of parking', async () => {
+    let releaseTurn!: () => void;
+    let parked = true;
+    const { r, sessionId, prompts } = await floodedLocalTurn(
+      () =>
+        new Promise<{ stopReason: string } | undefined>(resolve => {
+          if (!parked) {
+            resolve({ stopReason: 'end_turn' });
+            return;
+          }
+          parked = false;
+          releaseTurn = () => resolve({ stopReason: 'end_turn' });
+        })
+    );
+    try {
+      // the up leg is free so the ask crosses — its ANSWER is the c2a
+      // traffic a gated intake would park behind the flooded hold.
+      // The test client serves no fs/* method — the SDK's own -32601
+      // error response is the relay proof: it settles only if the
+      // response routed through the saturated intake.
+      const ask = r.agentConn.client.request('fs/read_text_file', {
+        sessionId,
+        path: '/x',
+      }) as Promise<unknown>;
+      await assert.rejects(hangGuard(ask), RequestError);
+      releaseTurn();
+      await Promise.allSettled(prompts);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
   });
 });
