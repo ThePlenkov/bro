@@ -97,6 +97,51 @@ describe('commandCliNames', () => {
     // one devin launch, and the `;` inside it splits nothing
     assert.deepEqual(commandCliNames('sh -c "devin \\"; claude\\""'), ['devin']);
   });
+
+  test('a backslash-newline is a continuation — the joined command still launches', () => {
+    // `\<newline>` is removed, not a separator: `cd && \`␤`devin` runs
+    // devin — splitting there hid the start from the caps (greptile PR
+    // #1094)
+    assert.deepEqual(commandCliNames('cd /tmp && \\\ndevin -p a'), ['cd', 'devin']);
+    // mid-word the continuation joins the name — bash runs `devin`
+    assert.deepEqual(commandCliNames('dev\\\nin -p a'), ['devin']);
+    // the continuation lands the comment where the words join
+    assert.deepEqual(commandCliNames('echo a \\\n# note\ndevin -p x'), ['echo', 'devin']);
+    // inside a double-quoted -c script the pair vanishes too — the
+    // inner shell never sees a newline separator
+    assert.deepEqual(commandCliNames('sh -c "devin -p \\\nx"'), ['devin']);
+  });
+
+  test('a descriptor redirection is not a command separator', () => {
+    // `2>&1` is one redirection — the `1` is no cli, so a provider
+    // entry sharing `… 2>&1` cannot gate an unrelated worker on it
+    assert.deepEqual(commandCliNames('devin -p x 2>&1'), ['devin']);
+    assert.deepEqual(commandCliNames('other-cli x 2>&1'), ['other-cli']);
+    // `&>`/`&>>` fold stdout+stderr into one redirect — still one command
+    assert.deepEqual(commandCliNames('devin -p x &> run.log'), ['devin']);
+    // a standalone `&` still separates — and `|&` is the stderr pipeline
+    assert.deepEqual(commandCliNames('devin a & other-cli b'), ['devin', 'other-cli']);
+    assert.deepEqual(commandCliNames('devin a |& tee log'), ['devin', 'tee']);
+  });
+
+  test('a backslash inside double quotes escapes only the five chars bash says', () => {
+    // `\;` inside a double-quoted -c script stays literal — the INNER
+    // shell sees `printf %s \; devin -p x` and runs only printf
+    // (devin is printf's argument — no launch, no provider lane)
+    assert.deepEqual(commandCliNames('bash -c "printf %s \\; devin -p x"'), ['printf']);
+    // the real escapes still decode: `\\` → `\`, `\"` stays inside
+    assert.deepEqual(commandCliNames('bash -c "devin -p a"'), ['devin']);
+  });
+
+  test('an explicitly quoted empty -c operand is a real token', () => {
+    // `bash -c '' devin` runs an EMPTY script — `devin` is its $0, no
+    // launch. Dropping the empty token read `devin` as the script
+    assert.deepEqual(commandCliNames("bash -c '' devin"), []);
+    assert.deepEqual(commandCliNames('bash -c "" devin'), []);
+    // a quoted empty word elsewhere is just an argument
+    assert.deepEqual(commandCliNames("devin -p ''"), ['devin']);
+    assert.deepEqual(commandCliNames("'' devin"), []);
+  });
 });
 
 describe('commandWorkerClis', () => {

@@ -31,6 +31,20 @@ export function isAssignment(token: Token): boolean {
 /** The characters that end a shell segment. */
 const SEPARATORS = new Set([';', '&', '|', '\n']);
 
+/** Is the `&` at `i` part of a redirection rather than a command
+ *  separator? `>&`/`<&` duplicate a descriptor and `&>`/`&>>` fold
+ *  stdout and stderr into one redirect — `devin -p x 2>&1` is ONE
+ *  command whose `1` launches nothing. A standalone `&` (and `|&`,
+ *  the stderr pipeline) still separates. */
+function isRedirectAmp(command: string, i: number): boolean {
+  return (
+    command.charAt(i) === '&' &&
+    (command.charAt(i - 1) === '>' ||
+      command.charAt(i - 1) === '<' ||
+      command.charAt(i + 1) === '>')
+  );
+}
+
 /** The quote characters. */
 const QUOTES = new Set(['"', "'"]);
 
@@ -75,8 +89,15 @@ export function segments(command: string): string[] {
       continue;
     }
     if (ch === '\\') {
-      // the escaped char is word text — `\;` separates nothing, and
-      // `\ ` keeps the word open so a `#` behind it is an argument
+      // `\<newline>` is a line CONTINUATION — the pair vanishes and the
+      // lines join, so `cd /tmp && \`␤`devin -p x` runs `devin` (and a
+      // `dev\<newline>in` word keeps its inWord state). Any other
+      // escaped char is word text — `\;` separates nothing, and `\ `
+      // keeps the word open so a `#` behind it is an argument
+      if (command.charAt(i + 1) === '\n') {
+        i++;
+        continue;
+      }
       current += ch;
       if (i + 1 < command.length) {
         current += command.charAt(++i);
@@ -94,7 +115,7 @@ export function segments(command: string): string[] {
       comment = true;
       continue;
     }
-    if (SEPARATORS.has(ch)) {
+    if (SEPARATORS.has(ch) && !isRedirectAmp(command, i)) {
       out.push(current);
       current = '';
       inWord = false;
@@ -126,8 +147,21 @@ export function tokens(segment: string): Token[] {
         continue;
       }
       if (quote === '"' && ch === '\\' && i + 1 < segment.length) {
-        // the escaped char is literal text — the backslash consumed
-        current += segment.charAt(++i);
+        const next = segment.charAt(i + 1);
+        // inside a double-quoted run `\` escapes only `$`, '`', '"',
+        // `\` and a newline (a continuation — the pair vanishes). Any
+        // other `\x` stays BOTH chars — `bash -c "a\;b"` hands the
+        // inner shell `a\;b`, whose own escape keeps `b` an argument
+        if (next === '\n') {
+          i++;
+          continue;
+        }
+        if (next === '"' || next === '\\' || next === '$' || next === '`') {
+          current += next;
+          i++;
+          continue;
+        }
+        current += ch;
         continue;
       }
       current += ch;
@@ -150,9 +184,12 @@ export function tokens(segment: string): Token[] {
   return out;
 }
 
-/** One token — an empty run is no token at all. */
+/** One token — an empty run is no token at all, UNLESS it was quoted:
+ *  `bash -c '' devin` runs an EMPTY script with `devin` as its $0, so
+ *  dropping the '' would read `devin` as the -c operand — a launch
+ *  that never happens. */
 function token(text: string, quoted: boolean): Token[] {
-  return text === '' ? [] : [{ text, quoted }];
+  return text === '' ? (quoted ? [{ text, quoted }] : []) : [{ text, quoted }];
 }
 
 /** The wrappers that take a bare operand before the command
@@ -348,7 +385,9 @@ export function commandCliNames(command: string, depth = 0): string[] {
   for (const segment of segments(command)) {
     const toks = tokens(segment);
     const word = toks.at(commandIndex(toks));
-    if (word === undefined) {
+    if (word === undefined || word.text === '') {
+      // a quoted EMPTY command (`'' devin`) launches nothing a lane
+      // can name — the bash verdict is "command not found"
       continue;
     }
     const wrapped = depth < MAX_WRAPPED_COMMAND_DEPTH ? wrappedCommand(toks) : undefined;

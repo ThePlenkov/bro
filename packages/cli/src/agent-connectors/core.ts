@@ -2856,19 +2856,41 @@ export function providerGateForKind(
   return gates.find(gate => gate.providerPlaneKinds.has(kind));
 }
 
-/** The provider verdict a cross-kind claim carries — the covering
- *  gate's lane and aggregate census, or nothing when no gate claims
- *  the kind. */
+/** The provider verdict a cross-kind claim carries — the FIRST
+ *  covering gate's lane and aggregate census (config order: the lane
+ *  the kind's starts were attributed to — it also drives the claim's
+ *  census dir), plus every OTHER gate covering the same kind. A kind
+ *  two lanes share claims once but each account lane still owes ITS
+ *  cap a verdict on the post-claim count — forwarding only the first
+ *  gate would let a second lane's cap sit unjudged while the start
+ *  lands (spec bro-x601l). Nothing when no gate claims the kind. */
 export function providerGatePayload(
   gates: readonly ProviderGate[],
   kind: string
 ):
-  | { providerCap: ProviderCapLane; providerCensus: (() => number) | undefined }
+  | {
+      providerCap: ProviderCapLane;
+      providerCensus: (() => number) | undefined;
+      /** every OTHER covering gate's verdict — judged inside the same
+       *  locked section, after the claim landed */
+      extraProviderVerdicts: {
+        providerCap: ProviderCapLane;
+        providerCensus: (() => number) | undefined;
+      }[];
+    }
   | Record<string, never> {
-  const gate = providerGateForKind(gates, kind);
+  const covering = gates.filter(gate => gate.providerPlaneKinds.has(kind));
+  const gate = covering.at(0);
   return gate === undefined
     ? {}
-    : { providerCap: gate.providerCap, providerCensus: gate.providerCensus };
+    : {
+        providerCap: gate.providerCap,
+        providerCensus: gate.providerCensus,
+        extraProviderVerdicts: covering.slice(1).map(g => ({
+          providerCap: g.providerCap,
+          providerCensus: g.providerCensus,
+        })),
+      };
 }
 
 /** The provider lane a spawn must fit under — `fleet.providerCaps`
@@ -2909,7 +2931,10 @@ export interface ProviderGate {
 /** The sessions a command will start on a provider gate's planes —
  *  the count the gate judges and the pass claims. A plane-less
  *  provider admits one session (its ledger has no plane starts to
- *  count). */
+ *  count), but a plane-backed count is the planes' own answer — a
+ *  command the planes say starts NOTHING (`devin models; other-cli x`
+ *  matched the provider's cli but opens no session of it) owes the
+ *  lane zero, not a phantom one-start charge. */
 function providerGateStarts(
   providerPlanes: readonly SessionPlane[],
   startsCommand: string | undefined
@@ -2917,9 +2942,9 @@ function providerGateStarts(
   if (providerPlanes.length === 0 || startsCommand === undefined) {
     return 1;
   }
-  return Math.max(
-    1,
-    providerPlanes.reduce((sum, plane) => sum + (plane.startsSessions?.(startsCommand) ?? 1), 0)
+  return providerPlanes.reduce(
+    (sum, plane) => sum + (plane.startsSessions?.(startsCommand) ?? 1),
+    0
   );
 }
 

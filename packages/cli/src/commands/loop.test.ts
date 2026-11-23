@@ -12,6 +12,7 @@ import {
   type Lease,
   type ProviderEntry,
   patchAgentRegistry,
+  providerSlotsDir,
   registerSessionPlane,
   releaseSessionStart,
   type RoutingTable,
@@ -1166,6 +1167,105 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
         });
       }
     );
+  });
+
+  test('the shared-claim re-check is what refuses — a session landing between preflight and claim trips prov2 (greptile PR #1094)', () => {
+    // Alpha's live count mirrors the claim ledger — prov2's read-only
+    // preflight sees 0 + 1 starting ≤ cap 1, but inside the locked
+    // re-check prov's claim has landed: 1 live + 1 claim = 2 > 1. A
+    // recheck deleted outright would wave this spawn through
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          // a claim counts as live the moment it lands — the landed
+          // session the mutex exists to see
+          countLive: () => countSessionReservations(dirA),
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              prov2: { type: 'cli', command: 'alpha-cli a; no-plane-cli b' },
+            },
+            { prov: 9, prov2: 1 }
+          );
+          const lane = templateLane('alpha-cli a; no-plane-cli b');
+          assert.throws(
+            () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1'),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              err.capCause === 'provider_cap' &&
+              /provider 'prov2' lane cap reached/.test(err.message)
+          );
+          // rollback hands prov's claim back — nothing stays held
+          assert.equal(countSessionReservations(dirA), 0);
+        });
+      }
+    );
+  });
+
+  test('same-keyed runs on different repos each claim the plane-less provider ledger (greptile PR #1094)', () => {
+    // `loop-<lead>` is repo-scoped — bead ids are — but the provider
+    // ledger is host-shared: a second repo's admission must write its
+    // OWN claim, or releasing the first drops the lane under a running
+    // worker
+    const { root: rootA, main: mainA } = initRepo('bro-loop-admit-a-');
+    const { root: rootB, main: mainB } = initRepo('bro-loop-admit-b-');
+    // the ledger lives under XDG_DATA_HOME — isolate it so the claims
+    // never land in the host's real census dir
+    const prevXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = tmpDir('bro-loop-xdg-');
+    try {
+      // no session planes registered — the provider entry's cli starts
+      // nothing a plane counts, so its lane is the claim ledger alone
+      withPlanes([], () => {
+        inside(mainA, rootA, () => {
+          const lane = templateLane('other-cli run', 'prov');
+          const ctxA = admitCtx(
+            mainA,
+            {},
+            { prov: { type: 'cli', command: 'other-cli run' } },
+            { prov: 2 }
+          );
+          const first = admitLaneSessions(ctxA, lane, admitSpec(mainA), 'loop-same');
+          try {
+            assert.equal(countSessionReservations(providerSlotsDir('prov')), 1);
+            inside(mainB, rootB, () => {
+              const ctxB = admitCtx(
+                mainB,
+                {},
+                { prov: { type: 'cli', command: 'other-cli run' } },
+                { prov: 2 }
+              );
+              const second = admitLaneSessions(ctxB, lane, admitSpec(mainB), 'loop-same');
+              try {
+                // both holds — never one adopted claim
+                assert.equal(countSessionReservations(providerSlotsDir('prov')), 2);
+              } finally {
+                release(second);
+              }
+            });
+            // the second's release dropped only its own claim
+            assert.equal(countSessionReservations(providerSlotsDir('prov')), 1);
+          } finally {
+            release(first);
+          }
+        });
+      });
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdg;
+    }
   });
 });
 

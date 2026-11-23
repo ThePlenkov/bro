@@ -897,8 +897,16 @@ function connectorContract(b: BackendCase): void {
     };
     try {
       const c = b.make({ dir: f.main }, env);
+      // an argv worker's own command is the acp driver — the provider
+      // gate judges the sessions the provider ENTRY command starts (the
+      // startsCommand default), so the spawn seats one devin start. A
+      // spawn whose command opens no session on the provider's planes
+      // would owe the lane zero and be admitted (bro-9f78j)
       await assert.rejects(
-        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+          worker: { kind: 'argv' as const, argv: ['/opt/devin', '-p'], cliName: 'devin' },
+        }),
         (err: unknown) =>
           err instanceof SpawnError &&
           err.kind === 'cap' &&
