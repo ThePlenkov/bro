@@ -80,6 +80,7 @@ import {
   readLifecycle,
   type ResolvedClass,
   type ReviewFacade,
+  releaseSessionSlot,
   releaseSessionStart,
   reviewHost,
   routeStepClass,
@@ -362,7 +363,7 @@ export function resolveBeadsDir(root: string, warn?: (msg: string) => void): str
  *  can't spoof: BRO_AGENT/BRO_MOL_ID come from the connector (extra),
  *  and ambient copies are stripped so a parent worker's badge can't
  *  bleed into the child's commits (bro-fzot). */
-function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
+function agentEnv(ctx: Pick<Ctx, 'beadsDir'>, extra: Record<string, string>): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const k of [
     'BRO_AGENT',
@@ -396,7 +397,7 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
 /** The command the template arm expands for a lane — a cli provider's
  *  `command` substitutes for the configured template; argv workers never
  *  reach it. */
-const laneCommand = (ctx: Ctx, lane: LoopLane): string =>
+const laneCommand = (ctx: Pick<Ctx, 'agent'>, lane: LoopLane): string =>
   lane.worker?.kind === 'template' ? lane.worker.command : ctx.agent;
 
 /** Commit-provenance pins for the loop's agent (bro-fzot) — the cli the
@@ -1236,8 +1237,8 @@ function admitCrossKindSessions(
  *  cross-kind claim already taken; a success leaves the caller holding
  *  the primary reservation + the cross-kind paths to release when the
  *  spawn's verdict lands. */
-function admitLaneSessions(
-  ctx: Ctx,
+export function admitLaneSessions(
+  ctx: { agent: string; env: AgentConnectorEnv; beadsDir?: string; root: string },
   lane: LoopLane,
   spec: { molStep: string; prompt: string; repoRoot: string },
   key: string
@@ -1267,10 +1268,12 @@ function admitLaneSessions(
   // spend under a shared '' scope where nothing can close it
   const scope = projectId(ctx.root);
   const liveByKind = liveSessionKeysByKind(readAgentRegistry(ctx.root));
+  const spawnedCmd = laneSpawnedCommand(lane, templateCommand);
+  let reservation: string | undefined;
   try {
     admitCrossKindSessions(
       ctx.env.agents,
-      laneSpawnedCommand(lane, templateCommand),
+      spawnedCmd,
       templateQuota?.plane.kind,
       key,
       spec.molStep,
@@ -1279,20 +1282,42 @@ function admitLaneSessions(
       scope,
       liveByKind
     );
-    const reservation =
-      templateQuota === undefined
-        ? undefined
-        : admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-            key,
-            molStep: spec.molStep,
-            workerEnv,
-            scope,
-            liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
-          });
+    if (templateQuota !== undefined) {
+      // every session the spawned command opens on the quota kind owes
+      // the lane a claim — a multi-start command judged once but
+      // claimed once would read one session where two land. Each admit
+      // re-judges post-claim: the Nth claim trips the refusal exactly
+      // when headroom cannot seat N.
+      const quotaView = sessionCapViews(spawnedCmd, ctx.env.agents, workerEnv).find(
+        v => v.kind === templateQuota.plane.kind
+      );
+      const quotaStarts = Math.max(
+        1,
+        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1
+      );
+      for (let i = 0; i < quotaStarts; i++) {
+        const claimed = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+          key,
+          molStep: spec.molStep,
+          workerEnv,
+          scope,
+          liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
+        });
+        if (i === 0) {
+          reservation = claimed;
+        } else if (claimed !== undefined) {
+          crossKind.push(claimed);
+        }
+      }
+    }
     return { reservation, crossKind };
   } catch (err) {
-    // every cross-kind claim this admission holds goes back — the
-    // caller never saw them
+    // every claim this admission holds goes back — the caller never
+    // saw them; the quota lane's own claims land per-start, so an
+    // early one can be held when a later start's verdict refuses
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation);
+    }
     releaseSessionStart(crossKind);
     throw err;
   }
