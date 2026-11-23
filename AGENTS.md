@@ -61,6 +61,20 @@ Developing bro itself: see CONTRIBUTING.md.
   guards). When a gate does flag new code, redesign the shape — do not
   split a long function into five trivial ones to game the metric;
   that is worse code, not better code.
+  Shapes the gates keep flagging (learned the hard way — write the
+  right side first): a function carrying >4 positional args → take one
+  context object; a discriminator `if/else` or `switch` → a handler map
+  keyed by the tag; a loop with conditionals inside → `filter`/`map`/
+  `flatMap` pipelines, or a table that drives the loop; JSX whose
+  render depends on the owner's state → one component per state branch;
+  N near-identical JSX blocks → one config array rendered generically;
+  index-as-key → a content-derived key; nested template literals →
+  hoist the inner one to a named const; `A && B || C` in shell → a real
+  `if/then/else` (it is NOT if-then-else); a legit argv/env path that a
+  scanner flags → per-line `// NOSONAR` with the reason (the repo's
+  convention — file-level exclusions are not honored); a test on a real
+  spawned process → poll for the exec'd identity before asserting
+  (`spawn` resolves at fork; `/proc` reads the parent's env first).
 - **Loop with retro** — when a gate or check fails, iterate until it is
   green and learn from each failure: after every red round, name the
   concrete finding (which rule, which function), the shape that caused
