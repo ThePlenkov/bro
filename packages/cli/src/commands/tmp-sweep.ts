@@ -287,6 +287,9 @@ export interface TmpSweepOptions {
    *  mounts need privileges a test lacks; faking one path's st_dev
    *  simulates the boundary. */
   lstat?: DevProbe;
+  /** mount-scan parent probe — the stat side of the seam (a symlinked
+   *  parent is followed to the fs its children actually sit on). */
+  stat?: DevProbe;
   /** in-use probe — test seam only (spec bro-wb8wf). A real /proc
    *  scan can't be scheduled mid-walk; a scripted probe can flip
    *  between the pre- and post-walk checks. */
@@ -451,6 +454,9 @@ interface SweepCtx {
   /** mount-scan dev probe — the test seam for faking a second
    *  filesystem; production leaves it undefined (lstatSync). */
   lstat?: DevProbe;
+  /** mount-scan parent probe — production leaves it undefined
+   *  (statSync; the parent path is followed, never lstat'd). */
+  stat?: DevProbe;
   /** in-use probe — resolved once from opts.inUse ?? isPathInUse so
    *  every consult in a run reads the same seam. */
   inUse: (path: string) => boolean;
@@ -462,10 +468,14 @@ function logKeep(fullPath: string, reason: string, quietKeeps: boolean): void {
   }
 }
 
-/** The pre-delete mount scan's probe — lstat, not stat: rm unlinks a
- *  symlink in place, so only an entry's OWN device can sit on a mount
- *  boundary, and `isSymbolicLink` is what proves a candidate root is
- *  such a link (vacuously clean — its target is never descended).
+/** The pre-delete mount scan's probe pair — lstat for the candidate
+ *  and every entry (rm unlinks a symlink in place, so only an entry's
+ *  OWN device can sit on a mount boundary, and `isSymbolicLink` is
+ *  what proves a candidate root is such a link — vacuously clean, its
+ *  target never descended), stat for the PARENT: a TMPDIR-style
+ *  symlinked parent physically holds its children on the link
+ *  TARGET's filesystem, and lstat would read the fs holding the link
+ *  inode itself — every candidate under it a false mount verdict.
  *  Injectable so a test can fake a second filesystem without a
  *  privileged mount (the seam topFillers set — spec bro-v96mp). */
 export type DevProbe = (p: string) => Pick<Stats, 'dev' | 'isSymbolicLink'>;
@@ -486,8 +496,11 @@ export type MountVerdict =
  *  deleted. A candidate that IS a symlink is vacuously clean: rm
  *  unlinks the link in place, the target is never descended — a stale
  *  `tmp-*` link onto another fs is litter to unlink, not a mount to
- *  keep. A real root is checked against its parent (a mount AT the
- *  candidate empties the mounted fs identically), then every entry's
+ *  keep. A real root is checked against its parent's STAT — the chain
+ *  followed, since a symlinked parent holds its children on the
+ *  target's fs while its own lstat dev reads the link's home fs (a
+ *  mount AT the candidate empties the mounted fs identically) — then
+ *  every entry's
  *  dev against the root's — files included: a bind-mounted file
  *  carries the source fs's dev and unlinking it removes the name off
  *  that device. The bound (topFillers' own 60k nodes / 1.5s) keeps a
@@ -495,9 +508,14 @@ export type MountVerdict =
  *  'uncertain', never waved through as 'clean'. */
 export function mountVerdict(
   root: string,
-  opts: { lstat?: DevProbe; budget?: { nodes: number; ms: number } } = {}
+  opts: {
+    lstat?: DevProbe;
+    stat?: DevProbe;
+    budget?: { nodes: number; ms: number };
+  } = {}
 ): MountVerdict {
   const lstat = opts.lstat ?? lstatSync;
+  const stat = opts.stat ?? statSync;
   const budget = opts.budget ?? { nodes: 60_000, ms: 1500 };
   const t0 = Date.now();
   let nodes = 0;
@@ -515,7 +533,10 @@ export function mountVerdict(
   const rootDev = rootSt.dev;
   const parent = dirname(root);
   try {
-    if (rootDev !== lstat(parent).dev) {
+    // stat, not lstat: root physically sits in the dir the parent path
+    // RESOLVES to — a TMPDIR symlink onto another fs makes lstat read
+    // the fs holding the link itself and every candidate a false mount
+    if (rootDev !== stat(parent).dev) {
       return { verdict: 'mount', at: root };
     }
   } catch {
@@ -680,7 +701,7 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
       logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
       return false;
     }
-    const mount = mountVerdict(fullPath, { lstat: ctx.lstat });
+    const mount = mountVerdict(fullPath, { lstat: ctx.lstat, stat: ctx.stat });
     if (mount.verdict !== 'clean') {
       console.error(`  keep ${fullPath} (${mountKeepReason(mount)})`);
       return false;
@@ -762,6 +783,7 @@ export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): voi
     quietKeeps: opts.quietKeeps === true,
     inUseMessage: process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use',
     lstat: opts.lstat,
+    stat: opts.stat,
     inUse: opts.inUse ?? isPathInUse,
   };
 

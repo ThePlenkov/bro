@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -658,18 +659,45 @@ describe('mountVerdict (bro-wb8wf)', () => {
     withTree(root => {
       // lstat(root) succeeded but dirname(root) cannot be read: the
       // partial failure used to blame the root. The reason must point
-      // at what actually failed so the keep-warning debugs true.
+      // at what actually failed so the keep-warning debugs true. The
+      // parent read is the STAT probe — a symlinked parent is followed.
       const parent = dirname(root);
-      const lstat: DevProbe = p => {
+      const stat: DevProbe = p => {
         if (p === parent) {
           throw Object.assign(new Error('denied'), { code: 'EACCES' });
         }
-        return lstatSync(p);
+        return statSync(p);
       };
-      assert.deepEqual(mountVerdict(root, { lstat }), {
+      assert.deepEqual(mountVerdict(root, { stat }), {
         verdict: 'uncertain',
         reason: `cannot stat ${parent}`,
       });
+    });
+  });
+
+  test('a symlinked parent is followed — a TMPDIR-style link is not a mount boundary', () => {
+    withTree(root => {
+      // <root>/link -> <root>/real, candidate inside: the TMPDIR shape
+      // where tmpdir is a symlink onto another filesystem. The link's
+      // own inode lives on a different fs than its target — lstat
+      // reads the link's home dev (foreign), stat resolves to where
+      // the candidate physically sits. The scan must compare against
+      // the resolved parent or every candidate under a symlinked
+      // TMPDIR reads a false mount and is kept forever.
+      const real = join(root, 'real');
+      mkdirSync(real);
+      const link = join(root, 'link');
+      symlinkSync(real, link, 'dir');
+      const candidate = join(link, 'tmp-stale');
+      mkdirSync(candidate);
+      const lstat: DevProbe = p => {
+        const st = lstatSync(p);
+        if (p === link) {
+          st.dev += 1; // the fs holding the link inode, not the target
+        }
+        return st;
+      };
+      assert.deepEqual(mountVerdict(candidate, { lstat }), { verdict: 'clean' });
     });
   });
 
