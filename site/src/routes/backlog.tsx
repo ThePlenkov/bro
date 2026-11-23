@@ -540,8 +540,8 @@ function Detail({
         </button>
       </div>
       <p className="bl-detail-badges">
-        {badges.map(([label, color]) => (
-          <span key={label} className="bl-badge" style={color ? { borderColor: color } : undefined}>
+        {badges.map(([label, color], i) => (
+          <span key={i} className="bl-badge" style={color ? { borderColor: color } : undefined}>
             {label}
           </span>
         ))}
@@ -560,6 +560,7 @@ function Detail({
           ))}
         </p>
       )}
+      {/* untrusted plain text — never switch this to dangerouslySetInnerHTML */}
       {b.description && <div className="bl-detail-desc">{b.description}</div>}
       {b.open_children + b.closed_children > 0 && (
         <p className="bl-detail-meta">
@@ -966,7 +967,7 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   const [picked, setPicked] = useState<Bead | null>(null);
 
   const beads = data.snapshot.issues;
-  const now = Date.now();
+  const [now] = useState(() => Date.now());
   const uni = useMemo(() => universes([...beads, ...data.gh.map(normalizeGh)]), [beads, data.gh]);
   const [f, setF] = useState<Filters>({
     q: '',

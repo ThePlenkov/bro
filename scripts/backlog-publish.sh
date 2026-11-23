@@ -106,8 +106,16 @@ publish_commit() {
 
 COMMIT="$(publish_commit)"
 for attempt in 1 2 3; do
-  if git -C "$ROOT" push "$REMOTE" "$COMMIT:$DATA_REF" "$COMMIT:$BRANCH_REF"; then
-    echo "backlog-publish: pushed backlog.json to $DATA_REF + $BRANCH_REF ($COMMIT)"
+  if git -C "$ROOT" push "$REMOTE" "$COMMIT:$DATA_REF"; then
+    echo "backlog-publish: pushed backlog.json to $DATA_REF ($COMMIT)"
+    # the heads twin is best-effort and pushed separately — a rejected
+    # branch push (protected-branch rules, per-ref policies) must not
+    # re-enter the retry loop and diverge the two refs
+    if git -C "$ROOT" push "$REMOTE" "$COMMIT:$BRANCH_REF"; then
+      echo "backlog-publish: mirrored to $BRANCH_REF"
+    else
+      echo "warning: could not mirror $COMMIT to $BRANCH_REF — raw fallback still reads $DATA_REF" >&2
+    fi
     exit 0
   fi
   if [[ "$attempt" -eq 3 ]]; then
