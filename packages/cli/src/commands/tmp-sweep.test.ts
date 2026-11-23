@@ -4,7 +4,14 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupTmpDirs, isPathInUse, tmpSweepVerdict, type TmpSweepInput } from './tmp-sweep.ts';
+import { testGit } from '@broject/core';
+import {
+  cleanupTmpDirs,
+  isPathInUse,
+  tmpSweepVerdict,
+  type TmpSweepInput,
+  workerTmpRoots,
+} from './tmp-sweep.ts';
 
 const HOUR = 60 * 60 * 1000;
 const GRACE = 10 * 60 * 1000;
@@ -257,5 +264,219 @@ describe('cleanupTmpDirs', () => {
         child.kill();
       }
     });
+  });
+
+  test("an extraRoots worker tmpdir sweeps by the same verdicts — emptied root rmdir'd (bro-v96mp)", () => {
+    const pid = deadPid();
+    assert.ok(pid > 0);
+    withTmp(dir => {
+      const agentDir = join(dir, 'bro-tmp', 'agent-x');
+      const leaf = join(agentDir, `tmp-${pid}-cccccccccccc`);
+      mkdirSync(leaf, { recursive: true, mode: 0o700 });
+      writeFileSync(join(leaf, 'marker'), 'x');
+      ageDir(leaf, GRACE + 60_000);
+      // a live-owner leaf beside it keeps — the daemon's own install
+      const live = join(agentDir, `tmp-${process.pid}-dddddddddddd`);
+      mkdirSync(live, { recursive: true, mode: 0o700 });
+      const out = lines(() => cleanupTmpDirs(false, { extraRoots: [agentDir] }));
+      assert.ok(
+        out.some(l => l.includes('deleted')),
+        `expected a delete line, got: ${out}`
+      );
+      assert.equal(existsSync(leaf), false);
+      assert.ok(existsSync(live));
+      // the emptied shell is litter of the same class — rmdir'd only
+      // once the live leaf is gone too
+      assert.ok(existsSync(agentDir));
+      rmSync(live, { recursive: true, force: true });
+    });
+  });
+
+  test('a missing extraRoots dir warns and skips — never fatal like tmpdir', () => {
+    withTmp(dir => {
+      const errs: string[] = [];
+      const orig = console.error;
+      console.error = (...args: unknown[]) => errs.push(args.join(' '));
+      let out: string[] = [];
+      try {
+        out = lines(() => cleanupTmpDirs(false, { extraRoots: [join(dir, 'no-such-bro-tmp')] }));
+      } finally {
+        console.error = orig;
+      }
+      assert.ok(!out.some(l => l.includes('error')), `got: ${out}`);
+      assert.ok(
+        errs.some(l => l.includes('cannot list') && l.includes('no-such-bro-tmp')),
+        `expected a stderr warning, got: ${errs}`
+      );
+    });
+  });
+});
+
+describe('workerTmpRoots (bro-v96mp)', () => {
+  /** A real `git init` — gitCommonDir answers via rev-parse, so a .git
+   *  shape alone is not enough. testGit scrubs the ambient repo pins
+   *  (a GIT_DIR from a hook/CI harness would redirect init) and throws
+   *  on a non-zero init, so a fixture that never landed fails here. */
+  const withRepo = (fn: (root: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-sweep-repo-'));
+    testGit(['init', '-q', root]);
+    try {
+      fn(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test('lists the main + linked worktree bro-tmp dirs', () => {
+    withRepo(root => {
+      const common = join(root, '.git');
+      mkdirSync(join(common, 'bro-tmp', 'agent-a'), { recursive: true });
+      mkdirSync(join(common, 'worktrees', 'wt1', 'bro-tmp', 'agent-b'), {
+        recursive: true,
+      });
+      // a stray file under bro-tmp is not an agent dir — never a root
+      writeFileSync(join(common, 'bro-tmp', 'stray'), 'x');
+      assert.deepEqual(workerTmpRoots(root).sort(), [
+        join(common, 'bro-tmp', 'agent-a'),
+        join(common, 'worktrees', 'wt1', 'bro-tmp', 'agent-b'),
+      ]);
+    });
+  });
+
+  test('[] outside a repository and with no bro-tmp dirs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sweep-notrepo-'));
+    try {
+      assert.deepEqual(workerTmpRoots(dir), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    withRepo(root => assert.deepEqual(workerTmpRoots(root), []));
+  });
+});
+
+describe('extra-root rmdir guard (bro-v96mp)', () => {
+  /** A real repo carrying a `bro-tmp/<agent>` shell — the emptied-root
+   *  rmdir only fires inside a gitdir the registry can be read from.
+   *  TMPDIR redirects to an empty fixture so the os.tmpdir() leg never
+   *  sweeps the real /tmp. */
+  const withRepo = (fn: (root: string, common: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-sweep-rmdir-'));
+    testGit(['init', '-q', root]); // scrubbed env + throw on non-zero
+    const common = join(root, '.git');
+    const tmp = join(root, 'faketmp');
+    mkdirSync(tmp);
+    const prev = process.env.TMPDIR;
+    process.env.TMPDIR = tmp;
+    try {
+      fn(root, common);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = prev;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  /** A registry entry whose agentId owns the shell — the fields
+   *  registryEntryState's liveness ladder reads. */
+  const writeAgents = (common: string, entries: Record<string, unknown>): void => {
+    mkdirSync(join(common, 'bro'), { recursive: true });
+    writeFileSync(join(common, 'bro', 'agents.json'), JSON.stringify(entries));
+  };
+
+  test("a stale emptied shell with no registry is orphan litter — rmdir'd", () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-gone');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.equal(existsSync(shell), false);
+    });
+  });
+
+  test('a fresh emptied shell keeps — the mtime is inside the TTL', () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-new');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    });
+  });
+
+  test('a stale shell a live registry agent owns keeps — its TMPDIR is not litter', () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-live');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      writeAgents(common, {
+        'mol-step-1': {
+          agentId: 'agent-live',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+        },
+      });
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    });
+  });
+
+  test("a stale shell whose registry agent already exited is litter — rmdir'd", () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-dead');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      writeAgents(common, {
+        'mol-step-1': {
+          agentId: 'agent-dead',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          exitStatus: 0,
+        },
+      });
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.equal(existsSync(shell), false);
+    });
+  });
+
+  test('a stale shell whose registry is corrupt keeps — unknown is not orphan proof', () => {
+    withRepo((_root, common) => {
+      const shell = join(common, 'bro-tmp', 'agent-corrupt');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      mkdirSync(join(common, 'bro'), { recursive: true });
+      writeFileSync(join(common, 'bro', 'agents.json'), '{torn write — never valid json');
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    });
+  });
+
+  test('a stale shell outside any repo keeps — the registry path cannot resolve', () => {
+    // agentRegistryPath answers null off-repo: 'unknown', never the
+    // empty-registry 'free' a failed probe would fake — the pinned
+    // TMPDIR of a worker whose registry can't be read is not litter.
+    // TMPDIR redirects to an empty fixture — the os.tmpdir() leg runs
+    // first and with deletion on would sweep the REAL /tmp otherwise
+    const norepo = mkdtempSync(join(tmpdir(), 'bro-sweep-norepo-'));
+    const emptyTmp = join(norepo, 'tmp');
+    mkdirSync(emptyTmp);
+    const prevTmp = process.env.TMPDIR;
+    process.env.TMPDIR = emptyTmp;
+    try {
+      const shell = join(norepo, 'bro-tmp', 'agent-offrepo');
+      mkdirSync(shell, { recursive: true, mode: 0o700 });
+      ageDir(shell, HOUR + 60_000);
+      cleanupTmpDirs(false, { extraRoots: [shell] });
+      assert.ok(existsSync(shell));
+    } finally {
+      if (prevTmp === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = prevTmp;
+      }
+      rmSync(norepo, { recursive: true, force: true });
+    }
   });
 });
