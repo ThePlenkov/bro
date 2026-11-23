@@ -2095,8 +2095,18 @@ export interface SessionQuotaLane {
 
 /** The session kind a spawn consumes — `agents.<backend>.sessionKind`
  *  when declared (sessionQuotaOf then demands a registered plane),
- *  else the first registered plane that detects the resolved command's
- *  CLI (worker cliName / worker template / backend command). */
+ *  else the kind the resolved command launches (worker cliName /
+ *  worker template / backend command). The first-token cli's plane
+ *  wins when one claims it — the cli IS the kind's identity even when
+ *  the invocation opens no session (`devin models` still bills devin).
+ *  When no plane claims that first token the command's own grammar
+ *  decides: the first registered plane whose startsSessions counts a
+ *  start takes the lane — `sh -c 'devin -p x'` names no plane cli at
+ *  position 0 yet launches a devin session, so the wrapped start owes
+ *  the same quota the bare spelling owes (spec bro-780ey). A spawn
+ *  keeps ONE primary lane — the registry-order rule sessionPlaneForCli
+ *  documents — while every other kind the command starts still admits
+ *  through the cross-kind pass. */
 export function sessionKindOf(
   env: AgentConnectorEnv,
   backend: string,
@@ -2107,13 +2117,15 @@ export function sessionKindOf(
   if (typeof declared === 'string' && declared !== '') {
     return declared;
   }
-  // an argv worker's argv[0] is the DRIVER (bro acp-worker, npx) — the
-  // wrapped agent's own cli rides cliName; argv0 is only the fallback
-  const cli =
-    spec.worker?.kind === 'argv'
-      ? commandCliName(spec.worker.cliName ?? spec.worker.argv[0] ?? '')
-      : commandCliName(spec.worker?.kind === 'template' ? spec.worker.command : command);
-  return sessionPlaneForCli(cli)?.kind;
+  if (spec.worker?.kind === 'argv') {
+    // an argv worker's argv[0] is the DRIVER (bro acp-worker, npx) — the
+    // wrapped agent's own cli rides cliName; argv0 is only the fallback.
+    // Argv execs verbatim — there is no shell wrap to unwrap.
+    const cli = commandCliName(spec.worker.cliName ?? spec.worker.argv[0] ?? '');
+    return sessionPlaneForCli(cli)?.kind;
+  }
+  const cmd = spec.worker?.kind === 'template' ? spec.worker.command : command;
+  return sessionPlaneForCli(commandCliName(cmd))?.kind ?? planesStartingSessions(cmd).at(0)?.kind;
 }
 
 /** The session quota this spawn must fit under — undefined when no
