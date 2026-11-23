@@ -51,14 +51,35 @@ test('hookOutcome: chatter with no control line is broken output', () => {
   assert.equal(failure, 'the hook answered with no control object');
 });
 
-test('hookOutcome: the last parseable line wins', () => {
+test('hookOutcome: the first parseable object line is the answer', () => {
+  // leading chatter is skipped; a trailing JSON line must not shadow
+  // the verdict — same contract as adapter-core's and opencode's
+  // parseControl
   const { control, failure } = hookOutcome({
     code: 0,
-    stdout: 'noise\n{"decision":"block","reason":"dirty"}\n',
+    stdout: 'noise\n{"decision":"block","reason":"dirty"}\n{"level":"warn","msg":"trailing"}\n',
     stderr: '',
     error: null,
   });
   assert.deepEqual(control, { decision: 'block', reason: 'dirty' });
+  assert.equal(failure, null);
+});
+
+test('hookOutcome: a JSON scalar or array line is chatter, not control', () => {
+  for (const stdout of ['42\n', '[1,2,3]\n', '"text"\n', 'null\n', 'true\n']) {
+    assert.equal(
+      hookOutcome({ code: 0, stdout, stderr: '', error: null }).failure,
+      'the hook answered with no control object'
+    );
+  }
+  // …but scalars ahead of the control are skipped, not fatal
+  const { control, failure } = hookOutcome({
+    code: 0,
+    stdout: '42\n{"decision":"block"}\n',
+    stderr: '',
+    error: null,
+  });
+  assert.deepEqual(control, { decision: 'block' });
   assert.equal(failure, null);
 });
 
@@ -125,4 +146,18 @@ test('a silent probe in a non-bro dir is health, never a warning', async () => {
   const { logs, idle } = makePlugin(dir);
   await idle('s1');
   assert.equal(logs.filter(l => l.level === 'warn').length, 0);
+});
+
+test('an unserializable payload is an outage, never healthy silence', async () => {
+  // JSON.stringify throws on circular input — the hook never ran, and
+  // mapping that to silence was the invisible-outage bug: the warning
+  // must fire instead
+  const { logs, idle } = makePlugin(dir);
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  await idle(circular as unknown as string);
+  const warns = logs.filter(l => l.level === 'warn');
+  assert.equal(warns.length, 1);
+  assert.match(warns[0]?.message ?? '', /stop gate did not run/);
+  assert.match(warns[0]?.message ?? '', /could not be serialized/);
 });

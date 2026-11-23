@@ -184,12 +184,22 @@ export function hookOutcome(result: SpawnResult): HookOutcome {
   if (result.stdout === '') {
     return { control: null, failure: null };
   }
-  // bro emits one JSON control object per line; take the last parseable one
-  for (const line of result.stdout.split('\n').reverse()) {
-    try {
-      return { control: JSON.parse(line) as unknown, failure: null };
-    } catch {
+  // bro emits one JSON control object per line — the first parseable
+  // OBJECT line is the answer, the same contract adapter-core's and
+  // opencode's parseControl keep. Trailing chatter must not shadow the
+  // verdict, and a JSON scalar/array line is chatter, not a control.
+  for (const line of result.stdout.split('\n')) {
+    const text = line.trim();
+    if (text === '') {
       continue;
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { control: parsed, failure: null };
+      }
+    } catch {
+      // not a control line — keep scanning
     }
   }
   return { control: null, failure: 'the hook answered with no control object' };
@@ -204,7 +214,9 @@ async function runBroHook(event: string, input: unknown): Promise<HookOutcome> {
   try {
     payload = JSON.stringify(input);
   } catch {
-    return { control: null, failure: null };
+    // the hook never ran — a serialization failure is an outage the
+    // diagnostic must surface, not healthy silence
+    return { control: null, failure: 'the hook payload could not be serialized' };
   }
   const result = await spawnCollect(argv[0], argv.slice(1), {
     input: payload,
@@ -295,6 +307,73 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
     return context;
   };
 
+  /** The session id a lifecycle event carries — `properties.sessionID`,
+   *  else the nested `info.id` some events use instead. */
+  const sessionIdOf = (properties: unknown): string | null => {
+    const props = (properties ?? {}) as Record<string, unknown>;
+    if (typeof props.sessionID === 'string') {
+      return props.sessionID;
+    }
+    const info = props.info as { id?: unknown } | undefined;
+    return typeof info?.id === 'string' ? info.id : null;
+  };
+
+  /** session.created primes the session's own probe, session.deleted
+   *  retires it — the cache is re-keyed on session boundaries, or a new
+   *  session's first (id-less) transform pushes the prior session's
+   *  cached context. */
+  const trackSession = async (type: string, sid: string | null): Promise<void> => {
+    if (type === 'session.created' && sid !== null) {
+      liveSessions.add(sid);
+      if (!hydratedContexts.has(sid)) {
+        await hydrate(sid);
+      }
+      return;
+    }
+    if (type === 'session.deleted') {
+      liveSessions.delete(sid ?? '');
+      if (sid === null) {
+        hydratedContexts.clear();
+      } else {
+        hydratedContexts.delete(sid);
+      }
+    }
+  };
+
+  /** session.idle is Kilo's Stop-equivalent: bro's stop gate decides
+   *  (decision: "block" when this session armed an aspect and left
+   *  unfinished business) and the plugin surfaces the verdict as a
+   *  warn log — Kilo cannot be halted from here. A dead probe is
+   *  indistinguishable from "nothing armed", so the failure warns once
+   *  per interval that the gate never ran, then stays quiet: fail-open
+   *  must not become spam-open on a broken install. */
+  const idleGate = async (sessionID: unknown): Promise<void> => {
+    const { control: out, failure } = await runBroHook('stop', { session_id: sessionID });
+    if (failure !== null) {
+      const now = Date.now();
+      if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
+        stopGateDiagAt = now;
+        await client.app.log({
+          body: {
+            service: 'bro',
+            level: 'warn',
+            message: `bro stop gate did not run (${failure}) — the stop is unguarded`,
+          },
+        });
+      }
+      return;
+    }
+    if (out && typeof out === 'object' && (out as { decision?: string }).decision === 'block') {
+      await client.app.log({
+        body: {
+          service: 'bro',
+          level: 'warn',
+          message: `bro stop gate blocked: ${(out as { reason?: string }).reason ?? 'unfinished work'}`,
+        },
+      });
+    }
+  };
+
   return {
     tool: {
       bro: tool({
@@ -337,68 +416,11 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
     },
 
     // --- stop gate: session.idle is Kilo's Stop-equivalent ---------------
-    //
-    // bro's stop gate blocks (decision: "block") when this session armed
-    // an aspect and left unfinished business. We can't halt Kilo from
-    // here, but we surface the block as a warn-level log so the session
-    // sees it before it would otherwise miss it.
 
     event: async ({ event }) => {
-      // the cache is re-keyed on session boundaries — a created session
-      // primes its own probe, a deleted one retires it. Without this a
-      // new session's first (id-less) transform pushes the prior
-      // session's cached context.
-      const props = (event.properties ?? {}) as Record<string, unknown>;
-      const sid =
-        typeof props.sessionID === 'string'
-          ? props.sessionID
-          : typeof (props.info as { id?: unknown } | undefined)?.id === 'string'
-            ? (props.info as { id: string }).id
-            : null;
-      if (event.type === 'session.created' && sid !== null) {
-        liveSessions.add(sid);
-        if (!hydratedContexts.has(sid)) {
-          await hydrate(sid);
-        }
-      } else if (event.type === 'session.deleted') {
-        liveSessions.delete(sid ?? '');
-        if (sid === null) {
-          hydratedContexts.clear();
-        } else {
-          hydratedContexts.delete(sid);
-        }
-      }
-      if (event.type !== 'session.idle') {
-        return;
-      }
-      const { control: out, failure } = await runBroHook('stop', {
-        session_id: event.properties.sessionID,
-      });
-      if (failure !== null) {
-        // a dead probe is indistinguishable from "nothing armed" — warn
-        // once per interval that the gate never ran, then stay quiet:
-        // fail-open must not become spam-open on a broken install
-        const now = Date.now();
-        if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
-          stopGateDiagAt = now;
-          await client.app.log({
-            body: {
-              service: 'bro',
-              level: 'warn',
-              message: `bro stop gate did not run (${failure}) — the stop is unguarded`,
-            },
-          });
-        }
-        return;
-      }
-      if (out && typeof out === 'object' && (out as { decision?: string }).decision === 'block') {
-        await client.app.log({
-          body: {
-            service: 'bro',
-            level: 'warn',
-            message: `bro stop gate blocked: ${(out as { reason?: string }).reason ?? 'unfinished work'}`,
-          },
-        });
+      await trackSession(event.type, sessionIdOf(event.properties));
+      if (event.type === 'session.idle') {
+        await idleGate(event.properties.sessionID);
       }
     },
 

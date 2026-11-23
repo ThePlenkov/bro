@@ -638,6 +638,22 @@ export function createBroDriver<Ctx>(
     }
   };
 
+  /** The healthy probe's verdict: a block refuses the stop; anything
+   *  else lets it land — surfacing bro's hint when it left one. */
+  const stopVerdict = (ctx: Ctx, sessionId: string, control: HookControl | null): unknown => {
+    if (control?.decision !== 'block') {
+      const hint = contextOf(control);
+      if (hint !== '') {
+        host.notify(ctx, hint, 'info');
+      }
+      return undefined;
+    }
+    gatedSession = sessionId;
+    const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
+    void refreshBoard(ctx).catch(() => {});
+    return host.refuseStop(reason === '' ? 'unfinished bro work' : reason);
+  };
+
   // the stop gate: bro decides, the host refuses. The host's own
   // "already refused" flag goes back to bro so bro's one-shot rule
   // applies — the driver never loops the gate itself.
@@ -663,17 +679,7 @@ export function createBroDriver<Ctx>(
       gateDiag(ctx, failure);
       return undefined;
     }
-    if (control?.decision !== 'block') {
-      const hint = contextOf(control);
-      if (hint !== '') {
-        host.notify(ctx, hint, 'info');
-      }
-      return undefined;
-    }
-    gatedSession = sessionId;
-    const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
-    void refreshBoard(ctx).catch(() => {});
-    return host.refuseStop(reason === '' ? 'unfinished bro work' : reason);
+    return stopVerdict(ctx, sessionId, control);
   };
 
   /** In-flight stop probes by session id — two concurrent stops must

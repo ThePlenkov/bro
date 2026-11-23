@@ -678,6 +678,19 @@ function createBroDriver(host, api, deps = {}) {
 			host.notify(ctx, `bro stop gate did not run — ${hookFailureText(failure)}; the stop is unguarded`, "warning");
 		} catch {}
 	};
+	/** The healthy probe's verdict: a block refuses the stop; anything
+	*  else lets it land — surfacing bro's hint when it left one. */
+	const stopVerdict = (ctx, sessionId, control) => {
+		if (control?.decision !== "block") {
+			const hint = contextOf(control);
+			if (hint !== "") host.notify(ctx, hint, "info");
+			return;
+		}
+		gatedSession = sessionId;
+		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
+		refreshBoard(ctx).catch(() => {});
+		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
+	};
 	const stopGate = async (event, ctx, sessionId) => {
 		if (host.stopAborted?.(event) === true) return;
 		const { control, failure } = await probeResult("stop", {
@@ -688,15 +701,7 @@ function createBroDriver(host, api, deps = {}) {
 			gateDiag(ctx, failure);
 			return;
 		}
-		if (control?.decision !== "block") {
-			const hint = contextOf(control);
-			if (hint !== "") host.notify(ctx, hint, "info");
-			return;
-		}
-		gatedSession = sessionId;
-		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
-		refreshBoard(ctx).catch(() => {});
-		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
+		return stopVerdict(ctx, sessionId, control);
 	};
 	/** In-flight stop probes by session id — two concurrent stops must
 	*  not both run the probe and both block: the second awaits the

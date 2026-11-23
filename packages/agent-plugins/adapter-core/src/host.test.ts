@@ -19,6 +19,7 @@ import {
   type BroContext,
   type BroHostApi,
   type BroHostBinding,
+  type BroHostShape,
 } from './host.ts';
 import type { Command, ResolveOptions } from './core.ts';
 
@@ -51,15 +52,29 @@ interface TestCtx extends BroContext {
   notes: Note[];
 }
 
-/** A host stub: the events the driver binds are recorded, notifications
- *  collected, and the stop refusal is an inspectable marker. */
-function makeHost(opts: { notifyThrows?: boolean; resolve?: Command | null } = {}): {
-  ctx: TestCtx;
-  handlers: Map<string, (event: unknown, ctx: TestCtx) => unknown>;
-  fireStop(): Promise<unknown>;
-} {
-  const handlers = new Map<string, (event: unknown, ctx: TestCtx) => unknown>();
-  const ctx: TestCtx = {
+type Handlers = Map<string, (event: unknown, ctx: TestCtx) => unknown>;
+type Notify = BroHostShape<TestCtx>['notify'];
+
+/** notify() that records into the ctx's notes sink. */
+const recordNotify: Notify = (c, text, level) => {
+  c.notes.push({ text, level });
+};
+
+/** notify() that explodes — the throwing-notify fail-open probe. */
+const explodingNotify: Notify = () => {
+  throw new Error('notify exploded');
+};
+
+/** on() that records every bound handler so the tests can fire them. */
+const recordOn =
+  (handlers: Handlers): BroHostShape<TestCtx>['on'] =>
+  (event, handler) => {
+    handlers.set(event, handler as (event: unknown, ctx: TestCtx) => unknown);
+  };
+
+/** The ctx the driver sees: a notes sink in the shared-lineage shape. */
+function makeCtx(): TestCtx {
+  return {
     notes: [],
     ui: {
       notify() {},
@@ -71,37 +86,50 @@ function makeHost(opts: { notifyThrows?: boolean; resolve?: Command | null } = {
     hasUI: false,
     sessionManager: { getSessionId: () => 'ses_1' },
   };
-  const binding: BroHostBinding<TestCtx> = sharedBinding<TestCtx>({
+}
+
+/** The host's own half: bound handlers recorded, notify() collected. */
+function makeBinding(handlers: Handlers, notifyThrows: boolean): BroHostBinding<TestCtx> {
+  return sharedBinding<TestCtx>({
     kind: 'test',
     stop: 'session_stop',
-    on(event, handler) {
-      handlers.set(event, handler as (event: unknown, ctx: TestCtx) => unknown);
-    },
+    on: recordOn(handlers),
     paint() {},
-    notify(c, text, level) {
-      if (opts.notifyThrows === true) {
-        throw new Error('notify exploded');
-      }
-      c.notes.push({ text, level });
-    },
+    notify: notifyThrows ? explodingNotify : recordNotify,
     refuseStop(reason) {
       return { blocked: reason };
     },
     stopAlreadyRefused: () => false,
   });
-  const api: BroHostApi<TestCtx> = {
-    registerCommand() {},
-    registerTool() {},
-    sendMessage() {},
-  };
-  const resolve =
-    opts.resolve === undefined
-      ? async (_o: ResolveOptions): Promise<Command | null> => ({
-          cmd: process.execPath,
-          args: [stub],
-        })
-      : async (_o: ResolveOptions): Promise<Command | null> => opts.resolve ?? null;
-  createBroDriver(binding, api, { resolve });
+}
+
+const API: BroHostApi<TestCtx> = {
+  registerCommand() {},
+  registerTool() {},
+  sendMessage() {},
+};
+
+/** The resolve seam: the stub CLI by default, or the caller's pinned
+ *  ladder end (null = every rung failed, the no-cli class). */
+function stubResolve(
+  pinned: Command | null | undefined
+): (o: ResolveOptions) => Promise<Command | null> {
+  return async (_o: ResolveOptions): Promise<Command | null> =>
+    pinned === undefined ? { cmd: process.execPath, args: [stub] } : pinned;
+}
+
+/** A host stub: the events the driver binds are recorded, notifications
+ *  collected, and the stop refusal is an inspectable marker. */
+function makeHost(opts: { notifyThrows?: boolean; resolve?: Command | null } = {}): {
+  ctx: TestCtx;
+  handlers: Handlers;
+  fireStop(): Promise<unknown>;
+} {
+  const handlers: Handlers = new Map();
+  const ctx = makeCtx();
+  createBroDriver(makeBinding(handlers, opts.notifyThrows === true), API, {
+    resolve: stubResolve(opts.resolve),
+  });
   const fireStop = async (): Promise<unknown> => {
     const handler = handlers.get('session_stop');
     assert.ok(handler !== undefined, 'the driver bound no stop handler');
