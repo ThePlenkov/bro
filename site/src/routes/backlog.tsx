@@ -174,7 +174,9 @@ async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
       }
     }
   } catch {
-    // Resolve the data ref below when the branch mirror or its metadata is unavailable.
+    // The raw branch remains usable when GitHub's API is rate-limited.
+    const branch = await fetch(`${RAW}/${BRANCH}/${BACKLOG_PATH}`);
+    if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: BRANCH };
   }
   const sha = await resolveSha();
   const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`);
@@ -187,7 +189,7 @@ function cacheSnapshot(data: Data): void {
     const cached = readCache();
     const cachedAt = cached ? Date.parse(cached.snapshot.generated_at) : Number.NaN;
     const generatedAt = Date.parse(data.snapshot.generated_at);
-    if (Number.isNaN(cachedAt) || Number.isNaN(generatedAt) || generatedAt >= cachedAt) {
+    if (!Number.isNaN(generatedAt) && (Number.isNaN(cachedAt) || generatedAt >= cachedAt)) {
       window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
     }
   } catch {
