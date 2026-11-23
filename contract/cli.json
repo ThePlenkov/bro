@@ -1369,10 +1369,20 @@
     },
     "plugins": {
       "name": "plugins",
-      "summary": "Plugin registry + client adapters: install|uninstall|list <client>",
+      "summary": "The BroPlugin registry — plugins for bro (commands, skills, config)",
       "spellings": ["plugins"],
       "aliases": [],
       "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "clients": {
+      "name": "clients",
+      "summary": "Agents that use bro — install matrix + adapters: list|install|uninstall <client>",
+      "spellings": ["clients"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "clients",
       "plan": false,
       "external": false
     },

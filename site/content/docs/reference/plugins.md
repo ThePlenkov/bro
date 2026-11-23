@@ -1,11 +1,9 @@
 ---
 title: "bro plugins"
-description: "Plugin registry + client adapters: install|uninstall|list <client>"
+description: "The BroPlugin registry — plugins for bro (commands, skills, config)"
 ---
 
-**`bro plugins`** — Plugin registry + client adapters: install|uninstall|list &lt;client&gt;
-
-`bro plugins install|uninstall|list`
+**`bro plugins`** — The BroPlugin registry — plugins for bro (commands, skills, config)
 
 | | |
 | --- | --- |

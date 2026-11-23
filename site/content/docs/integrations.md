@@ -117,9 +117,9 @@ explicitly.
 | Claude Code | repo root (`.claude-plugin/plugin.json` + `skills/`); hooks in `plugins/claude/bro/hooks/` |
 | Codex       | repo root (`plugin.json` + `skills/`); hooks in `plugins/codex/bro/hooks/`                 |
 | Cursor      | `plugins/cursor/bro`                                                                       |
-| OpenCode    | `bro plugins install opencode` — native plugin (server + TUI + RPC)                        |
-| Kilo        | `bro plugins install kilo` — module + `kilo.json` registration                             |
-| pi          | `bro plugins install pi` — extension module                                                |
+| OpenCode    | `bro clients install opencode` — native plugin (server + TUI + RPC)                        |
+| Kilo        | `bro clients install kilo` — module + `kilo.json` registration                             |
+| pi          | `bro clients install pi` — extension module                                                |
 
 Cursor installs from `.cursor-plugin/marketplace.json`. The adapter's
 `hooks/hooks.json` uses Cursor event names; `bro hooks` _(0.3.0)_ translates that
@@ -135,7 +135,7 @@ prompt.
 OpenCode v2 loads a plugin as a _directory_ — and it raises the TUI half
 only for a package that also has a server, so bro's three modules (the
 server entrypoint, the TUI half and the RPC contract they share) land
-together: `bro plugins install` materializes them into
+together: `bro clients install` materializes them into
 `$XDG_CONFIG_HOME/opencode/plugins/bro/` or, locally, into
 `.opencode/plugins/bro/`. Kilo and pi get the same treatment:
 a module file in the client's extension dir, with Kilo's global install
