@@ -4909,7 +4909,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             // and the reservation would idle out its TTL. Retry the plain
             // spawn over the same attempt artifacts. The refused child is
             // proven dead, so it does not block the catch's row stamp —
-            // only the retry's own pid may
+            // only the retry's own pid may still publish a handle
             childPid = undefined;
             if (stderrLog !== undefined) {
               appendPrivateFileSync(
