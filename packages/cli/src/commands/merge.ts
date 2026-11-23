@@ -280,7 +280,10 @@ async function fetchBounded(
 }
 
 /** The gate's green snapshot may be stale — a moved head or a dropped
- *  verdict re-enters the gate rather than merging unchecked commits. */
+ *  verdict re-enters the gate rather than merging unchecked commits. This
+ *  uncached re-probe is also the last Devin Review check before --auto:
+ *  reviewer findings arrive as threads, so an empty thread set is not
+ *  sufficient evidence that the current head is ready. */
 async function gateDrifted(ctx: MergeCtx, res: GateWaitResult): Promise<boolean> {
   ctx.cache?.invalidate(ctx.t);
   const fresh = await ctx.fetcher();
