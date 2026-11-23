@@ -17,9 +17,7 @@ const DOCS = `${BASE_URL}docs`;
 // heads twin `bro-data`, which raw.githubusercontent serves without the
 // API quota the ref-resolution call costs. GitHub issues and open PRs
 // come live from the REST API in the same request wave.
-const BRANCH = 'bro-data';
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
-const BRANCH_REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/heads/bro-data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
 const SNAPSHOT_KEY = 'bro:backlog:snapshot:v2';
@@ -160,24 +158,7 @@ async function fetchGh(): Promise<GhItem[]> {
   return out;
 }
 
-// The heads twin costs no API quota — the ref-resolution path stays as
-// the fallback until the branch exists (pre-migration snapshots).
 async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
-  try {
-    const [branchRef, dataRef] = await Promise.all([fetch(BRANCH_REF_API), fetch(REF_API)]);
-    if (branchRef.ok && dataRef.ok) {
-      const branchSha = ((await branchRef.json()) as { object: { sha: string } }).object.sha;
-      const dataSha = ((await dataRef.json()) as { object: { sha: string } }).object.sha;
-      if (branchSha === dataSha) {
-        const branch = await fetch(`${RAW}/${dataSha}/${BACKLOG_PATH}`);
-        if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: dataSha };
-      }
-    }
-  } catch {
-    // The raw branch remains usable when GitHub's API is rate-limited.
-    const branch = await fetch(`${RAW}/${BRANCH}/${BACKLOG_PATH}`);
-    if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: BRANCH };
-  }
   const sha = await resolveSha();
   const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`);
   if (!res.ok) throw new Error(`backlog.json not on refs/bro/data (${res.status})`);
