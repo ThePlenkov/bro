@@ -74,14 +74,47 @@ Developing bro itself: see CONTRIBUTING.md.
   scanner flags → per-line `// NOSONAR` with the reason (the repo's
   convention — file-level exclusions are not honored); a test on a real
   spawned process → poll for the exec'd identity before asserting
-  (`spawn` resolves at fork; `/proc` reads the parent's env first).
+  (`spawn` resolves at fork; `/proc` reads the parent's env first);
+  a computed key used to call a function (`SORTS[k](a,b)`, `MAP[t](x)`)
+  → `Object.getOwnPropertyDescriptor(map, k)?.value?.(...)` — the
+  dynamic-call SAST rule fires on plain `obj[k](...)`, and the
+  descriptor read also neutralizes prototype keys like `__proto__`;
+  interactive viewport state (zoom/pan/drag) → a `useViewport` hook +
+  a render-only `*Svg`/`*Canvas` component, not all inside the parent.
+
+  Reviewer bots flag a second class — semantics, not shape. Learned
+  the same way, same contract (write the right side first): enum-like
+  facets (status/type/priority) → derive the universe from the data,
+  a hard-coded list silently hides legal values; a fallible fetch →
+  throw or degrade with an explicit flag, `res.ok ? data : []` makes
+  an outage look like an empty queue (and cache fallback belongs to
+  the caller, or cached data reads as live); a list endpoint →
+  paginate, `per_page=100` is a cap not a promise; a caller-supplied
+  path → never `rm -rf` it on failure, fall back to a scratch dir;
+  a publish push to a shared ref → retry by re-parenting onto the
+  latest tip; `fetch` ≠ `pull` (fetch updates remote refs, pull
+  advances the working set — pick the verb that reaches the read
+  path); plumbing commits → export a git identity first; a
+  caller-supplied repo ref → normalize URL/ssh/slug before use; a
+  workflow that runs `.ts` directly → pin `setup-node` (the runner
+  default is older than unflagged type stripping); an exported
+  snapshot → write it AFTER the replication it mirrors, not before;
+  an external numeric field → `Number.isInteger` + a defined
+  fallback, bare `Number()` leaks NaN; a file that must ride an
+  `ls-files -i` artifact sync → it must be gitignored or it never
+  ships; a direction-bearing relation (blocks/parent) → verify the
+  dep semantics against real data before encoding `a.blocks = [b]`.
 - **Loop with retro** — when a gate or check fails, iterate until it is
   green and learn from each failure: after every red round, name the
   concrete finding (which rule, which function), the shape that caused
   it, and the pattern that would have avoided it, then carry that
   pattern into the next write. A failure that teaches nothing produces
   the same failure again next PR — the retro is what makes the loop
-  converge instead of bouncing between flags.
+  converge instead of bouncing between flags. Review threads follow
+  the same loop: a fixed finding resolves silently, a rejected one
+  gets a one-line rationale in the thread, and a finding class the
+  lists above don't name yet becomes a new entry there — not just a
+  fix here.
 - **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).

@@ -101,6 +101,16 @@ code nobody edits by hand.
   anti-pattern ↔ pattern list lives in AGENTS.md ("Green on first
   write"); review catches it so the gate never has to.
 
+- Semantics-shaped new code is the second list in the same AGENTS.md
+  section — flag the patterns the bots keep finding: hard-coded facet
+  universes that hide legal values, `res.ok ? data : []` silent-empty
+  fetches, unpaginated list endpoints, `rm -rf` on caller-supplied
+  paths, publish pushes without re-parenting retry, `fetch` where the
+  working set needs `pull`, plumbing commits without a git identity,
+  snapshots written before the sync they mirror, bare `Number()` on
+  external fields, un-gitignored files that must ride an artifact
+  sync, and dep direction assumed instead of verified on real data.
+
 - `hooks/run.sh` changes: must terminate for relative, nonexistent, and
   unset plugin roots (fixed-point break + absolute-path validation).
 - Shell fallbacks: a failed candidate must fall through to the next —
