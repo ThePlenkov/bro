@@ -24,6 +24,7 @@
  * so two callers racing a burst see each other's claims, not the same
  * headroom.
  */
+import { randomBytes } from 'node:crypto';
 import { SpawnError } from './agents.ts';
 import { acquireFileLockYielding, withFileLock } from './filelock.ts';
 import {
@@ -600,10 +601,16 @@ function providerSlotSection(
   opts: ProviderSlotOpts
 ): SessionStartAdmission {
   const dir = providerSlotsDir(lane.provider, lane.reservationsDir);
+  // The claim name dedups on the key — but this ledger is host-shared
+  // and a caller key is only REPO-unique (two repos' loops can mint the
+  // same `loop-<lead>`): a deterministic name would let the second run
+  // adopt the first's claim and free it while its own work still runs.
+  // The nonce makes every launch attempt its own claim; the caller's
+  // key stays the name's prefix for correlation.
   const claim = reserveSessionStart({
     kind: providerSlotsKind(lane.provider),
     agents: undefined,
-    key: opts.key,
+    key: `${opts.key}-${randomBytes(4).toString('hex')}`,
     count: 1,
     lane: opts.lane,
     dir,

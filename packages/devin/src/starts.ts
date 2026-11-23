@@ -12,7 +12,18 @@
  * plane, and the plane answers in devin's terms. The shell reading it
  * leans on lives in `shell.ts`.
  */
-import { atCommandPosition, base, commandIndex, segments, tokens, type Token } from './shell.ts'
+import {
+  atCommandPosition,
+  base,
+  MAX_WRAPPED_COMMAND_DEPTH,
+  readsStdinScript,
+  redirectIndexes,
+  type Segment,
+  scanSegments,
+  type Token,
+  tokens,
+  wrappedCommand,
+} from './shell.ts';
 
 /** The devin CLI's subcommands that never open a session: they read or
  *  manage what already exists. */
@@ -37,109 +48,96 @@ const NON_SESSION_COMMANDS = new Set([
   'uninstall',
   'update',
   'version',
-])
+]);
 
 /** `devin cloud` opens a cloud session, but `devin cloud ls` only lists
  *  cloud resources. */
-const CLOUD_RESOURCE_COMMANDS = new Set(['list', 'ls', 'rm', 'ssh', 'forward'])
+const CLOUD_RESOURCE_COMMANDS = new Set(['list', 'ls', 'rm', 'ssh', 'forward']);
 
 /** The flags that only print — they open nothing. */
-const NON_SESSION_FLAGS = new Set(['-h', '--help', '--version', '-V'])
-
-/** The shells whose `-c` argument is a command of its own. */
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
+const NON_SESSION_FLAGS = new Set(['-h', '--help', '--version', '-V']);
 
 /** Does this devin invocation open a session? The verb after the
  *  binary decides: no verb (the bare CLI) opens an interactive session,
  *  a flag (`-p`, `--print`, `--cloud`, `--prompt-file`) opens a
  *  one-shot, `acp` opens a served session, and the read-only verbs
- *  open none. */
+ *  open none. Redirections are the invocation's plumbing, never its
+ *  verb — `devin >log list` is `devin list`, which opens nothing. */
 function invocationStartsSession(toks: Token[], at: number): boolean {
-  const verb = toks.at(at + 1)?.text
+  const skip = redirectIndexes(toks);
+  // the index of the next argument — redirections are plumbing, not args
+  const nextArg = (from: number): number => {
+    for (let i = from; i < toks.length; i++) {
+      if (!skip.has(i)) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  const verbAt = nextArg(at + 1);
+  const verb = verbAt === -1 ? undefined : toks.at(verbAt)?.text;
   if (verb === undefined) {
-    return true
+    return true;
   }
   if (verb.startsWith('-')) {
-    return !NON_SESSION_FLAGS.has(verb)
+    return !NON_SESSION_FLAGS.has(verb);
   }
   if (verb === 'cloud') {
-    const sub = toks.at(at + 2)?.text
-    return sub === undefined || !CLOUD_RESOURCE_COMMANDS.has(sub)
+    const subAt = nextArg(verbAt + 1);
+    const sub = subAt === -1 ? undefined : toks.at(subAt)?.text;
+    return sub === undefined || !CLOUD_RESOURCE_COMMANDS.has(sub);
   }
-  return !NON_SESSION_COMMANDS.has(verb)
+  return !NON_SESSION_COMMANDS.has(verb);
 }
 
 /** The positions in a segment's tokens where a devin binary sits at a
  *  COMMAND position — a devin mentioned as an argument (`grep devin`)
  *  is not a start. */
 function devinCommandPositions(toks: Token[]): number[] {
-  const out: number[] = []
+  const out: number[] = [];
   for (let i = 0; i < toks.length; i++) {
-    const token = toks.at(i)
+    const token = toks.at(i);
     if (token === undefined || base(token) !== 'devin') {
-      continue
+      continue;
     }
     if (atCommandPosition(toks, i)) {
-      out.push(i)
+      out.push(i);
     }
   }
-  return out
-}
-
-/** The command a shell wrapper runs: `sh -c 'devin -p x'` — the string
- *  is a command of its own, so its starts count too. */
-function wrappedCommand(toks: Token[]): string | undefined {
-  const at = commandIndex(toks)
-  const shell = toks.at(at)
-  if (shell === undefined || !SHELLS.has(base(shell))) {
-    return undefined
-  }
-  if (!isShellCommandFlag(toks.at(at + 1)?.text)) {
-    return undefined
-  }
-  const script = toks.at(at + 2)
-  return script !== undefined && script.quoted ? script.text : undefined
-}
-
-/** Is this the shell's command flag? `-c` alone, or a combined short
- *  flag that carries it (`-lc`, `-ic`). */
-function isShellCommandFlag(flag: string | undefined): boolean {
-  if (flag === undefined) {
-    return false
-  }
-  if (flag === '-c') {
-    return true
-  }
-  // a combined short flag that carries the command ('-lc', '-ic') —
-  // read as letters, not as a polynomial pattern
-  if (!flag.startsWith('-') || flag.length < 2) {
-    return false
-  }
-  const letters = flag.slice(1)
-  return letters.includes('c') && /^[a-z]+$/.test(letters)
+  return out;
 }
 
 /** The starts one shell segment opens. */
-function countSegmentStarts(segment: string, depth: number): number {
-  const toks = tokens(segment)
-  let count = 0
+function countSegmentStarts(segment: Segment, depth: number): number {
+  const toks = tokens(segment.text);
+  let count = 0;
   for (const at of devinCommandPositions(toks)) {
     if (invocationStartsSession(toks, at)) {
-      count++
+      count++;
     }
   }
-  const wrapped = depth < 2 ? wrappedCommand(toks) : undefined
+  const wrapped = depth < MAX_WRAPPED_COMMAND_DEPTH ? wrappedCommand(toks) : undefined;
   if (wrapped !== undefined) {
-    count += countDevinSessionStarts(wrapped, depth + 1)
+    count += countDevinSessionStarts(wrapped, depth + 1);
+    return count;
   }
-  return count
+  // a here-document feeding a shell is the shell's PROGRAM — `sh
+  // <<EOF`␤`devin -p x`␤`EOF` opens a devin session the way `sh -c
+  // 'devin -p x'` does (feeding `cat` it stays data). The body draws
+  // on the same depth budget as a -c layer.
+  if (segment.bodies.length > 0 && depth < MAX_WRAPPED_COMMAND_DEPTH && readsStdinScript(toks)) {
+    for (const body of segment.bodies) {
+      count += countDevinSessionStarts(body, depth + 1);
+    }
+  }
+  return count;
 }
 
 /** How many devin sessions would this command open? */
 export function countDevinSessionStarts(command: string, depth = 0): number {
-  let count = 0
-  for (const segment of segments(command)) {
-    count += countSegmentStarts(segment, depth)
+  let count = 0;
+  for (const segment of scanSegments(command)) {
+    count += countSegmentStarts(segment, depth);
   }
-  return count
+  return count;
 }

@@ -88,9 +88,7 @@ import {
   routeStepClass,
   SpawnError,
   type SpawnWorker,
-  sessionCapRefusalFor,
   sessionCapViews,
-  sessionPlane,
   specStore,
   stepClassInfo,
   stepParent,
@@ -112,6 +110,8 @@ import {
 import { isStackName } from '@broject/stack';
 import {
   type AgentConnectorEnv,
+  admitProviderGateStarts,
+  admitSpawnedCommandStarts,
   applyFleetMatrix,
   applyFleetRouter,
   EMPTY_KEYS,
@@ -122,6 +122,11 @@ import {
   type MatrixLanePick,
   matrixLanePick,
   profileModelFor,
+  type ProviderGate,
+  providerGateOf,
+  providerGatePayload,
+  providerGateQuotaStarts,
+  providersForSpawnedCommand,
   providerWallsFor,
   resolveAgentConnector,
   resolveSpawnProvider,
@@ -891,6 +896,20 @@ async function resolveBeadLane(
 const shRender = (s: string): string =>
   /[\s'"\\]/.test(s) ? `'${s.replaceAll("'", String.raw`'\''`)}'` : s;
 
+/** Does this process GROUP still hold a live member? `detached: true`
+ *  makes a spawn's leader pid its group id — the group lives while any
+ *  descendant runs (a template's `worker >log 2>&1 &` survives the `sh
+ *  -c` leader's own exit). EPERM answers "yes" — the group exists but
+ *  refuses our signal; ESRCH is gone. */
+export function processGroupLive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin) — or off `base` when a stack already picked
  *  the fork point. An existing dir is reused as-is. */
@@ -1008,6 +1027,16 @@ function spawnAgent(
       say(ctx, `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${logNote}`);
     }
     ctx.stage = `worker pid=${child.pid ?? '?'}`;
+    // The run is over when the spawn's PROCESS GROUP empties, not when
+    // the `sh -c` leader exits — `detached: true` makes the leader's
+    // pid the group id, and a template that backgrounds its worker
+    // (`worker >log 2>&1 &`) frees the leader while the worker still
+    // runs. Resolving earlier would release the admission's claims
+    // while work still stands — the provider cap's ledger would seat
+    // a second start over a live one (coderabbit PR #1094). A worker
+    // that double-forks out of the group escapes this watch by
+    // construction — nothing left names it.
+    const groupLive = (): boolean => child.pid !== undefined && processGroupLive(child.pid);
     const settle = (code: number | null): void => {
       // custody returns to the loop process — the worker is gone but the
       // claim isn't: findPr and the member's watchBegin still stand
@@ -1040,10 +1069,19 @@ function spawnAgent(
     child.on('exit', (code, signal) => {
       if (code === null) {
         console.error(`loop: agent died on signal ${signal ?? '?'}`);
-        settle(null);
-        return;
       }
-      settle(code);
+      // the leader is gone — the verdict lands when the GROUP is empty:
+      // a detached worker still running holds the claims it was
+      // admitted under
+      const drain = (): void => {
+        if (!groupLive()) {
+          settle(code);
+          return;
+        }
+        const timer = setTimeout(drain, 1000);
+        timer.unref();
+      };
+      drain();
     });
   });
 }
@@ -1184,66 +1222,22 @@ function laneSpawnedCommand(lane: LoopLane, fallback: string): string {
   return fallback;
 }
 
-/** Cross-kind session admission: every OTHER session kind the spawned
- *  command starts consumes its cap too (a `devin -p …` payload draws on
- *  devin's budget from a native lane). Each claim runs under that
- *  kind's own host-wide admission mutex — the same lock the connector's
- *  admitSessionSlot holds — so a check-then-reserve here cannot race a
- *  parallel start into overshooting the cap. The quota lane's kind is
- *  skipped: admitSessionSlot covers its full lane, and claiming it
- *  twice would double-reserve one spawn against the same plane.
- *  Claimed paths append to `out` — a refusal mid-way is the caller's
- *  rollback set. `budgetCharged` reports each work-budget segment a
- *  claim just opened so the same rollback can refund them. */
-function admitCrossKindSessions(
-  agents: Record<string, Record<string, unknown>>,
-  spawnedCmd: string,
-  quotaKind: string | undefined,
-  key: string,
-  molStep: string,
-  workerEnv: Record<string, string>,
-  out: string[],
-  scope: string,
-  liveByKind: Map<string, Set<string>>,
-  budgetCharged: (kind: string) => void
-): void {
-  // a pre-flight refusal ahead of any claim; the authoritative count
-  // re-runs inside each kind's admission mutex below
-  const crossRefusal = sessionCapRefusalFor(spawnedCmd, agents, workerEnv);
-  if (crossRefusal !== undefined) {
-    throw new SpawnError(crossRefusal, 'cap');
-  }
-  for (const view of sessionCapViews(spawnedCmd, agents, workerEnv)) {
-    if (view.kind === quotaKind) {
-      continue;
-    }
-    const plane = sessionPlane(view.kind);
-    if (plane === undefined) {
-      continue;
-    }
-    for (let i = 0; i < view.starts; i++) {
-      const claimed = admitSessionSlot(plane, agents, {
-        key,
-        molStep,
-        workerEnv,
-        scope,
-        liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
-        budgetCharged,
-      });
-      if (claimed !== undefined) {
-        out.push(claimed);
-      }
-    }
-  }
-}
-
-/** Raw-template session admission — the same quota the registry spawn
- *  enforces: the lane's own kind via its quota lane, plus every other
- *  session kind the spawned command starts. A refusal hands back every
- *  cross-kind claim already taken and refunds every work-budget segment
- *  the claims charged; a success leaves the caller holding the primary
- *  reservation + the cross-kind paths to release when the spawn's
- *  verdict lands. */
+/** Raw-template session admission — the same admission the registry
+ *  spawn runs: the provider lane's OUTER gate first (spec bro-x601l —
+ *  `fleet.providerCaps` judges the aggregate census over every plane
+ *  the provider's entry command claims, shared with prepareSpawn
+ *  through providerGateOf/admitProviderGateStarts so the wiring cannot
+ *  drift per lane — bro-9f78j), then the cross-kind pass, then the
+ *  lane's own kind via its quota lane — one claim per session the
+ *  spawned command starts (a multi-start command judged once but
+ *  claimed once would read one session where two land). A refusal
+ *  hands back every claim already taken and refunds every work-budget
+ *  segment the claims charged; a success leaves the caller holding
+ *  the primary reservation + the cross-kind paths to release when the
+ *  spawn's verdict lands. The plane-less provider ledger's claims ride
+ *  `crossKind` too — a template worker never lands in the agent
+ *  registry, so the claims are the lane's only accounting and must be
+ *  held for the whole awaited run. */
 export function admitLaneSessions(
   ctx: { agent: string; env: AgentConnectorEnv; beadsDir?: string; root: string },
   lane: LoopLane,
@@ -1252,30 +1246,34 @@ export function admitLaneSessions(
 ): { reservation: string | undefined; crossKind: string[] } {
   const workerEnv = { ...agentEnv(ctx, { BRO_AGENT_ID: key }), [BATCH_MARKER_ENV]: '1' };
   const templateCommand = laneCommand(ctx, lane);
-  const templateQuota = sessionQuotaOf(
-    ctx.env,
-    'native',
-    {
-      beadsDir: ctx.beadsDir!,
-      molStep: spec.molStep,
-      prompt: spec.prompt,
-      repoRoot: spec.repoRoot,
-      env: workerEnv,
-      worker: lane.worker,
-      provider: lane.provider,
-      model: lane.model,
-      class: lane.class,
-    },
-    templateCommand
-  );
+  const laneSpec = {
+    beadsDir: ctx.beadsDir!,
+    molStep: spec.molStep,
+    prompt: spec.prompt,
+    repoRoot: spec.repoRoot,
+    env: workerEnv,
+    worker: lane.worker,
+    provider: lane.provider,
+    model: lane.model,
+    class: lane.class,
+  };
+  const templateQuota = sessionQuotaOf(ctx.env, 'native', laneSpec, templateCommand);
   const crossKind: string[] = [];
   // the same budget facts the registry spawn derives — a raw-template
   // lane scopes its ledger rows to this repo and prunes dead segments
   // on every admission (codeant #972): an unscoped key would bury the
   // spend under a shared '' scope where nothing can close it
   const scope = projectId(ctx.root);
-  const liveByKind = liveSessionKeysByKind(readAgentRegistry(ctx.root));
+  const registry = readAgentRegistry(ctx.root);
+  const liveByKind = liveSessionKeysByKind(registry);
   const spawnedCmd = laneSpawnedCommand(lane, templateCommand);
+  // an argv worker's spawned command is the acp DRIVER (`bro acp-worker
+  // --command 'devin acp'`) — the provider executable sits behind the
+  // driver's --command argument where the planes' grammar reads zero
+  // starts. The sessions it opens are the provider ENTRY command's
+  // own — left unset, the gate counts those (the startsCommand
+  // default), the same resolution the registry spawn runs.
+  const providerStartsCommand = lane.worker?.kind === 'argv' ? undefined : spawnedCmd;
   let reservation: string | undefined;
   // every work-budget segment an admit opens registers on
   // budgetChargedKinds — a LATER refusal hands them all back in the
@@ -1286,30 +1284,99 @@ export function admitLaneSessions(
     budgetChargedKinds.push(kind);
   };
   try {
-    admitCrossKindSessions(
-      ctx.env.agents,
-      spawnedCmd,
-      templateQuota?.plane.kind,
-      key,
-      spec.molStep,
-      workerEnv,
-      crossKind,
-      scope,
-      liveByKind,
-      budgetCharged
-    );
+    // the provider lanes resolved + pre-flighted before ANY claim
+    // lands — a full account lane refuses before a kind claim can hold
+    // a slot against it. The lane's provider is its own pick PLUS
+    // every OTHER armed provider entry the spawned command launches —
+    // a named `combo` template opening sessions on a second account
+    // lane still owes that lane's cap (the explicit pick heads the
+    // list for alias resolution; discovery adds the rest). With no
+    // named provider the spawned command's launches alone decide —
+    // never the agents.native.provider default a template escape
+    // bypassed.
+    const laneProviders =
+      lane.provider !== undefined
+        ? [
+            lane.provider,
+            ...providersForSpawnedCommand(ctx.env, spawnedCmd).filter(p => p !== lane.provider),
+          ]
+        : providersForSpawnedCommand(ctx.env, spawnedCmd);
+    const providerGates: ProviderGate[] = [];
+    for (const provider of laneProviders) {
+      const gate = providerGateOf({
+        dir: ctx.root,
+        registry,
+        env: ctx.env,
+        provider,
+        agents: ctx.env.agents,
+        workerEnv,
+        quotaPlaneKind: templateQuota?.plane.kind,
+        startsCommand: providerStartsCommand,
+      });
+      if (gate !== undefined) {
+        providerGates.push(gate);
+      }
+    }
+    // starts the provider-cap passes claimed per kind — the union over
+    // every gate (a start claims once, so the counts never overlap);
+    // the cross-kind pass subtracts them or one session reads as two.
+    // The map also feeds each pass: overlapping provider entries (one's
+    // command a prefix of another's) share the same planes, and a
+    // start an earlier gate claimed is re-JUDGED under this lane's cap
+    // but never claimed again.
+    const providerClaimedStarts = new Map<string, number>();
+    for (const providerGate of providerGates) {
+      for (const [kind, n] of admitProviderGateStarts(providerGate, {
+        dir: ctx.root,
+        env: ctx.env,
+        agents: ctx.env.agents,
+        workerEnv,
+        molStep: spec.molStep,
+        key,
+        scope,
+        liveByKind,
+        budgetCharged,
+        startsCommand: providerStartsCommand,
+        claimedStarts: providerClaimedStarts,
+        out: crossKind,
+        ledgerOut: crossKind,
+      })) {
+        providerClaimedStarts.set(kind, (providerClaimedStarts.get(kind) ?? 0) + n);
+      }
+    }
+    if (spawnedCmd !== '') {
+      admitSpawnedCommandStarts({
+        spawnedCommand: spawnedCmd,
+        agents: ctx.env.agents,
+        workerEnv,
+        molStep: spec.molStep,
+        agentId: key,
+        scope,
+        liveByKind,
+        providerClaimedStarts,
+        providerGates,
+        quotaPlaneKind: templateQuota?.plane.kind,
+        budgetCharged,
+        out: crossKind,
+      });
+    }
     if (templateQuota !== undefined) {
       // every session the spawned command opens on the quota kind owes
       // the lane a claim — a multi-start command judged once but
-      // claimed once would read one session where two land. Each admit
-      // re-judges post-claim: the Nth claim trips the refusal exactly
-      // when headroom cannot seat N.
+      // claimed once would read one session where two land, and the
+      // provider census would admit on a slot count that under-counts
+      // the lane. Each admit re-judges post-claim: the Nth claim trips
+      // the refusal exactly when headroom cannot seat N.
       const quotaView = sessionCapViews(spawnedCmd, ctx.env.agents, workerEnv).find(
         v => v.kind === templateQuota.plane.kind
       );
       const quotaStarts = Math.max(
         1,
-        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1
+        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1,
+        // the provider passes skipped this plane — their entry-command
+        // count is the quota loop's truth when the spawned command
+        // reads zero there (an argv driver's hidden starts)
+        ...providerGates.map(g => providerGateQuotaStarts(g, providerStartsCommand))
       );
       for (let i = 0; i < quotaStarts; i++) {
         const claimed = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
@@ -1318,6 +1385,10 @@ export function admitLaneSessions(
           workerEnv,
           scope,
           liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
+          // a provider gate whose own session plane IS this lane's —
+          // its verdict rides the quota admit instead of claiming the
+          // lane twice (spec bro-x601l)
+          ...providerGatePayload(providerGates, templateQuota.plane.kind),
           budgetCharged,
         });
         if (i === 0) {
@@ -1330,8 +1401,9 @@ export function admitLaneSessions(
     return { reservation, crossKind };
   } catch (err) {
     // every claim this admission holds goes back — the caller never
-    // saw them; the quota lane's own claims land per-start, so an
-    // early one can be held when a later start's verdict refuses
+    // saw them (the provider lane's ledger claims ride crossKind too);
+    // the quota lane's own claims land per-start, so an early one can
+    // be held when a later start's verdict refuses
     if (reservation !== undefined) {
       releaseSessionSlot(reservation);
     }
