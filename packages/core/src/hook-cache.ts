@@ -141,10 +141,21 @@ export function isJsonData(v: unknown, depth = 0): boolean {
     return false;
   }
   if (Array.isArray(v)) {
-    // every() skips holes — JSON.stringify writes them as null, and it
-    // drops non-index own keys too; a key count short of/over length
-    // is either, so refuse before recursing
-    return Object.keys(v).length === v.length && v.every(item => isJsonData(item, depth + 1));
+    // Neither check alone suffices: every() skips holes, and a hole
+    // plus an extra prop nets the right key count — while
+    // JSON.stringify writes the hole as null and drops the prop. The
+    // key count must equal length (no non-index own enumerable keys
+    // riding along) AND every index must be present (`i in v` — a
+    // hole reads absent).
+    if (Object.keys(v).length !== v.length) {
+      return false;
+    }
+    for (let i = 0; i < v.length; i++) {
+      if (!(i in v) || !isJsonData(v[i], depth + 1)) {
+        return false;
+      }
+    }
+    return true;
   }
   if (typeof v === 'object') {
     const proto = Object.getPrototypeOf(v);
