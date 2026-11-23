@@ -1,13 +1,25 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { testGit } from '@broject/core';
 import {
   cleanupTmpDirs,
+  type DevProbe,
   isPathInUse,
+  mountVerdict,
   tmpSweepVerdict,
   type TmpSweepInput,
   workerTmpRoots,
@@ -292,6 +304,30 @@ describe('cleanupTmpDirs', () => {
     });
   });
 
+  test('a stale tmp-* symlink unlinks in place — the target is never descended (bro-wb8wf)', () => {
+    withTmp(dir => {
+      const target = mkdtempSync(join(tmpdir(), 'bro-sweep-target-'));
+      try {
+        writeFileSync(join(target, 'precious'), 'x');
+        const link = join(dir, 'tmp-stalelink');
+        symlinkSync(target, link, 'dir');
+        // the verdict stats THROUGH the link (statSync follows), so the
+        // target's mtime is what must read stale — aging it ages the
+        // candidate the sweep sees
+        ageDir(target, HOUR + 60_000);
+        const out = lines(() => cleanupTmpDirs(false));
+        assert.equal(existsSync(link), false, 'the link itself is litter');
+        assert.ok(existsSync(join(target, 'precious')), 'the target is untouched');
+        assert.ok(
+          out.some(l => l.includes('deleted')),
+          `expected a delete line, got: ${out}`
+        );
+      } finally {
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('a missing extraRoots dir warns and skips — never fatal like tmpdir', () => {
     withTmp(dir => {
       const errs: string[] = [];
@@ -478,5 +514,358 @@ describe('extra-root rmdir guard (bro-v96mp)', () => {
       }
       rmSync(norepo, { recursive: true, force: true });
     }
+  });
+});
+
+/** A dev probe faking a mounted filesystem: `mountPath` (and anything
+ *  under it) answers a foreign st_dev; every other path gets the real
+ *  lstat. The dev is mutated on the real Stats — a `{ dev }` literal
+ *  would drop `isSymbolicLink` the probe contract carries.
+ *  Unprivileged tests cannot create real mounts — the seam stands in
+ *  (topFillers' precedent, spec bro-v96mp). */
+const fakeMount =
+  (mountPath: string): DevProbe =>
+  (p: string) => {
+    const st = lstatSync(p);
+    if (p === mountPath || p.startsWith(`${mountPath}/`)) {
+      st.dev += 1;
+    }
+    return st;
+  };
+
+describe('mountVerdict (bro-wb8wf)', () => {
+  const withTree = (fn: (root: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-mountscan-'));
+    try {
+      fn(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test('a plain tree scans clean', () => {
+    withTree(root => {
+      mkdirSync(join(root, 'sub', 'deep'), { recursive: true });
+      writeFileSync(join(root, 'sub', 'f'), 'x');
+      assert.deepEqual(mountVerdict(root), { verdict: 'clean' });
+    });
+  });
+
+  test('a nested mount is found at its own path — depth is no cover', () => {
+    withTree(root => {
+      const mnt = join(root, 'a', 'b', 'mnt');
+      mkdirSync(mnt, { recursive: true });
+      assert.deepEqual(mountVerdict(root, { lstat: fakeMount(mnt) }), {
+        verdict: 'mount',
+        at: mnt,
+      });
+    });
+  });
+
+  test('the root itself being a mount (dev ≠ parent) is the same hazard', () => {
+    withTree(root => {
+      assert.deepEqual(mountVerdict(root, { lstat: fakeMount(root) }), {
+        verdict: 'mount',
+        at: root,
+      });
+    });
+  });
+
+  test('a bind-mount-shaped file is caught — unlinking it removes the source name', () => {
+    withTree(root => {
+      const f = join(root, 'bindfile');
+      writeFileSync(f, 'x');
+      assert.deepEqual(mountVerdict(root, { lstat: fakeMount(f) }), {
+        verdict: 'mount',
+        at: f,
+      });
+    });
+  });
+
+  test('a symlink is not followed nor descended — rm unlinks it in place', () => {
+    withTree(root => {
+      const target = mkdtempSync(join(tmpdir(), 'bro-mountscan-t-'));
+      try {
+        writeFileSync(join(target, 'f'), 'x');
+        symlinkSync(target, join(root, 'link'), 'dir');
+        // both a stat-FOLLOW (target reads foreign) and a descend
+        // (children under the link read foreign) would trip the scan —
+        // 'clean' proves the probe stays lstat-shaped on the link itself
+        const link = join(root, 'link');
+        const lstat: DevProbe = p => {
+          const st = lstatSync(p);
+          if (p === target || p.startsWith(`${link}/`)) {
+            st.dev += 1;
+          }
+          return st;
+        };
+        assert.deepEqual(mountVerdict(root, { lstat }), { verdict: 'clean' });
+      } finally {
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test('an entry that vanished mid-walk does not block the proof', () => {
+    withTree(root => {
+      const gone = join(root, 'gone');
+      writeFileSync(gone, 'x');
+      const lstat: DevProbe = p => {
+        if (p === gone) {
+          throw Object.assign(new Error('vanished'), { code: 'ENOENT' });
+        }
+        return lstatSync(p);
+      };
+      assert.deepEqual(mountVerdict(root, { lstat }), { verdict: 'clean' });
+    });
+  });
+
+  test('an unstat-able entry is uncertain — never waved through as clean', () => {
+    withTree(root => {
+      const blocked = join(root, 'blocked');
+      writeFileSync(blocked, 'x');
+      const lstat: DevProbe = p => {
+        if (p === blocked) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        return lstatSync(p);
+      };
+      const r = mountVerdict(root, { lstat });
+      assert.equal(r.verdict, 'uncertain');
+    });
+  });
+
+  test('a spent bound is uncertain — a pathological tree is not a clean one', () => {
+    withTree(root => {
+      writeFileSync(join(root, 'f'), 'x');
+      const r = mountVerdict(root, { budget: { nodes: 0, ms: 60_000 } });
+      assert.equal(r.verdict, 'uncertain');
+    });
+  });
+
+  test('a listing cut mid-dir by the bound is uncertain — enumeration itself is budgeted', () => {
+    withTree(root => {
+      // a wide dir proves the bound stops the enumeration, not just the
+      // walk: an eager listing would scan all 8 before the first check
+      for (let i = 0; i < 8; i += 1) {
+        writeFileSync(join(root, `f${i}`), 'x');
+      }
+      const r = mountVerdict(root, { budget: { nodes: 3, ms: 60_000 } });
+      assert.equal(r.verdict, 'uncertain');
+    });
+  });
+
+  test('an unstat-able parent is uncertain — the reason names the parent, not the root', () => {
+    withTree(root => {
+      // lstat(root) succeeded but dirname(root) cannot be read: the
+      // partial failure used to blame the root. The reason must point
+      // at what actually failed so the keep-warning debugs true. The
+      // parent read is the STAT probe — a symlinked parent is followed.
+      const parent = dirname(root);
+      const stat: DevProbe = p => {
+        if (p === parent) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        return statSync(p);
+      };
+      assert.deepEqual(mountVerdict(root, { stat }), {
+        verdict: 'uncertain',
+        reason: `cannot stat ${parent}`,
+      });
+    });
+  });
+
+  test('a symlinked parent is followed — a TMPDIR-style link is not a mount boundary', () => {
+    withTree(root => {
+      // <root>/link -> <root>/real, candidate inside: the TMPDIR shape
+      // where tmpdir is a symlink onto another filesystem. The link's
+      // own inode lives on a different fs than its target — lstat
+      // reads the link's home dev (foreign), stat resolves to where
+      // the candidate physically sits. The scan must compare against
+      // the resolved parent or every candidate under a symlinked
+      // TMPDIR reads a false mount and is kept forever.
+      const real = join(root, 'real');
+      mkdirSync(real);
+      const link = join(root, 'link');
+      symlinkSync(real, link, 'dir');
+      const candidate = join(link, 'tmp-stale');
+      mkdirSync(candidate);
+      const lstat: DevProbe = p => {
+        const st = lstatSync(p);
+        if (p === link) {
+          st.dev += 1; // the fs holding the link inode, not the target
+        }
+        return st;
+      };
+      assert.deepEqual(mountVerdict(candidate, { lstat }), { verdict: 'clean' });
+    });
+  });
+
+  test('a symlinked candidate is clean — rm unlinks the link, the target is never descended', () => {
+    withTree(root => {
+      const target = mkdtempSync(join(tmpdir(), 'bro-mountscan-t-'));
+      try {
+        writeFileSync(join(target, 'precious'), 'x');
+        const link = join(root, 'tmp-stale-link');
+        symlinkSync(target, link, 'dir');
+        // the probe fails if anything at-or-under the link (or the
+        // target) is statted — 'clean' proves the scan looks at the
+        // link itself and no further
+        const lstat: DevProbe = p => {
+          assert.ok(
+            p !== target && !p.startsWith(`${link}/`),
+            `the scan must not reach past the link: ${p}`
+          );
+          return lstatSync(p);
+        };
+        assert.deepEqual(mountVerdict(link, { lstat }), { verdict: 'clean' });
+      } finally {
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+describe('mount-bearing candidates keep (bro-wb8wf)', () => {
+  /** stderr capture — the mount keep is a warning, not a keep line, so
+   *  quietKeeps can never silence it. */
+  const errLines = (fn: () => void): string[] => {
+    const errs: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => errs.push(args.join(' '));
+    try {
+      fn();
+    } finally {
+      console.error = orig;
+    }
+    return errs;
+  };
+
+  const withTmp = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sweep-root-'));
+    const prev = process.env.TMPDIR;
+    process.env.TMPDIR = dir;
+    try {
+      fn(dir);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = prev;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('a stale dir containing a mount keeps + warns; a clean stale dir deletes', () => {
+    const pid = deadPid();
+    assert.ok(pid > 0);
+    withTmp(dir => {
+      const mounted = join(dir, `tmp-${pid}-eeeeeeeeeeee`);
+      const mnt = join(mounted, 'deep', 'mnt');
+      mkdirSync(mnt, { recursive: true, mode: 0o700 });
+      writeFileSync(join(mnt, 'foreign'), 'precious');
+      const clean = join(dir, 'bro-published-ffffffff');
+      mkdirSync(clean, { recursive: true, mode: 0o700 });
+      ageDir(mounted, GRACE + 60_000);
+      ageDir(clean, HOUR + 60_000);
+      const errs = errLines(() => cleanupTmpDirs(false, { lstat: fakeMount(mnt) }));
+      assert.ok(existsSync(mounted), 'the mount-bearing dir must be kept');
+      assert.ok(existsSync(join(mnt, 'foreign')), 'its content untouched');
+      assert.ok(
+        errs.some(l => l.includes(mounted) && l.includes('mount point inside')),
+        `expected a stderr mount keep-warning, got: ${errs}`
+      );
+      assert.equal(existsSync(clean), false, 'the clean stale dir still deletes');
+    });
+  });
+
+  test('an unproven scan keeps too — deletion fails closed', () => {
+    withTmp(dir => {
+      const victim = join(dir, 'bro-published-gggggggg');
+      const blocked = join(victim, 'unstatable');
+      mkdirSync(victim, { recursive: true, mode: 0o700 });
+      writeFileSync(blocked, 'x');
+      ageDir(victim, HOUR + 60_000);
+      const lstat: DevProbe = p => {
+        if (p === blocked) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        return lstatSync(p);
+      };
+      const errs = errLines(() => cleanupTmpDirs(false, { lstat }));
+      assert.ok(existsSync(victim), 'an unproven tree must be kept');
+      assert.ok(
+        errs.some(l => l.includes(victim) && l.includes('unproven')),
+        `expected a stderr unproven keep-warning, got: ${errs}`
+      );
+    });
+  });
+
+  test('a process entering mid-walk keeps the dir — the post-walk re-check sees it', () => {
+    withTmp(dir => {
+      const victim = join(dir, 'bro-published-midwalk');
+      mkdirSync(victim, { recursive: true, mode: 0o700 });
+      writeFileSync(join(victim, 'marker'), 'x');
+      ageDir(victim, HOUR + 60_000);
+      // the lstat seam flips `entered` once the mount walk starts —
+      // every in-use consult before it (verdict + pre-walk) reads
+      // 'free', so only the post-walk re-verify can catch the arrival
+      let entered = false;
+      const lstat: DevProbe = p => {
+        entered = true;
+        return lstatSync(p);
+      };
+      let consulted = 0;
+      const inUse = (): boolean => {
+        consulted += 1;
+        return entered;
+      };
+      const out: string[] = [];
+      const orig = console.log;
+      console.log = (...args: unknown[]) => out.push(args.join(' '));
+      try {
+        cleanupTmpDirs(false, { lstat, inUse });
+      } finally {
+        console.log = orig;
+      }
+      assert.ok(existsSync(victim), 'a dir entered during the walk must be kept');
+      // verdict + pre-walk + post-walk — the last consult is what kept it
+      assert.ok(consulted >= 3, `expected ≥3 in-use consults, got ${consulted}`);
+      assert.ok(
+        out.some(l => l.includes(victim) && l.includes('in use')),
+        `expected an in-use keep line, got: ${out}`
+      );
+    });
+  });
+
+  test('dry-run reports the mount keep, never "would delete"', () => {
+    const pid = deadPid();
+    assert.ok(pid > 0);
+    withTmp(dir => {
+      const mounted = join(dir, `tmp-${pid}-hhhhhhhhhhhh`);
+      const mnt = join(mounted, 'mnt');
+      mkdirSync(mnt, { recursive: true, mode: 0o700 });
+      ageDir(mounted, GRACE + 60_000);
+      const out: string[] = [];
+      const orig = console.log;
+      try {
+        // the override sits inside the try — a throw from errLines must
+        // still restore console.log for the rest of the suite
+        console.log = (...args: unknown[]) => out.push(args.join(' '));
+        const errs = errLines(() => cleanupTmpDirs(true, { lstat: fakeMount(mnt) }));
+        assert.ok(
+          !out.some(l => l.includes('would delete') && l.includes(mounted)),
+          `dry-run must not promise the delete: ${out}`
+        );
+        assert.ok(
+          errs.some(l => l.includes(mounted) && l.includes('mount point inside')),
+          `got: ${errs}`
+        );
+      } finally {
+        console.log = orig;
+      }
+      assert.ok(existsSync(mounted));
+    });
   });
 });
