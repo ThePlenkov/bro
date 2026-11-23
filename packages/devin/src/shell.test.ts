@@ -86,6 +86,17 @@ describe('commandCliNames', () => {
     assert.deepEqual(commandCliNames('devin -p "#tag"'), ['devin']);
     assert.deepEqual(commandCliNames('x#y -p a'), ['x#y']);
   });
+
+  test('an escaped char is word text — no comment, no split', () => {
+    // `\ ` keeps the word open — the # behind it is an argument, and
+    // the real devin launch on the next segment is not commented away
+    assert.deepEqual(commandCliNames('echo \\ #; devin -p x'), ['echo', 'devin']);
+    // `\;` separates nothing — claude is devin's argument, not a command
+    assert.deepEqual(commandCliNames('devin a\\; claude b'), ['devin']);
+    // `\"` stays inside a double-quoted run — the -c script carries
+    // one devin launch, and the `;` inside it splits nothing
+    assert.deepEqual(commandCliNames('sh -c "devin \\"; claude\\""'), ['devin']);
+  });
 });
 
 describe('commandWorkerClis', () => {

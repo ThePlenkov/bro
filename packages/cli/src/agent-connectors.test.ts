@@ -1116,6 +1116,73 @@ function connectorContract(b: BackendCase): void {
       }
     });
 
+    test('an argv worker reserves on the provider ENTRY command — the acp driver hides its starts (greptile PR #1094)', async () => {
+      const f = fixture([
+        { id: 'fx-1', status: 'open' },
+        { id: 'fx-2', status: 'open' },
+      ]);
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            [b.name]: { ...f.env.agents[b.name], provider: 'prov' },
+            alpha: { reservationsDir: dirA },
+          },
+          providers: {
+            prov: { type: 'acp' as const, command: 'alpha-cli alpha-run' },
+          },
+          fleet: { maxConcurrent: 0, providerCaps: { prov: 1 } },
+        };
+        const c = b.make({ dir: f.main }, env);
+        // the worker's spawned command is a DRIVER string (`node -e …`
+        // stands in for `bro acp-worker --command 'alpha-cli
+        // alpha-run'`) — the planes' grammar reads zero alpha starts on
+        // it, so before the fix the provider pass claimed nothing and
+        // every acp spawn walked the lane uncounted
+        const info = await c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused'),
+          worker: { kind: 'argv', argv: [process.execPath, '-e', 'setTimeout(() => {}, 30000)'] },
+        });
+        try {
+          assert.equal(info.state, 'running');
+          // the one session the worker's provider command opens —
+          // claimed on alpha's ledger like any other start
+          assert.equal(countSessionReservations(dirA), 1);
+          await assert.rejects(
+            c.spawn({
+              ...SPEC(f.main, f.beadsDir, 'fx-2', 'unused'),
+              worker: {
+                kind: 'argv',
+                argv: [process.execPath, '-e', 'setTimeout(() => {}, 30000)'],
+              },
+            }),
+            (err: unknown) =>
+              err instanceof SpawnError &&
+              err.kind === 'cap' &&
+              /provider 'prov' lane cap reached.*provider_cap/.test(err.message)
+          );
+          assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
+        } finally {
+          await c.stop(info.id);
+        }
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
+        cleanup(f);
+      }
+    });
+
     test('a provider-covered kind with NO kind quota still draws judged slots (spec bro-x601l)', async () => {
       // neither kind carries maxSessions — sessionCapViews yields no
       // row for either, so the spawned command's starts would escape

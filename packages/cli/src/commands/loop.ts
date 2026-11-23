@@ -1233,6 +1233,13 @@ export function admitLaneSessions(
   const registry = readAgentRegistry(ctx.root);
   const liveByKind = liveSessionKeysByKind(registry);
   const spawnedCmd = laneSpawnedCommand(lane, templateCommand);
+  // an argv worker's spawned command is the acp DRIVER (`bro acp-worker
+  // --command 'devin acp'`) — the provider executable sits behind the
+  // driver's --command argument where the planes' grammar reads zero
+  // starts. The sessions it opens are the provider ENTRY command's
+  // own — left unset, the gate counts those (the startsCommand
+  // default), the same resolution the registry spawn runs.
+  const providerStartsCommand = lane.worker?.kind === 'argv' ? undefined : spawnedCmd;
   let reservation: string | undefined;
   // every work-budget segment an admit opens registers on
   // budgetChargedKinds — a LATER refusal hands them all back in the
@@ -1264,7 +1271,7 @@ export function admitLaneSessions(
         agents: ctx.env.agents,
         workerEnv,
         quotaPlaneKind: templateQuota?.plane.kind,
-        startsCommand: spawnedCmd,
+        startsCommand: providerStartsCommand,
       });
       if (gate !== undefined) {
         providerGates.push(gate);
@@ -1272,7 +1279,11 @@ export function admitLaneSessions(
     }
     // starts the provider-cap passes claimed per kind — the union over
     // every gate (a start claims once, so the counts never overlap);
-    // the cross-kind pass subtracts them or one session reads as two
+    // the cross-kind pass subtracts them or one session reads as two.
+    // The map also feeds each pass: overlapping provider entries (one's
+    // command a prefix of another's) share the same planes, and a
+    // start an earlier gate claimed is re-JUDGED under this lane's cap
+    // but never claimed again.
     const providerClaimedStarts = new Map<string, number>();
     for (const providerGate of providerGates) {
       for (const [kind, n] of admitProviderGateStarts(providerGate, {
@@ -1285,7 +1296,8 @@ export function admitLaneSessions(
         scope,
         liveByKind,
         budgetCharged,
-        startsCommand: spawnedCmd,
+        startsCommand: providerStartsCommand,
+        claimedStarts: providerClaimedStarts,
         out: crossKind,
         ledgerOut: crossKind,
       })) {

@@ -20,6 +20,7 @@ import {
   SpawnError,
   type SpawnWorker,
 } from '@broject/core';
+import { commandCliNames } from '@broject/devin';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop';
 import type { LoopLane } from '@broject/rig';
 import type { AgentConnectorEnv } from '../agent-connectors.ts';
@@ -689,14 +690,16 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
     );
   // planes are process-global — swap in the fixture's set, put the real
   // registry back no matter how the test lands
-  const withAlphaPlane = (
-    plane: Parameters<typeof registerSessionPlane>[0],
+  const withPlanes = (
+    planes: Parameters<typeof registerSessionPlane>[0][],
     fn: () => void
   ): void => {
     const prior = sessionPlanes();
     clearSessionPlanes();
     try {
-      registerSessionPlane(plane);
+      for (const plane of planes) {
+        registerSessionPlane(plane);
+      }
       fn();
     } finally {
       clearSessionPlanes();
@@ -705,6 +708,10 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
       }
     }
   };
+  const withAlphaPlane = (
+    plane: Parameters<typeof registerSessionPlane>[0],
+    fn: () => void
+  ): void => withPlanes([plane], fn);
 
   test('a held loop claim counts on the provider aggregate — the next spawn refuses provider_cap', () => {
     const { root, main } = initRepo('bro-loop-admit-');
@@ -996,6 +1003,165 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
             assert.equal(countSessionReservations(dirA), 1);
           } finally {
             release(admit);
+          }
+        });
+      }
+    );
+  });
+
+  test('an argv lane reserves on the provider ENTRY command — the acp driver hides its starts (greptile PR #1094)', () => {
+    // `bro acp-worker --command 'alpha-cli alpha-run'` reads zero alpha
+    // starts on a positional grammar — the provider executable sits
+    // inside the driver's --command argument. The gate counts the
+    // provider ENTRY command's sessions instead
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          // command positions, like the real planes — a cli named
+          // inside --command's argument is not a start
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            { prov: { type: 'acp', command: 'alpha-cli alpha-run' } },
+            { prov: 1 }
+          );
+          const lane: LoopLane = {
+            provider: 'prov',
+            worker: {
+              kind: 'argv',
+              argv: ['bro', 'acp-worker', '--command', 'alpha-cli alpha-run'],
+              cliName: 'alpha-cli',
+            },
+          };
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // the one session the provider command opens — claimed on
+            // alpha's ledger like any other start
+            assert.equal(countSessionReservations(dirA), 1);
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError && err.kind === 'cap' && err.capCause === 'provider_cap'
+            );
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+
+  test('overlapping provider entries share claims — one session, one slot (greptile PR #1094)', () => {
+    // 'prov' covers alpha alone; 'prov2' covers alpha+beta — the
+    // template's alpha starts match BOTH commands, so each provider
+    // gate claimed them before the fix (4 alpha slots for 2 sessions).
+    // A gate shares claims an earlier gate already landed on the same
+    // kind — its cap still judges them through the aggregate census
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    const dirB = tmpDir('bro-beta-resv-');
+    const cliStarts = (cli: string) => (cmd: string) =>
+      commandCliNames(cmd).filter(c => c === cli).length;
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('alpha-cli'),
+        },
+        {
+          kind: 'beta',
+          detectsCli: c => c === 'beta-cli',
+          countLive: () => 0,
+          startsSessions: cliStarts('beta-cli'),
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA }, beta: { reservationsDir: dirB } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              prov2: { type: 'cli', command: 'alpha-cli a; beta-cli b' },
+            },
+            { prov: 9, prov2: 9 }
+          );
+          const admit = admitLaneSessions(
+            ctx,
+            templateLane('alpha-cli a; alpha-cli a; beta-cli b'),
+            admitSpec(main),
+            'loop-fx-1'
+          );
+          try {
+            // 2 alpha + 1 beta starts = 3 slots — never 4+1
+            assert.equal(countSessionReservations(dirA), 2);
+            assert.equal(countSessionReservations(dirB), 1);
+          } finally {
+            release(admit);
+          }
+        });
+      }
+    );
+  });
+
+  test('a fully shared provider lane still judges its cap on the shared claims (greptile PR #1094)', () => {
+    // 'prov2' adds a cli no plane counts, so every plane it covers is
+    // already claimed by 'prov' — it lands no slot of its own, but its
+    // cap must still re-judge the census the shared claims sit in
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withPlanes(
+      [
+        {
+          kind: 'alpha',
+          detectsCli: c => c === 'alpha-cli',
+          countLive: () => 0,
+          startsSessions: cmd => commandCliNames(cmd).filter(c => c === 'alpha-cli').length,
+        },
+      ],
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            {
+              prov: { type: 'cli', command: 'alpha-cli a' },
+              prov2: { type: 'cli', command: 'alpha-cli a; no-plane-cli b' },
+            },
+            { prov: 9, prov2: 1 }
+          );
+          const lane = templateLane('alpha-cli a; no-plane-cli b');
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // prov claimed the alpha start; prov2's lane seats exactly
+            // it — one claim total, not one per gate
+            assert.equal(countSessionReservations(dirA), 1);
+            // a second start pushes the shared census to 2 — prov2's
+            // cap refuses it even though it would claim nothing itself
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'prov2' lane cap reached/.test(err.message)
+            );
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
           }
         });
       }

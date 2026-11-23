@@ -39,13 +39,20 @@ const QUOTES = new Set(['"', "'"]);
  *  shell comment: the rest of the line is text, not a command (`devin
  *  a # note; devin b` runs `devin a` alone — the `;` inside the
  *  comment splits nothing). A `#` inside a word or a quote stays text
- *  (`devin -p '#tag'`, `a#b`). */
+ *  (`devin -p '#tag'`, `a#b`) — and so does a `#` behind an ESCAPE: an
+ *  escaped char is word text wherever it lands, so `\ ` keeps the word
+ *  open and `echo \ #; devin x` still runs `devin`. */
 export function segments(command: string): string[] {
   const out: string[] = [];
   let current = '';
   let quote: string | null = null;
   let comment = false;
-  for (const ch of command) {
+  // mid-word: a `#` opens a comment only at a word's START — after
+  // whitespace, a separator, or nothing. An escaped char is word text
+  // even when it IS whitespace (`\ ` continues the word).
+  let inWord = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command.charAt(i);
     if (comment) {
       // the comment runs to the newline — which is itself a
       // separator, so scanning resumes as if it were never written
@@ -56,26 +63,45 @@ export function segments(command: string): string[] {
     }
     if (quote !== null) {
       current += ch;
+      if (quote === '"' && ch === '\\' && i + 1 < command.length) {
+        // `\"` inside a double-quoted run is an escape — the quote
+        // stays inside the string (the escape `tokens` reads too)
+        current += command.charAt(++i);
+        continue;
+      }
       if (ch === quote) {
         quote = null;
       }
       continue;
     }
+    if (ch === '\\') {
+      // the escaped char is word text — `\;` separates nothing, and
+      // `\ ` keeps the word open so a `#` behind it is an argument
+      current += ch;
+      if (i + 1 < command.length) {
+        current += command.charAt(++i);
+      }
+      inWord = true;
+      continue;
+    }
     if (QUOTES.has(ch)) {
       quote = ch;
       current += ch;
+      inWord = true;
       continue;
     }
-    if (ch === '#' && (current === '' || /\s/.test(current.charAt(current.length - 1)))) {
+    if (ch === '#' && !inWord) {
       comment = true;
       continue;
     }
     if (SEPARATORS.has(ch)) {
       out.push(current);
       current = '';
+      inWord = false;
       continue;
     }
     current += ch;
+    inWord = !/\s/.test(ch);
   }
   out.push(current);
   return out.map(s => s.trim()).filter(s => s !== '');
