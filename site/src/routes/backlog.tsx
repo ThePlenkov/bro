@@ -525,11 +525,11 @@ function Detail({
   onJump,
 }: Readonly<{ b: Bead; kids: string[]; onClose: () => void; onJump: (id: string) => void }>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
-  const badges: Array<[string, string | undefined]> = [
-    [b.type, TYPE_COLOR[b.type]],
-    [b.status, b.status === 'open' ? undefined : '#d8b56a'],
-    [`P${b.priority || '—'}`, undefined],
-    ...(isGh ? [['github', undefined] as [string, undefined]] : []),
+  const badges: Array<[id: string, label: string, color: string | undefined]> = [
+    ['type', b.type, TYPE_COLOR[b.type]],
+    ['status', b.status, b.status === 'open' ? undefined : '#d8b56a'],
+    ['priority', `P${b.priority || '—'}`, undefined],
+    ...(isGh ? [['source', 'github', undefined] as [string, string, undefined]] : []),
   ];
   return (
     <aside className="bl-detail">
@@ -540,8 +540,8 @@ function Detail({
         </button>
       </div>
       <p className="bl-detail-badges">
-        {badges.map(([label, color], i) => (
-          <span key={i} className="bl-badge" style={color ? { borderColor: color } : undefined}>
+        {badges.map(([id, label, color]) => (
+          <span key={id} className="bl-badge" style={color ? { borderColor: color } : undefined}>
             {label}
           </span>
         ))}
