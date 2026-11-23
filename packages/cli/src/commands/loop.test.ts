@@ -758,6 +758,48 @@ describe('admitLaneSessions — the provider cap reaches the raw-template lane (
     );
   });
 
+  test('a shell-wrapped template resolves the provider lane its command launches', () => {
+    // `sh -c '…'` resolved 'sh' under first-token reading — the
+    // provider gate returned undefined and a providerCaps-only config
+    // admitted workers past the account cap while the plane counted
+    // the nested start (greptile PR #1094)
+    const { root, main } = initRepo('bro-loop-admit-');
+    const dirA = tmpDir('bro-alpha-resv-');
+    withAlphaPlane(
+      alphaPlane(() => 0),
+      () => {
+        inside(main, root, () => {
+          const ctx = admitCtx(
+            main,
+            { alpha: { reservationsDir: dirA } },
+            { prov: { type: 'cli', command: 'alpha-cli alpha-run' } },
+            { prov: 1 }
+          );
+          const lane = templateLane("sh -c 'alpha-cli alpha-run'");
+          const first = admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-1');
+          try {
+            // the provider pass claimed one slot on alpha's census dir —
+            // the nested start is what the lane's cap seats
+            assert.equal(countSessionReservations(dirA), 1);
+            assert.throws(
+              () => admitLaneSessions(ctx, lane, admitSpec(main), 'loop-fx-2'),
+              (err: unknown) =>
+                err instanceof SpawnError &&
+                err.kind === 'cap' &&
+                err.capCause === 'provider_cap' &&
+                /provider 'prov' lane cap reached.*provider_cap/.test(err.message)
+            );
+            // the refused spawn claimed nothing — the held claim is the
+            // first admission's alone
+            assert.equal(countSessionReservations(dirA), 1);
+          } finally {
+            release(first);
+          }
+        });
+      }
+    );
+  });
+
   test('the per-kind cap still refuses under provider headroom', () => {
     const { root, main } = initRepo('bro-loop-admit-');
     const dirA = tmpDir('bro-alpha-resv-');

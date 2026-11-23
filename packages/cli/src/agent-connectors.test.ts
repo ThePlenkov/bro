@@ -74,6 +74,7 @@ import {
   makeNativeConnector,
   makeTmuxConnector,
   pidAlive,
+  providerForSpawnedCommand,
   registerAgentConnector,
   resolveAgentConnector,
   resolveSpawnProvider,
@@ -3734,6 +3735,91 @@ describe('resolveSpawnProvider', () => {
       'flag'
     );
     assert.equal(over.model, 'm2');
+  });
+});
+
+/** The raw-template lane's provider resolution — the entry the spawned
+ *  command launches, read through the SAME shell grammar the session
+ *  planes count starts on. First-token-only reading resolved 'sh' for
+ *  `sh -c 'devin …'` and skipped the provider cap entirely while the
+ *  plane counted the nested devin start (greptile PR #1094). */
+describe('providerForSpawnedCommand', () => {
+  const envOf = (
+    providers: AgentConnectorEnv['providers'],
+    providerCaps: Record<string, number>
+  ): AgentConnectorEnv => ({
+    agents: {},
+    connectors: {},
+    providers,
+    fleet: { maxConcurrent: 0, providerCaps },
+  });
+  const cli = (command: string) => ({ type: 'cli' as const, command });
+
+  test('a shell-wrapped template resolves the cli it runs', () => {
+    const env = envOf({ prov: cli('devin -p {promptFile}') }, { prov: 1 });
+    assert.equal(providerForSpawnedCommand(env, "sh -c 'devin -p /tmp/p.md'"), 'prov');
+    assert.equal(providerForSpawnedCommand(env, 'bash -c "devin acp"'), 'prov');
+    assert.equal(providerForSpawnedCommand(env, "bash -lc 'devin -p /tmp/p.md'"), 'prov');
+  });
+
+  test('assignments and wrappers still reach the launched cli', () => {
+    const env = envOf({ prov: cli('devin -p {promptFile}') }, { prov: 1 });
+    for (const command of [
+      'devin -p x',
+      'FOO=1 devin -p x',
+      'env F=1 devin -p x',
+      'env -i devin -p x',
+      'nice -n 5 devin -p x',
+      'timeout 30 devin -p x',
+      'nohup devin -p x',
+      'sudo -u root devin -p x',
+    ]) {
+      assert.equal(providerForSpawnedCommand(env, command), 'prov', command);
+    }
+  });
+
+  test('a compound template resolves the cli any segment launches', () => {
+    const env = envOf({ prov: cli('devin -p {promptFile}') }, { prov: 1 });
+    assert.equal(providerForSpawnedCommand(env, 'devin a & devin b'), 'prov');
+    assert.equal(providerForSpawnedCommand(env, 'cd /tmp && devin -p a'), 'prov');
+  });
+
+  test('a provider cli named only as an argument resolves nothing', () => {
+    // the plane counts no devin start in these either — a cap that
+    // armed anyway would gate sessions the command never opens
+    const env = envOf({ prov: cli('devin -p {promptFile}') }, { prov: 1 });
+    assert.equal(providerForSpawnedCommand(env, 'echo devin'), undefined);
+    assert.equal(providerForSpawnedCommand(env, "sh -c 'echo devin'"), undefined);
+    assert.equal(providerForSpawnedCommand(env, 'command -v devin'), undefined);
+    assert.equal(providerForSpawnedCommand(env, 'grep devin .git/bro/agents.json'), undefined);
+  });
+
+  test('a command no provider entry launches resolves no gate', () => {
+    const env = envOf({ prov: cli('devin -p {promptFile}') }, { prov: 1 });
+    assert.equal(providerForSpawnedCommand(env, 'node {promptFile}'), undefined);
+    assert.equal(providerForSpawnedCommand(env, ''), undefined);
+  });
+
+  test('an api entry launches no cli; an unarmed alias never shadows the armed one', () => {
+    const api = envOf({ api: { type: 'api', baseUrl: 'https://x', models: {} } }, { api: 1 });
+    assert.equal(providerForSpawnedCommand(api, 'devin -p x'), undefined);
+    // 'open' shares the launched cli but carries no cap — config order
+    // must still reach the armed 'prov' behind it
+    const env = envOf({ open: cli('devin -p x'), prov: cli('devin acp') }, { prov: 1 });
+    assert.equal(providerForSpawnedCommand(env, "sh -c 'devin -p x'"), 'prov');
+  });
+
+  test('the entry side reads wrappers the same way', () => {
+    // a provider whose own command sits behind env/nice/`sh -c` still
+    // claims the cli it launches
+    const env = envOf(
+      {
+        prov: cli("sh -c 'devin acp'"),
+        nice2: cli('env F=1 devin run'),
+      },
+      { prov: 1, nice2: 1 }
+    );
+    assert.equal(providerForSpawnedCommand(env, 'devin -p x'), 'prov');
   });
 });
 

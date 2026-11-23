@@ -10,107 +10,107 @@
 
 /** A shell token — its text and whether it was quoted. */
 export interface Token {
-  text: string
-  quoted: boolean
+  text: string;
+  quoted: boolean;
 }
 
 /** The basename of a path-like token. */
 export function base(token: Token): string {
-  return token.text.slice(token.text.lastIndexOf('/') + 1)
+  return token.text.slice(token.text.lastIndexOf('/') + 1);
 }
 
 /** The shell keywords that sit where a command sits (`then devin …`) —
  *  they are not commands themselves. */
-const SHELL_KEYWORDS = new Set(['do', 'done', 'else', 'elif', 'fi', 'then', '{', '}'])
+const SHELL_KEYWORDS = new Set(['do', 'done', 'else', 'elif', 'fi', 'then', '{', '}']);
 
 /** Is this token an environment assignment (`FOO=bar`)? */
 export function isAssignment(token: Token): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.text)
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.text);
 }
 
 /** The characters that end a shell segment. */
-const SEPARATORS = new Set([';', '&', '|', '\n'])
+const SEPARATORS = new Set([';', '&', '|', '\n']);
 
 /** The quote characters. */
-const QUOTES = new Set(['"', "'"])
+const QUOTES = new Set(['"', "'"]);
 
 /** The shell segments of a command — the split happens OUTSIDE quotes,
  *  the way a shell would. */
 export function segments(command: string): string[] {
-  const out: string[] = []
-  let current = ''
-  let quote: string | null = null
+  const out: string[] = [];
+  let current = '';
+  let quote: string | null = null;
   for (const ch of command) {
     if (quote !== null) {
-      current += ch
+      current += ch;
       if (ch === quote) {
-        quote = null
+        quote = null;
       }
-      continue
+      continue;
     }
     if (QUOTES.has(ch)) {
-      quote = ch
-      current += ch
-      continue
+      quote = ch;
+      current += ch;
+      continue;
     }
     if (SEPARATORS.has(ch)) {
-      out.push(current)
-      current = ''
-      continue
+      out.push(current);
+      current = '';
+      continue;
     }
-    current += ch
+    current += ch;
   }
-  out.push(current)
-  return out.map((s) => s.trim()).filter((s) => s !== '')
+  out.push(current);
+  return out.map(s => s.trim()).filter(s => s !== '');
 }
 
 /** The tokens of a shell segment, quotes honoured — a quoted run is ONE
  *  token. */
 export function tokens(segment: string): Token[] {
-  const out: Token[] = []
-  let current = ''
-  let quoted = false
-  let quote: string | null = null
+  const out: Token[] = [];
+  let current = '';
+  let quoted = false;
+  let quote: string | null = null;
   for (const ch of segment) {
     if (quote !== null) {
       // only the MATCHING quote closes the run — an apostrophe inside
       // a double-quoted run is text
       if (ch === quote) {
-        quote = null
-        continue
+        quote = null;
+        continue;
       }
-      current += ch
-      continue
+      current += ch;
+      continue;
     }
     if (QUOTES.has(ch)) {
-      quote = ch
-      quoted = true
-      continue
+      quote = ch;
+      quoted = true;
+      continue;
     }
     if (/\s/.test(ch)) {
-      out.push(...token(current, quoted))
-      current = ''
-      quoted = false
-      continue
+      out.push(...token(current, quoted));
+      current = '';
+      quoted = false;
+      continue;
     }
-    current += ch
+    current += ch;
   }
-  out.push(...token(current, quoted))
-  return out
+  out.push(...token(current, quoted));
+  return out;
 }
 
 /** One token — an empty run is no token at all. */
 function token(text: string, quoted: boolean): Token[] {
-  return text === '' ? [] : [{ text, quoted }]
+  return text === '' ? [] : [{ text, quoted }];
 }
 
 /** The wrappers that take a bare operand before the command
  *  (`timeout 30 devin`). */
-const WRAPPER_OPERANDS = new Set(['chrt', 'stdbuf', 'taskset', 'timeout'])
+const WRAPPER_OPERANDS = new Set(['chrt', 'stdbuf', 'taskset', 'timeout']);
 
 /** The options that take a value (`sudo -u root`, `nice -n 5`) — the
  *  value is not the command. */
-const VALUE_OPTIONS = new Set(['-U', '-c', '-m', '-n', '-o', '-u'])
+const VALUE_OPTIONS = new Set(['-U', '-c', '-m', '-n', '-o', '-u']);
 
 /** The wrappers a binary may sit behind — the token before the binary
  *  decides whether the binary is a command or an argument. */
@@ -133,87 +133,153 @@ const WRAPPERS = new Set([
   'timeout',
   'xargs',
   'yarn',
-])
+]);
 
 /** The index of the segment's command — the assignments and the
  *  wrappers (with their options, their values and the operand some of
  *  them take) are skipped; what is left is the command. */
 export function commandIndex(toks: Token[]): number {
-  let i = 0
+  let i = 0;
   while (i < toks.length) {
-    const token = toks.at(i)
+    const token = toks.at(i);
     if (token === undefined || isSkipped(token)) {
-      i++
-      continue
+      i++;
+      continue;
     }
-    const name = base(token)
+    const name = base(token);
     if (!WRAPPERS.has(name)) {
-      return i
+      return i;
     }
     if (isLookup(toks, i)) {
       // `command -v devin` LOOKS the binary up — it does not run it
-      return i
+      return i;
     }
-    i = skipWrapperArgs(toks, i + 1, token)
+    i = skipWrapperArgs(toks, i + 1, token);
   }
-  return i
+  return i;
 }
 
 /** Is this token skipped on the way to the command? An assignment and
  *  a shell keyword are not commands. */
 function isSkipped(token: Token): boolean {
-  return isAssignment(token) || SHELL_KEYWORDS.has(token.text)
+  return isAssignment(token) || SHELL_KEYWORDS.has(token.text);
 }
 
 /** Is this wrapper a lookup (`command -v X`) rather than a runner? */
 function isLookup(toks: Token[], at: number): boolean {
   if (base(toks.at(at) as Token) !== 'command') {
-    return false
+    return false;
   }
-  const flag = toks.at(at + 1)?.text
-  return flag === '-v' || flag === '-V'
+  const flag = toks.at(at + 1)?.text;
+  return flag === '-v' || flag === '-V';
 }
 
 /** The index after a wrapper's own arguments — its options (with the
  *  value some of them take) and the operand some of them need. */
 function skipWrapperArgs(toks: Token[], from: number, wrapper: Token): number {
-  let i = from
-  let operands = WRAPPER_OPERANDS.has(base(wrapper)) ? 1 : 0
+  let i = from;
+  let operands = WRAPPER_OPERANDS.has(base(wrapper)) ? 1 : 0;
   while (i < toks.length) {
-    const next = toks.at(i)
+    const next = toks.at(i);
     if (next === undefined) {
-      break
+      break;
     }
     if (next.text.startsWith('-')) {
-      i = skipOption(toks, i, next)
-      continue
+      i = skipOption(toks, i, next);
+      continue;
     }
     if (operands > 0) {
-      operands--
-      i++
-      continue
+      operands--;
+      i++;
+      continue;
     }
-    break
+    break;
   }
-  return i
+  return i;
 }
 
 /** The index after an option — with the value it takes, if any. */
 function skipOption(toks: Token[], at: number, option: Token): number {
-  const next = at + 1
-  return optionTakesNext(toks, next, option) ? next + 1 : next
+  const next = at + 1;
+  return optionTakesNext(toks, next, option) ? next + 1 : next;
 }
 
 /** Does this option take the next token as its value? */
 function optionTakesNext(toks: Token[], at: number, option: Token): boolean {
   if (!VALUE_OPTIONS.has(option.text)) {
-    return false
+    return false;
   }
-  const next = toks.at(at)
-  return next !== undefined && !next.text.startsWith('-')
+  const next = toks.at(at);
+  return next !== undefined && !next.text.startsWith('-');
 }
 
 /** Is the token at this position a command (not an argument)? */
 export function atCommandPosition(toks: Token[], at: number): boolean {
-  return at === commandIndex(toks)
+  return at === commandIndex(toks);
+}
+
+/** The shells whose `-c` argument is a command of its own — the
+ *  script's own commands are the launches, not the shell's. */
+const COMMAND_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish']);
+
+/** Is this the shell's command flag? `-c` alone, or a combined short
+ *  flag that carries it (`-lc`, `-ic`). */
+function isShellCommandFlag(flag: string | undefined): boolean {
+  if (flag === undefined) {
+    return false;
+  }
+  if (flag === '-c') {
+    return true;
+  }
+  // a combined short flag that carries the command ('-lc', '-ic') —
+  // read as letters, not as a polynomial pattern
+  if (!flag.startsWith('-') || flag.length < 2) {
+    return false;
+  }
+  const letters = flag.slice(1);
+  return letters.includes('c') && /^[a-z]+$/.test(letters);
+}
+
+/** The command a shell wrapper runs: `sh -c 'devin -p x'` — the string
+ *  is a command of its own, so its own reading applies. */
+export function wrappedCommand(toks: Token[]): string | undefined {
+  const at = commandIndex(toks);
+  const shell = toks.at(at);
+  if (shell === undefined || !COMMAND_SHELLS.has(base(shell))) {
+    return undefined;
+  }
+  if (!isShellCommandFlag(toks.at(at + 1)?.text)) {
+    return undefined;
+  }
+  const script = toks.at(at + 2);
+  return script?.quoted ? script.text : undefined;
+}
+
+/** How many `-c` layers a reader unwraps — deeper nesting is a string
+ *  a prompt carries, not a wrapper a spawn wrote. */
+export const MAX_WRAPPED_COMMAND_DEPTH = 2;
+
+/** The cli names a command launches — the basename at every segment's
+ *  command position (assignments and wrappers skipped), a shell's `-c`
+ *  script recursed into. The same words the session planes count
+ *  starts on: `sh -c 'devin -p x'` launches `devin`, `env V=1 nice -n 5
+ *  timeout 30 devin` launches `devin`, and `sh -c 'echo devin'`
+ *  launches `echo` — a provider named only as an argument is not a
+ *  start. */
+export function commandCliNames(command: string, depth = 0): string[] {
+  const out: string[] = [];
+  for (const segment of segments(command)) {
+    const toks = tokens(segment);
+    const word = toks.at(commandIndex(toks));
+    if (word === undefined) {
+      continue;
+    }
+    const wrapped = depth < MAX_WRAPPED_COMMAND_DEPTH ? wrappedCommand(toks) : undefined;
+    if (wrapped !== undefined) {
+      out.push(...commandCliNames(wrapped, depth + 1));
+      continue;
+    }
+    out.push(base(word));
+  }
+  return out;
 }

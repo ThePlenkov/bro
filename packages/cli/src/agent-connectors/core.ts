@@ -143,6 +143,7 @@ import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
 import {
+  commandCliNames,
   devinLogsDir,
   devinPidBead,
   devinPidCwd,
@@ -2111,23 +2112,31 @@ export function providerCapLaneOf(
 }
 
 /** The provider entry the spawned command launches — the entry whose
- *  own command shares the spawned command's cli identity (first-token
- *  basename, commandCliName). The raw-template lane resolves no route
- *  — `spec.provider` is deliberately empty there — so its provider
- *  gate derives from the command actually spawning: a template
- *  running a provider's own CLI draws on that entry's lane, and a
- *  command no provider entry claims owes no provider gate at all.
- *  Aliased entries on one cli resolve to the first ARMED lane in
- *  config order (spec bro-x601l: each can carry a cap over the same
- *  shared census — an unarmed entry never gates, so it must not
- *  shadow the cap a later alias declared for the same cli). */
+ *  own command launches one of the clis the spawned command does.
+ *  "Launches" reads the command the way the session planes count it
+ *  (commandCliNames — the same shell grammar `startsSessions` leans
+ *  on): the basename at every segment's command position, assignments
+ *  and wrappers (`env V=1`, `nice`, `timeout`, `nohup`, `sudo`…)
+ *  skipped, a shell's `-c` script recursed into. `sh -c 'devin -p x'`
+ *  therefore resolves a `devin` provider — the plane sees the nested
+ *  start and the gate must see the same entry — while `sh -c 'echo
+ *  devin'` resolves nothing: a provider named only as an argument is
+ *  not a start. The raw-template lane resolves no route —
+ *  `spec.provider` is deliberately empty there — so its provider gate
+ *  derives from the command actually spawning: a template running a
+ *  provider's own CLI draws on that entry's lane, and a command no
+ *  provider entry claims owes no provider gate at all. Aliased
+ *  entries on one cli resolve to the first ARMED lane in config order
+ *  (spec bro-x601l: each can carry a cap over the same shared census —
+ *  an unarmed entry never gates, so it must not shadow the cap a
+ *  later alias declared for the same cli). */
 export function providerForSpawnedCommand(
   env: AgentConnectorEnv,
   command: string
 ): string | undefined {
-  const cli = commandCliName(command);
+  const launched = new Set(commandCliNames(command));
   for (const [name, entry] of Object.entries(env.providers ?? {})) {
-    if (entry.type === 'api' || commandCliName(entry.command) !== cli) {
+    if (entry.type === 'api' || !commandCliNames(entry.command).some(cli => launched.has(cli))) {
       continue; // an api entry launches no cli — nothing to match
     }
     if (providerCapLaneOf(env, name) !== undefined) {
