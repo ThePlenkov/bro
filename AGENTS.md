@@ -103,7 +103,20 @@ Developing bro itself: see CONTRIBUTING.md.
   fallback, bare `Number()` leaks NaN; a file that must ride an
   `ls-files -i` artifact sync → it must be gitignored or it never
   ships; a direction-bearing relation (blocks/parent) → verify the
-  dep semantics against real data before encoding `a.blocks = [b]`.
+  dep semantics against real data before encoding `a.blocks = [b]`;
+  a render-scoped `Date.now()` (or any per-render value) feeding a
+  `useMemo` dep → freeze it per mount (`useState(() => Date.now())`),
+  an unstable dep recomputes the memo every render; a React `key`
+  from display text → a semantic slot id (label keys collide across
+  slots, index keys trip S6479); one `git push` carrying refs of
+  different criticality → separate pushes, a rejected best-effort
+  mirror must never re-enter the critical ref's retry loop; a
+  `// NOSONAR` comment → it must sit on the exact line the scanner
+  attributes (the call's first line), and formatters reflow comments
+  — keep the flagged construct on one ≤width line so a trailing
+  NOSONAR sticks; rendered untrusted text → mark the node
+  "never dangerouslySetInnerHTML" — the comment is the guard the next
+  refactor reads.
 - **Loop with retro** — when a gate or check fails, iterate until it is
   green and learn from each failure: after every red round, name the
   concrete finding (which rule, which function), the shape that caused
