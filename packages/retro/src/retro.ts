@@ -6,8 +6,7 @@
  * an unanswered wtf blocks, so the agent cannot self-declare the apology
  * done. beads IS the memory system — no sidecar files.
  */
-import { execFileSync } from 'node:child_process';
-import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core';
+import { bd, bdJson, evidenceKind, gitTry, refKind, taskStore } from '@broject/core';
 import type { BeadRow, RecordResult, RetroPlan } from './types.ts';
 
 const WTF_LABEL = 'wtf';
@@ -43,10 +42,9 @@ function shorten(text: string): string {
 /** Best-effort provenance for the capture — tolerate non-git directories. */
 function gitSnapshot(): string[] {
   try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf8',
-    }).trim(); // NOSONAR — argv array, no shell; PATH lookup is the contract
-    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim(); // NOSONAR — argv array, no shell
+    // gitTry spawns argv directly — no shell, fixed binary semantics
+    const branch = gitTry(['rev-parse', '--abbrev-ref', 'HEAD']).out.trim();
+    const sha = gitTry(['rev-parse', '--short', 'HEAD']).out.trim();
     return [`git: ${branch}@${sha}`];
   } catch {
     return [];

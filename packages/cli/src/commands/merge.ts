@@ -14,10 +14,10 @@ import {
   resolveLedger,
   waitForGate,
 } from '@broject/act';
-import type { ExitCode } from '@broject/core';
 import {
   emitLifecycle,
   ensureAuth,
+  type ExitCode,
   facadeName,
   ghTry,
   hasHelpFlag,
@@ -184,10 +184,7 @@ function setupCycle(argv: string[]): MergeCtx {
 /** A draft gates nothing — mark ready on the host and refresh the
  *  feed entry. Returns the snapshot the cycle opened on (the retro
  *  reads its thread ids). */
-async function readyPhase(
-  ctx: MergeCtx,
-  first: Awaited<ReturnType<MergeCtx['fetcher']>>
-): Promise<boolean> {
+function readyPhase(ctx: MergeCtx, first: Awaited<ReturnType<MergeCtx['fetcher']>>): boolean {
   if (first.state.state !== 'OPEN' || !first.state.isDraft) return true;
   try {
     markReady(ctx);
@@ -234,15 +231,14 @@ function settleFail(
 async function settlePhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   const deadline = Date.now() + (ctx.opts.timeoutMs ?? 45 * 60_000);
   const interval = ctx.opts.intervalMs ?? 60_000;
-  for (;;) {
-    const follow = await ctx.fetcher();
-    if (follow.state.state === 'MERGED') return follow.state;
-    if (follow.state.state !== 'OPEN') return settleFail(ctx, res, 'closed', follow.state);
-    if (Date.now() >= deadline) {
-      return settleFail(ctx, res, ctx.armedNote ? 'armed-timeout' : 'timeout', follow.state);
-    }
-    await new Promise(r => setTimeout(r, interval));
+  const follow = await ctx.fetcher();
+  if (follow.state.state === 'MERGED') return follow.state;
+  if (follow.state.state !== 'OPEN') return settleFail(ctx, res, 'closed', follow.state);
+  if (Date.now() >= deadline) {
+    return settleFail(ctx, res, ctx.armedNote ? 'armed-timeout' : 'timeout', follow.state);
   }
+  await new Promise(r => setTimeout(r, interval));
+  return settlePhase(ctx, res);
 }
 
 /** The gate's green snapshot may be stale — a moved head or a dropped
@@ -353,7 +349,7 @@ export async function runMergeCommand(argv: string[]): Promise<void> {
   const first = await firstFetch(ctx);
   ctx.threadsAtStart = first.state.threads.map(th => th.id);
   if (await alreadyLanded(ctx, first)) return;
-  if (!(await readyPhase(ctx, first))) return;
+  if (!readyPhase(ctx, first)) return;
 
   const res = await gatePhase(ctx);
   if (res === undefined) return;
@@ -376,12 +372,18 @@ async function alreadyLanded(
     first.state,
     ctx.argv
   );
+  await discharge(ctx, first.state);
+  return true;
+}
+
+/** --bead close + outcome record — one shape for the early and the
+ *  full-cycle success paths. */
+async function discharge(ctx: MergeCtx, state: PrActState): Promise<void> {
   const bead = flag(ctx.argv, '--bead');
   if (bead !== undefined) {
     closeLandedBead(ctx.rev, ctx.t, bead);
   }
-  await reportActOutcome(ctx.argv, ctx.t, first.state, 'merged');
-  return true;
+  await reportActOutcome(ctx.argv, ctx.t, state, 'merged');
 }
 
 /** The success tail — merged event (unless landPr emitted its own),
@@ -400,11 +402,7 @@ async function finishCycle(ctx: MergeCtx, res: GateWaitResult, landed: PrActStat
   }
   emitVerdict(gateVerdict(ctx, res), 'merged', landed, ctx.argv);
 
-  const bead = flag(ctx.argv, '--bead');
-  if (bead !== undefined) {
-    closeLandedBead(ctx.rev, ctx.t, bead);
-  }
-  await reportActOutcome(ctx.argv, ctx.t, landed, 'merged');
+  await discharge(ctx, landed);
 
   // —— phase: retro ——
   if (!ctx.argv.includes('--no-retro')) {
