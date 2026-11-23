@@ -13,6 +13,8 @@ import {
   prStateCache,
   resolveLedger,
   waitForGate,
+  watchBegin,
+  watchEnd,
 } from '@broject/act';
 import {
   emitLifecycle,
@@ -231,14 +233,50 @@ function settleFail(
 async function settlePhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState | undefined> {
   const deadline = Date.now() + (ctx.opts.timeoutMs ?? 45 * 60_000);
   const interval = ctx.opts.intervalMs ?? 60_000;
-  const follow = await ctx.fetcher();
+  // the gate's marker ended with its wait — settle is a fresh watch so a
+  // session dying mid-landing still leaves a rearmable promise
+  const marker = ctx.opts.watch ? watchBegin(ctx.opts.watch.dir, ctx.opts.watch) : null;
+  try {
+    return await settlePoll(ctx, res, deadline, interval);
+  } finally {
+    watchEnd(marker);
+  }
+}
+
+async function settlePoll(
+  ctx: MergeCtx,
+  res: GateWaitResult,
+  deadline: number,
+  interval: number
+): Promise<PrActState | undefined> {
+  const follow = await fetchBounded(ctx);
   if (follow.state.state === 'MERGED') return follow.state;
   if (follow.state.state !== 'OPEN') return settleFail(ctx, res, 'closed', follow.state);
-  if (Date.now() >= deadline) {
+  const remain = deadline - Date.now();
+  if (remain <= 0) {
     return settleFail(ctx, res, ctx.armedNote ? 'armed-timeout' : 'timeout', follow.state);
   }
-  await new Promise(r => setTimeout(r, interval));
-  return settlePhase(ctx, res);
+  // never sleep past the deadline — a huge --interval must not smear
+  // a small --timeout
+  await new Promise(r => setTimeout(r, Math.min(interval, remain)));
+  return settlePoll(ctx, res, deadline, interval);
+}
+
+/** Bounded fetch retries — a transient host hiccup mid-wait must not
+ *  abort the cycle. `attempts` total tries, 5s apart. */
+async function fetchBounded(
+  ctx: MergeCtx,
+  attempts = 3,
+  n = 0
+): Promise<Awaited<ReturnType<MergeCtx['fetcher']>>> {
+  try {
+    return await ctx.fetcher();
+  } catch (err) {
+    if (n + 1 >= attempts) throw err;
+    ctx.opts.onError?.(err, n + 1);
+    await new Promise(r => setTimeout(r, 5_000));
+    return fetchBounded(ctx, attempts, n + 1);
+  }
 }
 
 /** The gate's green snapshot may be stale — a moved head or a dropped
@@ -329,12 +367,7 @@ async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
 /** The cycle's first read — a transient host error aborts the run before
  *  any phase; one retry keeps a hiccup from killing a re-entry. */
 async function firstFetch(ctx: MergeCtx): Promise<Awaited<ReturnType<MergeCtx['fetcher']>>> {
-  try {
-    return await ctx.fetcher();
-  } catch {
-    await new Promise(r => setTimeout(r, 5000));
-    return ctx.fetcher();
-  }
+  return fetchBounded(ctx, 2);
 }
 
 export async function runMergeCommand(argv: string[]): Promise<void> {
