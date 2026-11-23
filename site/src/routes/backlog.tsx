@@ -19,6 +19,7 @@ const DOCS = `${BASE_URL}docs`;
 // come live from the REST API in the same request wave.
 const BRANCH = 'bro-data';
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
+const BRANCH_REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/heads/bro-data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
 const SNAPSHOT_KEY = 'bro:backlog:snapshot:v2';
@@ -143,12 +144,18 @@ const toGh = (i: GhRaw): GhItem => ({
 // empty queue and overwrite the cached one
 async function fetchGh(): Promise<GhItem[]> {
   const out: GhItem[] = [];
-  for (let page = 1; page <= 5; page++) {
-    const res = await fetch(`${ISSUES_API}&page=${page}`);
-    if (!res.ok) throw new Error(`github api ${res.status}`);
-    const items = (await res.json()) as GhRaw[];
-    out.push(...items.map(toGh));
-    if (items.length < 100) break;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15_000);
+  try {
+    for (let page = 1; ; page++) {
+      const res = await fetch(`${ISSUES_API}&page=${page}`, { signal: controller.signal });
+      if (!res.ok) throw new Error(`github api ${res.status}`);
+      const items = (await res.json()) as GhRaw[];
+      out.push(...items.map(toGh));
+      if (items.length < 100) break;
+    }
+  } finally {
+    window.clearTimeout(timeout);
   }
   return out;
 }
@@ -156,14 +163,38 @@ async function fetchGh(): Promise<GhItem[]> {
 // The heads twin costs no API quota — the ref-resolution path stays as
 // the fallback until the branch exists (pre-migration snapshots).
 async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
-  const branch = await fetch(`${RAW}/${BRANCH}/${BACKLOG_PATH}`);
-  if (branch.ok) {
-    return { snapshot: (await branch.json()) as Snapshot, sha: BRANCH };
+  try {
+    const [branchRef, dataRef] = await Promise.all([fetch(BRANCH_REF_API), fetch(REF_API)]);
+    if (branchRef.ok && dataRef.ok) {
+      const branchSha = ((await branchRef.json()) as { object: { sha: string } }).object.sha;
+      const dataSha = ((await dataRef.json()) as { object: { sha: string } }).object.sha;
+      if (branchSha === dataSha) {
+        const branch = await fetch(`${RAW}/${dataSha}/${BACKLOG_PATH}`);
+        if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: dataSha };
+      }
+    }
+  } catch {
+    // The raw branch remains usable when GitHub's API is rate-limited.
+    const branch = await fetch(`${RAW}/${BRANCH}/${BACKLOG_PATH}`);
+    if (branch.ok) return { snapshot: (await branch.json()) as Snapshot, sha: BRANCH };
   }
   const sha = await resolveSha();
   const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`);
   if (!res.ok) throw new Error(`backlog.json not on refs/bro/data (${res.status})`);
   return { snapshot: (await res.json()) as Snapshot, sha };
+}
+
+function cacheSnapshot(data: Data): void {
+  try {
+    const cached = readCache();
+    const cachedAt = cached ? Date.parse(cached.snapshot.generated_at) : Number.NaN;
+    const generatedAt = Date.parse(data.snapshot.generated_at);
+    if (!Number.isNaN(generatedAt) && (Number.isNaN(cachedAt) || generatedAt >= cachedAt)) {
+      window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
+    }
+  } catch {
+    /* quota or unavailable storage — live data remains visible */
+  }
 }
 
 // Beads are required (the whole point of the page) — the snapshot
@@ -172,12 +203,14 @@ async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
 // the meantime, the verdict arrives as ghUnavailable.
 async function load(): Promise<Data> {
   const { snapshot, sha } = await fetchSnapshot();
-  return {
+  const data = {
     snapshot,
     gh: readCache()?.gh ?? [],
     sha,
     fetchedAt: new Date().toISOString(),
   };
+  cacheSnapshot(data);
+  return data;
 }
 
 function ageDays(iso: string, now: number): number {
@@ -501,17 +534,27 @@ function Graph({ items, onPick }: Readonly<{ items: Bead[]; onPick: (b: Bead | n
 function RelRow({
   label,
   ids,
+  available,
   onJump,
-}: Readonly<{ label: string; ids: string[]; onJump: (id: string) => void }>) {
+}: Readonly<{
+  label: string;
+  ids: string[];
+  available: Set<string>;
+  onJump: (id: string) => void;
+}>) {
   if (ids.length === 0) return null;
   return (
     <p className="bl-detail-meta">
       {label}:{' '}
-      {ids.map(id => (
-        <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">
-          {id}{' '}
-        </button>
-      ))}
+      {ids.map(id =>
+        available.has(id) ? (
+          <button key={id} type="button" onClick={() => onJump(id)} className="bl-jump">
+            {id}{' '}
+          </button>
+        ) : (
+          <span key={id}>{id} </span>
+        )
+      )}
     </p>
   );
 }
@@ -521,9 +564,16 @@ function RelRow({
 function Detail({
   b,
   kids,
+  available,
   onClose,
   onJump,
-}: Readonly<{ b: Bead; kids: string[]; onClose: () => void; onJump: (id: string) => void }>) {
+}: Readonly<{
+  b: Bead;
+  kids: string[];
+  available: Set<string>;
+  onClose: () => void;
+  onJump: (id: string) => void;
+}>) {
   const isGh = b.id.startsWith('gh-') || b.id.startsWith('pr-');
   const badges: Array<[id: string, label: string, color: string | undefined]> = [
     ['type', b.type, TYPE_COLOR[b.type]],
@@ -574,10 +624,10 @@ function Detail({
           </a>
         </p>
       )}
-      {b.parent && <RelRow label="parent" ids={[b.parent]} onJump={onJump} />}
-      <RelRow label="children" ids={kids} onJump={onJump} />
-      <RelRow label="blocks" ids={b.blocks} onJump={onJump} />
-      <RelRow label="blocked by" ids={b.blocked_by} onJump={onJump} />
+      {b.parent && <RelRow label="parent" ids={[b.parent]} available={available} onJump={onJump} />}
+      <RelRow label="children" ids={kids} available={available} onJump={onJump} />
+      <RelRow label="blocks" ids={b.blocks} available={available} onJump={onJump} />
+      <RelRow label="blocked by" ids={b.blocked_by} available={available} onJump={onJump} />
     </aside>
   );
 }
@@ -632,11 +682,7 @@ function useBacklog(): LoadState {
         fetchGh()
           .then(items => {
             if (!alive) return;
-            try {
-              window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ ...data, gh: items }));
-            } catch {
-              /* quota — live next load instead */
-            }
+            cacheSnapshot({ ...data, gh: items });
             setState(s =>
               s.kind === 'ready'
                 ? { ...s, data: { ...s.data, gh: items, ghUnavailable: false } }
@@ -977,6 +1023,22 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
     source: 'all',
     orphansOnly: false,
   });
+  const previousUni = useRef(uni);
+  useEffect(() => {
+    const wasAll = <T,>(selected: Set<T>, previous: T[]) =>
+      selected.size === previous.length && previous.every(value => selected.has(value));
+    setF(current => ({
+      ...current,
+      status: wasAll(current.status, previousUni.current.status)
+        ? new Set(uni.status)
+        : current.status,
+      type: wasAll(current.type, previousUni.current.type) ? new Set(uni.type) : current.type,
+      priority: wasAll(current.priority, previousUni.current.priority)
+        ? new Set(uni.priority)
+        : current.priority,
+    }));
+    previousUni.current = uni;
+  }, [uni]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1000,11 +1062,12 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   // children are derivable from the parent column — no extra export field
   const childIds = useMemo(() => {
     const m = new Map<string, string[]>();
-    for (const b of beads) {
-      if (b.parent) (m.get(b.parent) ?? m.set(b.parent, []).get(b.parent)!).push(b.id);
-    }
+    beads
+      .filter(b => Boolean(b.parent))
+      .forEach(b => (m.get(b.parent!) ?? m.set(b.parent!, []).get(b.parent!)!).push(b.id));
     return m;
   }, [beads]);
+  const available = useMemo(() => new Set(beads.map(b => b.id)), [beads]);
   const pick = (id: string) => {
     const t = byId.get(id);
     if (t) setPicked(t);
@@ -1044,6 +1107,7 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
         <Detail
           b={picked}
           kids={childIds.get(picked.id) ?? []}
+          available={available}
           onClose={() => setPicked(null)}
           onJump={pick}
         />
@@ -1086,9 +1150,9 @@ function BacklogPage() {
             bro backlog, <em>live</em>.
           </h1>
           <p className="lede">
-            Every open bead plus the GitHub queue, read straight off <code>refs/bro/data</code> and
-            the REST API at page load. A publish job refreshes the snapshot on every merge to main —
-            what you see is what the store holds now.
+            Every open bead plus the GitHub queue, read from the <code>bro-data</code> snapshot
+            branch and the REST API at page load. A publish job refreshes the snapshot on every
+            merge to main — what you see is what the store holds now.
           </p>
         </section>
         <Gate state={state} />

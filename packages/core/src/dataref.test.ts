@@ -1,201 +1,182 @@
-import { after, describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs'
-import { join } from 'node:path'
-import { tmpDir } from './testtmp.ts'
-import {
-  DATA_REF,
-  dataRefCommit,
-  dataRefPull,
-  dataRefPush,
-  dataRefRoot,
-} from './dataref.ts'
-import { scrubEnv, testGit } from './testkit.ts'
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpDir } from './testtmp.ts';
+import { DATA_REF, dataRefCommit, dataRefPull, dataRefPush, dataRefRoot } from './dataref.ts';
+import { scrubEnv, testGit } from './testkit.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv())
+after(scrubEnv());
 
 function git(cwd: string, args: string[], opts?: { input?: string }): string {
-  return testGit(['-C', cwd, ...args], { // NOSONAR — test fixture
+  return testGit(['-C', cwd, ...args], {
+    // NOSONAR — test fixture
     encoding: 'utf8',
     input: opts?.input,
-  }).trim()
+  }).trim();
 }
 
 function makeRepo(): string {
-  const dir = tmpDir('bro-dataref-')
-  git(dir, ['init', '-b', 'main'])
-  git(dir, ['config', 'user.email', 't@t'])
-  git(dir, ['config', 'user.name', 't'])
-  mkdirSync(join(dir, '.agents/review-debt'), { recursive: true })
-  writeFileSync(join(dir, '.gitignore'), '.agents/\n')
-  writeFileSync(join(dir, '.agents/review-debt/ledger.jsonl'), '{"a":1}\n')
-  git(dir, ['add', '.gitignore'])
-  git(dir, ['commit', '-m', 'init'])
-  return dir
+  const dir = tmpDir('bro-dataref-');
+  git(dir, ['init', '-b', 'main']);
+  git(dir, ['config', 'user.email', 't@t']);
+  git(dir, ['config', 'user.name', 't']);
+  mkdirSync(join(dir, '.agents/review-debt'), { recursive: true });
+  writeFileSync(join(dir, '.gitignore'), '.agents/\n');
+  writeFileSync(join(dir, '.agents/review-debt/ledger.jsonl'), '{"a":1}\n');
+  git(dir, ['add', '.gitignore']);
+  git(dir, ['commit', '-m', 'init']);
+  return dir;
 }
 
 function makeBare(): string {
-  const dir = tmpDir('bro-dataref-remote-')
-  git(dir, ['init', '--bare', '-b', 'main'])
-  return dir
+  const dir = tmpDir('bro-dataref-remote-');
+  git(dir, ['init', '--bare', '-b', 'main']);
+  return dir;
 }
 
 function refPaths(root: string): string[] {
-  return git(root, ['ls-tree', '-r', '--name-only', DATA_REF]).split('\n')
+  return git(root, ['ls-tree', '-r', '--name-only', DATA_REF]).split('\n');
 }
 
 describe('dataRefCommit', () => {
   test('commits ignored artifacts to the data ref, tracked files excluded', () => {
-    const root = makeRepo()
-    const sha = dataRefCommit(root, '.agents', 'test sync')
-    assert.ok(sha)
-    assert.deepEqual(refPaths(root), ['.agents/review-debt/ledger.jsonl'])
+    const root = makeRepo();
+    const sha = dataRefCommit(root, '.agents', 'test sync');
+    assert.ok(sha);
+    assert.deepEqual(refPaths(root), ['.agents/review-debt/ledger.jsonl']);
     // the ref lives outside refs/heads — it must not show up as a branch
-    assert.equal(git(root, ['branch', '--list', 'bro/*']), '')
+    assert.equal(git(root, ['branch', '--list', 'bro/*']), '');
     // worktree status stays clean — plumbing never touches the index
-    assert.equal(git(root, ['status', '--porcelain']), '')
-  })
+    assert.equal(git(root, ['status', '--porcelain']), '');
+  });
 
   test('unchanged tree is a no-op returning the existing head', () => {
-    const root = makeRepo()
-    const first = dataRefCommit(root, '.agents', 'one')
-    const second = dataRefCommit(root, '.agents', 'two')
-    assert.equal(second, first)
-    assert.equal(git(root, ['rev-list', '--count', DATA_REF]), '1')
-  })
+    const root = makeRepo();
+    const first = dataRefCommit(root, '.agents', 'one');
+    const second = dataRefCommit(root, '.agents', 'two');
+    assert.equal(second, first);
+    assert.equal(git(root, ['rev-list', '--count', DATA_REF]), '1');
+  });
 
   test('content change produces a child commit; deleted files drop out', () => {
-    const root = makeRepo()
-    const first = dataRefCommit(root, '.agents', 'one')
-    writeFileSync(join(root, '.agents/review-debt/ledger.jsonl'), '{"a":1}\n{"b":2}\n')
-    const second = dataRefCommit(root, '.agents', 'two')
-    assert.notEqual(second, first)
-    assert.equal(git(root, ['rev-parse', `${DATA_REF}^`]), first)
-  })
+    const root = makeRepo();
+    const first = dataRefCommit(root, '.agents', 'one');
+    writeFileSync(join(root, '.agents/review-debt/ledger.jsonl'), '{"a":1}\n{"b":2}\n');
+    const second = dataRefCommit(root, '.agents', 'two');
+    assert.notEqual(second, first);
+    assert.equal(git(root, ['rev-parse', `${DATA_REF}^`]), first);
+  });
 
   test('untracked non-ignored files never sync', () => {
-    const root = makeRepo()
-    writeFileSync(join(root, '.agents', 'stray.txt'), 'untracked but not ignored\n')
+    const root = makeRepo();
+    writeFileSync(join(root, '.agents', 'stray.txt'), 'untracked but not ignored\n');
     // .agents/ is gitignored → stray IS ignored; use an unignored path instead
-    writeFileSync(join(root, 'notes.txt'), 'plain untracked\n')
-    dataRefCommit(root, '.', 'all')
-    const paths = refPaths(root)
-    assert.ok(paths.includes('.agents/review-debt/ledger.jsonl'))
-    assert.ok(!paths.includes('notes.txt'))
-    assert.ok(!paths.includes('.gitignore'))
-  })
-})
+    writeFileSync(join(root, 'notes.txt'), 'plain untracked\n');
+    dataRefCommit(root, '.', 'all');
+    const paths = refPaths(root);
+    assert.ok(paths.includes('.agents/review-debt/ledger.jsonl'));
+    assert.ok(!paths.includes('notes.txt'));
+    assert.ok(!paths.includes('.gitignore'));
+  });
+});
 
 describe('dataRefPush / dataRefPull', () => {
   test('push publishes the ref; pull materializes files on a fresh clone', () => {
-    const root = makeRepo()
-    const remote = makeBare()
-    git(root, ['remote', 'add', 'origin', remote])
-    dataRefCommit(root, '.agents', 'sync')
-    assert.equal(dataRefPush(root), true)
-    git(remote, ['rev-parse', '--verify', DATA_REF])
+    const root = makeRepo();
+    const remote = makeBare();
+    git(root, ['remote', 'add', 'origin', remote]);
+    dataRefCommit(root, '.agents', 'sync');
+    assert.ok(dataRefPush(root));
+    git(remote, ['rev-parse', '--verify', DATA_REF]);
 
-    const clone = tmpDir('bro-dataref-clone-')
-    git(clone, ['init', '-b', 'main'])
-    git(clone, ['config', 'user.email', 't@t'])
-    git(clone, ['config', 'user.name', 't'])
-    git(clone, ['remote', 'add', 'origin', remote])
-    assert.equal(dataRefPull(clone), 1)
+    const clone = tmpDir('bro-dataref-clone-');
+    git(clone, ['init', '-b', 'main']);
+    git(clone, ['config', 'user.email', 't@t']);
+    git(clone, ['config', 'user.name', 't']);
+    git(clone, ['remote', 'add', 'origin', remote]);
+    assert.equal(dataRefPull(clone), 1);
     assert.equal(
       readFileSync(join(clone, '.agents/review-debt/ledger.jsonl'), 'utf8'),
       '{"a":1}\n'
-    )
-  })
+    );
+  });
 
   test('materialize never overwrites tracked files', () => {
-    const root = makeRepo()
-    const remote = makeBare()
-    git(root, ['remote', 'add', 'origin', remote])
+    const root = makeRepo();
+    const remote = makeBare();
+    git(root, ['remote', 'add', 'origin', remote]);
     // a polluted ref carrying a tracked path — injected via plumbing,
     // since the normal commit path can never stage tracked content
-    const blob = git(root, ['hash-object', '-w', '--stdin'], { input: 'poisoned\n' })
-    const tree = git(root, ['mktree'], { input: `100644 blob ${blob}\t.gitignore\n` })
-    const commit = git(root, ['commit-tree', tree, '-m', 'poison'])
-    git(root, ['update-ref', DATA_REF, commit])
-    git(root, ['push', 'origin', `${DATA_REF}:${DATA_REF}`])
+    const blob = git(root, ['hash-object', '-w', '--stdin'], { input: 'poisoned\n' });
+    const tree = git(root, ['mktree'], { input: `100644 blob ${blob}\t.gitignore\n` });
+    const commit = git(root, ['commit-tree', tree, '-m', 'poison']);
+    git(root, ['update-ref', DATA_REF, commit]);
+    git(root, ['push', 'origin', `${DATA_REF}:${DATA_REF}`]);
 
-    const clone = tmpDir('bro-dataref-clone2-')
-    git(clone, ['init', '-b', 'main'])
-    git(clone, ['config', 'user.email', 't@t'])
-    git(clone, ['config', 'user.name', 't'])
-    git(clone, ['remote', 'add', 'origin', remote])
-    writeFileSync(join(clone, '.gitignore'), 'mine\n')
-    git(clone, ['add', '.gitignore'])
-    git(clone, ['commit', '-m', 'init'])
-    dataRefPull(clone)
-    assert.equal(readFileSync(join(clone, '.gitignore'), 'utf8'), 'mine\n')
-  })
+    const clone = tmpDir('bro-dataref-clone2-');
+    git(clone, ['init', '-b', 'main']);
+    git(clone, ['config', 'user.email', 't@t']);
+    git(clone, ['config', 'user.name', 't']);
+    git(clone, ['remote', 'add', 'origin', remote]);
+    writeFileSync(join(clone, '.gitignore'), 'mine\n');
+    git(clone, ['add', '.gitignore']);
+    git(clone, ['commit', '-m', 'init']);
+    dataRefPull(clone);
+    assert.equal(readFileSync(join(clone, '.gitignore'), 'utf8'), 'mine\n');
+  });
 
   test('pull with no remote ref reports -1', () => {
-    const root = makeRepo()
-    const remote = makeBare()
-    git(root, ['remote', 'add', 'origin', remote])
-    assert.equal(dataRefPull(root), -1)
-  })
+    const root = makeRepo();
+    const remote = makeBare();
+    git(root, ['remote', 'add', 'origin', remote]);
+    assert.equal(dataRefPull(root), -1);
+  });
 
   test('pull with an unreachable remote reports -2', () => {
-    const root = makeRepo()
-    git(root, ['remote', 'add', 'origin', join(tmpDir('bro-dataref-gone-'), 'gone.git')])
-    assert.equal(dataRefPull(root), -2)
-  })
+    const root = makeRepo();
+    git(root, ['remote', 'add', 'origin', join(tmpDir('bro-dataref-gone-'), 'gone.git')]);
+    assert.equal(dataRefPull(root), -2);
+  });
 
   test('diverged replicas merge .jsonl by line union', () => {
-    const remote = makeBare()
-    const r1 = makeRepo()
-    git(r1, ['remote', 'add', 'origin', remote])
-    dataRefCommit(r1, '.agents', 'r1')
-    assert.equal(dataRefPush(r1), true)
+    const remote = makeBare();
+    const r1 = makeRepo();
+    git(r1, ['remote', 'add', 'origin', remote]);
+    dataRefCommit(r1, '.agents', 'r1');
+    assert.ok(dataRefPush(r1));
 
     // replica 2: pull, append b, push
-    const r2 = tmpDir('bro-dataref-r2-')
-    git(r2, ['init', '-b', 'main'])
-    git(r2, ['config', 'user.email', 't@t'])
-    git(r2, ['config', 'user.name', 't'])
-    git(r2, ['remote', 'add', 'origin', remote])
-    dataRefPull(r2)
-    writeFileSync(
-      join(r2, '.agents/review-debt/ledger.jsonl'),
-      '{"a":1}\n{"b":2}\n'
-    )
-    dataRefCommit(r2, '.agents', 'r2')
-    assert.equal(dataRefPush(r2), true)
+    const r2 = tmpDir('bro-dataref-r2-');
+    git(r2, ['init', '-b', 'main']);
+    git(r2, ['config', 'user.email', 't@t']);
+    git(r2, ['config', 'user.name', 't']);
+    git(r2, ['remote', 'add', 'origin', remote]);
+    dataRefPull(r2);
+    writeFileSync(join(r2, '.agents/review-debt/ledger.jsonl'), '{"a":1}\n{"b":2}\n');
+    dataRefCommit(r2, '.agents', 'r2');
+    assert.ok(dataRefPush(r2));
 
     // replica 1 appends c on its stale head → push rejects → merge → retry
-    writeFileSync(
-      join(r1, '.agents/review-debt/ledger.jsonl'),
-      '{"a":1}\n{"c":3}\n'
-    )
-    dataRefCommit(r1, '.agents', 'r1c')
-    assert.equal(dataRefPush(r1), true)
+    writeFileSync(join(r1, '.agents/review-debt/ledger.jsonl'), '{"a":1}\n{"c":3}\n');
+    dataRefCommit(r1, '.agents', 'r1c');
+    assert.ok(dataRefPush(r1));
 
-    const merged = git(remote, ['show', `${DATA_REF}:.agents/review-debt/ledger.jsonl`])
-    assert.deepEqual(
-      merged.split('\n').filter(Boolean).sort(),
-      ['{"a":1}', '{"b":2}', '{"c":3}']
-    )
-  })
-})
+    const merged = git(remote, ['show', `${DATA_REF}:.agents/review-debt/ledger.jsonl`]);
+    assert.deepEqual(merged.split('\n').filter(Boolean).sort(), ['{"a":1}', '{"b":2}', '{"c":3}']);
+  });
+});
 
 describe('dataRefRoot', () => {
   test('null outside a worktree', () => {
-    const dir = tmpDir('bro-dataref-nowt-')
-    assert.equal(dataRefRoot(dir), null)
-  })
+    const dir = tmpDir('bro-dataref-nowt-');
+    assert.equal(dataRefRoot(dir), null);
+  });
 
   test('root inside a worktree', () => {
-    const root = makeRepo()
-    assert.equal(dataRefRoot(root), root)
-  })
-})
+    const root = makeRepo();
+    assert.equal(dataRefRoot(root), root);
+  });
+});

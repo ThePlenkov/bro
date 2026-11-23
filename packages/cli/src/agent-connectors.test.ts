@@ -1278,39 +1278,40 @@ function connectorContract(b: BackendCase): void {
     });
 
     test('a refused spawn refunds the work-budget segment its earlier claims opened (spec bro-x601l)', async () => {
-      // a batch spawn: alpha's admit opens a work-budget segment; beta's
-      // lane reads full only inside its own locked section (its live
-      // count turns 1 once alpha's claim exists). The refusal must hand
-      // the segment back — an open one charges worker-minutes for a
-      // worker that never ran
+      // a batch spawn: beta's admit (the cross-kind claim, taken first)
+      // opens a work-budget segment; alpha's lane — the quota lane the
+      // command's kind resolves to, admitted last — reads full only
+      // inside its own locked section (its live count turns 1 once
+      // beta's claim exists). The refusal must hand the segment back —
+      // an open one charges worker-minutes for a worker that never ran
       const f = fixture([{ id: 'fx-1', status: 'open' }], 'node {promptFile} alpha-run beta-run');
       const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
       const dirB = mkdtempSync(join(tmpdir(), 'bro-beta-resv-'));
-      const budgetLedger = join(laneBudgetDir(), 'alpha.json');
+      const budgetLedger = join(laneBudgetDir(), 'beta.json');
       const prior = sessionPlanes();
       clearSessionPlanes();
       try {
         registerSessionPlane({
           kind: 'alpha',
           detectsCli: cli => cli === 'alpha-cli',
-          countLive: () => 0,
+          // live turns 1 only once beta's claim exists — the pre-flight
+          // admits on 0+1 and the post-claim census is what refuses, so
+          // the segment is real when the verdict lands
+          countLive: () => (countSessionReservations(dirB) > 0 ? 1 : 0),
           startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
         });
         registerSessionPlane({
           kind: 'beta',
           detectsCli: cli => cli === 'beta-cli',
-          // live turns 1 only once alpha's claim exists — the pre-flight
-          // admits on 0+1 and the post-claim census is what refuses, so
-          // the segment is real when the verdict lands
-          countLive: () => (countSessionReservations(dirA) > 0 ? 1 : 0),
+          countLive: () => 0,
           startsSessions: cmd => (cmd.match(/beta-run/g) ?? []).length,
         });
         const env: AgentConnectorEnv = {
           ...f.env,
           agents: {
             ...f.env.agents,
-            alpha: { maxSessions: 5, workBudgetMinutes: 30, reservationsDir: dirA },
-            beta: { maxSessions: 1, reservationsDir: dirB },
+            alpha: { maxSessions: 1, reservationsDir: dirA },
+            beta: { maxSessions: 5, workBudgetMinutes: 30, reservationsDir: dirB },
           },
           fleet: { maxConcurrent: 0 },
         };
@@ -1323,7 +1324,7 @@ function connectorContract(b: BackendCase): void {
           (err: unknown) =>
             err instanceof SpawnError &&
             err.kind === 'cap' &&
-            /beta session quota reached/.test(err.message)
+            /alpha session quota reached/.test(err.message)
         );
         assert.equal(countSessionReservations(dirA), 0);
         assert.equal(countSessionReservations(dirB), 0);
@@ -1347,6 +1348,63 @@ function connectorContract(b: BackendCase): void {
         rmSync(dirA, { recursive: true, force: true });
         rmSync(dirB, { recursive: true, force: true });
         rmSync(budgetLedger, { force: true });
+        cleanup(f);
+      }
+    });
+
+    test('a wrapped template spawn admits through the session quota lane (bro-780ey)', async () => {
+      // the command's first token is `sh` — a lane a first-token parse
+      // never reached. maxWorkers is the lane the cross-kind pass can
+      // never cover (sessionCapViews needs maxSessions>0 to see a
+      // kind), so the quota lane is the ONLY admission this spawn has
+      const f = fixture(
+        [
+          { id: 'fx-1', status: 'open' },
+          { id: 'fx-2', status: 'open' },
+        ],
+        "sh -c 'node {promptFile} alpha-run'"
+      );
+      const dirA = mkdtempSync(join(tmpdir(), 'bro-alpha-resv-'));
+      const prior = sessionPlanes();
+      clearSessionPlanes();
+      try {
+        registerSessionPlane({
+          kind: 'alpha',
+          detectsCli: cli => cli === 'alpha-cli',
+          countLive: () => 0,
+          countWorkers: () => 0,
+          startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+        });
+        const env: AgentConnectorEnv = {
+          ...f.env,
+          agents: {
+            ...f.env.agents,
+            alpha: { maxWorkers: 1, reservationsDir: dirA },
+          },
+        };
+        const c = b.make({ dir: f.main }, env);
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        assert.equal(first.state, 'running');
+        // the quota lane's claim landed on the kind ledger and the
+        // registry row carries the kind it was admitted under
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.sessionKind, 'alpha');
+        assert.equal(countSessionReservations(dirA), 1);
+        // the worker lane is full — a second wrapped spawn refuses on it
+        await assert.rejects(
+          c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /alpha worker quota reached — 2\/1 live workers.*fx-2/.test(err.message)
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
+        await c.stop(first.id);
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+        rmSync(dirA, { recursive: true, force: true });
         cleanup(f);
       }
     });
@@ -1408,6 +1466,99 @@ function connectorContract(b: BackendCase): void {
       () => sessionQuotaOf(unregistered, 'native', spec, 'whatever'),
       (e: unknown) => e instanceof SpawnError && e.kind === 'config'
     );
+  });
+
+  test('sessionKindOf — wrapped templates resolve the launched cli (bro-780ey)', () => {
+    const spec = SPEC('/r', '/b', 'fx-1', 'p');
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} };
+    // a shell-wrapped devin command starts the same sessions the bare
+    // spelling does — the kind resolves through the plane's own grammar,
+    // not the first token
+    assert.equal(sessionKindOf(env, 'native', spec, "sh -c 'devin -p {promptFile}'"), 'devin');
+    assert.equal(sessionKindOf(env, 'native', spec, "bash -lc 'devin acp'"), 'devin');
+    assert.equal(sessionKindOf(env, 'native', spec, 'env FOO=1 nohup devin -p x'), 'devin');
+    assert.equal(sessionKindOf(env, 'native', spec, 'timeout 30 devin -p x'), 'devin');
+    // a wrapped command that opens no session claims no lane — a devin
+    // named only as an argument is not a start either
+    assert.equal(sessionKindOf(env, 'native', spec, "sh -c 'echo devin'"), undefined);
+    assert.equal(sessionKindOf(env, 'native', spec, "sh -c 'devin models'"), undefined);
+    // unwrapped answers keep the cli-identity semantics: `devin models`
+    // opens no session but IS the devin cli, so the lane still engages
+    assert.equal(sessionKindOf(env, 'native', spec, 'devin models'), 'devin');
+    assert.equal(sessionKindOf(env, 'native', spec, 'node {promptFile}'), undefined);
+    // a template worker's own command resolves the same way
+    const tpl = {
+      ...spec,
+      worker: { kind: 'template' as const, command: "sh -c 'devin -p {promptFile}'" },
+    };
+    assert.equal(sessionKindOf(env, 'native', tpl, 'node {promptFile}'), 'devin');
+  });
+
+  test('sessionKindOf — a wrapped multi-kind command keeps one primary lane (bro-780ey)', () => {
+    const spec = SPEC('/r', '/b', 'fx-1', 'p');
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} };
+    const prior = sessionPlanes();
+    clearSessionPlanes();
+    try {
+      registerSessionPlane({
+        kind: 'alpha',
+        detectsCli: cli => cli === 'alpha-cli',
+        countLive: () => 0,
+        startsSessions: cmd => (cmd.match(/alpha-run/g) ?? []).length,
+      });
+      registerSessionPlane({
+        kind: 'beta',
+        detectsCli: cli => cli === 'beta-cli',
+        countLive: () => 0,
+        startsSessions: cmd => (cmd.match(/beta-run/g) ?? []).length,
+      });
+      // the wrapped cli names the kind — each plane's own grammar claims
+      // its launches past the `sh -c` shell
+      assert.equal(sessionKindOf(env, 'native', spec, "sh -c 'alpha-cli alpha-run'"), 'alpha');
+      assert.equal(sessionKindOf(env, 'native', spec, "sh -c 'beta-cli beta-run'"), 'beta');
+      // a compound wrapped command still takes ONE lane — the first
+      // registered plane claiming it, the same first-registered-wins
+      // rule sessionPlaneForCli runs under; every other kind it starts
+      // stays cross-kind business
+      assert.equal(
+        sessionKindOf(env, 'native', spec, "sh -c 'beta-cli beta-run & alpha-cli alpha-run'"),
+        'alpha'
+      );
+      // first-token identity still wins before the grammar fallback —
+      // the bare spelling answers what it always did
+      assert.equal(
+        sessionKindOf(env, 'native', spec, 'beta-cli beta-run & alpha-cli alpha-run'),
+        'beta'
+      );
+      assert.equal(sessionKindOf(env, 'native', spec, "sh -c 'node x'"), undefined);
+    } finally {
+      clearSessionPlanes();
+      for (const plane of prior) registerSessionPlane(plane);
+    }
+  });
+
+  test('sessionQuotaOf — a wrapped template arms the kind lane (bro-780ey)', () => {
+    const spec = SPEC('/r', '/b', 'fx-1', 'p');
+    // a workers-only lane: sessionCapViews never surfaces it (a view
+    // needs maxSessions>0), so the quota lane is the ONLY admission a
+    // wrapped template has — first-token kind resolution skipped it
+    const workersOnly: AgentConnectorEnv = {
+      agents: { devin: { maxWorkers: 2, lockDir: '/l' } },
+      connectors: {},
+    };
+    assert.equal(
+      sessionQuotaOf(workersOnly, 'native', spec, "sh -c 'devin -p {promptFile}'")?.plane.kind,
+      'devin'
+    );
+    // a wrapped template worker resolves the same way
+    const tpl = {
+      ...spec,
+      worker: { kind: 'template' as const, command: "sh -c 'devin -p {promptFile}'" },
+    };
+    assert.equal(sessionQuotaOf(workersOnly, 'native', tpl, 'node x')?.plane.kind, 'devin');
+    // uncapped wrapped → still no scan paid
+    const uncapped: AgentConnectorEnv = { agents: {}, connectors: {} };
+    assert.equal(sessionQuotaOf(uncapped, 'native', spec, "sh -c 'devin -p'"), undefined);
   });
 
   test('fleet.maxConcurrent 0 means uncapped', async () => {
