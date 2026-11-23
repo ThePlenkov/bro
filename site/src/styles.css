@@ -318,3 +318,48 @@ section.how, section.self, section.not, section.vocab { padding: 64px 0 0; }
   .product-card { padding: 24px; }
   .marketplace-strip { padding: 24px; }
 }
+
+/* --- /backlog --------------------------------------------------------- */
+.bl-main { max-width: 1180px; }
+.bl-controls { padding: 24px 0 16px; }
+.bl-search {
+  width: 100%; box-sizing: border-box; padding: 10px 14px; margin-bottom: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  color: var(--text); font: 14px var(--mono);
+}
+.bl-chiprow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.bl-chip {
+  padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--dim); font: 11px var(--mono);
+  text-transform: uppercase; letter-spacing: .04em; cursor: pointer;
+}
+.bl-chip.on { border-color: var(--accent); color: var(--accent); background: #1d2a20; }
+.bl-sep { width: 8px; }
+.bl-listwrap { padding-bottom: 40px; }
+.bl-listwrap .debt-table th {
+  text-align: left; color: var(--faint); font: 11px var(--mono);
+  text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.bl-listwrap .debt-table td { padding: 6px 10px 6px 0; cursor: pointer; }
+.bl-row:hover td { background: #18211b; }
+.bl-graphwrap { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 40px; }
+.bl-graphtools {
+  display: flex; gap: 8px; align-items: center; padding: 10px 14px;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.bl-graphhint { margin-left: auto; color: var(--faint); font: 11px var(--mono); }
+
+.bl-node { cursor: pointer; }
+.bl-detail {
+  position: fixed; right: 24px; bottom: 24px; width: 340px; max-height: 60vh;
+  overflow: auto; background: var(--panel); border: 1px solid var(--accent);
+  border-radius: 8px; padding: 16px; z-index: 10; font-size: 13px;
+}
+.bl-detail-head { display: flex; justify-content: space-between; align-items: center; }
+.bl-detail-head code { color: var(--accent); }
+.bl-detail-head button { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 14px; }
+.bl-detail-title { margin: 10px 0 8px; color: var(--text); }
+.bl-detail-meta { color: var(--dim); font: 12px var(--mono); margin: 4px 0; }
+.bl-detail a { color: var(--accent); }
+.bl-jump { cursor: pointer; text-decoration: underline; font: inherit; background: none; border: none; padding: 0; color: inherit; }

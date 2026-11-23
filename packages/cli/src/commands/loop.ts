@@ -67,6 +67,8 @@ import {
   gitTry,
   hasHelpFlag,
   holdRoleLease,
+  laneBudgetKey,
+  laneBudgetRefund,
   type Lease,
   type LeaseStore,
   localLeaseStore,
@@ -80,11 +82,13 @@ import {
   readLifecycle,
   type ResolvedClass,
   type ReviewFacade,
+  releaseSessionSlot,
   releaseSessionStart,
   reviewHost,
   routeStepClass,
   SpawnError,
   type SpawnWorker,
+  sessionCapViews,
   specStore,
   stepClassInfo,
   stepParent,
@@ -1186,9 +1190,12 @@ function laneSpawnedCommand(lane: LoopLane, fallback: string): string {
  *  the provider's entry command claims, shared with prepareSpawn
  *  through providerGateOf/admitProviderGateStarts so the wiring cannot
  *  drift per lane — bro-9f78j), then the cross-kind pass, then the
- *  lane's own kind via its quota lane. A refusal hands back every
- *  claim already taken; a success leaves the caller holding the
- *  primary reservation + the cross-kind paths to release when the
+ *  lane's own kind via its quota lane — one claim per session the
+ *  spawned command starts (a multi-start command judged once but
+ *  claimed once would read one session where two land). A refusal
+ *  hands back every claim already taken and refunds every work-budget
+ *  segment the claims charged; a success leaves the caller holding
+ *  the primary reservation + the cross-kind paths to release when the
  *  spawn's verdict lands. The plane-less provider ledger's claims ride
  *  `crossKind` too — a template worker never lands in the agent
  *  registry, so the claims are the lane's only accounting and must be
@@ -1222,6 +1229,15 @@ export function admitLaneSessions(
   const registry = readAgentRegistry(ctx.root);
   const liveByKind = liveSessionKeysByKind(registry);
   const spawnedCmd = laneSpawnedCommand(lane, templateCommand);
+  let reservation: string | undefined;
+  // every work-budget segment an admit opens registers on
+  // budgetChargedKinds — a LATER refusal hands them all back in the
+  // catch so a spawn that never ran never meters (the prepareSpawn
+  // convention, spec bro-x601l)
+  const budgetChargedKinds: string[] = [];
+  const budgetCharged = (kind: string): void => {
+    budgetChargedKinds.push(kind);
+  };
   try {
     // the provider lane resolved + pre-flighted before ANY claim lands
     // — a full account lane refuses before a kind claim can hold a
@@ -1249,6 +1265,7 @@ export function admitLaneSessions(
             key,
             scope,
             liveByKind,
+            budgetCharged,
             out: crossKind,
             ledgerOut: crossKind,
           });
@@ -1266,33 +1283,68 @@ export function admitLaneSessions(
         providerCap: providerGate?.providerCap,
         providerCensus: providerGate?.providerCensus,
         quotaPlaneKind: templateQuota?.plane.kind,
+        budgetCharged,
         out: crossKind,
       });
     }
-    const reservation =
-      templateQuota === undefined
-        ? undefined
-        : admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-            key,
-            molStep: spec.molStep,
-            workerEnv,
-            scope,
-            liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
-            // the provider's own session plane IS this lane's — the
-            // verdict rides the quota admit instead of claiming the
-            // lane twice (spec bro-x601l)
-            ...(providerGate?.quotaCoversProvider === true
-              ? {
-                  providerCap: providerGate.providerCap,
-                  providerCensus: providerGate.providerCensus,
-                }
-              : {}),
-          });
+    if (templateQuota !== undefined) {
+      // every session the spawned command opens on the quota kind owes
+      // the lane a claim — a multi-start command judged once but
+      // claimed once would read one session where two land, and the
+      // provider census would admit on a slot count that under-counts
+      // the lane. Each admit re-judges post-claim: the Nth claim trips
+      // the refusal exactly when headroom cannot seat N.
+      const quotaView = sessionCapViews(spawnedCmd, ctx.env.agents, workerEnv).find(
+        v => v.kind === templateQuota.plane.kind
+      );
+      const quotaStarts = Math.max(
+        1,
+        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1
+      );
+      for (let i = 0; i < quotaStarts; i++) {
+        const claimed = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+          key,
+          molStep: spec.molStep,
+          workerEnv,
+          scope,
+          liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
+          // the provider's own session plane IS this lane's — the
+          // verdict rides the quota admit instead of claiming the
+          // lane twice (spec bro-x601l)
+          ...(providerGate?.quotaCoversProvider === true
+            ? {
+                providerCap: providerGate.providerCap,
+                providerCensus: providerGate.providerCensus,
+              }
+            : {}),
+          budgetCharged,
+        });
+        if (i === 0) {
+          reservation = claimed;
+        } else if (claimed !== undefined) {
+          crossKind.push(claimed);
+        }
+      }
+    }
     return { reservation, crossKind };
   } catch (err) {
     // every claim this admission holds goes back — the caller never
-    // saw them (the provider lane's ledger claims ride crossKind too)
+    // saw them (the provider lane's ledger claims ride crossKind too);
+    // the quota lane's own claims land per-start, so an early one can
+    // be held when a later start's verdict refuses
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation);
+    }
     releaseSessionStart(crossKind);
+    // the work-budget segments the released claims opened refund too —
+    // a spawn that never ran must not meter worker-minutes
+    for (const kind of budgetChargedKinds) {
+      try {
+        laneBudgetRefund(kind, laneBudgetKey(scope, key));
+      } catch {
+        // best-effort — a missed refund closes on the next budget scan
+      }
+    }
     throw err;
   }
 }
