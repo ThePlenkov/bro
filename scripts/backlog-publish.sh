@@ -37,10 +37,11 @@ REPO_SLUG="${REPO_SLUG%.git}"
 
 DOLT_DIR="${DOLT_DIR:-$WORK/dolt-repo}"
 if [[ -d "$DOLT_DIR/.dolt" ]]; then
-  # fetch alone leaves the working set behind — pull advances HEAD, and a
-  # failed pull (diverged clone) falls back to a fresh clone below
+  # fetch alone leaves the working set behind — pull advances HEAD; a
+  # failed pull (diverged or offline) falls back to a fresh clone under
+  # WORK, never deleting the caller's own directory
   if ! (cd "$DOLT_DIR" && dolt pull >/dev/null 2>&1); then
-    rm -rf "$DOLT_DIR"
+    DOLT_DIR="$WORK/dolt-repo-fresh"
   fi
 fi
 if [[ ! -d "$DOLT_DIR/.dolt" ]]; then
