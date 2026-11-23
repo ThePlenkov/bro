@@ -80,6 +80,27 @@ describe('hook-cache primitives', () => {
     assert.ok(!isJsonData(undefined));
   });
 
+  test('isJsonData: sparse arrays and non-index props never round-trip', () => {
+    // a hole serializes as null — key count alone misses it when an
+    // extra prop nets length back, and every() never visits the hole
+    assert.ok(!isJsonData([, 'code']));
+    assert.ok(!isJsonData(Object.assign([, 'code'], { label: 'x' })));
+    // a dense array carrying a prop loses it in the write — also refused
+    assert.ok(!isJsonData(Object.assign(['a', 'b'], { label: 'x' })));
+    // explicit undefined writes as null — refused like a hole
+    assert.ok(!isJsonData([undefined]));
+    // nested inside a record the same shapes must fail
+    assert.ok(!isJsonData({ defs: [, 'code'] }));
+    assert.ok(!isJsonData({ defs: Object.assign(['a'], { label: 'x' }) }));
+    // clean dense arrays — nested too — still pass
+    assert.ok(isJsonData(['a', 'b']));
+    assert.ok(isJsonData({ defs: ['a', ['b', 1, null]] }));
+    // non-array values are unchanged by the stricter array gate
+    assert.ok(isJsonData({ a: 1 }));
+    assert.ok(!isJsonData({ a: undefined }));
+    assert.ok(!isJsonData(NaN));
+  });
+
   test('readCacheFile tolerates garbage; writeCacheFile round-trips', () => {
     const dir = tmpDir('bro-hc-');
     const f = join(dir, 'r.json');
