@@ -27,6 +27,7 @@
 
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { resolveSurface } from './serve-surfaces.ts';
 
 export interface ProviderConfig {
   /** Messages-API base — the proxy forwards to `<upstream><req.url>`. */
@@ -251,7 +252,12 @@ async function forwardUpstream(
   opts: ForwardOptions = {}
 ): Promise<void> {
   const method = req.method ?? 'GET';
-  const target = `${cfg.upstream}${req.url ?? '/'}`;
+  const rawUrl = req.url ?? '/';
+  const queryAt = rawUrl.indexOf('?');
+  const rawPath = queryAt < 0 ? rawUrl : rawUrl.slice(0, queryAt);
+  const query = queryAt < 0 ? undefined : rawUrl.slice(queryAt + 1);
+  const { path } = resolveSurface(rawPath);
+  const target = `${cfg.upstream}${path}${query === undefined ? '' : `?${query}`}`;
   const lane = laneAbort(res, opts.timeoutMs);
   let upstream: Response;
   try {
