@@ -56,7 +56,6 @@ import {
   hasHelpFlag,
   LockTimeout,
   loadConfig,
-  pidAlive,
   printUsage,
   type ReviewFacade,
   readAgentRegistry,
@@ -67,19 +66,16 @@ import {
   type TaskStore,
   worktreePathFor,
 } from '@broject/core';
-import { beadForHead, type LoopConfig, loopSection, loopSlug } from '@broject/loop';
+import { type LoopConfig, loopSection, loopSlug } from '@broject/loop';
 import {
   agentOwner,
-  agentProcessesIn,
   claimLockPath,
-  detailMatches,
   hooksDirOf,
   isLinkedGitDir,
   LIVE_MARKER_MS,
   liveWorkDetails,
   ownerTag,
   processesRootedIn,
-  registryEntryHoldsClaim,
   worktreeClaim,
   worktreeClaimInfo,
   worktreeGitDir,
@@ -92,6 +88,12 @@ import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
 import { cleanupTmpDirs, workerTmpRoots } from './tmp-sweep.ts';
 import { recoverGhost } from './work-litter-ghosts.ts';
 import { reapStaleNxDaemons } from './work-litter-nx.ts';
+import {
+  litterBead,
+  litterOccupants,
+  releaseDeadClaim,
+  sessionClaimOn,
+} from './work-litter-owners.ts';
 
 export type { WorktreeClaimInfo } from '@broject/rig';
 // The worktree-claim reads moved to @broject/rig (bro-jamp7) — re-exported
@@ -1339,7 +1341,9 @@ function litterSlug(
   return undefined;
 }
 
-interface LitterCandidate {
+/** Exported for the work-litter-owners.ts sibling — the sweep's own
+ *  modules share the same candidate shape. */
+export interface LitterCandidate {
   /** the live linked worktree the litter branch is checked out in —
    *  undefined for a bare branch */
   w?: WorktreeInfo;
@@ -1354,8 +1358,9 @@ interface LitterCandidate {
 }
 
 /** Everything one candidate's verdict and reap need that is not the
- *  candidate itself — shared state read once for the whole sweep. */
-interface LitterCtx {
+ *  candidate itself — shared state read once for the whole sweep.
+ *  Exported for the work-litter-owners.ts sibling. */
+export interface LitterCtx {
   opts: LitterReapOpts;
   rep: LitterReap;
   main: WorktreeInfo;
@@ -1390,7 +1395,8 @@ interface LitterCtx {
   };
 }
 
-interface PrEvidence {
+/** Exported for the work-litter-owners.ts sibling. */
+export interface PrEvidence {
   /** false when the host lookup threw — the candidate stays, the PR
    *  state is unknowable */
   known: boolean;
@@ -1709,60 +1715,6 @@ function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow
   }
 }
 
-/** Candidate → bead row. Deterministic namespaces (loop/, stack/)
- *  read the exact slug map — a miss means no bead, full stop. Label
- *  namespaces (work//feat//fix//devin/ and detached dir/claim slugs)
- *  carry a human label, not a bead contract: beadForHead — the
- *  fleet-head reconcile's own matcher — is the ONLY rung, because its
- *  '-'-bounded prefix match already covers the tidy `work/<bead-id>`
- *  exact tail AND refuses ambiguity (two bead owners → undefined =
- *  keep). A raw exact-map shortcut would bypass that check: `work/
- *  <slug>` naming bead B while a shorter bead also prefix-matches
- *  would attribute the tree to B and reap a live owner's work. The
- *  second rung is the same matcher on the '<prefix>-<slug>' short
- *  form (`work/imvu3` → `bro-imvu3`), skipped when the slug already
- *  carries the prefix (that shape matched at rung one or names a
- *  doubled-prefix bead the prefix rung can't reach anyway). */
-function litterBead(ctx: LitterCtx, c: LitterCandidate): TaskRow | undefined {
-  if (c.label !== true) {
-    return ctx.bySlug.get(c.slug);
-  }
-  const headRef = c.branch === '' ? `x/${c.slug}` : c.branch;
-  const direct = beadForHead({ pr: 0, headRef }, ctx.bySlug);
-  if (direct !== undefined) {
-    return direct;
-  }
-  const p = ctx.prefix;
-  if (p !== undefined && p !== '' && !c.slug.startsWith(`${p}-`)) {
-    return beadForHead({ pr: 0, headRef: `x/${p}-${c.slug}` }, ctx.bySlug);
-  }
-  return undefined;
-}
-
-/** Live registry occupants pinning a tree — an agent (a respawned drive
- *  fixer, say) working a closed bead's tree still owns it. Undefined
- *  when the registry is unreadable: readAgentRegistry deliberately
- *  re-throws on corruption (a silent {} lets a reaper orphan live
- *  agents' trees — bro-f6zp), so an unknowable occupancy plane is a
- *  keep verdict, not an empty map. */
-function litterOccupants(root: string): Map<string, string> | undefined {
-  const occupied = new Map<string, string>();
-  try {
-    for (const [molStep, e] of Object.entries(readAgentRegistry(root))) {
-      const path = typeof e.worktree === 'string' ? resolve(e.worktree) : undefined;
-      const live =
-        typeof e.pid === 'number' &&
-        pidAlive(e.pid, typeof e.pidStart === 'string' ? e.pidStart : undefined);
-      if (path !== undefined && live) {
-        occupied.set(path, e.agentId || molStep);
-      }
-    }
-    return occupied;
-  } catch {
-    return undefined;
-  }
-}
-
 /** An open PR vetoes outright; a merged one is the land proof AND the
  *  head pin the branch delete compares against. A '' branch (unattributed
  *  detached HEAD) has nothing to ask about — known-clean absence, not a
@@ -1925,195 +1877,6 @@ function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence):
 // open-bead litter. Every plane fails CLOSED (unverifiable = live):
 // releasing a live worker's claim is the worst outcome this code can
 // produce.
-
-/** The claim's live owner, or undefined when every plane is dead. */
-function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  // every plane fails closed — first live (or unverifiable) owner wins
-  return (
-    runRecordOwner(ctx, c, bead) ??
-    registryOwner(ctx, c, bead) ??
-    sessionOwner(ctx, c) ??
-    watchOwner(ctx, c, bead) ??
-    treeProcessOwner(c)
-  );
-}
-
-/** loop run records — collectLoopRuns already judged pid+pidStart;
- *  beadIds covers the whole claimed clump, not just the lead */
-function runRecordOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  for (const v of ctx.claims.runs) {
-    if (
-      v.state === 'running' &&
-      (v.beadId === bead.id || v.beadIds?.includes(bead.id) === true || v.slug === c.slug)
-    ) {
-      return `loop worker pid ${v.pid} live`;
-    }
-  }
-  return undefined;
-}
-
-/** agent registry — an unreadable plane is not a dead worker */
-function registryOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  const { claims } = ctx;
-  if (claims.registry === undefined) {
-    return 'agent registry unreadable';
-  }
-  for (const [molStep, e] of Object.entries(claims.registry)) {
-    const hitsBead = molStep === bead.id;
-    const hitsTree =
-      c.w !== undefined &&
-      typeof e.worktree === 'string' &&
-      resolve(e.worktree) === resolve(c.w.path);
-    if ((hitsBead || hitsTree) && registryEntryHoldsClaim(claims.agentsHome, e)) {
-      return `agent ${e.agentId || molStep} live`;
-    }
-  }
-  return undefined;
-}
-
-/** A live ledger claim naming this candidate — the marker/arm-detail
- *  legs' machine-wide twin (bro-izpyk.10). `worktree:` binds by path
- *  first, then by its recorded detail like a marker line; `branch:`
- *  binds by name/detail the same way. `ids` lets a `.task`-style claim
- *  carry the full bead id (same widening sessionOwner's marker leg
- *  gets). */
-function sessionClaimOn(
-  rows: ClaimRow[],
-  c: LitterCandidate,
-  ids: string[] = []
-): ClaimRow | undefined {
-  return rows.find(row => {
-    const r = row.resource;
-    if (r.startsWith('worktree:')) {
-      const path = r.slice('worktree:'.length);
-      if (c.w !== undefined && resolve(path) === resolve(c.w.path)) {
-        return true;
-      }
-      const probe = row.detail || basename(path);
-      return (
-        detailMatches(probe, { branch: c.branch, slug: c.slug, worktree: c.w?.path }) ||
-        ids.includes(probe)
-      );
-    }
-    if (r.startsWith('branch:')) {
-      return detailMatches(row.detail || r.slice('branch:'.length), {
-        branch: c.branch,
-        slug: c.slug,
-        worktree: c.w?.path,
-      });
-    }
-    return false;
-  });
-}
-
-/** session markers — `bd --claim` arms .task, `bro work enter` arms .work */
-function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
-  // a .task marker carries the full bead id (`bd update <bead> --claim`)
-  // — branch/slug/worktree matching alone misses it for short label
-  // slugs (`work/imvu3` → `bro-imvu3`), so the resolved row's ids join
-  // the match set
-  const bead = litterBead(ctx, c);
-  const ids = bead === undefined ? [] : [bead.id, loopSlug(bead.id)];
-  const detail = ctx.claims.sessionDetails.find(
-    d =>
-      detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path }) || ids.includes(d)
-  );
-  if (detail !== undefined) {
-    return `session armed ${detail}`;
-  }
-  // ledger claims — the marker leg's cross-session twin (bro-izpyk.10):
-  // a live `worktree:`/`branch:` lease naming this candidate is the
-  // same keep-reason, machine-wide
-  const claim = sessionClaimOn(ctx.claims.sessionClaims, c, ids);
-  return claim === undefined
-    ? undefined
-    : `session ${claim.sid.slice(0, 8)} claims ${claim.resource}`;
-}
-
-/** live watch markers — a landed member's claim rides its act wait
- *  (bro-q6ppv): the loop services the gate stack past the worker's exit */
-function watchOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  for (const l of ctx.claims.watches) {
-    if (!l.alive) {
-      continue;
-    }
-    // a clump's whole id list rides the marker comma-joined (bro-q6ppv)
-    const hitsBead = l.watch.bead?.split(',').includes(bead.id) === true;
-    const hitsTree =
-      c.w !== undefined &&
-      typeof l.watch.workdir === 'string' &&
-      resolve(l.watch.workdir) === resolve(c.w.path);
-    if (hitsBead || hitsTree) {
-      return `watch on ${l.watch.link} live`;
-    }
-  }
-  return undefined;
-}
-
-/** a live agent-shaped process inside the tree — covers a worker that
- *  never registered (spawn crashed after fork, record write lost) */
-function treeProcessOwner(c: LitterCandidate): string | undefined {
-  if (c.w === undefined) {
-    return undefined;
-  }
-  const hit = agentProcessesIn(c.w.path)[0];
-  return hit === undefined ? undefined : `process ${hit.pid} live in tree`;
-}
-
-/** Release an orphaned claim — every plane dead. Runs the final
- *  liveness re-check and the note+reopen inside the shared registry
- *  lock: a respawn's claim→register writes under the same lock, so a
- *  worker landing during our wait either shows up in the re-read or
- *  claims after we've released (the reopened bead is then its target —
- *  correct). Returns the keep reason when the claim survives,
- *  undefined when it was released (or would be, under dry-run). */
-function releaseDeadClaim(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  const { opts, rep } = ctx;
-  const pre = claimOwner(ctx, c, bead);
-  if (pre !== undefined) {
-    return pre;
-  }
-  let release: () => void;
-  try {
-    release = acquireAgentRegistryLock(ctx.main.path);
-  } catch {
-    return 'occupancy lock contended';
-  }
-  try {
-    // re-read under the lock — the snapshot predates the wait, and a
-    // respawn's registry write lands inside this same section
-    let registry: Record<string, AgentRegistryEntry> | undefined;
-    try {
-      registry = readAgentRegistry(opts.root);
-    } catch {
-      registry = undefined;
-    }
-    const owner = claimOwner({ ...ctx, claims: { ...ctx.claims, registry } }, c, bead);
-    if (owner !== undefined) {
-      return owner;
-    }
-    if (opts.dryRun !== true) {
-      try {
-        opts.tasks.note(
-          bead.id,
-          'bro work prune --loop: released orphaned claim — every worker-liveness plane is dead (bro-ho09d)'
-        );
-        opts.tasks.reopen(bead.id);
-      } catch (err) {
-        rep.errors.push(
-          `claim release for ${bead.id} failed — ${err instanceof Error ? err.message : err}`
-        );
-        return 'claim release failed';
-      }
-    }
-    // the snapshot row drives the rest of the sweep's verdicts
-    bead.status = 'open';
-    rep.released.push(`${bead.id} (no live worker)`);
-    return undefined;
-  } finally {
-    release();
-  }
-}
 
 /** One candidate: claim liveness first (an in_progress bead with a dead
  *  worker is an orphan — released, then judged as open-bead litter),
