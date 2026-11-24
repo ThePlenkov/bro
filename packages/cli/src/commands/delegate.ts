@@ -183,6 +183,25 @@ function checkModeFields(req: DelegateRequest): void {
   }
 }
 
+function selectDelegate(env: AgentConnectorEnv, req: DelegateRequest): DelegateSel {
+  return {
+    req,
+    routed: routedLane(env, req),
+    delegatedBy: req.delegatedBy ?? (process.env.BRO_AGENT_ID?.trim() || undefined),
+  };
+}
+
+function runDelegate(
+  dir: string,
+  env: AgentConnectorEnv,
+  sel: DelegateSel,
+  opts: DelegateOpts
+): Promise<DelegateResult> {
+  return (sel.req.mode ?? 'wait') === 'wait'
+    ? delegateWait(dir, env, sel, opts)
+    : delegateDetach(dir, env, sel, opts);
+}
+
 /** The delegate contract — both CLI and the agents plane's
  *  exec('delegate') run it. Throws SpawnInputError on bad input,
  *  SpawnError on refusal/config/availability — plus the provider
@@ -196,12 +215,5 @@ export async function delegate(
   opts: DelegateOpts = {}
 ): Promise<DelegateResult> {
   checkModeFields(req);
-  const sel: DelegateSel = {
-    req,
-    routed: routedLane(env, req),
-    delegatedBy: req.delegatedBy ?? (process.env.BRO_AGENT_ID?.trim() || undefined),
-  };
-  return (req.mode ?? 'wait') === 'wait'
-    ? delegateWait(dir, env, sel, opts)
-    : delegateDetach(dir, env, sel, opts);
+  return runDelegate(dir, env, selectDelegate(env, req), opts);
 }
