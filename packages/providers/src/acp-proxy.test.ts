@@ -1121,6 +1121,44 @@ describe('acpProxy — tool_call guards + turn-end stop gate (bro-u2eps)', () =>
     }
   });
 
+  test('a broken stop probe warns once per session outage and reports recovery', async () => {
+    const logs: string[] = [];
+    let healthy = false;
+    const r = rig(
+      { replyText: 'ok' },
+      {
+        stopGate: async () => {
+          if (!healthy) {
+            throw new Error('bwrap probe timed out');
+          }
+          return undefined;
+        },
+      },
+      line => logs.push(line)
+    );
+    try {
+      await openSession(r.acp);
+      await r.acp.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'one' }],
+      });
+      await r.acp.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'two' }],
+      });
+      assert.equal(logs.filter(line => line.includes('stop gate probe unavailable')).length, 1);
+
+      healthy = true;
+      await r.acp.request('session/prompt', {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'three' }],
+      });
+      assert.equal(logs.filter(line => line.includes('stop gate probe recovered')).length, 1);
+    } finally {
+      assert.equal(await close(r), 0);
+    }
+  });
+
   test('a throwing toolCall seam never breaks the wire — the update still crosses', async () => {
     const logs: string[] = [];
     const fake = fakeAcpAgent({ replyText: 'ok', updates: [...TOOL_CALL_UPDATES] });

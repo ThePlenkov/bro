@@ -381,6 +381,56 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : und
  *  (null, a bare string, a non-Error object); reading `e.message`
  *  inside the catch throws a second error on a nullish reject. */
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+/** A broken stop probe must be visible, but a long-lived session must not
+ * turn every prompt into a warning. This is deliberately process-local:
+ * diagnostics are best effort and must never add a persistence failure path
+ * to the fail-open gate. */
+const STOP_GATE_DIAG_INTERVAL_MS = 15 * 60_000;
+interface StopGateProbeContext {
+  gate: NonNullable<AcpProxySeam['stopGate']>;
+  cwd: string;
+  sessionId: string;
+  outages: Map<string, number>;
+  log: (line: string) => void;
+}
+
+const runStopGateProbe = async ({
+  gate,
+  cwd,
+  sessionId,
+  outages,
+  log,
+}: StopGateProbeContext): Promise<{ block?: string; hints?: string[] } | undefined> => {
+  try {
+    const outcome = await gate(cwd, sessionId);
+    const prefix = `${sessionId}\u0000`;
+    const active = [...outages.keys()].filter(key => key.startsWith(prefix));
+    for (const outage of active) {
+      outages.delete(outage);
+    }
+    if (active.length > 0) {
+      log(`acp proxy: stop gate probe recovered (session ${sessionId})`);
+    }
+    return outcome;
+  } catch (e) {
+    const cause = errText(e);
+    const failureClass = /timeout|timed out/i.test(cause)
+      ? 'timeout'
+      : /not found|enoent|cannot exec|spawn/i.test(cause)
+        ? 'spawn'
+        : 'probe-error';
+    const key = `${sessionId}\u0000${failureClass}`;
+    const now = Date.now();
+    const last = outages.get(key);
+    if (last === undefined || now - last >= STOP_GATE_DIAG_INTERVAL_MS) {
+      outages.set(key, now);
+      log(
+        `acp proxy: stop gate probe unavailable (session ${sessionId}; ${cause}) — the stop is unguarded`
+      );
+    }
+    return undefined;
+  }
+};
 
 const paramsOf = (m: AnyMessage): Record<string, unknown> | undefined => {
   const p = wire(m).params;
@@ -2173,6 +2223,7 @@ export async function acpProxy(
    *    the answer. The gate turn's own end-of-turn is never gated —
    *    "gates, not loops": a repeated stop lets through, the same
    *    rule as the hook Stop gate's stop_hook_active. */
+  const stopProbeOutages = new Map<string, number>();
   const evalStopGate = (clientId: JsonRpcId, ses: ProxySession, sessionId: string): void => {
     const gate = opts.seam?.stopGate;
     const cwd = ses.cwd;
@@ -2183,12 +2234,13 @@ export async function acpProxy(
       if (!pending.has(clientId) || downDead.fired) {
         return;
       }
-      let outcome: { block?: string; hints?: string[] } | undefined;
-      try {
-        outcome = await gate(cwd, sessionId);
-      } catch (e) {
-        log(`acp proxy: stop gate eval failed (session ${sessionId}) — ${errText(e)}`);
-      }
+      const outcome = await runStopGateProbe({
+        gate,
+        cwd,
+        sessionId,
+        outages: stopProbeOutages,
+        log,
+      });
       // a cancel raced the eval — its 'cancelled' already landed
       if (!pending.has(clientId) || downDead.fired) {
         return;
