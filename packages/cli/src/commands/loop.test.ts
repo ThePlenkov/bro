@@ -88,6 +88,17 @@ describe('resolveLoopLane', () => {
     assert.deepEqual(lane, {});
   });
 
+  test('provider lane remains valid without optional route or matrix picks', async () => {
+    const lane = await resolveLoopLane(
+      laneEnv({ fakecli: { type: 'cli', command: 'fake run {promptFile}', model: 'm-1' } }),
+      { provider: 'fakecli' },
+      laneCfg()
+    );
+    assert.equal(lane.provider, 'fakecli');
+    assert.equal(lane.route, undefined);
+    assert.equal(lane.matrix, undefined);
+  });
+
   test('loop.provider config resolves a cli provider to its command template', async () => {
     const lane = await resolveLoopLane(
       laneEnv({ fakecli: { type: 'cli', command: 'fake run {promptFile}', model: 'm-1' } }),
