@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { git, initRepo, inside, runCli } from './testrepo.ts';
+import { e2eRepo, git, initRepo, inside, readBeads, runCli } from './testrepo.ts';
 
 const SARIF = (results: unknown[]): string =>
   JSON.stringify({ runs: [{ tool: { driver: { name: 'eslint' } }, results }] });
@@ -77,6 +77,26 @@ describe('bro debt import e2e', () => {
       assert.equal(new Set(rows.map(r => r.thread_id)).size, 1);
       assert.match(rows[0]!.thread_id, /^sverka:a%2Fb:eslint:no-unused-vars:findings\.sarif:fp-1$/);
     });
+  });
+
+  test('two imports project one bead by external_ref', () => {
+    const { main, db, env } = e2eRepo('bro-debt-import-beads-');
+    mkdirSync(join(main, '.beads'));
+    writeFileSync(
+      join(main, 'findings.sarif'),
+      SARIF([RES('no-unused-vars', 'x is unused', 'src/a.ts', 'bead-fp')])
+    );
+    for (let i = 0; i < 2; i += 1) {
+      const r = runCli(['debt', 'import', 'findings.sarif', '--repo', 'a/b'], {
+        cwd: main,
+        env,
+      });
+      assert.equal(r.code, 0, r.stderr);
+    }
+    const id = 'sverka:a%2Fb:eslint:no-unused-vars:findings.sarif:bead-fp';
+    const beads = readBeads(db).filter(row => row.external_ref === id);
+    assert.equal(beads.length, 1);
+    assert.deepEqual(beads[0]?.external_ref, id);
   });
 
   test('a declared fingerprint survives a re-run with reworded message', () => {
