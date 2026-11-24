@@ -166,8 +166,19 @@ export interface DriveArgs {
   connector?: string;
 }
 
-function everyToken(argv: string[]): string | undefined {
-  const every = argv.filter(a => a === '--every' || a.startsWith('--every='));
+interface EveryToken {
+  raw: string;
+  inline: boolean;
+  value?: string;
+}
+
+function everyToken(argv: string[]): EveryToken | undefined {
+  const every = argv
+    .filter(a => /^--every(?:=|$)/.test(a))
+    .map(raw => {
+      const inline = raw.startsWith('--every=');
+      return { raw, inline, value: inline ? raw.slice('--every='.length) : undefined };
+    });
   if (every.length > 1) {
     console.error('error: --every may be given only once');
     process.exit(2);
@@ -175,12 +186,12 @@ function everyToken(argv: string[]): string | undefined {
   return every[0];
 }
 
-function everyValue(argv: string[], token: string): string | undefined {
-  if (token !== '--every') {
-    return token.slice('--every='.length);
+function everyValue(argv: string[], token: EveryToken): string | undefined {
+  if (token.inline) {
+    return token.value;
   }
-  const next = argv[argv.indexOf(token) + 1];
-  return next !== undefined && next.trim() !== '' && !next.startsWith('--') ? next : undefined;
+  const next = argv[argv.indexOf(token.raw) + 1];
+  return next !== undefined && !next.startsWith('--') ? next : undefined;
 }
 
 function everyArgument(argv: string[], defaultEverySec: number): number | undefined {
@@ -189,7 +200,7 @@ function everyArgument(argv: string[], defaultEverySec: number): number | undefi
     return undefined;
   }
   const everyRaw = everyValue(argv, token);
-  if (everyRaw === '') {
+  if (everyRaw !== undefined && everyRaw.trim() === '') {
     console.error('error: --every requires a value');
     process.exit(2);
   }
