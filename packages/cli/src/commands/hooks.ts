@@ -2829,7 +2829,7 @@ function emitPreToolDeny(reason: string): void {
 async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const deadLoopBlock = deadLoopPreTool(process.cwd(), sessionId, input);
-  if (deadLoopBlock !== undefined) {
+  if (deadLoopBlock !== null) {
     emitPreToolDeny(deadLoopBlock);
     return;
   }

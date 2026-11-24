@@ -60,11 +60,16 @@ const LINEAGE_EVENTS = [
 /** Assert the surfaces every adapter registers, and the lifecycle
  *  events the lineage shares. The stop gate is the host's own — it is
  *  the one event whose name differs, so it is asserted separately. */
-function assertLineageSurfaces(events: string[], commands: string[], tools: string[]): void {
+function assertLineageSurfaces(
+  events: string[],
+  commands: string[],
+  tools: string[],
+  expectedCommands: string[]
+): void {
   for (const event of LINEAGE_EVENTS) {
     assert.ok(events.includes(event), `the adapter does not register ${event}`);
   }
-  assert.deepEqual(commands, ['bro']);
+  assert.deepEqual(commands, expectedCommands);
   assert.deepEqual(tools, ['bro_status']);
 }
 
@@ -73,7 +78,17 @@ test('the pi adapter loads, registers its surfaces, and speaks pi events', async
   const { pi, events, commands, tools } = hostStub();
   mod.default(pi);
 
-  assertLineageSurfaces(events, commands, tools);
+  assertLineageSurfaces(events, commands, tools, [
+    'bro',
+    'act',
+    'wtf',
+    'retro',
+    'learn',
+    'drill',
+    'judge',
+    'loop',
+    'goal',
+  ]);
 
   // pi's lifecycle vocabulary — the settle gate is pi's own
   assert.ok(events.includes('agent_before_settle'));
@@ -88,7 +103,17 @@ test('the omp adapter loads, registers its surfaces, and speaks omp events', asy
   const { pi, events, commands, tools } = hostStub();
   mod.default(pi);
 
-  assertLineageSurfaces(events, commands, tools);
+  assertLineageSurfaces(events, commands, tools, [
+    'bro',
+    'act',
+    'wtf',
+    'retro',
+    'learn',
+    'drill',
+    'judge',
+    'bro:loop',
+    'bro:goal',
+  ]);
 
   // omp's own vocabulary — the native stop gate is session_stop
   assert.ok(events.includes('session_stop'));
