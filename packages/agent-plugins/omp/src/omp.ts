@@ -105,6 +105,15 @@ export default function broExtension(pi: OmpApi): void {
    *  rather than a second implementation of each mode. */
   installModeBridges(pi, {
     board: () => driver.board as BoardSnapshot | null,
+    async modeContext(kind, cwd) {
+      const args = kind === 'prewalk' ? ['fleet', 'status', '--json'] : ['debt', 'next', '--json'];
+      const result = await driver.run(args, cwd);
+      if (result.code !== 0 || result.stdout.trim() === '') {
+        return null;
+      }
+      const label = kind === 'prewalk' ? 'provider routing' : 'review debt';
+      return `bro ${label} (read-only):\n${result.stdout.trim()}`;
+    },
   });
 }
 

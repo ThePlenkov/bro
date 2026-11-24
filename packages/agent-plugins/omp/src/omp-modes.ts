@@ -69,6 +69,8 @@ export interface BoardSnapshot {
 export interface ModeBridgeSource {
   /** The last board snapshot, or null when bro is not installed. */
   board(): BoardSnapshot | null;
+  /** Read-only mode context, using the host's real prompt-submit seam. */
+  modeContext?(kind: 'prewalk' | 'advisor', cwd: string): Promise<string | null>;
 }
 
 /**
@@ -160,6 +162,40 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
     const ids = running.map(a => a.id ?? '?');
     return {
       additionalContext: `bro: ${running.length} worker(s) already running (${ids.join(', ')}) — claim a bead before editing, so two workers never touch one unit of work.`,
+    };
+  });
+
+  /**
+   * Prewalk and Advisor do not expose separate omp extension events. Their
+   * real shared seam is prompt submission: return a hidden context message
+   * there rather than inventing model-handoff/advisor event names.
+   */
+  pi.on('before_agent_start', async (_event: unknown, ctx) => {
+    if (source.modeContext === undefined) {
+      return undefined;
+    }
+    let results: Array<string | null>;
+    try {
+      results = await Promise.all([
+        source.modeContext('prewalk', ctx.cwd),
+        source.modeContext('advisor', ctx.cwd),
+      ]);
+    } catch {
+      return undefined;
+    }
+    const [routing, debt] = results;
+    const parts = [routing, debt].filter(
+      (part): part is string => part !== null && part.trim() !== ''
+    );
+    if (parts.length === 0) {
+      return undefined;
+    }
+    return {
+      message: {
+        customType: 'bro-mode-context',
+        content: parts.join('\n\n'),
+        display: false,
+      },
     };
   });
 }
