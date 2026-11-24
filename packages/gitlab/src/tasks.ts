@@ -558,6 +558,17 @@ function claimOpenIssue(
     );
   }
   ensureLabel(dir, ref.projectPath, CLAIMED_LABEL);
+  assignClaim(dir, id, ref, me, assignees, labels);
+}
+
+function assignClaim(
+  dir: string,
+  id: string,
+  ref: { projectPath: string; iid: number },
+  me: string,
+  assignees: string[],
+  labels: string[]
+): void {
   // add assignee - need assignee_id; try to find user
   try {
     const myId = userIdOf(dir, me);
