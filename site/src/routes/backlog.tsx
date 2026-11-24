@@ -19,7 +19,6 @@ const DOCS = `${BASE_URL}docs`;
 // come live from the REST API in the same request wave.
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
 const BRANCH_REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/heads/bro-data';
-const BRANCH = 'bro-data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
 const SNAPSHOT_KEY = 'bro:backlog:snapshot:v2';
@@ -1092,11 +1091,13 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
   const byId = useMemo(() => new Map(beads.map(b => [b.id, b])), [beads]);
   // children are derivable from the parent column — no extra export field
   const childIds = useMemo(() => {
-    const m = new Map<string, string[]>();
-    beads
-      .filter(b => Boolean(b.parent))
-      .forEach(b => (m.get(b.parent!) ?? m.set(b.parent!, []).get(b.parent!)!).push(b.id));
-    return m;
+    return beads
+      .filter((b): b is Bead & { parent: string } => Boolean(b.parent))
+      .reduce(
+        (children, bead) =>
+          children.set(bead.parent, [...(children.get(bead.parent) ?? []), bead.id]),
+        new Map<string, string[]>()
+      );
   }, [beads]);
   const available = useMemo(() => new Set(beads.map(b => b.id)), [beads]);
   const pick = (id: string) => {
