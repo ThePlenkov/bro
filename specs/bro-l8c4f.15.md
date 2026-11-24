@@ -42,9 +42,13 @@ remained against the bead contract:
 ## Contract
 
 - **`bro debt import <file.sarif>…`** — explicit import of a completed
-  run/artifact. Positionals are SARIF files anywhere on disk. Repo for
-  identity resolves `--repo OWNER/REPO` → git `origin` remote →
-  `gh repo view`; all three failing is a loud error naming `--repo`.
+  run/artifact. Positionals are SARIF files inside the checkout —
+  resolved against the git toplevel (root-relative from any cwd), with
+  canonical containment enforced so a symlinked dir inside the repo
+  cannot smuggle an outside file in; an escaping positional is a usage
+  error. Repo for identity resolves `--repo OWNER/REPO` → git `origin`
+  remote → `gh repo view`; all three failing is a loud error naming
+  `--repo`.
 - **Identity** — `thread_id` =
   `sverka:enc(repo):enc(tool):enc(ruleId):enc(artifact):enc(fp)`
   where `artifact` is the SARIF path normalized checkout-relative (inside

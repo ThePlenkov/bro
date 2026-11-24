@@ -5,7 +5,14 @@
  *  the assertion targets. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { git, initRepo, inside, runCli } from './testrepo.ts';
 
@@ -159,6 +166,89 @@ describe('bro debt import e2e', () => {
       assert.equal(r.code, 2);
       assert.match(r.stderr, /outside the repo root/);
       assert.equal(harvestRows(main).length, 0);
+    });
+  });
+
+  test('a positional resolves repo-root-relative from a subdirectory cwd', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      writeFileSync(join(main, 'f.sarif'), SARIF([RES('r1', 'm', 'f.ts', 'fp-sub')]));
+      const sub = join(main, 'sub', 'dir');
+      mkdirSync(sub, { recursive: true });
+      // 'f.sarif' names <root>/f.sarif no matter where the command ran —
+      // a cwd-relative read would miss (no f.sarif under sub/) or
+      // attribute a different file. The ledger itself is cwd-scoped,
+      // so the row lands in the subdir's store.
+      const r = runCli(['debt', 'import', 'f.sarif', '--repo', 'a/b'], { cwd: sub });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(harvestRows(sub)[0]!.thread_id, /^sverka:a%2Fb:eslint:r1:f\.sarif:fp-sub$/);
+    });
+  });
+
+  test('a symlinked dir inside the repo cannot import outside files', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      // linkdir sits inside the checkout but points outside it — the
+      // lexical check passes, only canonical containment catches this
+      const outside = join(root, 'outside');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'x.sarif'), SARIF([RES('r1', 'm', 'f.ts')]));
+      symlinkSync(outside, join(main, 'linkdir'));
+      const r = runCli(['debt', 'import', 'linkdir/x.sarif', '--repo', 'a/b'], { cwd: main });
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /outside the repo root/);
+      assert.equal(harvestRows(main).length, 0);
+    });
+  });
+
+  test('a symlink staying inside the repo still imports', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      mkdirSync(join(main, 'real'), { recursive: true });
+      writeFileSync(join(main, 'real', 'x.sarif'), SARIF([RES('r1', 'm', 'f.ts', 'fp-l')]));
+      symlinkSync(join(main, 'real'), join(main, 'link'));
+      const r = runCli(['debt', 'import', 'link/x.sarif', '--repo', 'a/b'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      // canonical paths gate containment only — the artifact key keeps
+      // the lexical spelling the scan side derives keys from
+      assert.match(
+        harvestRows(main)[0]!.thread_id,
+        /^sverka:a%2Fb:eslint:r1:link%2Fx\.sarif:fp-l$/
+      );
+    });
+  });
+
+  test('a re-reported finding reopens its resolved row', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      writeFileSync(join(main, 'f.sarif'), SARIF([RES('r1', 'm', 'f.ts', 'fp-rr')]));
+      assert.equal(runCli(['debt', 'import', 'f.sarif', '--repo', 'a/b'], { cwd: main }).code, 0);
+      // a complete snapshot without the finding resolves it
+      writeFileSync(join(main, 'f.sarif'), SARIF([]));
+      assert.equal(runCli(['debt', 'import', 'f.sarif', '--repo', 'a/b'], { cwd: main }).code, 0);
+      assert.match(runCli(['debt', 'list', '--status', 'done'], { cwd: main }).stdout, /r1/);
+      // the finding comes back — the stale done overlay must not shadow
+      // the fresh row forever
+      writeFileSync(join(main, 'f.sarif'), SARIF([RES('r1', 'm', 'f.ts', 'fp-rr')]));
+      assert.equal(runCli(['debt', 'import', 'f.sarif', '--repo', 'a/b'], { cwd: main }).code, 0);
+      assert.match(runCli(['debt', 'list'], { cwd: main }).stdout, /r1/);
+      assert.doesNotMatch(runCli(['debt', 'list', '--status', 'done'], { cwd: main }).stdout, /r1/);
+    });
+  });
+
+  test('--dry-run names the thread_ids it would resolve', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      writeFileSync(join(main, 'f.sarif'), SARIF([RES('r1', 'm', 'f.ts', 'fp-dr')]));
+      assert.equal(runCli(['debt', 'import', 'f.sarif', '--repo', 'a/b'], { cwd: main }).code, 0);
+      const id = harvestRows(main)[0]!.thread_id;
+      writeFileSync(join(main, 'f.sarif'), SARIF([]));
+      const r = runCli(['debt', 'import', '--dry-run', 'f.sarif', '--repo', 'a/b'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /would resolve 1 row\(s\)/);
+      assert.ok(r.stdout.includes(id), `stdout should name ${id}`);
+      // and still writes nothing — the row stays open
+      assert.doesNotMatch(runCli(['debt', 'list', '--status', 'done'], { cwd: main }).stdout, /r1/);
     });
   });
 

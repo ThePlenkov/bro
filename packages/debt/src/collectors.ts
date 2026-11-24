@@ -600,19 +600,28 @@ export function sverkaArtifactOf(row: DebtRecord): string | undefined {
   }
 }
 
-/** Scan-scope membership by artifact path: inside a tracked dir or the
- *  well-known findings file — by PATH, not existence, so a deleted
- *  artifact's rows still resolve on the next complete sweep. Provenance
+/** Scan-scope membership by artifact path: a direct `.sarif` child of
+ *  a tracked dir or the well-known findings file — by PATH, not
+ *  existence, so a deleted artifact's rows still resolve on the next
+ *  complete sweep. The dir reader is non-recursive and `*.sarif`-only:
+ *  a nested or non-.sarif path under a tracked prefix can never be
+ *  re-read, so admitting it would resolve live rows as gone. Provenance
  *  that can't be named is assumed scan-born: the dir-scan was the only
  *  producer before `debt import` existed. */
 export function sverkaArtifactInScanScope(artifact: string | undefined): boolean {
   if (artifact === undefined) {
     return true;
   }
-  return (
-    SVERKA_SCAN_FILE_SET.has(artifact) ||
-    SVERKA_SCAN_DIR_PREFIXES.some(prefix => artifact.startsWith(prefix))
-  );
+  if (SVERKA_SCAN_FILE_SET.has(artifact)) {
+    return true;
+  }
+  return SVERKA_SCAN_DIR_PREFIXES.some(prefix => {
+    if (!artifact.startsWith(prefix)) {
+      return false;
+    }
+    const rest = artifact.slice(prefix.length);
+    return !rest.includes('/') && rest.endsWith('.sarif');
+  });
 }
 
 /** Resolve-scope predicate for the dir-scan: rows whose artifacts live

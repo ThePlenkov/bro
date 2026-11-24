@@ -612,6 +612,21 @@ describe('sverka resolve scopes', () => {
     assert.equal(inScope(row('sverka:3')), true);
   });
 
+  test('scan scope admits only the direct .sarif children the scanner reads', () => {
+    const inScope = sverkaScanScope();
+    // sarifFilesIn is non-recursive and *.sarif-only — an explicitly
+    // imported artifact under a tracked prefix that it cannot re-read
+    // must stay out, or the next sweep resolves live rows as gone
+    assert.equal(inScope(row('x', '.sverka/artifacts/nested/a.sarif')), false);
+    assert.equal(inScope(row('x', '.sverka/sarif/deep/b.sarif')), false);
+    assert.equal(inScope(row('x', '.sverka/artifacts/report.json')), false);
+    assert.equal(inScope(row('x', '.sverka/artifacts/notes.txt')), false);
+    // direct .sarif children keep the by-PATH contract, deleted included
+    assert.equal(inScope(row('x', '.sverka/artifacts/a.sarif')), true);
+    assert.equal(inScope(row('x', '.sverka/artifacts/gone.sarif')), true);
+    assert.equal(inScope(row('x', '.sverka/findings.sarif')), true);
+  });
+
   test('file scope is exactly the imported artifacts — other rows untouched', () => {
     const inScope = sverkaFileScope(['a.sarif', 'b.sarif']);
     assert.equal(inScope(row('x', 'a.sarif')), true);

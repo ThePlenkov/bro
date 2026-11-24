@@ -8,7 +8,7 @@
  *   mark PR collected|clean|skipped|none
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   dataRefCommit,
@@ -1444,18 +1444,13 @@ function resolveImportRepo(flag: string | undefined, root: string): string {
 
 /** Positional must be a readable file — a directory is a usage error
  *  pointing at the dir-scan; an unreadable path is a hard failure.
- *  The resolved path must stay inside the repo root — an escaping
- *  positional would import arbitrary file contents into the ledger. */
+ *  The canonical path must stay inside the canonical repo root — a
+ *  lexical check alone is symlink-blind, and an escaping positional
+ *  would import arbitrary file contents into the ledger. */
 function assertImportableFile(root: string, f: string): void {
-  const abs = resolve(root, f);
-  const rel = relative(root, abs);
-  if (rel.startsWith('..') || isAbsolute(rel)) {
-    console.error(`error: ${f} resolves outside the repo root`);
-    process.exit(2);
-  }
   let st: ReturnType<typeof statSync>;
   try {
-    st = statSync(abs);
+    st = statSync(f);
   } catch (err) {
     console.error(`error: cannot read ${f} — ${err instanceof Error ? err.message : err}`);
     process.exit(1);
@@ -1464,6 +1459,11 @@ function assertImportableFile(root: string, f: string): void {
     console.error(
       `error: ${f} is not a file — the .sverka dir sweep is \`bro debt collect --source sverka\``
     );
+    process.exit(2);
+  }
+  const rel = relative(realpathSync(root), realpathSync(f));
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    console.error(`error: ${f} resolves outside the repo root`);
     process.exit(2);
   }
 }
@@ -1545,6 +1545,7 @@ function writeImport(ctx: CollectCtx, records: DebtRecord[], gone: string[]): vo
       harvestedAt: ctx.harvestedAt,
       records,
     });
+    reopenTerminalRows(records);
   }
   if (gone.length === 0) {
     return;
@@ -1575,16 +1576,27 @@ function cmdImport(argv: string[]): void {
     harvestedAt: new Date().toISOString(),
     dir: root,
   };
-  args.files.forEach(f => assertImportableFile(root, f));
-  const records = readImportRecords(ctx, root, args.files);
-  const artifacts = [...new Set(args.files.map(f => sarifArtifactPath(root, f)))];
+  // Positionals resolve against the checkout top once — the spawn cwd
+  // may be a repo subdirectory, and validation, reading, and artifact
+  // keys must all see the same (root-relative) file.
+  const files = args.files.map(f => resolve(root, f));
+  for (const f of files) {
+    assertImportableFile(root, f);
+  }
+  const records = readImportRecords(ctx, root, files);
+  const artifacts = [...new Set(files.map(f => sarifArtifactPath(root, f)))];
   const gone = resolvedThreadIds(readDebtRecords(), 'sverka', records, sverkaFileScope(artifacts));
   console.error(
     `debt: sverka — ${records.length} finding(s) from ${artifacts.length} artifact(s)` +
       (args.dryRun ? ` — would resolve ${gone.length} row(s)` : '')
   );
   if (args.dryRun) {
-    records.forEach(row => console.log(JSON.stringify(row)));
+    for (const row of records) {
+      console.log(JSON.stringify(row));
+    }
+    for (const id of gone) {
+      console.log(id);
+    }
     return;
   }
   writeImport(ctx, records, gone);
