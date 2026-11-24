@@ -107,10 +107,10 @@ function settleRmSessions(
         stdio: 'ignore',
       });
       child.unref();
+      settled.push(sessionId);
     } catch {
       // advisory — a failed settle never blocks
     }
-    settled.push(sessionId);
   }
 }
 
