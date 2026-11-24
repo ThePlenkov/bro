@@ -141,7 +141,7 @@ async function readSnapshot(sha: string): Promise<Snapshot> {
   return snapshot as Snapshot;
 }
 
-async function readBranchSnapshot(): Promise<Snapshot | null> {
+async function readBranchSnapshot(): Promise<{ snapshot: Snapshot; sha: string } | null> {
   try {
     const [branchRes, refRes] = await Promise.all([
       fetch(BRANCH_REF_API, { signal: AbortSignal.timeout(15_000) }),
@@ -152,7 +152,7 @@ async function readBranchSnapshot(): Promise<Snapshot | null> {
     const ref = (await refRes.json()) as { object?: { sha?: string } };
     const branchSha = branch.object?.sha;
     if (!branchSha || branchSha !== ref.object?.sha) return null;
-    return await readSnapshot(branchSha);
+    return { snapshot: await readSnapshot(branchSha), sha: branchSha };
   } catch {
     return null;
   }
@@ -201,15 +201,9 @@ async function fetchGh(): Promise<GhItem[]> {
 
 async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
   const branchSnapshot = await readBranchSnapshot();
-  if (branchSnapshot) return { snapshot: branchSnapshot, sha: BRANCH };
+  if (branchSnapshot) return branchSnapshot;
 
-  let sha: string;
-  try {
-    sha = await resolveSha();
-  } catch {
-    // The branch mirror remains available when ref resolution is rate-limited.
-    sha = BRANCH;
-  }
+  const sha = await resolveSha();
   return { snapshot: await readSnapshot(sha), sha };
 }
 
