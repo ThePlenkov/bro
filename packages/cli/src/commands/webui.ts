@@ -516,38 +516,73 @@ function renderGates(gates) {
   list(document.getElementById('gatewarn'), warns, 'warn');
 }
 
+// the tick summary's two probe segments — each returns one { text,
+// muted, warn } so renderTicks stays a flat join; muted is the
+// no-heartbeat tone, warn raises the line's class
+function heartbeatPart(hb) {
+  if (hb === null || hb === undefined) {
+    return { text: 'no heartbeat — no watch has ticked here', muted: true };
+  }
+  var htail = hb.attention === 0 ? 'quiet' : hb.attention + ' attention';
+  if (hb.futureMs !== undefined) {
+    return { text: 'last tick stamped ' + age(hb.futureMs) + ' in the future — writer or reader clock skew — ' + htail, warn: true };
+  }
+  if (hb.writerSkewed) {
+    return { text: 'last tick ' + age(hb.ageMs) + ' ago — writer clock skew — ' + htail, warn: true };
+  }
+  return { text: 'last tick ' + age(hb.ageMs) + ' ago — ' + htail, warn: hb.ageMs > 30 * 60 * 1000 };
+}
+
+function drivePart(d) {
+  if (d.pid === null || d.pid === undefined) {
+    return { text: 'drive: no supervisor' };
+  }
+  if (d.alive) {
+    return { text: 'drive: alive · pid ' + d.pid + (d.ageMs === undefined ? '' : ' · lock ' + age(d.ageMs)) };
+  }
+  return { text: 'drive: dead — stale lock pid ' + d.pid + (d.ageMs === undefined ? '' : ' · ' + age(d.ageMs) + ' old'), warn: true };
+}
+
+function watchState(w) {
+  if (w.verdict) {
+    return { state: w.verdict + (w.blockers && w.blockers.length ? ' — ' + w.blockers.join('; ') : ''), cls: 'warn' };
+  }
+  if (w.alive) {
+    return { state: 'armed' };
+  }
+  return { state: 'stale' + (w.reported ? ' (reported)' : ''), cls: 'bad' };
+}
+
+// one armed-watch row — the verdict state colors the row, the rest is
+// muted facts
+function watchRow(w) {
+  var tr = el('tr');
+  var pr = el('td');
+  appendPrLink(pr, w.link);
+  tr.appendChild(pr);
+  tr.appendChild(el('td', w.kind || '—', 'muted'));
+  tr.appendChild(el('td', String(w.pid)));
+  var s = watchState(w);
+  tr.appendChild(el('td', s.state, s.cls));
+  tr.appendChild(el('td', (w.merge ? 'merge' : 'watch') + (w.cleanup ? '+cleanup' : ''), 'muted'));
+  tr.appendChild(el('td', w.ageMs === undefined ? '—' : age(w.ageMs), 'muted'));
+  tr.appendChild(el('td', w.timeoutMin === undefined ? '—' : w.timeoutMin + 'm', 'muted'));
+  return tr;
+}
+
 function renderTicks(t) {
   var sum = document.getElementById('ticksum');
   var tbody = document.getElementById('ticks');
   t = t || {};
   var parts = [];
   var cls = 'sum';
-  if (t.heartbeat === null || t.heartbeat === undefined) {
-    parts.push('no heartbeat — no watch has ticked here');
-    cls += ' muted';
-  } else {
-    var hb = t.heartbeat;
-    var htail = hb.attention === 0 ? 'quiet' : hb.attention + ' attention';
-    if (hb.futureMs !== undefined) {
-      parts.push('last tick stamped ' + age(hb.futureMs) + ' in the future — writer or reader clock skew — ' + htail);
-      cls += ' warn';
-    } else if (hb.writerSkewed) {
-      parts.push('last tick ' + age(hb.ageMs) + ' ago — writer clock skew — ' + htail);
-      cls += ' warn';
-    } else {
-      parts.push('last tick ' + age(hb.ageMs) + ' ago — ' + htail);
-      if (hb.ageMs > 30 * 60 * 1000) cls += ' warn';
-    }
-  }
-  var d = t.drive || { pid: null, alive: false };
-  if (d.pid === null || d.pid === undefined) {
-    parts.push('drive: no supervisor');
-  } else if (d.alive) {
-    parts.push('drive: alive · pid ' + d.pid + (d.ageMs === undefined ? '' : ' · lock ' + age(d.ageMs)));
-  } else {
-    parts.push('drive: dead — stale lock pid ' + d.pid + (d.ageMs === undefined ? '' : ' · ' + age(d.ageMs) + ' old'));
-    cls += ' warn';
-  }
+  var hp = heartbeatPart(t.heartbeat);
+  parts.push(hp.text);
+  if (hp.muted) cls += ' muted';
+  if (hp.warn) cls += ' warn';
+  var dp = drivePart(t.drive || { pid: null, alive: false });
+  parts.push(dp.text);
+  if (dp.warn) cls += ' warn';
   sum.textContent = parts.join(' · ');
   sum.className = cls;
   tbody.replaceChildren();
@@ -556,21 +591,7 @@ function renderTicks(t) {
     tbody.appendChild(el('tr')).appendChild(el('td', 'no armed watches', 'muted'));
   }
   watches.forEach(function (w) {
-    var tr = el('tr');
-    var pr = el('td');
-    appendPrLink(pr, w.link);
-    tr.appendChild(pr);
-    tr.appendChild(el('td', w.kind || '—', 'muted'));
-    tr.appendChild(el('td', String(w.pid)));
-    var state, scls;
-    if (w.verdict) { state = w.verdict + (w.blockers && w.blockers.length ? ' — ' + w.blockers.join('; ') : ''); scls = 'warn'; }
-    else if (w.alive) { state = 'armed'; }
-    else { state = 'stale' + (w.reported ? ' (reported)' : ''); scls = 'bad'; }
-    tr.appendChild(el('td', state, scls));
-    tr.appendChild(el('td', (w.merge ? 'merge' : 'watch') + (w.cleanup ? '+cleanup' : ''), 'muted'));
-    tr.appendChild(el('td', w.ageMs === undefined ? '—' : age(w.ageMs), 'muted'));
-    tr.appendChild(el('td', w.timeoutMin === undefined ? '—' : w.timeoutMin + 'm', 'muted'));
-    tbody.appendChild(tr);
+    tbody.appendChild(watchRow(w));
   });
 }
 
