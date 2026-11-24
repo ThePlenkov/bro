@@ -30,6 +30,7 @@
   },
   "overrides": {
     "mdast-util-to-markdown": "2.1.2",
-    "zod": "^4.6.6"
+    "zod": "^4.6.6",
+    "seroval": "^1.8.2"
   }
 }
