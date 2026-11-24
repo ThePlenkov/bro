@@ -6,9 +6,17 @@
  * so `bro debt sync` labels beads `debt:<source>`.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ghJson } from '@broject/core';
 import type { DebtPriority, DebtRecord } from './types.ts';
@@ -258,6 +266,8 @@ interface SarifResult {
   ruleId?: string;
   level?: string;
   message?: { text?: string };
+  fingerprints?: Record<string, string>;
+  partialFingerprints?: Record<string, string>;
   locations?: Array<{
     physicalLocation?: {
       artifactLocation?: { uri?: string };
@@ -289,6 +299,26 @@ function sarifLevelToPriority(level?: string): DebtPriority {
   }
 }
 
+/** Directories the dir-scan sweeps for artifacts, plus sverka's own
+ *  default `--format sarif` output. */
+const SVERKA_SCAN_DIRS = [join('.sverka', 'artifacts'), join('.sverka', 'sarif')];
+const SVERKA_SCAN_FILES = [join('.sverka', 'findings.sarif')];
+
+/** Artifact paths are stored `/`-normalized — the scope predicates below
+ *  compare on forward-slash forms. */
+const SVERKA_SCAN_DIR_PREFIXES = SVERKA_SCAN_DIRS.map(d => `${d.split(sep).join('/')}/`);
+const SVERKA_SCAN_FILE_SET = new Set(SVERKA_SCAN_FILES.map(f => f.split(sep).join('/')));
+
+/** The resolve-scope key for a sverka row: which SARIF artifact produced
+ *  it. Inside the checkout the path is repo-relative; outside it stays
+ *  absolute — two spellings of one file must normalize identically. */
+export function sarifArtifactPath(root: string, file: string): string {
+  const abs = resolve(root, file);
+  const rel = relative(root, abs);
+  const p = rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : abs;
+  return p.split(sep).join('/');
+}
+
 /** `.sarif` files directly inside one directory — readdir failures
  *  propagate so the caller can fail the snapshot as incomplete. */
 function sarifFilesIn(dir: string): string[] {
@@ -297,32 +327,69 @@ function sarifFilesIn(dir: string): string[] {
     .map(entry => join(dir, entry.name));
 }
 
-function findSarifFiles(root: string): { files: string[]; complete: boolean; reason?: string } {
-  const candidates = [join(root, '.sverka', 'artifacts'), join(root, '.sverka', 'sarif')];
-  const out: string[] = [];
-  let sawDir = false;
-  for (const dir of candidates) {
-    try {
-      if (!existsSync(dir)) continue;
-      sawDir = true;
-      out.push(...sarifFilesIn(dir));
-    } catch (err) {
-      return {
-        files: [],
-        complete: false,
-        reason: `cannot read SARIF directory ${dir} — ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
+/** One scan location's read result. `present` marks that the location
+ *  exists at all (an existing-but-empty dir still counts as a source);
+ *  `reason` carries a read failure — a location that cannot be read is
+ *  a snapshot that cannot be trusted complete. */
+interface SarifScan {
+  files: string[];
+  present: boolean;
+  reason?: string;
+}
+
+function scanArtifactDir(dir: string): SarifScan {
+  if (!existsSync(dir)) {
+    return { files: [], present: false };
   }
-  if (!sawDir) {
+  try {
+    return { files: sarifFilesIn(dir), present: true };
+  } catch (err) {
+    return {
+      files: [],
+      present: true,
+      reason: `cannot read SARIF directory ${dir} — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+function scanArtifactFile(file: string): SarifScan {
+  try {
+    return existsSync(file) && statSync(file).isFile()
+      ? { files: [file], present: true }
+      : { files: [], present: false };
+  } catch (err) {
+    return {
+      files: [],
+      present: true,
+      reason: `cannot stat SARIF file ${file} — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/** The sweep table — one reader per scan location; adding a location is
+ *  a row here, not another loop. Dir order is preserved so identical
+ *  checkouts produce identical file lists. */
+const SARIF_SCANNERS: ReadonlyArray<{ at: string; scan: (path: string) => SarifScan }> = [
+  ...SVERKA_SCAN_DIRS.map(at => ({ at, scan: scanArtifactDir })),
+  ...SVERKA_SCAN_FILES.map(at => ({ at, scan: scanArtifactFile })),
+];
+
+function findSarifFiles(root: string): { files: string[]; complete: boolean; reason?: string } {
+  const scans = SARIF_SCANNERS.map(({ at, scan }) => scan(join(root, at)));
+  const failures = scans.flatMap(s => s.reason ?? []);
+  if (failures.length > 0) {
+    return { files: [], complete: false, reason: failures[0] };
+  }
+  if (!scans.some(s => s.present)) {
     return {
       files: [],
       complete: false,
       reason:
-        'no .sverka/artifacts or .sverka/sarif directory found — import a completed sverka run first (bro check --evaluate or copy *.sarif into .sverka/artifacts)',
+        'no .sverka/artifacts or .sverka/sarif directory and no .sverka/findings.sarif found — import a completed sverka run first (bro debt import <file.sarif>, or drop artifacts in .sverka/artifacts)',
     };
   }
-  if (out.length === 0) {
+  const files = scans.flatMap(s => s.files);
+  if (files.length === 0) {
     return {
       files: [],
       complete: false,
@@ -330,7 +397,7 @@ function findSarifFiles(root: string): { files: string[]; complete: boolean; rea
         'no .sarif files found in .sverka/artifacts or .sverka/sarif — import a completed sverka run first',
     };
   }
-  return { files: [...new Set(out)], complete: true };
+  return { files: [...new Set(files)], complete: true };
 }
 
 export function collectSverka(ctx: CollectCtx): DebtRecord[] {
@@ -339,7 +406,15 @@ export function collectSverka(ctx: CollectCtx): DebtRecord[] {
   if (!found.complete) {
     throw new SourceSkipped(found.reason ?? 'incomplete sverka SARIF snapshot');
   }
-  return found.files.flatMap(file => collectSarifFile(ctx, root, file));
+  return importSarifFiles(ctx, root, found.files);
+}
+
+/** A file-set → records. Every file parses before any record returns —
+ *  callers (`debt import`, the dir-scan) write nothing on a partial
+ *  snapshot, so a failed read can never reach the resolve sweep looking
+ *  like "all findings fixed upstream". */
+export function importSarifFiles(ctx: CollectCtx, root: string, files: string[]): DebtRecord[] {
+  return files.flatMap(file => collectSarifFile(ctx, root, file));
 }
 
 /** One SARIF file → records. Anything unreadable or malformed throws
@@ -355,8 +430,8 @@ function collectSarifFile(ctx: CollectCtx, root: string, file: string): DebtReco
     );
   }
   const log = parseSarif(file, raw);
-  const relFile = relative(root, file);
-  return log.runs.flatMap(run => sarifRunRecords(ctx, run, relFile, root));
+  const artifact = sarifArtifactPath(root, file);
+  return log.runs.flatMap(run => sarifRunRecords(ctx, run, artifact, root));
 }
 
 /** JSON.parse can yield null/primitives too — validate before touching
@@ -398,17 +473,47 @@ function sarifUriToPath(uri: string, root: string): string {
   }
 }
 
+/** Deterministic pick from a SARIF fingerprint map: `primary` wins
+ *  (sverka's serialization), else the lexicographically first key — a
+ *  sorted pick keeps identity stable when upstream adds fingerprint
+ *  kinds over time. */
+function pickFingerprint(map: Record<string, string> | undefined): string | undefined {
+  if (map === null || typeof map !== 'object') {
+    return undefined;
+  }
+  const entries = Object.entries(map).filter(([, v]) => typeof v === 'string' && v !== '');
+  if (entries.length === 0) {
+    return undefined;
+  }
+  const primary = entries.find(([k]) => k === 'primary');
+  if (primary !== undefined) {
+    return primary[1];
+  }
+  return entries.sort(([a], [b]) => a.localeCompare(b))[0]![1];
+}
+
+/** The finding identity the artifact itself declares (SARIF
+ *  `fingerprints`, then `partialFingerprints`). Sverka emits
+ *  `fingerprints.primary` = sha256(checkId|rule|file|lines) — stable
+ *  across message-wording drift, which is exactly what "a known
+ *  fingerprint survives a re-run" asks of the ledger. */
+function declaredFingerprint(res: SarifResult): string | undefined {
+  return pickFingerprint(res.fingerprints) ?? pickFingerprint(res.partialFingerprints);
+}
+
 function sarifRunRecords(
   ctx: CollectCtx,
   run: SarifRun,
-  relFile: string,
+  artifact: string,
   root: string
 ): DebtRecord[] {
   // a null/primitive run element is malformed, not a clean run — `[]`
   // here would read as "findings fixed upstream" to the resolve sweep,
   // the exact lie SourceSkipped exists to refuse
   if (run === null || typeof run !== 'object') {
-    throw new SourceSkipped(`SARIF run in ${relFile} is not an object — refusing partial snapshot`);
+    throw new SourceSkipped(
+      `SARIF run in ${artifact} is not an object — refusing partial snapshot`
+    );
   }
   const tool = run.tool?.driver?.name ?? 'sverka';
   // `results` may be absent (a clean run legitimately reports nothing) but a
@@ -416,18 +521,18 @@ function sarifRunRecords(
   // as "findings fixed upstream" to the resolve sweep.
   if (run.results !== undefined && !Array.isArray(run.results)) {
     throw new SourceSkipped(
-      `SARIF run in ${relFile} has a non-array results value — refusing partial snapshot`
+      `SARIF run in ${artifact} has a non-array results value — refusing partial snapshot`
     );
   }
   const results = run.results ?? [];
-  return results.map(res => sarifResultRecord(ctx, tool, res, relFile, root));
+  return results.map(res => sarifResultRecord(ctx, tool, res, artifact, root));
 }
 
 function sarifResultRecord(
   ctx: CollectCtx,
   tool: string,
   res: SarifResult,
-  relFile: string,
+  artifact: string,
   root: string
 ): DebtRecord {
   // a null/primitive result element is malformed like the run/results
@@ -435,7 +540,7 @@ function sarifResultRecord(
   // to the resolve sweep and could retire its ledger row
   if (res === null || typeof res !== 'object') {
     throw new SourceSkipped(
-      `SARIF result in ${relFile} is not an object — refusing partial snapshot`
+      `SARIF result in ${artifact} is not an object — refusing partial snapshot`
     );
   }
   const ruleId = typeof res.ruleId === 'string' ? res.ruleId : 'unknown';
@@ -444,28 +549,88 @@ function sarifResultRecord(
   const line = typeof loc?.region?.startLine === 'number' ? loc.region.startLine : null;
   const msg =
     typeof res.message?.text === 'string' && res.message.text !== '' ? res.message.text : ruleId;
-  // Stable identity: source + tool + rule + artifact location + source SARIF
-  // file + message fingerprint. Segments are percent-encoded — `:` is legal
-  // inside ruleIds/URIs and must never act as a field delimiter. relFile
-  // scopes identity per artifact file so identical findings reported by two
-  // different snapshots stay distinct rows instead of silently merging.
-  // external_ref in beads = thread_id; ledger upserts by thread_id.
+  // Stable identity (spec bro-l8c4f.15): repo + tool + rule + artifact +
+  // fingerprint — the artifact's own declared fingerprint wins, else a
+  // hash over the canonical JSON [uri, line, message] (composite keys get
+  // a canonical encoding, never bare concat). Segments are
+  // percent-encoded so `:` inside fields can't delimit. `artifact` also
+  // scopes identity per source file: identical findings reported by two
+  // snapshots stay distinct rows. external_ref in beads = thread_id.
+  const fp =
+    declaredFingerprint(res) ??
+    fingerprint({ body: JSON.stringify([uri, line ?? 0, msg]), path: '' });
   const seg = (s: string): string => encodeURIComponent(s);
-  const threadId = `sverka:${seg(tool)}:${seg(ruleId)}:${seg(uri)}:${line ?? 0}:${seg(relFile)}:${fingerprint({ body: msg, path: uri })}`;
-  return baseRecord(ctx, {
-    threadId,
-    // No navigable URL exists for a local artifact — the machine-local path
-    // would be a dead link everywhere else, so the field stays empty and the
-    // repo-relative SARIF file rides in the body for provenance instead.
-    url: '',
-    priority: sarifLevelToPriority(res.level),
-    path: uri,
-    line,
-    author: tool,
-    body: `[${res.level ?? 'warning'}] ${ruleId}: ${msg} (${relFile})`,
-    createdAt: ctx.harvestedAt,
-    source: 'sverka',
-  });
+  const threadId = `sverka:${seg(ctx.repo)}:${seg(tool)}:${seg(ruleId)}:${seg(artifact)}:${seg(fp)}`;
+  return {
+    ...baseRecord(ctx, {
+      threadId,
+      // No navigable URL exists for a local artifact — the machine-local
+      // path would be a dead link everywhere else, so the field stays
+      // empty and the SARIF file rides in the body + `artifact` field
+      // for provenance instead.
+      url: '',
+      priority: sarifLevelToPriority(res.level),
+      path: uri,
+      line,
+      author: tool,
+      body: `[${res.level ?? 'warning'}] ${ruleId}: ${msg} (${artifact})`,
+      createdAt: ctx.harvestedAt,
+      source: 'sverka',
+    }),
+    artifact,
+  };
+}
+
+/** The producing artifact of a sverka row — the `artifact` field, or the
+ *  `relFile` segment of a pre-artifact thread_id
+ *  (`sverka:tool:rule:uri:line:relFile:fp`, 7 fields vs the current 6). */
+export function sverkaArtifactOf(row: DebtRecord): string | undefined {
+  if (row.artifact !== undefined) {
+    return row.artifact;
+  }
+  const segs = row.thread_id.split(':');
+  if (segs.length !== 7 || segs[0] !== 'sverka') {
+    return undefined;
+  }
+  const enc = segs[5]!;
+  try {
+    return decodeURIComponent(enc);
+  } catch {
+    return enc;
+  }
+}
+
+/** Scan-scope membership by artifact path: inside a tracked dir or the
+ *  well-known findings file — by PATH, not existence, so a deleted
+ *  artifact's rows still resolve on the next complete sweep. Provenance
+ *  that can't be named is assumed scan-born: the dir-scan was the only
+ *  producer before `debt import` existed. */
+export function sverkaArtifactInScanScope(artifact: string | undefined): boolean {
+  if (artifact === undefined) {
+    return true;
+  }
+  return (
+    SVERKA_SCAN_FILE_SET.has(artifact) ||
+    SVERKA_SCAN_DIR_PREFIXES.some(prefix => artifact.startsWith(prefix))
+  );
+}
+
+/** Resolve-scope predicate for the dir-scan: rows whose artifacts live
+ *  under the tracked paths. An artifact imported from elsewhere is
+ *  outside this scope — a directory sweep must never close it. */
+export function sverkaScanScope(): (row: DebtRecord) => boolean {
+  return row => sverkaArtifactInScanScope(sverkaArtifactOf(row));
+}
+
+/** Resolve-scope predicate for an explicit import: exactly the
+ *  normalized artifact paths passed on the command line. Importing file
+ *  B can never close rows scoped to file A. */
+export function sverkaFileScope(artifacts: string[]): (row: DebtRecord) => boolean {
+  const owned = new Set(artifacts);
+  return row => {
+    const artifact = sverkaArtifactOf(row);
+    return artifact !== undefined && owned.has(artifact);
+  };
 }
 
 // --- dependabot -------------------------------------------------------------
@@ -772,15 +937,24 @@ export function dedupeForSource(
 /**
  * Alerts/CI are server-side truth: an open ledger row for a source whose
  * finding is absent from the fresh fetch resolved upstream — return its
- * thread_ids so collect can overlay them `done`.
+ * thread_ids so collect can overlay them `done`. `inScope` narrows which
+ * rows the sweep may touch: an import/sweep closes only rows inside the
+ * snapshot it completely re-read (spec bro-l8c4f.15).
  */
 export function resolvedThreadIds(
   existing: DebtRecord[],
   source: DebtSource,
-  fresh: DebtRecord[]
+  fresh: DebtRecord[],
+  inScope?: (row: DebtRecord) => boolean
 ): string[] {
   const live = new Set(fresh.map(r => r.thread_id));
   return existing
-    .filter(r => r.source === source && r.status === 'open' && !live.has(r.thread_id))
+    .filter(
+      r =>
+        r.source === source &&
+        r.status === 'open' &&
+        !live.has(r.thread_id) &&
+        (inScope === undefined || inScope(r))
+    )
     .map(r => r.thread_id);
 }

@@ -153,7 +153,8 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'debt',
     group: 'review',
-    summary: 'Review-debt pipeline: collect|status|stats|trend|prs|list|mark|set|sync|next|watch',
+    summary:
+      'Review-debt pipeline: collect|status|stats|trend|prs|list|mark|set|sync|next|watch|import',
     run: runDebtCommand,
     skill: 'debt',
     configKey: 'debt',
@@ -198,6 +199,17 @@ export const PLUGINS: BroPlugin[] = [
           exits: {
             0: 'trend printed',
             2: 'usage — bad --by/--bucket/--since value',
+          },
+        },
+        import: {
+          flags: {
+            '--repo <o/r>': 'repo identity for thread_ids — default: origin remote → gh repo view',
+            '--dry-run': 'print the records + would-resolve ids without writing',
+          },
+          exits: {
+            0: 'artifact(s) imported (or dry-run printed)',
+            1: 'a positional is unreadable or a SARIF file failed to parse — nothing written',
+            2: 'usage — no files, a positional is not a file, or repo is unresolvable',
           },
         },
       },
