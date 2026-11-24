@@ -98,7 +98,13 @@ import {
   printUsage,
   type ExitCode,
 } from '@broject/core';
-import { ACT_STATE_TTL_MS, prStateCache, type PrActState, type PrStateCache } from '@broject/act';
+import {
+  ACT_STATE_TTL_MS,
+  deadWatchPlan,
+  prStateCache,
+  type PrActState,
+  type PrStateCache,
+} from '@broject/act';
 import { annotateThreads, judgeConfig, judgeFacade } from '@broject/judge';
 import {
   drivePolicy,
@@ -115,7 +121,7 @@ import {
 } from '../agent-connectors.ts';
 import { reconcileLanePause } from '../lane.ts';
 import { flag } from './args.ts';
-import { defaultBranch, runActCommand } from './act.ts';
+import { defaultBranch, rearmPass, runActCommand } from './act.ts';
 import { emitDevinUsage } from '@broject/devin';
 import {
   foreignPushEvent,
@@ -148,6 +154,14 @@ import { pipelineWakePass } from './pipeline.ts';
 import { SELF_ENTRY } from './self-entry.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts';
+
+function actRearmDue(ctx: Ctx, lastAt: number | undefined, now: number): boolean {
+  if (ctx.everySec === undefined || deadWatchPlan(ctx.mainRoot).length === 0) {
+    return false;
+  }
+  const cooldown = Math.max(60_000, ctx.everySec * 1000);
+  return lastAt === undefined || now - lastAt >= cooldown;
+}
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
     'Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]\n' +
@@ -1081,6 +1095,7 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
  *  `packages/rig` never imports back here. Closures read `ctx` lazily —
  *  by call time the literal is complete (same convention as loopDeps). */
 function driveDeps(ctx: Ctx): DriveDeps {
+  let lastActRearmAt: number | undefined;
   return {
     rev: ctx.rev,
     store: ctx.store,
@@ -1140,7 +1155,14 @@ function driveDeps(ctx: Ctx): DriveDeps {
     signalForeignPush: (pr, link, head) => signalForeignPush(ctx, pr, link, head),
     projectorTick: () => herdrProjectorTick(ctx),
     armProjectorFeed: () => armProjectorEvents(ctx),
-    pipelineWake: () => pipelineWakePass(ctx.mainRoot),
+    pipelineWake: async () => {
+      const now = Date.now();
+      if (actRearmDue(ctx, lastActRearmAt, now)) {
+        lastActRearmAt = now;
+        await rearmPass(ctx.mainRoot, false);
+      }
+      return pipelineWakePass(ctx.mainRoot);
+    },
   };
 }
 
