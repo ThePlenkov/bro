@@ -39,16 +39,40 @@ const describe = (v: unknown): string => {
 
 /** A config value under a credential-shaped path — or one that LOOKS
  *  like a credential — never echoes into a diagnostic: `bro doctor`
- *  output is retained in terminals and CI logs (sourcery PR #637). */
-const SECRET_PATH = /token|secret|password|credential|authoriz|api[-_]?key|bearer/i;
+ *  output is retained in terminals and CI logs (sourcery PR #637).
+ *  `env`/`header(s)` are declared secret channels (spec bro-l8c4f.14:
+ *  "diagnostics never echo env/header values") — the bare-segment
+ *  alternation matches only a whole path step, not `envVars`/
+ *  `environment`. */
+const SECRET_PATH =
+  /token|secret|password|credential|authoriz|api[-_]?key|bearer|\benv\b|\bheaders?\b/i;
 const SECRET_VALUE = /\b(bearer\s+\S+|xox[baprs]-\S+|ghp_[a-zA-Z0-9]{20,}|sk-[a-zA-Z0-9]{20,})/;
+
+/** A composite value is scanned in serialized form: a flat scan misses
+ *  credential-shaped keys NESTED inside an object — an object-valued
+ *  `env[].value` like `{token: "sk-…"}` would otherwise echo the whole
+ *  secret into the diagnostic. Match = the whole value redacts; there
+ *  is no partial masking of a printed value. */
+const compositeShaped = (v: unknown): boolean => {
+  if (v === null || typeof v !== 'object') {
+    return false;
+  }
+  let body: string;
+  try {
+    body = JSON.stringify(v) ?? '';
+  } catch {
+    // unserializable (circular, BigInt) — never echo what we cannot scan
+    return true;
+  }
+  return SECRET_PATH.test(body) || SECRET_VALUE.test(body);
+};
 
 /** The offending value in a violation message — redacted when its
  *  path or content looks credential-shaped; a literal token in a
  *  mistyped field is exactly the case that must not reach retained
  *  logs. */
 const credentialShaped = (path: string, v: unknown): boolean =>
-  SECRET_PATH.test(path) || (typeof v === 'string' && SECRET_VALUE.test(v));
+  SECRET_PATH.test(path) || (typeof v === 'string' && SECRET_VALUE.test(v)) || compositeShaped(v);
 
 const show = (path: string, v: unknown): string =>
   credentialShaped(path, v) ? '[redacted]' : describe(v);

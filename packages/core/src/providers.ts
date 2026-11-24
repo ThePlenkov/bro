@@ -594,7 +594,11 @@ function acpMcpServersFor(
     if (!isPlainObject(v)) {
       return { err: `mcpServers[${i}] must be an object descriptor` };
     }
-    const t = typeof v.type === 'string' ? v.type : 'stdio';
+    // an absent `type` reads as stdio (ACP labels only the non-stdio
+    // transports); a PRESENT non-stdio `type` — string or not — is
+    // invalid input and fails loud here, not as a `type: 7` riding
+    // session/new into a peer refusal (schema and parser agree)
+    const t = v.type === undefined ? 'stdio' : v.type;
     if (t !== 'stdio') {
       return { err: mcpTransportErr(t, i) };
     }
@@ -602,7 +606,10 @@ function acpMcpServersFor(
     if (dErr !== undefined) {
       return { err: dErr };
     }
-    out.push(v);
+    // wire-required `env` defaults to [] — the ACP schema requires the
+    // array, and a catch-wrapped agent-side parse would silently drop a
+    // descriptor missing it (a restriction reading as a no-op)
+    out.push(v.env === undefined ? { ...v, env: [] } : v);
   }
   return { mcpServers: out };
 }
@@ -611,18 +618,26 @@ function acpMcpServersFor(
  *  the negotiated-capability remediation, unknown names the accepted
  *  shape. Helper so the descriptor loop stays flat (CodeScene: a bumpy
  *  road needs no nested conditionals to read). */
-function mcpTransportErr(t: string, i: number): string {
+function mcpTransportErr(t: unknown, i: number): string {
   if (t === 'http' || t === 'sse' || t === 'streamable-http') {
     return `mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`;
   }
-  return `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`;
+  if (typeof t === 'string') {
+    return `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`;
+  }
+  return `mcpServers[${i}].type must be 'stdio' when present — a non-string transport is not a valid descriptor`;
 }
 
-/** A stdio descriptor is `{command, args, env?}` — ACP session/new
- *  validates the same wire shape, but a missing or mistyped field dies
- *  there as an opaque session-start failure instead of naming the bad
+/** A stdio descriptor is `{name, command, args, env?}` — ACP
+ *  session/new validates the same wire shape (`McpServerStdio`
+ *  requires all of name/command/args/env), but a missing or mistyped
+ *  field dies there as an opaque session-start failure — or a silent
+ *  entry drop under a catch-wrapped parse — instead of naming the bad
  *  config key. Values are never echoed into messages. */
 function stdioDescriptorErr(v: Record<string, unknown>, i: number): string | undefined {
+  if (typeof v.name !== 'string' || v.name === '') {
+    return `mcpServers[${i}].name must be a non-empty string`;
+  }
   if (typeof v.command !== 'string' || v.command === '') {
     return `mcpServers[${i}].command must be a non-empty string`;
   }

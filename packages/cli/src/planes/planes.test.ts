@@ -98,6 +98,21 @@ describe('plane catalog', () => {
     }
   });
 
+  test('the MCP write surface stays pinned to delegate — claim/resolve/spawn are never wired (spec bro-l8c4f.14)', () => {
+    const { dir, rm } = tmp();
+    try {
+      // the mcpVerbs allowlist IS the boundary: every other declared
+      // verb (spawn/stop/respawn, queue.claim, gates.resolve, …) is
+      // declared-but-unwired and can never become an MCP tool. The pin
+      // exists so a future verb can't ride the read planes into an ACP
+      // worker's tool list by accident.
+      const wired = planes(dir).flatMap(p => (p.mcpVerbs ?? []).map(v => `${p.name}.${v}`));
+      assert.deepEqual(wired, ['agents.delegate']);
+    } finally {
+      rm();
+    }
+  });
+
   test('every transport-exposed op declares a CLI twin in the contract (spec bro-xiq2m)', () => {
     const { dir, rm } = tmp();
     try {
