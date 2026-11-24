@@ -267,7 +267,7 @@ function followRemote(m: MemberView, lines: string[]): boolean {
 }
 
 /** Per-member cascade context — the inputs every sync step reads. */
-interface SyncCtx {
+export interface SyncCtx {
   root: string;
   rev: { repo: string; facade: ReviewFacade } | undefined;
   stacks: StackFacade | undefined;
@@ -299,7 +299,7 @@ function rebaseStep(
 
 /** How a member's cascade step ended — 'rebased' means its branch was
  *  rewritten, so the member ABOVE it rides a base that moved. */
-type SyncOutcome = 'ok' | 'rebased' | 'failed';
+export type SyncOutcome = 'ok' | 'rebased' | 'failed';
 
 /** The invariant's verdict BEFORE the move: 'ok' when the branch may
  *  move, 'failed' when the base's head cannot be read or the member is
@@ -329,9 +329,22 @@ function baseVerdict(m: MemberView, item: SyncPlanItem<MemberView>, ctx: SyncCtx
 /** The base's head AFTER the move: the platform rewrites a child when
  *  its parent MERGES — but a base that moved by a PUSH is not a merge,
  *  and the platform leaves the child where it was. The invariant
- *  decides, not the assumption. */
-function settleBase(item: SyncPlanItem<MemberView>, m: MemberView, ctx: SyncCtx): SyncOutcome {
-  if (carriesBaseHead(m.branch, item.desiredBase, ctx.root) === false) {
+ *  decides, not the assumption. A head that cannot be READ is the
+ *  preflight's answer too: an unknown truth is not "carries" — the
+ *  member fails, its edge stays stale so the next sync reschedules,
+ *  and the publish tail is dropped rather than attesting a chain the
+ *  invariant cannot prove. */
+export function settleBase(
+  item: SyncPlanItem<MemberView>,
+  m: MemberView,
+  ctx: SyncCtx
+): SyncOutcome {
+  const carries = carriesBaseHead(m.branch, item.desiredBase, ctx.root);
+  if (carries === undefined) {
+    ctx.lines.push(`  ${m.branch} skipped — the head of ${item.desiredBase} cannot be read`);
+    return 'failed';
+  }
+  if (!carries) {
     if (!rebaseMember(item, ctx.lines)) {
       return 'failed';
     }
