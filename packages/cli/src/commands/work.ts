@@ -27,50 +27,47 @@
  * discovers `.beads` through the git common dir regardless of how the
  * worktree was created.
  */
+
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
-  rmdirSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
+import { type ListedWatch, listWatches } from '@broject/act';
+import type { ExitCode } from '@broject/core';
 import {
+  type AgentRegistryEntry,
   acquireAgentRegistryLock,
   acquireFileLock,
   agentRegistryPath,
+  type ClaimRow,
+  type Connector,
   emitLifecycle,
   facade,
-  git,
   GIT_SYNC_PROBE_TIMEOUT_MS,
+  git,
   gitTry,
-  loadConfig,
-  LockTimeout,
-  pidAlive,
   hasHelpFlag,
+  LockTimeout,
+  loadConfig,
+  pidAlive,
   printUsage,
+  type ReviewFacade,
   readAgentRegistry,
   reviewHost,
   sessionProject,
   stackSection,
-  worktreePathFor,
-  type AgentRegistryEntry,
-  type ClaimRow,
-  type Connector,
-  type ReviewFacade,
   type TaskRow,
   type TaskStore,
+  worktreePathFor,
 } from '@broject/core';
-import type { ExitCode } from '@broject/core';
-import { assertMutableConfig } from '../config-policy.ts';
-import { beadForHead, loopSection, loopSlug, type LoopConfig } from '@broject/loop';
-import { listWatches, type ListedWatch } from '@broject/act';
-import { parseStackBranch } from '@broject/stack';
-import { flag, positionals } from './args.ts';
+import { beadForHead, type LoopConfig, loopSection, loopSlug } from '@broject/loop';
 import {
   agentOwner,
   agentProcessesIn,
@@ -87,11 +84,16 @@ import {
   worktreeClaimInfo,
   worktreeGitDir,
   worktreeIdleMs,
-  type ProcHit,
 } from '@broject/rig';
+import { parseStackBranch } from '@broject/stack';
+import { assertMutableConfig } from '../config-policy.ts';
+import { flag, positionals } from './args.ts';
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
 import { cleanupTmpDirs, workerTmpRoots } from './tmp-sweep.ts';
-export { LIVE_MARKER_MS };
+import { recoverGhost } from './work-litter-ghosts.ts';
+import { reapStaleNxDaemons } from './work-litter-nx.ts';
+
+export type { WorktreeClaimInfo } from '@broject/rig';
 // The worktree-claim reads moved to @broject/rig (bro-jamp7) — re-exported
 // here so existing importers (status, herdr-projector, drive, tests)
 // keep their `./work.ts` path until the policy slice retargets them.
@@ -103,7 +105,7 @@ export {
   worktreeGitDir,
   worktreeIdleMs,
 } from '@broject/rig';
-export type { WorktreeClaimInfo } from '@broject/rig';
+export { LIVE_MARKER_MS };
 
 export interface WorktreeInfo {
   path: string;
@@ -145,7 +147,6 @@ export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
       };
       out.push(cur);
     } else if (!cur) {
-      continue;
     } else if (line.startsWith('HEAD ')) {
       cur.head = line.slice('HEAD '.length);
     } else if (line.startsWith('branch refs/heads/')) {
@@ -579,14 +580,11 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
     process.exit(1);
   };
   const path = worktreePathFor(main.path, slug);
-  if (existsSync(path)) {
-    const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim();
-    const commonOf = (dir: string) =>
-      gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim();
-    const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path);
-    if (reusePath && onBranch === branch && sameRepo) {
-      return { path, branch, branchExists: true, reused: true, stacked: false };
-    }
+  const existing = existingTreeVerdict(path, branch, main.path, reusePath);
+  if (existing === 'reused') {
+    return { path, branch, branchExists: true, reused: true, stacked: false };
+  }
+  if (existing === 'present') {
     fail(`${path} already exists`);
   }
   // an existing branch under the target name means the slug names an
@@ -597,16 +595,7 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   if (branchExists && !allowExisting) {
     fail(`${branch} already exists`);
   }
-  const args = ['worktree', 'add', path];
-  if (branchExists) {
-    args.push(branch);
-  } else {
-    args.push('-b', branch);
-    if (base) {
-      args.push(base);
-    }
-  }
-  const res = gitTry(args);
+  const res = gitTry(worktreeAddArgs(path, branch, base, branchExists));
   if (res.code !== 0) {
     fail(`git worktree add failed — ${res.err}`);
   }
@@ -615,15 +604,80 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   // The edge records HERE, right after the add: it is part of the
   // plan→create window — a re-push of the same slug holds the push lock
   // until it lands, and must observe the member as stacked.
-  const stacked =
-    base !== undefined &&
-    base !== (main.branch ?? main.head) &&
-    base !== defaultRef &&
-    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0;
-  if (stacked && !branchExists) {
-    recordStackEdge(branch, base);
+  const stackBase = stackEdgeBase(base, main, defaultRef);
+  if (stackBase !== undefined && !branchExists) {
+    recordStackEdge(branch, stackBase);
   }
-  return { path, branch, branchExists, reused: false, stacked };
+  return { path, branch, branchExists, reused: false, stacked: stackBase !== undefined };
+}
+
+/** An existing target dir re-enters only when reusePath AND it stands
+ *  on the target branch AND it is this repo's (same common git dir —
+ *  an unrelated checkout that happens to sit on the same branch name
+ *  is not this stack's member); any other present dir fails. */
+function existingTreeVerdict(
+  path: string,
+  branch: string,
+  mainPath: string,
+  reusePath: boolean
+): 'reused' | 'present' | 'absent' {
+  if (!existsSync(path)) {
+    return 'absent';
+  }
+  return reusePath && checkoutMatches(path, branch, mainPath) ? 'reused' : 'present';
+}
+
+/** The reuse probes — current branch, then the shared common-dir
+ *  comparison (an unresolvable common dir can never be the same repo). */
+function checkoutMatches(path: string, branch: string, mainPath: string): boolean {
+  if (gitTry(['-C', path, 'branch', '--show-current']).out.trim() !== branch) {
+    return false;
+  }
+  const commonOf = (dir: string) =>
+    gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim();
+  const common = commonOf(path);
+  return common !== '' && common === commonOf(mainPath);
+}
+
+/** The `worktree add` argv — an existing branch checks out by name, a
+ *  new one mints -b off the base. */
+function worktreeAddArgs(
+  path: string,
+  branch: string,
+  base: string | undefined,
+  branchExists: boolean
+): string[] {
+  const args = ['worktree', 'add', path];
+  if (branchExists) {
+    return [...args, branch];
+  }
+  args.push('-b', branch);
+  if (base) {
+    args.push(base);
+  }
+  return args;
+}
+
+/** The base ref when it records a real stack edge — a local branch
+ *  other than the main checkout's own or the default ref; a raw
+ *  commit-ish and missing branches yield no merge order. */
+function stackEdgeBase(
+  base: string | undefined,
+  main: WorktreeInfo,
+  defaultRef: string | undefined
+): string | undefined {
+  if (base === undefined) {
+    return undefined;
+  }
+  if (base === (main.branch ?? main.head)) {
+    return undefined;
+  }
+  if (base === defaultRef) {
+    return undefined;
+  }
+  return gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
+    ? base
+    : undefined;
 }
 
 /** The post-add half of `enterWorktree` — claim marker, submodule init,
@@ -1359,24 +1413,21 @@ function litterCandidates(
   if (pr.code !== 0) {
     rep.errors.push(`worktree prune failed — ${pr.err || 'git error'}`);
   }
-  const first = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']);
-  if (first.code !== 0) {
-    rep.errors.push(`worktree list failed — ${first.err || 'git error'}`);
+  const first = listWorktrees(opts.root, rep);
+  if (first === undefined) {
     return undefined;
   }
-  const main = parseWorktreePorcelain(first.out)[0];
+  const main = first[0];
   if (main === undefined) {
     rep.errors.push('worktree list returned no main entry');
     return undefined;
   }
   recoverGhosts(opts, main, rep);
   // a recovered ghost is only visible to a fresh listing — re-read
-  const wt = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']);
-  if (wt.code !== 0) {
-    rep.errors.push(`worktree list failed — ${wt.err || 'git error'}`);
+  const all = listWorktrees(opts.root, rep);
+  if (all === undefined) {
     return undefined;
   }
-  const all = parseWorktreePorcelain(wt.out);
   const cands: LitterCandidate[] = [];
   const onTree = new Set<string>();
   // the main checkout's own branch is never bare litter — a fix/… or
@@ -1384,65 +1435,115 @@ function litterCandidates(
   if (main.branch !== undefined) {
     onTree.add(main.branch);
   }
-  // detached HEADs have no branch to name them — the tip→branch index
-  // is built lazily on the first one (one for-each-ref per sweep, and
-  // only when a detached tree actually exists)
+  const sink: CandSink = { opts, rep, main, onTree, cands, tipIndex: lazyTipIndex(opts, rep) };
+  for (const w of all.slice(1)) {
+    treeCand(w, sink);
+  }
+  litterBranches(opts, rep, onTree, cands);
+  return { main, cands };
+}
+
+/** `worktree list --porcelain`, parsed — undefined (and reported)
+ *  when git can't answer; the candidate set would be fiction. */
+function listWorktrees(root: string, rep: LitterReap): WorktreeInfo[] | undefined {
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
+  if (wt.code !== 0) {
+    rep.errors.push(`worktree list failed — ${wt.err || 'git error'}`);
+    return undefined;
+  }
+  return parseWorktreePorcelain(wt.out);
+}
+
+/** The detached-attribution index, read once and only when a detached
+ *  tree actually exists — one for-each-ref per sweep, lazily. */
+function lazyTipIndex(
+  opts: LitterReapOpts,
+  rep: LitterReap
+): () => Map<string, string[]> | undefined {
   let tips: Map<string, string[]> | undefined;
-  let tipsRead = false;
-  const tipIndex = (): Map<string, string[]> | undefined => {
-    if (!tipsRead) {
-      tipsRead = true;
+  let read = false;
+  return () => {
+    if (!read) {
+      read = true;
       tips = litterBranchTips(opts.root, opts.stackPrefix, rep);
     }
     return tips;
   };
-  for (const w of all.slice(1)) {
-    if (w.prunable !== undefined || !existsSync(w.path)) {
-      continue;
-    }
-    if (w.branch !== undefined) {
-      const s = litterSlug(w.branch, opts.stackPrefix);
-      if (s === undefined) {
-        continue;
-      }
-      onTree.add(w.branch);
-      cands.push({ w, branch: w.branch, slug: s.slug, label: s.label });
-      continue;
-    }
-    if (w.detached !== true) {
-      continue;
-    }
-    // tip attribution: exactly one candidate-eligible branch sitting
-    // on this HEAD names the tree — PR evidence and branch retire ride
-    // it. Zero or several matches stay unattributed (branch ''): the
-    // dir/claim slug alone feeds the bead verdict.
-    const tips = tipIndex();
-    if (tips === undefined) {
-      // the ref listing failed — attribution is off, so an open PR on
-      // the branch that WOULD have claimed this tip is invisible to
-      // the bead-only verdict. Keep every detached tree until a sweep
-      // can attribute honestly; never a silent reap on a failed probe
-      rep.kept.push(`${w.path} (tip index unavailable)`);
-      continue;
-    }
-    const atTip = tips.get(w.head) ?? [];
-    const attributed = atTip.length === 1 ? atTip[0] : undefined;
-    if (attributed !== undefined) {
-      const s = litterSlug(attributed, opts.stackPrefix);
-      if (s !== undefined) {
-        onTree.add(attributed);
-        cands.push({ w, branch: attributed, slug: s.slug, label: s.label });
-        continue;
-      }
-    }
-    const slug = detachedLitterSlug(w, main, opts.now);
-    if (slug === undefined) {
-      continue;
-    }
-    cands.push({ w, branch: '', slug, label: true });
+}
+
+/** Everything one worktree's litter classification reads or feeds —
+ *  the shared sweep state plus the sink the candidates land in. */
+interface CandSink {
+  opts: LitterReapOpts;
+  rep: LitterReap;
+  main: WorktreeInfo;
+  onTree: Set<string>;
+  cands: LitterCandidate[];
+  tipIndex: () => Map<string, string[]> | undefined;
+}
+
+/** One worktree → a litter candidate when it is litter-shaped:
+ *  prunable/missing trees aren't entries, branched trees read by
+ *  their branch, detached trees by tip attribution or the dir/claim
+ *  slug. */
+function treeCand(w: WorktreeInfo, sink: CandSink): void {
+  if (w.prunable !== undefined || !existsSync(w.path)) {
+    return;
   }
-  litterBranches(opts, rep, onTree, cands);
-  return { main, cands };
+  if (w.branch !== undefined) {
+    branchedTreeCand(w, w.branch, sink);
+    return;
+  }
+  if (w.detached === true) {
+    detachedTreeCand(w, sink);
+  }
+}
+
+/** A branched tree is a candidate when its branch is litter-shaped —
+ *  the branch also joins onTree so the bare-branch pass skips it. */
+function branchedTreeCand(w: WorktreeInfo, branch: string, sink: CandSink): void {
+  const s = litterSlug(branch, sink.opts.stackPrefix);
+  if (s === undefined) {
+    return;
+  }
+  sink.onTree.add(branch);
+  sink.cands.push({ w, branch, slug: s.slug, label: s.label });
+}
+
+/** A detached tree's name: exactly one candidate-eligible branch
+ *  sitting on this HEAD names the tree — PR evidence and branch retire
+ *  ride it. Zero or several matches stay unattributed (branch ''):
+ *  the dir/claim slug alone feeds the bead verdict. An unreadable
+ *  index keeps every detached tree — attribution is off, so an open
+ *  PR on the branch that WOULD have claimed this tip is invisible to
+ *  the bead-only verdict; never a silent reap on a failed probe. */
+function detachedTreeCand(w: WorktreeInfo, sink: CandSink): void {
+  const tips = sink.tipIndex();
+  if (tips === undefined) {
+    sink.rep.kept.push(`${w.path} (tip index unavailable)`);
+    return;
+  }
+  const atTip = tips.get(w.head) ?? [];
+  if (atTip.length === 1 && attributedTreeCand(w, atTip[0], sink)) {
+    return;
+  }
+  const slug = detachedLitterSlug(w, sink.main, sink.opts.now);
+  if (slug === undefined) {
+    return;
+  }
+  sink.cands.push({ w, branch: '', slug, label: true });
+}
+
+/** The tip's own branch names the tree when it is litter-shaped —
+ *  false leaves the dir/claim slug verdict in play. */
+function attributedTreeCand(w: WorktreeInfo, branch: string, sink: CandSink): boolean {
+  const s = litterSlug(branch, sink.opts.stackPrefix);
+  if (s === undefined) {
+    return false;
+  }
+  sink.onTree.add(branch);
+  sink.cands.push({ w, branch, slug: s.slug, label: s.label });
+  return true;
 }
 
 /** Local branch tip → candidate-eligible branch names — the detached
@@ -1546,130 +1647,11 @@ function recoverGhosts(opts: LitterReapOpts, main: WorktreeInfo, rep: LitterReap
     } catch {
       continue;
     }
-    recoverGhost(opts, path, name.slice(prefix.length), adminBase, rep);
+    recoverGhost(
+      { root: opts.root, adminBase, dryRun: opts.dryRun === true, rep },
+      { path, slug: name.slice(prefix.length) }
+    );
   }
-}
-
-function recoverGhost(
-  opts: LitterReapOpts,
-  path: string,
-  slug: string,
-  adminBase: string,
-  rep: LitterReap
-): void {
-  const keep = (why: string): void => {
-    rep.kept.push(`${path} (ghost — ${why})`);
-  };
-  const dotgit = join(path, '.git');
-  let isDir: boolean | undefined;
-  try {
-    isDir = statSync(dotgit).isDirectory();
-  } catch {
-    reapEmptyGhost(opts, path, rep);
-    return;
-  }
-  if (isDir) {
-    keep('separate clone');
-    return;
-  }
-  const admin = worktreeGitDir(path);
-  if (admin === null || dirname(admin) !== adminBase) {
-    keep('foreign .git pointer');
-    return;
-  }
-  if (existsSync(admin)) {
-    return; // registered but unlisted — worktree prune/list's business
-  }
-  const found = ghostBranch(opts.root, slug);
-  if (found === undefined) {
-    keep('no branch to bind');
-    return;
-  }
-  if ('ambiguous' in found) {
-    keep(`ambiguous branch binding — ${found.ambiguous.join(', ')}`);
-    return;
-  }
-  const branch = found.branch;
-  if (opts.dryRun === true) {
-    rep.repaired.push(`${path} [${branch}]`);
-    return;
-  }
-  // rebuild the admin entry the way `worktree add` would have written
-  // it — gitdir ↔ the worktree's own .git pointer, commondir back to
-  // the shared dir, HEAD pinned to the branch. `read-tree HEAD` then
-  // repopulates the index so status reads honestly (a ghost whose tip
-  // moved off its checkout reads dirty — kept, not silently reaped).
-  try {
-    mkdirSync(admin, { recursive: true });
-    writeFileSync(join(admin, 'gitdir'), `${dotgit}\n`);
-    writeFileSync(join(admin, 'commondir'), '../..\n');
-    writeFileSync(join(admin, 'HEAD'), `ref: refs/heads/${branch}\n`);
-  } catch (err) {
-    keep(`admin recreate failed — ${err instanceof Error ? err.message : err}`);
-    return;
-  }
-  gitTry(['-C', path, 'read-tree', 'HEAD']);
-  rep.repaired.push(`${path} [${branch}]`);
-}
-
-/** A ghost with no `.git` at all — the only provably-safe removal is an
- *  empty dir; anything else is kept as unverifiable provenance. */
-function reapEmptyGhost(opts: LitterReapOpts, path: string, rep: LitterReap): void {
-  let empty = false;
-  try {
-    empty = readdirSync(path).length === 0;
-  } catch {
-    // unreadable — keep below
-  }
-  if (!empty) {
-    rep.kept.push(`${path} (ghost — no .git — not provably a worktree)`);
-    return;
-  }
-  if (opts.dryRun !== true) {
-    // rmdirSync, not rmSync: it refuses anything that filled in
-    // between the check and the call — the guard IS the syscall
-    rmdirSync(path);
-  }
-  rep.reaped.push(`${path} (empty ghost dir)`);
-}
-
-/** The branch a recovered ghost binds HEAD to — the naming convention's
- *  own mapping: loop/<slug> first, then the label namespaces
- *  (work/<slug> — a `bro work enter` tail — plus feat//fix//devin/
- *  ad-hoc heads), else the stack member carrying <slug>. The dir name
- *  carries the slug, not the namespace: when several branches claim it
- *  the binding is a guess that can hand the tree the wrong branch's
- *  bead/PR evidence — 'ambiguous' refuses the recovery instead. */
-function ghostBranch(
-  root: string,
-  slug: string
-): { branch: string } | { ambiguous: string[] } | undefined {
-  const has = (b: string): boolean =>
-    gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0;
-  const matches: string[] = [];
-  for (const b of [
-    `loop/${slug}`,
-    `work/${slug}`,
-    `feat/${slug}`,
-    `fix/${slug}`,
-    `devin/${slug}`,
-  ]) {
-    if (has(b)) {
-      matches.push(b);
-    }
-  }
-  const st = gitTry(['-C', root, 'branch', '--list', 'stack/*', '--format=%(refname:short)']);
-  if (st.code === 0) {
-    for (const b of st.out.split('\n').filter(s => s !== '')) {
-      if (parseStackBranch(b)?.slug === slug) {
-        matches.push(b);
-      }
-    }
-  }
-  if (matches.length === 0) {
-    return undefined;
-  }
-  return matches.length === 1 ? { branch: matches[0] } : { ambiguous: matches };
 }
 
 /** Bare litter branches — a worktree-less loop/* (or label-namespace
@@ -1680,27 +1662,38 @@ function litterBranches(
   onTree: Set<string>,
   cands: LitterCandidate[]
 ): void {
+  const sink: BranchSink = { onTree, cands };
   for (const pat of ['loop/', opts.stackPrefix, ...LITTER_LABEL_PREFIXES]) {
-    if (pat === undefined) {
-      continue;
+    if (pat !== undefined) {
+      bareBranchesUnder(opts, rep, pat, sink);
     }
-    const bl = gitTry([
-      '-C',
-      opts.root,
-      'branch',
-      '--list',
-      `${pat}*`,
-      '--format=%(refname:short)',
-    ]);
-    if (bl.code !== 0) {
-      rep.errors.push(`branch list ${pat}* failed — ${bl.err || 'git error'}`);
-      continue;
-    }
-    for (const b of bl.out.split('\n').filter(s => s !== '' && !onTree.has(s))) {
-      const s = litterSlug(b, opts.stackPrefix);
-      if (s !== undefined) {
-        cands.push({ branch: b, slug: s.slug, label: s.label });
-      }
+  }
+}
+
+/** The two collections a bare-branch sweep feeds — branches already
+ *  on a tree (skipped) and the candidates it discovers. */
+interface BranchSink {
+  onTree: Set<string>;
+  cands: LitterCandidate[];
+}
+
+/** One namespace's bare branches — worktree-less tails become
+ *  candidates; a failed list only reports, the sweep still applies. */
+function bareBranchesUnder(
+  opts: LitterReapOpts,
+  rep: LitterReap,
+  pat: string,
+  sink: BranchSink
+): void {
+  const bl = gitTry(['-C', opts.root, 'branch', '--list', `${pat}*`, '--format=%(refname:short)']);
+  if (bl.code !== 0) {
+    rep.errors.push(`branch list ${pat}* failed — ${bl.err || 'git error'}`);
+    return;
+  }
+  for (const b of bl.out.split('\n').filter(s => s !== '' && !sink.onTree.has(s))) {
+    const s = litterSlug(b, opts.stackPrefix);
+    if (s !== undefined) {
+      sink.cands.push({ branch: b, slug: s.slug, label: s.label });
     }
   }
 }
@@ -2133,17 +2126,14 @@ function releaseDeadClaim(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): st
  *  contended past the bound is itself a claimant mid-act → keep. A
  *  failed removal keeps the branch too — it is still checked out there. */
 function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[]): void {
-  const { opts, rep, main } = ctx;
+  const { opts, rep } = ctx;
   const pr = litterPrEvidence(opts, c.branch);
   const label = c.w?.path ?? c.branch;
   const bead = litterBead(ctx, c);
-  if (bead?.status === 'in_progress' && opts.keepClaims?.has(bead.id) !== true) {
-    const owner = releaseDeadClaim(ctx, c, bead);
-    if (owner !== undefined) {
-      rep.kept.push(`${label} (bead in_progress — ${owner})`);
-      return;
-    }
-    // released — the bead reads open for the verdicts below
+  const orphan = orphanClaimKeep(ctx, c, bead);
+  if (orphan !== undefined) {
+    rep.kept.push(`${label} (${orphan})`);
+    return;
   }
   const done = litterDoneVerdict(c, ctx, pr);
   if (done !== undefined) {
@@ -2167,6 +2157,42 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
     retireLitterBranch(c, ctx, pr);
     return;
   }
+  reapTreeUnderLock(c.w, c, ctx, label);
+  retireLitterBranch(c, ctx, pr);
+}
+
+/** The orphan-claim leg: an in_progress bead whose every liveness
+ *  plane is dead gets its claim released so it re-queues — the bead
+ *  then reads open for the verdicts below. Returns the keep reason
+ *  when the claim survives (a live owner, a contended lock), undefined
+ *  when the bead is no live orphan — released, or never in_progress. */
+function orphanClaimKeep(
+  ctx: LitterCtx,
+  c: LitterCandidate,
+  bead: TaskRow | undefined
+): string | undefined {
+  if (bead?.status !== 'in_progress' || ctx.opts.keepClaims?.has(bead.id) === true) {
+    return undefined;
+  }
+  const owner = releaseDeadClaim(ctx, c, bead);
+  return owner === undefined ? undefined : `bead in_progress — ${owner}`;
+}
+
+/** The tree verdict + the removal as ONE locked section — the shared
+ *  registry lock is the same one claimWorktree and finishWorktreeEnter
+ *  hold across their claim→stamp / check→remove spans: without it a
+ *  claimant or respawned fixer can pin the path after the check and
+ *  lose its live tree to the removal (bro-qry9, bro-0fiq). A lock
+ *  contended past the bound is itself a claimant mid-act → keep. A
+ *  failed removal keeps the branch too — it is still checked out
+ *  there (the caller retires it after this returns). */
+function reapTreeUnderLock(
+  w: WorktreeInfo,
+  c: LitterCandidate,
+  ctx: LitterCtx,
+  label: string
+): void {
+  const { opts, rep, main } = ctx;
   let release: () => void;
   try {
     release = acquireAgentRegistryLock(main.path);
@@ -2180,15 +2206,14 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
       rep.kept.push(`${label} (${why})`);
       return;
     }
-    if (opts.dryRun !== true && !removeMergedWorktree(c.w.path, c.w, main)) {
-      rep.errors.push(`worktree ${c.w.path} not removed`);
+    if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
+      rep.errors.push(`worktree ${w.path} not removed`);
       return;
     }
     rep.reaped.push(litterReapedLabel(c));
   } finally {
     release();
   }
-  retireLitterBranch(c, ctx, pr);
 }
 
 interface ParkedCand {
@@ -2271,94 +2296,10 @@ function reapParkedCand(
   return 0;
 }
 
-/** An nx daemon's argv signature — `<wt>/node_modules/nx/dist/src/
- *  daemon/server/start.js`, a long-lived helper nx respawns on demand:
- *  never a worker, never work. Its cwd/argv inside the tree roots it
- *  on every /proc occupancy plane all the same, so a dead fixer's
- *  orphaned daemon pins the tree "live" and a safe reap reads as
- *  occupied (bro-7dgu3 — verified live: trees held by nothing else). */
-const NX_DAEMON_SCRIPT_RE = /nx[/\\]dist[/\\]src[/\\]daemon[/\\]server[/\\]start\.js$/;
-
-/** argv[0] is a node binary (`node`, `…/node`, `node.exe`) AND its
- *  script argument is the daemon's start.js — a flattened-argv
- *  substring match would SIGTERM any process merely carrying the path
- *  as data (`vim <path>`, `cp <path> …`); the script position is the
- *  daemon's shape (codeant, #975). */
-export function isNxDaemonCmd(cmd: string): boolean {
-  const argv = cmd.split(' ').filter(Boolean);
-  const exe = argv[0]?.split(/[/\\]/).pop() ?? '';
-  if (!/^node(\.\w+)?$/.test(exe)) {
-    return false;
-  }
-  const script = argv.slice(1).find(t => !t.startsWith('-'));
-  return script !== undefined && NX_DAEMON_SCRIPT_RE.test(script);
-}
-
-/** Bound the SIGTERM→exit wait — the reap's own rooted-scan must see a
- *  signalled ghost gone in THIS pass, not one sweep later. */
-const NX_KILL_WAIT_MS = 2_000;
-
-export interface NxDaemonReapOpts {
-  dryRun?: boolean;
-  /** Injectable rooted-process scan — tests stub it; production is
-   *  processesRootedIn (every occupant, not only agent-shaped). */
-  scan?: (worktree: string) => ProcHit[];
-  /** Injectable signal/liveness — tests never signal real pids. */
-  kill?: (pid: number) => void;
-  alive?: (pid: number) => boolean;
-  /** Bound on the post-SIGTERM wait — interactive callers keep the
-   *  default so this pass's verdict scan sees the ghosts gone; the
-   *  drive daemon passes 0 (a sync wait would freeze its event loop —
-   *  the next sweep's scan reaps once the daemons exit). */
-  waitMs?: number;
-}
-
-/** Kill stale nx daemons rooted in the candidate trees — bounded to
- *  trees whose EVERY rooted process is daemon-shaped: the only live
- *  thing left is disposable infrastructure. One non-daemon hit keeps
- *  hands off the whole tree — a live session's daemon keeps company.
- *  Returns the kill-report lines, 'nx daemon pid N (<path>)' — pushed
- *  under dryRun too (the 'would' list); no signals are sent then. */
-export function reapStaleNxDaemons(worktrees: string[], opts: NxDaemonReapOpts = {}): string[] {
-  const scan = opts.scan ?? ((wt: string) => processesRootedIn(wt));
-  const kill = opts.kill ?? ((pid: number) => process.kill(pid, 'SIGTERM'));
-  const alive = opts.alive ?? pidAlive;
-  const killed: string[] = [];
-  const pids: number[] = [];
-  for (const wt of worktrees) {
-    let rooted: ProcHit[];
-    try {
-      rooted = scan(wt);
-    } catch {
-      continue; // unverifiable — the verdict layer keeps the tree
-    }
-    if (rooted.length === 0 || !rooted.every(h => isNxDaemonCmd(h.cmd))) {
-      continue;
-    }
-    for (const h of rooted) {
-      if (opts.dryRun !== true) {
-        try {
-          kill(h.pid);
-          pids.push(h.pid);
-        } catch {
-          // already gone — nothing pinned
-        }
-      }
-      killed.push(`nx daemon pid ${h.pid} (${wt})`);
-    }
-  }
-  // let the SIGTERMs land before the verdicts' own rooted-scans — a
-  // still-dying daemon would pin its tree for one more sweep. Skipped
-  // at waitMs:0 — the caller chose the next sweep's scan over blocking
-  // this thread (the drive loop's async lane; Atomics.wait stalls every
-  // pending promise for the bound, amazon-q on #975)
-  const waitMs = opts.waitMs ?? NX_KILL_WAIT_MS;
-  const deadline = Date.now() + waitMs;
-  while (waitMs > 0 && pids.some(pid => alive(pid)) && Date.now() < deadline) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-  }
-  return killed;
-}
+export type { NxDaemonReapOpts } from './work-litter-nx.ts';
+// The stale-nx-daemon reap moved to work-litter-nx.ts (bro-fnkj4
+// wave-2c) — re-exported so importers keep their `./work.ts` path.
+export { isNxDaemonCmd, reapStaleNxDaemons } from './work-litter-nx.ts';
 
 export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
   const rep: LitterReap = {
@@ -2440,37 +2381,55 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
 function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
   const handled = new Set(cands.map(c => litterBead(ctx, c)?.id).filter(Boolean));
   for (const v of ctx.claims.runs) {
-    if (v.state !== 'dead') {
-      continue;
-    }
-    const ids = [...new Set([v.beadId, ...(v.beadIds ?? [])])];
-    for (const id of ids) {
-      const bead = ctx.bySlug.get(loopSlug(id)) ?? ctx.bySlug.get(v.slug);
-      if (
-        bead === undefined ||
-        bead.status !== 'in_progress' ||
-        handled.has(bead.id) ||
-        ctx.opts.keepClaims?.has(bead.id) === true
-      ) {
-        continue;
-      }
-      // the record's worktree still narrows the owner check — a live
-      // process inside it (or a marker naming it) keeps the claim even
-      // with the tree already hand-cleaned to a bare path
-      releaseDeadClaim(
-        ctx,
-        {
-          branch: '',
-          slug: loopSlug(bead.id),
-          w:
-            v.worktree === undefined
-              ? undefined
-              : { path: v.worktree, head: '', bare: false, detached: false },
-        },
-        bead
-      );
+    if (v.state === 'dead') {
+      releaseDeadRunBeads(ctx, v, handled);
     }
   }
+}
+
+/** One dead run record's bead ids — a record's beadIds covers every
+ *  clump member, not only the lead. */
+function releaseDeadRunBeads(
+  ctx: LitterCtx,
+  v: LoopRunView,
+  handled: Set<string | undefined>
+): void {
+  const ids = [...new Set([v.beadId, ...(v.beadIds ?? [])])];
+  for (const id of ids) {
+    releaseRunBeadClaim(ctx, v, id, handled);
+  }
+}
+
+/** One dead-record bead id → a claim release when the bead is still
+ *  in_progress and nothing else claimed it this pass. */
+function releaseRunBeadClaim(
+  ctx: LitterCtx,
+  v: LoopRunView,
+  id: string,
+  handled: Set<string | undefined>
+): void {
+  const bead = ctx.bySlug.get(loopSlug(id)) ?? ctx.bySlug.get(v.slug);
+  if (bead === undefined || bead.status !== 'in_progress') {
+    return;
+  }
+  if (handled.has(bead.id) || ctx.opts.keepClaims?.has(bead.id) === true) {
+    return;
+  }
+  // the record's worktree still narrows the owner check — a live
+  // process inside it (or a marker naming it) keeps the claim even
+  // with the tree already hand-cleaned to a bare path
+  releaseDeadClaim(
+    ctx,
+    {
+      branch: '',
+      slug: loopSlug(bead.id),
+      w:
+        v.worktree === undefined
+          ? undefined
+          : { path: v.worktree, head: '', bare: false, detached: false },
+    },
+    bead
+  );
 }
 
 export function runWorkCommand(argv: string[]): void | Promise<void> {
