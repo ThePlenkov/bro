@@ -47,7 +47,7 @@ jobs:
       # across projects instead of serializing per target
       - name: Typecheck + Test
         run: |
-          npx nx run-many -t typecheck test --exclude='skills-*,plugins-*-skills-*'
+          npx nx run-many -t typecheck test --exclude='skills-*,plugins-*-skills-*,.devin-*'
           npm run test:scripts
 
   # the 4.8m e2e suite is the tail of the critical path — it needs only
@@ -71,7 +71,7 @@ jobs:
         run: node scripts/gen-plugins.ts
 
       - name: Test E2E
-        run: npx nx run-many -t test:e2e --exclude='skills-*,plugins-*-skills-*'
+        run: npx nx run-many -t test:e2e --exclude='skills-*,plugins-*-skills-*,.devin-*'
 
       - name: Hook latency baseline
         # earlier steps may fail after the build — run anyway when the
