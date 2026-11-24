@@ -155,19 +155,20 @@ export function toGitHubRepo(
     const parsed = parseGithubRemote(input);
     return parsed === null ? null : GitHubRepo.from(parsed);
   }
-  if (!hasRepoCoordinates(input)) {
-    return null;
-  }
-  return GitHubRepo.from({ owner: input.owner.trim(), repo: input.repo.trim() });
+  const coords = repoCoordinates(input);
+  return coords === null ? null : GitHubRepo.from(coords);
 }
 
-function hasRepoCoordinates(input: { owner: string; repo: string }): boolean {
-  return (
-    typeof input.owner === 'string' &&
-    typeof input.repo === 'string' &&
-    input.owner.trim() !== '' &&
-    input.repo.trim() !== ''
-  );
+function repoCoordinates(input: {
+  owner: string;
+  repo: string;
+}): { owner: string; repo: string } | null {
+  if (typeof input.owner !== 'string' || typeof input.repo !== 'string') {
+    return null;
+  }
+  const owner = input.owner.trim();
+  const repo = input.repo.trim();
+  return owner === '' || repo === '' ? null : { owner, repo };
 }
 
 /** remote → {owner, repo} when it names a github.com repository —
