@@ -167,13 +167,16 @@ function hookEmitEnv(kind, opts = {}) {
 	if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
 	return env;
 }
-/**
-* Run one `bro hooks <event>` with the payload on stdin; resolve null on
-* every failure mode — spawn error, timeout, nonzero exit, garbage out.
-* `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
-*/
-async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
-	return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+/** The one-line cause a diagnostic surfaces for a failed hook call. */
+function hookFailureText(failure) {
+	switch (failure.kind) {
+		case "no-cli": return "no bro CLI resolved";
+		case "input": return "the hook payload could not be serialized";
+		case "spawn": return "the hook process failed to spawn";
+		case "timeout": return `the hook timed out after ${failure.timeoutMs}ms`;
+		case "exit": return `the hook exited ${failure.code ?? "with no exit code"}`;
+		case "output": return "the hook answered with no control object";
+	}
 }
 /**
 * callHook with the failure class attached. The stop gate needs to tell
@@ -407,17 +410,56 @@ const NPX_SPECS = ["@broject/bro@0.3.0", "@broject/bro"];
 *  (specs/bro-izpyk.9.md). A CLI that predates the marker ignores
 *  the env, so old↔new mixes degrade to the pre-emit status quo. */
 const HOOK_ENV = hookEmitEnv("kilo", { npxPin: NPX_SPECS[0] });
+const GATE_DIAG_INTERVAL_MS = 6e4;
 /** Auto-approve only a plain bro/bd/npx-bro invocation — no shell
 *  metacharacters in args (a metachar just means the ask goes to the
 *  user; auto-approve fails closed, never wrong). */
 const SAFE_CMD = [/^\s*(?:bro|bd)(?:\s+[^;&|`<>$()\\\n]*)?\s*$/, /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/];
-const BroPlugin = async ({ directory, client }) => {
+function hookOutcome(result) {
+	if (result.error !== null) return {
+		control: null,
+		failure: result.error
+	};
+	if (result.code !== 0) return {
+		control: null,
+		failure: `the hook exited ${result.code ?? "with no exit code"}`
+	};
+	if (result.stdout === "") return {
+		control: null,
+		failure: null
+	};
+	for (const line of result.stdout.split("\n")) {
+		const text = line.trim();
+		if (text === "") continue;
+		try {
+			const parsed = JSON.parse(text);
+			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return {
+				control: parsed,
+				failure: null
+			};
+		} catch {}
+	}
+	return {
+		control: null,
+		failure: "the hook answered with no control object"
+	};
+}
+const BroPlugin = async (input) => {
+	const { directory, client } = input;
+	const broArgv = input.broArgv;
 	const getCommand = createCommandResolver({ npxSpecs: NPX_SPECS });
 	/** Run one bro hook event; null on every failure mode (fail-open).
 	*  `bro hooks` itself no-ops in a repo that never opted in. */
-	const runBroHook = async (event, input) => {
+	const runBroHook = async (event, input$1) => {
+		if (broArgv !== void 0) return callHookDetailed({
+			cmd: broArgv[0] ?? "",
+			args: broArgv.slice(1)
+		}, event, input$1, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
 		const resolved = await getCommand();
-		return resolved === null ? null : callHook(resolved, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+		return resolved === null ? {
+			control: null,
+			failure: { kind: "no-cli" }
+		} : callHookDetailed(resolved, event, input$1, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
 	};
 	const run = async (sub, args) => {
 		const resolved = await getCommand();
@@ -436,13 +478,14 @@ const BroPlugin = async ({ directory, client }) => {
 	const liveSessions = /* @__PURE__ */ new Set();
 	const hydratedContexts = /* @__PURE__ */ new Map();
 	let hydrationToken = 0;
+	let stopGateDiagAt = 0;
 	const hydrate = async (sessionKey) => {
 		const token = ++hydrationToken;
 		hydratedContexts.set(sessionKey, {
 			token,
 			context: null
 		});
-		const control = await runBroHook("session-start", { session_id: sessionKey });
+		const { control } = await runBroHook("session-start", { session_id: sessionKey });
 		if (Object.is(hydratedContexts.get(sessionKey)?.token, token)) hydratedContexts.set(sessionKey, {
 			token,
 			context: contextOf(control) || null
@@ -470,8 +513,8 @@ const BroPlugin = async ({ directory, client }) => {
 				return run(args.sub, args.args ?? []);
 			}
 		}) },
-		"experimental.chat.system.transform": async (input, output) => {
-			const sessionKey = input.sessionID ?? "";
+		"experimental.chat.system.transform": async (input$1, output) => {
+			const sessionKey = input$1.sessionID ?? "";
 			if (sessionKey && !hydratedContexts.has(sessionKey)) {
 				liveSessions.add(sessionKey);
 				await hydrate(sessionKey);
@@ -491,15 +534,29 @@ const BroPlugin = async ({ directory, client }) => {
 				else hydratedContexts.delete(sid);
 			}
 			if (event.type !== "session.idle") return;
-			const control = await runBroHook("stop", { session_id: event.properties.sessionID });
+			const { control, failure } = await runBroHook("stop", { session_id: event.properties.sessionID });
+			if (failure !== null) {
+				const now = Date.now();
+				if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
+					stopGateDiagAt = now;
+					try {
+						await client.app.log({ body: {
+							service: "bro",
+							level: "warn",
+							message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`
+						} }).catch(() => {});
+					} catch {}
+				}
+				return;
+			}
 			if (control?.decision === "block") await client.app.log({ body: {
 				service: "bro",
 				level: "warn",
 				message: `bro stop gate blocked: ${control.reason ?? "unfinished work"}`
 			} });
 		},
-		"permission.ask": async (input, output) => {
-			const pats = input.patterns ?? input.pattern;
+		"permission.ask": async (input$1, output) => {
+			const pats = input$1.patterns ?? input$1.pattern;
 			const cmds = pats === void 0 ? [] : Array.isArray(pats) ? pats : [pats];
 			if (cmds.length > 0 && cmds.every((c) => SAFE_CMD.some((re) => re.test(c)))) output.status = "allow";
 		}
@@ -511,4 +568,4 @@ var kilo_default = {
 };
 
 //#endregion
-export { kilo_default as default };
+export { kilo_default as default, hookOutcome };

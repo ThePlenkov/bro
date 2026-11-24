@@ -18,10 +18,11 @@ import type { Plugin } from '@kilocode/plugin';
 import {
   HOOK_TIMEOUT_MS,
   RUN_TIMEOUT_MS,
-  callHook,
+  callHookDetailed,
   contextOf,
   createCommandResolver,
   hookEmitEnv,
+  hookFailureText,
   runCommand,
 } from '@broject/adapter-core/core';
 
@@ -36,6 +37,7 @@ const NPX_SPECS = ['@broject/bro@0.3.0', '@broject/bro'];
  *  (specs/bro-izpyk.9.md). A CLI that predates the marker ignores
  *  the env, so old↔new mixes degrade to the pre-emit status quo. */
 const HOOK_ENV = hookEmitEnv('kilo', { npxPin: NPX_SPECS[0] });
+const GATE_DIAG_INTERVAL_MS = 60_000;
 
 /** Auto-approve only a plain bro/bd/npx-bro invocation — no shell
  *  metacharacters in args (a metachar just means the ask goes to the
@@ -45,7 +47,46 @@ const SAFE_CMD = [
   /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/,
 ];
 
-const BroPlugin: Plugin = async ({ directory, client }) => {
+interface SpawnResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+}
+
+export interface HookOutcome {
+  control: unknown;
+  failure: string | null;
+}
+
+export function hookOutcome(result: SpawnResult): HookOutcome {
+  if (result.error !== null) {
+    return { control: null, failure: result.error };
+  }
+  if (result.code !== 0) {
+    return { control: null, failure: `the hook exited ${result.code ?? 'with no exit code'}` };
+  }
+  if (result.stdout === '') {
+    return { control: null, failure: null };
+  }
+  for (const line of result.stdout.split('\n')) {
+    const text = line.trim();
+    if (text === '') continue;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { control: parsed, failure: null };
+      }
+    } catch {
+      // Non-JSON output is diagnostic chatter.
+    }
+  }
+  return { control: null, failure: 'the hook answered with no control object' };
+}
+
+const BroPlugin: Plugin = async input => {
+  const { directory, client } = input;
+  const broArgv = (input as { broArgv?: string[] }).broArgv;
   // resolved on first use — the PATH tier costs a spawn probe and kilo
   // loads plugins even in repos where bro is inert. The shared resolver
   // owns the ladder (pin → sibling → checkout → PATH → npx) and the
@@ -55,10 +96,14 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   /** Run one bro hook event; null on every failure mode (fail-open).
    *  `bro hooks` itself no-ops in a repo that never opted in. */
   const runBroHook = async (event: string, input: unknown) => {
+    if (broArgv !== undefined) {
+      const command = { cmd: broArgv[0] ?? '', args: broArgv.slice(1) };
+      return callHookDetailed(command, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+    }
     const resolved = await getCommand();
     return resolved === null
-      ? null
-      : callHook(resolved, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+      ? { control: null, failure: { kind: 'no-cli' as const } }
+      : callHookDetailed(resolved, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
   };
 
   // --- tools: bro subcommands the model can call directly -------------------
@@ -85,10 +130,11 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   const liveSessions = new Set<string>();
   const hydratedContexts = new Map<string, { token: number; context: string | null }>();
   let hydrationToken = 0;
+  let stopGateDiagAt = 0;
   const hydrate = async (sessionKey: string): Promise<void> => {
     const token = ++hydrationToken;
     hydratedContexts.set(sessionKey, { token, context: null });
-    const control = await runBroHook('session-start', { session_id: sessionKey });
+    const { control } = await runBroHook('session-start', { session_id: sessionKey });
     if (Object.is(hydratedContexts.get(sessionKey)?.token, token)) {
       hydratedContexts.set(sessionKey, { token, context: contextOf(control) || null });
     }
@@ -187,7 +233,29 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       if (event.type !== 'session.idle') {
         return;
       }
-      const control = await runBroHook('stop', { session_id: event.properties.sessionID });
+      const { control, failure } = await runBroHook('stop', {
+        session_id: event.properties.sessionID,
+      });
+      if (failure !== null) {
+        const now = Date.now();
+        if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
+          stopGateDiagAt = now;
+          try {
+            await client.app
+              .log({
+                body: {
+                  service: 'bro',
+                  level: 'warn',
+                  message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`,
+                },
+              })
+              .catch(() => {});
+          } catch {
+            // Diagnostics are fail-open and must never break the lifecycle hook.
+          }
+        }
+        return;
+      }
       if (control?.decision === 'block') {
         await client.app.log({
           body: {
