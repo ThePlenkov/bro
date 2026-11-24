@@ -96,12 +96,15 @@ REST resource paths are stable.
   else `open`.
 - **blocked** — an open issue is blocked when it carries a `blocked`
   label or the premium `blocked` flag is set on the issue entity
-  (incoming open blockers). `blocking_issues_count` is deliberately
+  (incoming open blockers). The flag is **premium-only**: free-tier
+  REST payloads omit it entirely, so incoming blockers are invisible
+  there — on free instances the `blocked` label is the *only* marker
+  and a blocker linked via `is_blocked_by` does not flip status.
+  `blocking_issues_count` is deliberately
   NOT a signal: it counts the open issues this issue *blocks* — the
-  outgoing direction — so a blocker is itself ready work. Free-tier
-  REST exposes no incoming-blocker field; the label is the manual
-  marker there, and `deps()` stays unsupported rather than fanning
-  out a links read per row. There is no sub-issue probe — GitLab
+  outgoing direction — so a blocker is itself ready work. `deps()`
+  stays unsupported rather than fanning out a links read per row.
+  There is no sub-issue probe — GitLab
   tasks are not decomposed through this facade.
 - **ready** — open + unblocked + unassigned + unclaimed, ordered
   priority asc then `created_at` asc.
@@ -117,8 +120,12 @@ REST resource paths are stable.
   `PUT assignee_id` → re-read verify → `PUT labels=…,bro:claimed`.
   Check-then-act can't be atomic over REST: a contested assignee set
   resolves to the lexicographically smallest username — the loser
-  unassigns itself (`assignee_id=0`) and throws
-  `claim contested — <winner> holds it`; the label lands last so
+  removes ONLY itself by rewriting the set to the surviving logins
+  (`assignee_ids[]=<each non-me id>`; `assignee_id=0` would unassign
+  ALL, wiping the winner) and throws
+  `claim contested — <winner> holds it`. A login that won't resolve
+  to an id leaves the assignment untouched — staying assigned is
+  untidy but never strips the winner; the label lands last so
   "label present ⇒ claim verified". Pre-claimed issues (label or any
   assignee) throw `already claimed` before any write; closed issues
   throw `only open issues are claimable`; an unresolvable viewer
@@ -129,7 +136,10 @@ REST resource paths are stable.
   (`POST issues/<iid>/notes`) first — a failed note aborts the close —
   then `PUT state_event=close`. **reopen** — `state_event=reopen`
   (skipped when already open), `assignee_id=0`, and the label set
-  minus `bro:claimed`/`blocked`, so the issue re-queues.
+  minus `bro:claimed`/`blocked`, so the issue re-queues. Every write
+  in the sequence is checked — a mid-sequence failure throws with the
+  landed partial state in the message (e.g. `unassign failed — issue
+  may be reopened+assigned`), never a silent half-reopen.
 - **create** — `POST projects/<p>/issues` with `title`, `description`
   (body + trailer via `withMeta`), `labels[]=` per label. `parent`/
   `deps` on the input throw `create does not support parent/deps` —
@@ -138,10 +148,13 @@ REST resource paths are stable.
   `labels`/`label` only. `status`, `assignee`, and unknown keys throw
   — status moves through reopen/close, assignee through claim. An
   empty patch is a no-op call-wise.
-- **link** — `related` and `blocked`/`blocks`/`blocked-by` map to
-  `POST issues/<from>/links` (`link_type=blocks` for the blocked
-  family; same-project targets only, with a `target_project_id`
-  retry for API versions that require it). `parent`, `tracks`,
+- **link** — `related` and `blocked`/`blocked-by`/`blocks` map to
+  `POST issues/<from>/links`. Direction follows the core contract —
+  `link(a, b, 'blocked')` means "a is blocked by b": `blocked` and
+  `blocked-by` post `link_type=is_blocked_by`, `blocks` posts
+  `link_type=blocks`. Same-project targets only, with a
+  `target_project_id` retry for API versions that require it.
+  `parent`, `tracks`,
   `discovered`, and unknown rels throw
   `unsupported dependency operations explicitly rejected`.
 - **note / remove** — `POST …/notes`; `DELETE issues/<iid>`.

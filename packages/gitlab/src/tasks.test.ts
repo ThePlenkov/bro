@@ -25,8 +25,11 @@ const WIN32 = process.platform === 'win32';
  *                         read answers file <n> — claim interleavings
  *    FAKE_GLAB_ISSUE_404 / _500 — comma iids the read fails for
  *    FAKE_GLAB_ACTOR / _USER_ID — `api user` / `users?username=`
+ *    FAKE_GLAB_USER_IDS  — 'login:id' csv overriding users?username=
+ *                         per login ('none' answers an empty list)
  *    FAKE_GLAB_CREATED   — POST /issues response
- *    FAKE_GLAB_FAIL_ALL / _NOTE_FAIL / _PUT_FAIL — transport failures
+ *    FAKE_GLAB_FAIL_ALL / _NOTE_FAIL / _PUT_FAIL / _PUT_FAIL_N —
+ *                         transport failures (N = the Nth issues PUT)
  *    FAKE_GLAB_LINK_NEEDS_PROJECT — first links POST demands
  *                         target_project_id (the retry the code runs) */
 const FAKE_GLAB = `#!/bin/sh
@@ -49,12 +52,18 @@ case "$1 $2" in
         else echo '{"iid":42,"state":"opened","title":"created"}'; fi ;;
       "PUT "*"/issues/"*)
         if [ "$FAKE_GLAB_PUT_FAIL" = "1" ]; then echo 'put refused' >&2; exit 1; fi
+        pn=$(grep -c "PUT .*issues/" "$FAKE_GLAB_LOG")
+        if [ "$FAKE_GLAB_PUT_FAIL_N" = "$pn" ]; then echo 'put refused' >&2; exit 1; fi
         echo '{}' ;;
       "DELETE "*"/issues/"*) echo '{}' ;;
     esac ;;
   "api "*) case "$2" in
       user) printf '%s\\n' "{\\"username\\":\\"$FAKE_GLAB_ACTOR\\"}" ;;
-      "users?username="*) printf '%s\\n' "[{\\"id\\":\${FAKE_GLAB_USER_ID:-7},\\"username\\":\\"$FAKE_GLAB_ACTOR\\"}]" ;;
+      "users?username="*)
+        u=$(echo "$2" | sed 's/^users?username=//')
+        uid=$(echo ",$FAKE_GLAB_USER_IDS," | sed -n "s/.*,$u:\\([^,]*\\).*/\\1/p")
+        if [ "$uid" = "none" ]; then echo '[]';
+        else printf '%s\\n' "[{\\"id\\":\${uid:-\${FAKE_GLAB_USER_ID:-7}},\\"username\\":\\"$u\\"}]"; fi ;;
       *"/issues?state="*)
         st=$(echo "$2" | sed 's/.*state=\\([a-z]*\\).*/\\1/')
         pg=$(echo "$2" | sed 's/.*page=\\([0-9]*\\).*/\\1/')
@@ -522,7 +531,7 @@ describe('gitlabTasks', { skip: WIN32 }, () => {
     }
   });
 
-  test('claim race: the higher-login loser unassigns and throws', () => {
+  test('claim race: the higher-login loser unassigns only itself and throws', () => {
     const seq = mkdtempSync(join(tmpdir(), 'bro-gl-seq-'));
     try {
       writeFileSync(join(seq, '1.json'), JSON.stringify(issue({ iid: 42 })));
@@ -530,12 +539,52 @@ describe('gitlabTasks', { skip: WIN32 }, () => {
         join(seq, '2.json'),
         JSON.stringify(issue({ iid: 42, assignees: ['zz-me', 'aaa-rival'] }))
       );
-      withRepo({ FAKE_GLAB_ACTOR: 'zz-me', FAKE_GLAB_ISSUE_SEQ: seq }, (dir, log) => {
-        assert.throws(() => gitlabTasks(dir).claim('42'), /claim contested — aaa-rival holds it/);
-        assert.match(calls(log).join('\n'), /-f assignee_id=0/);
-        // the loser must NOT land the commit flag
-        assert.equal(callsMatching(log, /-f labels=.*bro:claimed/).length, 0);
-      });
+      withRepo(
+        {
+          FAKE_GLAB_ACTOR: 'zz-me',
+          FAKE_GLAB_USER_IDS: 'aaa-rival:11',
+          FAKE_GLAB_ISSUE_SEQ: seq,
+        },
+        (dir, log) => {
+          assert.throws(() => gitlabTasks(dir).claim('42'), /claim contested — aaa-rival holds it/);
+          // the loser rewrites the set to JUST the winner's id — never
+          // assignee_id=0, which GitLab reads as "unassign ALL"
+          assert.equal(callsMatching(log, /-f assignee_id=0$/).length, 0);
+          const rewrites = callsMatching(log, /-f assignee_ids/);
+          assert.equal(rewrites.length, 1, calls(log).join('\n'));
+          assert.match(rewrites[0]!, /assignee_ids\[\]=11$/);
+          // the loser must NOT land the commit flag
+          assert.equal(callsMatching(log, /-f labels=.*bro:claimed/).length, 0);
+        }
+      );
+    } finally {
+      rmSync(seq, { recursive: true, force: true });
+    }
+  });
+
+  test('claim race: an unresolvable winner id never writes assignees', () => {
+    const seq = mkdtempSync(join(tmpdir(), 'bro-gl-seq-'));
+    try {
+      writeFileSync(join(seq, '1.json'), JSON.stringify(issue({ iid: 42 })));
+      writeFileSync(
+        join(seq, '2.json'),
+        JSON.stringify(issue({ iid: 42, assignees: ['zz-me', 'aaa-rival'] }))
+      );
+      withRepo(
+        {
+          FAKE_GLAB_ACTOR: 'zz-me',
+          FAKE_GLAB_USER_IDS: 'aaa-rival:none',
+          FAKE_GLAB_ISSUE_SEQ: seq,
+        },
+        (dir, log) => {
+          assert.throws(() => gitlabTasks(dir).claim('42'), /claim contested — aaa-rival holds it/);
+          // no assignee rewrite at all: never assignee_id=0 (strips the
+          // winner), never a guessed id — staying assigned beats stripping
+          assert.equal(callsMatching(log, /-f assignee_id=0$/).length, 0);
+          assert.equal(callsMatching(log, /-f assignee_ids/).length, 0);
+          assert.equal(callsMatching(log, /-f labels=.*bro:claimed/).length, 0);
+        }
+      );
     } finally {
       rmSync(seq, { recursive: true, force: true });
     }
@@ -559,6 +608,27 @@ describe('gitlabTasks', { skip: WIN32 }, () => {
         // the winner never unassigns itself — the loser's removal is theirs to run
         assert.equal(callsMatching(log, /-f assignee_id=0/).length, 0);
       });
+    } finally {
+      rmSync(seq, { recursive: true, force: true });
+    }
+  });
+
+  test('claim fails loud when the commit-flag write fails after assignment', () => {
+    const seq = mkdtempSync(join(tmpdir(), 'bro-gl-seq-'));
+    try {
+      writeFileSync(join(seq, '1.json'), JSON.stringify(issue({ iid: 42 })));
+      writeFileSync(join(seq, '2.json'), JSON.stringify(issue({ iid: 42, assignees: ['me'] })));
+      writeFileSync(join(seq, '3.json'), JSON.stringify(issue({ iid: 42, assignees: ['me'] })));
+      withRepo(
+        { FAKE_GLAB_ACTOR: 'me', FAKE_GLAB_ISSUE_SEQ: seq, FAKE_GLAB_PUT_FAIL_N: '2' },
+        dir => {
+          // PUT#1 is the assignee write — the half-claim must surface
+          assert.throws(
+            () => gitlabTasks(dir).claim('42'),
+            /claim of 42 assigned the actor but the bro:claimed label write failed/
+          );
+        }
+      );
     } finally {
       rmSync(seq, { recursive: true, force: true });
     }
@@ -644,6 +714,32 @@ describe('gitlabTasks', { skip: WIN32 }, () => {
     });
   });
 
+  test('reopen fails loud on partial writes — the landed state is in the error', () => {
+    const closedClaimed = JSON.stringify(
+      issue({ iid: 42, state: 'closed', labels: ['bro:claimed'], assignees: ['me'] })
+    );
+    // PUT#2 is the unassign — the state_event=reopen already landed
+    withRepo({ FAKE_GLAB_ISSUE: closedClaimed, FAKE_GLAB_PUT_FAIL_N: '2' }, dir => {
+      assert.throws(
+        () => gitlabTasks(dir).reopen('42'),
+        /reopen of 42 succeeded but unassign failed — issue may be reopened\+assigned/
+      );
+    });
+    // PUT#3 is the label write — assignees are already released
+    withRepo({ FAKE_GLAB_ISSUE: closedClaimed, FAKE_GLAB_PUT_FAIL_N: '3' }, dir => {
+      assert.throws(
+        () => gitlabTasks(dir).reopen('42'),
+        /reopen of 42 released assignees but the label write failed/
+      );
+    });
+    // PUT#1 — a refused reopen aborts before the release writes run
+    withRepo({ FAKE_GLAB_ISSUE: closedClaimed, FAKE_GLAB_PUT_FAIL_N: '1' }, (dir, log) => {
+      assert.throws(() => gitlabTasks(dir).reopen('42'), /failed to reopen 42/);
+      assert.equal(callsMatching(log, /-f assignee_id=0/).length, 0);
+      assert.equal(callsMatching(log, /-f labels=/).length, 0);
+    });
+  });
+
   test('note posts to the issue notes endpoint', () => {
     withRepo({}, (dir, log) => {
       gitlabTasks(dir).note('5', 'progress so far');
@@ -715,15 +811,27 @@ describe('gitlabTasks', { skip: WIN32 }, () => {
     });
   });
 
-  test('link related and blocks hit the links endpoint; retry carries project id', () => {
+  test('link related and the blocked family hit the links endpoint with direction', () => {
     withRepo({}, (dir, log) => {
       gitlabTasks(dir).link('1', '2', 'related');
+      // link(a, b, 'blocked') = "a is blocked by b" → is_blocked_by on a
       gitlabTasks(dir).link('3', '4', 'blocked');
+      gitlabTasks(dir).link('5', '6', 'blocked-by');
+      // 'blocks' is the reverse — a blocks b → link_type=blocks
+      gitlabTasks(dir).link('7', '8', 'blocks');
       const lines = calls(log).join('\n');
       assert.match(lines, /POST projects\/acme%2Fwidgets\/issues\/1\/links -f target_issue_iid=2/);
       assert.match(
         lines,
-        /POST projects\/acme%2Fwidgets\/issues\/3\/links -f target_issue_iid=4 -f link_type=blocks/
+        /POST projects\/acme%2Fwidgets\/issues\/3\/links -f target_issue_iid=4 -f link_type=is_blocked_by/
+      );
+      assert.match(
+        lines,
+        /POST projects\/acme%2Fwidgets\/issues\/5\/links -f target_issue_iid=6 -f link_type=is_blocked_by/
+      );
+      assert.match(
+        lines,
+        /POST projects\/acme%2Fwidgets\/issues\/7\/links -f target_issue_iid=8 -f link_type=blocks/
       );
     });
     // older API shapes require target_project_id — the retry adds it
