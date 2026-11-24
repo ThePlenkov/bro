@@ -704,15 +704,29 @@ describe('gascity connector', () => {
         stderr: (result.stderr || '').trim().slice(0, 500),
       };
     };
-    const lifecycle = (name: string, args: string[], cwd = process.cwd()): void => {
-      const result = runFixture(args, cwd);
+    const lifecycle = (
+      name: string,
+      args: string[],
+      expectJson?: (parsed: unknown) => boolean
+    ): void => {
+      const result = runFixture(args);
+      let ok = result.status === 0;
+      if (ok && expectJson !== undefined) {
+        try {
+          ok = expectJson(JSON.parse(result.stdout));
+        } catch {
+          ok = false;
+        }
+      }
       checks.push({
         name,
-        ok: result.status === 0,
+        ok,
         exitCode: result.status,
         stdout: result.stdout || result.stderr,
       });
     };
+    const isRecord = (v: unknown): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
     try {
       lifecycle('gc init minimal lifecycle city', [
         'init',
@@ -729,19 +743,17 @@ describe('gascity connector', () => {
       ]);
       lifecycle('gc agent add fx', ['agent', 'add', '--city', city, '--name', 'fx']);
       lifecycle('gc start lifecycle city', ['start', city]);
-      lifecycle('gc session list --json', ['session', 'list', '--json', '--city', city]);
-      lifecycle('gc rig list --json', ['rig', 'list', '--json', '--city', city]);
-      lifecycle('gc session new fx --alias fx --no-attach --json', [
-        'session',
-        'new',
-        'fx',
-        '--alias',
-        'fx',
-        '--no-attach',
-        '--json',
-        '--city',
-        city,
-      ]);
+      lifecycle('gc session list --json', ['session', 'list', '--json', '--city', city], v =>
+        Array.isArray(v)
+      );
+      lifecycle('gc rig list --json', ['rig', 'list', '--json', '--city', city], v =>
+        Array.isArray(v)
+      );
+      lifecycle(
+        'gc session new fx --alias fx --no-attach --json',
+        ['session', 'new', 'fx', '--alias', 'fx', '--no-attach', '--json', '--city', city],
+        v => isRecord(v) && typeof v.session_id === 'string' && v.session_id.length > 0
+      );
       lifecycle('gc session submit fx ping', ['session', 'submit', 'fx', 'ping', '--city', city]);
       lifecycle('gc session close fx', ['session', 'close', 'fx', '--city', city]);
     } finally {
@@ -759,7 +771,10 @@ describe('gascity connector', () => {
       timestamp: new Date().toISOString(),
       checks,
       passed: checks.every(c => c.ok),
-      fixtureCoverage: checks.filter(c => c.name.startsWith('gc session ')).every(c => c.ok),
+      fixtureCoverage: (() => {
+        const sessionChecks = checks.filter(c => c.name.startsWith('gc session '));
+        return sessionChecks.length > 0 && sessionChecks.every(c => c.ok);
+      })(),
       evidenceType: 'versioned-real-gc-conformance',
     };
     writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
