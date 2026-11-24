@@ -3,7 +3,7 @@
  *  (`bro run debt.toml`) shares. Split out of debt.ts — the module was
  *  past the CodeScene file-size bar. */
 import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { ensureAuth, gitTry, reviewHost } from '@broject/core';
 import {
   applyDebtLabel,
@@ -59,11 +59,11 @@ interface SetArgs {
   notes: string | null;
 }
 
-/** --threads-file resolves against the repo root like an import
- *  positional (debt-import.ts): the canonical path must stay inside the
- *  canonical repo root — an escaping path would read arbitrary file
- *  lines into thread-id candidates and echo them to stderr via the
- *  not-in-ledger warning. */
+/** The canonical file must stay inside the canonical repo root — an
+ *  escaping --threads-file would read arbitrary lines into thread-id
+ *  candidates and echo them to stderr via the not-in-ledger warning.
+ *  `..` is a path segment test, not a prefix: a file literally named
+ *  `..ids.txt` inside the root is legitimate. */
 function assertThreadsFile(root: string, f: string): void {
   let st: ReturnType<typeof statSync>;
   try {
@@ -77,16 +77,20 @@ function assertThreadsFile(root: string, f: string): void {
     process.exit(2);
   }
   const rel = relative(realpathSync(root), realpathSync(f));
-  if (rel.startsWith('..') || isAbsolute(rel)) {
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     console.error(`error: ${f} resolves outside the repo root`);
     process.exit(2);
   }
 }
 
-/** --threads-file rows: one id per line, '#' comments allowed. */
+/** --threads-file rows: one id per line, '#' comments allowed. Resolves
+ *  against the invocation cwd like any CLI path arg — import
+ *  positionals resolve against the root instead because their artifact
+ *  keys are root-scoped (debt-import.ts); a thread-id list has no such
+ *  key. */
 function readThreadIdsFile(path: string): string[] {
+  const f = resolve(process.cwd(), path);
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
-  const f = resolve(root, path);
   assertThreadsFile(root, f);
   return readFileSync(f, 'utf8')
     .split('\n')
