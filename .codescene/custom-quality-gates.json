@@ -394,6 +394,11 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/drive.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/fleet.ts"
     },
     {
@@ -415,6 +420,11 @@
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/loop-state.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/loop.ts"
     },
     {
       "quality_gates": "bare_minimum",
