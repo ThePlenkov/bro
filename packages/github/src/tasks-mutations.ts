@@ -9,8 +9,9 @@
  * micro-window (a loser's verify landing before the winner's write)
  * stays visible — the issue shows both assignees — never faked.
  */
-import { bodyMeta, gh, ghJson, ghTry, nativeTaskRel, withMeta } from '@broject/core';
+
 import type { ClaimCapability, TaskInput, TaskRow } from '@broject/core';
+import { bodyMeta, gh, ghJson, ghTry, nativeTaskRel, withMeta } from '@broject/core';
 import { ensureLabel, ghActor, issueNumber, queryIssueSync } from './tasks-queries.ts';
 import { assigneesOf, BLOCKED_LABEL, CLAIMED_LABEL, labelsOf, toRow } from './tasks-rows.ts';
 
@@ -154,9 +155,14 @@ const createBody = (i: TaskInput): string | undefined =>
     : undefined;
 
 /** 'kind:ref' — refs may be issue URLs carrying their own colons, so
- *  split on the FIRST colon only. */
+ *  split on the FIRST colon only. A missing colon is a malformed dep:
+ *  slicing at -1 would fake the kind ('parents' → 'parent') and pass
+ *  the rel regex with a bogus ref — throw before either caller slices. */
 function depRef(d: string): { kind: string; ref: string } {
   const colon = d.indexOf(':');
+  if (colon === -1) {
+    throw new Error(`github tasks: dep '${d}' is not 'kind:ref' (blocked | parent)`);
+  }
   return { kind: d.slice(0, colon), ref: d.slice(colon + 1) };
 }
 
