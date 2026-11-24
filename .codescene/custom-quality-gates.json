@@ -439,6 +439,53 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/debt.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from debt.ts: the argv layer — usage text, option readers, flag parsers — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/debt-args.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from debt.ts: the sverka/SARIF import path — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/debt-import.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from debt.ts: the read-only reports — status/stats/trend/prs/list/next — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/debt-query.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from debt.ts: the review-threads scan/harvest/label pipeline — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/debt-scan.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from debt.ts: the multi-source collectors and ledger projections — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/debt-sources.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from debt.ts: the ledger/label mutations — set/mark/applyVerdicts — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/debt-verdicts.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/dogfood.ts"
     },
     {
