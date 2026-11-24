@@ -12,7 +12,9 @@ and the wiring helpers to point clients at it. The listener binds to
 **The provider plane is opt-in transport.** The
 `task → agent → PR → gate → debt` wedge — `bro review act`, `bro review
 debt` — resolves no provider, starts no listener, and reads no upstream
-credential. Nothing on this page is required to run the gate or sweep
+credential. The one exception is itself opt-in: `judge.mode: shadow`
+can call a configured provider credential to annotate unresolved review
+threads. Nothing on this page is required to run the gate or sweep
 the ledger.
 
 ## Three separate concerns
