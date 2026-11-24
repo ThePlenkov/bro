@@ -89,25 +89,56 @@ with separate connectors for Cloud and Data Center/Server.
   [package README](https://github.com/ThePlenkov/bro/blob/main/packages/jira/README.md)
   for details.
 
+### GitLab Issues
+
+GitLab Issues are supported as an opt-in `tasks` backend via
+[`@broject/gitlab`](https://github.com/ThePlenkov/bro/tree/main/packages/gitlab)
+— the same connector that provides the `reviews` facade over `glab`.
+
+- **Selection:** name-only opt-in — `connectors.tasks = "gitlab"`. A GitLab
+  remote alone never flips the task backend (the connector marks `tasks`
+  opt-in via `optInFacades`).
+- **Auth/prerequisites:** an authenticated `glab` CLI. The project resolves
+  from the origin remote (`GROUP/PROJECT`, nested groups included) or an
+  explicit positional; self-hosted instances are picked up from the remote
+  host or `GITLAB_HOST`.
+- **Version availability:** GitLab tasks support is available in the
+  current `bro` package line (shipped with `@broject/gitlab`).
+- **Capabilities:** issues as `TaskStore`/`TaskStoreAsync` — list/ready/get/
+  create/update, claim (assignee + `bro:claimed` label, contested claims
+  keep the winner assigned), close/reopen, and issue links
+  (`related`/`blocked`/`blocks`/`blocked-by` — `blocked`/`blocked-by` map
+  to GitLab's `is_blocked_by` link type). Issue references accept `42`,
+  `#42`, issue URLs, and cross-project `group/project#42`.
+- **Honest absences:** `deps()` is not supported; `create` rejects
+  `parent`/`deps`; `update` rejects `status`/`assignee`; `link` supports
+  only `related`/`blocked`/`blocks`/`blocked-by` within one project (no
+  `parent`/`tracks`/`discovered`, no cross-project links); the REST
+  `blocked` flag is premium-only — on free-tier instances the `blocked`
+  label is the portable marker; **`publish` is not implemented**. See the
+  [package README](https://github.com/ThePlenkov/bro/blob/main/packages/gitlab/README.md)
+  and [spec](https://github.com/ThePlenkov/bro/blob/main/specs/bro-l8c4f.16.md)
+  for details.
+
 ### Keeping your existing tracker
 
-If you already use Linear or Jira (or any supported tracker), you do **not**
-need to migrate to beads to use bro's task facade. Set
-`connectors.tasks` to the appropriate backend and configure auth/prerequisites
-above. bro commands that consume the tasks facade will route through that
+If you already use Linear, Jira, or GitLab Issues (or any supported
+tracker), you do **not** need to migrate to beads to use bro's task facade.
+Set `connectors.tasks` to the appropriate backend and configure
+auth/prerequisites above. bro commands that consume the tasks facade will route through that
 connector. Beads-specific features (e.g. certain projections/imports) remain
 beads-centric; connectors document their capabilities and honest absences
 explicitly.
 
 ### Facade → connector → capabilities (quick matrix)
 
-| Facade    | Connectors                                                     | Selection                                                                              | Notes                                                                                                                     |
-| --------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `reviews` | `github` (`gh`), `gitlab` (`glab`)                             | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations.                                                                           |
-| `tasks`   | `beads` (`bd`, default), `github`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default.            | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
-| `queries` | `github`, `gitlab`, `atlassian`, `linear`                      | Configured via `connectors.queries` or per `bro query` step                            | Plan-driven fan-out across providers.                                                                                     |
-| `agents`  | Native/tmux/Gas City backends                                  | Configured via `connectors.agents`                                                     | Detached agents/workers.                                                                                                  |
-| `specs`   | Native + tool-layout matchers                                  | Detected or explicitly configured                                                      | Spec-driven workflows.                                                                                                    |
+| Facade    | Connectors                                                               | Selection                                                                              | Notes                                                                                                                     |
+| --------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `reviews` | `github` (`gh`), `gitlab` (`glab`)                                       | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations.                                                                           |
+| `tasks`   | `beads` (`bd`, default), `github`, `gitlab`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default.            | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
+| `queries` | `github`, `gitlab`, `atlassian`, `linear`                                | Configured via `connectors.queries` or per `bro query` step                            | Plan-driven fan-out across providers.                                                                                     |
+| `agents`  | Native/tmux/Gas City backends                                            | Configured via `connectors.agents`                                                     | Detached agents/workers.                                                                                                  |
+| `specs`   | Native + tool-layout matchers                                            | Detected or explicitly configured                                                      | Spec-driven workflows.                                                                                                    |
 
 ## Agent clients
 

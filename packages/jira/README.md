@@ -7,28 +7,28 @@ issue links, transitions, assignee, comments.
 
 Two deployment surfaces share one mapping layer:
 
-| connector | surface | users | bodies | search | projects |
-| --- | --- | --- | --- | --- | --- |
-| `jira` | Jira Cloud `/rest/api/3` | `accountId` | ADF | `POST /search/jql` (nextPageToken) | `/project/search` |
-| `jira-dc` | Data Center/Server `/rest/api/2` | `name` (`key` alias) | plain strings | `POST /search` (startAt) | `/project` |
+| connector | surface                          | users                | bodies        | search                             | projects          |
+| --------- | -------------------------------- | -------------------- | ------------- | ---------------------------------- | ----------------- |
+| `jira`    | Jira Cloud `/rest/api/3`         | `accountId`          | ADF           | `POST /search/jql` (nextPageToken) | `/project/search` |
+| `jira-dc` | Data Center/Server `/rest/api/2` | `name` (`key` alias) | plain strings | `POST /search` (startAt)           | `/project`        |
 
 Same mapping contract as `github-issues` (bro-huy5o.1) and `linear`
 (bro-huy5o.2):
 
-| contract | Jira |
-| --- | --- |
-| `id` | issue key (`PROJ-123`); bare numbers resolve inside the serving project, `/browse/` URLs pass through |
-| `status` | statusCategory `done` → `closed`, `indeterminate` → `in_progress`; `new`/other → `in_progress` (assignee) \| `blocked` \| `open` |
-| `blocked` | unresolved `Blocks` link landing inward, open sub-task, or the `blocked` label |
-| `ready` | JQL `project = K AND statusCategory != Done AND assignee is EMPTY`, priority then created |
-| `claim` | assignee write + verify re-read; a start transition rides best-effort |
-| `close` | comment reason → first `done` transition |
-| `reopen` | transition to `new` (fallback `indeterminate`) + unassign + drop the label |
-| `type` | native `issuetype` wins, then `type:`/`kind:`/`epic` labels, then the bro trailer |
-| `priority` | positional over the site's ordered `/priority` list onto bd's 0–4 |
-| `deps` | `issuelinks` + `parent`/`subtasks` → canonical `TaskDepEdge` rows |
-| `link` | `blocked`→Blocks (`to` outward), `related`→Relates, `parent`→`fields.parent`; site customs resolve by name |
-| `children` | hydrated `subtasks` rows |
+| contract   | Jira                                                                                                                             |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `id`       | issue key (`PROJ-123`); bare numbers resolve inside the serving project, `/browse/` URLs pass through                            |
+| `status`   | statusCategory `done` → `closed`, `indeterminate` → `in_progress`; `new`/other → `in_progress` (assignee) \| `blocked` \| `open` |
+| `blocked`  | unresolved `Blocks` link landing inward, open sub-task, or the `blocked` label                                                   |
+| `ready`    | JQL `project = K AND statusCategory != Done AND assignee is EMPTY`, priority then created                                        |
+| `claim`    | assignee write + verify re-read; a start transition rides best-effort                                                            |
+| `close`    | comment reason → first `done` transition                                                                                         |
+| `reopen`   | transition to `new` (fallback `indeterminate`) + unassign + drop the label                                                       |
+| `type`     | native `issuetype` wins, then `type:`/`kind:`/`epic` labels, then the bro trailer                                                |
+| `priority` | positional over the site's ordered `/priority` list onto bd's 0–4                                                                |
+| `deps`     | `issuelinks` + `parent`/`subtasks` → canonical `TaskDepEdge` rows                                                                |
+| `link`     | `blocked`→Blocks (`to` outward), `related`→Relates, `parent`→`fields.parent`; site customs resolve by name                       |
+| `children` | hydrated `subtasks` rows                                                                                                         |
 
 ## Setup
 
@@ -70,3 +70,9 @@ Jira site:
 - `description` is ADF↔text mapped on Cloud and plain text on DC; the
   `<!-- bro: … -->` trailer rides a plain paragraph / plain body and survives
   verbatim on both.
+
+## Links
+
+- Docs: <https://broject.dev/docs/integrations>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/jira>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

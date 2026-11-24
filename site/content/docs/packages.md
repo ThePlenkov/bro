@@ -34,7 +34,7 @@ is a quick guide, not the complete catalog.
 | `@broject/drill`    | Scoped descent frames — drill down/up with result + prevention memos                        |
 | `@broject/convoy`   | Molecule runner — beads DAG workflows scheduled inside the agent                            |
 | `@broject/github`   | GitHub connector — the `reviews` facade over the `gh` CLI                                   |
-| `@broject/gitlab`   | GitLab connector — the `reviews` facade over the `glab` CLI                                 |
+| `@broject/gitlab`   | GitLab connector — `reviews` facade over `glab` + opt-in `tasks` facade over GitLab Issues  |
 | `@broject/linear`   | Linear connector — the `tasks` facade over Linear GraphQL API                               |
 | `@broject/jira`     | Jira connector — the `tasks` facade over the `atlassian` CLI (Cloud/Data Center)            |
 | `@broject/learn`    | Lesson store — schema and `bd kv` CRUD behind `bro self learn`                              |
