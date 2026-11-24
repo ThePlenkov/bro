@@ -5556,7 +5556,7 @@ function firstSegment(id: string): string {
  *  The LANE rides the row as its own field: the reader must not have
  *  to guess it back out of the id, whose head is a formatted string and
  *  the model's own name may carry a slash of its own. */
-type ServedRow = (model: RoutedModel) => Record<string, unknown>;
+ type ServedRow = (model: RoutedModel) => Record<string, unknown>;
 
 const anthropicServedRow: ServedRow = m => ({
   type: 'model',
