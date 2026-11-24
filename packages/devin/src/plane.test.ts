@@ -314,8 +314,8 @@ describe('countDevinSessions', () => {
           // only the real leader counts; the TID-recycled stale lock is ignored
           assert.equal(countDevinSessions([dir], undefined, procDir), 1);
         } finally {
-          leader.kill();
-          tid.kill();
+          killDevinCli(leader);
+          killDevinCli(tid);
         }
       });
     });
