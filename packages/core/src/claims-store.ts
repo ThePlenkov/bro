@@ -31,7 +31,7 @@ import {
   type LedgerStore,
 } from './ledger-store.ts';
 import { pidAlive } from './proc.ts';
-import { taskStore, type TaskRow, type TaskStore } from './tasks.ts';
+import { claimRemote, taskStore, type TaskRow, type TaskStore } from './tasks.ts';
 import {
   CLAIM_DEFAULT_TTL_MS,
   type ClaimFacade,
@@ -327,12 +327,13 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     if (assignee !== '') {
       return { ok: false, conflict: taskConflict(resource, assignee) };
     }
-    try {
-      ts.claim(id);
-      return { ok: true };
-    } catch {
+    // remote-atomic claim (spec bro-4i4q4): publish + verify on the
+    // shared head — a raced verdict names the standing holder; thrown
+    // store/sync errors propagate as infra, never as a fake refusal
+    if (!claimRemote(ts, id)) {
       return taskClaimAfterRefusal(ts, resource, id, actor);
     }
+    return { ok: true };
   };
 
   const taskRelease = async (

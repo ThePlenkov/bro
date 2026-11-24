@@ -911,6 +911,43 @@ function makeStore(x: StoreExec): TaskStore {
   };
 }
 
+/** Remote-atomic claim (spec specs/bro-4i4q4.md) — `claim()` is
+ *  exclusive only inside this replica (`claimCapability`:
+ *  authority 'store'); independently syncing replicas each hold a
+ *  separate authority, so the claim is real once it lands on the
+ *  shared head. Publish via `sync()`, then read the merged truth:
+ *  in_progress + our assignee = won; anything else = raced — the head
+ *  carries another owner and the row is theirs, so we must NOT
+ *  reopen. A `sync` failure leaves an invisible local draft — undo it
+ *  best-effort and rethrow: a claim that cannot be published must not
+ *  pretend to exist. Backends without `sync` write through to the
+ *  service already — skip the publish and verify by re-read. */
+export function claimRemote(ts: TaskStore, id: string): boolean {
+  ts.claim(id);
+  if (ts.sync !== undefined) {
+    try {
+      ts.sync();
+    } catch (err) {
+      try {
+        ts.reopen(id);
+      } catch {
+        /* the sync error is the verdict, not the undo */
+      }
+      throw err;
+    }
+  }
+  const row = ts.get(id);
+  if (row === undefined) {
+    return false;
+  }
+  if ((row.status ?? '').toLowerCase() !== 'in_progress') {
+    return false;
+  }
+  const actor = ts.actor?.() ?? '';
+  // '' = unverifiable identity — the claim marker's word stands
+  return actor === '' || (row.assignee ?? '').trim() === actor;
+}
+
 /** The beads-backed TaskStore. `dir` selects the store via cwd —
  *  callers that need the global store resolve it themselves
  *  (`resolveGlobalDir` lives in the cli layer). */

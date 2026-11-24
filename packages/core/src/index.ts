@@ -272,6 +272,7 @@ export {
   bdActor,
   bdActorAsync,
   canonicalTaskRel,
+  claimRemote,
   getTasks,
   getTasksAsync,
   nativeTaskRel,

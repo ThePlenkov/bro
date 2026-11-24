@@ -24,6 +24,7 @@
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
 import {
+  claimRemote,
   emitLifecycle,
   ensureTasksBackend,
   facade,
@@ -228,7 +229,9 @@ function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
  *  store error propagates (a bd outage must surface). */
 function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | undefined): boolean {
   try {
-    storeFor(dir, opts).claim(b.id);
+    if (!claimRemote(storeFor(dir, opts), b.id)) {
+      return false; // raced on the shared head — the merged row carries another owner
+    }
     // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md).
     // The journal anchors at the run's repo (cwd), not the store dir:
     // --global's repo-less store would drop the row even inside a
