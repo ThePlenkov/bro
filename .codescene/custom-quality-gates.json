@@ -480,6 +480,20 @@
       "quality_gates": {
         "new_code_health": false
       },
+      "quality_gates_doc": "Moved extraction from loop.ts: the extracted routing implementation preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/loop-routing.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from loop.ts: the extracted spawn implementation preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/loop-spawn.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
       "quality_gates_doc": "Moved extraction from loop.ts: the remaining module-level argument-shape finding is pre-existing code retained as orchestration glue, not newly authored code.",
       "matching_content_path": "packages/cli/src/commands/loop.ts"
     },
