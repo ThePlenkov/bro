@@ -296,9 +296,15 @@ const isHarvestBlob = (e: { path: string; type: string }) =>
   e.type === 'blob' && e.path.startsWith(HARVEST_PREFIX) && e.path.endsWith('.jsonl');
 
 async function fetchHarvests(sha: string): Promise<Finding[]> {
-  const treeRes = await fetch(`${TREE_API}/${sha}?recursive=1`);
+  const treeRes = await fetch(`${TREE_API}/${sha}?recursive=1`, {
+    signal: AbortSignal.timeout(15_000),
+  });
+  await throwIfRateLimited(treeRes);
   if (!treeRes.ok) {
-    return [];
+    throw {
+      kind: 'unknown',
+      message: `harvest tree fetch failed (HTTP ${treeRes.status})`,
+    } satisfies LoadError;
   }
   const tree = (await treeRes.json()) as { tree?: Array<{ path: string; type: string }> };
   const paths = (tree.tree ?? [])
@@ -313,7 +319,7 @@ async function fetchHarvests(sha: string): Promise<Finding[]> {
 }
 
 async function resolveApiSnapshotSha(): Promise<string> {
-  const refRes = await fetch(REF_API);
+  const refRes = await fetch(REF_API, { signal: AbortSignal.timeout(15_000) });
   await throwIfRateLimited(refRes);
   if (!refRes.ok) {
     throw {
@@ -354,7 +360,9 @@ async function resolveSnapshotSha(): Promise<string> {
   // The sync command mirrors refs/bro/data to a branch. Raw content is
   // unauthenticated and cacheable, so the normal dashboard path never spends
   // the browser's shared GitHub REST quota.
-  const branch = await fetch(`${RAW}/bro-data/${SUMMARY_PATH}`);
+  const branch = await fetch(`${RAW}/bro-data/${SUMMARY_PATH}`, {
+    signal: AbortSignal.timeout(15_000),
+  });
   if (branch.ok) return 'bro-data';
   const branchBody = await branch
     .clone()
