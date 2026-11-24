@@ -18,7 +18,6 @@ const DOCS = `${BASE_URL}docs`;
 // API quota the ref-resolution call costs. GitHub issues and open PRs
 // come live from the REST API in the same request wave.
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
-const BRANCH_REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/heads/bro-data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
 const SNAPSHOT_KEY = 'bro:backlog:snapshot:v2';
@@ -125,7 +124,14 @@ function readCache(): { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt
 
 async function resolveSha(): Promise<string> {
   const refRes = await fetch(REF_API, { signal: AbortSignal.timeout(15_000) });
-  if (!refRes.ok) throw new Error(`could not resolve refs/bro/data (${refRes.status})`);
+  if (!refRes.ok) {
+    if (refRes.status === 403 || refRes.status === 429) {
+      throw new Error(
+        `GitHub API unavailable or rate-limited (HTTP ${refRes.status}); try again later`
+      );
+    }
+    throw new Error(`could not resolve refs/bro/data (${refRes.status})`);
+  }
   const { object } = (await refRes.json()) as { object: { sha: string } };
   return object.sha;
 }
@@ -138,23 +144,6 @@ async function readSnapshot(sha: string): Promise<Snapshot> {
     throw new Error('invalid backlog snapshot');
   }
   return snapshot as Snapshot;
-}
-
-async function readBranchSnapshot(): Promise<{ snapshot: Snapshot; sha: string } | null> {
-  try {
-    const [branchRes, refRes] = await Promise.all([
-      fetch(BRANCH_REF_API, { signal: AbortSignal.timeout(15_000) }),
-      fetch(REF_API, { signal: AbortSignal.timeout(15_000) }),
-    ]);
-    if (!branchRes.ok || !refRes.ok) return null;
-    const branch = (await branchRes.json()) as { object?: { sha?: string } };
-    const ref = (await refRes.json()) as { object?: { sha?: string } };
-    const branchSha = branch.object?.sha;
-    if (!branchSha || branchSha !== ref.object?.sha) return null;
-    return { snapshot: await readSnapshot(branchSha), sha: branchSha };
-  } catch {
-    return null;
-  }
 }
 
 interface GhRaw {
@@ -198,10 +187,37 @@ async function fetchGh(): Promise<GhItem[]> {
   return out;
 }
 
-async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
-  const branchSnapshot = await readBranchSnapshot();
-  if (branchSnapshot) return branchSnapshot;
+function decodeSnapshot(value: unknown): Snapshot {
+  const snapshot = value as Partial<Snapshot>;
+  if (typeof snapshot.generated_at !== 'string' || !Array.isArray(snapshot.issues)) {
+    throw new Error('invalid backlog snapshot');
+  }
+  return snapshot as Snapshot;
+}
 
+function snapshotHttpError(status: number): Error | null {
+  if (status === 403 || status === 429) {
+    return new Error(`snapshot unavailable or rate-limited (HTTP ${status}); try again later`);
+  }
+  if (status !== 404) return new Error(`backlog snapshot unavailable (HTTP ${status})`);
+  return null;
+}
+
+async function readRawBranchSnapshot(): Promise<{ snapshot: Snapshot; sha: string } | null> {
+  const branchRes = await fetch(`${RAW}/bro-data/${BACKLOG_PATH}`, {
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (branchRes.ok) {
+    return { snapshot: decodeSnapshot(await branchRes.json()), sha: 'bro-data' };
+  }
+  const error = snapshotHttpError(branchRes.status);
+  if (error) throw error;
+  return null;
+}
+
+async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
+  const branchSnapshot = await readRawBranchSnapshot();
+  if (branchSnapshot) return branchSnapshot;
   const sha = await resolveSha();
   return { snapshot: await readSnapshot(sha), sha };
 }
@@ -245,6 +261,16 @@ async function load(): Promise<Data> {
 
 function ageDays(iso: string, now: number): number {
   return Math.floor((now - Date.parse(iso)) / 86400000);
+}
+
+function formatSnapshotAge(iso: string): string {
+  const elapsed = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(elapsed) || elapsed < 60_000) return 'just now';
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `${minutes}m old`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h old`;
+  return `${Math.floor(hours / 24)}d old`;
 }
 
 const TYPE_COLOR: Record<string, string> = {
@@ -1109,7 +1135,7 @@ function Ready({ data, cached }: Readonly<{ data: Data; cached: boolean }>) {
     <>
       {cached && (
         <section className="debt-empty">
-          <p>showing the last cached snapshot — GitHub API unreachable right now</p>
+          <p>showing the last cached snapshot — GitHub API unavailable right now</p>
         </section>
       )}
       {data.ghUnavailable && !cached && (
@@ -1195,8 +1221,9 @@ function BacklogPage() {
           {state.kind === 'ready' && (
             <span className="debt-note">
               {' '}
-              · snapshot {state.data.sha.slice(0, 8)} ·{' '}
-              {state.data.snapshot.generated_at.slice(0, 16).replace('T', ' ')}Z
+              · snapshot {state.data.sha.slice(0, 8)} · generated{' '}
+              {state.data.snapshot.generated_at.slice(0, 16).replace('T', ' ')}Z (
+              {formatSnapshotAge(state.data.snapshot.generated_at)})
             </span>
           )}
         </p>

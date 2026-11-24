@@ -312,6 +312,71 @@ async function fetchHarvests(sha: string): Promise<Finding[]> {
   return texts.flatMap(t => parseJsonl<Finding>(t));
 }
 
+async function resolveApiSnapshotSha(): Promise<string> {
+  const refRes = await fetch(REF_API);
+  await throwIfRateLimited(refRes);
+  if (!refRes.ok) {
+    throw {
+      kind: refRes.status === 404 ? 'ref_missing' : 'unknown',
+      message:
+        refRes.status === 404
+          ? 'data ref not found — the review-debt snapshot may not be published yet.'
+          : `Failed to resolve bro/data ref (HTTP ${refRes.status}).`,
+    } satisfies LoadError;
+  }
+  const refJson = (await refRes.json()) as { object?: { sha?: string } };
+  if (!refJson.object?.sha) {
+    throw { kind: 'ref_missing', message: 'data ref not found' } satisfies LoadError;
+  }
+  return refJson.object.sha;
+}
+
+async function throwIfRateLimited(res: Response): Promise<void> {
+  const body = await res
+    .clone()
+    .text()
+    .catch(() => '');
+  if (!isRateLimitedStatus(res.status, res, body)) return;
+  const { retryAfter, reset } = getRateLimitHeaders(res);
+  const resetMsg = reset ? ` reset at ${new Date(parseInt(reset, 10) * 1000).toISOString()}.` : '';
+  throw {
+    kind: 'rate_limited',
+    status: res.status,
+    retryAfter,
+    reset,
+    message: retryAfter
+      ? `GitHub API rate limit reached (HTTP ${res.status}); retry after ${retryAfter}s.`
+      : `GitHub API rate limit reached (HTTP ${res.status})${resetMsg}`,
+  } satisfies LoadError;
+}
+
+async function resolveSnapshotSha(): Promise<string> {
+  // The sync command mirrors refs/bro/data to a branch. Raw content is
+  // unauthenticated and cacheable, so the normal dashboard path never spends
+  // the browser's shared GitHub REST quota.
+  const branch = await fetch(`${RAW}/bro-data/${SUMMARY_PATH}`);
+  if (branch.ok) return 'bro-data';
+  const branchBody = await branch
+    .clone()
+    .text()
+    .catch(() => '');
+  if (isRateLimitedStatus(branch.status, branch, branchBody)) {
+    throw {
+      kind: 'rate_limited',
+      status: branch.status,
+      ...getRateLimitHeaders(branch),
+      message: `GitHub raw snapshot unavailable (HTTP ${branch.status}); retry later.`,
+    } satisfies LoadError;
+  }
+  if (branch.status !== 404) {
+    throw {
+      kind: 'summary_failed',
+      message: `snapshot branch unavailable (HTTP ${branch.status})`,
+    } satisfies LoadError;
+  }
+  return resolveApiSnapshotSha();
+}
+
 async function load(): Promise<{
   data: Data;
   source: 'live' | 'cache';
@@ -319,9 +384,9 @@ async function load(): Promise<{
   sha?: string;
   cacheReason?: CacheReason;
 }> {
-  let refRes: Response;
+  let sha: string;
   try {
-    refRes = await fetch(REF_API);
+    sha = await resolveSnapshotSha();
   } catch (err) {
     const cached = readSnapshot();
     if (cached) {
@@ -330,104 +395,10 @@ async function load(): Promise<{
         source: 'cache',
         fetchedAt: cached.fetched_at,
         sha: cached.sha,
-        cacheReason: 'network',
+        cacheReason: (err as { kind?: CacheReason }).kind ?? 'network',
       };
     }
-    throw {
-      kind: 'unknown',
-      message: err instanceof Error ? err.message : String(err),
-    } satisfies LoadError;
-  }
-
-  const refBodyPromise = refRes
-    .clone()
-    .text()
-    .catch(() => '');
-  const refBody = await refBodyPromise;
-  if (isRateLimitedStatus(refRes.status, refRes, refBody)) {
-    const cached = readSnapshot();
-    if (cached) {
-      return {
-        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
-        source: 'cache',
-        fetchedAt: cached.fetched_at,
-        sha: cached.sha,
-        cacheReason: 'rate_limited',
-      };
-    }
-    const { retryAfter, reset } = getRateLimitHeaders(refRes);
-    const resetMsg =
-      !retryAfter && reset ? ` reset at ${new Date(parseInt(reset) * 1000).toISOString()}.` : '';
-    throw {
-      kind: 'rate_limited',
-      status: refRes.status,
-      retryAfter,
-      reset,
-      message: retryAfter
-        ? `GitHub API rate limit reached (HTTP ${refRes.status}); retry after ${retryAfter}s.`
-        : `GitHub API rate limit reached (HTTP ${refRes.status})${resetMsg ? resetMsg.slice(0, -1) + '.' : '.'}`,
-    } satisfies LoadError;
-  }
-
-  if (!refRes.ok) {
-    const cached = readSnapshot();
-    if (cached && refRes.status === 404) {
-      return {
-        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
-        source: 'cache',
-        fetchedAt: cached.fetched_at,
-        sha: cached.sha,
-        cacheReason: 'ref_missing',
-      };
-    }
-    if (cached) {
-      return {
-        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
-        source: 'cache',
-        fetchedAt: cached.fetched_at,
-        sha: cached.sha,
-        cacheReason: refRes.status === 404 ? 'ref_missing' : 'unknown',
-      };
-    }
-    throw {
-      kind: refRes.status === 404 ? 'ref_missing' : 'unknown',
-      message: `Failed to resolve bro/data ref (HTTP ${refRes.status}).`,
-    } satisfies LoadError;
-  }
-
-  let refJson: any;
-  try {
-    refJson = await refRes.json();
-  } catch (err) {
-    const cached = readSnapshot();
-    if (cached) {
-      return {
-        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
-        source: 'cache',
-        fetchedAt: cached.fetched_at,
-        sha: cached.sha,
-        cacheReason: 'unknown',
-      };
-    }
-    throw {
-      kind: 'unknown',
-      message: err instanceof Error ? err.message : String(err),
-    } satisfies LoadError;
-  }
-
-  const sha = refJson?.object?.sha;
-  if (!sha) {
-    const cached = readSnapshot();
-    if (cached) {
-      return {
-        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
-        source: 'cache',
-        fetchedAt: cached.fetched_at,
-        sha: cached.sha,
-        cacheReason: 'ref_missing',
-      };
-    }
-    throw { kind: 'ref_missing', message: 'data ref not found' } satisfies LoadError;
+    throw err;
   }
 
   try {
@@ -570,7 +541,6 @@ function DebtDashboard() {
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [errorKind, setErrorKind] = useState<LoadError['kind'] | null>(null);
-  const [retryAfter, setRetryAfter] = useState<string | null>(null);
   const [source, setSource] = useState<'live' | 'cache' | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [sha, setSha] = useState<string | undefined>(undefined);
@@ -588,7 +558,6 @@ function DebtDashboard() {
         setCacheReason(res.cacheReason ?? null);
         setError(null);
         setErrorKind(null);
-        setRetryAfter(null);
       },
       (err: unknown) => {
         if (!active) return;
@@ -601,7 +570,6 @@ function DebtDashboard() {
           const e = err as LoadError;
           setErrorKind(e.kind);
           if (e.kind === 'rate_limited') {
-            setRetryAfter(e.retryAfter ?? null);
             setError(e.message);
           } else if (e.kind === 'ref_missing') {
             setError('data ref not found — the review-debt snapshot may not be published yet.');
@@ -700,7 +668,7 @@ function DebtDashboard() {
             <p>
               Showing last available snapshot
               {fetchedAt ? ` from ${formatDateTime(fetchedAt)} (${formatAge(fetchedAt)})` : ''}.
-              {sha ? (
+              {sha && sha !== 'bro-data' ? (
                 <>
                   {' '}
                   Saved snapshot is pinned to commit{' '}
@@ -720,6 +688,15 @@ function DebtDashboard() {
                 'Live data may be temporarily unavailable due to a network issue.'}
               {(cacheReason === 'unknown' || cacheReason === null) &&
                 'Live data may be temporarily unavailable.'}
+            </p>
+          </section>
+        )}
+        {source === 'live' && data !== null && (
+          <section className="debt-empty">
+            <p>
+              Snapshot generated {formatAge(data.summary.generated_at)} (
+              {formatDateTime(data.summary.generated_at)}). This timestamp is the data age, not the
+              page load time.
             </p>
           </section>
         )}
