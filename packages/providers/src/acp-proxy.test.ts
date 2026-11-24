@@ -209,6 +209,45 @@ function rawEchoAgent(stream: Stream, seen: { prompts?: unknown }): Promise<void
   })();
 }
 
+interface BespokeProxyRig {
+  seen: { clientProbe?: unknown; echoParams?: unknown };
+  conn: ClientConnection;
+  agentConn: AgentConnection;
+  clientSide: Stream;
+  agentSide: Stream;
+  proxyDone: Promise<number>;
+}
+
+function bespokeProxyRig(): BespokeProxyRig {
+  const seen: BespokeProxyRig['seen'] = {};
+  const [clientSide, proxyUp] = streamPair();
+  const [proxyDown, agentSide] = streamPair();
+  const agentConn = bespokeAgent(agentSide, seen);
+  const conn = client({ name: 'test-client' })
+    .onRequest<{ n: number }, { ok: boolean; got: unknown }>(
+      '_acpx/client-probe',
+      p => p as { n: number },
+      ctx => ({ ok: true, got: ctx.params })
+    )
+    .connect(clientSide);
+  const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+  return { seen, conn, agentConn, clientSide, agentSide, proxyDone };
+}
+
+async function closeBespokeProxyRig(r: BespokeProxyRig): Promise<void> {
+  r.conn.close();
+  await r.clientSide.writable
+    .getWriter()
+    .close()
+    .catch(() => {});
+  assert.equal(await r.proxyDone, 0);
+  r.agentConn.close();
+  await r.agentSide.writable
+    .getWriter()
+    .close()
+    .catch(() => {});
+}
+
 describe('acpProxy — verbatim forwarding', () => {
   test('initialize/session/new/session/prompt round-trip with no seam — byte-identical params', async () => {
     const r = rig({ replyText: 'hello' });
@@ -275,46 +314,25 @@ describe('acpProxy — verbatim forwarding', () => {
   });
 
   test('unknown _-methods forward both ways, responses and errors verbatim', async () => {
-    const seen: { clientProbe?: unknown; echoParams?: unknown } = {};
-    const [clientSide, proxyUp] = streamPair();
-    const [proxyDown, agentSide] = streamPair();
-    const agentConn = bespokeAgent(agentSide, seen);
-    const conn = client({ name: 'test-client' })
-      .onRequest<{ n: number }, { ok: boolean; got: unknown }>(
-        '_acpx/client-probe',
-        p => p as { n: number },
-        ctx => ({ ok: true, got: ctx.params })
-      )
-      .connect(clientSide);
-    const proxyDone = acpProxy(proxyUp, proxyDown, { log: () => {} });
+    const r = bespokeProxyRig();
     try {
-      await conn.agent.request('initialize', INIT_PARAMS);
-      const echoed = await conn.agent.request<{ echoed: unknown }>('_acpx/echo', { q: 42 });
+      await r.conn.agent.request('initialize', INIT_PARAMS);
+      const echoed = await r.conn.agent.request<{ echoed: unknown }>('_acpx/echo', { q: 42 });
       assert.deepEqual(echoed, { echoed: { q: 42 } });
-      await conn.agent.request('session/new', { cwd: '/x', mcpServers: [] });
-      await conn.agent.request('session/prompt', {
+      await r.conn.agent.request('session/new', { cwd: '/x', mcpServers: [] });
+      await r.conn.agent.request('session/prompt', {
         sessionId: 's-custom',
         prompt: [{ type: 'text', text: 'go' }],
       });
       // the agent's outbound _-method reached the client verbatim
-      assert.deepEqual(seen.clientProbe, { ok: true, got: { n: 1 } });
+      assert.deepEqual(r.seen.clientProbe, { ok: true, got: { n: 1 } });
       // an unknown method the agent does NOT serve crosses an error back
       await assert.rejects(
-        conn.agent.request('_acpx/missing', {}),
+        r.conn.agent.request('_acpx/missing', {}),
         (e: unknown) => e instanceof RequestError && e.code === -32601
       );
     } finally {
-      conn.close();
-      await clientSide.writable
-        .getWriter()
-        .close()
-        .catch(() => {});
-      assert.equal(await proxyDone, 0);
-      agentConn.close();
-      await agentSide.writable
-        .getWriter()
-        .close()
-        .catch(() => {});
+      await closeBespokeProxyRig(r);
     }
   });
 
