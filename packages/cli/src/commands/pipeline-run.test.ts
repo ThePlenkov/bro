@@ -13,8 +13,10 @@ import { runPipelineCommand } from './pipeline.ts';
 import { git, initRepo, insideAsync, installFakeBd } from './testrepo.ts';
 
 class Exit extends Error {
-  constructor(public code: number) {
+  public readonly code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 

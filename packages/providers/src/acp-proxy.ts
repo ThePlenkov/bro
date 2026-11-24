@@ -48,6 +48,8 @@ import { acpChildEnv } from './acp.ts';
 import { agentTurnPlane, type AgentTurnPlane } from './acp-events.ts';
 import { otelSpan, type OtelSpan } from './otel.ts';
 
+type StreamReadResult<T> = { done: false; value: T } | { done: true; value: T | undefined };
+
 /** One observed tool call, as the session/update stream reports it —
  *  `phase:'start'` is the `tool_call` announce, `phase:'end'` the
  *  terminal `tool_call_update` (status completed|failed). `input` is
@@ -2106,7 +2108,7 @@ export async function acpProxy(
         log(`acp proxy: dropped ${tag} ${wire(m).method ?? 'message'}: ${errText(e)}`);
       }
     };
-    let read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined = reader.read();
+    let read: Promise<StreamReadResult<AnyMessage>> | undefined = reader.read();
     let eof = false;
     /** Intake paused at the read bound with NO read outstanding — the
      *  prefetched one already landed in the hold. Distinct from EOF:
@@ -2115,7 +2117,7 @@ export async function acpProxy(
     /** A pre-done read — where a wait still needs a promise while the
      *  intake is paused or spent, this resolves immediately so the
      *  loop falls through to its own break conditions. */
-    const READ_DONE = Promise.resolve<ReadableStreamReadResult<AnyMessage>>({
+    const READ_DONE = Promise.resolve<StreamReadResult<AnyMessage>>({
       value: undefined,
       done: true,
     });
@@ -2223,7 +2225,7 @@ export async function acpProxy(
       // lands the intake pauses outright: a paused pump issues no
       // new read until room re-opens it.
       if (held.length + bypassed >= ACP_PROXY_READ_HIGH_WATER) {
-        const r: 'room' | { readonly read: ReadableStreamReadResult<AnyMessage> } | undefined =
+        const r: 'room' | { readonly read: StreamReadResult<AnyMessage> } | undefined =
           read === undefined
             ? await untilStop(roomReady())
             : await untilStop(Promise.race([roomReady(), read.then(v => ({ read: v }) as const)]));
@@ -2250,9 +2252,7 @@ export async function acpProxy(
       if (held.length === 0) {
         // nothing to route — the intake read is the only wait worth
         // taking (room opening would find an empty hold anyway)
-        const r: ReadableStreamReadResult<AnyMessage> | undefined = await untilStop(
-          read ?? READ_DONE
-        );
+        const r: StreamReadResult<AnyMessage> | undefined = await untilStop(read ?? READ_DONE);
         if (r === undefined) break;
         read = r.done ? undefined : reader.read();
         if (r.done) {

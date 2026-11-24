@@ -17,8 +17,10 @@ function repo(cfg: unknown = {}): string {
 }
 
 class ExitSignal extends Error {
-  constructor(public code: number) {
+  public readonly code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 

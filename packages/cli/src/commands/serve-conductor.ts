@@ -91,6 +91,30 @@ import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
+function startPing(
+  res: ServerResponse,
+  pingMs: number | undefined,
+  write: () => void
+): NodeJS.Timeout | undefined {
+  if (pingMs === undefined || pingMs <= 0) {
+    return undefined;
+  }
+  const ping = setInterval(() => {
+    if (res.writableEnded || res.destroyed) {
+      clearInterval(ping);
+      return;
+    }
+    try {
+      write();
+    } catch {
+      clearInterval(ping);
+    }
+  }, pingMs);
+  ping.unref();
+  res.once('close', () => clearInterval(ping));
+  return ping;
+}
+
 /** One PUBLIC route — the name a client asks for, and the ENTRY it
  *  reaches. A route is the first segment of a requested model id; the
  *  entry is the private config name of the provider's configuration.
@@ -1426,9 +1450,9 @@ class StopFilter {
   sawText = false;
   hit: string | undefined;
 
-  private readonly seqs: string[];
+  private readonly seqs!: string[];
   constructor(seqs: string[]) {
-    this.seqs = seqs;
+    Object.assign(this, { seqs });
   }
 
   feed(s: string): string {
@@ -1516,11 +1540,11 @@ abstract class TagPump {
   private pending = '';
   private inCall = false;
 
-  private readonly tools: boolean;
+  private readonly tools!: boolean;
   /** tools=false — the request withheld the tool contract; markup an
    *  agent emits anyway stays raw text, matching the recorded reply. */
   constructor(tools = true) {
-    this.tools = tools;
+    Object.assign(this, { tools });
 
     // no base state — the flag is the whole constructor
   }
@@ -1623,44 +1647,32 @@ class LiveTurn extends TagPump {
 
   private ping?: NodeJS.Timeout;
 
-  private readonly res: ServerResponse;
+  private readonly res!: ServerResponse;
   private readonly stops: StopFilter | undefined;
-  private readonly contract: ToolContract;
-  constructor(
-    res: ServerResponse,
-    model: string,
-    inputTokens: number,
-    stops: StopFilter | undefined,
-    pingMs?: number,
+  private readonly contract!: ToolContract;
+  constructor({
+    res,
+    model,
+    inputTokens,
+    stops,
+    pingMs,
     tools = true,
-    clientTools: ClientTool[] = [],
-    contract: ToolContract = OPEN_CONTRACT
-  ) {
+    clientTools = [],
+    contract = OPEN_CONTRACT,
+  }: {
+    res: ServerResponse;
+    model: string;
+    inputTokens: number;
+    stops: StopFilter | undefined;
+    pingMs?: number;
+    tools?: boolean;
+    clientTools?: ClientTool[];
+    contract?: ToolContract;
+  }) {
     super(tools);
-    this.res = res;
-    this.stops = stops;
-    this.contract = contract;
+    Object.assign(this, { res, stops, contract });
     this.clientTools = clientTools;
-    if (pingMs !== undefined && pingMs > 0) {
-      this.ping = setInterval(() => {
-        if (res.writableEnded || res.destroyed) {
-          if (this.ping) clearInterval(this.ping);
-          return;
-        }
-        try {
-          sse(res, 'ping', { type: 'ping' });
-        } catch {
-          if (this.ping) clearInterval(this.ping);
-        }
-      }, pingMs);
-      this.ping.unref();
-      res.once('close', () => {
-        if (this.ping !== undefined) {
-          clearInterval(this.ping);
-          this.ping = undefined;
-        }
-      });
-    }
+    this.ping = startPing(res, pingMs, () => sse(res, 'ping', { type: 'ping' }));
     sse(res, 'message_start', messageStartEvent(model, inputTokens));
   }
 
@@ -3501,16 +3513,16 @@ function messagesStreamOpener(
       // fingerprint stays server-side
       ...(key?.startsWith('h:') === true ? { 'x-bro-session': key } : {}),
     });
-    const live = new LiveTurn(
+    const live = new LiveTurn({
       res,
-      servedModel(requestModel, lane.opts, lane.cfg, body),
+      model: servedModel(requestModel, lane.opts, lane.cfg, body),
       inputTokens,
       stops,
-      lane.cfg.keepaliveMs ?? 10_000,
-      body.tool_choice?.type !== 'none',
-      tools,
-      clientToolContract(body.tool_choice)
-    );
+      pingMs: lane.cfg.keepaliveMs ?? 10_000,
+      tools: body.tool_choice?.type !== 'none',
+      clientTools: tools,
+      contract: clientToolContract(body.tool_choice),
+    });
     set(live);
     return live.onUpdate;
   };
@@ -4008,49 +4020,34 @@ class RespLive extends TagPump {
 
   private ping?: NodeJS.Timeout;
 
-  private readonly res: ServerResponse;
-  private readonly respId: string;
-  private readonly model: string;
-  private readonly inputTokens: number;
-  private readonly store: boolean;
+  private readonly res!: ServerResponse;
+  private readonly respId!: string;
+  private readonly model!: string;
+  private readonly inputTokens!: number;
+  private readonly store!: boolean;
   private readonly cap?: number;
-  constructor(
-    res: ServerResponse,
-    respId: string,
-    model: string,
-    inputTokens: number,
-    store: boolean,
+  constructor({
+    res,
+    respId,
+    model,
+    inputTokens,
+    store,
     tools = true,
-    cap?: number,
-    pingMs?: number
-  ) {
+    cap,
+    pingMs,
+  }: {
+    res: ServerResponse;
+    respId: string;
+    model: string;
+    inputTokens: number;
+    store: boolean;
+    tools?: boolean;
+    cap?: number;
+    pingMs?: number;
+  }) {
     super(tools);
-    this.res = res;
-    this.respId = respId;
-    this.model = model;
-    this.inputTokens = inputTokens;
-    this.store = store;
-    this.cap = cap;
-    if (pingMs !== undefined && pingMs > 0) {
-      this.ping = setInterval(() => {
-        if (res.writableEnded || res.destroyed) {
-          if (this.ping) clearInterval(this.ping);
-          return;
-        }
-        try {
-          res.write(': ping\n\n');
-        } catch {
-          if (this.ping) clearInterval(this.ping);
-        }
-      }, pingMs);
-      this.ping.unref();
-      res.once('close', () => {
-        if (this.ping !== undefined) {
-          clearInterval(this.ping);
-          this.ping = undefined;
-        }
-      });
-    }
+    Object.assign(this, { res, respId, model, inputTokens, store, cap });
+    this.ping = startPing(res, pingMs, () => res.write(': ping\n\n'));
     sse(res, 'response.created', {
       type: 'response.created',
       response: this.respObj('in_progress'),
@@ -4536,15 +4533,15 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
   }
   if (rreq.stream === true) {
     sseHead(res);
-    const rl = new RespLive(
+    const rl = new RespLive({
       res,
       respId,
       model,
-      lr?.inputTokens ?? 0,
+      inputTokens: lr?.inputTokens ?? 0,
       store,
-      true,
-      capCharsOf(rreq.max_output_tokens)
-    );
+      tools: true,
+      cap: capCharsOf(rreq.max_output_tokens),
+    });
     rl.replay(blocks);
     rl.finish(status, blocksTokens(blocks), lr?.stopReason);
     res.end();
@@ -4607,16 +4604,16 @@ function respStreamOpener(
   if (rreq.stream !== true) return undefined;
   return inputTokens => {
     sseHead(res);
-    const live = new RespLive(
+    const live = new RespLive({
       res,
-      d.respId,
-      servedModel(requestModelOf(d.body), lane.opts, lane.cfg, d.body),
+      respId: d.respId,
+      model: servedModel(requestModelOf(d.body), lane.opts, lane.cfg, d.body),
       inputTokens,
-      d.store,
-      d.tools,
-      capCharsOf(rreq.max_output_tokens),
-      lane.cfg.keepaliveMs ?? 10_000
-    );
+      store: d.store,
+      tools: d.tools,
+      cap: capCharsOf(rreq.max_output_tokens),
+      pingMs: lane.cfg.keepaliveMs ?? 10_000,
+    });
     d.set(live);
     return live.onUpdate;
   };
@@ -5034,49 +5031,34 @@ class ChatLive extends TagPump {
 
   private ping?: NodeJS.Timeout;
 
-  private readonly res: ServerResponse;
-  private readonly id: string;
-  private readonly model: string;
-  private readonly created: number;
+  private readonly res!: ServerResponse;
+  private readonly id!: string;
+  private readonly model!: string;
+  private readonly created!: number;
   private readonly cap?: number;
   private readonly stops?: StopFilter;
-  constructor(
-    res: ServerResponse,
-    id: string,
-    model: string,
-    created: number,
+  constructor({
+    res,
+    id,
+    model,
+    created,
     tools = true,
-    cap?: number,
-    stops?: StopFilter,
-    pingMs?: number
-  ) {
+    cap,
+    stops,
+    pingMs,
+  }: {
+    res: ServerResponse;
+    id: string;
+    model: string;
+    created: number;
+    tools?: boolean;
+    cap?: number;
+    stops?: StopFilter;
+    pingMs?: number;
+  }) {
     super(tools);
-    this.res = res;
-    this.id = id;
-    this.model = model;
-    this.created = created;
-    this.cap = cap;
-    this.stops = stops;
-    if (pingMs !== undefined && pingMs > 0) {
-      this.ping = setInterval(() => {
-        if (this.res.writableEnded || this.res.destroyed) {
-          if (this.ping) clearInterval(this.ping);
-          return;
-        }
-        try {
-          this.res.write(': ping\n\n');
-        } catch {
-          if (this.ping) clearInterval(this.ping);
-        }
-      }, pingMs);
-      this.ping.unref();
-      this.res.once('close', () => {
-        if (this.ping !== undefined) {
-          clearInterval(this.ping);
-          this.ping = undefined;
-        }
-      });
-    }
+    Object.assign(this, { res, id, model, created, cap, stops });
+    this.ping = startPing(res, pingMs, () => res.write(': ping\n\n'));
   }
 
   private ev(delta: Record<string, unknown>, finish: string | null = null): void {
@@ -5295,16 +5277,16 @@ async function chatCompletions(
         creq.stream === true
           ? () => {
               sseHead(res);
-              live = new ChatLive(
+              live = new ChatLive({
                 res,
-                chatId,
+                id: chatId,
                 model,
                 created,
                 tools,
-                capCharsOf(creq.max_completion_tokens ?? creq.max_tokens),
+                cap: capCharsOf(creq.max_completion_tokens ?? creq.max_tokens),
                 stops,
-                lane.cfg.keepaliveMs ?? 10_000
-              );
+                pingMs: lane.cfg.keepaliveMs ?? 10_000,
+              });
               return live.onUpdate;
             }
           : undefined,
@@ -5416,7 +5398,14 @@ function chatDeliver(
   const usageOrUndef = d.creq.stream_options?.include_usage === true ? usage : undefined;
   if (o.replay && d.creq.stream === true) {
     sseHead(res);
-    const rl = new ChatLive(res, d.chatId, d.model, d.created, d.tools, cap);
+    const rl = new ChatLive({
+      res,
+      id: d.chatId,
+      model: d.model,
+      created: d.created,
+      tools: d.tools,
+      cap,
+    });
     rl.replay(blocks);
     rl.finish(stopReason, usageOrUndef);
     res.end();
