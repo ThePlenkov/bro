@@ -1222,6 +1222,7 @@ export {
   providerGateForKind,
   providerGatePayload,
 } from './session-admit.ts';
+export { settleAcpSessions } from './acp-settle.ts';
 
 /** Identity-pin env keys the connector owns — a caller-supplied value
  *  would redirect the claim store or re-badge the worker, so every
@@ -4278,120 +4279,6 @@ export function workerWithResume(
     return worker;
   }
   return { ...worker, argv: [...worker.argv, '--resume', resumeSessionId] };
-}
-
-/** Settle recorded acp sessions at PR completion — run each unique
- *  provider `sessionRm` template detached, then clear `acpSessionId` on
- *  the matched registry entries (spec bro-5qsnr §5). Matching is by
- *  molStep name or path-resolved worktree. Returns the settled session
- *  ids for the caller's log line. Failures are advisory — never a
- *  settle blocker. */
-export function settleAcpSessions(
-  dir: string,
-  env: AgentConnectorEnv,
-  opts: { worktree?: string; molSteps?: string[] } = {}
-): string[] {
-  const settled: string[] = [];
-  try {
-    const registry = readAgentRegistry(dir);
-    const molSteps = new Set(opts.molSteps ?? []);
-    const worktreeArg = opts.worktree;
-    const worktreeResolved = worktreeArg !== undefined ? resolve(worktreeArg) : undefined;
-    let worktreeReal: string | undefined;
-    if (worktreeResolved !== undefined) {
-      try {
-        worktreeReal = realpathSync(worktreeResolved);
-      } catch {
-        worktreeReal = worktreeResolved;
-      }
-    }
-
-    const matched: Array<[string, AgentRegistryEntry]> = [];
-    for (const [molStep, entry] of Object.entries(registry)) {
-      let match = false;
-      if (molSteps.size > 0 && molSteps.has(molStep)) {
-        match = true;
-      }
-      if (
-        !match &&
-        worktreeResolved !== undefined &&
-        typeof entry.worktree === 'string' &&
-        entry.worktree !== ''
-      ) {
-        const entryResolved = resolve(entry.worktree);
-        let entryReal: string;
-        try {
-          entryReal = realpathSync(entryResolved);
-        } catch {
-          entryReal = entryResolved;
-        }
-        if (entryReal === worktreeReal || entryResolved === worktreeResolved) {
-          match = true;
-        }
-      }
-      if (match) {
-        matched.push([molStep, entry]);
-      }
-    }
-
-    // unique session ids → their minting provider
-    const idProvider = new Map<string, string>();
-    for (const [, entry] of matched) {
-      if (
-        typeof entry.acpSessionId === 'string' &&
-        entry.acpSessionId !== '' &&
-        typeof entry.provider === 'string' &&
-        entry.provider !== '' &&
-        !idProvider.has(entry.acpSessionId)
-      ) {
-        idProvider.set(entry.acpSessionId, entry.provider);
-      }
-    }
-
-    const providers = env.providers ?? {};
-    for (const [sessionId, providerName] of idProvider) {
-      if (!/^[\w.-]+$/.test(sessionId)) {
-        continue;
-      }
-      const prov = providers[providerName];
-      if (prov === undefined || prov.type !== 'acp') {
-        continue;
-      }
-      const template = prov.sessionRm;
-      if (template === undefined || template === '') {
-        continue;
-      }
-      const rm = template.replaceAll('{sessionId}', sessionId);
-      try {
-        const child = spawn('/bin/sh', ['-c', rm], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        child.unref();
-      } catch {
-        // advisory — a failed settle never blocks
-      }
-      settled.push(sessionId);
-    }
-
-    // clear acpSessionId on matched entries
-    for (const [molStep, entry] of matched) {
-      if (typeof entry.acpSessionId !== 'string' || entry.acpSessionId === '') {
-        continue;
-      }
-      try {
-        if (registry[molStep] !== undefined) {
-          patchAgentRegistry(dir, molStep, { acpSessionId: undefined });
-        }
-      } catch {
-        // advisory
-      }
-    }
-
-    return settled;
-  } catch {
-    return settled;
-  }
 }
 
 /** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
