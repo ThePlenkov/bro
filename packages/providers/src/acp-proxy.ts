@@ -178,6 +178,8 @@ export interface AcpAgentOverlay {
   prompt?(turn: AcpAgentTurn): Promise<{ stopReason: string } | undefined>;
 }
 
+type OverlayPrompt = NonNullable<AcpAgentOverlay['prompt']>;
+
 export interface AcpProxyOptions {
   seam?: AcpProxySeam;
   /** Agent mode (spec bro-tegz2) — bro's own surface on top of the
@@ -1223,6 +1225,107 @@ export async function acpProxy(
    *  residual the stall bound still owns.) */
   const upRoom = (): Promise<unknown> => Promise.race([upOut.room(), wireDoneLatch.promise]);
 
+  type OverlayOutcome =
+    | { kind: 'failed'; failure: unknown }
+    | { kind: 'answered'; result: { stopReason: string } }
+    | { kind: 'declined' };
+
+  const runOverlay = async (context: {
+    overlay: OverlayPrompt;
+    id: JsonRpcId;
+    own: PendingRequest;
+    sessionId: string;
+    ses: ProxySession;
+    params: Record<string, unknown>;
+  }): Promise<OverlayOutcome> => {
+    const { overlay, id, own, sessionId, ses, params } = context;
+    const ctrl = new AbortController();
+    own.abort = () => ctrl.abort();
+    try {
+      const result = await overlay({
+        sessionId,
+        cwd: ses.cwd,
+        text: promptText(params),
+        emit: update => {
+          if (pending.get(id) === own && !upDead.fired) {
+            writeUp({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: { sessionId, update },
+            } as AnyMessage);
+          }
+        },
+        signal: ctrl.signal,
+      });
+      return result === undefined ? { kind: 'declined' } : { kind: 'answered', result };
+    } catch (failure) {
+      return { kind: 'failed', failure };
+    } finally {
+      own.abort = undefined;
+    }
+  };
+
+  const settleOverlayFailure = async (
+    id: JsonRpcId,
+    own: PendingRequest,
+    ses: ProxySession,
+    failure: unknown
+  ): Promise<void> => {
+    if (pending.get(id) !== own) return;
+    await upRoom();
+    if (pending.get(id) !== own) return;
+    ses.held.delete(id);
+    pending.delete(id);
+    own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
+    writeUp({
+      jsonrpc: '2.0',
+      id,
+      error: {
+        code: -32603,
+        message: `acp agent: local turn failed — ${failure instanceof Error ? failure.message : String(failure)}`,
+      },
+    } as AnyMessage);
+  };
+
+  const settleOverlayResult = async (
+    id: JsonRpcId,
+    own: PendingRequest,
+    ses: ProxySession,
+    result: { stopReason: string }
+  ): Promise<void> => {
+    if (pending.get(id) !== own) return;
+    await upRoom();
+    if (pending.get(id) !== own) return;
+    ses.held.delete(id);
+    pending.delete(id);
+    own.prompt?.span.end({
+      'acp.proxy.local': true,
+      'acp.stop_reason': result.stopReason,
+    });
+    answerUpstream(id, result);
+  };
+
+  const forwardPrompt = async (context: {
+    m: AnyMessage;
+    id: JsonRpcId;
+    own: PendingRequest;
+    params: Record<string, unknown>;
+    sessionId: string;
+    ses: ProxySession;
+  }): Promise<void> => {
+    const { m, id, own, params, sessionId, ses } = context;
+    const first = !ses.seenPrompt;
+    const injected = await injectPrompt(m, params, sessionId, ses);
+    if (!crossable(id, own)) return;
+    if (own.prompt !== undefined) own.prompt.first = first;
+    ses.seenPrompt = true;
+    // A settled collection that crosses closes the slot; an
+    // unsettled one stays owed — the next prompt retries.
+    ses.sessionCtxDone = ses.sessionCtxDone || injected.sessionCtxSettled;
+    ses.plane?.start();
+    writeDown(injected.m);
+  };
+
   /** The held write, run inside the session's writeQ: "first prompt" =
    *  first to actually CROSS, decided here under the serialized queue —
    *  a cancelled held prompt never claims the slot, and two queued
@@ -1251,82 +1354,13 @@ export async function acpProxy(
       // it produces no downstream response to hold.
       const overlay = opts.agent?.prompt;
       if (overlay !== undefined) {
-        const ctrl = new AbortController();
-        own.abort = () => ctrl.abort();
-        let result: { stopReason: string } | undefined;
-        let threw = false;
-        let failure: unknown;
-        try {
-          result = await overlay({
-            sessionId,
-            cwd: ses.cwd,
-            text: promptText(params),
-            emit: update => {
-              // guarded by the pending entry — a cancel that landed
-              // mid-turn already answered and discharged it, and a
-              // request that reused the id is a different turn: a late
-              // emit must not reach either wire
-              if (pending.get(id) === own && !upDead.fired) {
-                writeUp({
-                  jsonrpc: '2.0',
-                  method: 'session/update',
-                  params: { sessionId, update },
-                } as AnyMessage);
-              }
-            },
-            signal: ctrl.signal,
-          });
-        } catch (e) {
-          // a `throw undefined` is still a crashed handler — a boolean
-          // flag, not the thrown value, decides the error path
-          threw = true;
-          failure = e;
-        } finally {
-          own.abort = undefined;
-        }
-        if (threw) {
-          // a crashed handler is a -32603 upstream — never a fake
-          // success; a cancel that already answered wins the race, and
-          // a reused id belongs to its new request. The answer gates
-          // on up-leg room like any local result
-          if (pending.get(id) === own) {
-            await upRoom();
-            if (pending.get(id) === own) {
-              // the held marker this request owns goes with its
-              // discharge — dropping pending first would orphan it
-              // (every later cancel would walk a dead id forever)
-              ses.held.delete(id);
-              pending.delete(id);
-              own.prompt?.span.end({ 'acp.proxy.local': true, 'acp.error': true }, 'error');
-              writeUp({
-                jsonrpc: '2.0',
-                id,
-                error: {
-                  code: -32603,
-                  message: `acp agent: local turn failed — ${failure instanceof Error ? failure.message : String(failure)}`,
-                },
-              } as AnyMessage);
-            }
-          }
+        const outcome = await runOverlay({ overlay, id, own, sessionId, ses, params });
+        if (outcome.kind === 'failed') {
+          await settleOverlayFailure(id, own, ses, outcome.failure);
           return;
         }
-        if (result !== undefined) {
-          if (pending.get(id) === own) {
-            // the local result is an upstream write the c2a bound
-            // can't see — admit it only once the up leg has room so
-            // a client that stopped reading throttles local intake
-            // instead of being found by the stall bound
-            await upRoom();
-            if (pending.get(id) === own) {
-              ses.held.delete(id);
-              pending.delete(id);
-              own.prompt?.span.end({
-                'acp.proxy.local': true,
-                'acp.stop_reason': result.stopReason,
-              });
-              answerUpstream(id, result);
-            }
-          }
+        if (outcome.kind === 'answered') {
+          await settleOverlayResult(id, own, ses, outcome.result);
           return;
         }
         // the overlay declined — the verbatim path resumes; the await
@@ -1335,18 +1369,7 @@ export async function acpProxy(
           return;
         }
       }
-      const first = !ses.seenPrompt;
-      const injected = await injectPrompt(m, params, sessionId, ses);
-      if (!crossable(id, own)) {
-        return;
-      }
-      if (own.prompt !== undefined) own.prompt.first = first;
-      ses.seenPrompt = true;
-      // a settled collection that crosses closes the slot; an
-      // unsettled one stays owed — the next prompt retries
-      ses.sessionCtxDone = ses.sessionCtxDone || injected.sessionCtxSettled;
-      ses.plane?.start();
-      writeDown(injected.m);
+      await forwardPrompt({ m, id, own, params, sessionId, ses });
     } finally {
       // the charged slot frees with the write attempt — a crossed
       // prompt's depth took it over inside the try, every other exit
