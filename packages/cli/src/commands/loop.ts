@@ -50,6 +50,7 @@ import { ACT_STATE_TTL_MS, type PrStateCache, prStateCache } from '@broject/act'
 import {
   type AgentConnector,
   type AgentInfo,
+  type AgentRegistryEntry,
   admitSessionSlot,
   awaitFileLock,
   BATCH_MARKER_ENV,
@@ -131,6 +132,7 @@ import {
   resolveAgentConnector,
   resolveSpawnProvider,
   resolveSpawnRoute,
+  type SessionQuotaLane,
   type SpawnProviderPick,
   sessionQuotaOf,
   settleAcpSessions,
@@ -1222,6 +1224,153 @@ function laneSpawnedCommand(lane: LoopLane, fallback: string): string {
   return fallback;
 }
 
+/** The shared admission facts the three claim passes inside
+ *  admitLaneSessions read — derived once so no pass re-resolves them. */
+interface LaneAdmit {
+  dir: string;
+  registry: Record<string, AgentRegistryEntry>;
+  env: AgentConnectorEnv;
+  liveByKind: Map<string, Set<string>>;
+  workerEnv: Record<string, string>;
+  molStep: string;
+  key: string;
+  scope: string;
+  spawnedCmd: string;
+  startsCommand: string | undefined;
+  quotaPlaneKind: string | undefined;
+  budgetCharged: (kind: string) => void;
+  out: string[];
+}
+
+/** The provider lanes a raw-template spawn owes, resolved + pre-flighted
+ *  before ANY claim lands — a full account lane refuses before a kind
+ *  claim can hold a slot against it. The lane's provider is its own
+ *  pick PLUS every OTHER armed provider entry the spawned command
+ *  launches — a named `combo` template opening sessions on a second
+ *  account lane still owes that lane's cap (the explicit pick heads
+ *  the list for alias resolution; discovery adds the rest). With no
+ *  named provider the spawned command's launches alone decide — never
+ *  the agents.native.provider default a template escape bypassed. */
+function laneProviderGates(a: LaneAdmit, pick: string | undefined): ProviderGate[] {
+  const providers =
+    pick !== undefined
+      ? [pick, ...providersForSpawnedCommand(a.env, a.spawnedCmd).filter(p => p !== pick)]
+      : providersForSpawnedCommand(a.env, a.spawnedCmd);
+  return providers
+    .map(provider =>
+      providerGateOf({
+        dir: a.dir,
+        registry: a.registry,
+        env: a.env,
+        provider,
+        agents: a.env.agents,
+        workerEnv: a.workerEnv,
+        quotaPlaneKind: a.quotaPlaneKind,
+        startsCommand: a.startsCommand,
+      })
+    )
+    .filter((gate): gate is ProviderGate => gate !== undefined);
+}
+
+/** One start count map folded into another — the union over every
+ *  gate (a start claims once, so the counts never overlap). */
+function mergeStartCounts(into: Map<string, number>, starts: ReadonlyMap<string, number>): void {
+  for (const [kind, n] of starts) {
+    into.set(kind, (into.get(kind) ?? 0) + n);
+  }
+}
+
+/** Starts the provider-cap passes claimed per kind — the union over
+ *  every gate; the cross-kind pass subtracts them or one session reads
+ *  as two. The map also feeds each pass: overlapping provider entries
+ *  (one's command a prefix of another's) share the same planes, and a
+ *  start an earlier gate claimed is re-JUDGED under this lane's cap
+ *  but never claimed again. */
+function claimProviderGateStarts(
+  a: LaneAdmit,
+  providerGates: readonly ProviderGate[]
+): Map<string, number> {
+  const claimedStarts = new Map<string, number>();
+  for (const providerGate of providerGates) {
+    mergeStartCounts(
+      claimedStarts,
+      admitProviderGateStarts(providerGate, {
+        dir: a.dir,
+        env: a.env,
+        agents: a.env.agents,
+        workerEnv: a.workerEnv,
+        molStep: a.molStep,
+        key: a.key,
+        scope: a.scope,
+        liveByKind: a.liveByKind,
+        budgetCharged: a.budgetCharged,
+        startsCommand: a.startsCommand,
+        claimedStarts,
+        out: a.out,
+        ledgerOut: a.out,
+      })
+    );
+  }
+  return claimedStarts;
+}
+
+/** The lane's own-kind claims via its quota lane — one per session the
+ *  spawned command starts on the quota kind (a multi-start command
+ *  judged once but claimed once would read one session where two
+ *  land, and the provider census would admit on a slot count that
+ *  under-counts the lane). Each admit re-judges post-claim: the Nth
+ *  claim trips the refusal exactly when headroom cannot seat N.
+ *  Returns the primary reservation; later claims ride `a.out` with
+ *  the cross-kind set. */
+function claimQuotaStarts(
+  a: LaneAdmit,
+  quota: SessionQuotaLane,
+  providerGates: readonly ProviderGate[]
+): string | undefined {
+  const quotaView = sessionCapViews(a.spawnedCmd, a.env.agents, a.workerEnv).find(
+    v => v.kind === quota.plane.kind
+  );
+  const quotaStarts = Math.max(
+    1,
+    quotaView?.starts ?? quota.plane.startsSessions?.(a.spawnedCmd) ?? 1,
+    // the provider passes skipped this plane — their entry-command
+    // count is the quota loop's truth when the spawned command
+    // reads zero there (an argv driver's hidden starts)
+    ...providerGates.map(g => providerGateQuotaStarts(g, a.startsCommand))
+  );
+  let reservation: string | undefined;
+  try {
+    for (let i = 0; i < quotaStarts; i++) {
+      const claimed = admitSessionSlot(quota.plane, quota.agents, {
+        key: a.key,
+        molStep: a.molStep,
+        workerEnv: a.workerEnv,
+        scope: a.scope,
+        liveKeys: a.liveByKind.get(quota.plane.kind) ?? EMPTY_KEYS,
+        // a provider gate whose own session plane IS this lane's —
+        // its verdict rides the quota admit instead of claiming the
+        // lane twice (spec bro-x601l)
+        ...providerGatePayload(providerGates, quota.plane.kind),
+        budgetCharged: a.budgetCharged,
+      });
+      if (i === 0) {
+        reservation = claimed;
+      } else if (claimed !== undefined) {
+        a.out.push(claimed);
+      }
+    }
+    return reservation;
+  } catch (err) {
+    // a later start's refusal strands the primary claim inside this
+    // frame — the caller's catch frees the cross-kind claims off a.out
+    // but never saw this one
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation);
+    }
+    throw err;
+  }
+}
+
 /** Raw-template session admission — the same admission the registry
  *  spawn runs: the provider lane's OUTER gate first (spec bro-x601l —
  *  `fleet.providerCaps` judges the aggregate census over every plane
@@ -1284,66 +1433,23 @@ export function admitLaneSessions(
     budgetChargedKinds.push(kind);
   };
   try {
-    // the provider lanes resolved + pre-flighted before ANY claim
-    // lands — a full account lane refuses before a kind claim can hold
-    // a slot against it. The lane's provider is its own pick PLUS
-    // every OTHER armed provider entry the spawned command launches —
-    // a named `combo` template opening sessions on a second account
-    // lane still owes that lane's cap (the explicit pick heads the
-    // list for alias resolution; discovery adds the rest). With no
-    // named provider the spawned command's launches alone decide —
-    // never the agents.native.provider default a template escape
-    // bypassed.
-    const laneProviders =
-      lane.provider !== undefined
-        ? [
-            lane.provider,
-            ...providersForSpawnedCommand(ctx.env, spawnedCmd).filter(p => p !== lane.provider),
-          ]
-        : providersForSpawnedCommand(ctx.env, spawnedCmd);
-    const providerGates: ProviderGate[] = [];
-    for (const provider of laneProviders) {
-      const gate = providerGateOf({
-        dir: ctx.root,
-        registry,
-        env: ctx.env,
-        provider,
-        agents: ctx.env.agents,
-        workerEnv,
-        quotaPlaneKind: templateQuota?.plane.kind,
-        startsCommand: providerStartsCommand,
-      });
-      if (gate !== undefined) {
-        providerGates.push(gate);
-      }
-    }
-    // starts the provider-cap passes claimed per kind — the union over
-    // every gate (a start claims once, so the counts never overlap);
-    // the cross-kind pass subtracts them or one session reads as two.
-    // The map also feeds each pass: overlapping provider entries (one's
-    // command a prefix of another's) share the same planes, and a
-    // start an earlier gate claimed is re-JUDGED under this lane's cap
-    // but never claimed again.
-    const providerClaimedStarts = new Map<string, number>();
-    for (const providerGate of providerGates) {
-      for (const [kind, n] of admitProviderGateStarts(providerGate, {
-        dir: ctx.root,
-        env: ctx.env,
-        agents: ctx.env.agents,
-        workerEnv,
-        molStep: spec.molStep,
-        key,
-        scope,
-        liveByKind,
-        budgetCharged,
-        startsCommand: providerStartsCommand,
-        claimedStarts: providerClaimedStarts,
-        out: crossKind,
-        ledgerOut: crossKind,
-      })) {
-        providerClaimedStarts.set(kind, (providerClaimedStarts.get(kind) ?? 0) + n);
-      }
-    }
+    const admit: LaneAdmit = {
+      dir: ctx.root,
+      registry,
+      env: ctx.env,
+      liveByKind,
+      workerEnv,
+      molStep: spec.molStep,
+      key,
+      scope,
+      spawnedCmd,
+      startsCommand: providerStartsCommand,
+      quotaPlaneKind: templateQuota?.plane.kind,
+      budgetCharged,
+      out: crossKind,
+    };
+    const providerGates = laneProviderGates(admit, lane.provider);
+    const providerClaimedStarts = claimProviderGateStarts(admit, providerGates);
     if (spawnedCmd !== '') {
       admitSpawnedCommandStarts({
         spawnedCommand: spawnedCmd,
@@ -1361,42 +1467,7 @@ export function admitLaneSessions(
       });
     }
     if (templateQuota !== undefined) {
-      // every session the spawned command opens on the quota kind owes
-      // the lane a claim — a multi-start command judged once but
-      // claimed once would read one session where two land, and the
-      // provider census would admit on a slot count that under-counts
-      // the lane. Each admit re-judges post-claim: the Nth claim trips
-      // the refusal exactly when headroom cannot seat N.
-      const quotaView = sessionCapViews(spawnedCmd, ctx.env.agents, workerEnv).find(
-        v => v.kind === templateQuota.plane.kind
-      );
-      const quotaStarts = Math.max(
-        1,
-        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1,
-        // the provider passes skipped this plane — their entry-command
-        // count is the quota loop's truth when the spawned command
-        // reads zero there (an argv driver's hidden starts)
-        ...providerGates.map(g => providerGateQuotaStarts(g, providerStartsCommand))
-      );
-      for (let i = 0; i < quotaStarts; i++) {
-        const claimed = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-          key,
-          molStep: spec.molStep,
-          workerEnv,
-          scope,
-          liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
-          // a provider gate whose own session plane IS this lane's —
-          // its verdict rides the quota admit instead of claiming the
-          // lane twice (spec bro-x601l)
-          ...providerGatePayload(providerGates, templateQuota.plane.kind),
-          budgetCharged,
-        });
-        if (i === 0) {
-          reservation = claimed;
-        } else if (claimed !== undefined) {
-          crossKind.push(claimed);
-        }
-      }
+      reservation = claimQuotaStarts(admit, templateQuota, providerGates);
     }
     return { reservation, crossKind };
   } catch (err) {
@@ -1625,14 +1696,8 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     process.exit(1);
   }
   const broCfg = loadBroConfig(root);
-  const loopCfg = broCfg.loop as LoopConfig;
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    // install validates the configured tasks backend — a github-tasks
-    // rig has no beads to check; previews (--print/--dry-run) stay pure
-    if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
-      ensureTasksBackend(root, broCfg.connectors);
-    }
-    runLoopSched(argv, root, loopCfg);
+    runLoopSchedLifecycle(argv, root, broCfg);
     return;
   }
   rejectStrayArgs(argv);
@@ -1703,20 +1768,38 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     if (everySec === undefined) {
       await guardedRun(ctx, releaseAll);
     } else {
-      // supervised passes are strictly sequential — a pass drains the
-      // queue, then the supervisor sleeps until the next re-scan; the
-      // awaits must stay inside the loop, not fan out
-      for (;;) {
-        ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
-        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
-        await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
-      }
+      await supervisedPasses(ctx, everySec, releaseAll);
     }
   } finally {
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
     releaseSupervisor();
     roleLease?.release();
+  }
+}
+
+/** `bro loop install|uninstall` ride the scheduler path — install
+ *  validates the configured tasks backend first (a github-tasks rig
+ *  has no beads to check; previews --print/--dry-run stay pure). */
+function runLoopSchedLifecycle(
+  argv: string[],
+  root: string,
+  broCfg: ReturnType<typeof loadBroConfig>
+): void {
+  if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
+    ensureTasksBackend(root, broCfg.connectors);
+  }
+  runLoopSched(argv, root, broCfg.loop as LoopConfig);
+}
+
+/** Supervised passes are strictly sequential — a pass drains the
+ *  queue, then the supervisor sleeps until the next re-scan; the
+ *  awaits must stay inside the loop, not fan out. */
+async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => void): Promise<void> {
+  for (;;) {
+    ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
+    await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+    await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
   }
 }
 
@@ -2371,19 +2454,22 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
   }
 }
 
-/** Workers this run saw exit with no learn/retro evidence (spec
- *  bro-xkv42.2) — the durable `learn-miss` journal rows unioned with
- *  the registry verdict: a respawn resets the entry's learnCheck, but
- *  its journal row survives, so the audit can't lose an earlier miss.
- *  Only steps the loop itself worked are this audit's tail; a foreign
- *  lane's miss surfaces on `bro agents status` instead. */
-function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
-  const tails = new Map<string, string>();
-  const add = (key: string, line: string): void => {
-    if (!tails.has(key)) {
-      tails.set(key, line);
-    }
-  };
+/** First writer wins — the journal row and the registry verdict can
+ *  name the same agent+bead, and the audit reports a miss once. */
+function putTail(tails: Map<string, string>, key: string, line: string): void {
+  if (!tails.has(key)) {
+    tails.set(key, line);
+  }
+}
+
+/** The durable `learn-miss` journal rows for steps this run worked —
+ *  a respawn resets the registry entry's learnCheck, but its journal
+ *  row survives, so the audit can't lose an earlier miss. */
+function learnMissJournalTails(
+  root: string,
+  seen: ReadonlySet<string>,
+  tails: Map<string, string>
+): void {
   try {
     for (const ev of readLifecycle(root, { kind: 'learn-miss' })) {
       if (ev.bead === undefined || !seen.has(ev.bead)) {
@@ -2392,23 +2478,46 @@ function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
       const agent = typeof ev.detail?.agent === 'string' ? ev.detail.agent : ev.actor;
       const cause = typeof ev.detail?.cause === 'string' ? ev.detail.cause : undefined;
       const suffix = cause === undefined ? '' : ` (${cause})`;
-      add(`${agent}|${ev.bead}`, `${agent} ${ev.bead}${suffix}`);
+      putTail(tails, `${agent}|${ev.bead}`, `${agent} ${ev.bead}${suffix}`);
     }
   } catch {
-    // journal unreadable — the registry scan below still reports
+    // journal unreadable — the registry scan still reports
   }
+}
+
+/** The registry's learnCheck=miss verdict for steps this run worked —
+ *  false when the registry itself could not be read. */
+function learnMissRegistryTails(
+  root: string,
+  seen: ReadonlySet<string>,
+  tails: Map<string, string>
+): boolean {
   try {
     for (const [step, e] of Object.entries(readAgentRegistry(root))) {
       if (!seen.has(step) || e.learnCheck !== 'miss') {
         continue;
       }
       const cause = e.cause === undefined ? '' : ` (${e.cause})`;
-      add(`${e.agentId}|${step}`, `${e.agentId} ${step}${cause}`);
+      putTail(tails, `${e.agentId}|${step}`, `${e.agentId} ${step}${cause}`);
     }
+    return true;
   } catch {
-    if (tails.size === 0) {
-      return ['warning: learn-miss audit failed — registry unreadable'];
-    }
+    return false;
+  }
+}
+
+/** Workers this run saw exit with no learn/retro evidence (spec
+ *  bro-xkv42.2) — the durable `learn-miss` journal rows unioned with
+ *  the registry verdict: a respawn resets the entry's learnCheck, but
+ *  its journal row survives, so the audit can't lose an earlier miss.
+ *  Only steps the loop itself worked are this audit's tail; a foreign
+ *  lane's miss surfaces on `bro agents status` instead. */
+function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
+  const tails = new Map<string, string>();
+  learnMissJournalTails(root, seen, tails);
+  const registryRead = learnMissRegistryTails(root, seen, tails);
+  if (!registryRead && tails.size === 0) {
+    return ['warning: learn-miss audit failed — registry unreadable'];
   }
   return [...tails.values()];
 }
@@ -2622,23 +2731,96 @@ export function skipLeasedBeads<T extends { id: string }>(
  *  unreadable store answers not-drained — a blip never masks work. */
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
-/** The run's mutable queue state — the gate stack, the outcome tally,
- *  and the claim bookkeeping the tick helpers share. */
-function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
-  const rows: FleetPrRow[] = [];
+/** The review backend's own open-PR listing — undefined when the facade
+ *  names no openPrs (the branch scan answers instead), null when the
+ *  listing itself failed (unknown beats incomplete). */
+function fleetPrsFromBackend(ctx: Ctx): FleetPrRow[] | null | undefined {
+  if (typeof ctx.rev.openPrs !== 'function') {
+    return undefined;
+  }
   try {
-    if (typeof ctx.rev.openPrs === 'function') {
-      const list = ctx.rev.openPrs(ctx.repo);
-      for (const p of list ?? []) {
-        if (p?.headRef && isFleetHead(p.headRef)) {
-          rows.push({ pr: p.pr, headRef: p.headRef });
-        }
+    const rows: FleetPrRow[] = [];
+    for (const p of ctx.rev.openPrs(ctx.repo) ?? []) {
+      if (p?.headRef && isFleetHead(p.headRef)) {
+        rows.push({ pr: p.pr, headRef: p.headRef });
       }
-      return rows;
     }
+    return rows;
   } catch {
     // PR listing failed — cannot produce complete listing
     return null;
+  }
+}
+
+/** `git ls-remote --heads origin <prefix>*` — the ref names under one
+ *  fleet prefix. [] when no origin exists to ask (a local-only fleet
+ *  is a complete answer); null when the remote exists but cannot
+ *  answer — 'unknown', never an incomplete scan. */
+function lsRemoteHeads(root: string, prefix: string): string[] | null {
+  const ls = gitTry(['-C', root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
+  if (ls.code === 0) {
+    return ls.out
+      .split('\n')
+      .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
+      .filter(Boolean);
+  }
+  // no origin at all is a complete answer (the fleet is local-only);
+  // an unreachable remote is 'unknown'
+  if (/does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)) {
+    return [];
+  }
+  return null;
+}
+
+/** Remote heads for every fleet prefix — LOCAL refs alone undercount:
+ *  a pushed head whose local branch was already deleted (land
+ *  cleanup, another clone's push) is still a live fleet PR, so remote
+ *  heads join the scan. */
+function remoteFleetHeads(root: string, prefixes: readonly string[]): string[] | null {
+  const remote: string[] = [];
+  for (const prefix of prefixes) {
+    const heads = lsRemoteHeads(root, prefix);
+    if (heads === null) {
+      return null;
+    }
+    remote.push(...heads);
+  }
+  return remote;
+}
+
+/** One branch's fleet PRs folded into rows — false when the facade
+ *  cannot answer the branch at all (a non-fleet branch is still ASKED:
+ *  its answer failing makes the listing incomplete too). */
+function collectBranchPrs(ctx: Ctx, b: string, rows: FleetPrRow[]): boolean {
+  try {
+    for (const pr of ctx.rev.prsForBranch(b)) {
+      if (isFleetHead(b)) {
+        rows.push({ pr, headRef: b });
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** prsForBranch over the union of known branches — a branch the facade
+ *  cannot answer fails the whole listing (unknown beats incomplete). */
+function collectBranchFleetPrs(ctx: Ctx, branches: readonly string[], rows: FleetPrRow[]): boolean {
+  for (const b of branches) {
+    if (!collectBranchPrs(ctx, b, rows)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The run's mutable queue state — the gate stack, the outcome tally,
+ *  and the claim bookkeeping the tick helpers share. */
+function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
+  const listed = fleetPrsFromBackend(ctx);
+  if (listed !== undefined) {
+    return listed;
   }
   // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown.
   // LOCAL refs alone undercount: a pushed head whose local branch was already
@@ -2650,38 +2832,14 @@ function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
     if (tails.errors.length > 0) {
       return null;
     }
-    const remote: string[] = [];
-    for (const prefix of prefixes) {
-      const ls = gitTry(['-C', ctx.root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
-      if (ls.code !== 0) {
-        // no origin at all is a complete answer (the fleet is local-only);
-        // an unreachable remote is 'unknown'
-        if (
-          /does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)
-        ) {
-          continue;
-        }
-        return null;
-      }
-      remote.push(
-        ...ls.out
-          .split('\n')
-          .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
-          .filter(Boolean)
-      );
+    const remote = remoteFleetHeads(ctx.root, prefixes);
+    if (remote === null) {
+      return null;
     }
     const branches = [...new Set([...tails.worktreeBranches, ...tails.branches, ...remote])];
-    for (const b of branches) {
-      try {
-        for (const pr of ctx.rev.prsForBranch(b)) {
-          if (isFleetHead(b)) {
-            rows.push({ pr, headRef: b });
-          }
-        }
-      } catch {
-        // failed to check a branch - listing incomplete
-        return null;
-      }
+    const rows: FleetPrRow[] = [];
+    if (!collectBranchFleetPrs(ctx, branches, rows)) {
+      return null;
     }
     return rows;
   } catch {
