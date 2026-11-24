@@ -571,7 +571,16 @@ interface ClaimContext {
 }
 
 function assignClaim({ dir, id, ref, me, assignees, labels }: ClaimContext): void {
-  // add assignee - need assignee_id; try to find user
+  assignActor(dir, id, ref, me);
+  finalizeClaim({ dir, id, ref, me, assignees, labels });
+}
+
+function assignActor(
+  dir: string,
+  id: string,
+  ref: { projectPath: string; iid: number },
+  me: string
+): void {
   try {
     const myId = userIdOf(dir, me);
     if (myId === undefined) {
@@ -587,6 +596,9 @@ function assignClaim({ dir, id, ref, me, assignees, labels }: ClaimContext): voi
     }
     throw new Error(`gitlab tasks: failed to assign ${me} to ${id} — cannot claim`);
   }
+}
+
+function finalizeClaim({ dir, id, ref, me, assignees, labels }: ClaimContext): void {
   const check = getIssueSync(dir, ref);
   const checkAssignees = check ? assigneesOf(check) : assignees;
   const others = checkAssignees.filter(a => a !== me);
