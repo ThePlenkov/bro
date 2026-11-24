@@ -1260,6 +1260,13 @@
       "matching_content_path": "packages/acp/tui/pane.test.tsx"
     },
     {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction code (PR #1146): serve-state.ts was extracted from serve.ts; the String Heavy Function Arguments finding is pre-existing moved code, while new filesystem validation remains subject to the security review.",
+      "matching_content_path": "packages/cli/src/commands/serve-state.ts"
+    },
+    {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/hooks.ts"

@@ -224,160 +224,34 @@ import { collectSnapshot } from './watch.ts';
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts';
 import { FLEET_PAGE, WEBUI_CSP } from './webui.ts';
 import { UI_CSP, UI_PAGE } from './ui-page.ts';
-
-// --- serve state (discovery) ---------------------------------------------------
-
-/** What a client needs to find and trust the server for a repo. The
- *  token is the session credential: every write must present it as
- *  `Authorization: Bearer`, and the file's 0600 mode makes "can read
- *  the token" mean "same-UID local process". */
-export interface ServeState {
-  pid: number;
-  url: string;
-  dir: string;
-  startedAt: string;
-  token: string;
-  /** The `/v1/*` provider plane is wired (bro-om6m8.1) — `bro provider`
-   *  resolution skips facade-only serves so `url` never names an
-   *  endpoint whose Messages routes 404. Absent on pre-flag files:
-   *  treated as unwired, which is the safe read. */
-  provider?: boolean;
-}
-
-/** `<git-common-dir>/bro/serve.json` — shared across linked worktrees,
- *  same anchor as agents.json and the hooks markers. Null outside a
- *  repo. */
-export function serveStatePath(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const common = r.code === 0 ? r.out.trim() : '';
-  return common === '' ? null : join(common, 'bro', 'serve.json');
-}
-
-/** The state-file read — full-record validation shared by serve.json
- *  and provider.json: a torn/garbage entry is not a state. */
-export function readStateFile(path: string): ServeState | undefined {
-  try {
-    const v = JSON.parse(readFileSync(path, 'utf8')) as Partial<ServeState>;
-    if (
-      typeof v.pid === 'number' &&
-      typeof v.url === 'string' &&
-      typeof v.dir === 'string' &&
-      typeof v.token === 'string' &&
-      // an empty token would validate yet never authenticate — a
-      // malformed record is torn state, not a live server
-      v.token.length > 0
-    ) {
-      return v as ServeState;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-export function readServeState(dir: string): ServeState | undefined {
-  const path = serveStatePath(dir);
-  return path === null ? undefined : readStateFile(path);
-}
-
-/** tmp+rename — readers never see a half-written state file. Path-based:
- *  serve.json (repo) and provider.json (host) share the discipline. */
-export function writeStateFile(path: string, state: ServeState): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  // the file carries the session token — publish at 0600 so "can read
-  // it" equals "same-UID local process" (spec bro-l8c4f.4: the writer
-  // repairs a pre-existing permissive tmp mode before the content
-  // lands, and pins 0600 exactly even under a pathological umask)
-  rmSync(tmp, { force: true });
-  writePrivateFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
-  renameSync(tmp, path);
-}
-
-export function writeServeState(dir: string, state: ServeState): void {
-  const path = serveStatePath(dir);
-  if (path === null) {
-    throw new Error('no git common dir — cannot write serve.json');
-  }
-  writeStateFile(path, state);
-}
-
-/** Remove the state file only while it still names THIS process — a
- *  successor that already rewrote it must not be unregistered by the
- *  dying predecessor's cleanup. */
-export function clearStateFile(path: string): void {
-  try {
-    const state = readStateFile(path);
-    if (state !== undefined && state.pid === process.pid) {
-      rmSync(path, { force: true });
-    }
-  } catch {
-    // best-effort — the stale-pid check on next start covers leftovers
-  }
-}
-
-export function clearServeState(dir: string): void {
-  const path = serveStatePath(dir);
-  if (path !== null) {
-    clearStateFile(path);
-  }
-}
-
-/** A recorded serve whose pid is still alive — a second `bro serve`
- *  refuses to start against this (two servers, one discovery file). */
-export function liveServeState(dir: string): ServeState | undefined {
-  const state = readServeState(dir);
-  return state !== undefined && pidAlive(state.pid) ? state : undefined;
-}
-
-/** `<serve.json>.lock` — the singleton gate, so two starters can't
- *  both pass the live-state check and both write serve.json. The hold
- *  rides `holdFileLock` (spec bro-2duu9): heartbeated for the server's
- *  whole lifetime so a >15min serve never reads abandoned to the
- *  janitor's `*.lock` sweep or to filelock contenders — the file
- *  carries the shared `pid:token` shape. A live foreign holder refuses,
- *  a dead/tokenless leftover is stolen. Returns the release, or
- *  undefined when another server holds it. */
-export function acquireServeLock(
-  dir: string,
-  opts: HeldLockOptions = {}
-): (() => void) | undefined {
-  const statePath = serveStatePath(dir);
-  if (statePath === null) {
-    return undefined;
-  }
-  try {
-    // a held lock refuses the start, not waits — the small bound only
-    // covers stealing a dead holder's leftover and the re-link after
-    return holdFileLock(`${statePath}.lock`, {
-      waitMs: 250,
-      label: 'serve lock',
-      ...opts,
-    });
-  } catch (err) {
-    if (err instanceof LockTimeout) {
-      return undefined;
-    }
-    throw err;
-  }
-}
+import { HttpError, parseSpawnBody } from './serve-validation.ts';
+import {
+  acquireServeLock,
+  clearStateFile,
+  clearServeState,
+  liveServeState,
+  readStateFile,
+  readServeState,
+  serveStatePath,
+  writeServeState,
+  writeStateFile,
+  type ServeState,
+} from './serve-state.ts';
+export { HttpError, parseSpawnBody } from './serve-validation.ts';
+export {
+  acquireServeLock,
+  clearStateFile,
+  clearServeState,
+  liveServeState,
+  readStateFile,
+  readServeState,
+  serveStatePath,
+  writeServeState,
+  writeStateFile,
+} from './serve-state.ts';
+export type { ServeState } from './serve-state.ts';
 
 // --- HTTP plumbing ---------------------------------------------------------------
-
-/** Fail-closed request error carrying its status — the handler maps it
- *  without a second decode of the failure. */
-export class HttpError extends Error {
-  override name = 'HttpError';
-  constructor(
-    public status: number,
-    message: string,
-    /** close the connection after the response is sent — the terminal
-     *  verdict for an over-bound upload: status out, socket behind it */
-    public close = false
-  ) {
-    super(message);
-  }
-}
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -608,98 +482,6 @@ function parseRef(seg: string, noun = 'agent ref'): string {
     throw new HttpError(400, `invalid ${noun} "${ref}"`);
   }
   return ref;
-}
-
-const SPAWN_FIELDS = new Set([
-  'molStep',
-  'worktree',
-  'prompt',
-  'promptFile',
-  'connector',
-  'beadsDir',
-  'provider',
-  'model',
-  'profile',
-  'class',
-  'autoApprove',
-  'lane',
-  'resumeSessionId',
-]);
-
-/** The raw JSON object behind a spawn body — parsed, object-shaped,
- *  and free of unknown fields. */
-function spawnDoc(raw: string | undefined): Record<string, unknown> {
-  if (raw === undefined || raw.trim() === '') {
-    throw new HttpError(400, 'POST /api/v1/agents needs a JSON body');
-  }
-  let doc: unknown;
-  try {
-    doc = JSON.parse(raw);
-  } catch {
-    throw new HttpError(400, 'request body is not valid JSON');
-  }
-  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) {
-    throw new HttpError(400, 'request body must be a JSON object');
-  }
-  const unknown = Object.keys(doc).filter(k => !SPAWN_FIELDS.has(k));
-  if (unknown.length > 0) {
-    throw new HttpError(400, `unknown field(s): ${unknown.join(', ')}`);
-  }
-  return doc as Record<string, unknown>;
-}
-
-/** Per-field value types — every field is a non-empty string except
- *  the boolean `autoApprove`. */
-function assertSpawnField(k: string, v: unknown): void {
-  if (k === 'autoApprove') {
-    if (v !== undefined && typeof v !== 'boolean') {
-      throw new HttpError(400, 'field "autoApprove" must be a boolean');
-    }
-  } else if (v !== undefined && (typeof v !== 'string' || v.trim() === '')) {
-    // an empty string is not "unset" — it would ride through as an
-    // empty argv element or lookup key and fail AFTER the 201
-    throw new HttpError(400, `field "${k}" must be a non-empty string`);
-  }
-}
-
-/** The body lane — omitted reads 'interactive' (API clients are
- *  people/tools at the session lane); a present lane must be a real
- *  value, anything else is a 400. */
-function spawnLane(req: Record<string, unknown>): 'batch' | 'interactive' {
-  if (req.lane === undefined) {
-    return 'interactive';
-  }
-  if (req.lane !== 'batch' && req.lane !== 'interactive') {
-    throw new HttpError(400, 'field "lane" must be "batch" or "interactive"');
-  }
-  return req.lane;
-}
-
-/** POST body → StepSpawnRequest — strict: a misspelled field must be a
- *  400, not a silently dropped option. */
-export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
-  const req = spawnDoc(raw);
-  for (const [k, v] of Object.entries(req)) {
-    assertSpawnField(k, v);
-  }
-  if (typeof req.molStep !== 'string' || req.molStep.trim() === '') {
-    throw new HttpError(400, 'field "molStep" is required');
-  }
-  return {
-    lane: spawnLane(req),
-    molStep: req.molStep,
-    worktree: req.worktree as string | undefined,
-    prompt: req.prompt as string | undefined,
-    promptFile: req.promptFile as string | undefined,
-    connector: req.connector as string | undefined,
-    beadsDir: req.beadsDir as string | undefined,
-    provider: req.provider as string | undefined,
-    model: req.model as string | undefined,
-    profile: req.profile as string | undefined,
-    class: req.class as string | undefined,
-    autoApprove: req.autoApprove as boolean | undefined,
-    resumeSessionId: req.resumeSessionId as string | undefined,
-  };
 }
 
 /** Serialize the agents board for the wire — `bro agents status
@@ -1418,41 +1200,11 @@ async function routeAgentLog(
   if (m === null) {
     return false;
   }
-  if (req.method !== 'GET') {
-    send(res, 405, { error: 'method not allowed' });
+  const agent = await authorizeAgentRoute(req, res, url, deps, token, statePathHint, m[1]!);
+  if (agent === undefined) {
     return true;
   }
-  const credentialed =
-    bearerMatch(req.headers.authorization, token) ||
-    tokenEq(url.searchParams.get('token') ?? '', token);
-  if (!credentialed) {
-    send(
-      res,
-      401,
-      { error: `session token required — read it from ${statePathHint}` },
-      { headers: { 'www-authenticate': 'Bearer' } }
-    );
-    return true;
-  }
-  let ref: string;
-  try {
-    ref = parseRef(m[1]!);
-  } catch (err) {
-    // keep the refusal local — a bad ref answers 400 here rather than
-    // escaping to handleRequest's catch, which would try to write an
-    // error body after this route's stream may already have started
-    if (err instanceof HttpError) {
-      send(res, err.status, { error: err.message });
-      return true;
-    }
-    throw err;
-  }
-  const { hit, degraded } = await deps.find(ref);
-  if (!hit) {
-    send(res, 404, missBody(ref, degraded));
-    return true;
-  }
-  const log = logTarget(hit.agent);
+  const log = logTarget(agent.hit.agent);
   if ('status' in log) {
     send(res, log.status, { error: log.error });
     return true;
@@ -1497,6 +1249,51 @@ async function routeAgentLog(
   );
   res.on('close', () => handle.stop());
   return true;
+}
+
+async function authorizeAgentRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string,
+  encodedRef: string
+): Promise<
+  { ref: string; hit: NonNullable<Awaited<ReturnType<ServeDeps['find']>>['hit']> } | undefined
+> {
+  if (req.method !== 'GET') {
+    send(res, 405, { error: 'method not allowed' });
+    return undefined;
+  }
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    tokenEq(url.searchParams.get('token') ?? '', token);
+  if (!credentialed) {
+    send(
+      res,
+      401,
+      { error: `session token required — read it from ${statePathHint}` },
+      { headers: { 'www-authenticate': 'Bearer' } }
+    );
+    return undefined;
+  }
+  let ref: string;
+  try {
+    ref = parseRef(encodedRef);
+  } catch (err) {
+    if (err instanceof HttpError) {
+      send(res, err.status, { error: err.message });
+      return undefined;
+    }
+    throw err;
+  }
+  const { hit, degraded } = await deps.find(ref);
+  if (!hit) {
+    send(res, 404, missBody(ref, degraded));
+    return undefined;
+  }
+  return { ref, hit };
 }
 
 /** GET /api/v1/agents/<id>/events — the agent-scoped leg of the bus's
@@ -1803,35 +1600,8 @@ async function routeAgentEventsImpl(
   statePathHint: string,
   m: RegExpExecArray
 ): Promise<boolean> {
-  if (req.method !== 'GET') {
-    send(res, 405, { error: 'method not allowed' });
-    return true;
-  }
-  const credentialed =
-    bearerMatch(req.headers.authorization, token) ||
-    tokenEq(url.searchParams.get('token') ?? '', token);
-  if (!credentialed) {
-    send(
-      res,
-      401,
-      { error: `session token required — read it from ${statePathHint}` },
-      { headers: { 'www-authenticate': 'Bearer' } }
-    );
-    return true;
-  }
-  let ref: string;
-  try {
-    ref = parseRef(m[1]!);
-  } catch (err) {
-    if (err instanceof HttpError) {
-      send(res, err.status, { error: err.message });
-      return true;
-    }
-    throw err;
-  }
-  const { hit, degraded } = await deps.find(ref);
-  if (!hit) {
-    send(res, 404, missBody(ref, degraded));
+  const agent = await authorizeAgentRoute(req, res, url, deps, token, statePathHint, m[1]!);
+  if (agent === undefined) {
     return true;
   }
   if (url.searchParams.has('follow')) {
@@ -1845,14 +1615,14 @@ async function routeAgentEventsImpl(
     // `acp:<sessionId>` — those address by session, not by this route)
     await openEventsSse(req, res, bus, socket, {
       topics: ['agent'],
-      keys: [hit.agent.id],
+      keys: [agent.hit.agent.id],
     });
     return true;
   }
   // the durable archive sits next to the .log — derive from the same
   // pointer so remote-backend honesty (a URL `log`, a missing file)
   // applies identically to its structured sibling
-  const log = logTarget(hit.agent);
+  const log = logTarget(agent.hit.agent);
   if ('status' in log) {
     send(res, log.status, { error: log.error });
     return true;
@@ -1862,10 +1632,10 @@ async function routeAgentEventsImpl(
   // weird registry id can't walk the path). A blind .log→.events.jsonl
   // replace would silently check the log itself whenever the log's
   // name drifts (rotation, a non-standard name).
-  const archive = join(dirname(log.path), `${basename(hit.agent.id)}.events.jsonl`);
+  const archive = join(dirname(log.path), `${basename(agent.hit.agent.id)}.events.jsonl`);
   if (!existsSync(archive)) {
     send(res, 404, {
-      error: `no events archive for agent ${hit.agent.id} — the worker predates the event plane or its turn never wrote`,
+      error: `no events archive for agent ${agent.hit.agent.id} — the worker predates the event plane or its turn never wrote`,
     });
     return true;
   }
@@ -2611,24 +2381,21 @@ function logServePlanes(planes: {
   }
 }
 
-export async function runServeCommand(argv: string[]): Promise<void> {
-  if (argv[0] === 'ensure') {
-    await cmdEnsure(argv.slice(1));
-    return;
-  }
-  if (argv[0] === 'watchdog') {
-    await cmdWatchdog(argv.slice(1));
-    return;
-  }
-  const port = parseServePort(argv);
+interface ServeContext {
+  dir: string;
+  statePath: string;
+  port: number;
+  meta: ServeMeta;
+  token: string;
+  deps: ServeDeps;
+  server: ReturnType<typeof createServer>;
+  providerCfg: ProviderConfig | undefined;
+  conductorCfg: ConductorConfig | undefined;
+  releaseLock: () => void;
+}
 
-  // One listener per repo — serve.json lives in the common dir shared
-  // by every linked worktree, so the anchor must be the path that
-  // outlives them all: the MAIN worktree root. A serve spawned inside
-  // a `bro work` checkout that later got `leave`d kept its cwd there —
-  // acp spawns died with the directory and `ensure` refused from main
-  // (bro-ofbw4). chdir first so `dir`, the recorded state, and every
-  // inherited child cwd land on the durable path.
+function prepareServe(argv: string[]): ServeContext {
+  const port = parseServePort(argv);
   const anchor = mainWorktreeRoot(process.cwd());
   if (anchor !== null && anchor !== process.cwd()) {
     process.chdir(anchor);
@@ -2644,132 +2411,135 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     console.error(`error: already serving ${live.url} (pid ${live.pid}) — one host per repo`);
     process.exit(1);
   }
-  // the lock makes the singleton atomic — live-state check → write has a
-  // gap two starters could both pass through; O_EXCL create cannot
   const releaseLock = acquireServeLock(dir);
   if (releaseLock === undefined) {
     console.error('error: another bro serve is starting or running (serve.json.lock held)');
     process.exit(1);
   }
-
   const env = loadAgentEnv(dir);
   const meta: ServeMeta = { dir, startedAt: '' };
-  // the conductor answers /v1 from a configured acp provider — the byte
-  // proxy's upstream+key pair stays the plain-HTTP fallback
-  const planes = servePlanes(dir);
-  const { conductorCfg, providerCfg } = planes;
-  logServePlanes(planes);
-  // the session token — the "local session context" made concrete.
-  // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
-  // (crash recovery keeps the credential clients already hold), else
-  // generated fresh. Never printed: clients read it out of the 0600
-  // serve.json below, so possession implies same-UID file access
+  const configuredPlanes = servePlanes(dir);
+  logServePlanes(configuredPlanes);
+  const { conductorCfg, providerCfg } = configuredPlanes;
   const token = serveSessionToken();
   const deps = realDeps(dir, env, { conductorCfg, providerCfg });
-  const server = createServer(createServeHandler(deps, meta, token));
+  return {
+    dir,
+    statePath,
+    port,
+    meta,
+    token,
+    deps,
+    server: createServer(createServeHandler(deps, meta, token)),
+    providerCfg,
+    conductorCfg,
+    releaseLock,
+  };
+}
 
+async function startServeListener(
+  context: ServeContext
+): Promise<{ url: string; boundPort: number }> {
+  const { server, port, meta } = context;
+  const bound = await new Promise<{ url: string; boundPort: number }>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      meta.startedAt = new Date().toISOString();
+      const addr = server.address();
+      const boundPort = typeof addr === 'object' && addr !== null ? addr.port : port;
+      resolve({ boundPort, url: `http://127.0.0.1:${boundPort}` });
+    });
+  }).catch((err: unknown) => {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+  writeServeState(context.dir, {
+    pid: process.pid,
+    url: bound.url,
+    dir: context.dir,
+    startedAt: context.meta.startedAt,
+    token: context.token,
+    ...(context.providerCfg !== undefined || context.conductorCfg !== undefined
+      ? { provider: true }
+      : {}),
+  });
+  if ((statSync(context.statePath).mode & 0o077) !== 0) {
+    console.error(
+      `warning: ${context.statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
+    );
+  }
+  return bound;
+}
+
+function armServeWatchdog(context: ServeContext, boundPort: number): void {
   try {
-    let boundPort = port;
-    const url = await new Promise<string>((resolve, reject) => {
-      server.once('error', reject);
-      // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
-      // no --host flag to widen it with.
-      server.listen(port, '127.0.0.1', () => {
-        meta.startedAt = new Date().toISOString();
-        const addr = server.address();
-        boundPort = typeof addr === 'object' && addr !== null ? addr.port : port;
-        resolve(`http://127.0.0.1:${boundPort}`);
-      });
-    }).catch((err: unknown) => {
-      console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    });
+    const logFd = openPrivateAppendSync(join(dirname(context.statePath), 'serve.log'));
+    try {
+      spawn(
+        process.execPath,
+        [
+          ENTRY_FILE,
+          'serve',
+          'watchdog',
+          '--port',
+          String(boundPort),
+          '--pid',
+          String(process.pid),
+        ],
+        { cwd: context.dir, detached: true, stdio: ['ignore', logFd, logFd], env: process.env }
+      )
+        .once('error', e => {
+          console.error(`warning: watchdog did not arm — ${e.message}`);
+        })
+        .unref();
+    } finally {
+      closeSync(logFd);
+    }
+  } catch (err) {
+    console.error(
+      `warning: watchdog did not arm — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
 
-    writeServeState(dir, {
-      pid: process.pid,
-      url,
-      dir,
-      startedAt: meta.startedAt,
-      token,
-      // the flag `bro provider` resolution reads — a facade-only serve
-      // must not shadow the host listener's endpoint
-      ...(providerCfg !== undefined || conductorCfg !== undefined ? { provider: true } : {}),
-    });
-    // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
-    // leave the token group/other-readable — the auth boundary then
-    // doesn't hold, so say so loudly rather than trusting silently
-    if ((statSync(statePath).mode & 0o077) !== 0) {
-      console.error(
-        `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
-      );
-    }
-    // the keepalive leg (bro-ofbw4): between apiKeyHelper runs — clients
-    // only re-ensure on auth refresh — a dead listener is minutes of
-    // failed calls. One detached watchdog per generation polls the
-    // recorded pid and respawns `bro serve` on the bound port; it
-    // retires when the record is retracted (clean stop) or superseded
-    // (the next generation arms its own).
-    {
-      // arming failure is a warning, never a crash — a serve already
-      // listening must not exit over a supervisor it can live without;
-      // the next generation's own arm is unaffected either way
-      try {
-        const logFd = openPrivateAppendSync(join(dirname(statePath), 'serve.log'));
-        try {
-          spawn(
-            process.execPath,
-            [
-              ENTRY_FILE,
-              'serve',
-              'watchdog',
-              '--port',
-              String(boundPort),
-              '--pid',
-              String(process.pid),
-            ],
-            { cwd: dir, detached: true, stdio: ['ignore', logFd, logFd], env: process.env }
-          )
-            .once('error', e => {
-              console.error(`warning: watchdog did not arm — ${e.message}`);
-            })
-            .unref();
-        } finally {
-          closeSync(logFd);
-        }
-      } catch (err) {
-        console.error(
-          `warning: watchdog did not arm — ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
+async function waitForServeShutdown(server: ReturnType<typeof createServer>): Promise<void> {
+  await new Promise<void>(resolve => {
+    const shutdown = (): void => {
+      const force = setTimeout(() => {
+        server.closeAllConnections();
+      }, 2_000);
+      server.close(() => {
+        clearTimeout(force);
+        resolve();
+      });
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+  });
+}
+
+export async function runServeCommand(argv: string[]): Promise<void> {
+  if (argv[0] === 'ensure') {
+    await cmdEnsure(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'watchdog') {
+    await cmdWatchdog(argv.slice(1));
+    return;
+  }
+  const context = prepareServe(argv);
+  try {
+    const { url, boundPort } = await startServeListener(context);
+    armServeWatchdog(context, boundPort);
     console.log(`bro serve — ${url}`);
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop');
-
-    const broker = await armBusBroker(dir, url);
-
-    await new Promise<void>(resolve => {
-      const shutdown = (): void => {
-        // close() waits on keep-alive sockets — cap the grace so a
-        // parked connection can't hang SIGTERM forever; in-flight
-        // requests get a short window to land first
-        const force = setTimeout(() => {
-          server.closeAllConnections();
-        }, 2_000);
-        server.close(() => {
-          clearTimeout(force);
-          resolve();
-        });
-      };
-      process.once('SIGINT', shutdown);
-      process.once('SIGTERM', shutdown);
-    });
-    // kill the pooled acp transport before the broker — its ref'd child
-    // handles are what would otherwise pin the loop past server.close()
-    deps.provider?.dispose?.();
-    deps.acp?.dispose?.();
+    const broker = await armBusBroker(context.dir, url);
+    await waitForServeShutdown(context.server);
+    context.deps.provider?.dispose?.();
+    context.deps.acp?.dispose?.();
     await broker?.close();
-    clearServeState(dir);
+    clearServeState(context.dir);
   } finally {
-    releaseLock();
+    context.releaseLock();
   }
 }
