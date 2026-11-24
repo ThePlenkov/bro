@@ -118,31 +118,27 @@ function withFakeBd(
     writeFileSync(join(dir, 'bd'), FAKE_BD);
     chmodSync(join(dir, 'bd'), 0o755);
     writeFileSync(join(dir, 'ready.json'), JSON.stringify(ready));
-    const log = join(dir, 'claims.log');
-    const prev = {
-      PATH: process.env.PATH,
-      FAKE_BD_READY: process.env.FAKE_BD_READY,
-      FAKE_BD_LOG: process.env.FAKE_BD_LOG,
-      FAKE_BD_CLAIM_FAIL: process.env.FAKE_BD_CLAIM_FAIL,
-      FAKE_BD_UPDATE_FAIL: process.env.FAKE_BD_UPDATE_FAIL,
-      FAKE_BD_PREFIX: process.env.FAKE_BD_PREFIX,
-      FAKE_BD_READY_LOG: process.env.FAKE_BD_READY_LOG,
-      FAKE_BD_CONFIG_FAIL: process.env.FAKE_BD_CONFIG_FAIL,
-      FAKE_BD_EPIC_PARENTS: process.env.FAKE_BD_EPIC_PARENTS,
-      FAKE_BD_CLAIMED: process.env.FAKE_BD_CLAIMED,
-    };
     writeFileSync(join(dir, 'claimed.log'), '');
-    process.env.PATH = `${dir}:${prev.PATH}`;
-    process.env.FAKE_BD_READY = join(dir, 'ready.json');
-    process.env.FAKE_BD_LOG = log;
-    process.env.FAKE_BD_CLAIMED = join(dir, 'claimed.log');
-    process.env.FAKE_BD_READY_LOG = join(dir, 'ready.log');
-    process.env.FAKE_BD_CLAIM_FAIL = claimFail;
-    process.env.FAKE_BD_UPDATE_FAIL = updateFail;
-    if (prefix === '') delete process.env.FAKE_BD_PREFIX;
-    else process.env.FAKE_BD_PREFIX = prefix;
-    if (epicParents === '') delete process.env.FAKE_BD_EPIC_PARENTS;
-    else process.env.FAKE_BD_EPIC_PARENTS = epicParents;
+    const log = join(dir, 'claims.log');
+    // the env the fake reads — one map applied uniformly; '' flag
+    // params delete the key instead of smuggling an empty value
+    const env: Record<string, string | undefined> = {
+      PATH: `${dir}:${process.env.PATH}`,
+      FAKE_BD_READY: join(dir, 'ready.json'),
+      FAKE_BD_LOG: log,
+      FAKE_BD_CLAIMED: join(dir, 'claimed.log'),
+      FAKE_BD_READY_LOG: join(dir, 'ready.log'),
+      FAKE_BD_CLAIM_FAIL: claimFail,
+      FAKE_BD_UPDATE_FAIL: updateFail,
+      FAKE_BD_PREFIX: prefix === '' ? undefined : prefix,
+      FAKE_BD_EPIC_PARENTS: epicParents === '' ? undefined : epicParents,
+      FAKE_BD_CONFIG_FAIL: undefined,
+    };
+    const prev = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(env)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     const lines: string[] = [];
     const orig = console.log;
     console.log = (...args: unknown[]) => lines.push(args.join(' '));
