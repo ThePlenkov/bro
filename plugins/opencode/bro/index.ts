@@ -225,6 +225,28 @@ function hookEmitEnv(kind, opts = {}) {
 * `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
 */
 async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
+	return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+}
+/**
+* callHook with the failure class attached. The stop gate needs to tell
+* "bro had nothing to say" apart from "bro could not answer": both are
+* fail-open, but the second must not pass invisibly. A clean exit with
+* empty stdout is silence (failure null) — only real outage kinds set it.
+*/
+async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
+	let input;
+	try {
+		input = JSON.stringify(payload);
+	} catch {
+		return {
+			control: null,
+			failure: { kind: "input" }
+		};
+	}
+	if (input === void 0) return {
+		control: null,
+		failure: { kind: "input" }
+	};
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -247,16 +269,25 @@ async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		return null;
+		return {
+			control: null,
+			failure: { kind: "spawn" }
+		};
 	}
 	let settled = false;
-	const settle = (value) => {
+	const settle = (result) => {
 		if (!settled) {
 			settled = true;
-			resolve(value);
+			resolve(result);
 		}
 	};
-	const timer = killAfter(child, timeoutMs, () => settle(null));
+	const timer = killAfter(child, timeoutMs, () => settle({
+		control: null,
+		failure: {
+			kind: "timeout",
+			timeoutMs
+		}
+	}));
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -265,14 +296,38 @@ async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 	});
 	child.on("error", () => {
 		clearTimeout(timer);
-		settle(null);
+		settle({
+			control: null,
+			failure: { kind: "spawn" }
+		});
 	});
 	child.on("close", (code) => {
 		clearTimeout(timer);
-		settle(code === 0 ? parseControl(out) : null);
+		if (code !== 0) {
+			settle({
+				control: null,
+				failure: {
+					kind: "exit",
+					code
+				}
+			});
+			return;
+		}
+		const control = parseControl(out);
+		if (control === null && out.trim() !== "") {
+			settle({
+				control: null,
+				failure: { kind: "output" }
+			});
+			return;
+		}
+		settle({
+			control,
+			failure: null
+		});
 	});
 	child.stdin?.on("error", () => {});
-	child.stdin?.end(JSON.stringify(payload));
+	child.stdin?.end(input);
 	return promise;
 }
 /**
