@@ -1126,6 +1126,38 @@ export async function acpProxy(
    *  per-prompt flag would lose every prompt queued behind the first
    *  (the cancel path aborts held prompts by deleting their pending
    *  entry). */
+  /** The pending entry a stamped prompt registers before it queues —
+   *  the slot charge and the payload cell live on it so a settle can
+   *  free the slot (release) or drop the payload (detach). */
+  const promptEntry = (
+    sessionId: string,
+    cell: { m?: AnyMessage; params?: Record<string, unknown> },
+    parentCtx?: NonNullable<Parameters<typeof otelSpan>[2]>['parent']
+  ): PendingRequest => ({
+    method: 'session/prompt',
+    prompt: {
+      sessionId,
+      span: otelSpan('acp.proxy.turn', { 'acp.session': sessionId }, { parent: parentCtx }),
+      // charge the down leg's bound AT ACCEPT — a prompt waiting on the
+      // seam has no wire depth yet, so without the hold a prompt flood
+      // parks nothing while pending/writeQ/held grow past the mark.
+      // The slot lives on the entry: a session/cancel settling this
+      // prompt while it still waits in the writeQ frees the slot at
+      // settle (abortHeld), not whenever the seam ahead of it returns.
+      release: downOut.hold(),
+      // the queued cross reads its payload through a cell the settle
+      // path clears via `detach` — a prompt cancelled while still
+      // queued behind a stuck writeQ is discharged from `pending`, and
+      // without the detach its message and params would stay retained
+      // by this closure for the life of the queue (the chain itself
+      // can't be unlinked, the payload it would act on can)
+      detach: () => {
+        cell.m = undefined;
+        cell.params = undefined;
+      },
+    },
+  });
+
   const onPromptRequest = (m: AnyMessage, id: JsonRpcId): void => {
     const target = promptSession(m);
     if (target === undefined) {
@@ -1133,45 +1165,15 @@ export async function acpProxy(
       writeDown(m);
       return;
     }
-    const turn = otelSpan(
-      'acp.proxy.turn',
-      {
-        'acp.session': target.sessionId,
-      },
-      { parent: target.ses.span?.ctx }
-    );
-    // charge the down leg's bound AT ACCEPT — a prompt waiting on the
-    // seam has no wire depth yet, so without the hold a prompt flood
-    // parks nothing while pending/writeQ/held grow past the mark.
-    // The slot lives on the entry: a session/cancel settling this
-    // prompt while it still waits in the writeQ frees the slot at
-    // settle (abortHeld), not whenever the seam ahead of it returns.
-    const release = downOut.hold();
-    // the queued cross reads its payload through a cell the settle
-    // path clears via `detach` — a prompt cancelled while still
-    // queued behind a stuck writeQ is discharged from `pending`, and
-    // without the detach its message and params would stay retained
-    // by this closure for the life of the queue (the chain itself
-    // can't be unlinked, the payload it would act on can)
     const cell: { m?: AnyMessage; params?: Record<string, unknown> } = {
       m,
       params: target.params,
     };
-    const entry: PendingRequest = {
-      method: 'session/prompt',
-      prompt: {
-        sessionId: target.sessionId,
-        span: turn,
-        release,
-        detach: () => {
-          cell.m = undefined;
-          cell.params = undefined;
-        },
-      },
-    };
+    const entry = promptEntry(target.sessionId, cell, target.ses.span?.ctx);
     pending.set(id, entry);
     target.ses.held.add(id);
     const { sessionId, ses } = target;
+    const release = entry.prompt?.release;
     // the entry is captured AT ENQUEUE — if a cancel discharges the
     // id and a new request reuses it before this queued write runs,
     // `pending.get(id)` inside crossPrompt would return the NEW
@@ -1183,7 +1185,7 @@ export async function acpProxy(
       const cp = cell.params;
       cell.m = undefined;
       cell.params = undefined;
-      return cm === undefined || cp === undefined
+      return cm === undefined || cp === undefined || release === undefined
         ? Promise.resolve()
         : crossPrompt({
             m: cm,
