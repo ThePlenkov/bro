@@ -1215,6 +1215,18 @@
       "matching_content_path": "scripts/bench-hooks.ts"
     },
     {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/work.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from packages/cli/src/commands/work.ts: the litter sweep retains its pre-existing debt while the command module graduates to the bare-minimum rung.",
+      "matching_content_path": "packages/cli/src/commands/work-litter.ts"
+    },
+    {
       "quality_gates": {
         "new_code_health": true
       },
