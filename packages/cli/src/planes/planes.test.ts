@@ -82,6 +82,15 @@ describe('plane catalog', () => {
               // (agents.delegate — spec bro-z8tng) answers the client
               // bug it validates first: missing args, never a silent
               // success on an empty call
+              if (plane.name === 'agents' && verb === 'delegate') {
+                assert.ok(err instanceof PlaneVerbError, `${plane.name}.${verb}: ${String(err)}`);
+                assert.equal(err.plane, 'agents');
+                assert.equal(
+                  err.message,
+                  'agents.delegate: delegate --wait needs a provider — pass --provider <name> or declare fleet.routing.<class>.chain'
+                );
+                return true;
+              }
               assert.ok(
                 err instanceof PlaneUnavailable || err instanceof PlaneVerbError,
                 `${plane.name}.${verb}: ${String(err)}`
