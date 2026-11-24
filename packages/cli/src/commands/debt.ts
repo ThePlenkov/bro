@@ -7,7 +7,6 @@
  *   list [filters]                   ledger rows
  *   mark PR collected|clean|skipped|none
  */
-import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import {
   dataRefCommit,
@@ -23,32 +22,20 @@ import { parseCollectArgs, readOption, usage } from './debt-args.ts';
 import { collectReviewThreads } from './debt-scan.ts';
 import { cmdImport } from './debt-import.ts';
 import { cmdList, cmdNext, cmdPrs, cmdStats, cmdStatus, cmdTrend } from './debt-query.ts';
+import { cmdMark, cmdSet } from './debt-verdicts.ts';
 import {
   cmdSync,
   collectDebtSources,
   refreshDebtLedger,
   warnUnknownSources,
 } from './debt-sources.ts';
-import {
-  applyDebtLabel,
-  applyDebtVerdicts,
-  buildSummary,
-  clearDebtLabels,
-  DEBT_ROW_STATUSES,
-  DEBT_STATES,
-  ensureDebtLabels,
-  parseSources,
-  readDebtRecords,
-  writeSummary,
-  type DebtPrState,
-  type DebtStatus,
-  type DebtVerdict,
-} from '@broject/debt';
+import { parseSources } from '@broject/debt';
 
 export { parseCollectArgs } from './debt-args.ts';
 export type { CollectArgs } from './debt-args.ts';
 export { collectReviewThreads } from './debt-scan.ts';
 export { refreshDebtLedger, syncDedupeOverlays } from './debt-sources.ts';
+export { applyVerdicts } from './debt-verdicts.ts';
 
 // --- collect ---------------------------------------------------------------
 
@@ -93,114 +80,6 @@ async function cmdCollect(
     return;
   }
   refreshDebtLedger();
-}
-
-// --- mark ------------------------------------------------------------------
-
-function cmdMark(argv: string[]): void {
-  const positional = argv.filter(a => !a.startsWith('--'));
-  const [prRaw, stateRaw, ...rest] = positional;
-  const pr = Number(prRaw);
-  if (!Number.isFinite(pr) || !stateRaw) {
-    console.error(`Usage: bro debt mark PR <${[...DEBT_STATES, 'none'].join('|')}> [OWNER REPO]`);
-    process.exit(2);
-  }
-  const rev = reviewHost(undefined, loadBroConfig().connectors);
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
-  const repo = rev.resolveRepo(rest);
-  if (stateRaw === 'none') {
-    clearDebtLabels(rev, { repo, pr });
-    console.error(`debt mark: cleared debt:* labels on ${rev.prLink(repo, pr)}`);
-    return;
-  }
-  if (!(DEBT_STATES as readonly string[]).includes(stateRaw)) {
-    console.error(`error: unknown state ${stateRaw}`);
-    process.exit(2);
-  }
-  ensureDebtLabels(rev, repo);
-  applyDebtLabel(rev, { repo, pr, state: stateRaw as DebtPrState });
-  console.error(`debt mark: ${rev.prLink(repo, pr)} → debt:${stateRaw}`);
-}
-
-// --- set -------------------------------------------------------------------
-
-type DebtRowStatus = DebtStatus;
-
-interface SetArgs {
-  threadIds: string[];
-  fixPr: number | null;
-  notes: string | null;
-}
-
-function parseSetFlags(argv: string[]): SetArgs {
-  const out: SetArgs = { threadIds: [], fixPr: null, notes: null };
-  for (let i = 0; i < argv.length; i += 1) {
-    const value = readOption(argv, i);
-    if (argv[i] === '--thread-id' && value !== null) {
-      out.threadIds.push(value);
-      i += 1;
-    } else if (argv[i] === '--threads-file' && value !== null) {
-      out.threadIds.push(
-        ...readFileSync(value, 'utf8')
-          .split('\n')
-          .map(l => l.trim())
-          .filter(l => l.length > 0 && !l.startsWith('#'))
-      );
-      i += 1;
-    } else if (argv[i] === '--fix-pr' && value !== null) {
-      const n = Number(value);
-      if (!Number.isInteger(n) || n <= 0) {
-        console.error(`error: --fix-pr must be a positive integer, got "${value}"`);
-        process.exit(2);
-      }
-      out.fixPr = n;
-      i += 1;
-    } else if (argv[i] === '--notes' && value !== null) {
-      out.notes = value;
-      i += 1;
-    }
-  }
-  return out;
-}
-
-function cmdSet(argv: string[]): void {
-  // Status is strictly the first positional — scanning all argv would let a
-  // flag value like --notes "done" get picked up as the status.
-  const status = argv[0] as DebtRowStatus | undefined;
-  const { threadIds, fixPr, notes } = parseSetFlags(argv.slice(1));
-
-  if (
-    !status ||
-    !(DEBT_ROW_STATUSES as readonly string[]).includes(status) ||
-    threadIds.length === 0
-  ) {
-    console.error(
-      `Usage: bro debt set <${DEBT_ROW_STATUSES.join('|')}> --thread-id ID… ` +
-        '[--threads-file PATH] [--fix-pr N] [--notes T]'
-    );
-    process.exit(2);
-  }
-
-  applyVerdicts(
-    [...new Set(threadIds)].map(thread_id => ({
-      thread_id,
-      status,
-      fix_pr: fixPr ?? undefined,
-      notes: notes ?? undefined,
-    }))
-  );
-}
-
-/** Apply verdicts to the ledger — shared by `debt set` (argv → uniform
- *  verdicts) and the debt plan runner (`bro run debt.toml`). */
-export function applyVerdicts(verdicts: DebtVerdict[]): void {
-  const { applied, missing } = applyDebtVerdicts(verdicts);
-  writeSummary(buildSummary(readDebtRecords()));
-  console.error(`debt set: ${applied} row(s) updated`);
-  if (missing.length > 0) {
-    console.error(`warning: thread id(s) not in ledger: ${missing.join(', ')}`);
-    process.exitCode = 1;
-  }
 }
 
 // --- watch -----------------------------------------------------------------
