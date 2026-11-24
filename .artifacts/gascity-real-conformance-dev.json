@@ -1,0 +1,71 @@
+{
+  "bead": "bro-l8c4f.10",
+  "binary": "gc",
+  "version": "dev",
+  "timestamp": "2026-11-24T11:09:15.768Z",
+  "checks": [
+    {
+      "name": "gc --help",
+      "ok": true,
+      "stdout": "Gas City CLI — orchestration-builder for multi-agent workflows\n\nUsage:\n  gc [flags]\n  gc [command]\n\nAvailable Commands:\n  agent           Manage agent configuration\n  agent-script    Run a determinist",
+      "exitCode": 0
+    },
+    {
+      "name": "gc supervisor status --json",
+      "ok": true,
+      "stdout": "{\"checked_paths\":[\"/home/ubuntu/.gc/supervisor.sock\"],\"ok\":true,\"pid\":1978835,\"pid_source\":\"control_socket\",\"running\":true,\"schema_version\":\"1\",\"socket_path\":\"/home/ubuntu/.gc/supervisor.sock\",\"superv",
+      "exitCode": 0
+    },
+    {
+      "name": "gc init minimal lifecycle city",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "[1/8] Creating runtime scaffold\n[2/8] Installing hooks (Claude Code)\n[3/8] Writing default prompts\n[4/8] Writing pack.toml\n[5/8] Writing city configuration\nWelcome to Gas City!\nInitialized city \"city\" with default provider \"claude\".\n[6/8] Skipping provider readiness checks\n[7/8] Skipping supervisor startup\nNext: cd /tmp/bro-gc-real-YAO2pi/city && gc start"
+    },
+    {
+      "name": "gc agent add fx",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "Scaffolded agent 'fx'"
+    },
+    {
+      "name": "gc start lifecycle city",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "Supervisor: pid=1978835 exe=/home/ubuntu/gopath/bin/gc buildID=e7d4e2354 started=2m ago\nRegistered city 'city' (/tmp/bro-gc-real-YAO2pi/city)\n[8/8] Waiting for supervisor to start city\n  Adopting sessions...\nCity started under supervisor."
+    },
+    {
+      "name": "gc session list --json",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "{\"filters\":{},\"ok\":true,\"schema_version\":\"1\",\"sessions\":[],\"summary\":{\"total\":0,\"active\":0,\"suspended\":0,\"closed\":0}}"
+    },
+    {
+      "name": "gc rig list --json",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "{\"city_name\":\"city\",\"city_path\":\"/tmp/bro-gc-real-YAO2pi/city\",\"ok\":true,\"rigs\":[{\"name\":\"city\",\"path\":\"/tmp/bro-gc-real-YAO2pi/city\",\"prefix\":\"ci\",\"hq\":true,\"suspended\":false,\"running\":true,\"beads\":\"initialized\"}],\"schema_version\":\"1\",\"summary\":{\"total\":1,\"suspended\":0,\"running\":1}}"
+    },
+    {
+      "name": "gc session new fx --alias fx --no-attach --json",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "{\"schema_version\":\"1\",\"ok\":true,\"session_id\":\"ci-wisp-9bg\",\"session_name\":\"s-ci-wisp-9bg\",\"alias\":\"fx\",\"template\":\"fx\",\"transport\":\"\",\"work_dir\":\"/tmp/bro-gc-real-YAO2pi/city\",\"deferred_start\":true,\"attached\":false}"
+    },
+    {
+      "name": "gc session submit fx ping",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "Queued follow-up for fx"
+    },
+    {
+      "name": "gc session close fx",
+      "ok": true,
+      "exitCode": 0,
+      "stdout": "Session ci-wisp-9bg closed."
+    }
+  ],
+  "passed": true,
+  "fixtureCoverage": true,
+  "evidenceType": "versioned-real-gc-conformance"
+}
