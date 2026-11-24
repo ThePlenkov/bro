@@ -3914,7 +3914,7 @@ describe('the catalog cache — one provider read, not one per request', () => {
   test('the warm read fills the cache before any client asks', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
     const conductor = conductorProxy(CFG, { acp: { peer: fake.app } });
-      let warmed = false;
+    let warmed = false;
     const warm = conductor.warmCatalog().then(() => {
       warmed = true;
     });
