@@ -790,6 +790,21 @@ export async function acpProxy(
    *  source id). */
   const OPEN_METHODS = new Set(['session/new', 'session/load', 'session/fork', 'session/resume']);
 
+  /** Track and forward a client request that does not need prompt handling. */
+  const onClientControlRequest = (m: AnyMessage, method: string, id: JsonRpcId): void => {
+    const params = paramsOf(m);
+    const sessionId = sessionIdOf(m);
+    const pendingRequest: PendingRequest = {
+      method,
+      ...(OPEN_METHODS.has(method)
+        ? { bind: { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) } }
+        : {}),
+      ...(method === 'session/close' && sessionId !== undefined ? { close: sessionId } : {}),
+    };
+    pending.set(id, pendingRequest);
+    writeDownFor(sessionId, m);
+  };
+
   /** c2a request — verbatim forward plus the session/prompt seam. */
   const onClientRequest = (m: AnyMessage): void => {
     const method = wire(m).method as string;
@@ -798,16 +813,7 @@ export async function acpProxy(
       onPromptRequest(m, id);
       return;
     }
-    const params = paramsOf(m);
-    const sessionId = sessionIdOf(m);
-    pending.set(id, {
-      method,
-      ...(OPEN_METHODS.has(method)
-        ? { bind: { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) } }
-        : {}),
-      ...(method === 'session/close' && sessionId !== undefined ? { close: sessionId } : {}),
-    });
-    writeDownFor(sessionId, m);
+    onClientControlRequest(m, method, id);
   };
 
   /** The stamped session a prompt rides — undefined when the client
