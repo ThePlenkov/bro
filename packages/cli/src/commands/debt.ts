@@ -88,25 +88,60 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function cmdWatch(argv: string[]): Promise<void> {
-  let intervalSec = 300;
-  const collectArgv: string[] = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--interval') {
-      const value = readOption(argv, i);
-      const n = Number(value);
-      // setTimeout overflows above 2^31-1 ms (~24.8 days) and fires
-      // immediately — bound the interval below that.
-      if (value === null || !Number.isSafeInteger(n) || n <= 0 || n * 1000 > 2_147_483_647) {
-        console.error(`error: --interval must be a positive integer (seconds), got "${value}"`);
-        process.exit(2);
-      }
-      intervalSec = n;
-      i += 1;
-      continue;
-    }
-    collectArgv.push(argv[i]!);
+/** setTimeout overflows above 2^31-1 ms (~24.8 days) and fires
+ *  immediately — bound the interval below that. */
+const MAX_INTERVAL_MS = 2_147_483_647;
+
+function parseIntervalSec(value: string | null): number {
+  const n = Number(value);
+  const bad = value === null || !Number.isSafeInteger(n) || n <= 0;
+  if (bad || n * 1000 > MAX_INTERVAL_MS) {
+    console.error(`error: --interval must be a positive integer (seconds), got "${value}"`);
+    process.exit(2);
   }
+  return n;
+}
+
+interface WatchArgs {
+  intervalSec: number;
+  collectArgv: string[];
+}
+
+/** One argv slot — --interval's value or a collect flag passthrough. */
+function watchArg(argv: string[], i: number, out: WatchArgs): number {
+  if (argv[i] !== '--interval') {
+    out.collectArgv.push(argv[i]!);
+    return 0;
+  }
+  out.intervalSec = parseIntervalSec(readOption(argv, i));
+  return 1;
+}
+
+function parseWatchArgs(argv: string[]): WatchArgs {
+  const out: WatchArgs = { intervalSec: 300, collectArgv: [] };
+  for (let i = 0; i < argv.length; i += 1) {
+    i += watchArg(argv, i, out);
+  }
+  return out;
+}
+
+/** One collect pass — cmdCollect wrote ledger + overlays, so publish
+ *  per tick when this pass actually mutated (read-only flags write
+ *  nothing). The post-handler sync never runs: watch never returns.
+ *  A failed pass (network blip, gh outage) must not kill the loop. */
+async function watchTick(collectArgv: string[]): Promise<void> {
+  try {
+    await cmdCollect(collectArgv, { throwOnAuthFailure: true });
+    if (commandMutatedLedger('collect', collectArgv)) {
+      maybeDataRefSync();
+    }
+  } catch (err) {
+    console.error(`debt watch: collect failed — ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+async function cmdWatch(argv: string[]): Promise<void> {
+  const { intervalSec, collectArgv } = parseWatchArgs(argv);
   // Startup auth is fail-fast — an unauthenticated watch exits with the
   // remediation line now rather than spinning on a failure it can never
   // fix. Inside the loop the same check throws (see cmdCollect), so a
@@ -114,18 +149,7 @@ async function cmdWatch(argv: string[]): Promise<void> {
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
   console.error(`debt watch: collecting every ${intervalSec}s — Ctrl-C to stop`);
   for (;;) {
-    try {
-      await cmdCollect(collectArgv, { throwOnAuthFailure: true });
-      // cmdCollect wrote ledger + overlays — publish now, per tick, but
-      // only when this pass actually mutated (read-only flags write
-      // nothing). The post-handler sync never runs: watch never returns.
-      if (commandMutatedLedger('collect', collectArgv)) {
-        maybeDataRefSync();
-      }
-    } catch (err) {
-      // A failed pass (network blip, gh outage) must not kill the loop.
-      console.error(`debt watch: collect failed — ${err instanceof Error ? err.message : err}`);
-    }
+    await watchTick(collectArgv);
     await sleep(intervalSec * 1000);
   }
 }
