@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
@@ -413,6 +413,11 @@ function recoverGhosts(opts: LitterReapOpts, main: WorktreeInfo, rep: LitterReap
       continue;
     }
     const path = join(parent, name);
+    // `name` comes from the filesystem. Keep recovery bounded to the
+    // sibling directory we intentionally scanned.
+    if (!isWithinRoot(path, parent)) {
+      continue;
+    }
     if (listed.has(resolve(path))) {
       continue;
     }
@@ -425,6 +430,25 @@ function recoverGhosts(opts: LitterReapOpts, main: WorktreeInfo, rep: LitterReap
     }
     recoverGhost(opts, path, name.slice(prefix.length), adminBase, rep);
   }
+}
+
+function isWithinRoot(candidate: string, root: string): boolean {
+  const base = resolve(root);
+  const target = resolve(candidate);
+  return target === base || target.startsWith(`${base}${sep}`);
+}
+
+function adminEntryPath(admin: string, adminBase: string, entry: string): string | undefined {
+  const safeAdmin = resolve(admin);
+  if (!isWithinRoot(safeAdmin, adminBase) || dirname(safeAdmin) !== resolve(adminBase)) {
+    return undefined;
+  }
+  const allowed = new Set(['gitdir', 'commondir', 'HEAD']);
+  if (!allowed.has(entry)) {
+    return undefined;
+  }
+  const target = resolve(safeAdmin, entry);
+  return dirname(target) === safeAdmin ? target : undefined;
 }
 
 function recoverGhost(
@@ -477,10 +501,17 @@ function recoverGhost(
   // repopulates the index so status reads honestly (a ghost whose tip
   // moved off its checkout reads dirty — kept, not silently reaped).
   try {
+    const gitdirFile = adminEntryPath(admin, adminBase, 'gitdir');
+    const commondirFile = adminEntryPath(admin, adminBase, 'commondir');
+    const headFile = adminEntryPath(admin, adminBase, 'HEAD');
+    if (gitdirFile === undefined || commondirFile === undefined || headFile === undefined) {
+      keep('admin path escaped litter root');
+      return;
+    }
     mkdirSync(admin, { recursive: true });
-    writeFileSync(join(admin, 'gitdir'), `${dotgit}\n`);
-    writeFileSync(join(admin, 'commondir'), '../..\n');
-    writeFileSync(join(admin, 'HEAD'), `ref: refs/heads/${branch}\n`);
+    writeFileSync(gitdirFile, `${dotgit}\n`);
+    writeFileSync(commondirFile, '../..\n');
+    writeFileSync(headFile, `ref: refs/heads/${branch}\n`);
   } catch (err) {
     keep(`admin recreate failed — ${err instanceof Error ? err.message : err}`);
     return;
