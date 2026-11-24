@@ -2203,6 +2203,36 @@ export async function acpProxy(
     });
   };
 
+  type StopGateCandidate = {
+    request: PendingRequest;
+    session: ProxySession | undefined;
+    message: AnyMessage;
+  };
+  type ActiveStopGateCandidate = StopGateCandidate & {
+    request: PendingRequest & { prompt: NonNullable<PendingRequest['prompt']> };
+    session: ProxySession;
+  };
+  const isStopGateCandidate = (
+    candidate: StopGateCandidate
+  ): candidate is ActiveStopGateCandidate => {
+    if (candidate.request.prompt === undefined) {
+      return false;
+    }
+    if (candidate.session === undefined) {
+      return false;
+    }
+    if (hooksOff) {
+      return false;
+    }
+    if (opts.seam?.stopGate === undefined) {
+      return false;
+    }
+    if (candidate.session.cwd === undefined) {
+      return false;
+    }
+    return wire(candidate.message).error === undefined;
+  };
+
   /** a2c response — route verbatim; the bookkeeping it lands (session
    *  bind, turn span) rides on the pending entry it discharges. The
    *  two exceptions (spec bro-u2eps §2): a gate re-prompt's response
@@ -2268,22 +2298,16 @@ export async function acpProxy(
       releaseOnClose(req.close);
     }
     const ses = req.prompt === undefined ? undefined : sessions.get(req.prompt.sessionId);
-    if (
-      req.prompt !== undefined &&
-      ses !== undefined &&
-      !hooksOff &&
-      opts.seam?.stopGate !== undefined &&
-      ses.cwd !== undefined &&
-      wire(m).error === undefined
-    ) {
+    const gateCandidate: StopGateCandidate = { request: req, session: ses, message: m };
+    if (isStopGateCandidate(gateCandidate)) {
       // hold the response for the gate verdict — the turn's own
       // span/plane bookkeeping still closes on THIS response: the
       // client's turn really did end here, and the gate re-prompt
       // opens its own turn span rather than extending a closed one
-      finishTurn(req, m);
-      req.heldResponse = m;
+      finishTurn(gateCandidate.request, gateCandidate.message);
+      gateCandidate.request.heldResponse = gateCandidate.message;
       pending.set(id, req);
-      evalStopGate(id, ses, req.prompt.sessionId);
+      evalStopGate(id, gateCandidate.session, gateCandidate.request.prompt.sessionId);
       return;
     }
     finishTurn(req, m);
