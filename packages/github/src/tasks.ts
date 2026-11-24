@@ -38,9 +38,7 @@ import {
 } from '@broject/core';
 import type {
   ClaimCapability,
-  DepOpts,
   PublishResult,
-  TaskDepEdge,
   TaskInput,
   TaskRow,
   TaskStore,
@@ -72,129 +70,12 @@ import {
   statesFor,
   toRow,
 } from './tasks-rows.ts';
+import { depsAsync, depsSync, neighborsAsync, neighborsSync } from './tasks-deps.ts';
 import type { IssueNode } from './tasks-queries.ts';
 
 /** The projection marker — every bead-materialized issue carries it,
  *  so `gh issue list -l bro:bead` is the board's instant filter. */
 const MIRROR_LABEL = 'bro:bead';
-
-// --- deps ---------------------------------------------------------------------------
-
-const wants = (dir: 'up' | 'down', direction?: string): boolean =>
-  direction === undefined || direction === dir;
-
-/** X depends-on Y — blockedBy is X's own dep set (a 'down' read);
- *  blocking is what depends on X ('up'). */
-function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
-  const id = String(n.number);
-  const out: TaskDepEdge[] = [];
-  if (wants('down', direction)) {
-    for (const b of n.blockedBy?.nodes ?? []) {
-      out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocked' });
-    }
-  }
-  if (wants('up', direction)) {
-    for (const b of n.blocking?.nodes ?? []) {
-      out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocked' });
-    }
-  }
-  return out;
-}
-
-/** parent is a 'down' edge (this issue depends on it); subIssues read 'up'. */
-function parentEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
-  const id = String(n.number);
-  const out: TaskDepEdge[] = [];
-  if (wants('down', direction) && n.parent) {
-    out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent' });
-  }
-  if (wants('up', direction)) {
-    for (const c of n.subIssues?.nodes ?? []) {
-      out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent' });
-    }
-  }
-  return out;
-}
-
-/** blockedBy → `type: 'blocked'` edges (X depends-on Y); parent/subIssue
- *  → `parent`. Edges always leave in the generic rel vocabulary. */
-function depEdges(n: IssueNode, opts: DepOpts): TaskDepEdge[] {
-  const rel = opts.rel === undefined ? undefined : nativeTaskRel(opts.rel);
-  return [
-    ...(rel === undefined || rel === 'blocks' ? blockEdges(n, opts.direction) : []),
-    ...(rel === undefined || rel === 'parent-child' ? parentEdges(n, opts.direction) : []),
-  ];
-}
-
-function depsSync(dir: string, ids: string[], opts: DepOpts): TaskDepEdge[] {
-  const out: TaskDepEdge[] = [];
-  for (const id of ids) {
-    const n = queryIssueSync(dir, issueNumber(dir, id));
-    if (n) {
-      out.push(...depEdges(n, opts));
-    }
-  }
-  return out;
-}
-
-async function depsAsync(dir: string, ids: string[], opts: DepOpts): Promise<TaskDepEdge[]> {
-  const nodes = await Promise.all(ids.map(id => queryIssueAsync(dir, issueNumber(dir, id))));
-  return nodes.flatMap(n => (n === undefined ? [] : depEdges(n, opts)));
-}
-
-/** Hydrated rows on the far side of `id`'s edges — the row-plane twin
- *  of deps(). `dependency_type` rides along normalized, matching the
- *  beads store's neighbors() shape. */
-async function neighborsAsync(dir: string, id: string, opts: DepOpts): Promise<TaskRow[]> {
-  const n = await queryIssueAsync(dir, issueNumber(dir, id));
-  if (n === undefined) {
-    return [];
-  }
-  // edges carry the canonical issue number — a non-canonical input id
-  // ('#42', a URL) compared raw picks the wrong endpoint, returning n
-  // as its own neighbor
-  const self = String(n.number);
-  const others = new Set<string>();
-  const relOf = new Map<string, string>();
-  for (const e of depEdges(n, opts)) {
-    const other = e.issue_id === self ? e.depends_on_id : e.issue_id;
-    others.add(other);
-    relOf.set(other, e.type);
-  }
-  const rows = await Promise.all(
-    [...others].map(async o => {
-      const node = await queryIssueAsync(dir, Number(o));
-      if (node === undefined) {
-        return undefined;
-      }
-      const rel = relOf.get(o);
-      return rel === undefined
-        ? (pub(toRow(node)) as TaskRow)
-        : ({ ...pub(toRow(node)), dependency_type: rel } as TaskRow);
-    })
-  );
-  return rows.filter((r): r is TaskRow => r !== undefined);
-}
-
-function neighborsSync(dir: string, id: string, opts: DepOpts): TaskRow[] {
-  const n = queryIssueSync(dir, issueNumber(dir, id));
-  if (n === undefined) {
-    return [];
-  }
-  const self = String(n.number);
-  const others = new Map<string, string>();
-  for (const e of depEdges(n, opts)) {
-    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type);
-  }
-  const rows: TaskRow[] = [];
-  for (const [o, rel] of others) {
-    const node = queryIssueSync(dir, Number(o));
-    if (node !== undefined) {
-      rows.push({ ...pub(toRow(node)), dependency_type: rel } as TaskRow);
-    }
-  }
-  return rows;
-}
 
 // --- sync mutations -----------------------------------------------------------------
 
