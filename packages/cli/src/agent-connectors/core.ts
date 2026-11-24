@@ -113,7 +113,6 @@ import {
   requireProviderSurface,
   resolveModelRoute,
   resolveStepClass,
-  scanProc,
   SESSION_SLOT_TTL_MS,
   sessionAdmissionLock,
   sessionCapRefusal,
@@ -167,10 +166,10 @@ import {
   dropWorkMarker,
   SAFE_AGENT_ID,
   touchWorkMarker,
-  workMarkerPath,
   writeWorkMarker,
 } from './work-markers.ts';
-import { entryPidStart, unitOwnsGroup, unitSnapshot } from './proc-units.ts';
+import { entryPidStart, signalUnitGroups } from './proc-units.ts';
+import { markStoppedEntry, pollUntilGone } from './stop-entry.ts';
 import {
   COPILOT_COUNT_TTL_MS,
   copilotCountFile,
@@ -5293,103 +5292,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           : adoptNativeHandle(dir, home, molStep, entry);
       const pid = adopted?.pid ?? entryPid;
       const start = adopted !== undefined ? (adopted.start ?? undefined) : entryPidStart(entry);
-      // The unit check lives outside the signal block: a repeated `down`
-      // can find the wrapper already dead while a descendant still holds
-      // the group — the lock guard below must see it even when no signal
-      // was sent. `unit` stays empty without a live wrapper (the tree
-      // link is already broken by then — the snapshot only works
-      // pre-death).
-      let unit: Array<{ pid: number; start?: string }> = [];
-      const unitAlive = () =>
-        pid !== undefined &&
-        (pidAlive(pid, start) ||
-          groupMemberAlive(pid, start) ||
-          unit.some(d => pidAlive(d.pid, d.start)));
-      if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
-        // the tree snapshot rides BEFORE the signal: a descendant that
-        // escaped the group (setsid — or a scope payload a fork-style
-        // systemd-run gave its own pid to, bro-ybo8z) is invisible to
-        // groupMemberAlive, and once the wrapper dies it reparents to
-        // init — the pre-signal pid+starttime pin is the only handle
-        // left on it. The signal goes to every group the tree spans:
-        // a scoped payload's own pgid gets SIGTERM too.
-        const snap = unitSnapshot(pid);
-        unit = snap.members;
-        const groups = new Set<number>([pid, ...snap.groups]);
-        // pid → recorded starttime for every pid the snapshot owns —
-        // the identity table the per-group re-check below signals
-        // against (a recycled pgid holds none of these pids)
-        const recorded = new Map<number, string | undefined>([[pid, start]]);
-        for (const m of unit) {
-          recorded.set(m.pid, m.start);
-        }
-        for (const g of groups) {
-          // re-verify the group is still ours before signaling: between
-          // snapshot and kill the group could have emptied and its pgid
-          // been recycled, and kill(-g) would then hit an unrelated
-          // process group. The wrapper's own group gets the weaker
-          // groupMemberAlive re-check when no recorded member answers:
-          // a descendant that already outlived the wrapper is absent
-          // from the pre-death snapshot yet still holds the group, and
-          // skipping it would leak the unit's last writer. Off /proc
-          // (scan null) no re-check is possible — the legacy signal
-          // stands, same as before.
-          const fresh = scanProc();
-          if (
-            fresh !== null &&
-            !unitOwnsGroup(fresh, g, recorded) &&
-            !(g === pid && groupMemberAlive(pid, start))
-          ) {
-            continue;
-          }
-          try {
-            // a lane-paused group (spec bro-y3jvd) pends every signal —
-            // SIGCONT first or the TERM below waits on a stopped process
-            process.kill(-g, 'SIGCONT');
-          } catch {
-            // not stopped, or already gone — the TERM below decides
-          }
-          try {
-            process.kill(-g, 'SIGTERM'); // detached → own process group
-          } catch {
-            // No fallback to kill(pid): a native child is always its own
-            // group leader, so a failed group signal means the group was
-            // emptied or recycled — signaling a bare pid could hit an
-            // unrelated process.
-          }
-        }
-        // let the signal land before recording the stop — `stopped` on a
-        // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless).
-        // The unit, not the wrapper, is the wait: a TERM-resistant
-        // descendant outlives the sh-wrapper it was spawned under, and
-        // `stopped` over it would free a respawn onto a live writer
-        // (bro-l8c4f.3)
-        const deadline = Date.now() + 2_000;
-        while (unitAlive() && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25));
-        }
-      }
+      // signal every process group the unit spans, then wait for the
+      // unit to die — the returned probe answers unit liveness for the
+      // lock-time re-check even when no signal was sent (a repeated
+      // `down` can find the wrapper dead while a descendant still
+      // holds the group)
+      const unitAlive = await signalUnitGroups(pid, start);
       // a respawn during the kill wait re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
       // 'stopped' + the marker drop land on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
-        const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt ||
-          unitAlive()
-        ) {
-          return; // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true });
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry);
-      });
+      markStoppedEntry({ dir, molStep, entry, id, stillLive: unitAlive });
     },
 
     capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
@@ -5826,40 +5738,18 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         tmuxRun(socket, ['kill-session', '-t', name]);
         // let the kill land before recording the stop — 'stopped' on a
         // still-live session would let a respawn run alongside it
-        const deadline = Date.now() + 2_000;
-        while (tmuxProbe(socket, name).live === 'running' && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25)); // NOSONAR — bounded kill-wait poll
-        }
+        await pollUntilGone(() => tmuxProbe(socket, name).live === 'running');
       }
       // a respawn during the kill wait re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
       // 'stopped' + the marker drop land on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
-        const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
-          return; // respawned — the live run owns the entry
-        }
-        if (name !== undefined) {
-          const p = tmuxProbe(socket, name);
-          if (p.live === 'running') {
-            return; // still alive — the live run owns the entry
-          }
-          if (p.live === 'unknown') {
-            // an unverifiable probe must not record 'stopped' on a
-            // session that may still be live — fail loudly instead
-            throw new Error(`cannot verify ${id}'s tmux session stopped — ${p.err}`);
-          }
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true });
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry);
+      markStoppedEntry({
+        dir,
+        molStep,
+        entry,
+        id,
+        what: 'tmux session',
+        probe: name === undefined ? undefined : () => tmuxProbe(socket, name),
       });
     },
 
@@ -7444,40 +7334,18 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         dockerRun(['rm', '-f', target]);
         // let the rm land before recording the stop — 'stopped' on a
         // still-live container would let a respawn run beside it
-        const deadline = Date.now() + 2_000;
-        while (dockerInspect(name).live === 'running' && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25)); // NOSONAR — bounded kill-wait poll
-        }
+        await pollUntilGone(() => dockerInspect(name).live === 'running');
       }
       // a respawn during the rm re-probes and re-pins the entry under
       // the registry lock — re-verify under the SAME lock or 'stopped'
       // lands on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
-        const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
-          return; // respawned — the live run owns the entry
-        }
-        if (name !== undefined) {
-          const p = dockerInspect(name);
-          if (p.live === 'running') {
-            return; // still alive — the live run owns the entry
-          }
-          if (p.live === 'unknown') {
-            // an unverifiable probe must not record 'stopped' on a
-            // container that may still be live — fail loudly instead
-            throw new Error(`cannot verify ${id}'s container stopped — ${p.err}`);
-          }
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true });
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry);
+      markStoppedEntry({
+        dir,
+        molStep,
+        entry,
+        id,
+        what: 'container',
+        probe: name === undefined ? undefined : () => dockerInspect(name),
       });
     },
 

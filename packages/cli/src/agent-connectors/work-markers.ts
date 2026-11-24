@@ -88,8 +88,12 @@ export function dropWorkMarker(dir: string, molStep: string, entry: AgentRegistr
     // write + marker write — same lock the spawner holds (re-entrant)
     withAgentRegistryLock(dir, () => {
       const cur = readAgentRegistry(dir)[molStep];
-      if (cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt !== entry.spawnedAt) {
-        return; // respawned — the live run owns the marker now
+      // a NEWER run of the same agent re-pinned the entry — the live
+      // run owns the marker now
+      const respawned =
+        cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt !== entry.spawnedAt;
+      if (respawned) {
+        return;
       }
       const marker = workMarkerPath(dir, entry.agentId);
       if (marker !== null) {
