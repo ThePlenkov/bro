@@ -14,42 +14,24 @@ import type { ClaimCapability, TaskInput, TaskRow } from '@broject/core';
 import { ensureLabel, ghActor, issueNumber, queryIssueSync } from './tasks-queries.ts';
 import { assigneesOf, BLOCKED_LABEL, CLAIMED_LABEL, labelsOf, toRow } from './tasks-rows.ts';
 
-/** 'blocks' → POST blocked_by — "from is blocked by to". */
-function linkBlocked(dir: string, from: string, to: string): void {
-  const blocker = queryIssueSync(dir, issueNumber(dir, to));
-  if (blocker?.databaseId === undefined) {
-    throw new Error(`github tasks: cannot resolve ${to} to an issue id`);
+/** The dependency write both rels share — resolve one side's REST
+ *  databaseId, then POST the endpoint naming the other side's NUMBER.
+ *  'blocks' resolves `to` and posts onto `from`'s dependencies;
+ *  'parent-child' resolves `from` and posts onto `to`'s sub_issues.
+ *  The resolve runs first — a missing issue errors before the other
+ *  side's ref is even parsed. */
+function linkRel(dir: string, from: string, to: string, type: string): void {
+  const resolve = type === 'blocks' ? to : from;
+  const node = queryIssueSync(dir, issueNumber(dir, resolve));
+  if (node?.databaseId === undefined) {
+    throw new Error(`github tasks: cannot resolve ${resolve} to an issue id`);
   }
-  gh(
-    [
-      'api',
-      '-X',
-      'POST',
-      `repos/{owner}/{repo}/issues/${issueNumber(dir, from)}/dependencies/blocked_by`,
-      '-f',
-      `issue_id=${blocker.databaseId}`,
-    ],
-    dir
-  );
-}
-
-/** 'parent' → POST sub_issues — makes `from` a sub-issue of `to`. */
-function linkParent(dir: string, from: string, to: string): void {
-  const child = queryIssueSync(dir, issueNumber(dir, from));
-  if (child?.databaseId === undefined) {
-    throw new Error(`github tasks: cannot resolve ${from} to an issue id`);
-  }
-  gh(
-    [
-      'api',
-      '-X',
-      'POST',
-      `repos/{owner}/{repo}/issues/${issueNumber(dir, to)}/sub_issues`,
-      '-f',
-      `sub_issue_id=${child.databaseId}`,
-    ],
-    dir
-  );
+  const endpoint =
+    type === 'blocks'
+      ? `repos/{owner}/{repo}/issues/${issueNumber(dir, from)}/dependencies/blocked_by`
+      : `repos/{owner}/{repo}/issues/${issueNumber(dir, to)}/sub_issues`;
+  const field = type === 'blocks' ? 'issue_id' : 'sub_issue_id';
+  gh(['api', '-X', 'POST', endpoint, '-f', `${field}=${node.databaseId}`], dir);
 }
 
 /** link(from, to, 'blocked') — "from is blocked by to". 'parent'
@@ -58,12 +40,8 @@ function linkParent(dir: string, from: string, to: string): void {
  *  — thrown, never faked as comments. */
 export function linkSync(dir: string, from: string, to: string, rel: string): void {
   const type = nativeTaskRel(rel);
-  if (type === 'blocks') {
-    linkBlocked(dir, from, to);
-    return;
-  }
-  if (type === 'parent-child') {
-    linkParent(dir, from, to);
+  if (type === 'blocks' || type === 'parent-child') {
+    linkRel(dir, from, to, type);
     return;
   }
   throw new Error(`github tasks: link rel '${rel}' has no GitHub analogue (blocked | parent)`);
