@@ -101,9 +101,6 @@ import {
   diskFloorBytes,
   diskFloorFor,
   expandAgentCmd,
-  FLEET_HEAD_PREFIXES,
-  type FleetPrRow,
-  isFleetHead,
   type LoopConfig,
   loopSlug,
   MB,
@@ -144,6 +141,7 @@ import { runActCommand } from './act.ts';
 import { flag, positionals } from './args.ts';
 import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { listOpenFleetPrs, loopRefTails } from './fleet-prs.ts';
 import { explainSpawn } from './loop-explain.ts';
 import { type RouteTableLane, routeTableLane } from './loop-routes.ts';
 import { linkRunToDecision, reconcileOutcomes, reportRoutedOutcome } from './outcome-report.ts';
@@ -183,6 +181,10 @@ import {
   recordStackEdge,
   stackPushLockPath,
 } from './work.ts';
+
+// loop.test.ts pins loopRefTails on this module's surface — the
+// implementation lives in fleet-prs.ts now
+export { loopRefTails };
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -2385,15 +2387,6 @@ function openLoopPrs(ctx: Ctx, branches: string[]): string[] {
   return out;
 }
 
-interface RefTails {
-  worktrees: string[];
-  /** branch names riding a loop/* worktree — disjoint from `branches`,
-   *  needed so the open-PR audit sees PRs on worktree'd branches too */
-  worktreeBranches: string[];
-  branches: string[];
-  errors: string[];
-}
-
 /** Every linked worktree this clone holds — the spec's `worktreeWarn`
  *  mark counts checkouts, and disk/coordination pressure doesn't care
  *  which branch a checkout sits on. The main worktree heads `worktree
@@ -2405,37 +2398,6 @@ function linkedWorktreeCount(root: string): number | undefined {
     return undefined;
   }
   return Math.max(0, parseWorktreePorcelain(wt.out).length - 1);
-}
-
-/** loop/* worktrees still checked out + loop/* branches with no
- *  worktree — both are run tails; a `--stack` run owns its `stack/<name>/*`
- *  branches the same way. A failed git probe reports as an error line,
- *  never as a false "clean". */
-export function loopRefTails(root: string, prefixes: string[] = ['loop/']): RefTails {
-  const errors: string[] = [];
-  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
-  if (wt.code !== 0) {
-    errors.push(`worktree list failed — ${wt.err || 'git error'}`);
-  }
-  const trees = parseWorktreePorcelain(wt.out).filter(w =>
-    prefixes.some(p => w.branch?.startsWith(p))
-  );
-  const onTree = new Set(trees.map(w => w.branch!));
-  const bare: string[] = [];
-  for (const prefix of prefixes) {
-    const bl = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)']);
-    if (bl.code !== 0) {
-      errors.push(`branch list failed — ${bl.err || 'git error'}`);
-      continue;
-    }
-    bare.push(...bl.out.split('\n').filter(b => b && !onTree.has(b)));
-  }
-  return {
-    worktrees: trees.map(w => `${w.path} [${w.branch}]`),
-    worktreeBranches: trees.map(w => w.branch!),
-    branches: bare,
-    errors,
-  };
 }
 
 /** Beads left in_progress, split by this run's claims vs pre-existing —
@@ -2730,122 +2692,6 @@ export function skipLeasedBeads<T extends { id: string }>(
  *  would idle the run forever instead of reporting done. An
  *  unreadable store answers not-drained — a blip never masks work. */
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
-
-/** The review backend's own open-PR listing — undefined when the facade
- *  names no openPrs (the branch scan answers instead), null when the
- *  listing itself failed (unknown beats incomplete). */
-function fleetPrsFromBackend(ctx: Ctx): FleetPrRow[] | null | undefined {
-  if (typeof ctx.rev.openPrs !== 'function') {
-    return undefined;
-  }
-  try {
-    const rows: FleetPrRow[] = [];
-    for (const p of ctx.rev.openPrs(ctx.repo) ?? []) {
-      if (p?.headRef && isFleetHead(p.headRef)) {
-        rows.push({ pr: p.pr, headRef: p.headRef });
-      }
-    }
-    return rows;
-  } catch {
-    // PR listing failed — cannot produce complete listing
-    return null;
-  }
-}
-
-/** `git ls-remote --heads origin <prefix>*` — the ref names under one
- *  fleet prefix. [] when no origin exists to ask (a local-only fleet
- *  is a complete answer); null when the remote exists but cannot
- *  answer — 'unknown', never an incomplete scan. */
-function lsRemoteHeads(root: string, prefix: string): string[] | null {
-  const ls = gitTry(['-C', root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
-  if (ls.code === 0) {
-    return ls.out
-      .split('\n')
-      .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
-      .filter(Boolean);
-  }
-  // no origin at all is a complete answer (the fleet is local-only);
-  // an unreachable remote is 'unknown'
-  if (/does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)) {
-    return [];
-  }
-  return null;
-}
-
-/** Remote heads for every fleet prefix — LOCAL refs alone undercount:
- *  a pushed head whose local branch was already deleted (land
- *  cleanup, another clone's push) is still a live fleet PR, so remote
- *  heads join the scan. */
-function remoteFleetHeads(root: string, prefixes: readonly string[]): string[] | null {
-  const remote: string[] = [];
-  for (const prefix of prefixes) {
-    const heads = lsRemoteHeads(root, prefix);
-    if (heads === null) {
-      return null;
-    }
-    remote.push(...heads);
-  }
-  return remote;
-}
-
-/** One branch's fleet PRs folded into rows — false when the facade
- *  cannot answer the branch at all (a non-fleet branch is still ASKED:
- *  its answer failing makes the listing incomplete too). */
-function collectBranchPrs(ctx: Ctx, b: string, rows: FleetPrRow[]): boolean {
-  try {
-    for (const pr of ctx.rev.prsForBranch(b)) {
-      if (isFleetHead(b)) {
-        rows.push({ pr, headRef: b });
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** prsForBranch over the union of known branches — a branch the facade
- *  cannot answer fails the whole listing (unknown beats incomplete). */
-function collectBranchFleetPrs(ctx: Ctx, branches: readonly string[], rows: FleetPrRow[]): boolean {
-  for (const b of branches) {
-    if (!collectBranchPrs(ctx, b, rows)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/** The run's mutable queue state — the gate stack, the outcome tally,
- *  and the claim bookkeeping the tick helpers share. */
-function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
-  const listed = fleetPrsFromBackend(ctx);
-  if (listed !== undefined) {
-    return listed;
-  }
-  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown.
-  // LOCAL refs alone undercount: a pushed head whose local branch was already
-  // deleted (land cleanup, another clone's push) is still a live fleet PR, so
-  // remote heads join the scan — `ls-remote` answers the authoritative set.
-  const prefixes = FLEET_HEAD_PREFIXES;
-  try {
-    const tails = loopRefTails(ctx.root, prefixes);
-    if (tails.errors.length > 0) {
-      return null;
-    }
-    const remote = remoteFleetHeads(ctx.root, prefixes);
-    if (remote === null) {
-      return null;
-    }
-    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches, ...remote])];
-    const rows: FleetPrRow[] = [];
-    if (!collectBranchFleetPrs(ctx, branches, rows)) {
-      return null;
-    }
-    return rows;
-  } catch {
-    return null;
-  }
-}
 
 /** `push origin --delete <branch>` as a tails verdict — a remote that
  *  already dropped the ref answers "does not exist", which IS the
