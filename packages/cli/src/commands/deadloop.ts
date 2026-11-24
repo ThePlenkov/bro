@@ -220,7 +220,7 @@ export function deadLoopPostTool(
   if (fresh && prior?.signature === loop.signature) {
     return [];
   }
-  return fresh && prior?.signature === loop.signature ? [] : [loopWarning(loop)];
+  return [loopWarning(loop)];
 }
 
 function matchingLoop(
