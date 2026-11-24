@@ -89,10 +89,15 @@ function makeCtx(): TestCtx {
 }
 
 /** The host's own half: bound handlers recorded, notify() collected. */
-function makeBinding(handlers: Handlers, notifyThrows: boolean): BroHostBinding<TestCtx> {
+function makeBinding(
+  handlers: Handlers,
+  notifyThrows: boolean,
+  withUserInput = true
+): BroHostBinding<TestCtx> {
   return sharedBinding<TestCtx>({
     kind: 'test',
     stop: 'session_stop',
+    userInput: withUserInput ? 'input' : undefined,
     on: recordOn(handlers),
     paint() {},
     notify: notifyThrows ? explodingNotify : recordNotify,
@@ -102,6 +107,44 @@ function makeBinding(handlers: Handlers, notifyThrows: boolean): BroHostBinding<
     stopAlreadyRefused: () => false,
   });
 }
+
+test('user input captures the prompt and runs prompt-submit before agent start', async () => {
+  respond({
+    'prompt-submit': '{"hookSpecificOutput":{"additionalContext":"prompt nudge"}}',
+  });
+  const { ctx, handlers } = makeHost();
+  const input = handlers.get('input');
+  const before = handlers.get('before_agent_start');
+  assert.ok(input !== undefined);
+  assert.ok(before !== undefined);
+
+  await input({ text: 'inspect the queue' }, ctx);
+  assert.deepEqual(await before({}, ctx), {
+    message: { customType: 'bro-context', content: 'prompt nudge', display: false },
+  });
+});
+
+test('agent start does not probe prompt-submit without a user-input event', async () => {
+  respond({
+    'prompt-submit': '{"hookSpecificOutput":{"additionalContext":"must not run"}}',
+  });
+  const { ctx, handlers } = makeHost();
+  const before = handlers.get('before_agent_start');
+  assert.ok(before !== undefined);
+  assert.equal(await before({}, ctx), undefined);
+});
+
+test('agent start probes prompt-submit on hosts without a user-input event', async () => {
+  respond({
+    'prompt-submit': '{"hookSpecificOutput":{"additionalContext":"start nudge"}}',
+  });
+  const { ctx, handlers } = makeHost({ userInput: false });
+  const before = handlers.get('before_agent_start');
+  assert.ok(before !== undefined);
+  assert.deepEqual(await before({}, ctx), {
+    message: { customType: 'bro-context', content: 'start nudge', display: false },
+  });
+});
 
 const API: BroHostApi<TestCtx> = {
   registerCommand() {},
@@ -120,16 +163,22 @@ function stubResolve(
 
 /** A host stub: the events the driver binds are recorded, notifications
  *  collected, and the stop refusal is an inspectable marker. */
-function makeHost(opts: { notifyThrows?: boolean; resolve?: Command | null } = {}): {
+function makeHost(
+  opts: { notifyThrows?: boolean; resolve?: Command | null; userInput?: boolean } = {}
+): {
   ctx: TestCtx;
   handlers: Handlers;
   fireStop(): Promise<unknown>;
 } {
   const handlers: Handlers = new Map();
   const ctx = makeCtx();
-  createBroDriver(makeBinding(handlers, opts.notifyThrows === true), API, {
-    resolve: stubResolve(opts.resolve),
-  });
+  createBroDriver(
+    makeBinding(handlers, opts.notifyThrows === true, opts.userInput !== false),
+    API,
+    {
+      resolve: stubResolve(opts.resolve),
+    }
+  );
   const fireStop = async (): Promise<unknown> => {
     const handler = handlers.get('session_stop');
     assert.ok(handler !== undefined, 'the driver bound no stop handler');

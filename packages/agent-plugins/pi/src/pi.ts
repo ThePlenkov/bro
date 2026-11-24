@@ -22,8 +22,9 @@
  *   session_before_compact    → pre-compact    (context carried into the
  *                                              post-compaction inject)
  *   session_compact           → post-compaction (re-prime hydration)
- *   before_agent_start        → prompt-submit  (nudge + the cached
- *                                               hydration, one hidden message)
+ *   input                    → prompt-submit  (capture the prompt and
+ *                                             cache its nudge)
+ *   before_agent_start       → cached nudge + hydration (one hidden message)
  *   tool_result               → post-tool      (arming + nudges; nudge
  *                                               text appended to content)
  *   agent_before_settle       → stop           (block → continue + the
@@ -162,6 +163,7 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
       kind: 'pi',
       npxPin: NPX_PIN,
       stop: 'agent_before_settle',
+      userInput: 'input',
       on(event, handler) {
         pi.on(event as never, handler as never);
       },
