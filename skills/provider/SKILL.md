@@ -15,6 +15,12 @@ the real credential from the server env), never the protocol. SSE
 streams, tool_use, and `/v1/models` discovery all pass through
 untouched.
 
+**Opt-in transport.** The gate/debt workflow (`bro review act`, `bro
+review debt`) needs no listener, no provider entry, and no upstream
+key — this plane exists only for clients that point
+`ANTHROPIC_BASE_URL` at it. The boundary contract (credential,
+retention, approval) lives in `site/content/docs/commands/provider.md`.
+
 Two planes produce an endpoint:
 
 - **host listener** — `bro provider serve`: user-scoped, repo-free,

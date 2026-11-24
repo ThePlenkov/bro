@@ -56,7 +56,10 @@ requires `Authorization: Bearer <token>`.
 
 ### Provider plane — proxy and conductor
 
-`/v1/*` is the provider plane — Anthropic Messages plus the OpenAI
+`/v1/*` is the provider plane — opt-in model transport whose
+credential/retention/approval boundary contract lives under
+[provider](/docs/commands/provider). This section is the mechanics:
+Anthropic Messages plus the OpenAI
 dialects below — and authenticates on the
 session token (`Authorization: Bearer` / `x-api-key`), GETs included —
 an unauthenticated call would spend the upstream credential anyway.
