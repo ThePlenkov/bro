@@ -32,9 +32,10 @@ an agent polls into something that arrives.
 - **`rpc.ts` / `tui.tsx`** — the RPC client and the terminal half (the
   TUI raises only because the server half exists).
 - **Skills**: installed as a directory, bro's skills reach opencode
-  through opencode's own plane — `~/.agents/skills/`, where
-  `bro skills sync` puts them — so the plugin-side registration and the
-  agents-skills plane never double-register.
+  through opencode's own plane — the run root's `.agents/skills/`, where
+  `bro skills sync` puts them (`--root <dir>`, default the current
+  directory) — so the plugin-side registration and the agents-skills
+  plane never double-register.
 - Generated-adapter direction: the verbatim-copy modules fold into the
   shared core (`packages/agent-plugins/adapter-core/`) the way pi and omp did;
   a divergence between the copy and the core is drift to repair, not a
@@ -46,4 +47,4 @@ an agent polls into something that arrives.
 - RPC board state pushes (`changed` / `attention`) reach an open TUI
   without the agent polling.
 - Skills register exactly once across both paths (plugin-adjacent and
-  `~/.agents/skills/`).
+  the run root's `.agents/skills/`).
