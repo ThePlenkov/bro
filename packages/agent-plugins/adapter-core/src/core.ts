@@ -184,24 +184,39 @@ export interface ResolveOptions {
  * bro is skipped rather than failing every hook.
  */
 export async function resolveCommand(opts: ResolveOptions = {}): Promise<Command | null> {
-  if (opts.command !== undefined && opts.command !== '') {
-    const [cmd, ...args] = opts.command.split(/\s+/).filter(p => p !== '');
-    if (cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks']))) {
-      return { cmd, args };
-    }
+  return (
+    (await resolvePinnedCommand(opts.command)) ??
+    (await resolveLocalCommand()) ??
+    (await resolvePathCommand()) ??
+    (await resolveNpxCommand(opts.npxPin))
+  );
+}
+
+async function resolvePinnedCommand(command: string | undefined): Promise<Command | null> {
+  if (command === undefined || command === '') {
+    return null;
   }
+  const [cmd, ...args] = command.split(/\s+/).filter(part => part !== '');
+  return cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks'])) ? { cmd, args } : null;
+}
+
+async function resolveLocalCommand(): Promise<Command | null> {
   for (const entry of [siblingCli(), checkoutCli()]) {
     if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
       return { cmd: jsRuntime(), args: [entry] };
     }
   }
-  if (await exitsZero('bro', ['hooks'])) {
-    return { cmd: 'bro', args: [] };
-  }
-  if (opts.npxPin !== undefined && (await exitsZero('npx', ['--version']))) {
-    return { cmd: 'npx', args: ['-y', '--prefer-offline', opts.npxPin] };
-  }
   return null;
+}
+
+async function resolvePathCommand(): Promise<Command | null> {
+  return (await exitsZero('bro', ['hooks'])) ? { cmd: 'bro', args: [] } : null;
+}
+
+async function resolveNpxCommand(npxPin: string | undefined): Promise<Command | null> {
+  return npxPin !== undefined && (await exitsZero('npx', ['--version']))
+    ? { cmd: 'npx', args: ['-y', '--prefer-offline', npxPin] }
+    : null;
 }
 
 /**
@@ -256,6 +271,16 @@ export interface HookResult {
   failure: HookFailure | null;
 }
 
+/** All inputs that travel together for one hook protocol invocation. */
+export interface HookCallOptions {
+  command: Command;
+  event: string;
+  payload: unknown;
+  cwd: string;
+  timeoutMs: number;
+  extraEnv?: Record<string, string>;
+}
+
 /** The one-line cause a diagnostic surfaces for a failed hook call. */
 export function hookFailureText(failure: HookFailure): string {
   switch (failure.kind) {
@@ -279,15 +304,8 @@ export function hookFailureText(failure: HookFailure): string {
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
  * `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
  */
-export async function callHook(
-  command: Command,
-  event: string,
-  payload: unknown,
-  cwd: string,
-  timeoutMs: number,
-  extraEnv?: Record<string, string>
-): Promise<HookControl | null> {
-  return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+export async function callHook(options: HookCallOptions): Promise<HookControl | null> {
+  return (await callHookDetailed(options)).control;
 }
 
 /**
@@ -296,20 +314,13 @@ export async function callHook(
  * fail-open, but the second must not pass invisibly. A clean exit with
  * empty stdout is silence (failure null) — only real outage kinds set it.
  */
-export async function callHookDetailed(
-  command: Command,
-  event: string,
-  payload: unknown,
-  cwd: string,
-  timeoutMs: number,
-  extraEnv?: Record<string, string>
-): Promise<HookResult> {
+export async function callHookDetailed(options: HookCallOptions): Promise<HookResult> {
   // serialize before spawning: a payload JSON.stringify rejects means the
   // hook can never run — that is its own outage class, not a spawn error
   // and never healthy silence (and this function resolves, never throws)
   let input: string | undefined;
   try {
-    input = JSON.stringify(payload);
+    input = JSON.stringify(options.payload);
   } catch {
     return { control: null, failure: { kind: 'input' } };
   }
@@ -321,9 +332,9 @@ export async function callHookDetailed(
   const { promise, resolve } = Promise.withResolvers<HookResult>();
   let child: ChildProcess;
   try {
-    child = spawn(command.cmd, [...command.args, 'hooks', event], {
-      cwd,
-      env: extraEnv === undefined ? undefined : { ...process.env, ...extraEnv },
+    child = spawn(options.command.cmd, [...options.command.args, 'hooks', options.event], {
+      cwd: options.cwd,
+      env: options.extraEnv === undefined ? undefined : { ...process.env, ...options.extraEnv },
       stdio: ['pipe', 'pipe', 'ignore'],
       windowsHide: true,
       detached: process.platform !== 'win32',
@@ -338,8 +349,8 @@ export async function callHookDetailed(
       resolve(result);
     }
   };
-  const timer = killAfter(child, timeoutMs, () =>
-    settle({ control: null, failure: { kind: 'timeout', timeoutMs } })
+  const timer = killAfter(child, options.timeoutMs, () =>
+    settle({ control: null, failure: { kind: 'timeout', timeoutMs: options.timeoutMs } })
   );
   let out = '';
   child.stdout?.setEncoding('utf8');
