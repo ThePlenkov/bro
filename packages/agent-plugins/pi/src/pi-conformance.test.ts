@@ -43,6 +43,7 @@ function registeredEventsExist(api: ExtensionAPI): void {
   api.on('session_before_compact', () => {});
   api.on('session_compact', () => {});
   api.on('before_agent_start', () => {});
+  api.on('input', () => {});
   api.on('tool_result', () => {});
   api.on('turn_end', () => {});
   api.on('session_shutdown', () => {});

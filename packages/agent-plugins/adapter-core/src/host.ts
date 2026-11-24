@@ -115,6 +115,8 @@ export interface BroHostShape<Ctx extends BroContext> {
   kind: string;
   /** The host's stop event. */
   stop: string;
+  /** The host's event carrying the submitted user prompt, when it has one. */
+  userInput?: string;
   /** Register a handler. */
   on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void;
   /** Paint the board. */
@@ -149,7 +151,7 @@ export function sharedBinding<Ctx extends BroContext>(
   host: BroHostShape<Ctx>
 ): BroHostBinding<Ctx> {
   return {
-    events: { ...LINEAGE_EVENTS, stop: host.stop },
+    events: { ...LINEAGE_EVENTS, stop: host.stop, userInput: host.userInput },
     on: host.on,
     sessionId(ctx) {
       return ctx.sessionManager.getSessionId() ?? '';
@@ -171,8 +173,11 @@ export function sharedBinding<Ctx extends BroContext>(
     stopAlreadyRefused: host.stopAlreadyRefused,
     stopAborted: host.stopAborted,
     promptOf(event) {
-      const turn = event as { prompt?: string };
-      return typeof turn.prompt === 'string' ? turn.prompt : '';
+      const turn = event as { prompt?: unknown; text?: unknown };
+      if (typeof turn.prompt === 'string') {
+        return turn.prompt;
+      }
+      return typeof turn.text === 'string' ? turn.text : '';
     },
     inject(text) {
       return {
@@ -211,6 +216,7 @@ export interface BroHostBinding<Ctx = unknown> {
     stop?: string;
     turnEnd?: string;
     sessionShutdown?: string;
+    userInput?: string;
   };
   /** Register a handler. */
   on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void;
@@ -354,6 +360,9 @@ export function createBroDriver<Ctx>(
    *  let through, and a NEW session starts with a fresh gate (the
    *  flag dies with its session instead of leaking into the next). */
   let gatedSession: string | undefined;
+  /** Prompt-submit probes run when the host receives input, not when the
+   * agent starts. Keep their answers until that input's turn begins. */
+  const promptNudges = new Map<string, Promise<string>>();
 
   /** Resolve the CLI once. Probing costs a spawn even where bro is
    *  inert, so it stays lazy. A *failed* resolution is not permanent:
@@ -574,15 +583,15 @@ export function createBroDriver<Ctx>(
   bind(host.events.beforeAgentStart, async (event, ctx) => {
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
-    const prompt = host.promptOf(event);
-    const nudge = probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf);
+    const nudge = promptNudges.get(sessionId);
+    promptNudges.delete(sessionId);
 
     const parts: string[] = [];
     const hydrationText = await consumeHydration(sessionId, cwd);
     if (hydrationText !== '') {
       parts.push(hydrationText);
     }
-    const nudgeText = (await nudge).trim();
+    const nudgeText = nudge === undefined ? '' : (await nudge).trim();
     if (nudgeText !== '') {
       parts.push(nudgeText);
     }
@@ -590,6 +599,20 @@ export function createBroDriver<Ctx>(
       return undefined;
     }
     return host.inject(parts.join('\n\n'));
+  });
+
+  bind(host.events.userInput, (event, ctx) => {
+    const prompt = host.promptOf(event);
+    if (prompt === '') {
+      return undefined;
+    }
+    const sessionId = host.sessionId(ctx);
+    const cwd = host.cwd(ctx);
+    promptNudges.set(
+      sessionId,
+      probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf)
+    );
+    return undefined;
   });
 
   // post-tool: the arming markers + nudges live in bro; the nudge text

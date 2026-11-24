@@ -93,6 +93,7 @@ function makeBinding(handlers: Handlers, notifyThrows: boolean): BroHostBinding<
   return sharedBinding<TestCtx>({
     kind: 'test',
     stop: 'session_stop',
+    userInput: 'input',
     on: recordOn(handlers),
     paint() {},
     notify: notifyThrows ? explodingNotify : recordNotify,
@@ -102,6 +103,32 @@ function makeBinding(handlers: Handlers, notifyThrows: boolean): BroHostBinding<
     stopAlreadyRefused: () => false,
   });
 }
+
+test('user input captures the prompt and runs prompt-submit before agent start', async () => {
+  respond({
+    'prompt-submit': '{"hookSpecificOutput":{"additionalContext":"prompt nudge"}}',
+  });
+  const { ctx, handlers } = makeHost();
+  const input = handlers.get('input');
+  const before = handlers.get('before_agent_start');
+  assert.ok(input !== undefined);
+  assert.ok(before !== undefined);
+
+  await input({ text: 'inspect the queue' }, ctx);
+  assert.deepEqual(await before({}, ctx), {
+    message: { customType: 'bro-context', content: 'prompt nudge', display: false },
+  });
+});
+
+test('agent start does not probe prompt-submit without a user-input event', async () => {
+  respond({
+    'prompt-submit': '{"hookSpecificOutput":{"additionalContext":"must not run"}}',
+  });
+  const { ctx, handlers } = makeHost();
+  const before = handlers.get('before_agent_start');
+  assert.ok(before !== undefined);
+  assert.equal(await before({}, ctx), undefined);
+});
 
 const API: BroHostApi<TestCtx> = {
   registerCommand() {},

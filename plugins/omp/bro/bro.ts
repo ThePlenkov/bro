@@ -433,7 +433,8 @@ function sharedBinding(host) {
 	return {
 		events: {
 			...LINEAGE_EVENTS,
-			stop: host.stop
+			stop: host.stop,
+			userInput: host.userInput
 		},
 		on: host.on,
 		sessionId(ctx) {
@@ -457,7 +458,8 @@ function sharedBinding(host) {
 		stopAborted: host.stopAborted,
 		promptOf(event) {
 			const turn = event;
-			return typeof turn.prompt === "string" ? turn.prompt : "";
+			if (typeof turn.prompt === "string") return turn.prompt;
+			return typeof turn.text === "string" ? turn.text : "";
 		},
 		inject(text) {
 			return { message: {
@@ -513,6 +515,9 @@ function createBroDriver(host, api, deps = {}) {
 	*  let through, and a NEW session starts with a fresh gate (the
 	*  flag dies with its session instead of leaking into the next). */
 	let gatedSession;
+	/** Prompt-submit probes run when the host receives input, not when the
+	* agent starts. Keep their answers until that input's turn begins. */
+	const promptNudges = /* @__PURE__ */ new Map();
 	/** Resolve the CLI once. Probing costs a spawn even where bro is
 	*  inert, so it stays lazy. A *failed* resolution is not permanent:
 	*  PATH, a local install or npx can appear mid-session, so a null
@@ -654,17 +659,25 @@ function createBroDriver(host, api, deps = {}) {
 	bind(host.events.beforeAgentStart, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const nudge = probe("prompt-submit", {
-			session_id: sessionId,
-			prompt: host.promptOf(event)
-		}, cwd).then(contextOf);
+		const nudge = promptNudges.get(sessionId);
+		promptNudges.delete(sessionId);
 		const parts = [];
 		const hydrationText = await consumeHydration(sessionId, cwd);
 		if (hydrationText !== "") parts.push(hydrationText);
-		const nudgeText = (await nudge).trim();
+		const nudgeText = nudge === void 0 ? "" : (await nudge).trim();
 		if (nudgeText !== "") parts.push(nudgeText);
 		if (parts.length === 0) return;
 		return host.inject(parts.join("\n\n"));
+	});
+	bind(host.events.userInput, (event, ctx) => {
+		const prompt = host.promptOf(event);
+		if (prompt === "") return;
+		const sessionId = host.sessionId(ctx);
+		const cwd = host.cwd(ctx);
+		promptNudges.set(sessionId, probe("prompt-submit", {
+			session_id: sessionId,
+			prompt
+		}, cwd).then(contextOf));
 	});
 	bind(host.events.toolResult, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
