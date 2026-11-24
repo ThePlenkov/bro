@@ -480,19 +480,7 @@
       "quality_gates": {
         "new_code_health": false
       },
-      "quality_gates_doc": "Moved extraction from loop.ts: the extracted routing/spawn implementations preserve existing behavior and are not newly authored code.",
-      "matching_content_path": "packages/cli/src/commands/loop-routing.ts"
-    },
-    {
-      "quality_gates": {
-        "new_code_health": false
-      },
-      "quality_gates_doc": "Moved extraction from loop.ts: the extracted routing/spawn implementations preserve existing behavior and are not newly authored code.",
-      "matching_content_path": "packages/cli/src/commands/loop-spawn.ts"
-    },
-    {
-      "quality_gates": "bare_minimum",
-      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "quality_gates_doc": "Moved extraction from loop.ts: the remaining module-level argument-shape finding is pre-existing code retained as orchestration glue, not newly authored code.",
       "matching_content_path": "packages/cli/src/commands/loop.ts"
     },
     {
