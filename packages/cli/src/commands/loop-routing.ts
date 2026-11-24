@@ -46,9 +46,9 @@ export async function resolveLoopLane(
   env: AgentConnectorEnv,
   sel: LoopLaneSel,
   cfg: LoopConfig,
-  route?: ResolvedClass,
-  matrix?: MatrixLanePick
+  ...routing: [route?: ResolvedClass, matrix?: MatrixLanePick]
 ): Promise<LoopLane> {
+  const [route, matrix] = routing;
   const agentIsProvider = sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent);
   if (agentIsProvider && sel.provider !== undefined && sel.provider !== sel.agent) {
     throw new SpawnError(
@@ -80,29 +80,18 @@ export async function resolveLoopLane(
   // keeps routing (same tiers as lanePicks' provider order). A matrix
   // pick suppresses the walk the same way — its lane is already the
   // vetted one; chain candidates were never capability-checked.
-  const routeSpec =
-    route !== undefined &&
-    matrix === undefined &&
-    sel.provider === undefined &&
-    !agentIsProvider &&
-    flagProvider === undefined &&
-    provider === route.provider
-      ? await resolveSpawnRoute(
-          env,
-          'native',
-          route,
-          {
-            model:
-              sel.model ??
-              (sel.profile === undefined ? undefined : fleetProfileOf(env, sel.profile)?.model),
-            // the effective lane model — a config profile/loop.model
-            // the head would otherwise lose to the provider default
-            modelFallback: model,
-            autoApprove,
-          },
-          pickTier(sel, agentIsProvider, profileSourced)
-        )
-      : undefined;
+  const routeSpec = await resolveRouteSpec({
+    env,
+    sel,
+    route,
+    matrix,
+    agentIsProvider,
+    flagProvider,
+    provider,
+    model,
+    autoApprove,
+    profileSourced,
+  });
   return {
     ...lane,
     ...(route === undefined ? {} : { class: route.class }),
@@ -112,6 +101,55 @@ export async function resolveLoopLane(
     ...(matrix === undefined ? {} : { matrix: matrix.lane }),
     ...(routeSpec === undefined ? {} : { route: routeSpec }),
   };
+}
+
+async function resolveRouteSpec(args: {
+  env: AgentConnectorEnv;
+  sel: LoopLaneSel;
+  route?: ResolvedClass;
+  matrix?: MatrixLanePick;
+  agentIsProvider: boolean;
+  flagProvider?: string;
+  provider?: string;
+  model?: string;
+  autoApprove?: boolean;
+  profileSourced: boolean;
+}): Promise<LoopLane['route']> {
+  const {
+    env,
+    sel,
+    route,
+    matrix,
+    agentIsProvider,
+    flagProvider,
+    provider,
+    model,
+    autoApprove,
+    profileSourced,
+  } = args;
+  if (
+    route === undefined ||
+    matrix !== undefined ||
+    sel.provider !== undefined ||
+    agentIsProvider ||
+    flagProvider !== undefined ||
+    provider !== route.provider
+  ) {
+    return undefined;
+  }
+  return resolveSpawnRoute(
+    env,
+    'native',
+    route,
+    {
+      model:
+        sel.model ??
+        (sel.profile === undefined ? undefined : fleetProfileOf(env, sel.profile)?.model),
+      modelFallback: model,
+      autoApprove,
+    },
+    pickTier(sel, agentIsProvider, profileSourced)
+  );
 }
 
 /** Donor lookup — a recorded `acpSessionId` rides again only when the
@@ -301,27 +339,46 @@ function beadClassInfo(
   };
   const router = ctx.env.fleet?.router;
   const matrix = ctx.env.fleet?.matrix;
-  const routerMayFire =
-    routerEnabled &&
-    router !== undefined &&
-    router.mode !== 'off' &&
-    ctx.sel.class === undefined &&
-    info.label === undefined &&
-    ctx.beadsDir !== undefined;
+  const routerMayFire = classRouterNeedsDetails(ctx, info.label, routerEnabled, router);
   // the matrix router (bro-v0pvd.1) judges every bead's task text — no
   // class/label exemptions — and wants the description the ready row
   // may not carry, so it earns the same extra `bd show` the class
   // router does (still gated on routerEnabled: dry runs never pay it)
-  const matrixMayFire =
-    routerEnabled &&
+  const matrixMayFire = matrixRouterNeedsDetails(ctx, routerEnabled, matrix);
+  return routerMayFire || matrixMayFire
+    ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) }
+    : info;
+}
+
+function classRouterNeedsDetails(
+  ctx: Ctx,
+  label: string | undefined,
+  enabled: boolean,
+  router: NonNullable<Ctx['env']['fleet']>['router']
+): boolean {
+  return (
+    enabled &&
+    router !== undefined &&
+    router.mode !== 'off' &&
+    ctx.sel.class === undefined &&
+    label === undefined &&
+    ctx.beadsDir !== undefined
+  );
+}
+
+function matrixRouterNeedsDetails(
+  ctx: Ctx,
+  enabled: boolean,
+  matrix: NonNullable<Ctx['env']['fleet']>['matrix']
+): boolean {
+  return (
+    enabled &&
     matrix !== undefined &&
     matrix.provider !== undefined &&
     matrix.mode !== 'off' &&
     Object.keys(matrix.models).length > 0 &&
-    ctx.beadsDir !== undefined;
-  return routerMayFire || matrixMayFire
-    ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) }
-    : info;
+    ctx.beadsDir !== undefined
+  );
 }
 
 /** One claimed bead's spawn lane — fleet.routing resolves its class
