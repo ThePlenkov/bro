@@ -224,7 +224,7 @@ const capArchive = (file: string): void => {
   }
   const staged = `${file}.cap-${process.pid}`;
   try {
-    writePrivateFileSync(staged, tail);
+    writePrivateFileSync({ path: staged, data: tail });
     renameSync(staged, file);
   } finally {
     rmSync(staged, { force: true }); // a no-op once the rename landed
@@ -237,7 +237,7 @@ const capArchive = (file: string): void => {
  *  row alike. One statSync per row, the otel sink's own shape —
  *  proportional next to the open/write/close the append already pays. */
 const appendArchiveRow = (file: string, line: string): void => {
-  appendPrivateFileSync(file, line);
+  appendPrivateFileSync({ path: file, data: line });
   capArchive(file);
 };
 
@@ -264,7 +264,7 @@ export function agentEventRecord(
   );
   if (file === undefined) return;
   try {
-    mkdirPrivateSync(dirname(file));
+    mkdirPrivateSync({ path: dirname(file) });
     appendArchiveRow(
       file,
       `${JSON.stringify({ ts: new Date().toISOString(), session: sessionId, by, key: agentId, ...row })}\n`
@@ -328,7 +328,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       // first — in a dir another user can write, a swapped-in
       // permissive file between rows must never collect the next row
       if (!dirReady) {
-        mkdirPrivateSync(dirname(file));
+        mkdirPrivateSync({ path: dirname(file) });
         dirReady = true;
       }
       appendArchiveRow(file, `${JSON.stringify(row)}\n`);

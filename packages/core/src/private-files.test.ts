@@ -37,7 +37,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     try {
       const prev = process.umask(0o022);
       const f = join(dir, 'prompt.md');
-      writePrivateFileSync(f, 'secret');
+      writePrivateFileSync({ path: f, data: 'secret' });
       process.umask(prev);
       assert.equal(mode(f), 0o600);
       assert.equal(readFileSync(f, 'utf8'), 'secret');
@@ -51,7 +51,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     try {
       const f = join(dir, 'prompt.md');
       writeFileSync0164(f);
-      writePrivateFileSync(f, 'new content');
+      writePrivateFileSync({ path: f, data: 'new content' });
       assert.equal(mode(f), 0o600);
       assert.equal(readFileSync(f, 'utf8'), 'new content');
     } finally {
@@ -64,10 +64,10 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     try {
       const f = join(dir, 'agent.log');
       writeFileSync0164(f);
-      appendPrivateFileSync(f, 'line1\n');
+      appendPrivateFileSync({ path: f, data: 'line1\n' });
       assert.equal(mode(f), 0o600);
       assert.equal(readFileSync(f, 'utf8'), 'line1\n');
-      appendPrivateFileSync(f, 'line2\n');
+      appendPrivateFileSync({ path: f, data: 'line2\n' });
       assert.equal(readFileSync(f, 'utf8'), 'line1\nline2\n');
     } finally {
       done();
@@ -78,7 +78,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     const { dir, done } = tmp();
     try {
       const f = join(dir, 'agent.log');
-      appendPrivateFileSync(f, '');
+      appendPrivateFileSync({ path: f, data: '' });
       assert.equal(mode(f), 0o600);
     } finally {
       done();
@@ -89,7 +89,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     const { dir, done } = tmp();
     try {
       const f = join(dir, 'agent.stderr');
-      const fd = openPrivateAppendSync(f);
+      const fd = openPrivateAppendSync({ path: f });
       try {
         assert.equal(mode(f), PRIVATE_FILE_MODE);
       } finally {
@@ -104,13 +104,13 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     const { dir, done } = tmp();
     try {
       const fresh = join(dir, 'a', 'b');
-      mkdirPrivateSync(fresh);
+      mkdirPrivateSync({ path: fresh });
       assert.equal(mode(fresh), 0o700);
       // an existing dir keeps its mode — a shared-rig dir stays usable
       const shared = join(dir, 'shared');
-      mkdirPrivateSync(shared);
+      mkdirPrivateSync({ path: shared });
       chmodSync(shared, 0o755);
-      mkdirPrivateSync(shared);
+      mkdirPrivateSync({ path: shared });
       assert.equal(mode(shared), 0o755);
     } finally {
       done();
@@ -123,7 +123,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
       const prev = process.umask(0o177);
       const fresh = join(dir, 'x', 'y');
       try {
-        mkdirPrivateSync(fresh);
+        mkdirPrivateSync({ path: fresh });
       } finally {
         process.umask(prev);
       }
@@ -132,7 +132,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
       // it is created
       assert.equal(mode(fresh), 0o700);
       assert.equal(mode(join(dir, 'x')), 0o700);
-      writePrivateFileSync(join(fresh, 'prompt.md'), 'x');
+      writePrivateFileSync({ path: join(fresh, 'prompt.md'), data: 'x' });
     } finally {
       done();
     }
@@ -160,8 +160,8 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
         return origWrite(file, data);
       };
       try {
-        writePrivateFileSync(f, 'secret');
-        appendPrivateFileSync(f, 'more');
+        writePrivateFileSync({ path: f, data: 'secret' });
+        appendPrivateFileSync({ path: f, data: 'more' });
       } finally {
         privateFs.fchmod = origChmod;
         privateFs.write = origWrite;
@@ -188,8 +188,8 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
       writeFileSync(target, 'theirs');
       const link = join(dir, 'agent.log');
       symlinkSync(target, link);
-      assert.throws(() => writePrivateFileSync(link, 'secret'), { code: 'ELOOP' });
-      assert.throws(() => appendPrivateFileSync(link, 'secret'), { code: 'ELOOP' });
+      assert.throws(() => writePrivateFileSync({ path: link, data: 'secret' }), { code: 'ELOOP' });
+      assert.throws(() => appendPrivateFileSync({ path: link, data: 'secret' }), { code: 'ELOOP' });
       assert.equal(readFileSync(target, 'utf8'), 'theirs');
     } finally {
       done();
@@ -208,8 +208,8 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
         return { ...st, uid: st.uid + 1 };
       }) as typeof privateFs.fstat;
       try {
-        assert.throws(() => appendPrivateFileSync(f, 'x'), /foreign-owned/);
-        assert.throws(() => writePrivateFileSync(f, 'x'), /foreign-owned/);
+        assert.throws(() => appendPrivateFileSync({ path: f, data: 'x' }), /foreign-owned/);
+        assert.throws(() => writePrivateFileSync({ path: f, data: 'x' }), /foreign-owned/);
       } finally {
         privateFs.fstat = origFstat;
       }

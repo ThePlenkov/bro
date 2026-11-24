@@ -2091,8 +2091,8 @@ export async function ensureServe(
     deps.spawnServer();
   } else {
     const logDir = dirname(statePath);
-    mkdirPrivateSync(logDir);
-    const logFd = openPrivateAppendSync(join(logDir, 'serve.log'));
+    mkdirPrivateSync({ path: logDir });
+    const logFd = openPrivateAppendSync({ path: join(logDir, 'serve.log') });
     try {
       // ENTRY_FILE, not argv[1] — the child resolves its script under
       // `cwd: repo`, so a relative argv[1] (CLI launched from a linked
@@ -2240,8 +2240,8 @@ async function cmdWatchdog(argv: string[]): Promise<void> {
     if (verdict === 'retire') return;
     if (verdict === 'alive') continue;
     try {
-      mkdirPrivateSync(logDir);
-      const logFd = openPrivateAppendSync(join(logDir, 'serve.log'));
+      mkdirPrivateSync({ path: logDir });
+      const logFd = openPrivateAppendSync({ path: join(logDir, 'serve.log') });
       try {
         // the new generation writes its own serve.json and arms its own
         // watchdog — we retire on the next tick's superseded pid. The
@@ -2473,7 +2473,7 @@ async function startServeListener(
 
 function armServeWatchdog(context: ServeContext, boundPort: number): void {
   try {
-    const logFd = openPrivateAppendSync(join(dirname(context.statePath), 'serve.log'));
+    const logFd = openPrivateAppendSync({ path: join(dirname(context.statePath), 'serve.log') });
     try {
       spawn(
         process.execPath,

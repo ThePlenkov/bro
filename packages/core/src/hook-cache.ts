@@ -77,7 +77,7 @@ export function writeCacheFile(file: string, record: object, prefix: string): vo
   try {
     mkdirSync(dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    writePrivateFileSync(tmp, JSON.stringify(record));
+    writePrivateFileSync({ path: tmp, data: JSON.stringify(record) });
     renameSync(tmp, file);
     const dir = dirname(file);
     const cutoff = Date.now() - CACHE_SWEEP_MS;

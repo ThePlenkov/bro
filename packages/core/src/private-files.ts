@@ -52,7 +52,29 @@ export const privateFs = {
  *  guard and the constant is undefined. */
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
-function warn(path: string, err: unknown): void {
+export type PrivateFileData = string | Uint8Array;
+
+export interface PrivatePath {
+  path: string;
+}
+
+export interface PrivateFileWrite extends PrivatePath {
+  data: PrivateFileData;
+}
+
+interface PrivateOpen extends PrivatePath {
+  flags: number;
+}
+
+interface PrivateDescriptor extends PrivatePath {
+  fd: number;
+}
+
+interface PrivateWarning extends PrivatePath {
+  err: unknown;
+}
+
+function warn({ path, err }: PrivateWarning): void {
   console.error(
     `warning: could not pin owner-only mode on ${path} — ${err instanceof Error ? err.message : String(err)}`
   );
@@ -61,11 +83,11 @@ function warn(path: string, err: unknown): void {
 /** Repair-before-write — open(2) create-mode covers a NEW file only;
  *  this pins the mode on an inherited permissive file before any byte
  *  lands. Best-effort: warn, never fail (non-POSIX filesystems). */
-function pinPrivateFile(fd: number, path: string): void {
+function pinPrivateFile({ fd, path }: PrivateDescriptor): void {
   try {
     privateFs.fchmod(fd, PRIVATE_FILE_MODE);
   } catch (err) {
-    warn(path, err);
+    warn({ path, err });
   }
 }
 
@@ -73,7 +95,7 @@ function pinPrivateFile(fd: number, path: string): void {
  *  writing would feed their file (fchmod then fails EPERM and the
  *  warning path would append anyway). Refuse, don't warn through.
  *  POSIX-only: win32 has no uid in stat; the ACL owns the guarantee. */
-function refuseForeignFile(fd: number, path: string): void {
+function refuseForeignFile({ fd, path }: PrivateDescriptor): void {
   if (typeof process.getuid !== 'function') {
     return;
   }
@@ -88,11 +110,12 @@ function refuseForeignFile(fd: number, path: string): void {
 /** The shared open: no symlinks, no foreign files, mode pinned on the
  *  descriptor before the caller's first byte. A refusal closes the fd
  *  and throws — a planted artifact fails the spawn loudly. */
-function openPrivateSync(path: string, flags: number): number {
+function openPrivateSync({ path, flags }: PrivateOpen): number {
   const fd = openSync(path, flags | NOFOLLOW, PRIVATE_FILE_MODE);
   try {
-    refuseForeignFile(fd, path);
-    pinPrivateFile(fd, path);
+    const descriptor = { fd, path };
+    refuseForeignFile(descriptor);
+    pinPrivateFile(descriptor);
   } catch (err) {
     closeSync(fd);
     throw err;
@@ -105,8 +128,8 @@ function openPrivateSync(path: string, flags: number): number {
  *  rides on the VERIFIED descriptor, not the open — O_TRUNC at open
  *  would empty a foreign-owned planted file before the owner check
  *  could refuse it. */
-export function writePrivateFileSync(path: string, data: string | Uint8Array): void {
-  const fd = openPrivateSync(path, constants.O_WRONLY | constants.O_CREAT);
+export function writePrivateFileSync({ path, data }: PrivateFileWrite): void {
+  const fd = openPrivateSync({ path, flags: constants.O_WRONLY | constants.O_CREAT });
   try {
     privateFs.truncate(fd, 0);
     privateFs.write(fd, data);
@@ -119,8 +142,8 @@ export function writePrivateFileSync(path: string, data: string | Uint8Array): v
  *  writePrivateFileSync, with the append offset. `''` pre-creates a
  *  pinned empty file for later appends (shell `>>`, `tee -a`, a
  *  detached fd) to inherit. */
-export function appendPrivateFileSync(path: string, data: string | Uint8Array): void {
-  const fd = openPrivateAppendSync(path);
+export function appendPrivateFileSync({ path, data }: PrivateFileWrite): void {
+  const fd = openPrivateAppendSync({ path: path });
   try {
     privateFs.write(fd, data);
   } finally {
@@ -131,8 +154,11 @@ export function appendPrivateFileSync(path: string, data: string | Uint8Array): 
 /** Open `path` for append owner-only and hand back the fd — for callers
  *  that keep the descriptor (spawn stdio redirection). The mode is
  *  pinned before the caller's first write. */
-export function openPrivateAppendSync(path: string): number {
-  return openPrivateSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND);
+export function openPrivateAppendSync({ path }: PrivatePath): number {
+  return openPrivateSync({
+    path,
+    flags: constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND,
+  });
 }
 
 /** `mkdir -p` pinned owner-only on creation. An existing dir keeps its
@@ -142,7 +168,7 @@ export function openPrivateAppendSync(path: string): number {
  *  0700 — recursive mkdir then EACCES's trying to descend through its
  *  own unsearchable intermediate. The pin has to ride between levels,
  *  not after the whole call. */
-export function mkdirPrivateSync(path: string): void {
+export function mkdirPrivateSync({ path }: PrivatePath): void {
   if (existsSync(path)) {
     return;
   }
@@ -162,7 +188,7 @@ export function mkdirPrivateSync(path: string): void {
     try {
       chmodSync(d, PRIVATE_DIR_MODE);
     } catch (err) {
-      warn(d, err);
+      warn({ path: d, err });
     }
   }
 }

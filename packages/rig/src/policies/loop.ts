@@ -847,8 +847,8 @@ export function clumpTitle(beads: ReadyBead[]): string {
  *  close still counts — the unclosed tail falls through to requeue. */
 
 function writePrompt(item: LoopItem, text: string): void {
-  mkdirPrivateSync(dirname(item.promptFile));
-  writePrivateFileSync(item.promptFile, text);
+  mkdirPrivateSync({ path: dirname(item.promptFile) });
+  writePrivateFileSync({ path: item.promptFile, data: text });
 }
 
 function ensureWorktree(root: string, branch: string, dir: string, base?: string): void {

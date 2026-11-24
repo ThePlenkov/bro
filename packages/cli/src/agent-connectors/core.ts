@@ -3427,7 +3427,7 @@ function commitMcpArtifact(home: string, agentId: string, spec: SpawnSpec): void
       ? spec.worker.mcpServers
       : undefined;
   if (mcpServers !== undefined && mcpServers.length > 0) {
-    writePrivateFileSync(mcpFile, JSON.stringify(mcpServers));
+    writePrivateFileSync({ path: mcpFile, data: JSON.stringify(mcpServers) });
   } else {
     rmSync(mcpFile, { force: true });
   }
@@ -3469,7 +3469,7 @@ function commitSpawn(
   exitFile: string;
   runId: string;
 } {
-  mkdirPrivateSync(home);
+  mkdirPrivateSync({ path: home });
   const { agentId, existing, lease, runId } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
@@ -3489,10 +3489,10 @@ function commitSpawn(
   // >>/2>> — lands on an already-0600 file. The .exit file can't be
   // pre-created (readExitFile parses empty as exit 0); the wrapper's
   // `umask 077` subshell pins it at write time instead.
-  writePrivateFileSync(promptFile, spec.prompt);
-  appendPrivateFileSync(log, '');
+  writePrivateFileSync({ path: promptFile, data: spec.prompt });
+  appendPrivateFileSync({ path: log, data: '' });
   if (stderrLog !== undefined) {
-    appendPrivateFileSync(stderrLog, '');
+    appendPrivateFileSync({ path: stderrLog, data: '' });
   }
   commitMcpArtifact(home, agentId, spec);
   const logFrom = logSizeOrZero(log);
@@ -4605,9 +4605,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let childPid: number | undefined;
         let spawned: AgentRegistryEntry;
         try {
-          fd = openPrivateAppendSync(log);
+          fd = openPrivateAppendSync({ path: log });
           if (stderrLog !== undefined) {
-            errFd = openPrivateAppendSync(stderrLog);
+            errFd = openPrivateAppendSync({ path: stderrLog });
           }
           // the worker's tmpdir exists before the payload execs — the
           // nx daemon's mkdtemp needs the parent (spec bro-v96mp)
@@ -4733,15 +4733,15 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             // only the retry's own pid may still publish a handle
             childPid = undefined;
             if (stderrLog !== undefined) {
-              appendPrivateFileSync(
-                stderrLog,
-                'bro: systemd-run refused the scope — respawned without the wrap\n'
-              );
+              appendPrivateFileSync({
+                path: stderrLog,
+                data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
+              });
             } else {
-              appendPrivateFileSync(
-                log,
-                'bro: systemd-run refused the scope — respawned without the wrap\n'
-              );
+              appendPrivateFileSync({
+                path: log,
+                data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
+              });
             }
             // the discarded child may still emit 'error' (the ENOENT
             // path) — an unlistened error event takes the whole CLI down
@@ -4804,7 +4804,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // the admission stamp — durable only after pid+marker, so a
           // crash earlier can never admit a worker the registry cannot
           // reach. Existence is the signal; the pid inside is forensic.
-          writePrivateFileSync(goFile, `${child.pid ?? -1}\n`);
+          writePrivateFileSync({ path: goFile, data: `${child.pid ?? -1}\n` });
         } catch (err) {
           // sync failure after the reservation — hand the slot back
           if (reservation !== undefined) {
@@ -5187,7 +5187,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
               )
               .map(([k, v]) => `export ${k}=${shQuote(v)}`)
               .join('\n');
-            writePrivateFileSync(envFile, `${ambient}\n`);
+            writePrivateFileSync({ path: envFile, data: `${ambient}\n` });
             const worker = workerWithResume(spec.worker, resumeSessionId);
             const cliBadge = workerCliBadge(worker, command);
             const envArgs = [
@@ -5721,12 +5721,12 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     const agentDir = join(city, 'agents', spec.molStep);
     // owner-only (spec bro-l8c4f.4) — agent.toml inlines the caller's
     // env table; a permissive file leaks secrets into every local login
-    mkdirPrivateSync(agentDir);
-    writePrivateFileSync(
-      join(agentDir, 'prompt.template.md'),
-      read('prompt.template.md', GC_PROMPT_TEMPLATE)
-    );
-    writePrivateFileSync(join(agentDir, 'agent.toml'), agentToml);
+    mkdirPrivateSync({ path: agentDir });
+    writePrivateFileSync({
+      path: join(agentDir, 'prompt.template.md'),
+      data: read('prompt.template.md', GC_PROMPT_TEMPLATE),
+    });
+    writePrivateFileSync({ path: join(agentDir, 'agent.toml'), data: agentToml });
   };
 
   /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
@@ -6656,7 +6656,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnect
       `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
     );
   }
-  writePrivateFileSync(envFile, `${ambient}\n`);
+  writePrivateFileSync({ path: envFile, data: `${ambient}\n` });
 }
 
 /** The `docker run` argv — operator `runArgs` sit FIRST so docker's
@@ -7483,9 +7483,9 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     target: { owner: string; repo: string; slug: string }
   ): { task: CopilotTask; taskId: string } => {
     const bodyFile = join(home, `${agentId}.task.json`);
-    writePrivateFileSync(
-      bodyFile,
-      JSON.stringify({
+    writePrivateFileSync({
+      path: bodyFile,
+      data: JSON.stringify({
         prompt: spec.prompt,
         create_pull_request: true,
         ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
@@ -7495,8 +7495,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         ...(knobString('customAgent') !== undefined
           ? { custom_agent: knobString('customAgent') }
           : {}),
-      })
-    );
+      }),
+    });
     const res = ghRun(
       [
         'api',
