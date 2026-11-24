@@ -125,7 +125,9 @@ GitLab Issues are supported as an opt-in `tasks` backend via
 If you already use Linear, Jira, or GitLab Issues (or any supported
 tracker), you do **not** need to migrate to beads to use bro's task facade.
 Set `connectors.tasks` to the appropriate backend and configure
-auth/prerequisites above. bro commands that consume the tasks facade will route through that
+auth/prerequisites above. These connectors are available in the current bro
+package line; the package README linked above is the version-specific setup
+reference. bro commands that consume the tasks facade will route through that
 connector. Beads-specific features (e.g. certain projections/imports) remain
 beads-centric; connectors document their capabilities and honest absences
 explicitly.
@@ -137,6 +139,8 @@ explicitly.
 | `reviews` | `github` (`gh`), `gitlab` (`glab`)                                       | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations.                                                                           |
 | `tasks`   | `beads` (`bd`, default), `github`, `gitlab`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default.            | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
 | `queries` | `github`, `gitlab`, `atlassian`, `linear`                                | Configured via `connectors.queries` or per `bro query` step                            | Plan-driven fan-out across providers.                                                                                     |
+| `stacks`  | Local stack state + `github`, `gitlab` review connectors                | Review connector selected from the repository host                                  | Worktree/PR chains are local; host-specific publish/merge behavior is not a task-backend capability.                      |
+| `mesh`    | Local/beads, GitHub issue, and Wasteland transports                     | Peer bindings under `bro mesh peers`; not `connectors.tasks`                         | Cross-rig requests and inboxes. Linear and Jira are not mesh transports.                                                 |
 | `agents`  | Native/tmux/Gas City backends                                            | Configured via `connectors.agents`                                                     | Detached agents/workers.                                                                                                  |
 | `specs`   | Native + tool-layout matchers                                            | Detected or explicitly configured                                                      | Spec-driven workflows.                                                                                                    |
 
