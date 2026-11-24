@@ -870,6 +870,46 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/github/src/tasks.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from tasks.ts: the dep-edge and neighbors read path preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/github/src/tasks-deps.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from tasks.ts: the issue-verb write path preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/github/src/tasks-mutations.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from tasks.ts: the bead→issue projection preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/github/src/tasks-publish.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from tasks.ts: the issue-node shape and graphql read path preserve existing behavior and are not newly authored code.",
+      "matching_content_path": "packages/github/src/tasks-queries.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from tasks.ts: the row derivation and filtering preserve existing behavior and are not newly authored code.",
+      "matching_content_path": "packages/github/src/tasks-rows.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/gitlab/src/glab.ts"
     },
     {

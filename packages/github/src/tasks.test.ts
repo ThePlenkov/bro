@@ -1,17 +1,17 @@
-import { after, describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { facade, facadeName, registerConnector, scrubEnv, testGit } from '@broject/core'
-import { githubConnector } from './index.ts'
-import { githubTasks } from './tasks.ts'
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { facade, facadeName, registerConnector, scrubEnv, testGit } from '@broject/core';
+import { githubConnector } from './index.ts';
+import { githubTasks } from './tasks.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv())
+after(scrubEnv());
 
-const WIN32 = process.platform === 'win32'
+const WIN32 = process.platform === 'win32';
 
 /** Scripted gh on PATH — records argv to $FAKE_GH_LOG, answers by argv
  *  shape. Payloads are env-driven:
@@ -22,6 +22,7 @@ const WIN32 = process.platform === 'win32'
  *                       read answers file <n> — deterministic
  *                       interleavings (claim races)
  *    FAKE_GH_SUBS     — the subIssues query body
+ *    FAKE_GH_ISSUE_FAIL — any value fails every issue(number) read
  *    FAKE_GH_ACTOR    — `api user` login */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
@@ -46,6 +47,7 @@ case "$1" in
           *"issues(first"*) echo "$FAKE_GH_ISSUES" ;;
           *"issue(number:\$n){ subIssues"*) echo "$FAKE_GH_SUBS" ;;
           *"issue(number"*)
+            if [ -n "$FAKE_GH_ISSUE_FAIL" ]; then echo 'gh: read timed out' >&2; exit 1; fi
             n=$(grep -c 'issue(number' "$FAKE_GH_LOG")
             if [ -n "$FAKE_GH_ISSUE_SEQ" ] && [ -f "$FAKE_GH_ISSUE_SEQ/$n.json" ]; then
               cat "$FAKE_GH_ISSUE_SEQ/$n.json"
@@ -66,7 +68,9 @@ case "$1" in
         esac ;;
       --paginate)
         case "$*" in
-          *milestones*) echo "$FAKE_GH_MILESTONES" ;;
+          # --slurp wraps every page in an array — the env carries the
+          # comma-separated page bodies, so '[{a}],[{b}]' emits two pages
+          *milestones*) echo "[$FAKE_GH_MILESTONES]" ;;
           *) echo '{}' ;;
         esac ;;
       *milestones*) echo "$FAKE_GH_MILESTONES" ;;
@@ -79,27 +83,27 @@ case "$1" in
     esac ;;
   label) : ;;
 esac
-`
+`;
 
 interface NodeOpts {
-  number: number
-  title?: string
-  state?: string
-  stateReason?: string | null
-  labels?: string[]
-  assignees?: string[]
-  blockedBy?: [number, string][]
-  blocking?: [number, string][]
-  subIssues?: [number, string][]
-  parent?: number
-  issueType?: string
-  body?: string
-  createdAt?: string
-  closedAt?: string
-  databaseId?: number
+  number: number;
+  title?: string;
+  state?: string;
+  stateReason?: string | null;
+  labels?: string[];
+  assignees?: string[];
+  blockedBy?: [number, string][];
+  blocking?: [number, string][];
+  subIssues?: [number, string][];
+  parent?: number;
+  issueType?: string;
+  body?: string;
+  createdAt?: string;
+  closedAt?: string;
+  databaseId?: number;
 }
 
-const ref = (n: [number, string]) => ({ number: n[0], state: n[1] })
+const ref = (n: [number, string]) => ({ number: n[0], state: n[1] });
 
 /** A GraphQL issue node in the shape tasks.ts queries for. */
 function node(o: NodeOpts): Record<string, unknown> {
@@ -115,14 +119,14 @@ function node(o: NodeOpts): Record<string, unknown> {
     createdAt: o.createdAt ?? `2026-01-0${o.number}T00:00:00Z`,
     closedAt: o.closedAt ?? null,
     issueType: o.issueType !== undefined ? { name: o.issueType } : null,
-    labels: { nodes: (o.labels ?? []).map((name) => ({ name })) },
-    assignees: { nodes: (o.assignees ?? []).map((login) => ({ login })) },
+    labels: { nodes: (o.labels ?? []).map(name => ({ name })) },
+    assignees: { nodes: (o.assignees ?? []).map(login => ({ login })) },
     parent: o.parent !== undefined ? { number: o.parent } : null,
     blockedBy: { nodes: (o.blockedBy ?? []).map(ref) },
     blocking: { nodes: (o.blocking ?? []).map(ref) },
     subIssues: { nodes: (o.subIssues ?? []).map(ref) },
-  }
-  return n
+  };
+  return n;
 }
 
 const issuesPage = (nodes: Record<string, unknown>[]): string =>
@@ -132,44 +136,41 @@ const issuesPage = (nodes: Record<string, unknown>[]): string =>
         issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } },
       },
     },
-  })
+  });
 
 const issueRead = (n: Record<string, unknown> | null): string =>
-  JSON.stringify({ data: { repository: { issue: n } } })
+  JSON.stringify({ data: { repository: { issue: n } } });
 
 const subIssuesRead = (nodes: Record<string, unknown>[]): string =>
   JSON.stringify({
     data: { repository: { issue: { subIssues: { nodes } } } },
-  })
+  });
 
-function withFakeGh(
-  env: Record<string, string>,
-  fn: (log: string, dir: string) => void
-): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-'))
-  const log = join(dir, 'gh.log')
-  writeFileSync(log, '')
-  writeFileSync(join(dir, 'gh'), FAKE_GH)
-  chmodSync(join(dir, 'gh'), 0o755)
-  const prevPath = process.env.PATH
-  process.env.PATH = `${dir}:${prevPath}`
-  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
-  Object.assign(process.env, { FAKE_GH_LOG: log, ...env })
+function withFakeGh(env: Record<string, string>, fn: (log: string, dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-'));
+  const log = join(dir, 'gh.log');
+  writeFileSync(log, '');
+  writeFileSync(join(dir, 'gh'), FAKE_GH);
+  chmodSync(join(dir, 'gh'), 0o755);
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${dir}:${prevPath}`;
+  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...env });
   try {
-    fn(log, dir)
+    fn(log, dir);
   } finally {
-    process.env.PATH = prevPath
+    process.env.PATH = prevPath;
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
-    delete process.env.FAKE_GH_LOG
-    rmSync(dir, { recursive: true, force: true })
+    delete process.env.FAKE_GH_LOG;
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const calls = (log: string): string[] => readFileSync(log, 'utf8').trim().split('\n')
-const callsMatching = (log: string, re: RegExp): string[] => calls(log).filter((l) => re.test(l))
+const calls = (log: string): string[] => readFileSync(log, 'utf8').trim().split('\n');
+const callsMatching = (log: string, re: RegExp): string[] => calls(log).filter(l => re.test(l));
 
 describe('githubTasks', { skip: WIN32 }, () => {
   test('list maps issue state/labels/assignees onto task status', () => {
@@ -178,63 +179,120 @@ describe('githubTasks', { skip: WIN32 }, () => {
       node({ number: 2, title: 'claimed', labels: ['bro:claimed'], assignees: ['me'] }),
       node({ number: 3, title: 'blocked', blockedBy: [[9, 'OPEN']] }),
       node({ number: 4, title: 'closed work', state: 'CLOSED', closedAt: '2026-01-05T00:00:00Z' }),
-    ])
+    ]);
     withFakeGh({ FAKE_GH_ISSUES: issues, FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
-      const rows = githubTasks(dir).list({ all: true })
-      const status = new Map(rows.map((r) => [r.id, r.status]))
+      const rows = githubTasks(dir).list({ all: true });
+      const status = new Map(rows.map(r => [r.id, r.status]));
       assert.deepEqual(Object.fromEntries(status), {
         '1': 'open',
         '2': 'in_progress',
         '3': 'blocked',
         '4': 'closed',
-      })
+      });
       // the transport carrier never leaves the store
-      assert.equal(rows.some((r) => '__node' in r), false)
-    })
-  })
+      assert.equal(
+        rows.some(r => '__node' in r),
+        false
+      );
+    });
+  });
+
+  test("list with all+status:'closed' queries CLOSED only — all must not widen an explicit status", () => {
+    // all:true + status:'closed' fetching [OPEN,CLOSED] under a
+    // filter-free cap lets the bounded page fill with open rows and
+    // hide every closed match past the limit
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUES: issuesPage([
+          node({
+            number: 4,
+            title: 'closed work',
+            state: 'CLOSED',
+            closedAt: '2026-01-05T00:00:00Z',
+          }),
+        ]),
+      },
+      (log, dir) => {
+        const rows = githubTasks(dir).list({ all: true, status: 'closed', limit: 5 });
+        assert.deepEqual(
+          rows.map(r => r.id),
+          ['4']
+        );
+        const q = readFileSync(log, 'utf8');
+        assert.match(q, /-f states=CLOSED/);
+        assert.doesNotMatch(q, /-f states=OPEN/);
+      }
+    );
+  });
 
   test('ready excludes blocked and claimed issues, orders priority then created', () => {
     const issues = issuesPage([
       node({ number: 1, title: 'blocked by open dep', blockedBy: [[9, 'OPEN']], labels: ['p1'] }),
       node({ number: 2, title: 'claimed', assignees: ['me'], labels: ['p1'] }),
-      node({ number: 3, title: 'later, higher prio', labels: ['p1'], createdAt: '2026-01-01T00:00:00Z' }),
-      node({ number: 4, title: 'earlier, lower prio', labels: ['p2'], createdAt: '2026-01-02T00:00:00Z' }),
-      node({ number: 5, title: 'unblocked — dep landed', blockedBy: [[9, 'CLOSED']], labels: ['p2'], createdAt: '2026-01-03T00:00:00Z' }),
-      node({ number: 6, title: 'open sub-issues make it not-ready', subIssues: [[7, 'OPEN']], labels: ['p0'] }),
+      node({
+        number: 3,
+        title: 'later, higher prio',
+        labels: ['p1'],
+        createdAt: '2026-01-01T00:00:00Z',
+      }),
+      node({
+        number: 4,
+        title: 'earlier, lower prio',
+        labels: ['p2'],
+        createdAt: '2026-01-02T00:00:00Z',
+      }),
+      node({
+        number: 5,
+        title: 'unblocked — dep landed',
+        blockedBy: [[9, 'CLOSED']],
+        labels: ['p2'],
+        createdAt: '2026-01-03T00:00:00Z',
+      }),
+      node({
+        number: 6,
+        title: 'open sub-issues make it not-ready',
+        subIssues: [[7, 'OPEN']],
+        labels: ['p0'],
+      }),
       node({ number: 7, title: 'manual blocked label', labels: ['blocked'] }),
-    ])
+    ]);
     withFakeGh({ FAKE_GH_ISSUES: issues, FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
-      const ready = githubTasks(dir).ready()
+      const ready = githubTasks(dir).ready();
       // p1 (3) first; then p2s in created order (4 before 5)
       assert.deepEqual(
-        ready.map((r) => r.id),
+        ready.map(r => r.id),
         ['3', '4', '5']
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('a closed blocker un-gates the dependent issue — blocked-by ordering', () => {
     const blocked = issuesPage([
       node({ number: 8, title: 'dep', state: 'OPEN' }),
       node({ number: 9, title: 'blocked', blockedBy: [[8, 'OPEN']], labels: ['p0'] }),
-    ])
+    ]);
     withFakeGh({ FAKE_GH_ISSUES: blocked, FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
       assert.deepEqual(
-        githubTasks(dir).ready().map((r) => r.id),
+        githubTasks(dir)
+          .ready()
+          .map(r => r.id),
         ['8']
-      )
-    })
+      );
+    });
     const unblocked = issuesPage([
       node({ number: 8, title: 'dep', state: 'CLOSED' }),
       node({ number: 9, title: 'now ready', blockedBy: [[8, 'CLOSED']], labels: ['p0'] }),
-    ])
+    ]);
     withFakeGh({ FAKE_GH_ISSUES: unblocked, FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
       assert.deepEqual(
-        githubTasks(dir).ready().map((r) => r.id),
+        githubTasks(dir)
+          .ready()
+          .map(r => r.id),
         ['9']
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('claim assigns the actor and lands bro:claimed after verification', () => {
     withFakeGh(
@@ -244,19 +302,19 @@ describe('githubTasks', { skip: WIN32 }, () => {
         FAKE_GH_ISSUE_2: issueRead(node({ number: 42, assignees: ['me'] })),
       },
       (log, dir) => {
-        githubTasks(dir).claim('42')
-        const lines = calls(log)
+        githubTasks(dir).claim('42');
+        const lines = calls(log);
         assert.match(
-          lines.find((l) => /issue edit 42 .*--add-assignee me/.test(l)) ?? '',
+          lines.find(l => /issue edit 42 .*--add-assignee me/.test(l)) ?? '',
           /issue edit 42/
-        )
-        const labelIdx = lines.findIndex((l) => /--add-label bro:claimed/.test(l))
-        const assignIdx = lines.findIndex((l) => /--add-assignee me/.test(l))
+        );
+        const labelIdx = lines.findIndex(l => /--add-label bro:claimed/.test(l));
+        const assignIdx = lines.findIndex(l => /--add-assignee me/.test(l));
         // the label lands LAST — it is the commit flag
-        assert.ok(assignIdx >= 0 && labelIdx > assignIdx, calls(log).join('\n'))
+        assert.ok(assignIdx >= 0 && labelIdx > assignIdx, calls(log).join('\n'));
       }
-    )
-  })
+    );
+  });
 
   test('claim race: the higher-login loser unassigns and throws', () => {
     // session order: my read shows the issue free, my assign lands, the
@@ -268,16 +326,16 @@ describe('githubTasks', { skip: WIN32 }, () => {
         FAKE_GH_ISSUE_2: issueRead(node({ number: 42, assignees: ['zz-me', 'aaa-rival'] })),
       },
       (log, dir) => {
-        assert.throws(() => githubTasks(dir).claim('42'), /claim contested — aaa-rival holds it/)
+        assert.throws(() => githubTasks(dir).claim('42'), /claim contested — aaa-rival holds it/);
         assert.match(
           callsMatching(log, /--remove-assignee zz-me/).join('\n'),
           /--remove-assignee zz-me/
-        )
+        );
         // the loser must NOT land the commit flag
-        assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 0)
+        assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 0);
       }
-    )
-  })
+    );
+  });
 
   test('claim race: the lower-login winner keeps the claim and labels', () => {
     withFakeGh(
@@ -287,13 +345,13 @@ describe('githubTasks', { skip: WIN32 }, () => {
         FAKE_GH_ISSUE_2: issueRead(node({ number: 42, assignees: ['aaa-me', 'zz-rival'] })),
       },
       (log, dir) => {
-        githubTasks(dir).claim('42')
-        assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 1)
+        githubTasks(dir).claim('42');
+        assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 1);
         // the winner never unassigns itself — the loser's removal is theirs to run
-        assert.equal(callsMatching(log, /--remove-assignee/).length, 0)
+        assert.equal(callsMatching(log, /--remove-assignee/).length, 0);
       }
-    )
-  })
+    );
+  });
 
   test('claimCapability declares best-effort assignment — never a lease', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
@@ -301,64 +359,62 @@ describe('githubTasks', { skip: WIN32 }, () => {
         strength: 'best-effort',
         identity: 'viewer',
         authority: 'service',
-      })
-    })
-  })
+      });
+    });
+  });
 
   /** Bodies for the reads of a scripted claim race — each entry is the
    *  assignee the Nth issue(42) read reports (null = unassigned). A
    *  contested race reads raceReads(null, 'alice', null, 'bob'): B's
    *  pre-read is a stale snapshot, its verify shows B's own write. */
   const raceReads = (...who: (string | null)[]): string[] =>
-    who.map((a) =>
-      issueRead(node({ number: 42, ...(a === null ? {} : { assignees: [a] }) }))
-    )
+    who.map(a => issueRead(node({ number: 42, ...(a === null ? {} : { assignees: [a] }) })));
 
   /** Run the scripted race: claim A, then `second()` — a viewer flip
    *  goes inside the closure (spec specs/bro-l8c4f.12). */
   const claimRace = (dir: string, bodies: string[], second: () => void): void => {
-    const seq = join(dir, 'seq')
-    mkdirSync(seq, { recursive: true })
-    bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
-    process.env.FAKE_GH_ISSUE_SEQ = seq
+    const seq = join(dir, 'seq');
+    mkdirSync(seq, { recursive: true });
+    bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b));
+    process.env.FAKE_GH_ISSUE_SEQ = seq;
     try {
-      githubTasks(dir).claim('42')
-      second()
+      githubTasks(dir).claim('42');
+      second();
     } finally {
-      delete process.env.FAKE_GH_ISSUE_SEQ
+      delete process.env.FAKE_GH_ISSUE_SEQ;
     }
-  }
+  };
 
   test('claim interleaving: two viewers both win the residual window', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'alice' }, (log, dir) => {
-      const dirB = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-b-'))
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-b-'));
       try {
         // ghActor caches per dir — the rival racer claims through a
         // second store dir
         claimRace(dir, raceReads(null, 'alice', null, 'bob'), () => {
-          process.env.FAKE_GH_ACTOR = 'bob'
-          githubTasks(dirB).claim('42')
-        })
+          process.env.FAKE_GH_ACTOR = 'bob';
+          githubTasks(dirB).claim('42');
+        });
       } finally {
-        rmSync(dirB, { recursive: true, force: true })
+        rmSync(dirB, { recursive: true, force: true });
       }
       // both claims returned — each wrote its assignee and the commit flag
-      assert.match(callsMatching(log, /--add-assignee alice/).join('\n'), /--add-assignee alice/)
-      assert.match(callsMatching(log, /--add-assignee bob/).join('\n'), /--add-assignee bob/)
-      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2)
-    })
-  })
+      assert.match(callsMatching(log, /--add-assignee alice/).join('\n'), /--add-assignee alice/);
+      assert.match(callsMatching(log, /--add-assignee bob/).join('\n'), /--add-assignee bob/);
+      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2);
+    });
+  });
 
   test('claim interleaving: two workers on one viewer both pass — one identity', () => {
     // one credential = one identity: worker B is indistinguishable from
     // worker A on the wire — BOTH verify "assigned to me" and return.
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
-      claimRace(dir, raceReads(null, 'me', null, 'me'), () => githubTasks(dir).claim('42'))
+      claimRace(dir, raceReads(null, 'me', null, 'me'), () => githubTasks(dir).claim('42'));
       // both workers' writes landed — under ONE identity
-      assert.equal(callsMatching(log, /--add-assignee me/).length, 2)
-      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2)
-    })
-  })
+      assert.equal(callsMatching(log, /--add-assignee me/).length, 2);
+      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2);
+    });
+  });
 
   test('claim refuses an already-claimed issue before assigning', () => {
     withFakeGh(
@@ -367,53 +423,58 @@ describe('githubTasks', { skip: WIN32 }, () => {
         FAKE_GH_ISSUE_1: issueRead(node({ number: 42, assignees: ['other'] })),
       },
       (log, dir) => {
-        assert.throws(() => githubTasks(dir).claim('42'), /already claimed by other/)
-        assert.equal(callsMatching(log, /--add-assignee/).length, 0)
+        assert.throws(() => githubTasks(dir).claim('42'), /already claimed by other/);
+        assert.equal(callsMatching(log, /--add-assignee/).length, 0);
       }
-    )
+    );
     withFakeGh(
       {
         FAKE_GH_ACTOR: 'me',
         FAKE_GH_ISSUE_1: issueRead(node({ number: 42, labels: ['bro:claimed'] })),
       },
       (log, dir) => {
-        assert.throws(() => githubTasks(dir).claim('42'), /already claimed/)
-        assert.equal(callsMatching(log, /--add-assignee/).length, 0)
+        assert.throws(() => githubTasks(dir).claim('42'), /already claimed/);
+        assert.equal(callsMatching(log, /--add-assignee/).length, 0);
       }
-    )
-  })
+    );
+  });
 
   test('close lands the reason as a comment', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
-      githubTasks(dir).close('#42', 'landed via PR 7')
-      assert.match(calls(log).join('\n'), /issue close 42 --comment landed via PR 7/)
-    })
-  })
+      githubTasks(dir).close('#42', 'landed via PR 7');
+      assert.match(calls(log).join('\n'), /issue close 42 --comment landed via PR 7/);
+    });
+  });
 
   test('reopen on an already-open issue skips the verb but drops the claim', () => {
     // gh issue reopen errors on OPEN issues — a claimed issue being
     // un-claimed is already open; only the markers need releasing
     withFakeGh(
-      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42, assignees: ['me'], labels: ['bro:claimed'] })) },
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(
+          node({ number: 42, assignees: ['me'], labels: ['bro:claimed'] })
+        ),
+      },
       (log, dir) => {
-        githubTasks(dir).reopen('42')
-        const lines = calls(log)
-        assert.equal(lines.filter((l) => /issue reopen/.test(l)).length, 0)
-        assert.match(lines.join('\n'), /--remove-assignee me/)
-        assert.match(lines.join('\n'), /--remove-label bro:claimed/)
+        githubTasks(dir).reopen('42');
+        const lines = calls(log);
+        assert.equal(lines.filter(l => /issue reopen/.test(l)).length, 0);
+        assert.match(lines.join('\n'), /--remove-assignee me/);
+        assert.match(lines.join('\n'), /--remove-label bro:claimed/);
       }
-    )
-  })
+    );
+  });
 
   test('reopen on a closed issue runs the verb', () => {
     withFakeGh(
       { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42, state: 'CLOSED' })) },
       (log, dir) => {
-        githubTasks(dir).reopen('42')
-        assert.match(calls(log).join('\n'), /issue reopen 42/)
+        githubTasks(dir).reopen('42');
+        assert.match(calls(log).join('\n'), /issue reopen 42/);
       }
-    )
-  })
+    );
+  });
 
   test('GHES schema drift retries without relation fields — absent, not faked', () => {
     // every graphql call fails on rel fields the first time; the fake
@@ -432,41 +493,44 @@ case "$1" in
     esac ;;
   *) : ;;
 esac
-`
-    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-'))
-    const log = join(dir, 'gh.log')
-    writeFileSync(log, '')
-    writeFileSync(join(dir, 'gh'), driftOnce)
-    chmodSync(join(dir, 'gh'), 0o755)
-    const prevPath = process.env.PATH
-    process.env.PATH = `${dir}:${prevPath}`
-    const prevIssues = process.env.FAKE_GH_ISSUES
-    const prevLog = process.env.FAKE_GH_LOG
-    process.env.FAKE_GH_LOG = log
+`;
+    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-'));
+    const log = join(dir, 'gh.log');
+    writeFileSync(log, '');
+    writeFileSync(join(dir, 'gh'), driftOnce);
+    chmodSync(join(dir, 'gh'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${dir}:${prevPath}`;
+    const prevIssues = process.env.FAKE_GH_ISSUES;
+    const prevLog = process.env.FAKE_GH_LOG;
+    process.env.FAKE_GH_LOG = log;
     // a 'blockedBy' node field CANNOT be in the fallback response — GHES
     // lacks the field entirely, so the same payload without it is what
     // the server would answer
-    process.env.FAKE_GH_ISSUES = issuesPage([node({ number: 1, title: 'ghes issue' })])
+    process.env.FAKE_GH_ISSUES = issuesPage([node({ number: 1, title: 'ghes issue' })]);
     try {
-      const rows = githubTasks(dir).list()
-      assert.deepEqual(rows.map((r) => r.id), ['1'])
+      const rows = githubTasks(dir).list();
+      assert.deepEqual(
+        rows.map(r => r.id),
+        ['1']
+      );
       // two graphql calls: the drifted rel query, then the core retry.
       // The query arg carries newlines — slice on call boundaries, not lines
       const entries = readFileSync(log, 'utf8')
         .split(/(?=api graphql -f query=)/)
-        .filter((s) => s.startsWith('api graphql'))
-      assert.equal(entries.length, 2)
-      assert.match(entries[0]!, /blockedBy/)
-      assert.doesNotMatch(entries[1]!, /blockedBy/)
+        .filter(s => s.startsWith('api graphql'));
+      assert.equal(entries.length, 2);
+      assert.match(entries[0]!, /blockedBy/);
+      assert.doesNotMatch(entries[1]!, /blockedBy/);
     } finally {
-      process.env.PATH = prevPath
-      if (prevIssues === undefined) delete process.env.FAKE_GH_ISSUES
-      else process.env.FAKE_GH_ISSUES = prevIssues
-      if (prevLog === undefined) delete process.env.FAKE_GH_LOG
-      else process.env.FAKE_GH_LOG = prevLog
-      rmSync(dir, { recursive: true, force: true })
+      process.env.PATH = prevPath;
+      if (prevIssues === undefined) delete process.env.FAKE_GH_ISSUES;
+      else process.env.FAKE_GH_ISSUES = prevIssues;
+      if (prevLog === undefined) delete process.env.FAKE_GH_LOG;
+      else process.env.FAKE_GH_LOG = prevLog;
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('create passes labels and writes a bro metadata trailer', () => {
     withFakeGh(
@@ -480,21 +544,33 @@ esac
           type: 'bug',
           priority: 1,
           labels: ['bug'],
-        })
-        assert.equal(row.id, '42')
-        assert.match(calls(log).join('\n'), /issue create --title new task --body .*bro:.*"type":"bug".*"priority":1.*--label bug/)
+        });
+        assert.equal(row.id, '42');
+        assert.match(
+          calls(log).join('\n'),
+          /issue create --title new task --body .*bro:.*"type":"bug".*"priority":1.*--label bug/
+        );
       }
-    )
-  })
+    );
+  });
+
+  test('dep without kind:ref throws before the issue is created', () => {
+    withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
+      // 'parents' would slice to kind 'parent' — a valid rel — and link
+      // a bogus ref; the throw must land before `issue create` runs
+      assert.throws(
+        () => githubTasks(dir).create({ title: 'x', deps: ['parents'] }),
+        /is not 'kind:ref'/
+      );
+      assert.equal(callsMatching(log, /issue create/).length, 0);
+    });
+  });
 
   test('unsupported link type throws — never faked as a comment', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
-      assert.throws(
-        () => githubTasks(dir).link('1', '2', 'discovered-from'),
-        /no GitHub analogue/
-      )
-    })
-  })
+      assert.throws(() => githubTasks(dir).link('1', '2', 'discovered-from'), /no GitHub analogue/);
+    });
+  });
 
   test('link blocks maps to the dependencies endpoint with the databaseId', () => {
     withFakeGh(
@@ -503,28 +579,28 @@ esac
         FAKE_GH_ISSUE_1: issueRead(node({ number: 2, databaseId: 777 })),
       },
       (log, dir) => {
-        githubTasks(dir).link('1', '2', 'blocks')
+        githubTasks(dir).link('1', '2', 'blocks');
         assert.match(
           calls(log).join('\n'),
           /api -X POST repos\/\{owner\}\/\{repo\}\/issues\/1\/dependencies\/blocked_by -f issue_id=777/
-        )
+        );
       }
-    )
-  })
+    );
+  });
 
   test('deps direction — blockedBy reads down, blocking reads up', () => {
-    const n = node({ number: 9, blockedBy: [[8, 'OPEN']], blocking: [[10, 'OPEN']] })
+    const n = node({ number: 9, blockedBy: [[8, 'OPEN']], blocking: [[10, 'OPEN']] });
     withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(n) }, (_log, dir) => {
       assert.deepEqual(githubTasks(dir).deps(['9'], { direction: 'down' }), [
         { issue_id: '9', depends_on_id: '8', type: 'blocked' },
-      ])
-    })
+      ]);
+    });
     withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(n) }, (_log, dir) => {
       assert.deepEqual(githubTasks(dir).deps(['9'], { direction: 'up' }), [
         { issue_id: '10', depends_on_id: '9', type: 'blocked' },
-      ])
-    })
-  })
+      ]);
+    });
+  });
 
   test('neighbors on a non-canonical id returns the dep, never the issue itself', () => {
     withFakeGh(
@@ -537,12 +613,14 @@ esac
         // '#9' resolves to issue 9 — edges carry String(n.number), so a
         // raw-id comparison would return the queried row as a neighbor
         assert.deepEqual(
-          githubTasks(dir).neighbors('#9').map((r) => r.id),
+          githubTasks(dir)
+            .neighbors('#9')
+            .map(r => r.id),
           ['8']
-        )
+        );
       }
-    )
-  })
+    );
+  });
 
   test('sub-issue parent does not reach row.parent — it is not an orchestrated step', () => {
     // classify() gates `row.parent` rows as molecule steps; a github
@@ -555,20 +633,75 @@ esac
         FAKE_GH_ISSUE_2: issueRead(node({ number: 5, parent: 3 })),
       },
       (_log, dir) => {
-        const row = githubTasks(dir).get('5')
-        assert.equal(row?.parent, undefined)
+        const row = githubTasks(dir).get('5');
+        assert.equal(row?.parent, undefined);
         assert.deepEqual(githubTasks(dir).deps(['5'], { rel: 'parent' }), [
           { issue_id: '5', depends_on_id: '3', type: 'parent' },
-        ])
+        ]);
       }
-    )
-  })
+    );
+  });
+
+  test('nested rel-field drift still returns children — subIssues itself is supported', () => {
+    // a GHES that HAS subIssues but lacks a nested node field (issueType):
+    // the rel query dies inside nodes{…}, and the core-only retry still
+    // carries subIssues — children must come back. Treating the first
+    // drift as absence would silently empty children() (codeant)
+    const driftNested = `#!/bin/sh
+echo "$@" >> "$FAKE_GH_LOG"
+case "$1" in
+  repo) echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
+  api)
+    case "$*" in
+      *issueType*|*blockedBy*|*"parent {"*)
+        echo 'gh: Cannot query field "issueType" on type "Issue".' >&2
+        exit 1 ;;
+      *subIssues*) echo "$FAKE_GH_SUBS" ;;
+      *) echo '{}' ;;
+    esac ;;
+  *) : ;;
+esac
+`;
+    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-'));
+    const log = join(dir, 'gh.log');
+    writeFileSync(log, '');
+    writeFileSync(join(dir, 'gh'), driftNested);
+    chmodSync(join(dir, 'gh'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${dir}:${prevPath}`;
+    const prevSubs = process.env.FAKE_GH_SUBS;
+    const prevLog = process.env.FAKE_GH_LOG;
+    process.env.FAKE_GH_LOG = log;
+    process.env.FAKE_GH_SUBS = subIssuesRead([node({ number: 7, title: 'kid' })]);
+    try {
+      const kids = githubTasks(dir).children('3');
+      assert.deepEqual(
+        kids.map(r => r.id),
+        ['7']
+      );
+      // two graphql calls — the drifted rel query, then the core retry.
+      // The query arg carries newlines — slice on call boundaries
+      const entries = readFileSync(log, 'utf8')
+        .split(/(?=api graphql -f query=)/)
+        .filter(s => s.startsWith('api graphql'));
+      assert.equal(entries.length, 2);
+      assert.match(entries[0]!, /issueType/);
+      assert.doesNotMatch(entries[1]!, /issueType/);
+    } finally {
+      process.env.PATH = prevPath;
+      if (prevSubs === undefined) delete process.env.FAKE_GH_SUBS;
+      else process.env.FAKE_GH_SUBS = prevSubs;
+      if (prevLog === undefined) delete process.env.FAKE_GH_LOG;
+      else process.env.FAKE_GH_LOG = prevLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test('prefix() is undefined — the repo itself is the scope', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
-      assert.equal(githubTasks(dir).prefix(), undefined)
-    })
-  })
+      assert.equal(githubTasks(dir).prefix(), undefined);
+    });
+  });
 
   test('publish dedups on an own-repo issue external_ref — no second create', () => {
     withFakeGh(
@@ -581,13 +714,13 @@ esac
             external_ref: 'https://github.com/acme/widgets/issues/42',
           },
           {}
-        )
-        assert.equal(res?.item.id, '42')
-        assert.equal(res?.replaceExternalRef, undefined)
-        assert.equal(callsMatching(log, /issue create/).length, 0)
+        );
+        assert.equal(res?.item.id, '42');
+        assert.equal(res?.replaceExternalRef, undefined);
+        assert.equal(callsMatching(log, /issue create/).length, 0);
       }
-    )
-  })
+    );
+  });
 
   test('publish on a stale own-repo ref re-creates and flags the map for replacement', () => {
     // the mapped issue is gone (deleted) — the first read answers null,
@@ -608,13 +741,13 @@ esac
             external_ref: 'https://github.com/acme/widgets/issues/41',
           },
           {}
-        )
-        assert.equal(res?.item.id, '42')
-        assert.equal(res?.replaceExternalRef, true)
-        assert.equal(callsMatching(log, /issue create/).length, 1)
+        );
+        assert.equal(res?.item.id, '42');
+        assert.equal(res?.replaceExternalRef, true);
+        assert.equal(callsMatching(log, /issue create/).length, 1);
       }
-    )
-  })
+    );
+  });
 
   test('publish on a stale ref must not leak the source metadata external_ref into the new item', () => {
     // a source row whose metadata bag carries the dead ref would copy
@@ -640,17 +773,17 @@ esac
             },
           },
           {}
-        )
-        assert.equal(res?.item.id, '42')
-        assert.equal(res?.item.external_ref, 'https://github.com/acme/widgets/issues/42')
-        assert.equal(res?.replaceExternalRef, true)
-        const created = callsMatching(log, /issue create/).join('\n')
+        );
+        assert.equal(res?.item.id, '42');
+        assert.equal(res?.item.external_ref, 'https://github.com/acme/widgets/issues/42');
+        assert.equal(res?.replaceExternalRef, true);
+        const created = callsMatching(log, /issue create/).join('\n');
         // provenance keys pass through; external_ref never does
-        assert.match(created, /"bead_src":"x"/)
-        assert.doesNotMatch(created, /external_ref/)
+        assert.match(created, /"bead_src":"x"/);
+        assert.doesNotMatch(created, /external_ref/);
       }
-    )
-  })
+    );
+  });
 
   test('publish declines a foreign external_ref — another system owns that map', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
@@ -664,15 +797,39 @@ esac
           githubTasks(dir).publish!({ id: 'bro-t1', title: 'x', external_ref }, {}),
           undefined,
           external_ref
-        )
+        );
       }
-      assert.equal(callsMatching(log, /issue create/).length, 0)
-    })
-  })
+      assert.equal(callsMatching(log, /issue create/).length, 0);
+    });
+  });
+
+  test('a failed read on an own-repo ref throws — a broken gh is not a foreign ref', () => {
+    // declining is the verdict for a CONFIRMED foreign map; a transient
+    // read failure must fail loud — silently skipping the publish reads
+    // as "another system owns this" and the bead never gets its mirror
+    withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_FAIL: '1' }, (log, dir) => {
+      assert.throws(
+        () =>
+          githubTasks(dir).publish!(
+            {
+              id: 'bro-t1',
+              title: 'x',
+              external_ref: 'https://github.com/acme/widgets/issues/42',
+            },
+            {}
+          ),
+        /gh api failed/
+      );
+      assert.equal(callsMatching(log, /issue create/).length, 0);
+    });
+  });
 
   test('publish creates a bro:bead issue carrying the bead provenance', () => {
     withFakeGh(
-      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42, labels: ['bro:bead'] })) },
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42, labels: ['bro:bead'] })),
+      },
       (log, dir) => {
         const res = githubTasks(dir).publish!(
           {
@@ -683,17 +840,17 @@ esac
             description: 'the work',
           },
           {}
-        )
-        assert.equal(res?.item.id, '42')
+        );
+        assert.equal(res?.item.id, '42');
         // the --body arg carries newlines — the create entry spans
         // physical lines, so match the raw log, not per-line hits
-        const created = readFileSync(log, 'utf8')
-        assert.match(created, /--label bro:bead --label area:cli/)
-        assert.match(created, /"bead":"bro-t9"/)
-        assert.match(created, /"type":"feature"/)
+        const created = readFileSync(log, 'utf8');
+        assert.match(created, /--label bro:bead --label area:cli/);
+        assert.match(created, /"bead":"bro-t9"/);
+        assert.match(created, /"type":"feature"/);
       }
-    )
-  })
+    );
+  });
 
   test('publish with an epic parent materializes a milestone and joins it', () => {
     withFakeGh(
@@ -707,15 +864,15 @@ esac
         const res = githubTasks(dir).publish!(
           { id: 'bro-c1', title: 'child', issue_type: 'feature' },
           { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic' } }
-        )
-        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/3')
-        const lines = calls(log).join('\n')
-        assert.match(lines, /api --paginate repos\/acme\/widgets\/milestones\?state=all/)
-        assert.match(lines, /api -X POST repos\/acme\/widgets\/milestones -f title=the epic/)
-        assert.match(lines, /api -X PATCH repos\/\{owner\}\/\{repo\}\/issues\/42 -F milestone=3/)
+        );
+        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/3');
+        const lines = calls(log).join('\n');
+        assert.match(lines, /api --paginate --slurp repos\/acme\/widgets\/milestones\?state=all/);
+        assert.match(lines, /api -X POST repos\/acme\/widgets\/milestones -f title=the epic/);
+        assert.match(lines, /api -X PATCH repos\/\{owner\}\/\{repo\}\/issues\/42 -F milestone=3/);
       }
-    )
-  })
+    );
+  });
 
   test('a same-title milestone is reused — dedup survives a lost external_ref map', () => {
     withFakeGh(
@@ -729,13 +886,36 @@ esac
         const res = githubTasks(dir).publish!(
           { id: 'bro-c1', title: 'child', issue_type: 'feature' },
           { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic' } }
-        )
-        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/5')
-        assert.equal(callsMatching(log, /POST repos\/acme\/widgets\/milestones/).length, 0)
-        assert.match(calls(log).join('\n'), /-F milestone=5/)
+        );
+        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/5');
+        assert.equal(callsMatching(log, /POST repos\/acme\/widgets\/milestones/).length, 0);
+        assert.match(calls(log).join('\n'), /-F milestone=5/);
       }
-    )
-  })
+    );
+  });
+
+  test('a milestone match on a later page is found — --slurp folds the pages', () => {
+    // two REST pages of milestones and the title sits on page 2 —
+    // --paginate emits one JSON array per page, so a bare JSON.parse
+    // dies on the concatenated bodies and the dedup never runs
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_MILESTONES:
+          '[{"number":4,"title":"other","html_url":"https://github.com/acme/widgets/milestone/4"}],[{"number":5,"title":"the epic","html_url":"https://github.com/acme/widgets/milestone/5"}]',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+          { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic' } }
+        );
+        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/5');
+        assert.equal(callsMatching(log, /POST repos\/acme\/widgets\/milestones/).length, 0);
+        assert.match(calls(log).join('\n'), /-F milestone=5/);
+      }
+    );
+  });
 
   test('an epic already carrying a milestone ref joins it — no list or create', () => {
     withFakeGh(
@@ -751,18 +931,18 @@ esac
               external_ref: 'https://github.com/acme/widgets/milestone/7',
             },
           }
-        )
-        assert.equal(res?.epicRef, undefined)
-        const lines = calls(log).join('\n')
-        assert.doesNotMatch(lines, /milestones\?state=all/)
-        assert.doesNotMatch(lines, /POST repos\/acme\/widgets\/milestones/)
-        assert.match(lines, /-F milestone=7/)
+        );
+        assert.equal(res?.epicRef, undefined);
+        const lines = calls(log).join('\n');
+        assert.doesNotMatch(lines, /milestones\?state=all/);
+        assert.doesNotMatch(lines, /POST repos\/acme\/widgets\/milestones/);
+        assert.match(lines, /-F milestone=7/);
       }
-    )
-  })
+    );
+  });
 
   test('a foreign epic ref joins no container — the issue still projects', () => {
-    const read42 = issueRead(node({ number: 42 }))
+    const read42 = issueRead(node({ number: 42 }));
     withFakeGh(
       { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: read42, FAKE_GH_ISSUE_2: read42 },
       (log, dir) => {
@@ -774,15 +954,15 @@ esac
           const res = githubTasks(dir).publish!(
             { id: 'bro-c1', title: 'child', issue_type: 'feature' },
             { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic', external_ref } }
-          )
-          assert.equal(res?.item.id, '42', external_ref)
-          assert.equal(res?.epicRef, undefined, external_ref)
+          );
+          assert.equal(res?.item.id, '42', external_ref);
+          assert.equal(res?.epicRef, undefined, external_ref);
         }
-        const lines = calls(log).join('\n')
-        assert.doesNotMatch(lines, /milestone/)
+        const lines = calls(log).join('\n');
+        assert.doesNotMatch(lines, /milestone/);
       }
-    )
-  })
+    );
+  });
 
   test('a failed milestone join does not lose the created issue', () => {
     withFakeGh(
@@ -802,70 +982,72 @@ esac
               external_ref: 'https://github.com/acme/widgets/milestone/7',
             },
           }
-        )
+        );
         // the created issue still returns — the epic join is best-effort,
         // so publishSync's external_ref write-back survives a PATCH miss
-        assert.equal(res?.item.id, '42')
+        assert.equal(res?.item.id, '42');
       }
-    )
-  })
-})
+    );
+  });
+});
 
 describe('github tasks connector selection', { skip: WIN32 }, () => {
   const repoWithRemote = (url: string): string => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-conn-'))
-    testGit(['init', '-q', dir])
-    testGit(['-C', dir, 'remote', 'add', 'origin', url])
-    return dir
-  }
+    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-conn-'));
+    testGit(['init', '-q', dir]);
+    testGit(['-C', dir, 'remote', 'add', 'origin', url]);
+    return dir;
+  };
 
   test('tasks stays beads on a github remote — opt-in is name-only', () => {
-    registerConnector(githubConnector)
-    const dir = repoWithRemote('git@github.com:acme/widgets.git')
+    registerConnector(githubConnector);
+    const dir = repoWithRemote('git@github.com:acme/widgets.git');
     try {
       // remote match would claim reviews; tasks must NOT follow it
-      assert.equal(facadeName('reviews', { dir }), 'github')
-      assert.equal(facadeName('tasks', { dir }), 'beads')
+      assert.equal(facadeName('reviews', { dir }), 'github');
+      assert.equal(facadeName('tasks', { dir }), 'beads');
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('connectors.tasks=github resolves the github TaskStore', () => {
-    registerConnector(githubConnector)
-    const dir = repoWithRemote('git@github.com:acme/widgets.git')
+    registerConnector(githubConnector);
+    const dir = repoWithRemote('git@github.com:acme/widgets.git');
     try {
-      const name = facadeName('tasks', { dir }, { prefer: { tasks: 'github' } })
-      assert.equal(name, 'github')
-      const store = facade('tasks', { dir }, { prefer: { tasks: 'github' } })
-      assert.equal(typeof store.ready, 'function')
-      assert.equal(typeof store.claim, 'function')
+      const name = facadeName('tasks', { dir }, { prefer: { tasks: 'github' } });
+      assert.equal(name, 'github');
+      const store = facade('tasks', { dir }, { prefer: { tasks: 'github' } });
+      assert.equal(typeof store.ready, 'function');
+      assert.equal(typeof store.claim, 'function');
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('connectors.tasks=github resolves on a non-github remote too', () => {
-    registerConnector(githubConnector)
+    registerConnector(githubConnector);
     // an explicit pin is an operator choice — the remote only drives
     // auto-match, never the pin
-    const dir = repoWithRemote('git@gitlab.com:acme/widgets.git')
+    const dir = repoWithRemote('git@gitlab.com:acme/widgets.git');
     try {
-      assert.equal(facadeName('tasks', { dir }, { prefer: { tasks: 'github' } }), 'github')
+      assert.equal(facadeName('tasks', { dir }, { prefer: { tasks: 'github' } }), 'github');
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('tasksAsync honors the same opt-in', () => {
-    registerConnector(githubConnector)
-    const dir = repoWithRemote('git@github.com:acme/widgets.git')
+    registerConnector(githubConnector);
+    const dir = repoWithRemote('git@github.com:acme/widgets.git');
     try {
-      assert.equal(facadeName('tasksAsync', { dir }), 'beads')
-      assert.equal(facadeName('tasksAsync', { dir }, { prefer: { tasksAsync: 'github' } }), 'github')
+      assert.equal(facadeName('tasksAsync', { dir }), 'beads');
+      assert.equal(
+        facadeName('tasksAsync', { dir }, { prefer: { tasksAsync: 'github' } }),
+        'github'
+      );
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
-})
-
+  });
+});
