@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   gitTry,
+  type HeldLockOptions,
   holdFileLock,
   LockTimeout,
-  type HeldLockOptions,
-  mkdirPrivateSync,
   writePrivateFileSync,
 } from '@broject/core';
 import { pidAlive } from '../agent-connectors.ts';
@@ -28,7 +28,11 @@ export function serveStatePath(dir: string): string | null {
 
 export function readStateFile(path: string): ServeState | undefined {
   try {
-    const v = JSON.parse(readFileSync(path, 'utf8')) as Partial<ServeState>;
+    const safePath = trustedStatePath(path);
+    if (safePath === undefined) {
+      return undefined;
+    }
+    const v = JSON.parse(readFileSync(safePath, 'utf8')) as Partial<ServeState>;
     if (isValidState(v)) {
       return v as ServeState;
     }
@@ -36,6 +40,38 @@ export function readStateFile(path: string): ServeState | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * State paths are produced by serveStatePath/providerStatePath, never accepted
+ * as arbitrary file names. Keep that invariant at this last filesystem
+ * boundary too: only the two known state locations are readable, and
+ * realpathSync rejects symlinks that would otherwise escape those locations.
+ */
+function trustedStatePath(path: string): string | undefined {
+  const candidate = resolve(path);
+  const providerBase = process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state');
+  const providerPath = resolve(join(providerBase, 'bro', 'provider.json'));
+  const isProviderPath = candidate === providerPath;
+  const commonDir = resolve(dirname(dirname(candidate)));
+  const isServePath =
+    candidate === resolve(join(commonDir, 'bro', 'serve.json')) &&
+    basename(candidate) === 'serve.json' &&
+    basename(dirname(candidate)) === 'bro' &&
+    gitCommonDir(commonDir) === commonDir;
+  if (!isProviderPath && !isServePath) {
+    return undefined;
+  }
+  try {
+    return realpathSync(candidate) === candidate ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function gitCommonDir(dir: string): string | undefined {
+  const result = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return result.code === 0 && result.out.trim() !== '' ? resolve(result.out.trim()) : undefined;
 }
 
 function isValidState(v: Partial<ServeState>): boolean {
