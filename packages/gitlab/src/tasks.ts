@@ -536,12 +536,12 @@ function releaseContestedClaim(
   glabTry(args, gopts(dir));
 }
 
-function claimSync(dir: string, id: string): void {
-  const ref = parseIssueRef(dir, id);
-  const n = getIssueSync(dir, ref);
-  if (n === undefined) {
-    throw new Error(`gitlab tasks: issue ${id} not found`);
-  }
+function claimOpenIssue(
+  dir: string,
+  id: string,
+  ref: { projectPath: string; iid: number },
+  n: GitLabIssue
+): void {
   if (n.state === 'closed') {
     throw new Error(`gitlab tasks: ${id} is closed — only open issues are claimable`);
   }
@@ -594,6 +594,15 @@ function claimSync(dir: string, id: string): void {
     throw new Error(`gitlab tasks: ${id} claim contested — ${winner} holds it`);
   }
   writeClaimLabel(dir, ref, id, labels);
+}
+
+function claimSync(dir: string, id: string): void {
+  const ref = parseIssueRef(dir, id);
+  const n = getIssueSync(dir, ref);
+  if (n === undefined) {
+    throw new Error(`gitlab tasks: issue ${id} not found`);
+  }
+  claimOpenIssue(dir, id, ref, n);
 }
 
 function reopenSync(dir: string, id: string): void {
