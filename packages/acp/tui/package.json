@@ -12,10 +12,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opentui/core": "0.8.0",
-    "@opentui/solid": "0.8.0",
+    "@opentui/core": "0.9.0",
+    "@opentui/solid": "0.9.0",
     "solid-js": "^1.9.12",
     "web-tree-sitter": "^0.25.10"
+  },
+  "overrides": {
+    "seroval": "1.7.9",
+    "seroval-plugins": "1.7.8"
   },
   "devDependencies": {
     "tsx": "^4.20.0",
