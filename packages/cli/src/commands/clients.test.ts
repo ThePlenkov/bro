@@ -235,12 +235,31 @@ describe('clients install/uninstall/list', () => {
     );
     // the shipped adapter carries bro's ownership sentinel
     assert.ok(isBroAdapter(readFileSync(globalPath, 'utf8')));
+    assert.deepEqual(
+      [...readFileSync(globalPath, 'utf8').matchAll(/from\s+['"](\.[^'"]*)['"]/g)],
+      [],
+      'the installed extension must not import from the checkout'
+    );
 
     const again = installClient('omp', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
       ['current', 'current']
     );
+  });
+
+  test('omp config takes precedence over the pi compatibility environment variable', () => {
+    const f = fixture();
+    const ompDir = join(f.opts.env.XDG_CONFIG_HOME!, 'omp-agent');
+    const piDir = join(f.opts.env.XDG_CONFIG_HOME!, 'pi-agent');
+    f.opts.env.OMP_AGENT_DIR = ompDir;
+    f.opts.env.PI_CODING_AGENT_DIR = piDir;
+
+    const out = installClient('omp', ['global'], f.opts);
+
+    assert.equal(out[0]!.path, join(ompDir, 'extensions', 'bro.ts'));
+    assert.ok(existsSync(join(ompDir, 'extensions', 'bro.ts')));
+    assert.ok(!existsSync(join(piDir, 'extensions', 'bro.ts')));
   });
 
   test('install on a stale module reports updated; list shows stale first', () => {

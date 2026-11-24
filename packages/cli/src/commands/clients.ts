@@ -150,6 +150,23 @@ function firstExisting(candidates: Array<string | null>): string | null {
   return null;
 }
 
+/** An adapter installed as a loose host extension must carry its implementation
+ *  with it. In particular, never mistake a generated re-export shim for the
+ *  bundled artifact: its relative import points back into a checkout which
+ *  may not exist when the host loads the extension. */
+function firstStandalone(candidates: Array<string | null>): string | null {
+  for (const candidate of candidates) {
+    if (candidate === null || !existsSync(candidate)) {
+      continue;
+    }
+    const source = readFileSync(candidate, 'utf8');
+    if (!/\b(?:from|import|export)\s*["']\./.test(source)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 /** Artifact sources in preference order: the TS source (checkout), then the
  *  repo-distributed adapter a bro clone carries under plugins/, then the
  *  copy that rides the tarball. The names differ — the checkout keeps
@@ -289,7 +306,7 @@ function piArtifact(cwd: string): string | null {
   const ap = agentPluginPackageRoot('pi');
   const pkg = packageRoot();
   const root = gitRoot(cwd);
-  return firstExisting([
+  return firstStandalone([
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
     ap === null ? null : join(ap, 'dist', 'pi.js'),
     ap === null ? null : join(ap, 'src', 'pi.ts'),
@@ -301,7 +318,7 @@ function ompArtifact(cwd: string): string | null {
   const ap = agentPluginPackageRoot('omp');
   const pkg = packageRoot();
   const root = gitRoot(cwd);
-  return firstExisting([
+  return firstStandalone([
     root === null ? null : join(root, 'plugins', 'omp', 'bro', 'bro.ts'),
     ap === null ? null : join(ap, 'dist', 'omp.js'),
     ap === null ? null : join(ap, 'src', 'omp.ts'),
@@ -310,9 +327,9 @@ function ompArtifact(cwd: string): string | null {
 }
 
 /** omp's active agent directory — the user profile's config root.
- *  `OMP_AGENT_DIR` relocates it; `PI_CODING_AGENT_DIR` is accepted for
- *  pi-coding-agent/OMP lineage compatibility; a named profile lives under
- *  `~/.omp/profiles/<name>/agent`. */
+ *  Explicit omp configuration wins over the compatibility environment
+ *  variable: `OMP_AGENT_DIR` > `PI_CODING_AGENT_DIR` > profile > default.
+ *  A named profile lives under `~/.omp/profiles/<name>/agent`. */
 function ompAgentDir(env: NodeJS.ProcessEnv): string {
   const override = env.OMP_AGENT_DIR || env.PI_CODING_AGENT_DIR;
   if (override !== undefined && override !== '') {
