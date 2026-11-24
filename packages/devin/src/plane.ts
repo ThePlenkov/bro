@@ -304,16 +304,44 @@ function lockWriteBoundMs(path: string): number | undefined {
   }
 }
 
+/** A lock must name the session process itself, not a kernel thread.
+ *  /proc/<tid>/cmdline and kill(0) both answer for a TID, so a stale
+ *  lock whose pid was recycled into a thread of a live devin process
+ *  would otherwise read as a live session. Tgid==Pid is the leader
+ *  check; unreadable status fails closed (treat as live) like the
+ *  other unverifiable probes. A host without procDir skips the probe
+ *  — there is no /proc status to read. */
+function isProcessLeader(pid: number, procDir: string): boolean {
+  if (!existsSync(procDir)) {
+    return true;
+  }
+  const dir = join(procDir, String(pid));
+  try {
+    const status = readFileSync(join(dir, 'status'), 'utf8');
+    const m = /^Tgid:\t(\d+)$/m.exec(status);
+    if (m === null) {
+      return true;
+    }
+    return Number.parseInt(m[1]!, 10) === pid;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && existsSync(procDir) && !existsSync(dir)) {
+      return false;
+    }
+    return true;
+  }
+}
+
 /** Is this lock a live devin session? A lock names a pid; the pid
- *  must be alive, still be the devin cli — AND still be the process the
- *  lock was written for. The cmdline check can't see two phantoms: a
- *  pid recycled into ANOTHER devin-named process (serve's `devin acp` /
- *  `devin rm` churn recycles dead session pids into devin argv[0]s —
- *  bro-q0v0e), and a foreign uid's unreadable cmdline that fails open.
- *  The write bound sees both: the pid a lock names existed at write
- *  time, so a /proc starttime that postdates the lock's last change by
- *  more than the slew tolerance is a stranger wearing the number —
- *  /proc stat stays world-readable where cmdline is not. */
+ *  must be alive, still be the devin cli, be the process leader — a
+ *  TID reuse is stale — AND still be the process the lock was written
+ *  for. The cmdline check can't see two phantoms: a pid recycled into
+ *  ANOTHER devin-named process (serve's `devin acp` / `devin rm` churn
+ *  recycles dead session pids into devin argv[0]s — bro-q0v0e), and a
+ *  foreign uid's unreadable cmdline that fails open. The write bound
+ *  sees both: the pid a lock names existed at write time, so a /proc
+ *  starttime that postdates the lock's last change by more than the
+ *  slew tolerance is a stranger wearing the number — /proc stat stays
+ *  world-readable where cmdline is not. */
 function lockIsLiveSession(
   pid: number | undefined,
   lockPath: string,
@@ -347,7 +375,7 @@ function lockIsLiveSession(
     }
     return row.startMs <= bound + LOCK_PID_SKEW_MS;
   }
-  if (!isDevinProcess(pid, procDir)) {
+  if (!isDevinProcess(pid, procDir) || !isProcessLeader(pid, procDir)) {
     return false;
   }
   const bound = lockWriteBoundMs(lockPath);
@@ -955,12 +983,16 @@ export function devinPidIsOwned(pid: number, procDir = '/proc'): boolean {
   }
 }
 
-/** One session's activity stamp — the freshest of every lock name's
- *  transcript (a resumed session writes under its SECOND lock's name,
- *  so reading only the first misses the live one) and its own output
- *  log across every candidate dir, all mtime-based. Undefined means
- *  no stamp could be read at all: the session is live but cannot
- *  prove idle. */
+/** One session's activity stamp. The ATIF transcript is the primary
+ *  signal — it moves on real conversation/work activity. The CLI's own
+ *  output log is a FALLBACK only when no transcript exists for any lock
+ *  name: the log also receives periodic housekeeping (skills discovery,
+ *  remote-config refresh) that keeps mtime fresh while the session is
+ *  actually idle, which would make the idle window unreachable. When a
+ *  transcript exists, its mtime is authoritative; a stale transcript
+ *  means the session has gone idle even if the log is still churning.
+ *  Undefined means no stamp could be read at all: the session is live
+ *  but cannot prove idle. */
 function devinSessionActivityMs(
   names: string[],
   pid: number,
@@ -968,6 +1000,7 @@ function devinSessionActivityMs(
   logsDirs: string[]
 ): number | undefined {
   let at: number | undefined;
+  let sawTranscript = false;
   const stamp = (path: string | undefined): void => {
     if (path === undefined) {
       return;
@@ -983,8 +1016,15 @@ function devinSessionActivityMs(
   };
   for (const name of names) {
     for (const dir of transcriptsDirs) {
-      stamp(devinSessionTranscript(name, dir));
+      const p = devinSessionTranscript(name, dir);
+      if (p !== undefined) {
+        sawTranscript = true;
+        stamp(p);
+      }
     }
+  }
+  if (sawTranscript) {
+    return at;
   }
   for (const dir of logsDirs) {
     stamp(devinPidLog(pid, dir));

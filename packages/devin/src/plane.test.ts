@@ -290,6 +290,37 @@ describe('countDevinSessions', () => {
     });
   });
 
+  test('a lock naming a TID of a live devin process is stale — not a session', () => {
+    withProc((procDir, mk) => {
+      withLockDir(dir => {
+        const leader = spawnDevinCli();
+        const tid = spawnDevinCli();
+        try {
+          // process leader owns the live devin session
+          mk(leader.pid!, 'PATH=/bin\0', '/dev/pts/6', 'devin');
+          // stale lock whose pid was recycled into a thread of leader
+          mk(tid.pid!, 'PATH=/bin\0', '/dev/pts/6', 'devin');
+          writeFileSync(
+            join(procDir, String(tid.pid!), 'status'),
+            `Name:\tdevin\nTgid:\t${leader.pid!}\nPid:\t${tid.pid!}\n`
+          );
+          // lockIsLiveSession pins pid starttime to the lock write bound
+          // (spec bro-q0v0e) — make the locks old enough to read as real
+          const past = new Date(Date.now() - 3600_000);
+          writeFileSync(join(dir, 'maddening-column.lock'), String(tid.pid!));
+          writeFileSync(join(dir, 'stone-shade.lock'), String(leader.pid!));
+          utimesSync(join(dir, 'maddening-column.lock'), past, past);
+          utimesSync(join(dir, 'stone-shade.lock'), past, past);
+          // only the real leader counts; the TID-recycled stale lock is ignored
+          assert.equal(countDevinSessions([dir], undefined, procDir), 1);
+        } finally {
+          leader.kill();
+          tid.kill();
+        }
+      });
+    });
+  });
+
   test('a pid recycled into ANOTHER devin process is stale — its start postdates the lock', () => {
     withProc((procDir, mk) => {
       withLockDir(dir => {
