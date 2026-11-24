@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
+  fstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -48,7 +49,10 @@ export function readStateFile(path: string): ServeState | undefined {
     const fd = openSync(safePath, 'r');
     let raw: string;
     try {
-      raw = readFileSync(fd, 'utf8');
+      const size = fstatSync(fd).size;
+      const buffer = Buffer.alloc(size);
+      const bytes = readSync(fd, buffer, 0, size, 0);
+      raw = buffer.subarray(0, bytes).toString('utf8');
     } finally {
       closeSync(fd);
     }
@@ -83,7 +87,8 @@ function trustedStatePath(path: string): string | undefined {
     return undefined;
   }
   try {
-    return realpathSync(candidate) === candidate ? candidate : undefined;
+    const canonicalPath = join(realpathSync(dirname(candidate)), basename(candidate));
+    return realpathSync(candidate) === canonicalPath ? candidate : undefined;
   } catch {
     return undefined;
   }
