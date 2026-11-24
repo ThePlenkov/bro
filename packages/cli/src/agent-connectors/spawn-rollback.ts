@@ -32,21 +32,26 @@ export interface SpawnClaimRun {
 type StepProbe = ReturnType<typeof probeStep>;
 type StepStore = ReturnType<typeof taskStoreAt>;
 
+/** The step context both claim undos compare-and-set against — the
+ *  store a rewrite lands in, the step id, the post-spawn probe, and
+ *  the beads dir whose actor name a fresh claim wrote. */
+interface ClaimRollbackCtx {
+  store: StepStore;
+  molStep: string;
+  now: StepProbe;
+  beadsDir: string;
+}
+
 /** A rebind's undo — the bookkeeping wrote `actor`, then `claimAs`
  *  when the caller pinned one; restore the pre-spawn assignee only
  *  while the step still carries a name this spawn wrote (a claim
  *  another actor moved meanwhile is theirs, not ours to unbind). */
-function restoreRebindAssignee(
-  store: StepStore,
-  molStep: string,
-  now: StepProbe,
-  run: SpawnClaimRun
-): void {
+function restoreRebindAssignee(ctx: ClaimRollbackCtx, run: SpawnClaimRun): void {
   const prev = run.previousAssignee;
   const stillOurs =
-    prev !== undefined && (now?.assignee === run.actor || now?.assignee === run.claimAs);
+    prev !== undefined && (ctx.now?.assignee === run.actor || ctx.now?.assignee === run.claimAs);
   if (stillOurs) {
-    store.update(molStep, { assignee: prev });
+    ctx.store.update(ctx.molStep, { assignee: prev });
   }
 }
 
@@ -56,17 +61,12 @@ function restoreRebindAssignee(
  *  bookkeeping rebound it to (a claim-on-behalf still counts — it is
  *  this spawn's fact to unbind, and skipping it would strand the bead
  *  in_progress under a name the dead run owned). */
-function reopenFreshClaim(
-  store: StepStore,
-  molStep: string,
-  now: StepProbe,
-  beadsDir: string,
-  claimAs: string | undefined
-): void {
+function reopenFreshClaim(ctx: ClaimRollbackCtx, run: SpawnClaimRun): void {
   const ours =
-    now?.assignee === bdActor(beadsDir) || (claimAs !== undefined && now?.assignee === claimAs);
-  if (now?.status === 'in_progress' && ours) {
-    store.reopen(molStep);
+    ctx.now?.assignee === bdActor(ctx.beadsDir) ||
+    (run.claimAs !== undefined && ctx.now?.assignee === run.claimAs);
+  if (ctx.now?.status === 'in_progress' && ours) {
+    ctx.store.reopen(ctx.molStep);
   }
 }
 
@@ -78,13 +78,17 @@ function reopenFreshClaim(
  *  produced. */
 export function rollbackSpawnClaim(beadsDir: string, molStep: string, run: SpawnClaimRun): void {
   try {
-    const now = probeStep(beadsDir, molStep);
-    const store = taskStoreAt(beadsDir);
+    const ctx: ClaimRollbackCtx = {
+      store: taskStoreAt(beadsDir),
+      molStep,
+      now: probeStep(beadsDir, molStep),
+      beadsDir,
+    };
     const rebind = run.claimed && run.previousAssignee !== undefined;
     if (rebind) {
-      restoreRebindAssignee(store, molStep, now, run);
+      restoreRebindAssignee(ctx, run);
     } else if (!run.claimed) {
-      reopenFreshClaim(store, molStep, now, beadsDir, run.claimAs);
+      reopenFreshClaim(ctx, run);
     }
   } catch {
     // best-effort — the 'lost' entry still names the failed run
