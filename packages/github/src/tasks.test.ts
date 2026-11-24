@@ -193,6 +193,35 @@ describe('githubTasks', { skip: WIN32 }, () => {
     });
   });
 
+  test("list with all+status:'closed' queries CLOSED only — all must not widen an explicit status", () => {
+    // all:true + status:'closed' fetching [OPEN,CLOSED] under a
+    // filter-free cap lets the bounded page fill with open rows and
+    // hide every closed match past the limit
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUES: issuesPage([
+          node({
+            number: 4,
+            title: 'closed work',
+            state: 'CLOSED',
+            closedAt: '2026-01-05T00:00:00Z',
+          }),
+        ]),
+      },
+      (log, dir) => {
+        const rows = githubTasks(dir).list({ all: true, status: 'closed', limit: 5 });
+        assert.deepEqual(
+          rows.map(r => r.id),
+          ['4']
+        );
+        const q = readFileSync(log, 'utf8');
+        assert.match(q, /-f states=CLOSED/);
+        assert.doesNotMatch(q, /-f states=OPEN/);
+      }
+    );
+  });
+
   test('ready excludes blocked and claimed issues, orders priority then created', () => {
     const issues = issuesPage([
       node({ number: 1, title: 'blocked by open dep', blockedBy: [[9, 'OPEN']], labels: ['p1'] }),

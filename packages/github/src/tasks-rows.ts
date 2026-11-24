@@ -142,11 +142,16 @@ export function applyFilter(rows: TaskRow[], f: TaskFilter): TaskRow[] {
   return q;
 }
 
+/** An explicit status decides the issue states: 'closed' maps 1:1 onto
+ *  CLOSED and every other derived status can only come from OPEN
+ *  issues. `all` widens only the status-free default — under an
+ *  explicit status it would fill the bounded page with rows applyFilter
+ *  must drop, hiding matches past the cap. */
 export function statesFor(f: TaskFilter): string[] {
-  if (f.all === true) {
-    return ['OPEN', 'CLOSED'];
+  if (f.status !== undefined) {
+    return f.status === 'closed' ? ['CLOSED'] : ['OPEN'];
   }
-  return f.status === 'closed' ? ['CLOSED'] : ['OPEN'];
+  return f.all === true ? ['OPEN', 'CLOSED'] : ['OPEN'];
 }
 
 /** Client-side filters still drop fetched rows — a query-level cap
