@@ -145,9 +145,9 @@ describe('configDiagnostics', () => {
   test('acp mcpServers validate as stdio descriptors — malformed entries diagnose (spec bro-l8c4f.14)', () => {
     const clean = dirWith('bro.config.json', {
       providers: {
-        kilo: {
+        'dv-acp': {
           type: 'acp',
-          command: 'kilo acp',
+          command: 'dv acp',
           mcpServers: [
             { type: 'stdio', name: 'bro', command: 'bro', args: ['mcp'], env: [] },
             { name: 'x', command: 'c', args: [] }, // type defaults to stdio
@@ -159,28 +159,56 @@ describe('configDiagnostics', () => {
 
     const bad = dirWith('bro.config.json', {
       providers: {
-        kilo: {
+        'dv-acp': {
           type: 'acp',
-          command: 'kilo acp',
+          command: 'dv acp',
           mcpServers: [{ type: 'stdio', command: 'c', args: [] }],
         },
       },
     });
     const diags = configDiagnostics(bad);
     assert.equal(diags.length, 1);
-    assert.match(diags[0]!.path, /providers\.kilo\.mcpServers\[0\]/);
+    assert.match(diags[0]!.path, /providers\.dv-acp\.mcpServers\[0\]/);
     // a non-stdio transport fails the entry schema outright — the
     // headless worker wires no negotiated capability for it
     const http = dirWith('bro.config.json', {
       providers: {
-        kilo: {
+        'dv-acp': {
           type: 'acp',
-          command: 'kilo acp',
+          command: 'dv acp',
           mcpServers: [{ type: 'http', name: 'x', url: 'https://x', headers: [] }],
         },
       },
     });
     assert.ok(configDiagnostics(http).length > 0);
+  });
+
+  test('a credential nested inside a composite env value never echoes — the value redacts whole', () => {
+    // an object-valued env[].value fails the string schema; printing
+    // the offender would leak its credential keys into retained logs
+    // (spec bro-l8c4f.14: diagnostics never echo env/header values)
+    const dir = dirWith('bro.config.json', {
+      providers: {
+        'dv-acp': {
+          type: 'acp',
+          command: 'dv acp',
+          mcpServers: [
+            {
+              type: 'stdio',
+              name: 'x',
+              command: 'c',
+              args: [],
+              env: [{ name: 'K', value: { token: 'CANARY-TOKEN-9f8e7d6c5b' } }],
+            },
+          ],
+        },
+      },
+    });
+    const diags = configDiagnostics(dir);
+    assert.ok(diags.length > 0);
+    const text = diags.map(d => `${d.path} ${d.message}`).join('\n');
+    assert.doesNotMatch(text, /CANARY-TOKEN-9f8e7d6c5b|token/);
+    assert.match(text, /\[redacted\]/);
   });
 
   test('diagnostics carry layer + file provenance per hit', () => {

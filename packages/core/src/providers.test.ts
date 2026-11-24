@@ -578,6 +578,7 @@ describe('parseProviderEntry', () => {
     // required stdio wire fields fail loud at parse for the same reason —
     // ACP session/new would reject them as an opaque session-start error
     for (const mcpServers of [
+      [{ type: 7, name: 'x', command: 'c', args: [] }], // non-string transport ≠ omitted
       [{ type: 'stdio', command: 'c', args: [] }], // no name
       [{ type: 'stdio', name: 7, command: 'c', args: [] }], // numeric name
       [{ type: 'stdio', name: 'x', args: [] }], // no command

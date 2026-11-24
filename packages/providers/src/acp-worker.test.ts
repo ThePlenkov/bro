@@ -352,6 +352,24 @@ describe('runAcpWorker', () => {
     }
   });
 
+  test('a non-string transport fails before session/new — it is not "omitted" stdio', async () => {
+    // a numeric `type` must die at validation, not ride session/new
+    // into a peer refusal — the config parser rejects the same input
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [{ type: 7, name: 'x', command: 'c', args: [] }],
+    });
+    try {
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 1);
+      assert.match(lines.join('\n'), /mcpServers\[0\]\.type must be 'stdio'/);
+      assert.deepEqual(fake.sessionRequests, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a nameless stdio descriptor fails before session/new — the wire requires it', async () => {
     const fake = fakeAcpAgent({ replyText: 'done' });
     const { spec, lines, dir } = workerSpec({

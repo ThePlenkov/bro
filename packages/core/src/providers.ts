@@ -594,7 +594,11 @@ function acpMcpServersFor(
     if (!isPlainObject(v)) {
       return { err: `mcpServers[${i}] must be an object descriptor` };
     }
-    const t = typeof v.type === 'string' ? v.type : 'stdio';
+    // an absent `type` reads as stdio (ACP labels only the non-stdio
+    // transports); a PRESENT non-stdio `type` — string or not — is
+    // invalid input and fails loud here, not as a `type: 7` riding
+    // session/new into a peer refusal (schema and parser agree)
+    const t = v.type === undefined ? 'stdio' : v.type;
     if (t !== 'stdio') {
       return { err: mcpTransportErr(t, i) };
     }
@@ -614,11 +618,14 @@ function acpMcpServersFor(
  *  the negotiated-capability remediation, unknown names the accepted
  *  shape. Helper so the descriptor loop stays flat (CodeScene: a bumpy
  *  road needs no nested conditionals to read). */
-function mcpTransportErr(t: string, i: number): string {
+function mcpTransportErr(t: unknown, i: number): string {
   if (t === 'http' || t === 'sse' || t === 'streamable-http') {
     return `mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`;
   }
-  return `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`;
+  if (typeof t === 'string') {
+    return `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`;
+  }
+  return `mcpServers[${i}].type must be 'stdio' when present — a non-string transport is not a valid descriptor`;
 }
 
 /** A stdio descriptor is `{name, command, args, env?}` — ACP

@@ -168,7 +168,10 @@ function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] 
     if (!isPlainObject(v)) {
       throw new AcpWorkerError(`${by}: mcpServers[${i}] must be an object descriptor`);
     }
-    const t = typeof v.type === 'string' ? v.type : 'stdio';
+    // absent `type` reads as stdio; a present non-stdio one — string
+    // or not — fails loud here instead of riding session/new into a
+    // peer refusal (the config parser/schema reject the same input)
+    const t = v.type === undefined ? 'stdio' : v.type;
     if (t !== 'stdio') {
       throw mcpTransportErr(t, i, by);
     }
@@ -186,14 +189,19 @@ function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] 
 
 /** The non-stdio transports all fail here — HTTP-family ones carry the
  *  negotiated-capability remediation, unknown names the accepted shape. */
-function mcpTransportErr(t: string, i: number, by: string): AcpWorkerError {
+function mcpTransportErr(t: unknown, i: number, by: string): AcpWorkerError {
   if (t === 'http' || t === 'sse' || t === 'streamable-http') {
     return new AcpWorkerError(
       `${by}: mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`
     );
   }
+  if (typeof t === 'string') {
+    return new AcpWorkerError(
+      `${by}: mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`
+    );
+  }
   return new AcpWorkerError(
-    `${by}: mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`
+    `${by}: mcpServers[${i}].type must be 'stdio' when present — a non-string transport is not a valid descriptor`
   );
 }
 

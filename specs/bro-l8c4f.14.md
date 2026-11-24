@@ -3,6 +3,7 @@ parent: bro-l8c4f
 scope:
   - packages/core/src/providers.ts
   - packages/core/src/config.ts
+  - packages/core/src/schema-validator.ts
   - packages/cli/schemas/bro.config.schema.json
   - packages/providers/src/acp-worker.ts
   - packages/providers/src/acp-worker.test.ts
@@ -64,7 +65,8 @@ explicit config.
   `mcp.planes`). The MCP surface stays read-plane plus the one spec'd
   write (`agents.delegate`, bro-z8tng): `claim`/`resolve`/`spawn` verbs
   are never in `mcpVerbs` and stay capability-hidden — a regression pin
-  asserts the wired-write allowlist is exactly `['delegate']`.
+  asserts the qualified `plane.verb` allowlist is exactly
+  `['agents.delegate']`.
 
 ## Acceptance criteria
 
@@ -83,9 +85,9 @@ explicit config.
       `invalid JSON`, never echoing the parser's source slice;
       descriptors never reach argv (`agent-connectors.test.ts`).
 - [x] BRO server still does NOT export claim/resolve/spawn writes —
-      `planes.test.ts` pins the catalog's wired `mcpVerbs` to
-      `['delegate']`; `spawn`/`stop`/`respawn` stay
-      declared-but-unwired (capability `false`).
+      `planes.test.ts` pins the catalog's wired `mcpVerbs` — qualified
+      `plane.verb` — to `['agents.delegate']`; `spawn`/`stop`/`respawn`
+      stay declared-but-unwired (capability `false`).
 
 ## Non-negotiables
 
