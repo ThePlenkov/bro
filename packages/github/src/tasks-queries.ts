@@ -289,7 +289,18 @@ export function querySubIssuesSync(dir: string, n: number): IssueNode[] {
     if (!isDriftError(err)) {
       throw err;
     }
-    return []; // GHES: declared absent
+    // the drifted field may sit INSIDE the sub-issue nodes (issueType,
+    // blockedBy, parent) while subIssues itself is supported — retry
+    // core-only before declaring the feature absent; an empty list
+    // must mean "no children", never "the query died"
+    try {
+      return run(false);
+    } catch (retryErr) {
+      if (!isDriftError(retryErr)) {
+        throw retryErr;
+      }
+      return []; // GHES: subIssues itself absent — declared, not faked
+    }
   }
 }
 
@@ -308,7 +319,18 @@ export async function querySubIssuesAsync(dir: string, n: number): Promise<Issue
     if (!isDriftError(err)) {
       throw err;
     }
-    return []; // GHES: declared absent
+    // the drifted field may sit INSIDE the sub-issue nodes (issueType,
+    // blockedBy, parent) while subIssues itself is supported — retry
+    // core-only before declaring the feature absent; an empty list
+    // must mean "no children", never "the query died"
+    try {
+      return await run(false);
+    } catch (retryErr) {
+      if (!isDriftError(retryErr)) {
+        throw retryErr;
+      }
+      return []; // GHES: subIssues itself absent — declared, not faked
+    }
   }
 }
 

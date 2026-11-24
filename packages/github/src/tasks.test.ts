@@ -22,6 +22,7 @@ const WIN32 = process.platform === 'win32';
  *                       read answers file <n> — deterministic
  *                       interleavings (claim races)
  *    FAKE_GH_SUBS     — the subIssues query body
+ *    FAKE_GH_ISSUE_FAIL — any value fails every issue(number) read
  *    FAKE_GH_ACTOR    — `api user` login */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
@@ -46,6 +47,7 @@ case "$1" in
           *"issues(first"*) echo "$FAKE_GH_ISSUES" ;;
           *"issue(number:\$n){ subIssues"*) echo "$FAKE_GH_SUBS" ;;
           *"issue(number"*)
+            if [ -n "$FAKE_GH_ISSUE_FAIL" ]; then echo 'gh: read timed out' >&2; exit 1; fi
             n=$(grep -c 'issue(number' "$FAKE_GH_LOG")
             if [ -n "$FAKE_GH_ISSUE_SEQ" ] && [ -f "$FAKE_GH_ISSUE_SEQ/$n.json" ]; then
               cat "$FAKE_GH_ISSUE_SEQ/$n.json"
@@ -66,7 +68,9 @@ case "$1" in
         esac ;;
       --paginate)
         case "$*" in
-          *milestones*) echo "$FAKE_GH_MILESTONES" ;;
+          # --slurp wraps every page in an array — the env carries the
+          # comma-separated page bodies, so '[{a}],[{b}]' emits two pages
+          *milestones*) echo "[$FAKE_GH_MILESTONES]" ;;
           *) echo '{}' ;;
         esac ;;
       *milestones*) echo "$FAKE_GH_MILESTONES" ;;
@@ -638,6 +642,61 @@ esac
     );
   });
 
+  test('nested rel-field drift still returns children — subIssues itself is supported', () => {
+    // a GHES that HAS subIssues but lacks a nested node field (issueType):
+    // the rel query dies inside nodes{…}, and the core-only retry still
+    // carries subIssues — children must come back. Treating the first
+    // drift as absence would silently empty children() (codeant)
+    const driftNested = `#!/bin/sh
+echo "$@" >> "$FAKE_GH_LOG"
+case "$1" in
+  repo) echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
+  api)
+    case "$*" in
+      *issueType*|*blockedBy*|*"parent {"*)
+        echo 'gh: Cannot query field "issueType" on type "Issue".' >&2
+        exit 1 ;;
+      *subIssues*) echo "$FAKE_GH_SUBS" ;;
+      *) echo '{}' ;;
+    esac ;;
+  *) : ;;
+esac
+`;
+    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-'));
+    const log = join(dir, 'gh.log');
+    writeFileSync(log, '');
+    writeFileSync(join(dir, 'gh'), driftNested);
+    chmodSync(join(dir, 'gh'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${dir}:${prevPath}`;
+    const prevSubs = process.env.FAKE_GH_SUBS;
+    const prevLog = process.env.FAKE_GH_LOG;
+    process.env.FAKE_GH_LOG = log;
+    process.env.FAKE_GH_SUBS = subIssuesRead([node({ number: 7, title: 'kid' })]);
+    try {
+      const kids = githubTasks(dir).children('3');
+      assert.deepEqual(
+        kids.map(r => r.id),
+        ['7']
+      );
+      // two graphql calls — the drifted rel query, then the core retry.
+      // The query arg carries newlines — slice on call boundaries
+      const entries = readFileSync(log, 'utf8')
+        .split(/(?=api graphql -f query=)/)
+        .filter(s => s.startsWith('api graphql'));
+      assert.equal(entries.length, 2);
+      assert.match(entries[0]!, /issueType/);
+      assert.doesNotMatch(entries[1]!, /issueType/);
+    } finally {
+      process.env.PATH = prevPath;
+      if (prevSubs === undefined) delete process.env.FAKE_GH_SUBS;
+      else process.env.FAKE_GH_SUBS = prevSubs;
+      if (prevLog === undefined) delete process.env.FAKE_GH_LOG;
+      else process.env.FAKE_GH_LOG = prevLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('prefix() is undefined — the repo itself is the scope', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
       assert.equal(githubTasks(dir).prefix(), undefined);
@@ -744,6 +803,27 @@ esac
     });
   });
 
+  test('a failed read on an own-repo ref throws — a broken gh is not a foreign ref', () => {
+    // declining is the verdict for a CONFIRMED foreign map; a transient
+    // read failure must fail loud — silently skipping the publish reads
+    // as "another system owns this" and the bead never gets its mirror
+    withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_FAIL: '1' }, (log, dir) => {
+      assert.throws(
+        () =>
+          githubTasks(dir).publish!(
+            {
+              id: 'bro-t1',
+              title: 'x',
+              external_ref: 'https://github.com/acme/widgets/issues/42',
+            },
+            {}
+          ),
+        /gh api failed/
+      );
+      assert.equal(callsMatching(log, /issue create/).length, 0);
+    });
+  });
+
   test('publish creates a bro:bead issue carrying the bead provenance', () => {
     withFakeGh(
       {
@@ -787,7 +867,7 @@ esac
         );
         assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/3');
         const lines = calls(log).join('\n');
-        assert.match(lines, /api --paginate repos\/acme\/widgets\/milestones\?state=all/);
+        assert.match(lines, /api --paginate --slurp repos\/acme\/widgets\/milestones\?state=all/);
         assert.match(lines, /api -X POST repos\/acme\/widgets\/milestones -f title=the epic/);
         assert.match(lines, /api -X PATCH repos\/\{owner\}\/\{repo\}\/issues\/42 -F milestone=3/);
       }
@@ -800,6 +880,29 @@ esac
         FAKE_GH_ACTOR: 'me',
         FAKE_GH_MILESTONES:
           '[{"number":5,"title":"the epic","html_url":"https://github.com/acme/widgets/milestone/5"}]',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+          { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic' } }
+        );
+        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/5');
+        assert.equal(callsMatching(log, /POST repos\/acme\/widgets\/milestones/).length, 0);
+        assert.match(calls(log).join('\n'), /-F milestone=5/);
+      }
+    );
+  });
+
+  test('a milestone match on a later page is found — --slurp folds the pages', () => {
+    // two REST pages of milestones and the title sits on page 2 —
+    // --paginate emits one JSON array per page, so a bare JSON.parse
+    // dies on the concatenated bodies and the dedup never runs
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_MILESTONES:
+          '[{"number":4,"title":"other","html_url":"https://github.com/acme/widgets/milestone/4"}],[{"number":5,"title":"the epic","html_url":"https://github.com/acme/widgets/milestone/5"}]',
         FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
       },
       (log, dir) => {

@@ -47,10 +47,13 @@ const milestoneUrl = (repo: string, m: MilestoneRow): string =>
 function ensureMilestone(dir: string, epic: TaskRow): { number: number; url: string } {
   const repo = repoOf(dir);
   const title = epic.title !== undefined && epic.title.trim() !== '' ? epic.title : epic.id;
-  const all = ghJson<MilestoneRow[]>(
-    ['api', '--paginate', `repos/${repo}/milestones?state=all&per_page=100`],
+  // --paginate emits one JSON array per page — --slurp folds them into a
+  // single array-of-arrays JSON.parse can handle; past 100 milestones a
+  // bare parse dies mid-output and the title-match never runs
+  const all = ghJson<MilestoneRow[][]>(
+    ['api', '--paginate', '--slurp', `repos/${repo}/milestones?state=all&per_page=100`],
     dir
-  );
+  ).flat();
   const hit = all.find(m => m.title === title);
   if (hit !== undefined) {
     return { number: hit.number, url: milestoneUrl(repo, hit) };
@@ -90,12 +93,18 @@ function epicMilestone(dir: string, epic: TaskRow): { milestone?: number; epicRe
 type MappedRef = { kind: 'live'; row: TaskRow } | { kind: 'stale' } | { kind: 'foreign' };
 
 function mappedRef(dir: string, ref: string): MappedRef {
+  // resolve the repo outside the ref-parse catch — a gh failure (here or
+  // in the issue read below) is a broken read, not a foreign ref, and
+  // must fail loud instead of declining the publish as a quiet no-op
+  repoOf(dir);
+  let n: number;
   try {
-    const cur = queryIssueSync(dir, issueNumber(dir, ref));
-    return cur === undefined ? { kind: 'stale' } : { kind: 'live', row: pub(toRow(cur)) };
+    n = issueNumber(dir, ref);
   } catch {
     return { kind: 'foreign' };
   }
+  const cur = queryIssueSync(dir, n);
+  return cur === undefined ? { kind: 'stale' } : { kind: 'live', row: pub(toRow(cur)) };
 }
 
 /** Join the new issue to the epic's milestone — best-effort: the issue
