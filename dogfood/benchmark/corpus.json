@@ -7,7 +7,7 @@
   "tasks": [
     {
       "taskId": "bench-smoke-001",
-      "revision": "ead0d27d",
+      "revision": "ead0d27d0250492d35b430958279c8a1a476fd2b",
       "models": ["codex", "claude"],
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
