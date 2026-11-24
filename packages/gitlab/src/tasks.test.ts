@@ -474,6 +474,18 @@ describe('gitlabTasks', { skip: WIN32 }, () => {
     );
   });
 
+  test('https self-hosted remotes preserve host and nested project paths', () => {
+    withRepo(
+      {},
+      (dir, log) => {
+        gitlabTasks(dir).get('9');
+        assert.match(readFileSync(log, 'utf8'), /env:GITLAB_HOST=gitlab\.corp\.com:8443/);
+        assert.match(calls(log).join('\n'), /api projects\/group%2Fsub%2Fproj\/issues\/9/);
+      },
+      'https://gitlab.corp.com:8443/group/sub/proj.git'
+    );
+  });
+
   test('no GitLab remote fails loud — never a silent default project', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-gl-noremote-'));
     testGit(['init', '-b', 'main'], { cwd: dir, stdio: 'ignore' });
