@@ -25,23 +25,6 @@ interface SettlePath {
   real: string;
 }
 
-/** The target's path forms — realpath falls back to the resolved path
- *  where it cannot resolve (a tree already gone still settles by its
- *  recorded name). */
-function settlePathOf(worktree: string | undefined): SettlePath | undefined {
-  if (worktree === undefined) {
-    return undefined;
-  }
-  const resolved = resolve(worktree);
-  let real: string;
-  try {
-    real = realpathSync(resolved);
-  } catch {
-    real = resolved;
-  }
-  return { resolved, real };
-}
-
 /** An entry's recorded worktree against the target — either path form
  *  matching either of the target's counts (a symlinked tree resolves
  *  differently per side). */
@@ -166,11 +149,21 @@ export function settleAcpSessions(
   const settled: string[] = [];
   try {
     const registry = readAgentRegistry(dir);
-    const matched = settleMatchedEntries(
-      registry,
-      new Set(opts.molSteps ?? []),
-      settlePathOf(opts.worktree)
-    );
+    // the target's two path forms — realpath falls back to the
+    // resolved path where it cannot resolve (a tree already gone
+    // still settles by its recorded name)
+    const worktreeResolved = opts.worktree === undefined ? undefined : resolve(opts.worktree);
+    let worktree: SettlePath | undefined;
+    if (worktreeResolved !== undefined) {
+      let real: string;
+      try {
+        real = realpathSync(worktreeResolved);
+      } catch {
+        real = worktreeResolved;
+      }
+      worktree = { resolved: worktreeResolved, real };
+    }
+    const matched = settleMatchedEntries(registry, new Set(opts.molSteps ?? []), worktree);
     settleRmSessions(env.providers ?? {}, settleIdProviders(matched), settled);
     clearSettledSessions(dir, registry, matched);
   } catch {

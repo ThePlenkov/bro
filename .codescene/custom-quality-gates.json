@@ -367,8 +367,8 @@
       "matching_content_path": "packages/cli/src/agent-connectors/work-markers.ts"
     },
     {
-      "quality_gates": "bare_minimum",
-      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
       "matching_content_path": "packages/cli/src/agent-connectors/acp-settle.ts"
     },
     {

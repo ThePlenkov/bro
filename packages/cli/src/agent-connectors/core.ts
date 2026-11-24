@@ -167,6 +167,7 @@ import { markStoppedEntry, pollUntilGone } from './stop-entry.ts';
 import {
   admitPlanefreeProviderLane,
   claimGatePlaneStarts,
+  type ProviderGateAdmit,
   rejudgeSharedProviderLane,
 } from './provider-admit.ts';
 import {
@@ -2799,6 +2800,23 @@ export function providerGateOf(args: {
   };
 }
 
+/** admitProviderGateStarts' argument bundle — the shared
+ *  ProviderGateAdmit claim context plus the repo/env facts the
+ *  plane-less lane's census needs. */
+interface GateAdmitArgs extends ProviderGateAdmit {
+  /** The repo the plane-less census reads — the registry's live
+   *  occupants on this provider entry, re-read INSIDE the provider
+   *  mutex (the namespaced claim ledger is counted inside the
+   *  locked section itself). */
+  dir: string;
+  /** The connector's agents home the census probes — prepareSpawn's
+   *  `home`. Defaults to `agentsHome(dir)`. */
+  home?: string | null;
+  env: AgentConnectorEnv;
+  /** plane-less ledger claims — the caller owns their custody */
+  ledgerOut: string[];
+}
+
 /** The provider lane's claims — every session the provider's own
  *  command starts draws on the lane: one claim per plane per start,
  *  each judged inside the kind's mutex with the aggregate verdict
@@ -2813,45 +2831,7 @@ export function providerGateOf(args: {
  *  read as two. */
 export function admitProviderGateStarts(
   gate: ProviderGate,
-  args: {
-    /** The repo the plane-less census reads — the registry's live
-     *  occupants on this provider entry, re-read INSIDE the provider
-     *  mutex (the namespaced claim ledger is counted inside the
-     *  locked section itself). */
-    dir: string;
-    /** The connector's agents home the census probes — prepareSpawn's
-     *  `home`. Defaults to `agentsHome(dir)`. */
-    home?: string | null;
-    env: AgentConnectorEnv;
-    agents: Record<string, Record<string, unknown>> | undefined;
-    workerEnv: Record<string, string> | undefined;
-    molStep: string | undefined;
-    key: string;
-    scope: string;
-    liveByKind: Map<string, Set<string>>;
-    /** reports a work-budget segment an admit just opened — the caller
-     *  refunds them all when a later refusal unwinds the spawn */
-    budgetCharged?: (kind: string) => void;
-    /** The command whose starts this spawn admits — the spawn's own
-     *  template when a command line launches the provider's sessions;
-     *  the provider's own command when unset (a spawn whose command
-     *  line only DRIVES the provider's — `bro acp-worker --command
-     *  'devin acp'` hides `devin` behind an argument the planes'
-     *  grammar cannot see — opens the sessions the entry command
-     *  starts). */
-    startsCommand?: string;
-    /** Starts an earlier provider pass already claimed for this
-     *  spawn, per kind — a gate whose plane an earlier gate covers
-     *  shares that gate's claims: the sessions sit inside this lane's
-     *  aggregate census, so this lane's cap still judges them, but no
-     *  second slot lands (one session claimed twice reads as two
-     *  starts — valid work refused or headroom burned). */
-    claimedStarts?: ReadonlyMap<string, number>;
-    /** per-plane claims — the caller's rollback/custody set */
-    out: string[];
-    /** plane-less ledger claims — the caller owns their custody */
-    ledgerOut: string[];
-  }
+  args: GateAdmitArgs
 ): Map<string, number> {
   const providerClaimedStarts = new Map<string, number>();
   // a covered plane whose every start an earlier pass claimed: no new
