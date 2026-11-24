@@ -639,6 +639,37 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/claude/bro': { skills: false, runSh: false },
 };
 
+const drift = [];
+
+// the npx fallback pin always equals plugin.json's version — rewrite the
+// adapter sources before bundling so the embedded copies receive the same pin
+const VERSIONED_SOURCES = [
+  'hooks.json',
+  'hooks/run.sh',
+  'plugins/codex/bro/hooks/hooks.json',
+  // the materialized opencode modules carry the npx fallback pin
+  'packages/agent-plugins/opencode/src/opencode.ts',
+  // the pi and omp extensions carry the same pin
+  'packages/agent-plugins/pi/src/pi.ts',
+  'packages/agent-plugins/omp/src/omp.ts',
+];
+const PIN_RE = /@broject\/bro@[\w.:-]+/g;
+
+for (const src of VERSIONED_SOURCES) {
+  const p = join(ROOT, src);
+  if (!existsSync(p)) {
+    drift.push(src);
+    continue;
+  }
+  const text = readFileSync(p, 'utf8');
+  const synced = text.replace(PIN_RE, `@broject/bro@${manifest.version}`);
+  if (CHECK ? synced !== text : false) {
+    drift.push(src);
+  } else if (!CHECK && synced !== text) {
+    writeFileSync(p, synced);
+  }
+}
+
 // files written per adapter — value is source path, [text] literal
 // content, or null for a hand-written file that must already exist
 const ADAPTERS = {
@@ -696,22 +727,6 @@ const ADAPTERS = {
     LICENSE: 'LICENSE',
   },
 };
-
-// the npx fallback pin always equals plugin.json's version — rewrite it in
-// the hook sources so a version bump can't leave a stale pin behind
-const VERSIONED_SOURCES = [
-  'hooks.json',
-  'hooks/run.sh',
-  'plugins/codex/bro/hooks/hooks.json',
-  // the materialized opencode modules carry the npx fallback pin
-  'packages/agent-plugins/opencode/src/opencode.ts',
-  // the pi and omp extensions carry the same pin
-  'packages/agent-plugins/pi/src/pi.ts',
-  'packages/agent-plugins/omp/src/omp.ts',
-];
-const PIN_RE = /@broject\/bro@[\w.:-]+/g;
-
-const drift = [];
 
 /** Remove symlinked path components above `path` so generated writes can't
  *  follow a link outside the checkout. Returns true when drift was recorded
@@ -775,22 +790,6 @@ function emit(path, content) {
 // root file and the adapter copy both emit from devinHooksJson(), so a
 // hand-edit to either surfaces as drift here, not as a separate lint
 emit('hooks.json', devinHooksJson());
-
-// keep every `@broject/bro@…` npx pin equal to plugin.json's version
-for (const src of VERSIONED_SOURCES) {
-  const p = join(ROOT, src);
-  if (!existsSync(p)) {
-    drift.push(src);
-    continue;
-  }
-  const text = readFileSync(p, 'utf8');
-  const synced = text.replace(PIN_RE, `@broject/bro@${manifest.version}`);
-  if (CHECK ? synced !== text : false) {
-    drift.push(src);
-  } else if (!CHECK && synced !== text) {
-    writeFileSync(p, synced);
-  }
-}
 
 // skill frontmatter pins the MAJOR line (`Requires: npx -y @broject/bro@0`)
 // — rewrite every skills/*/SKILL.md pin to plugin.json's major so the
