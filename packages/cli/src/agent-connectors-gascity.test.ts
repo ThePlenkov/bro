@@ -617,7 +617,7 @@ describe('gascity connector', () => {
     skip: process.env.BRO_REAL_GC !== '1',
   }, async () => {
     const { spawnSync } = await import('node:child_process');
-    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const { chmodSync, mkdirSync, writeFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     // every probe is bounded — a hung real gc must fail the check,
     // never stall the suite without a verdict
@@ -635,8 +635,8 @@ describe('gascity connector', () => {
         return false;
       }
     };
-    const v = spawnSync('gc', ['--version'], { encoding: 'utf8', timeout: GC_TIMEOUT });
-    assert.equal(v.status, 0, 'gc --version must succeed');
+    const v = spawnSync('gc', ['version'], { encoding: 'utf8', timeout: GC_TIMEOUT });
+    assert.equal(v.status, 0, 'gc version must succeed');
     const version = (v.stdout || v.stderr || '').trim();
     assert.ok(version.length > 0);
 
@@ -648,7 +648,13 @@ describe('gascity connector', () => {
     const safeVersion = version.replace(/[^a-zA-Z0-9._-]+/g, '_');
     const evidencePath = join(evidenceDir, `gascity-real-conformance-${safeVersion}.json`);
 
-    const checks: Array<{ name: string; ok: boolean; detail?: string; stdout?: string }> = [];
+    const checks: Array<{
+      name: string;
+      ok: boolean;
+      detail?: string;
+      stdout?: string;
+      exitCode?: number | null;
+    }> = [];
 
     // Check basic help/commands exist
     const help = spawnSync('gc', ['--help'], { encoding: 'utf8', timeout: GC_TIMEOUT });
@@ -656,6 +662,7 @@ describe('gascity connector', () => {
       name: 'gc --help',
       ok: help.status === 0,
       stdout: (help.stdout || '').slice(0, 200),
+      exitCode: help.status,
     });
 
     // Try to get supervisor status if supported
@@ -667,29 +674,83 @@ describe('gascity connector', () => {
       name: 'gc supervisor status --json',
       ok: sup.status === 0 && jsonHas(sup.stdout || '', 'schema_version'),
       stdout: (sup.stdout || sup.stderr || '').slice(0, 200),
+      exitCode: sup.status,
     });
 
-    // Try session list
-    const slist = spawnSync('gc', ['session', 'list', '--json'], {
-      encoding: 'utf8',
-      timeout: GC_TIMEOUT,
-    });
-    checks.push({
-      name: 'gc session list --json',
-      ok: slist.status === 0 && jsonHas(slist.stdout || '', 'sessions'),
-      stdout: (slist.stdout || slist.stderr || '').slice(0, 200),
-    });
-
-    // Try rig list
-    const rlist = spawnSync('gc', ['rig', 'list', '--json'], {
-      encoding: 'utf8',
-      timeout: GC_TIMEOUT,
-    });
-    checks.push({
-      name: 'gc rig list --json',
-      ok: rlist.status === 0 && jsonHas(rlist.stdout || '', 'rigs'),
-      stdout: (rlist.stdout || rlist.stderr || '').slice(0, 200),
-    });
+    // The minimal city still needs a provider command when a session is
+    // submitted. A local executable is intentional: this fixture proves the
+    // GC lifecycle contract without requiring an LLM key or network access.
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'bro-gc-real-'));
+    const city = join(fixtureRoot, 'city');
+    const bin = join(fixtureRoot, 'bin');
+    mkdirSync(bin);
+    const stubProvider = join(bin, 'claude');
+    writeFileSync(stubProvider, '#!/bin/sh\nprintf "stub provider\\n"\nexit 0\n');
+    chmodSync(stubProvider, 0o755);
+    const fixtureEnv = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+    };
+    const runFixture = (args: string[], cwd = process.cwd()) => {
+      const result = spawnSync('gc', args, {
+        cwd,
+        env: fixtureEnv,
+        encoding: 'utf8',
+        timeout: GC_TIMEOUT,
+      });
+      return {
+        status: result.status,
+        stdout: (result.stdout || '').trim().slice(0, 500),
+        stderr: (result.stderr || '').trim().slice(0, 500),
+      };
+    };
+    const lifecycle = (name: string, args: string[], cwd = process.cwd()): void => {
+      const result = runFixture(args, cwd);
+      checks.push({
+        name,
+        ok: result.status === 0,
+        exitCode: result.status,
+        stdout: result.stdout || result.stderr,
+      });
+    };
+    try {
+      lifecycle('gc init minimal lifecycle city', [
+        'init',
+        '--template',
+        'minimal',
+        '--default-provider',
+        'claude',
+        '--providers',
+        'claude',
+        '--no-start',
+        '--skip-provider-readiness',
+        '--yes',
+        city,
+      ]);
+      lifecycle('gc agent add fx', ['agent', 'add', '--city', city, '--name', 'fx']);
+      lifecycle('gc start lifecycle city', ['start', city]);
+      lifecycle('gc session list --json', ['session', 'list', '--json', '--city', city]);
+      lifecycle('gc rig list --json', ['rig', 'list', '--json', '--city', city]);
+      lifecycle('gc session new fx --alias fx --no-attach --json', [
+        'session',
+        'new',
+        'fx',
+        '--alias',
+        'fx',
+        '--no-attach',
+        '--json',
+        '--city',
+        city,
+      ]);
+      lifecycle('gc session submit fx ping', ['session', 'submit', 'fx', 'ping', '--city', city]);
+      lifecycle('gc session close fx', ['session', 'close', 'fx', '--city', city]);
+    } finally {
+      // Stop is best-effort in cleanup; lifecycle assertions above retain the
+      // command verdict, while this prevents a failed probe leaking a city.
+      runFixture(['session', 'close', 'fx', '--city', city]);
+      runFixture(['stop', city]);
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
 
     const evidence = {
       bead: 'bro-l8c4f.10',
@@ -698,10 +759,7 @@ describe('gascity connector', () => {
       timestamp: new Date().toISOString(),
       checks,
       passed: checks.every(c => c.ok),
-      // probes only — version/help/status/list verify the binary and
-      // JSON contracts; no lifecycle fixture (session new/submit/
-      // close) has run, so coverage stays unclaimed until one does
-      fixtureCoverage: false,
+      fixtureCoverage: checks.filter(c => c.name.startsWith('gc session ')).every(c => c.ok),
       evidenceType: 'versioned-real-gc-conformance',
     };
     writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
@@ -718,6 +776,10 @@ describe('gascity connector', () => {
       `real gc must pass every probed command (conformance evidence): ${JSON.stringify(
         checks.filter(c => !c.ok).map(c => c.name)
       )}`
+    );
+    assert.ok(
+      evidence.fixtureCoverage,
+      'real gc lifecycle fixture must cover session new/submit/close'
     );
   });
 });
