@@ -342,12 +342,7 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   if (new RegExp(`${at}${bro}\\s+(?:review\\s+)?act\\b`).test(c)) {
     return 'act';
   }
-  if (new RegExp(`${at}${bro}\\s+(?:work\\s+)?drill\\b`).test(c)) {
-    return 'drill';
-  }
-  // wtf registers under self (bro self wtf → retrospect capture); the
-  // bare form still dispatches via the group host
-  if (new RegExp(`${at}${bro}\\s+(?:self\\s+)?wtf\\b`).test(c)) {
+  if (new RegExp(`${at}${bro}\\s+(?:(?:work\\s+)?drill|(?:self\\s+)?wtf)\\b`).test(c)) {
     return 'drill';
   }
   if (new RegExp(String.raw`${at}${bro}\s+work\b`).test(c)) {
