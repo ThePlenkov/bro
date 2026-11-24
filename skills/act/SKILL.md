@@ -235,6 +235,8 @@ default store, so standard installs already have it).
   _died_ with the host/session never ran that cleanup — its dead marker
   stays, the session-start nudge names it, and `bro review act rearm` puts the
   watch back up.
+  When that stale/dead-watch nudge names a PR, run `bro act status <PR>`
+  before anything else.
   **'Watcher armed' is never the end state.** The first poll line is a
   coverage snapshot — proof the watch runs — not the verdict; a gate
   still showing `reviewers_pending>0` is unsettled, and the verdict is
