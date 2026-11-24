@@ -107,11 +107,12 @@ GitLab Issues are supported as an opt-in `tasks` backend via
 - **Capabilities:** issues as `TaskStore`/`TaskStoreAsync` — list/ready/get/
   create/update, claim (assignee + `bro:claimed` label, contested claims
   keep the winner assigned), close/reopen, and issue links
-  (`related`/`blocks`/`is_blocked_by`). Issue references accept `42`,
+  (`related`/`blocked`/`blocks`/`blocked-by` — `blocked`/`blocked-by` map
+  to GitLab's `is_blocked_by` link type). Issue references accept `42`,
   `#42`, issue URLs, and cross-project `group/project#42`.
 - **Honest absences:** `deps()` is not supported; `create` rejects
   `parent`/`deps`; `update` rejects `status`/`assignee`; `link` supports
-  only `related`/`blocks`/`blocked-by` within one project (no
+  only `related`/`blocked`/`blocks`/`blocked-by` within one project (no
   `parent`/`tracks`/`discovered`, no cross-project links); the REST
   `blocked` flag is premium-only — on free-tier instances the `blocked`
   label is the portable marker; **`publish` is not implemented**. See the
