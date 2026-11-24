@@ -126,16 +126,20 @@ export function resumeSessionFor(
 ): string | undefined {
   try {
     const reg = readAgentRegistry(ctx.root);
-    const entry = reg[molStep];
-    if (entry === undefined) return undefined;
-    const id = entry.acpSessionId;
-    if (typeof id !== 'string' || id === '') return undefined;
-    if (lane?.provider === undefined || entry.provider !== lane.provider) return undefined;
-    if (lane.worker?.kind !== 'argv') return undefined;
-    return id;
+    return resumableSessionId(reg[molStep], lane);
   } catch {
     return undefined;
   }
+}
+
+function resumableSessionId(
+  entry: ReturnType<typeof readAgentRegistry>[string] | undefined,
+  lane: { provider?: string; worker?: SpawnWorker } | undefined
+): string | undefined {
+  const id = entry?.acpSessionId;
+  const sameProvider = lane?.provider !== undefined && entry?.provider === lane.provider;
+  const isAcpWorker = lane?.worker?.kind === 'argv';
+  return typeof id === 'string' && id !== '' && sameProvider && isAcpWorker ? id : undefined;
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
