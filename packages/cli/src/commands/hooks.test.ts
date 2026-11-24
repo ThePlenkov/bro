@@ -281,7 +281,14 @@ describe('classifyArmCommand', () => {
     // the registered spellings carry the group word (specs/bro-npx)
     assert.equal(classifyArmCommand('bro work drill down "x"'), 'drill');
     assert.equal(classifyArmCommand('bro work drill up --result "done"'), 'drill');
-    assert.equal(classifyArmCommand('bro work wtf "why"'), 'drill');
+    // wtf registers under self, not work (review round on PR #1168) —
+    // `bro work wtf` dispatches nowhere and arms nothing
+    assert.equal(classifyArmCommand('bro self wtf "why"'), 'drill');
+    assert.equal(classifyArmCommand('bro work wtf "why"'), null);
+    // npx-prefixed group-word forms (amazon-q review round)
+    assert.equal(classifyArmCommand('npx -y @broject/bro review act status'), 'act');
+    assert.equal(classifyArmCommand('npx @broject/bro work drill down "x"'), 'drill');
+    assert.equal(classifyArmCommand('npx bro self wtf "why"'), 'drill');
   });
 
   test('arms work on worktree-mutating commands', () => {
