@@ -180,6 +180,7 @@
     }
   },
   "mesh": {
+    "rig": "mesh://ThePlenkov/bro",
     "peers": {
       "sverka": {
         "rig": "mesh://sverka-dev/sverka",
