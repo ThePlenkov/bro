@@ -18,7 +18,7 @@ import {
   reviewHost,
 } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
-import { parseCollectArgs, readOption, usage } from './debt-args.ts';
+import { parseCollectArgs, usage } from './debt-args.ts';
 import { collectReviewThreads } from './debt-scan.ts';
 import { cmdImport } from './debt-import.ts';
 import { cmdList, cmdNext, cmdPrs, cmdStats, cmdStatus, cmdTrend } from './debt-query.ts';
@@ -29,6 +29,7 @@ import {
   refreshDebtLedger,
   warnUnknownSources,
 } from './debt-sources.ts';
+import { parseWatchArgs } from './debt-watch.ts';
 import { parseSources } from '@broject/debt';
 
 export { parseCollectArgs } from './debt-args.ts';
@@ -86,43 +87,6 @@ async function cmdCollect(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/** setTimeout overflows above 2^31-1 ms (~24.8 days) and fires
- *  immediately — bound the interval below that. */
-const MAX_INTERVAL_MS = 2_147_483_647;
-
-function parseIntervalSec(value: string | null): number {
-  const n = Number(value);
-  const bad = value === null || !Number.isSafeInteger(n) || n <= 0;
-  if (bad || n * 1000 > MAX_INTERVAL_MS) {
-    console.error(`error: --interval must be a positive integer (seconds), got "${value}"`);
-    process.exit(2);
-  }
-  return n;
-}
-
-interface WatchArgs {
-  intervalSec: number;
-  collectArgv: string[];
-}
-
-/** One argv slot — --interval's value or a collect flag passthrough. */
-function watchArg(argv: string[], i: number, out: WatchArgs): number {
-  if (argv[i] !== '--interval') {
-    out.collectArgv.push(argv[i]!);
-    return 0;
-  }
-  out.intervalSec = parseIntervalSec(readOption(argv, i));
-  return 1;
-}
-
-function parseWatchArgs(argv: string[]): WatchArgs {
-  const out: WatchArgs = { intervalSec: 300, collectArgv: [] };
-  for (let i = 0; i < argv.length; i += 1) {
-    i += watchArg(argv, i, out);
-  }
-  return out;
 }
 
 /** One collect pass — cmdCollect wrote ledger + overlays, so publish
