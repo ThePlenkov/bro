@@ -21,7 +21,7 @@ import type {
   TaskStoreAsync,
 } from '@broject/core';
 import { gitTry } from '@broject/core';
-import { glab, glabJson, glabJsonAsync, glabPaged, glabPagedAsync, glabTry } from './glab.ts';
+import { glab, glabJson, glabPaged, glabTry } from './glab.ts';
 import type { GlabOpts } from './glab.ts';
 import { hostFor } from './reviews.ts';
 
@@ -37,14 +37,16 @@ function remoteUrl(dir: string): string | undefined {
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
 }
 
-/** host + path split for GitLab remotes — https, ssh:// and scp-style */
+/** host + path split for GitLab remotes — https, ssh:// and scp-style.
+ *  An ssh:// `user@` prefix is not part of the host (the port stays —
+ *  self-hosted URLs still build). */
 function remoteParts(url: string): { host: string; path: string } | null {
   const m =
     /^(?:https?|ssh):\/\/([^/]+)\/(.+?)\/?$/i.exec(url) ?? /^[^@\s]+@([^:/]+):(.+?)\/?$/.exec(url);
   if (!m) {
     return null;
   }
-  return { host: m[1]!.toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
+  return { host: m[1]!.replace(/^[^@]+@/, '').toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
 }
 
 interface ResolvedProject {
@@ -93,9 +95,12 @@ interface GitLabIssue {
   labels?: string[];
   milestone?: { title?: string } | null;
   references?: { full?: string };
-  blocking_issues_count?: number;
-  blocked_issues_count?: number;
-  has_blocked_issues?: boolean;
+  /** Premium flag: this issue has open incoming blockers. Absent on
+   *  free instances — the `blocked` label is the manual marker there.
+   *  `blocking_issues_count` is NOT the blocked signal: it counts the
+   *  open issues THIS issue blocks (outgoing — a blocker is itself
+   *  ready work), so reading it as "blocked" inverts the map. */
+  blocked?: boolean;
 }
 
 const actorCache = new Map<string, string>();
@@ -116,10 +121,6 @@ function glabActor(dir: string): string {
   return a;
 }
 
-async function glabActorAsync(dir: string): Promise<string> {
-  return glabActor(dir);
-}
-
 function labelsOf(i: GitLabIssue): string[] {
   return i.labels ?? [];
 }
@@ -136,16 +137,7 @@ function isBlocked(i: GitLabIssue, labels: string[]): boolean {
   if (labels.includes(BLOCKED_LABEL)) {
     return true;
   }
-  if (isInteger(i.blocking_issues_count) && i.blocking_issues_count > 0) {
-    return true;
-  }
-  if (isInteger(i.blocked_issues_count) && i.blocked_issues_count > 0) {
-    return true;
-  }
-  if (i.has_blocked_issues === true) {
-    return true;
-  }
-  return false;
+  return i.blocked === true;
 }
 
 function statusOf(i: GitLabIssue, labels: string[], assignees: string[]): string {
