@@ -3244,6 +3244,11 @@ function prepareSpawn(
     throw err;
   }
   let charged: LaneAdmission['admitted'];
+  // the attempt token — minted HERE so the catch's registry rollback
+  // can CAS on it: a respawn reuses the agentId but never the runId,
+  // which is what lets the restore tell "the row this spawn wrote"
+  // from a successor's that landed first (spec bro-l8c4f.5)
+  const runId = mintRunId();
   try {
     // the rate gate charges LAST — after every admission that can
     // still refuse (spec bro-y3jvd): a batch spawn pays its request
@@ -3279,6 +3284,7 @@ function prepareSpawn(
         previousAssignee,
         existing,
         lease: workLease.lease,
+        runId,
       }
     );
     // the committed row now counts the lane itself — the in-flight
@@ -3333,6 +3339,7 @@ function prepareSpawn(
       previousAssignee,
       existing,
       claimAs: opts.claimAs,
+      runId,
     });
     throw err;
   }
@@ -3343,7 +3350,8 @@ function prepareSpawn(
  *  claim is only rewritten while it still carries an assignee this
  *  spawn wrote (a claim another actor moved meanwhile is theirs, not
  *  ours to unbind), and the registry row is only restored/removed while
- *  it still names this spawn's agentId. Every step is best-effort — a
+ *  it still carries this spawn's runId (a same-agentId respawn's row is
+ *  a successor's, not ours). Every step is best-effort — a
  *  rollback that fails leaves the 'lost' registry entry the ordering
  *  comment above promises, never a second thrown error masking the
  *  first. */
@@ -3358,6 +3366,7 @@ function rollbackSpawnWrite(
     previousAssignee: string | undefined;
     existing: AgentRegistryEntry | undefined;
     claimAs: string | undefined;
+    runId: string;
   }
 ): void {
   // the claim — a phantom step carries none, so there is nothing to unbind
@@ -3367,11 +3376,13 @@ function rollbackSpawnWrite(
   // the registry row this spawn wrote over `existing` — restore the row
   // it replaced (a respawn keeps its predecessor's facts), or drop the
   // fresh row so no dead spawn entry lingers. Only while the row still
-  // names OUR agentId — a respawn that already landed owns it now.
+  // carries OUR runId — a respawn reuses the agentId but mints a fresh
+  // token, so a successor's row is never ours to unbind.
   restoreRegistryRow({
     dir,
     molStep: spec.molStep,
     agentId: run.agentId,
+    runId: run.runId,
     existing: run.existing,
   });
 }
@@ -3446,6 +3457,10 @@ function commitSpawn(
     previousAssignee?: string;
     existing: AgentRegistryEntry | undefined;
     lease: Lease;
+    /** the attempt token the caller minted — respawns reuse the
+     *  agentId but never the runId, so it doubles as the rollback's
+     *  CAS identity on the row this commit writes */
+    runId: string;
   }
 ): {
   promptFile: string;
@@ -3455,15 +3470,14 @@ function commitSpawn(
   runId: string;
 } {
   mkdirPrivateSync(home);
-  const { agentId, existing, lease } = run;
+  const { agentId, existing, lease, runId } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
   const captureStderr = backend !== 'gascity' && backend !== 'copilot' && backend !== 'devin';
   const stderrLog = captureStderr ? join(home, `${agentId}.stderr`) : undefined;
-  // every attempt mints its own runId — respawns reuse the agentId but
+  // every attempt carries its own runId — respawns reuse the agentId but
   // never the attempt artifacts: an old wrapper's late writes land in
   // its own runId's files, never the live run's (spec bro-l8c4f.5)
-  const runId = mintRunId();
   const exitFile = join(home, agentExitFileName(agentId, runId));
   rmSync(exitFile, { force: true });
   // a pre-handshake run's legacy exit file would alias nothing the new

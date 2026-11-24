@@ -220,8 +220,12 @@ function claimUncoveredProviderStarts(ctx: CrossKindAdmit, coveredKinds: Set<str
 /** Admit every session a spawned command starts — the cross-kind
  *  claims a spawn owes beyond its own quota lane (which
  *  admitSessionSlot already covered). Claims land on `out` — custody
- *  is the caller's, released when the spawn unwinds or the committed
- *  row takes over the count. */
+ *  is the caller's, and it outlives the commit: a committed registry
+ *  row does NOT take over their count the way it does the plane-free
+ *  provider claims (the worker may not have started or written its
+ *  session mark yet). They release only on launch-failure cleanup or
+ *  session handoff (retag onto the spawned pid); releasing them at
+ *  commit would open a gap in the session count. */
 export function admitSpawnedCommandStarts(args: {
   spawnedCommand: string;
   agents: Record<string, Record<string, unknown>> | undefined;

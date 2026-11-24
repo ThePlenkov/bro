@@ -13,7 +13,7 @@ import { resolve } from 'node:path';
 import {
   type AgentRegistryEntry,
   type ProviderEntry,
-  patchAgentRegistry,
+  patchAgentRegistryIf,
   readAgentRegistry,
 } from '@broject/core';
 import type { AgentConnectorEnv } from './core.ts';
@@ -54,8 +54,10 @@ function settleMatchedEntries(
   const matched: Array<[string, AgentRegistryEntry]> = [];
   for (const [molStep, entry] of Object.entries(registry)) {
     const byStep = molSteps.size > 0 && molSteps.has(molStep);
-    const byTree = worktree !== undefined && entryMatchesWorktree(entry, worktree);
-    const hit = byStep || byTree;
+    // a step-name hit needs no worktree probe — realpath on an
+    // unresponsive mount would stall the settle for a row the name
+    // already selected
+    const hit = byStep || (worktree !== undefined && entryMatchesWorktree(entry, worktree));
     if (hit) {
       matched.push([molStep, entry]);
     }
@@ -114,22 +116,24 @@ function settleRmSessions(
   }
 }
 
-/** Clear `acpSessionId` on the matched rows — skipped where the row
- *  already lost its entry (a parallel reaper owns it now). */
-function clearSettledSessions(
-  dir: string,
-  registry: Record<string, AgentRegistryEntry>,
-  matched: Array<[string, AgentRegistryEntry]>
-): void {
+/** Clear `acpSessionId` on the matched rows. The patch lands only
+ *  while the CURRENT row still holds the matched session — a row a
+ *  reaper removed or a respawn replaced between the snapshot read and
+ *  the write is left untouched (the CAS check and the write share one
+ *  registry lock). */
+function clearSettledSessions(dir: string, matched: Array<[string, AgentRegistryEntry]>): void {
   for (const [molStep, entry] of matched) {
     const hasSession = typeof entry.acpSessionId === 'string' && entry.acpSessionId !== '';
     if (!hasSession) {
       continue;
     }
     try {
-      if (registry[molStep] !== undefined) {
-        patchAgentRegistry(dir, molStep, { acpSessionId: undefined });
-      }
+      patchAgentRegistryIf(
+        dir,
+        molStep,
+        { acpSessionId: undefined },
+        cur => cur !== undefined && cur.acpSessionId === entry.acpSessionId
+      );
     } catch {
       // advisory
     }
@@ -165,7 +169,7 @@ export function settleAcpSessions(
     }
     const matched = settleMatchedEntries(registry, new Set(opts.molSteps ?? []), worktree);
     settleRmSessions(env.providers ?? {}, settleIdProviders(matched), settled);
-    clearSettledSessions(dir, registry, matched);
+    clearSettledSessions(dir, matched);
   } catch {
     // advisory — a registry read failure still returns what settled
   }

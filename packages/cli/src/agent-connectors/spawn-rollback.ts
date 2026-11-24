@@ -51,15 +51,21 @@ function restoreRebindAssignee(
 }
 
 /** A fresh claim's undo — reopen only while the step still sits in
- *  the in_progress/our-actor state this spawn's claimStep produced. */
+ *  the in_progress state this spawn's claimStep produced AND carries
+ *  a name this spawn wrote: our actor, or the `claimAs` the
+ *  bookkeeping rebound it to (a claim-on-behalf still counts — it is
+ *  this spawn's fact to unbind, and skipping it would strand the bead
+ *  in_progress under a name the dead run owned). */
 function reopenFreshClaim(
   store: StepStore,
   molStep: string,
   now: StepProbe,
-  beadsDir: string
+  beadsDir: string,
+  claimAs: string | undefined
 ): void {
-  const stillOurs = now?.status === 'in_progress' && now.assignee === bdActor(beadsDir);
-  if (stillOurs) {
+  const ours =
+    now?.assignee === bdActor(beadsDir) || (claimAs !== undefined && now?.assignee === claimAs);
+  if (now?.status === 'in_progress' && ours) {
     store.reopen(molStep);
   }
 }
@@ -78,7 +84,7 @@ export function rollbackSpawnClaim(beadsDir: string, molStep: string, run: Spawn
     if (rebind) {
       restoreRebindAssignee(store, molStep, now, run);
     } else if (!run.claimed) {
-      reopenFreshClaim(store, molStep, now, beadsDir);
+      reopenFreshClaim(store, molStep, now, beadsDir, run.claimAs);
     }
   } catch {
     // best-effort — the 'lost' entry still names the failed run
@@ -88,19 +94,23 @@ export function rollbackSpawnClaim(beadsDir: string, molStep: string, run: Spawn
 /** Undo the registry row a failed spawn wrote over `existing` —
  *  restore the row it replaced (a respawn keeps its predecessor's
  *  facts), or drop the fresh row so no dead spawn entry lingers.
- *  Only while the row still names OUR agentId — a respawn that
- *  already landed owns it now. */
+ *  Only while the row is still THE ONE this spawn wrote — a respawn
+ *  reuses the agentId but mints its own runId, so agentId alone
+ *  cannot tell our row from a successor that landed first. */
 export function restoreRegistryRow(args: {
   dir: string;
   molStep: string;
   agentId: string;
+  /** the attempt token this spawn wrote into its row — the CAS
+   *  identity a same-agentId respawn can never match */
+  runId: string;
   existing: AgentRegistryEntry | undefined;
 }): void {
   try {
     withAgentRegistryLock(args.dir, () => {
       const reg = readAgentRegistry(args.dir);
       const cur = reg[args.molStep];
-      const foreign = cur === undefined || cur.agentId !== args.agentId;
+      const foreign = cur === undefined || cur.agentId !== args.agentId || cur.runId !== args.runId;
       if (foreign) {
         return;
       }
