@@ -102,7 +102,7 @@ test('provider docs keep transport and boundary policy separate from workflow me
   );
   assert.match(
     docs,
-    /bro review act.*bro review debt/s,
+    /bro review act[\s\S]{0,60}bro review\s*\ndebt/,
     'provider docs must state that the core gate/debt workflow needs no provider plane'
   );
 });
