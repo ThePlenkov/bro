@@ -18,7 +18,12 @@
         "timeToGreenMs": 600000,
         "humanInterventions": 0,
         "controlPlaneCalls": 50,
-        "tokens": { "input": 100000, "output": 20000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 100000,
+          "output": 20000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
@@ -34,7 +39,7 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "History task (medium feature, 4 files +723): hooks waste-guard — deterministic tool-call discipline (dup-cache, verify-gate, batch nudge). Starting state is the parent of the PR #1080 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "description": "History task (medium feature, 4 files +723): hooks waste-guard \u2014 deterministic tool-call discipline (dup-cache, verify-gate, batch nudge). Starting state is the parent of the PR #1080 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
         "waste-guard hook behavior lands per the reference PR #1080 diff",
         "the PR's added/changed tests pass",
@@ -44,7 +49,12 @@
         "timeToGreenMs": 2700000,
         "humanInterventions": 0,
         "controlPlaneCalls": 80,
-        "tokens": { "input": 250000, "output": 60000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 250000,
+          "output": 60000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
@@ -70,7 +80,12 @@
         "timeToGreenMs": 1500000,
         "humanInterventions": 0,
         "controlPlaneCalls": 50,
-        "tokens": { "input": 150000, "output": 40000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 150000,
+          "output": 40000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
@@ -96,7 +111,12 @@
         "timeToGreenMs": 3600000,
         "humanInterventions": 0,
         "controlPlaneCalls": 100,
-        "tokens": { "input": 400000, "output": 90000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 400000,
+          "output": 90000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
@@ -112,7 +132,7 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "History task (big focused fix, 2 files +1755): acp-proxy pump writes awaited — outbound backpressure against a stalled peer. Starting state is the parent of the PR #1096 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "description": "History task (big focused fix, 2 files +1755): acp-proxy pump writes awaited \u2014 outbound backpressure against a stalled peer. Starting state is the parent of the PR #1096 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
         "awaited pump writes / backpressure lands per the reference PR #1096 diff",
         "the PR's added/changed tests pass",
@@ -122,7 +142,12 @@
         "timeToGreenMs": 2700000,
         "humanInterventions": 0,
         "controlPlaneCalls": 80,
-        "tokens": { "input": 300000, "output": 80000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 300000,
+          "output": 80000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
@@ -138,7 +163,7 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "History task (focused fix, 3 files +691): tmp-sweep never deletes across a mount boundary — a stale tmp dir containing a mount must not lose foreign-fs content. Starting state is the parent of the PR #1098 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "description": "History task (focused fix, 3 files +691): tmp-sweep never deletes across a mount boundary \u2014 a stale tmp dir containing a mount must not lose foreign-fs content. Starting state is the parent of the PR #1098 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
         "mount-boundary guard lands per the reference PR #1098 diff",
         "the PR's added/changed tests pass",
@@ -148,7 +173,12 @@
         "timeToGreenMs": 1200000,
         "humanInterventions": 0,
         "controlPlaneCalls": 40,
-        "tokens": { "input": 120000, "output": 30000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
@@ -174,11 +204,140 @@
         "timeToGreenMs": 3000000,
         "humanInterventions": 0,
         "controlPlaneCalls": 90,
-        "tokens": { "input": 350000, "output": 85000, "cacheRead": 0, "cacheWrite": 0 },
+        "tokens": {
+          "input": 350000,
+          "output": 85000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
         "duplicateWorkCount": 0,
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
       }
+    },
+    {
+      "taskId": "bro-4i4q4",
+      "revision": "a411765deaf95385272a1f5467a309a5f021554c",
+      "pr": 1124,
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (core + cli, 2 files +~200): remote-atomic bead claim \u2014 publish via bd sync then verify the merged head; bro next and bro claim integrate it. Starting state is the parent of the PR #1124 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-4i4q4",
+      "mergeCommit": "b5d8f3c48f23c54dd0d1592d102b716a8df5cf94"
+    },
+    {
+      "taskId": "bro-gqn54",
+      "revision": "8653b9a675bb6333c3b40fe5c8eaee07d1295241",
+      "pr": 1114,
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (merge verb, 1 file +~120): close the post-arm thread race \u2014 pinned direct merge on the gate-verified sha and settle-loop disarm on new unresolved threads. Starting state is the parent of the PR #1114 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-gqn54",
+      "mergeCommit": "7ffe23e22098128fee528bb8f4b7e36260453a60"
+    },
+    {
+      "taskId": "bro-merge-review-race",
+      "revision": "192ac5447ab8fc1fe487c879ab2cfbc37de12175",
+      "pr": 1100,
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (exit gate, 1 file +~60): merge gate must not arm while a Devin Review run is in flight \u2014 pending reviewer check-runs block until settled. Starting state is the parent of the PR #1100 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-merge-review-race",
+      "mergeCommit": "69282ed94097c78e2c512021bf95f167f0d3c422"
+    },
+    {
+      "taskId": "bro-ezboq",
+      "revision": "5671a2f5383156febf302465c5a64d5519359a6f",
+      "pr": 1066,
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (serve, 2 files +~150): per-lane quota gate for acp turns \u2014 serve.limits parser, laneGateTake admission, 429 with retry-after. Starting state is the parent of the PR #1066 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-ezboq",
+      "mergeCommit": "3b3395483d5bd7a9ab2854104300a190a2656fca"
     }
   ]
 }
