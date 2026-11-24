@@ -115,6 +115,7 @@ function readCache(): { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt
       () => Array.isArray(snapshot.issues),
       () => typeof value.fetchedAt === 'string',
       () => Array.isArray(value.gh),
+      () => typeof value.sha === 'string',
     ];
     if (checks.some(check => !check())) return null;
     return value as { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt: string };
