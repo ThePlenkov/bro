@@ -1,5 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
@@ -37,7 +45,14 @@ export function readStateFile(path: string): ServeState | undefined {
     if (safePath === undefined) {
       return undefined;
     }
-    const v = JSON.parse(readFileSync(safePath, 'utf8')) as Partial<ServeState>;
+    const fd = openSync(safePath, 'r');
+    let raw: string;
+    try {
+      raw = readFileSync(fd, 'utf8');
+    } finally {
+      closeSync(fd);
+    }
+    const v = JSON.parse(raw) as Partial<ServeState>;
     if (isValidState(v)) {
       return v as ServeState;
     }
