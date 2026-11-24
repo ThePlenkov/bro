@@ -25,7 +25,10 @@ and the drift must be visible, not silent.
 - **Event map**: `SessionStart`, `PreCompact`, `UserPromptSubmit`,
   `PostToolUse`, `PostToolUseFailure`, `Stop`, `PreToolUse` — each
   dispatched as `"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh" <event> || true`
-  with timeout 20.
+  with timeout 20. **Gap (documented, per the master table's paired
+  pre/post-compact requirement):** Claude Code exposes no `PostCompact`
+  event — the manifest carries `PreCompact` only; the post-compact
+  rehydrate rides the post-compaction `SessionStart` instead.
 - **Marketplace sources**: a directory source (pointing at a dev
   checkout) is a supported, documented split — the plugin is
   dev-reactive while hooks still resolve the stable PATH binary in

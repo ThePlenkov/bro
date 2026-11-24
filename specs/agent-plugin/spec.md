@@ -73,7 +73,7 @@ documented gap in its child spec:
 | prompt-submit | sdd/learn/guard nudges for the session's own claims |
 | post-tool | notify drain (mailbox → context); no-op fast path applies |
 | stop | the review/work/task/drill gates — gates, not loops: block once, a repeated stop passes |
-| permission | stdout is the answer — a denied tool call must never be a silent fail-open |
+| permission | stdout is the answer — a denied tool call must never be a silent fail-open; this row holds even under `BRO_HOOKS=0` (the exception the hook-chain section carves) |
 
 ### Stop-gate connector model
 
@@ -135,6 +135,9 @@ client's story no longer fits a table row.
   cache copy (`installed`/`stale`), no emitted adapter (spec bro-cl1).
 - Fail-open holds: any hook invocation with bro absent or broken exits 0
   and the session proceeds — fixtures per event, per client.
+- The `BRO_HOOKS=0` fast-exit path answers `permission` via stdout even
+  when every other event exits before resolving a binary — a fixture
+  pins it: machine-backend tree, permission event, correct stdout.
 - The no-op fast path exits 0 without a Node spawn when nothing can emit
   or mutate (bro-arm83 fixtures).
 - Each client's event map covers the required lifecycle table or names
