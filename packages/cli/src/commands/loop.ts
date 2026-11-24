@@ -50,15 +50,14 @@ import { ACT_STATE_TTL_MS, type PrStateCache, prStateCache } from '@broject/act'
 import {
   type AgentConnector,
   type AgentInfo,
+  type AgentRegistryEntry,
   admitSessionSlot,
   awaitFileLock,
   BATCH_MARKER_ENV,
   type BrouterModels,
   CLASS_LABEL_PREFIX,
   type ClaimCapability,
-  type ClaimRow,
   commandCliName,
-  type ExitCode,
   type ExplainSlice,
   ensureTasksBackend,
   explainSlicesOrExit,
@@ -75,7 +74,6 @@ import {
   type MirrorPolicy,
   mkdirPrivateSync,
   openPrivateAppendSync,
-  printUsage,
   procStat,
   projectId,
   readAgentRegistry,
@@ -100,14 +98,10 @@ import {
   diskFloorBytes,
   diskFloorFor,
   expandAgentCmd,
-  FLEET_HEAD_PREFIXES,
-  type FleetPrRow,
-  isFleetHead,
   type LoopConfig,
   loopSlug,
   MB,
 } from '@broject/loop';
-import { isStackName } from '@broject/stack';
 import {
   type AgentConnectorEnv,
   admitProviderGateStarts,
@@ -131,6 +125,7 @@ import {
   resolveAgentConnector,
   resolveSpawnProvider,
   resolveSpawnRoute,
+  type SessionQuotaLane,
   type SpawnProviderPick,
   sessionQuotaOf,
   settleAcpSessions,
@@ -142,6 +137,24 @@ import { runActCommand } from './act.ts';
 import { flag, positionals } from './args.ts';
 import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { listOpenFleetPrs, loopRefTails } from './fleet-prs.ts';
+import {
+  claimedTails,
+  openLoopPrs,
+  sayLoopAudit,
+  sweepLoopLitter,
+  syncAfterAudit,
+} from './loop-audit.ts';
+import {
+  effectiveAgent,
+  flagTierPin,
+  labelSelection,
+  type LoopLaneSel,
+  loopLaneSel,
+  rejectStrayArgs,
+  stackNameFlag,
+  usage,
+} from './loop-args.ts';
 import { explainSpawn } from './loop-explain.ts';
 import { type RouteTableLane, routeTableLane } from './loop-routes.ts';
 import { linkRunToDecision, reconcileOutcomes, reportRoutedOutcome } from './outcome-report.ts';
@@ -169,18 +182,21 @@ import {
   type StackSlot,
 } from '@broject/rig';
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
-import { runSyncCommand } from './sync.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 import {
   defaultBranchName,
-  type LitterReap,
   litterClaims,
   parseWorktreePorcelain,
   readStackEdges,
-  reapLoopLitter,
   recordStackEdge,
   stackPushLockPath,
 } from './work.ts';
+
+// loop.test.ts pins loopRefTails + syncAfterAudit on this module's
+// surface — the implementations live in fleet-prs.ts / loop-audit.ts
+// now; LoopLaneSel moved with the argv layer to loop-args.ts
+export { loopRefTails, syncAfterAudit };
+export type { LoopLaneSel };
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -276,50 +292,6 @@ interface Ctx {
   q: LoopQueue;
   /** The claim scope `runLoop` resolved — read by the claim pick. */
   scope?: unknown;
-}
-
-/** Clickable PR ref for this repo — user-facing lines never print bare #N. */
-const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr);
-
-function usage(exitCode: ExitCode = 2): never {
-  printUsage(
-    `Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
-       bro loop [--every SEC]        run in supervised loop mode
-       bro loop install [--every N] [--print]
-       bro loop uninstall
-  --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
-                                a value naming a configured providers.<name>
-                                spawns through the provider registry instead
-  --provider NAME                providers.<name> pick (acp → headless worker)
-  --profile NAME                 fleet.profiles.<name> preset
-  --class NAME                   pin every claimed bead to one
-                                fleet.routing class (default: the bead's
-                                class:<name> label, else 'default')
-  --model M                      model override for the provider lane
-  --auto-approve                 acp permission policy: allow, not deny
-  --explain[=SLICES]             print why the bead landed on this route —
-                                route, model, health, cost (or a subset)
-  --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
-  --parked-wake MIN              parked bead's snooze before it wakes to
-                                open (loop.parkedWakeMin, 120; 0 = iced
-                                until bd undefer)
-  --label a,b                    declared scope — only beads carrying one
-                                of these labels are claimable
-  --stack NAME                   chain claimed beads onto stack NAME —
-                                each PR targets the member below
-  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 1)
-  --max-open-total N             hard ceiling on total open fleet PRs (loop.maxOpenTotal, 10; 0 = off)
-  --disk-min-slots N             disk floor in slot units — pushes hold while
-                                free disk < N×loop.worktreeMb on any fs the
-                                run writes to (loop.diskMinSlots, 2; 0 = off)
-  --batch N                      max beads per claim — a clump shares the
-                                lead's affinity key (spec/epic/area/path),
-                                one worktree, one worker, one PR
-                                (loop.batch, 1 = solo)
-  --every SEC                    supervised loop cadence, ≥${MIN_INTERVAL_SEC}s
-  --interval SEC                 gate poll interval, ≥0.1s (60)`,
-    exitCode
-  );
 }
 
 const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
@@ -441,17 +413,6 @@ function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string
 }
 
 // --- the agent lane: provider registry or raw template (spec bro-c3no8) -------
-
-/** What a spawn runs — the provider-resolved worker when the provider
- *  lane engaged, undefined for the raw `loop.agent`/`--agent` template. */
-export interface LoopLaneSel {
-  agent?: string;
-  provider?: string;
-  profile?: string;
-  model?: string;
-  autoApprove?: boolean;
-  class?: string;
-}
 
 /** Resolve which lane `bro loop` spawns through. A `--agent` value that
  *  exactly names a configured `providers.<name>` IS a provider pick;
@@ -1222,6 +1183,153 @@ function laneSpawnedCommand(lane: LoopLane, fallback: string): string {
   return fallback;
 }
 
+/** The shared admission facts the three claim passes inside
+ *  admitLaneSessions read — derived once so no pass re-resolves them. */
+interface LaneAdmit {
+  dir: string;
+  registry: Record<string, AgentRegistryEntry>;
+  env: AgentConnectorEnv;
+  liveByKind: Map<string, Set<string>>;
+  workerEnv: Record<string, string>;
+  molStep: string;
+  key: string;
+  scope: string;
+  spawnedCmd: string;
+  startsCommand: string | undefined;
+  quotaPlaneKind: string | undefined;
+  budgetCharged: (kind: string) => void;
+  out: string[];
+}
+
+/** The provider lanes a raw-template spawn owes, resolved + pre-flighted
+ *  before ANY claim lands — a full account lane refuses before a kind
+ *  claim can hold a slot against it. The lane's provider is its own
+ *  pick PLUS every OTHER armed provider entry the spawned command
+ *  launches — a named `combo` template opening sessions on a second
+ *  account lane still owes that lane's cap (the explicit pick heads
+ *  the list for alias resolution; discovery adds the rest). With no
+ *  named provider the spawned command's launches alone decide — never
+ *  the agents.native.provider default a template escape bypassed. */
+function laneProviderGates(a: LaneAdmit, pick: string | undefined): ProviderGate[] {
+  const providers =
+    pick !== undefined
+      ? [pick, ...providersForSpawnedCommand(a.env, a.spawnedCmd).filter(p => p !== pick)]
+      : providersForSpawnedCommand(a.env, a.spawnedCmd);
+  return providers
+    .map(provider =>
+      providerGateOf({
+        dir: a.dir,
+        registry: a.registry,
+        env: a.env,
+        provider,
+        agents: a.env.agents,
+        workerEnv: a.workerEnv,
+        quotaPlaneKind: a.quotaPlaneKind,
+        startsCommand: a.startsCommand,
+      })
+    )
+    .filter((gate): gate is ProviderGate => gate !== undefined);
+}
+
+/** One start count map folded into another — the union over every
+ *  gate (a start claims once, so the counts never overlap). */
+function mergeStartCounts(into: Map<string, number>, starts: ReadonlyMap<string, number>): void {
+  for (const [kind, n] of starts) {
+    into.set(kind, (into.get(kind) ?? 0) + n);
+  }
+}
+
+/** Starts the provider-cap passes claimed per kind — the union over
+ *  every gate; the cross-kind pass subtracts them or one session reads
+ *  as two. The map also feeds each pass: overlapping provider entries
+ *  (one's command a prefix of another's) share the same planes, and a
+ *  start an earlier gate claimed is re-JUDGED under this lane's cap
+ *  but never claimed again. */
+function claimProviderGateStarts(
+  a: LaneAdmit,
+  providerGates: readonly ProviderGate[]
+): Map<string, number> {
+  const claimedStarts = new Map<string, number>();
+  for (const providerGate of providerGates) {
+    mergeStartCounts(
+      claimedStarts,
+      admitProviderGateStarts(providerGate, {
+        dir: a.dir,
+        env: a.env,
+        agents: a.env.agents,
+        workerEnv: a.workerEnv,
+        molStep: a.molStep,
+        key: a.key,
+        scope: a.scope,
+        liveByKind: a.liveByKind,
+        budgetCharged: a.budgetCharged,
+        startsCommand: a.startsCommand,
+        claimedStarts,
+        out: a.out,
+        ledgerOut: a.out,
+      })
+    );
+  }
+  return claimedStarts;
+}
+
+/** The lane's own-kind claims via its quota lane — one per session the
+ *  spawned command starts on the quota kind (a multi-start command
+ *  judged once but claimed once would read one session where two
+ *  land, and the provider census would admit on a slot count that
+ *  under-counts the lane). Each admit re-judges post-claim: the Nth
+ *  claim trips the refusal exactly when headroom cannot seat N.
+ *  Returns the primary reservation; later claims ride `a.out` with
+ *  the cross-kind set. */
+function claimQuotaStarts(
+  a: LaneAdmit,
+  quota: SessionQuotaLane,
+  providerGates: readonly ProviderGate[]
+): string | undefined {
+  const quotaView = sessionCapViews(a.spawnedCmd, a.env.agents, a.workerEnv).find(
+    v => v.kind === quota.plane.kind
+  );
+  const quotaStarts = Math.max(
+    1,
+    quotaView?.starts ?? quota.plane.startsSessions?.(a.spawnedCmd) ?? 1,
+    // the provider passes skipped this plane — their entry-command
+    // count is the quota loop's truth when the spawned command
+    // reads zero there (an argv driver's hidden starts)
+    ...providerGates.map(g => providerGateQuotaStarts(g, a.startsCommand))
+  );
+  let reservation: string | undefined;
+  try {
+    for (let i = 0; i < quotaStarts; i++) {
+      const claimed = admitSessionSlot(quota.plane, quota.agents, {
+        key: a.key,
+        molStep: a.molStep,
+        workerEnv: a.workerEnv,
+        scope: a.scope,
+        liveKeys: a.liveByKind.get(quota.plane.kind) ?? EMPTY_KEYS,
+        // a provider gate whose own session plane IS this lane's —
+        // its verdict rides the quota admit instead of claiming the
+        // lane twice (spec bro-x601l)
+        ...providerGatePayload(providerGates, quota.plane.kind),
+        budgetCharged: a.budgetCharged,
+      });
+      if (i === 0) {
+        reservation = claimed;
+      } else if (claimed !== undefined) {
+        a.out.push(claimed);
+      }
+    }
+    return reservation;
+  } catch (err) {
+    // a later start's refusal strands the primary claim inside this
+    // frame — the caller's catch frees the cross-kind claims off a.out
+    // but never saw this one
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation);
+    }
+    throw err;
+  }
+}
+
 /** Raw-template session admission — the same admission the registry
  *  spawn runs: the provider lane's OUTER gate first (spec bro-x601l —
  *  `fleet.providerCaps` judges the aggregate census over every plane
@@ -1284,66 +1392,23 @@ export function admitLaneSessions(
     budgetChargedKinds.push(kind);
   };
   try {
-    // the provider lanes resolved + pre-flighted before ANY claim
-    // lands — a full account lane refuses before a kind claim can hold
-    // a slot against it. The lane's provider is its own pick PLUS
-    // every OTHER armed provider entry the spawned command launches —
-    // a named `combo` template opening sessions on a second account
-    // lane still owes that lane's cap (the explicit pick heads the
-    // list for alias resolution; discovery adds the rest). With no
-    // named provider the spawned command's launches alone decide —
-    // never the agents.native.provider default a template escape
-    // bypassed.
-    const laneProviders =
-      lane.provider !== undefined
-        ? [
-            lane.provider,
-            ...providersForSpawnedCommand(ctx.env, spawnedCmd).filter(p => p !== lane.provider),
-          ]
-        : providersForSpawnedCommand(ctx.env, spawnedCmd);
-    const providerGates: ProviderGate[] = [];
-    for (const provider of laneProviders) {
-      const gate = providerGateOf({
-        dir: ctx.root,
-        registry,
-        env: ctx.env,
-        provider,
-        agents: ctx.env.agents,
-        workerEnv,
-        quotaPlaneKind: templateQuota?.plane.kind,
-        startsCommand: providerStartsCommand,
-      });
-      if (gate !== undefined) {
-        providerGates.push(gate);
-      }
-    }
-    // starts the provider-cap passes claimed per kind — the union over
-    // every gate (a start claims once, so the counts never overlap);
-    // the cross-kind pass subtracts them or one session reads as two.
-    // The map also feeds each pass: overlapping provider entries (one's
-    // command a prefix of another's) share the same planes, and a
-    // start an earlier gate claimed is re-JUDGED under this lane's cap
-    // but never claimed again.
-    const providerClaimedStarts = new Map<string, number>();
-    for (const providerGate of providerGates) {
-      for (const [kind, n] of admitProviderGateStarts(providerGate, {
-        dir: ctx.root,
-        env: ctx.env,
-        agents: ctx.env.agents,
-        workerEnv,
-        molStep: spec.molStep,
-        key,
-        scope,
-        liveByKind,
-        budgetCharged,
-        startsCommand: providerStartsCommand,
-        claimedStarts: providerClaimedStarts,
-        out: crossKind,
-        ledgerOut: crossKind,
-      })) {
-        providerClaimedStarts.set(kind, (providerClaimedStarts.get(kind) ?? 0) + n);
-      }
-    }
+    const admit: LaneAdmit = {
+      dir: ctx.root,
+      registry,
+      env: ctx.env,
+      liveByKind,
+      workerEnv,
+      molStep: spec.molStep,
+      key,
+      scope,
+      spawnedCmd,
+      startsCommand: providerStartsCommand,
+      quotaPlaneKind: templateQuota?.plane.kind,
+      budgetCharged,
+      out: crossKind,
+    };
+    const providerGates = laneProviderGates(admit, lane.provider);
+    const providerClaimedStarts = claimProviderGateStarts(admit, providerGates);
     if (spawnedCmd !== '') {
       admitSpawnedCommandStarts({
         spawnedCommand: spawnedCmd,
@@ -1361,42 +1426,7 @@ export function admitLaneSessions(
       });
     }
     if (templateQuota !== undefined) {
-      // every session the spawned command opens on the quota kind owes
-      // the lane a claim — a multi-start command judged once but
-      // claimed once would read one session where two land, and the
-      // provider census would admit on a slot count that under-counts
-      // the lane. Each admit re-judges post-claim: the Nth claim trips
-      // the refusal exactly when headroom cannot seat N.
-      const quotaView = sessionCapViews(spawnedCmd, ctx.env.agents, workerEnv).find(
-        v => v.kind === templateQuota.plane.kind
-      );
-      const quotaStarts = Math.max(
-        1,
-        quotaView?.starts ?? templateQuota.plane.startsSessions?.(spawnedCmd) ?? 1,
-        // the provider passes skipped this plane — their entry-command
-        // count is the quota loop's truth when the spawned command
-        // reads zero there (an argv driver's hidden starts)
-        ...providerGates.map(g => providerGateQuotaStarts(g, providerStartsCommand))
-      );
-      for (let i = 0; i < quotaStarts; i++) {
-        const claimed = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-          key,
-          molStep: spec.molStep,
-          workerEnv,
-          scope,
-          liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
-          // a provider gate whose own session plane IS this lane's —
-          // its verdict rides the quota admit instead of claiming the
-          // lane twice (spec bro-x601l)
-          ...providerGatePayload(providerGates, templateQuota.plane.kind),
-          budgetCharged,
-        });
-        if (i === 0) {
-          reservation = claimed;
-        } else if (claimed !== undefined) {
-          crossKind.push(claimed);
-        }
-      }
+      reservation = claimQuotaStarts(admit, templateQuota, providerGates);
     }
     return { reservation, crossKind };
   } catch (err) {
@@ -1463,62 +1493,6 @@ const HEARTBEAT_MIN_MS = 2_000;
  *  is NOT this worker — 'lost' rather than inherit a foreign
  *  generation's clock. For a fix/rebase worker (`m.pr` already set)
  *  the terminal read is simply 'active': the gate re-polls. */
-function labelSelection(argv: string[]): { labels?: string[] } {
-  const raw = flag(argv, '--label');
-  if (raw === undefined) {
-    return {};
-  }
-  const labels = raw
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s !== '');
-  if (labels.length === 0) {
-    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui');
-    process.exit(2);
-  }
-  return { labels };
-}
-
-/** `--stack NAME` — must form a git-ref-safe component or the member
- *  branches it plans would fail on creation mid-run. */
-function stackNameFlag(argv: string[]): string | undefined {
-  const name = flag(argv, '--stack');
-  if (name !== undefined && !isStackName(name)) {
-    console.error(`bro loop: invalid stack name "${name}" ([a-z0-9_.-])`);
-    process.exit(2);
-  }
-  return name;
-}
-
-const LOOP_VALUE_FLAGS = new Set([
-  '--agent',
-  '--merge-timeout',
-  '--parked-wake',
-  '--max',
-  '--max-open',
-  '--max-open-total',
-  '--worktree-warn',
-  '--disk-min-slots',
-  '--batch',
-  '--batch-min-priority',
-  '--interval',
-  '--every',
-  '--label',
-  '--stack',
-  '--provider',
-  '--profile',
-  '--class',
-  '--model',
-]);
-const LOOP_BOOL_FLAGS = new Set([
-  '--json',
-  '--dry-run',
-  '--help',
-  '--auto-approve',
-  '--print',
-  '--explain',
-]);
-
 function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
   // install arms and uninstall disarms — both are the orchestrator's
   // own authority over the supervisor cadence; a spawned worker owns
@@ -1625,14 +1599,8 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     process.exit(1);
   }
   const broCfg = loadBroConfig(root);
-  const loopCfg = broCfg.loop as LoopConfig;
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    // install validates the configured tasks backend — a github-tasks
-    // rig has no beads to check; previews (--print/--dry-run) stay pure
-    if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
-      ensureTasksBackend(root, broCfg.connectors);
-    }
-    runLoopSched(argv, root, loopCfg);
+    runLoopSchedLifecycle(argv, root, broCfg);
     return;
   }
   rejectStrayArgs(argv);
@@ -1703,14 +1671,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     if (everySec === undefined) {
       await guardedRun(ctx, releaseAll);
     } else {
-      // supervised passes are strictly sequential — a pass drains the
-      // queue, then the supervisor sleeps until the next re-scan; the
-      // awaits must stay inside the loop, not fan out
-      for (;;) {
-        ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
-        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
-        await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
-      }
+      await supervisedPasses(ctx, everySec, releaseAll);
     }
   } finally {
     process.removeListener('SIGINT', onInt);
@@ -1720,21 +1681,28 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   }
 }
 
-/** Strict flag parse — an unquoted `--agent devin -p --prompt-file
- *  {promptFile}` reads as agent='devin' plus a tail of unknown flags,
- *  silently spawning a bare `devin <file>` TUI per bead instead of a
- *  headless worker. */
-function rejectStrayArgs(argv: string[]): void {
-  const stray = positionals(argv, LOOP_VALUE_FLAGS, {
-    boolFlags: LOOP_BOOL_FLAGS,
-    strict: true,
-  });
-  if (stray.length > 0) {
-    console.error(
-      `bro loop: unexpected argument '${stray[0]}' — quote the agent template ` +
-        "as one arg: --agent 'devin -p --prompt-file {promptFile}'"
-    );
-    process.exit(2);
+/** `bro loop install|uninstall` ride the scheduler path — install
+ *  validates the configured tasks backend first (a github-tasks rig
+ *  has no beads to check; previews --print/--dry-run stay pure). */
+function runLoopSchedLifecycle(
+  argv: string[],
+  root: string,
+  broCfg: ReturnType<typeof loadBroConfig>
+): void {
+  if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
+    ensureTasksBackend(root, broCfg.connectors);
+  }
+  runLoopSched(argv, root, broCfg.loop as LoopConfig);
+}
+
+/** Supervised passes are strictly sequential — a pass drains the
+ *  queue, then the supervisor sleeps until the next re-scan; the
+ *  awaits must stay inside the loop, not fan out. */
+async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => void): Promise<void> {
+  for (;;) {
+    ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
+    await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+    await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
   }
 }
 
@@ -1762,48 +1730,6 @@ async function resolveRunLane(
   const env = loadAgentEnv(root);
   const sel = loopLaneSel(argv);
   return { env, sel, ...(await resolveRunLaneInner(env, sel, cfg)) };
-}
-
-function loopLaneSel(argv: string[]): LoopLaneSel {
-  return {
-    agent: flag(argv, '--agent'),
-    provider: flag(argv, '--provider'),
-    profile: flag(argv, '--profile'),
-    model: flag(argv, '--model'),
-    autoApprove: argv.includes('--auto-approve') ? true : undefined,
-    class: flag(argv, '--class'),
-  };
-}
-
-/** The flag TIER's provider pick — with routing armed, lane.provider
- *  also carries the fallback class's chain head (the floor), so
- *  "is the provider pinned?" must be read from the picks themselves. */
-function flagTierPin(env: AgentConnectorEnv, sel: LoopLaneSel): boolean {
-  return (
-    sel.provider !== undefined ||
-    (sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)) ||
-    (sel.profile !== undefined && fleetProfileOf(env, sel.profile).provider !== undefined)
-  );
-}
-
-/** The template the run expands — a cli provider's `command`
- *  substitutes for `loop.agent`; a template --agent stays the literal
- *  value (provider names are never templates, resolveLoopLane consumed
- *  them); else the config default. */
-function effectiveAgent(
-  lane: LoopLane,
-  sel: LoopLaneSel,
-  env: AgentConnectorEnv,
-  cfg: LoopConfig
-): string {
-  if (lane.worker?.kind === 'template') {
-    return lane.worker.command;
-  }
-  const agentFlag = sel.agent;
-  if (agentFlag !== undefined && !Object.hasOwn(env.providers ?? {}, agentFlag)) {
-    return agentFlag;
-  }
-  return cfg.agent;
 }
 
 async function resolveRunLaneInner(
@@ -2286,31 +2212,6 @@ function loopScope(): ReturnType<typeof nextScope> | null {
   }
 }
 
-/** Open PRs on local loop/* branches — exact per-branch lookup, so the
- *  audit is bounded by the repo's own tail set, not a global PR cap. */
-function openLoopPrs(ctx: Ctx, branches: string[]): string[] {
-  const out: string[] = [];
-  for (const b of branches) {
-    try {
-      for (const pr of ctx.rev.prsForBranch(b)) {
-        out.push(`${prRef(ctx, pr)} (${b})`);
-      }
-    } catch {
-      out.push(`warning: PR lookup failed for ${b} — host unreachable`);
-    }
-  }
-  return out;
-}
-
-interface RefTails {
-  worktrees: string[];
-  /** branch names riding a loop/* worktree — disjoint from `branches`,
-   *  needed so the open-PR audit sees PRs on worktree'd branches too */
-  worktreeBranches: string[];
-  branches: string[];
-  errors: string[];
-}
-
 /** Every linked worktree this clone holds — the spec's `worktreeWarn`
  *  mark counts checkouts, and disk/coordination pressure doesn't care
  *  which branch a checkout sits on. The main worktree heads `worktree
@@ -2324,50 +2225,55 @@ function linkedWorktreeCount(root: string): number | undefined {
   return Math.max(0, parseWorktreePorcelain(wt.out).length - 1);
 }
 
-/** loop/* worktrees still checked out + loop/* branches with no
- *  worktree — both are run tails; a `--stack` run owns its `stack/<name>/*`
- *  branches the same way. A failed git probe reports as an error line,
- *  never as a false "clean". */
-export function loopRefTails(root: string, prefixes: string[] = ['loop/']): RefTails {
-  const errors: string[] = [];
-  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
-  if (wt.code !== 0) {
-    errors.push(`worktree list failed — ${wt.err || 'git error'}`);
+/** First writer wins — the journal row and the registry verdict can
+ *  name the same agent+bead, and the audit reports a miss once. */
+function putTail(tails: Map<string, string>, key: string, line: string): void {
+  if (!tails.has(key)) {
+    tails.set(key, line);
   }
-  const trees = parseWorktreePorcelain(wt.out).filter(w =>
-    prefixes.some(p => w.branch?.startsWith(p))
-  );
-  const onTree = new Set(trees.map(w => w.branch!));
-  const bare: string[] = [];
-  for (const prefix of prefixes) {
-    const bl = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)']);
-    if (bl.code !== 0) {
-      errors.push(`branch list failed — ${bl.err || 'git error'}`);
-      continue;
-    }
-    bare.push(...bl.out.split('\n').filter(b => b && !onTree.has(b)));
-  }
-  return {
-    worktrees: trees.map(w => `${w.path} [${w.branch}]`),
-    worktreeBranches: trees.map(w => w.branch!),
-    branches: bare,
-    errors,
-  };
 }
 
-/** Beads left in_progress, split by this run's claims vs pre-existing —
- *  a shared store holds other sessions' claims too. */
-function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; other: string[] } {
+/** The durable `learn-miss` journal rows for steps this run worked —
+ *  a respawn resets the registry entry's learnCheck, but its journal
+ *  row survives, so the audit can't lose an earlier miss. */
+function learnMissJournalTails(
+  root: string,
+  seen: ReadonlySet<string>,
+  tails: Map<string, string>
+): void {
   try {
-    const rows = tasks.list({ status: 'in_progress' });
-    const fmt = (r: { id: string; title?: string }) =>
-      `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim();
-    return {
-      own: rows.filter(r => seen.has(r.id)).map(fmt),
-      other: rows.filter(r => !seen.has(r.id)).map(fmt),
-    };
+    for (const ev of readLifecycle(root, { kind: 'learn-miss' })) {
+      if (ev.bead === undefined || !seen.has(ev.bead)) {
+        continue;
+      }
+      const agent = typeof ev.detail?.agent === 'string' ? ev.detail.agent : ev.actor;
+      const cause = typeof ev.detail?.cause === 'string' ? ev.detail.cause : undefined;
+      const suffix = cause === undefined ? '' : ` (${cause})`;
+      putTail(tails, `${agent}|${ev.bead}`, `${agent} ${ev.bead}${suffix}`);
+    }
   } catch {
-    return { own: [], other: ['warning: claimed-task audit failed — store unavailable'] };
+    // journal unreadable — the registry scan still reports
+  }
+}
+
+/** The registry's learnCheck=miss verdict for steps this run worked —
+ *  false when the registry itself could not be read. */
+function learnMissRegistryTails(
+  root: string,
+  seen: ReadonlySet<string>,
+  tails: Map<string, string>
+): boolean {
+  try {
+    for (const [step, e] of Object.entries(readAgentRegistry(root))) {
+      if (!seen.has(step) || e.learnCheck !== 'miss') {
+        continue;
+      }
+      const cause = e.cause === undefined ? '' : ` (${e.cause})`;
+      putTail(tails, `${e.agentId}|${step}`, `${e.agentId} ${step}${cause}`);
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -2379,131 +2285,12 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
  *  lane's miss surfaces on `bro agents status` instead. */
 function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
   const tails = new Map<string, string>();
-  const add = (key: string, line: string): void => {
-    if (!tails.has(key)) {
-      tails.set(key, line);
-    }
-  };
-  try {
-    for (const ev of readLifecycle(root, { kind: 'learn-miss' })) {
-      if (ev.bead === undefined || !seen.has(ev.bead)) {
-        continue;
-      }
-      const agent = typeof ev.detail?.agent === 'string' ? ev.detail.agent : ev.actor;
-      const cause = typeof ev.detail?.cause === 'string' ? ev.detail.cause : undefined;
-      const suffix = cause === undefined ? '' : ` (${cause})`;
-      add(`${agent}|${ev.bead}`, `${agent} ${ev.bead}${suffix}`);
-    }
-  } catch {
-    // journal unreadable — the registry scan below still reports
-  }
-  try {
-    for (const [step, e] of Object.entries(readAgentRegistry(root))) {
-      if (!seen.has(step) || e.learnCheck !== 'miss') {
-        continue;
-      }
-      const cause = e.cause === undefined ? '' : ` (${e.cause})`;
-      add(`${e.agentId}|${step}`, `${e.agentId} ${step}${cause}`);
-    }
-  } catch {
-    if (tails.size === 0) {
-      return ['warning: learn-miss audit failed — registry unreadable'];
-    }
+  learnMissJournalTails(root, seen, tails);
+  const registryRead = learnMissRegistryTails(root, seen, tails);
+  if (!registryRead && tails.size === 0) {
+    return ['warning: learn-miss audit failed — registry unreadable'];
   }
   return [...tails.values()];
-}
-
-/** The close-out litter sweep — reap the provably-done leftovers before
- *  the audit names what survived. A sweep failure is a warning line,
- *  never a crash. `sessionClaims` is the prefetched claims leg — the
- *  same union `work prune --loop` threads (bro-izpyk.10); undefined
- *  runs the keep-planes marker-only. */
-function sweepLoopLitter(
-  ctx: Ctx,
-  parkedClaims: ReadonlySet<string>,
-  sessionClaims?: ClaimRow[]
-): LitterReap | undefined {
-  try {
-    return reapLoopLitter({
-      root: ctx.root,
-      tasks: ctx.tasks,
-      rev: { repo: ctx.repo, facade: ctx.rev },
-      stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
-      parkedKeep: ctx.cfg.parkedKeep,
-      parkedTtlDays: ctx.cfg.parkedTtlDays,
-      keepClaims: parkedClaims,
-      sessionClaims,
-    });
-  } catch (err) {
-    say(
-      ctx,
-      `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`
-    );
-    return undefined;
-  }
-}
-
-/** The audit's printed report: what the sweep reaped, then every tail
- *  that survived it — 'clean' only when no section has anything left. */
-function sayLoopAudit(
-  ctx: Ctx,
-  reap: LitterReap | undefined,
-  sections: [string, string[]][]
-): void {
-  say(ctx, 'loop audit:');
-  for (const r of reap?.released ?? []) {
-    say(ctx, `  released claim: ${r}`);
-  }
-  for (const g of reap?.repaired ?? []) {
-    say(ctx, `  re-registered: ${g}`);
-  }
-  for (const k of reap?.killed ?? []) {
-    say(ctx, `  killed: ${k}`);
-  }
-  for (const r of reap?.reaped ?? []) {
-    say(ctx, `  reaped: ${r}`);
-  }
-  for (const b of reap?.branches ?? []) {
-    say(ctx, `  deleted branch: ${b}`);
-  }
-  for (const e of reap?.errors ?? []) {
-    say(ctx, `  reap error: ${e}`);
-  }
-  if (sections.every(([, items]) => items.length === 0)) {
-    say(ctx, '  clean — no loop tails');
-    return;
-  }
-  for (const [label, items] of sections) {
-    for (const item of items) {
-      say(ctx, `  ${label}: ${item}`);
-    }
-  }
-}
-
-/** The audit's exit-path `bro sync` — fail-open by contract. Sync code
- *  throws its failures (the CLI keeps the same verdict via main's
- *  catch), but a stray process.exit anywhere in the subtree must still
- *  degrade to a warning: an exit here kills the runner mid-write and
- *  drops the audit lines still buffered on stdout (bro-qjbwq). */
-export function syncAfterAudit(
-  ctx: { json: boolean },
-  sync: () => void = () => runSyncCommand([])
-): void {
-  const realExit = process.exit;
-  process.exit = ((code?: number) => {
-    throw new Error(`bro sync called process.exit(${code ?? 0})`);
-  }) as typeof process.exit;
-  try {
-    sync();
-  } catch (err) {
-    say(
-      ctx,
-      `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)} ` +
-        `— infra; the next run's audit retries`
-    );
-  } finally {
-    process.exit = realExit;
-  }
 }
 
 /** End-of-run sweep: first reap the provably-done litter (closed-bead or
@@ -2621,73 +2408,6 @@ export function skipLeasedBeads<T extends { id: string }>(
  *  would idle the run forever instead of reporting done. An
  *  unreadable store answers not-drained — a blip never masks work. */
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
-
-/** The run's mutable queue state — the gate stack, the outcome tally,
- *  and the claim bookkeeping the tick helpers share. */
-function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
-  const rows: FleetPrRow[] = [];
-  try {
-    if (typeof ctx.rev.openPrs === 'function') {
-      const list = ctx.rev.openPrs(ctx.repo);
-      for (const p of list ?? []) {
-        if (p?.headRef && isFleetHead(p.headRef)) {
-          rows.push({ pr: p.pr, headRef: p.headRef });
-        }
-      }
-      return rows;
-    }
-  } catch {
-    // PR listing failed — cannot produce complete listing
-    return null;
-  }
-  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown.
-  // LOCAL refs alone undercount: a pushed head whose local branch was already
-  // deleted (land cleanup, another clone's push) is still a live fleet PR, so
-  // remote heads join the scan — `ls-remote` answers the authoritative set.
-  const prefixes = FLEET_HEAD_PREFIXES;
-  try {
-    const tails = loopRefTails(ctx.root, prefixes);
-    if (tails.errors.length > 0) {
-      return null;
-    }
-    const remote: string[] = [];
-    for (const prefix of prefixes) {
-      const ls = gitTry(['-C', ctx.root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
-      if (ls.code !== 0) {
-        // no origin at all is a complete answer (the fleet is local-only);
-        // an unreachable remote is 'unknown'
-        if (
-          /does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)
-        ) {
-          continue;
-        }
-        return null;
-      }
-      remote.push(
-        ...ls.out
-          .split('\n')
-          .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
-          .filter(Boolean)
-      );
-    }
-    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches, ...remote])];
-    for (const b of branches) {
-      try {
-        for (const pr of ctx.rev.prsForBranch(b)) {
-          if (isFleetHead(b)) {
-            rows.push({ pr, headRef: b });
-          }
-        }
-      } catch {
-        // failed to check a branch - listing incomplete
-        return null;
-      }
-    }
-    return rows;
-  } catch {
-    return null;
-  }
-}
 
 /** `push origin --delete <branch>` as a tails verdict — a remote that
  *  already dropped the ref answers "does not exist", which IS the
