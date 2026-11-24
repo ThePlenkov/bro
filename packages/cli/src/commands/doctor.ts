@@ -2379,13 +2379,13 @@ function meshRigCheck(dir: string, pinned: string | undefined): DoctorCheck {
  *  counted for the dolt probe. GitHub-derived bindings need a `login`
  *  (no explicit transport override) or the plane admits nothing after the
  *  url-derivation flip. */
-function meshPeerChecks(
+function meshPeerCensus(
   aliases: string[],
   peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
-): { row: DoctorCheck; remotes: number } {
+): { bad: number; remotes: number; missingLoginAliases: string[] } {
   let remotes = 0;
   let bad = 0;
-  let missingLogin = 0;
+  const missingLoginAliases: string[] = [];
   for (const alias of aliases) {
     const raw = peers[alias] as {
       rig?: unknown;
@@ -2408,37 +2408,35 @@ function meshPeerChecks(
         p.login === '' ||
         (typeof p.login === 'string' && p.login.trim() === ''))
     ) {
-      missingLogin++;
+      missingLoginAliases.push(alias);
     }
   }
-  if (bad > 0 || missingLogin > 0) {
-    if (bad > 0) {
-      const row = check(
-        'mesh-peers',
-        'warn',
-        `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; ${missingLogin} github-derived without login` : ''}`,
-        missingLogin > 0
-          ? 'each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived need "login" or set "transport": "beads-remote" to keep a replica binding'
-          : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
-      );
-      return { row, remotes };
-    }
-    if (missingLogin > 0) {
-      const row = check(
-        'mesh-peers',
-        'warn',
-        `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
-        'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
-      );
-      return { row, remotes };
-    }
+  return { bad, remotes, missingLoginAliases };
+}
+
+function meshPeerChecks(
+  aliases: string[],
+  peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
+): { row: DoctorCheck; remotes: number } {
+  const { bad, remotes, missingLoginAliases } = meshPeerCensus(aliases, peers);
+  const missingLogin = missingLoginAliases.length;
+  if (bad > 0) {
+    const row = check(
+      'mesh-peers',
+      'warn',
+      `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; github-derived without login: ${missingLoginAliases.join(', ')}` : ''}`,
+      missingLogin > 0
+        ? `each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived peer(s) ${missingLoginAliases.join(', ')} need "login" or set "transport": "beads-remote" to keep a replica binding`
+        : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
+    );
+    return { row, remotes };
   }
   if (missingLogin > 0) {
     const row = check(
       'mesh-peers',
       'warn',
-      `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
-      'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
+      `${aliases.length} peer(s), ${remotes} beads-remote — github-derived without login: ${missingLoginAliases.join(', ')}`,
+      `set "login" for ${missingLoginAliases.join(', ')} or set "transport": "beads-remote" to keep a replica binding`
     );
     return { row, remotes };
   }
