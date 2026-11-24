@@ -459,7 +459,7 @@
       "quality_gates": {
         "new_code_health": false
       },
-      "quality_gates_doc": "Moved extraction from debt.ts: the read-only reports — status/stats/trend/prs/list/next — preserves existing behavior and is not newly authored code.",
+      "quality_gates_doc": "Moved extraction from debt.ts: the reports — status/stats/trend/prs/list plus `next` (read-only; a successful `next --claim` marks the finding claimed and rewrites the summary) — preserves existing behavior and is not newly authored code.",
       "matching_content_path": "packages/cli/src/commands/debt-query.ts"
     },
     {

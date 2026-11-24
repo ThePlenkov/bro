@@ -66,11 +66,15 @@ function collectSourceRecordsDebt(
       debtCfg.stale_days
     );
   } catch (err) {
-    console.error(
-      err instanceof SourceSkipped
-        ? `debt: ${source} skipped — ${err.message}`
-        : `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
-    );
+    if (err instanceof SourceSkipped) {
+      console.error(`debt: ${source} skipped — ${err.message}`);
+      return undefined;
+    }
+    // An unexpected failure means an incomplete sweep — mark the run
+    // failed so CI doesn't read a partial collect as clean. Rows stay
+    // open either way: the resolve sweep never runs without a snapshot.
+    console.error(`debt: source ${source} failed — ${err instanceof Error ? err.message : err}`);
+    process.exitCode = 1;
     return undefined;
   }
 }
@@ -308,7 +312,25 @@ export function cmdSync(argv: string[]): void {
     process.exit(1);
   }
   const records = readDebtRecords();
-  const res = syncDebtToBeads(records, { dryRun });
+  let res: ReturnType<typeof syncDebtToBeads>;
+  try {
+    res = syncDebtToBeads(records, { dryRun });
+  } catch (err) {
+    // Same failure taxonomy as maybeProjectDebtToBeads — but `sync` is
+    // the explicit request, so a run that projected nothing exits
+    // nonzero rather than degrading to a warn.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isBdCompatError(err)) {
+      console.error(`debt sync skipped: ${msg}`);
+      console.error(
+        'beads projection off — ledger stays jsonl-only; upgrade/downgrade bd ' +
+          'or set "stores": ["jsonl"] in bro.config.json'
+      );
+    } else {
+      console.error(`debt sync FAILED: ${msg}`);
+    }
+    process.exit(1);
+  }
   const verb = dryRun ? '[dry-run] ' : '';
   console.error(
     `${verb}debt sync: ${records.length} record(s) — ${res.created} created, ` +

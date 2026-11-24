@@ -2,8 +2,9 @@
  *  (PR debt:* labels), and applyVerdicts, which the debt plan runner
  *  (`bro run debt.toml`) shares. Split out of debt.ts — the module was
  *  past the CodeScene file-size bar. */
-import { readFileSync } from 'node:fs';
-import { ensureAuth, reviewHost } from '@broject/core';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve } from 'node:path';
+import { ensureAuth, gitTry, reviewHost } from '@broject/core';
 import {
   applyDebtLabel,
   applyDebtVerdicts,
@@ -58,9 +59,36 @@ interface SetArgs {
   notes: string | null;
 }
 
+/** --threads-file resolves against the repo root like an import
+ *  positional (debt-import.ts): the canonical path must stay inside the
+ *  canonical repo root — an escaping path would read arbitrary file
+ *  lines into thread-id candidates and echo them to stderr via the
+ *  not-in-ledger warning. */
+function assertThreadsFile(root: string, f: string): void {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(f);
+  } catch (err) {
+    console.error(`error: cannot read ${f} — ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+  if (!st.isFile()) {
+    console.error(`error: ${f} is not a file`);
+    process.exit(2);
+  }
+  const rel = relative(realpathSync(root), realpathSync(f));
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    console.error(`error: ${f} resolves outside the repo root`);
+    process.exit(2);
+  }
+}
+
 /** --threads-file rows: one id per line, '#' comments allowed. */
 function readThreadIdsFile(path: string): string[] {
-  return readFileSync(path, 'utf8')
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
+  const f = resolve(root, path);
+  assertThreadsFile(root, f);
+  return readFileSync(f, 'utf8')
     .split('\n')
     .map(l => l.trim())
     .filter(l => l.length > 0 && !l.startsWith('#'));
