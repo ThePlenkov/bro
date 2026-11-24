@@ -3,8 +3,6 @@
  */
 import { type SpawnOptions, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { hostname } from 'node:os';
-import { VERSION } from '../version.ts';
 import {
   accessSync,
   closeSync,
@@ -22,6 +20,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   type AccountWall,
@@ -34,6 +33,7 @@ import {
   admitSessionSlot,
   agentEntryBlocked,
   agentExitFileName,
+  agentRegistryLockDepth,
   agentsSection,
   appendPrivateFileSync,
   BATCH_MARKER_ENV,
@@ -66,9 +66,6 @@ import {
   handleOwner,
   isAgentCause,
   isAgentLearnCheck,
-  laneBudgetKey,
-  laneBudgetRefund,
-  rateDeathBackoff,
   isBatchSpawn,
   isQualifiedRouteId,
   JudgeUnavailable,
@@ -76,11 +73,13 @@ import {
   type LeaseHolder,
   type LeaseStore,
   type ListResult,
+  laneBudgetKey,
+  laneBudgetRefund,
   loadConfig,
   localLeaseStore,
-  mainWorktreeRoot,
   type MatrixVerdict,
   type ModelRoute,
+  mainWorktreeRoot,
   mintAgentId,
   mintRunId,
   mkdirPrivateSync,
@@ -93,35 +92,35 @@ import {
   patchAgentRegistry,
   patchAgentRegistryIf,
   pidAlive,
-  projectId,
+  planesStartingSessions,
   probeStep,
   procStat,
-  providerCallGrade,
+  projectId,
   providerAccount,
-  providerWallOwners,
-  readAgentRegistry,
-  readLedgerWalls,
-  recordWall,
-  agentRegistryLockDepth,
-  type ResolvedClass,
-  type RoutingTable,
-  rebindStep,
-  releaseSessionSlot,
-  releaseSessionStart,
-  retagSessionSlots,
-  requireProviderSurface,
-  resolveModelRoute,
-  resolveStepClass,
-  SESSION_SLOT_TTL_MS,
-  sessionCapViews,
-  planesStartingSessions,
+  providerCallGrade,
   providerCapCensus,
   providerCapRefusal,
   providerSlotsDir,
+  providerWallOwners,
+  type ResolvedClass,
+  type RoutingTable,
+  rateDeathBackoff,
+  readAgentRegistry,
+  readLedgerWalls,
+  rebindStep,
+  recordWall,
+  releaseSessionSlot,
+  releaseSessionStart,
+  requireProviderSurface,
+  resolveModelRoute,
+  resolveStepClass,
+  retagSessionSlots,
+  SESSION_SLOT_TTL_MS,
   type SessionPlane,
   SpawnError,
   type SpawnSpec,
   type SpawnWorker,
+  sessionCapViews,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
@@ -136,8 +135,6 @@ import {
   writeAgentRegistry,
   writePrivateFileSync,
 } from '@broject/core';
-import { expandAgentCmd, LEARN_RETRO_CLOSEOUT, type LoopConfig, loopSection } from '@broject/loop';
-import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
@@ -152,31 +149,17 @@ import {
   devinSessionPlane,
   listDevinSessions,
 } from '@broject/devin';
-import { assertMutableConfig } from '../config-policy.ts';
+import { expandAgentCmd, LEARN_RETRO_CLOSEOUT, type LoopConfig, loopSection } from '@broject/loop';
+import { type AcpSeam, type FetchFn, otelEvent } from '@broject/providers';
 import { enterWorktree } from '../commands/work.ts';
-import { checkRunLearnEvidence } from './learn-evidence.ts';
+import { assertMutableConfig } from '../config-policy.ts';
 import {
-  agentsHome,
-  dropWorkMarker,
-  SAFE_AGENT_ID,
-  touchWorkMarker,
-  writeWorkMarker,
-} from './work-markers.ts';
-import { entryPidStart, signalUnitGroups } from './proc-units.ts';
-import { markStoppedEntry, pollUntilGone } from './stop-entry.ts';
-import {
-  admitPlanefreeProviderLane,
-  claimGatePlaneStarts,
-  type ProviderGateAdmit,
-  rejudgeSharedProviderLane,
-} from './provider-admit.ts';
-import {
-  admitSpawnedCommandStarts,
-  EMPTY_KEYS,
-  providerGatePayload,
-  type ProviderGate,
-} from './session-admit.ts';
-import { restoreRegistryRow, rollbackSpawnClaim } from './spawn-rollback.ts';
+  COPILOT_COUNT_TTL_MS,
+  copilotCountFile,
+  readCopilotCount,
+  writeCopilotCount,
+} from '../session-planes/copilot.ts';
+import { VERSION } from '../version.ts';
 import {
   copilotEntryRepo,
   copilotHasPullArtifact,
@@ -192,21 +175,34 @@ import {
   copilotTaskIdOf,
   copilotTaskState,
 } from './copilot-tasks.ts';
+import { checkRunLearnEvidence } from './learn-evidence.ts';
+import { entryPidStart, signalUnitGroups } from './proc-units.ts';
 import {
-  COPILOT_COUNT_TTL_MS,
-  copilotCountFile,
-  readCopilotCount,
-  writeCopilotCount,
-} from '../session-planes/copilot.ts';
+  admitPlanefreeProviderLane,
+  claimGatePlaneStarts,
+  type ProviderGateAdmit,
+  rejudgeSharedProviderLane,
+} from './provider-admit.ts';
+import {
+  admitSpawnedCommandStarts,
+  EMPTY_KEYS,
+  type ProviderGate,
+  providerGatePayload,
+} from './session-admit.ts';
+import { restoreRegistryRow, rollbackSpawnClaim } from './spawn-rollback.ts';
+import { markStoppedEntry, pollUntilGone } from './stop-entry.ts';
+import {
+  agentsHome,
+  dropWorkMarker,
+  SAFE_AGENT_ID,
+  touchWorkMarker,
+  writeWorkMarker,
+} from './work-markers.ts';
 // external-activity planes self-register on import — the spawn guard
 // reads every ecosystem's "an agent bro does not own is working" probe
 import '../session-planes/markers.ts';
 import '../session-planes/opencode.ts';
 
-export * from '@broject/core';
-export { otelEvent } from '@broject/providers';
-export type { AcpSeam, FetchFn } from '@broject/providers';
-export { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
 export { spawn, spawnSync } from 'node:child_process';
 export { createHash } from 'node:crypto';
 export {
@@ -227,58 +223,10 @@ export {
   writeFileSync,
 } from 'node:fs';
 export { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-
-export {
-  AgentNotFound,
-  agentEntryBlocked,
-  agentExitFileName,
-  agentsSection,
-  bdActor,
-  admitSessionSlot,
-  BATCH_MARKER_ENV,
-  isBatchSpawn,
-  claimStep,
-  classifyExitCause,
-  classifyExitCauseParts,
-  appendPrivateFileSync,
-  cliCommandModel,
-  commandCliName,
-  DEFAULT_CONFIG,
-  deriveProviderWalls,
-  emitLifecycle,
-  entryRunId,
-  ghHost,
-  gitTry,
-  isAgentCause,
-  JudgeUnavailable,
-  loadConfig,
-  mintAgentId,
-  mintRunId,
-  mkdirPrivateSync,
-  openPrivateAppendSync,
-  patchAgentRegistry,
-  probeStep,
-  procStat,
-  providerCallGrade,
-  rebindStep,
-  releaseSessionSlot,
-  requireProviderSurface,
-  resolveStepClass,
-  SESSION_SLOT_TTL_MS,
-  sessionPlane,
-  sessionPlaneForCli,
-  sessionQuotaConfig,
-  sessionSlotsDir,
-  SpawnError,
-  stepParent,
-  ProviderSurfaceError,
-  readAgentRegistry,
-  UnknownProviderError,
-  withAgentRegistryLock,
-  writeAgentRegistry,
-  writePrivateFileSync,
-  shQuote,
-};
+export * from '@broject/core';
+export { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
+export type { AcpSeam, FetchFn } from '@broject/providers';
+export { otelEvent } from '@broject/providers';
 export type {
   AgentCause,
   AgentConnector,
@@ -298,6 +246,58 @@ export type {
   SpawnSpec,
   SpawnWorker,
 };
+export {
+  AgentNotFound,
+  admitSessionSlot,
+  agentEntryBlocked,
+  agentExitFileName,
+  agentsSection,
+  appendPrivateFileSync,
+  BATCH_MARKER_ENV,
+  bdActor,
+  claimStep,
+  classifyExitCause,
+  classifyExitCauseParts,
+  cliCommandModel,
+  commandCliName,
+  DEFAULT_CONFIG,
+  deriveProviderWalls,
+  emitLifecycle,
+  entryRunId,
+  ghHost,
+  gitTry,
+  isAgentCause,
+  isBatchSpawn,
+  JudgeUnavailable,
+  loadConfig,
+  mintAgentId,
+  mintRunId,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  ProviderSurfaceError,
+  patchAgentRegistry,
+  probeStep,
+  procStat,
+  providerCallGrade,
+  readAgentRegistry,
+  rebindStep,
+  releaseSessionSlot,
+  requireProviderSurface,
+  resolveStepClass,
+  SESSION_SLOT_TTL_MS,
+  SpawnError,
+  sessionPlane,
+  sessionPlaneForCli,
+  sessionQuotaConfig,
+  sessionSlotsDir,
+  shQuote,
+  stepParent,
+  UnknownProviderError,
+  withAgentRegistryLock,
+  writeAgentRegistry,
+  writePrivateFileSync,
+};
+
 import '../session-planes/copilot.ts';
 import {
   type LaneAdmission,
@@ -1228,9 +1228,7 @@ export function eachAgentConnector(
 // zombie and pid-reuse checks; re-exported so existing imports from
 // this module keep resolving
 export { pidAlive } from '@broject/core';
-// the markers/home leaf moved to ./work-markers.ts — re-export the
-// public piece so existing imports from this module keep resolving
-export { agentPromptPath } from './work-markers.ts';
+export { settleAcpSessions } from './acp-settle.ts';
 export {
   admitSpawnedCommandStarts,
   EMPTY_KEYS,
@@ -1238,7 +1236,9 @@ export {
   providerGateForKind,
   providerGatePayload,
 } from './session-admit.ts';
-export { settleAcpSessions } from './acp-settle.ts';
+// the markers/home leaf moved to ./work-markers.ts — re-export the
+// public piece so existing imports from this module keep resolving
+export { agentPromptPath } from './work-markers.ts';
 
 /** Identity-pin env keys the connector owns — a caller-supplied value
  *  would redirect the claim store or re-badge the worker, so every
