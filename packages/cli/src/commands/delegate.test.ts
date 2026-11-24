@@ -321,10 +321,12 @@ describe('bro fleet delegate — --detach', () => {
     const fx = fixture();
     try {
       process.env.BRO_AGENT_ID = 'native-caller';
+      process.env.BRO_DELEGATED_BY = 'forged-caller';
       const r = await delegate(fx.main, loadAgentEnv(fx.main), {
         prompt: LONG_RUN,
         mode: 'detach',
         beadsDir: fx.beads,
+        delegatedBy: 'spec-delegator',
       });
       assert.equal(r.mode, 'detach');
       const info = r.agent;
@@ -332,13 +334,14 @@ describe('bro fleet delegate — --detach', () => {
       const entry = readAgentRegistry(fx.main)[info.molStep];
       assert.ok(entry, 'registry entry for the adhoc step');
       assert.equal(entry.agentId, info.id);
-      assert.equal(entry.delegatedBy, 'native-caller');
-      assert.equal(info.delegatedBy, 'native-caller');
+      assert.equal(entry.delegatedBy, 'spec-delegator');
+      assert.equal(info.delegatedBy, 'spec-delegator');
       // BRO_BATCH marks the fleet's lane inside the worker's env
       if (info.pid !== undefined && existsSync(`/proc/${info.pid}/environ`)) {
         const environ = readFileSync(`/proc/${info.pid}/environ`, 'utf8');
         assert.match(environ, /BRO_BATCH=1/);
-        assert.match(environ, /BRO_DELEGATED_BY=native-caller/);
+        assert.match(environ, /BRO_DELEGATED_BY=spec-delegator/);
+        assert.doesNotMatch(environ, /BRO_DELEGATED_BY=forged-caller/);
       }
       // the stored work order is ask text + the shared closeout contract
       const stored = agentPromptPath(fx.main, String(entry.agentId));
