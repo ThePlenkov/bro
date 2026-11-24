@@ -36,10 +36,15 @@ function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
  *  and `ls-files -u` are real call sites; `--exec` must still not eat
  *  the innocent `--exec-path`. */
 const GIT_COMMAND_ARG = /^(--(upload-pack|receive-pack|exec|template)(=|$)|ext::)/;
+const GIT_COMMAND_FLAGS = new Set(['--upload-pack', '--receive-pack', '--exec', '--template']);
 
 function assertGitArgs(args: string[]): void {
   for (const a of args) {
-    if (GIT_COMMAND_ARG.test(a)) {
+    // Git accepts both --upload-pack=<command> and
+    // --upload-pack <command>. Reject the standalone spellings too:
+    // otherwise the next, caller-provided argument becomes an executable
+    // command even though it does not itself match GIT_COMMAND_ARG.
+    if (GIT_COMMAND_ARG.test(a) || GIT_COMMAND_FLAGS.has(a)) {
       throw new Error(`git arg rejected — command-runner flag: ${a}`);
     }
   }

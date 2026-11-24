@@ -23,6 +23,7 @@ import {
   gitLogStamp,
   gitUpstreamBehind,
   gitUpstreamBehindAsync,
+  gitTry,
   gitTryAsync,
   gitWorktreeRoots,
   mainWorktreeRoot,
@@ -33,6 +34,16 @@ import { scrubEnv, testGit } from './testkit.ts';
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv());
+
+describe('git command-runner arguments', () => {
+  test('rejects standalone command-runner flags before spawning git', () => {
+    for (const flag of ['--upload-pack', '--receive-pack', '--exec', '--template']) {
+      const result = gitTry([flag, 'echo injected']);
+      assert.equal(result.code, 128, flag);
+      assert.match(result.err, /command-runner flag/);
+    }
+  });
+});
 
 function git(cwd: string, args: string[]): string {
   return testGit(['-C', cwd, ...args]).trim();
