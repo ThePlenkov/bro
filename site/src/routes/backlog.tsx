@@ -18,6 +18,8 @@ const DOCS = `${BASE_URL}docs`;
 // API quota the ref-resolution call costs. GitHub issues and open PRs
 // come live from the REST API in the same request wave.
 const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
+const BRANCH_REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/heads/bro-data';
+const BRANCH = 'bro-data';
 const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
 const ISSUES_API = 'https://api.github.com/repos/ThePlenkov/bro/issues?state=open&per_page=100';
 const SNAPSHOT_KEY = 'bro:backlog:snapshot:v2';
@@ -107,15 +109,15 @@ function readCache(): { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt
     if (!raw) return null;
     const value = JSON.parse(raw) as Partial<Data>;
     const snapshot = value.snapshot as Partial<Snapshot> | undefined;
-    if (
-      !snapshot ||
-      typeof snapshot.generated_at !== 'string' ||
-      !Array.isArray(snapshot.issues) ||
-      typeof value.fetchedAt !== 'string' ||
-      !Array.isArray(value.gh)
-    ) {
-      return null;
-    }
+    if (!snapshot) return null;
+    const checks = [
+      () => typeof snapshot.generated_at === 'string',
+      () => Array.isArray(snapshot.issues),
+      () => typeof value.fetchedAt === 'string',
+      () => Array.isArray(value.gh),
+      () => typeof value.sha === 'string',
+    ];
+    if (checks.some(check => !check())) return null;
     return value as { snapshot: Snapshot; gh: GhItem[]; sha: string; fetchedAt: string };
   } catch {
     return null;
@@ -127,6 +129,33 @@ async function resolveSha(): Promise<string> {
   if (!refRes.ok) throw new Error(`could not resolve refs/bro/data (${refRes.status})`);
   const { object } = (await refRes.json()) as { object: { sha: string } };
   return object.sha;
+}
+
+async function readSnapshot(sha: string): Promise<Snapshot> {
+  const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`backlog.json not on refs/bro/data (${res.status})`);
+  const snapshot = (await res.json()) as Partial<Snapshot>;
+  if (typeof snapshot.generated_at !== 'string' || !Array.isArray(snapshot.issues)) {
+    throw new Error('invalid backlog snapshot');
+  }
+  return snapshot as Snapshot;
+}
+
+async function readBranchSnapshot(): Promise<{ snapshot: Snapshot; sha: string } | null> {
+  try {
+    const [branchRes, refRes] = await Promise.all([
+      fetch(BRANCH_REF_API, { signal: AbortSignal.timeout(15_000) }),
+      fetch(REF_API, { signal: AbortSignal.timeout(15_000) }),
+    ]);
+    if (!branchRes.ok || !refRes.ok) return null;
+    const branch = (await branchRes.json()) as { object?: { sha?: string } };
+    const ref = (await refRes.json()) as { object?: { sha?: string } };
+    const branchSha = branch.object?.sha;
+    if (!branchSha || branchSha !== ref.object?.sha) return null;
+    return { snapshot: await readSnapshot(branchSha), sha: branchSha };
+  } catch {
+    return null;
+  }
 }
 
 interface GhRaw {
@@ -171,34 +200,27 @@ async function fetchGh(): Promise<GhItem[]> {
 }
 
 async function fetchSnapshot(): Promise<{ snapshot: Snapshot; sha: string }> {
-  let sha: string;
-  try {
-    sha = await resolveSha();
-  } catch {
-    // The raw branch mirror remains available when the GitHub API is rate-limited.
-    sha = 'bro-data';
-  }
-  const res = await fetch(`${RAW}/${sha}/${BACKLOG_PATH}`, { signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`backlog.json not on refs/bro/data (${res.status})`);
-  const snapshot = (await res.json()) as Partial<Snapshot>;
-  if (typeof snapshot.generated_at !== 'string' || !Array.isArray(snapshot.issues)) {
-    throw new Error('invalid backlog snapshot');
-  }
-  return { snapshot: snapshot as Snapshot, sha };
+  const branchSnapshot = await readBranchSnapshot();
+  if (branchSnapshot) return branchSnapshot;
+
+  const sha = await resolveSha();
+  return { snapshot: await readSnapshot(sha), sha };
+}
+
+function cacheIsNewer(cached: ReturnType<typeof readCache>, data: Data): boolean {
+  const cachedAt = cached ? Date.parse(cached.snapshot.generated_at) : Number.NaN;
+  const generatedAt = Date.parse(data.snapshot.generated_at);
+  if (Number.isNaN(generatedAt)) return false;
+  if (Number.isNaN(cachedAt) || generatedAt > cachedAt) return true;
+  if (generatedAt < cachedAt) return false;
+  const cachedFetchedAt = cached ? Date.parse(cached.fetchedAt) : Number.NaN;
+  return Number.isNaN(cachedFetchedAt) || Date.parse(data.fetchedAt) >= cachedFetchedAt;
 }
 
 function cacheSnapshot(data: Data): void {
   try {
     const cached = readCache();
-    const cachedAt = cached ? Date.parse(cached.snapshot.generated_at) : Number.NaN;
-    const generatedAt = Date.parse(data.snapshot.generated_at);
-    const cachedFetchedAt = cached ? Date.parse(cached.fetchedAt) : Number.NaN;
-    const fetchedAt = Date.parse(data.fetchedAt);
-    const isNewer =
-      data.gh.length > 0
-        ? Number.isNaN(cachedFetchedAt) || fetchedAt >= cachedFetchedAt
-        : Number.isNaN(cachedAt) || generatedAt >= cachedAt;
-    if (!Number.isNaN(generatedAt) && isNewer) {
+    if (cacheIsNewer(cached, data)) {
       window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
     }
   } catch {
@@ -1159,7 +1181,7 @@ function BacklogPage() {
             bro backlog, <em>live</em>.
           </h1>
           <p className="lede">
-            Every open bead plus the GitHub queue, read from the <code>refs/bro/data</code> snapshot
+            Every open bead plus the GitHub queue, read from the <code>bro-data</code> snapshot
             branch and the REST API at page load. A publish job refreshes the snapshot on every
             merge to main — what you see is what the store holds now.
           </p>
