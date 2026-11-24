@@ -11,7 +11,7 @@
  * caller narrows nothing (every leg reads the same LitterCtx).
  */
 import { basename, resolve } from 'node:path';
-import type { ListedWatch } from '@broject/act';
+import { type ListedWatch, listWatches } from '@broject/act';
 import {
   type AgentRegistryEntry,
   acquireAgentRegistryLock,
@@ -21,8 +21,14 @@ import {
   type TaskRow,
 } from '@broject/core';
 import { beadForHead, loopSlug } from '@broject/loop';
-import { agentProcessesIn, detailMatches, registryEntryHoldsClaim } from '@broject/rig';
-import type { LoopRunView } from './loop-state.ts';
+import {
+  agentProcessesIn,
+  detailMatches,
+  hooksDirOf,
+  liveWorkDetails,
+  registryEntryHoldsClaim,
+} from '@broject/rig';
+import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
 import type { LitterCandidate, LitterCtx, WorktreeInfo } from './work.ts';
 
 /** Candidate → bead row. Deterministic namespaces (loop/, stack/)
@@ -310,9 +316,13 @@ export function releaseDeadClaim(
   }
   try {
     // re-read under the lock — the snapshot predates the wait, and a
-    // respawn's registry write lands inside this same section
-    const registry = registrySnapshot(opts.root);
-    const owner = claimOwner({ ...ctx, claims: { ...ctx.claims, registry } }, c, bead);
+    // respawn's registry write lands inside this same section. The
+    // marker, watch, and run planes refresh beside it: a claim armed
+    // or stamped during the wait is a live owner, not an orphan to
+    // release. sessionClaims alone stays on the sweep prefetch — the
+    // ledger's read is async (no sync re-read exists inside this
+    // section) and its writers don't serialize on this lock anyway.
+    const owner = claimOwner({ ...ctx, claims: freshClaims(ctx) }, c, bead);
     if (owner !== undefined) {
       return owner;
     }
@@ -329,6 +339,27 @@ export function releaseDeadClaim(
   } finally {
     release();
   }
+}
+
+/** The locked recheck's plane refresh — every claim plane a claimant
+ *  can write during the lock wait is read again, not just the
+ *  registry: `.work` arms and watch stamps serialize on this same lock
+ *  (acquireOccupancyLocks' contract), and a fresh run record/marker
+ *  read answers "who claimed during the wait" the sweep snapshot can't.
+ *  `sessionClaims` is the one plane left on the snapshot — its ledger
+ *  read is async, so no sync re-read exists here. Planes that can't be
+ *  read answer like their sweep-start miss (registry unreadable still
+ *  fails closed through registrySnapshot's undefined). */
+function freshClaims(ctx: LitterCtx): LitterCtx['claims'] {
+  const hooks = hooksDirOf(ctx.opts.root);
+  const now = ctx.opts.now ?? Date.now();
+  return {
+    ...ctx.claims,
+    runs: collectLoopRuns(ctx.opts.root, now),
+    registry: registrySnapshot(ctx.opts.root),
+    sessionDetails: hooks === null ? [] : liveWorkDetails(hooks, ['.work', '.task'], now),
+    watches: listWatches(ctx.opts.root),
+  };
 }
 
 /** The note+reopen half of a claim release — a store write that loses

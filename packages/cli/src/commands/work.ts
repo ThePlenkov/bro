@@ -1920,8 +1920,12 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
     retireLitterBranch(c, ctx, pr);
     return;
   }
-  reapTreeUnderLock(c.w, c, ctx, label);
-  retireLitterBranch(c, ctx, pr);
+  // the branch retires only when the tree is gone (or, under dry-run,
+  // would be): a kept tree keeps its branch — it is still checked out
+  // there, and a dry-run 'would delete' line on a kept tree is a lie
+  if (reapTreeUnderLock(c.w, c, ctx, label)) {
+    retireLitterBranch(c, ctx, pr);
+  }
 }
 
 /** The orphan-claim leg: an in_progress bead whose every liveness
@@ -1946,34 +1950,38 @@ function orphanClaimKeep(
  *  hold across their claim→stamp / check→remove spans: without it a
  *  claimant or respawned fixer can pin the path after the check and
  *  lose its live tree to the removal (bro-qry9, bro-0fiq). A lock
- *  contended past the bound is itself a claimant mid-act → keep. A
- *  failed removal keeps the branch too — it is still checked out
- *  there (the caller retires it after this returns). */
+ *  contended past the bound is itself a claimant mid-act → keep.
+ *  Returns true only when the tree is gone (or, under dry-run, would
+ *  be) — the caller retires the branch on that verdict alone: a kept
+ *  tree keeps its branch, it is still checked out there, and an
+ *  attributed branch on a kept detached tree is not the removal's to
+ *  retire. */
 function reapTreeUnderLock(
   w: WorktreeInfo,
   c: LitterCandidate,
   ctx: LitterCtx,
   label: string
-): void {
+): boolean {
   const { opts, rep, main } = ctx;
   let release: () => void;
   try {
     release = acquireAgentRegistryLock(main.path);
   } catch {
     rep.kept.push(`${label} (occupancy lock contended)`);
-    return;
+    return false;
   }
   try {
     const why = litterTreeVerdict(c, ctx);
     if (why !== undefined) {
       rep.kept.push(`${label} (${why})`);
-      return;
+      return false;
     }
     if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
       rep.errors.push(`worktree ${w.path} not removed`);
-      return;
+      return false;
     }
     rep.reaped.push(litterReapedLabel(c));
+    return true;
   } finally {
     release();
   }
