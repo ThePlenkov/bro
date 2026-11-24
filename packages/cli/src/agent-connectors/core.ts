@@ -177,6 +177,21 @@ import {
 } from './session-admit.ts';
 import { restoreRegistryRow, rollbackSpawnClaim } from './spawn-rollback.ts';
 import {
+  copilotEntryRepo,
+  copilotHasPullArtifact,
+  copilotHeadRef,
+  copilotRemoteRepo,
+} from './copilot-refs.ts';
+import { copilotSweepLandedSlots } from './copilot-slots.ts';
+import {
+  type CopilotSession,
+  type CopilotTask,
+  copilotLatestSession,
+  copilotSessionError,
+  copilotTaskIdOf,
+  copilotTaskState,
+} from './copilot-tasks.ts';
+import {
   COPILOT_COUNT_TTL_MS,
   copilotCountFile,
   readCopilotCount,
@@ -7035,126 +7050,6 @@ function ghRun(args: string[], timeoutMs = 30_000): GhResult {
  *  terminal; idle and waiting_for_user are suspended-but-alive). */
 const COPILOT_LIVE_STATES = new Set(['queued', 'in_progress', 'idle', 'waiting_for_user']);
 
-/** Task ids are server-minted UUIDs; the registry pin is trusted only
- *  when it can't smuggle a path/query segment into the REST URL. */
-const COPILOT_SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/** The loosely-typed REST task — fields narrow at use, so a preview
- *  schema drift degrades a read instead of crashing it. */
-interface CopilotTask {
-  id?: unknown;
-  state?: unknown;
-  artifacts?: unknown;
-  sessions?: unknown;
-}
-
-interface CopilotSession {
-  id?: unknown;
-  state?: unknown;
-  workflow_run_id?: unknown;
-  error?: unknown;
-  head_ref?: unknown;
-  created_at?: unknown;
-  updated_at?: unknown;
-}
-
-function copilotTaskIdOf(entry: AgentRegistryEntry): string | undefined {
-  const id = entry.taskId;
-  return typeof id === 'string' && COPILOT_SAFE_TASK_ID.test(id) ? id : undefined;
-}
-
-function copilotTaskState(task: CopilotTask): string {
-  return typeof task.state === 'string' ? task.state : '';
-}
-
-function copilotTaskSessions(task: CopilotTask): CopilotSession[] {
-  return Array.isArray(task.sessions)
-    ? task.sessions.filter((s): s is CopilotSession => typeof s === 'object' && s !== null)
-    : [];
-}
-
-/** The latest session a task reports — sessions accumulate across
- *  retries/steers; the newest carries the live state, the workflow run
- *  and the error the terminal verdict classifies. */
-function copilotLatestSession(task: CopilotTask): CopilotSession | undefined {
-  const sessions = copilotTaskSessions(task);
-  let latest: CopilotSession | undefined;
-  let stamp = '';
-  for (const s of sessions) {
-    const at =
-      typeof s.updated_at === 'string'
-        ? s.updated_at
-        : typeof s.created_at === 'string'
-          ? s.created_at
-          : '';
-    if (latest === undefined || at >= stamp) {
-      latest = s;
-      stamp = at;
-    }
-  }
-  return latest;
-}
-
-/** The remote branch the session pushes — `branch` artifacts carry
- *  `base_ref`/`head_ref` at creation; session objects repeat them. */
-function copilotHeadRef(task: CopilotTask): string | undefined {
-  if (Array.isArray(task.artifacts)) {
-    for (const a of task.artifacts) {
-      const ref = a as { type?: unknown; data?: { head_ref?: unknown } };
-      if (ref?.type === 'branch' && typeof ref.data?.head_ref === 'string') {
-        return ref.data.head_ref;
-      }
-    }
-  }
-  for (const s of copilotTaskSessions(task)) {
-    if (typeof s.head_ref === 'string' && s.head_ref !== '') {
-      return s.head_ref;
-    }
-  }
-  return undefined;
-}
-
-function copilotHasPullArtifact(task: CopilotTask): boolean {
-  return (
-    Array.isArray(task.artifacts) &&
-    task.artifacts.some(a => (a as { type?: unknown })?.type === 'pull')
-  );
-}
-
-/** Error text a failed session left behind — the terminal verdict's
- *  classifyExitCause input (a rate-limit wall reads 'rate_limited',
- *  not 'crash'). */
-function copilotSessionError(task: CopilotTask): string {
-  const err = copilotLatestSession(task)?.error;
-  const msg = (err as { message?: unknown })?.message;
-  return typeof msg === 'string' ? msg : '';
-}
-
-/** The 'owner/repo' a registry entry's task lives on — pinned at
- *  spawn; the worktree's origin is the fallback for entries predating
- *  the pin. */
-function copilotEntryRepo(entry: AgentRegistryEntry): string | undefined {
-  if (typeof entry.taskRepo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(entry.taskRepo)) {
-    return entry.taskRepo;
-  }
-  return typeof entry.worktree === 'string' ? copilotRemoteRepo(entry.worktree) : undefined;
-}
-
-/** `git@host:o/r(.git)`, `https://host/o/r(.git)`, `ssh://…/o/r` →
- *  `o/r` — the last two path segments of any origin form GitHub
- *  accepts. */
-function copilotParseRemote(url: string): string | undefined {
-  const m = /([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?\/?$/.exec(
-    url.trim()
-  );
-  return m === null ? undefined : `${m[1]}/${m[2]}`;
-}
-
-function copilotRemoteRepo(dir: string): string | undefined {
-  const url = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
-  return url.code === 0 ? copilotParseRemote(url.out) : undefined;
-}
-
 /** The PR the task opened — resolved via the pushes' head_ref, the
  *  same join `gh agent-task view` hydrates internally. Absent until a
  *  pull artifact exists; a failed read stays unpinned rather than
@@ -7497,36 +7392,6 @@ function copilotSessionQuota(env: AgentConnectorEnv): SessionQuotaLane | undefin
     );
   }
   return { plane, agents: env.agents };
-}
-
-/** Retire `.slot` reservations whose remote task already landed in the
- *  refreshed live set — the admission contract a landed spawn must not
- *  double-count (live + reservation) under. The correlation needs the
- *  repo's registry (agentId → taskId), so the sweep rides connector
- *  reads rather than the host-wide plane: each repo sweeps its own
- *  slots, and a cross-repo spawn's reservation gets retired by that
- *  repo's next refresh — the TTL bounds whatever remains. */
-function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string>): void {
-  let names: string[];
-  try {
-    names = readdirSync(slotsDir);
-  } catch {
-    return; // no/unreadable dir — the tally reports its own verdict
-  }
-  for (const e of Object.values(readAgentRegistry(dir))) {
-    if (e.backend !== 'copilot' || typeof e.taskId !== 'string' || !live.has(e.taskId)) {
-      continue;
-    }
-    for (const name of names) {
-      if (name.startsWith(`${e.agentId}-`) && name.endsWith('.slot')) {
-        try {
-          rmSync(join(slotsDir, name), { force: true });
-        } catch {
-          // a racing reaper already got it
-        }
-      }
-    }
-  }
 }
 
 /** Refresh the count cache the copilot plane serves — best-effort and
