@@ -150,8 +150,9 @@ async function readBranchSnapshot(): Promise<Snapshot | null> {
     if (!branchRes.ok || !refRes.ok) return null;
     const branch = (await branchRes.json()) as { object?: { sha?: string } };
     const ref = (await refRes.json()) as { object?: { sha?: string } };
-    if (!branch.object?.sha || branch.object.sha !== ref.object?.sha) return null;
-    return await readSnapshot(BRANCH);
+    const branchSha = branch.object?.sha;
+    if (!branchSha || branchSha !== ref.object?.sha) return null;
+    return await readSnapshot(branchSha);
   } catch {
     return null;
   }
