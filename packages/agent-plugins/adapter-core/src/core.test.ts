@@ -179,47 +179,77 @@ function stubAnswer(map: Record<string, string>, status = '0', sleep?: number): 
 
 test('callHookDetailed: a control object is health, not failure', async () => {
   stubAnswer({ stop: '{"decision":"block","reason":"x"}' });
-  const { control, failure } = await callHookDetailed(stubCmd, 'stop', {}, hookDir, 5_000);
+  const { control, failure } = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: {},
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(control?.decision, 'block');
   assert.equal(failure, null);
 });
 
 test('callHookDetailed: clean exit + empty stdout is silence, no failure', async () => {
   stubAnswer({});
-  const { control, failure } = await callHookDetailed(stubCmd, 'stop', {}, hookDir, 5_000);
+  const { control, failure } = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: {},
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(control, null);
   assert.equal(failure, null);
 });
 
 test('callHookDetailed: a nonzero exit names its code', async () => {
   stubAnswer({}, '3');
-  const { control, failure } = await callHookDetailed(stubCmd, 'stop', {}, hookDir, 5_000);
+  const { control, failure } = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: {},
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(control, null);
   assert.deepEqual(failure, { kind: 'exit', code: 3 });
 });
 
 test('callHookDetailed: chatter with no control line is broken output', async () => {
   stubAnswer({ stop: 'loading...\ngarbage\n' });
-  const { control, failure } = await callHookDetailed(stubCmd, 'stop', {}, hookDir, 5_000);
+  const { control, failure } = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: {},
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(control, null);
   assert.deepEqual(failure, { kind: 'output' });
 });
 
 test('callHookDetailed: a timed-out hook is its own class', async () => {
   stubAnswer({}, '0', 60_000);
-  const { control, failure } = await callHookDetailed(stubCmd, 'stop', {}, hookDir, 50);
+  const { control, failure } = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: {},
+    cwd: hookDir,
+    timeoutMs: 50,
+  });
   assert.equal(control, null);
   assert.deepEqual(failure, { kind: 'timeout', timeoutMs: 50 });
 });
 
 test('callHookDetailed: a child that cannot spawn is its own class', async () => {
-  const { control, failure } = await callHookDetailed(
-    { cmd: '/nonexistent/bro-cli-xyz', args: [] },
-    'stop',
-    {},
-    hookDir,
-    5_000
-  );
+  const { control, failure } = await callHookDetailed({
+    command: { cmd: '/nonexistent/bro-cli-xyz', args: [] },
+    event: 'stop',
+    payload: {},
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(control, null);
   assert.deepEqual(failure, { kind: 'spawn' });
 });
@@ -231,12 +261,24 @@ test('callHookDetailed: an unserializable payload is an outage, not silence', as
   // never receive
   const circular: { self?: unknown } = {};
   circular.self = circular;
-  const { control, failure } = await callHookDetailed(stubCmd, 'stop', circular, hookDir, 5_000);
+  const { control, failure } = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: circular,
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(control, null);
   assert.deepEqual(failure, { kind: 'input' });
   // stringify returns undefined (not a throw) for undefined/functions/
   // symbols — same outage class, still no child spawned
-  const undef = await callHookDetailed(stubCmd, 'stop', undefined, hookDir, 5_000);
+  const undef = await callHookDetailed({
+    command: stubCmd,
+    event: 'stop',
+    payload: undefined,
+    cwd: hookDir,
+    timeoutMs: 5_000,
+  });
   assert.equal(undef.control, null);
   assert.deepEqual(undef.failure, { kind: 'input' });
 });

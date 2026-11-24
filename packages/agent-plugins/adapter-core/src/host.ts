@@ -404,7 +404,14 @@ export function createBroDriver<Ctx>(
     const cmd = await command();
     return cmd === null
       ? { control: null, failure: { kind: 'no-cli' } }
-      : callHookDetailed(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+      : callHookDetailed({
+          command: cmd,
+          event,
+          payload,
+          cwd,
+          timeoutMs,
+          extraEnv: host.hookEnv,
+        });
   };
 
   /** Probe one bro hook. Fail-open: every failure is "no opinion". */

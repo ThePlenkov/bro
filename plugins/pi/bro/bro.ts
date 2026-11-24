@@ -100,30 +100,38 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	if (opts.command !== void 0 && opts.command !== "") {
-		const [cmd, ...args] = opts.command.split(/\s+/).filter((p) => p !== "");
-		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	}
+	return await resolvePinnedCommand(opts.command) ?? await resolveLocalCommand() ?? await resolvePathCommand() ?? await resolveNpxCommand(opts.npxPin);
+}
+async function resolvePinnedCommand(command) {
+	if (command === void 0 || command === "") return null;
+	const [cmd, ...args] = command.split(/\s+/).filter((part) => part !== "");
+	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function resolveLocalCommand() {
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
 		cmd: jsRuntime(),
 		args: [entry]
 	};
-	if (await exitsZero("bro", ["hooks"])) return {
+	return null;
+}
+async function resolvePathCommand() {
+	return await exitsZero("bro", ["hooks"]) ? {
 		cmd: "bro",
 		args: []
-	};
-	if (opts.npxPin !== void 0 && await exitsZero("npx", ["--version"])) return {
+	} : null;
+}
+async function resolveNpxCommand(npxPin) {
+	return npxPin !== void 0 && await exitsZero("npx", ["--version"]) ? {
 		cmd: "npx",
 		args: [
 			"-y",
 			"--prefer-offline",
-			opts.npxPin
+			npxPin
 		]
-	};
-	return null;
+	} : null;
 }
 /**
 * The env an in-process adapter stamps on its `bro hooks` spawn so the
@@ -161,10 +169,10 @@ function hookFailureText(failure) {
 * fail-open, but the second must not pass invisibly. A clean exit with
 * empty stdout is silence (failure null) — only real outage kinds set it.
 */
-async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
+async function callHookDetailed(options) {
 	let input;
 	try {
-		input = JSON.stringify(payload);
+		input = JSON.stringify(options.payload);
 	} catch {
 		return {
 			control: null,
@@ -178,15 +186,15 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
-		child = spawn(command.cmd, [
-			...command.args,
+		child = spawn(options.command.cmd, [
+			...options.command.args,
 			"hooks",
-			event
+			options.event
 		], {
-			cwd,
-			env: extraEnv === void 0 ? void 0 : {
+			cwd: options.cwd,
+			env: options.extraEnv === void 0 ? void 0 : {
 				...process.env,
-				...extraEnv
+				...options.extraEnv
 			},
 			stdio: [
 				"pipe",
@@ -209,11 +217,11 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 			resolve(result);
 		}
 	};
-	const timer = killAfter(child, timeoutMs, () => settle({
+	const timer = killAfter(child, options.timeoutMs, () => settle({
 		control: null,
 		failure: {
 			kind: "timeout",
-			timeoutMs
+			timeoutMs: options.timeoutMs
 		}
 	}));
 	let out = "";
@@ -547,7 +555,14 @@ function createBroDriver(host, api, deps = {}) {
 		return cmd === null ? {
 			control: null,
 			failure: { kind: "no-cli" }
-		} : callHookDetailed(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+		} : callHookDetailed({
+			command: cmd,
+			event,
+			payload,
+			cwd,
+			timeoutMs,
+			extraEnv: host.hookEnv
+		});
 	};
 	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
 	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => (await probeResult(event, payload, cwd, timeoutMs)).control;
