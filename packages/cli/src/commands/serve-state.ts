@@ -11,6 +11,11 @@ import {
 } from '@broject/core';
 import { pidAlive } from '../agent-connectors.ts';
 
+const STATE_DIR = 'bro';
+const SERVE_STATE_FILE = 'serve.json';
+const PROVIDER_STATE_FILE = 'provider.json';
+const GIT_COMMON_ARGS = ['rev-parse', '--path-format=absolute', '--git-common-dir'];
+
 export interface ServeState {
   pid: number;
   url: string;
@@ -51,13 +56,13 @@ export function readStateFile(path: string): ServeState | undefined {
 function trustedStatePath(path: string): string | undefined {
   const candidate = resolve(path);
   const providerBase = process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state');
-  const providerPath = resolve(join(providerBase, 'bro', 'provider.json'));
+  const providerPath = resolve(join(providerBase, STATE_DIR, PROVIDER_STATE_FILE));
   const isProviderPath = candidate === providerPath;
   const commonDir = resolve(dirname(dirname(candidate)));
   const isServePath =
-    candidate === resolve(join(commonDir, 'bro', 'serve.json')) &&
-    basename(candidate) === 'serve.json' &&
-    basename(dirname(candidate)) === 'bro' &&
+    candidate === resolve(join(commonDir, STATE_DIR, SERVE_STATE_FILE)) &&
+    basename(candidate) === SERVE_STATE_FILE &&
+    basename(dirname(candidate)) === STATE_DIR &&
     gitCommonDir(commonDir) === commonDir;
   if (!isProviderPath && !isServePath) {
     return undefined;
@@ -70,7 +75,7 @@ function trustedStatePath(path: string): string | undefined {
 }
 
 function gitCommonDir(dir: string): string | undefined {
-  const result = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const result = gitTry(['-C', dir, ...GIT_COMMON_ARGS]);
   return result.code === 0 && result.out.trim() !== '' ? resolve(result.out.trim()) : undefined;
 }
 
