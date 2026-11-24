@@ -124,19 +124,35 @@ describe('devinExternalActivity (spec bro-eqi2d)', () => {
     });
   });
 
-  test('the session log mtime is the other activity stamp', () => {
+  test('a fresh log cannot mask an idle transcript — logs are housekeeping', () => {
     withProc((procDir, mk) => {
       const d = dirs();
       d.procDir = procDir;
       mk(process.pid, 'PATH=/bin\0', '/dev/pts/2');
       writeFileSync(join(d.lockDir, 'peach.lock'), String(process.pid));
-      // a stale transcript but a fresh output log — still active
+      // transcript is the real activity signal; the log keeps churning on
+      // skills-discovery/remote-config while the session is idle
       const stale = join(d.transcriptsDir, 'peach.json');
       writeFileSync(stale, '{}');
       const old = new Date(Date.now() - 3600_000);
       utimesSync(stale, old, old);
       writeFileSync(join(d.logsDir, `devin_20260101_${process.pid}.log`), 'x');
+      assert.equal(devinExternalActivity(ctx(d)).active, false);
+    });
+  });
+
+  test('the session log mtime is the fallback when no transcript exists', () => {
+    withProc((procDir, mk) => {
+      const d = dirs();
+      d.procDir = procDir;
+      mk(process.pid, 'PATH=/bin\0', '/dev/pts/2');
+      writeFileSync(join(d.lockDir, 'peach.lock'), String(process.pid));
+      // no transcript at all — the log is the only provable stamp
+      writeFileSync(join(d.logsDir, `devin_20260101_${process.pid}.log`), 'x');
       assert.equal(devinExternalActivity(ctx(d)).active, true);
+      const old = new Date(Date.now() - 3600_000);
+      utimesSync(join(d.logsDir, `devin_20260101_${process.pid}.log`), old, old);
+      assert.equal(devinExternalActivity(ctx(d)).active, false);
     });
   });
 
