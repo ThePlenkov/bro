@@ -192,7 +192,7 @@ function everyValue(argv: string[], token: EveryToken): string | undefined {
 
 function everyArgument(argv: string[], defaultEverySec: number): number | undefined {
   const token = everyToken(argv);
-  if (token === undefined) {
+  if (!token) {
     return undefined;
   }
   const everyRaw = everyValue(argv, token);
