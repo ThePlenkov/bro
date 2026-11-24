@@ -16,8 +16,8 @@
 import {
   type AgentRegistryEntry,
   groupMemberAlive,
-  pidAlive,
   type ProcEntry,
+  pidAlive,
   scanProc,
 } from '@broject/core';
 import { pollUntilGone } from './stop-entry.ts';

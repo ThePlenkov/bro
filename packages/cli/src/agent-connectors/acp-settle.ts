@@ -12,8 +12,8 @@ import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   type AgentRegistryEntry,
-  patchAgentRegistry,
   type ProviderEntry,
+  patchAgentRegistry,
   readAgentRegistry,
 } from '@broject/core';
 import type { AgentConnectorEnv } from './core.ts';

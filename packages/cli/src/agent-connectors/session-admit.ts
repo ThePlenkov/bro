@@ -14,13 +14,13 @@
  * keep resolving.
  */
 import {
+  admitSessionSlot,
   type ProviderCapLane,
   type SessionPlane,
-  admitSessionSlot,
+  SpawnError,
   sessionCapRefusal,
   sessionCapViews,
   sessionPlane,
-  SpawnError,
 } from '@broject/core';
 
 /** The `liveKeys` a kind carries when the caller holds no snapshot —
