@@ -23,79 +23,69 @@
  */
 import { basename } from 'node:path';
 import {
-  acquireFileLock,
-  countMergesInRange,
-  facade,
-  gitTry,
-  LockTimeout,
-  MANUAL_CASCADE,
-  mergeChainPerLayer,
-  hasHelpFlag,
-  printUsage,
-  reviewHost,
-  shQuote,
-  stackHost,
-  type PrMeta,
-  type ReviewFacade,
-  type StackCascade,
-  type StackChainMember,
-  type StackFacade,
-  type StackMergeOpts,
-} from '@broject/core';
-import type { ExitCode } from '@broject/core';
-import {
   acquireMergeSlot,
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
-  resolveLedger,
   releaseMergeSlot,
+  resolveLedger,
 } from '@broject/act';
+import {
+  acquireFileLock,
+  countMergesInRange,
+  facade,
+  gitTry,
+  hasHelpFlag,
+  LockTimeout,
+  MANUAL_CASCADE,
+  mergeChainPerLayer,
+  type PrMeta,
+  type ReviewFacade,
+  reviewHost,
+  type StackCascade,
+  type StackChainMember,
+  type StackFacade,
+  type StackMergeOpts,
+  shQuote,
+  stackHost,
+} from '@broject/core';
 import {
   displayBase,
   formatStackBranch,
   isStackName,
   nextIndex,
-  parseStackBranch,
   planSync,
+  type SyncMemberInput,
+  type SyncPlanItem,
   stackMembers,
   stackNames,
   stackTop,
-  type SyncMemberInput,
-  type SyncPlanItem,
 } from '@broject/stack';
-import { flag, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
+import { positionals } from './args.ts';
+import {
+  MERGE_BOOL_FLAGS,
+  NAME_FLAGS,
+  requiredStackName,
+  resolveStackName,
+  usage,
+} from './stack-args.ts';
 import {
   createWorktree,
+  defaultBranchName,
   dirtyCount,
+  type EnterWorktreeResult,
   finishWorktreeEnter,
   mainWorktree,
-  defaultBranchName,
   parseWorktreePorcelain,
   readStackEdges,
   recordStackEdge,
   removeStackEdge,
   stackPushLockPath,
   stateOfWorktree,
-  type EnterWorktreeResult,
   type WorktreeCreateResult,
   type WorktreeInfo,
 } from './work.ts';
-
-const NAME_FLAGS = new Set(['--name']);
-
-function usage(exitCode: ExitCode = 2): never {
-  printUsage(
-    `usage:
-  bro stack push <bead> [--name <stack>]
-  bro stack list [<name>]
-  bro stack sync [<name>]
-  bro stack publish [<name>]
-  bro stack merge [<name>] [--squash|--merge|--rebase] [--admin]`,
-    exitCode
-  );
-}
 
 function allBranches(dir: string): string[] {
   return gitTry(['-C', dir, 'branch', '--format=%(refname:short)'])
@@ -152,27 +142,6 @@ function remotesOf(dir: string): string[] {
  *  the git call takes the ref. */
 function ontoBase(dir: string, base: string): string {
   return baseRef(dir, base) ?? base;
-}
-
-/** Stack name resolution: --name wins, else the current worktree's own
- *  `stack/<name>/…` branch (push from inside a member extends that
- *  stack), else it must be given — guessing a name would scatter
- *  branches across stacks nobody asked for. */
-function resolveStackName(argv: string[]): string {
-  const explicit = flag(argv, '--name');
-  if (explicit !== undefined) {
-    if (!isStackName(explicit)) {
-      console.error(`error: invalid stack name "${explicit}" ([a-z0-9_.-])`);
-      process.exit(2);
-    }
-    return explicit;
-  }
-  const cur = parseStackBranch(gitTry(['branch', '--show-current']).out.trim());
-  if (cur) {
-    return cur.name;
-  }
-  console.error('error: no stack context — pass --name <stack>');
-  usage();
 }
 
 /** The live member carrying this bead's slug — a re-push re-enters that
@@ -1138,14 +1107,7 @@ function publishStack(
  *  (positional, --name, or the member worktree's own branch). */
 function cmdPublish(argv: string[]): void {
   const pos = positionals(argv, NAME_FLAGS);
-  const name =
-    flag(argv, '--name') ??
-    pos[0] ??
-    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name;
-  if (name === undefined || !isStackName(name)) {
-    console.error('error: no stack context — pass a name or run inside a member worktree');
-    usage();
-  }
+  const name = requiredStackName(argv, pos);
   const main = mainWorktree();
   const stacks = resolveStacks(main.path);
   if (stacks?.publish === undefined) {
@@ -1392,8 +1354,6 @@ function cmdSync(argv: string[]): void {
   }
 }
 
-const MERGE_BOOL_FLAGS = new Set(['--squash', '--merge', '--rebase', '--admin']);
-
 /** `bro stack merge` — land the chain bottom→top through the
  *  connector's own mechanism: `gh stack merge` where the extension
  *  answers, bottom-up `PUT …/merge` on GitLab (the platform retargets
@@ -1403,14 +1363,7 @@ const MERGE_BOOL_FLAGS = new Set(['--squash', '--merge', '--rebase', '--admin'])
  *  the per-layer fallback effectively all-or-nothing on the gate axis. */
 async function cmdMerge(argv: string[]): Promise<void> {
   const pos = positionals(argv, NAME_FLAGS, { boolFlags: MERGE_BOOL_FLAGS, strict: true });
-  const name =
-    flag(argv, '--name') ??
-    pos[0] ??
-    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name;
-  if (name === undefined || !isStackName(name)) {
-    console.error('error: no stack context — pass a name or run inside a member worktree');
-    usage();
-  }
+  const name = requiredStackName(argv, pos);
   const picked = (['--squash', '--merge', '--rebase'] as const).filter(f => argv.includes(f));
   if (picked.length > 1) {
     console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`);
