@@ -664,6 +664,67 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/stack.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the argv layer — flag sets, usage text, and the shared name resolvers — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-args.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the fork/base truth — reflog, merge-base, and containment reads the sync plan and the rebase replay share — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-fork.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the list report — member rows and the publish hint — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-list.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the merge verb — mergeable prefix, exit gates, connector dispatch, and post-merge cascade — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-merge.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the push verb and its result reporter — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-push.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the read model — branch namespace, edges, worktrees, PR state, and the review/stacks resolvers — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-refs.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the host registration — membership preflight, publish, and cmdPublish — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-register.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from stack.ts: the post-merge cascade and cmdSync — retire/rebase/retarget/follow plus the auto-publish tail — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/stack-sync.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/status.ts"
     },
     {
