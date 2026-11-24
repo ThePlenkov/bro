@@ -425,10 +425,10 @@ export const ACP_PROXY_READ_HIGH_WATER = 64;
 const CLOSE_GRACE_MS = 1_000;
 
 /** The backpressure ledger for one writable leg (bro-0w2tg): writes
- *  still issue immediately and in order, but their settle promises
+ *  still issue immediately and in order, but their awaited settle promises
  *  now feed `depth` — a writer.write() settles only when the peer's
  *  sink accepts the encoded line, so a peer that stops reading lets
- *  un-awaited writes queue without bound. `holds` charges work that
+ *  writes queue only to the high-water bound. `holds` charges work that
  *  was accepted but has not written yet — a session prompt queued on
  *  its writeQ behind a slow seam, a permission ask mid-eval — so the
  *  bound covers intake the wire count cannot see yet. Once depth plus
@@ -440,12 +440,13 @@ const CLOSE_GRACE_MS = 1_000;
  *  flush — are bounded reactions to messages already received, so
  *  they share the ledger without needing their own pause. */
 interface Outbound {
-  /** Issue a wire write — order-preserved, fire-and-forget exactly
-   *  like the un-awaited write was: a rejection fires the leg's dead
-   *  latch. A leg already declared dead accepts nothing — its queued
-   *  writes abandon at teardown either way, and a peer that resumes
-   *  mid-close must never execute work its callers already lost. */
-  send(m: AnyMessage): void;
+  /** Issue a wire write in order. The returned promise settles only after
+   *  the sink accepts the message, so the ledger can use the sink's actual
+   *  backpressure rather than merely counting calls to write(). A leg
+   *  already declared dead accepts nothing — its queued writes abandon at
+   *  teardown either way, and a peer that resumes mid-close must never
+   *  execute work its callers already lost. */
+  send(m: AnyMessage): Promise<void>;
   /** Charge one accepted-but-unwritten slot against the bound —
    *  returns the idempotent release, which the caller runs when its
    *  write issues (the write's own depth takes the slot over) or the
@@ -555,16 +556,19 @@ const outbound = (
     }
   };
   return {
-    send(m) {
+    async send(m): Promise<void> {
       if (dead.fired) {
         return;
       }
       depth++;
       arm();
-      writer.write(m).then(settled, () => {
-        settled();
+      try {
+        await writer.write(m);
+      } catch {
         dead.fire();
-      });
+      } finally {
+        settled();
+      }
     },
     hold() {
       holds++;
