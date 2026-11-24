@@ -81,3 +81,28 @@ test('debt has no judge facade call site at all', () => {
     'debt.ts must not resolve a model facade — the ledger is filesystem + review host only'
   );
 });
+
+test('provider docs keep transport and boundary policy separate from workflow mechanics', () => {
+  const docs = readFileSync(
+    fileURLToPath(new URL('../../../../site/content/docs/commands/provider.md', import.meta.url)),
+    'utf8'
+  );
+  for (const heading of [
+    '## Three separate concerns',
+    '## Credential boundary',
+    '## Retention',
+    '## Approval boundary',
+  ]) {
+    assert.match(docs, new RegExp(`^${heading}$`, 'm'), `${heading} is missing from provider docs`);
+  }
+  assert.match(
+    docs,
+    /The provider plane is opt-in transport/,
+    'provider docs must state that model transport is opt-in'
+  );
+  assert.match(
+    docs,
+    /bro review act[\s\S]{0,60}bro review\s*\ndebt/,
+    'provider docs must state that the core gate/debt workflow needs no provider plane'
+  );
+});
