@@ -38,6 +38,28 @@ fail lines + findings).
 | `bro self dogfood status [run-id] [--json]`                                                         | Run ledger; calling it advances runner→analyst for terminal runners                                                                                                                                                                                                |
 | `bro self dogfood report <run-id>`                                                                  | The verdict once written; run state + transcript pointers otherwise                                                                                                                                                                                                |
 
+## Benchmark (spec bro-l8c4f.9)
+
+Paired bare-vs-BRO workflow outcome benchmark (`native` is an optional
+third variant). The corpus (`dogfood/benchmark/corpus.json`, `pinned:
+true`) lists tasks with pinned `revision`/`models`/CI and `targets` set
+before measurement; history tasks replay a closed bead + merged PR
+(`revision` = merge-parent, reference = PR diff, checks = PR tests).
+
+| Command                                                                         | What it does                                                                                                                                                                       |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro self benchmark corpus` (alias `bro self dogfood benchmark corpus`)         | Print the pinned corpus                                                                                                                                                            |
+| `bro self benchmark run [--targets <path>] [--record <file\|->] [--out <path>]` | Validate corpus+targets; `--record` appends externally measured rows (JSON object, array, or JSONL; `-` = stdin) to `.evidence/benchmark/paired-results.jsonl` (`--out` overrides) |
+
+Row shape is the published draft-07 schema
+(`packages/cli/schemas/benchmark/paired-results.schema.json`):
+`variant` ∈ `bare|bro|native`, `repeat` ≥1 (run index), `wallMs`,
+`actRounds`, `toolCalls`, `contextPeakTokens`, `costUsd` (required,
+nullable — unknown is not 0), plus the outcome/intervention/token
+metrics. Bare `run` refuses to fabricate a baseline — recording is for
+rows a real harness measured, and every row must name a corpus task at
+its pinned revision.
+
 ## Policy
 
 - **Orchestrator-only** — `BRO_AGENT_ID` refuses `run`: a worker never

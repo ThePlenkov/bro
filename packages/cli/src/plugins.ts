@@ -923,7 +923,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'benchmark',
     group: 'self',
-    summary: 'Paired native-vs-BRO workflow outcome benchmarks',
+    summary: 'Paired bare-vs-BRO workflow outcome benchmarks',
     run: runBenchmarkCommand,
     skill: 'dogfood',
   }),

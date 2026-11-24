@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import {
+  appendFileSync,
   chmodSync,
   copyFileSync,
   existsSync,
@@ -41,7 +42,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   acquireFileLock,
   gitCommonDir,
@@ -70,9 +71,9 @@ function usage(exitCode: ExitCode = 2): never {
   bro self dogfood status [run-id] [--json]
   bro self dogfood report <run-id>
   bro self dogfood benchmark corpus
-  bro self dogfood benchmark run [--targets <path>]
+  bro self dogfood benchmark run [--targets <path>] [--record <file|->] [--out <path>]
   bro self benchmark corpus
-  bro self benchmark run [--targets <path>]`,
+  bro self benchmark run [--targets <path>] [--record <file|->] [--out <path>]`,
     exitCode
   );
 }
@@ -903,6 +904,210 @@ function assertValidTargetsFile(targetsFlag: string): void {
   }
 }
 
+// --- paired results (spec bro-l8c4f.9, update 2026-11-08) ----------------------
+
+/** One paired-results JSONL row — the TS mirror of
+ *  `packages/cli/schemas/benchmark/paired-results.schema.json`. The
+ *  published draft-07 schema is the contract; this type keeps the emit
+ *  path honest and `dogfood.test.ts` proves the two cannot drift. */
+export interface PairedResult {
+  taskId: string;
+  revision: string;
+  runId: string;
+  variant: 'bare' | 'bro' | 'native';
+  model: string;
+  startedAt: string;
+  finishedAt: string;
+  timeToGreenMs: number;
+  humanInterventions: number;
+  controlPlaneCalls: number;
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  duplicateWorkCount: number;
+  abandonedWorkCount: number;
+  mergedFindingsWithoutFollowup: number;
+  costUsd: number | null;
+  contextPeakTokens: number;
+  toolCalls: number;
+  actRounds: number;
+  wallMs: number;
+  repeat: number;
+  outcome: 'pass' | 'fail' | 'partial';
+  notes?: string;
+}
+
+const PAIRED_STRING_KEYS = ['taskId', 'revision', 'runId', 'model'] as const;
+const PAIRED_INT_KEYS = [
+  'timeToGreenMs',
+  'humanInterventions',
+  'controlPlaneCalls',
+  'duplicateWorkCount',
+  'abandonedWorkCount',
+  'mergedFindingsWithoutFollowup',
+  'contextPeakTokens',
+  'toolCalls',
+  'actRounds',
+  'wallMs',
+] as const;
+const PAIRED_TOKEN_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
+const PAIRED_VARIANTS = new Set(['bare', 'bro', 'native']);
+const PAIRED_OUTCOMES = new Set(['pass', 'fail', 'partial']);
+const PAIRED_KEYS = new Set<string>([
+  ...PAIRED_STRING_KEYS,
+  'variant',
+  'startedAt',
+  'finishedAt',
+  'tokens',
+  'costUsd',
+  'repeat',
+  'outcome',
+  'notes',
+  ...PAIRED_INT_KEYS,
+]);
+
+/** The first schema violation found in a paired-result row, or null.
+ *  Runtime validation is hand-rolled — ajv stays out of the runtime
+ *  path and the test suite proves parity against the published schema
+ *  fixture-for-fixture (same rule as schemas/plans). */
+export function pairedResultError(row: unknown): string | null {
+  if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+    return 'expected an object';
+  }
+  const r = row as Record<string, unknown>;
+  for (const key of Object.keys(r)) {
+    if (!PAIRED_KEYS.has(key)) {
+      return `unknown field "${key}"`;
+    }
+  }
+  for (const key of PAIRED_STRING_KEYS) {
+    if (typeof r[key] !== 'string' || r[key] === '') {
+      return `${key}: expected a non-empty string`;
+    }
+  }
+  if (!PAIRED_VARIANTS.has(r.variant as string)) {
+    return 'variant: expected bare|bro|native';
+  }
+  for (const key of ['startedAt', 'finishedAt'] as const) {
+    if (typeof r[key] !== 'string') {
+      return `${key}: expected an ISO date-time string`;
+    }
+  }
+  for (const key of PAIRED_INT_KEYS) {
+    if (!Number.isInteger(r[key]) || (r[key] as number) < 0) {
+      return `${key}: expected an integer >= 0`;
+    }
+  }
+  const tokens = r.tokens;
+  if (typeof tokens !== 'object' || tokens === null || Array.isArray(tokens)) {
+    return 'tokens: expected an object';
+  }
+  for (const key of Object.keys(tokens as Record<string, unknown>)) {
+    if (!(PAIRED_TOKEN_KEYS as readonly string[]).includes(key)) {
+      return `tokens.${key}: unknown field`;
+    }
+  }
+  for (const key of PAIRED_TOKEN_KEYS) {
+    const v = (tokens as Record<string, unknown>)[key];
+    if (!Number.isInteger(v) || (v as number) < 0) {
+      return `tokens.${key}: expected an integer >= 0`;
+    }
+  }
+  // costUsd is REQUIRED yet nullable — a missing key and an explicit
+  // null are different verdicts (unknown cost is not 0)
+  if (r.costUsd === undefined) {
+    return 'costUsd: required — a number >= 0 or null';
+  }
+  if (r.costUsd !== null && (typeof r.costUsd !== 'number' || r.costUsd < 0)) {
+    return 'costUsd: expected a number >= 0 or null';
+  }
+  if (!Number.isInteger(r.repeat) || (r.repeat as number) < 1) {
+    return 'repeat: expected an integer >= 1';
+  }
+  if (!PAIRED_OUTCOMES.has(r.outcome as string)) {
+    return 'outcome: expected pass|fail|partial';
+  }
+  if (r.notes !== undefined && typeof r.notes !== 'string') {
+    return 'notes: expected a string';
+  }
+  return null;
+}
+
+/** `.evidence/benchmark/paired-results.jsonl` — the default sink a
+ *  paired run appends to (`--out` overrides). */
+function pairedResultsPath(dir: string): string {
+  return join(dir, '.evidence', 'benchmark', 'paired-results.jsonl');
+}
+
+/** Rows are validated BEFORE anything is appended — a rejected batch
+ *  leaves the file untouched rather than half-written. */
+function appendPairedResults(out: string, rows: PairedResult[]): void {
+  mkdirSync(dirname(out), { recursive: true });
+  appendFileSync(out, rows.map(r => `${JSON.stringify(r)}\n`).join(''));
+}
+
+/** `--record` input — one JSON object, a JSON array, or JSONL (one
+ *  object per line). `-` reads stdin. Every row must name a corpus
+ *  task at its pinned revision — a row tied to anything else is not a
+ *  paired measurement of this corpus. */
+function benchmarkRecord(recordPath: string, out: string, corpus: BenchmarkJson): void {
+  let text: string;
+  try {
+    text = recordPath === '-' ? readFileSync(0, 'utf8') : readFileSync(recordPath, 'utf8');
+  } catch (err) {
+    die(
+      `cannot read benchmark record file ${recordPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  let rows: unknown[];
+  try {
+    const doc = JSON.parse(text) as unknown;
+    rows = Array.isArray(doc) ? doc : [doc];
+  } catch {
+    // not a single JSON document — try one object per line (JSONL)
+    rows = [];
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed === '') {
+        continue;
+      }
+      try {
+        rows.push(JSON.parse(trimmed) as unknown);
+      } catch (err) {
+        die(
+          `invalid benchmark record JSONL in ${recordPath}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+  }
+  if (rows.length === 0) {
+    die(`invalid benchmark record file ${recordPath}: no rows`);
+  }
+  const pinned = new Map<string, string>();
+  for (const task of Array.isArray(corpus.tasks) ? corpus.tasks : []) {
+    const t = task as { taskId?: unknown; revision?: unknown };
+    if (typeof t.taskId === 'string' && typeof t.revision === 'string') {
+      pinned.set(t.taskId, t.revision);
+    }
+  }
+  for (const row of rows) {
+    const err = pairedResultError(row);
+    if (err !== null) {
+      die(`invalid paired result row: ${err}`);
+    }
+    const r = row as PairedResult;
+    const revision = pinned.get(r.taskId);
+    if (revision === undefined) {
+      die(`invalid paired result row: taskId "${r.taskId}" is not a corpus task`);
+    }
+    if (r.revision !== revision) {
+      die(
+        `invalid paired result row: taskId "${r.taskId}" revision must be the pinned ${revision}`
+      );
+    }
+  }
+  appendPairedResults(out, rows as PairedResult[]);
+  console.log(`benchmark: recorded ${rows.length} row(s) → ${out}`);
+}
+
 function benchmarkCorpus(dir: string): void {
   const corpus = benchmarkCorpusPath(dir);
   if (!existsSync(corpus)) {
@@ -912,8 +1117,10 @@ function benchmarkCorpus(dir: string): void {
 }
 
 function benchmarkRun(dir: string, argv: string[]): void {
-  positionals(argv.slice(1), new Set(['--targets']), { strict: true });
+  positionals(argv.slice(1), new Set(['--targets', '--record', '--out']), { strict: true });
   const targetsFlag = flag(argv, '--targets');
+  const recordFlag = flag(argv, '--record');
+  const outFlag = flag(argv, '--out');
   // the corpus always comes from the pinned path — `--targets` is a
   // targets override, never the corpus itself (a targets-shaped file
   // has no .tasks and would silently emit zero rows)
@@ -925,6 +1132,15 @@ function benchmarkRun(dir: string, argv: string[]): void {
   assertValidCorpusTasks(corpusPath, Array.isArray(corpus.tasks) ? corpus.tasks : []);
   if (targetsFlag !== undefined) {
     assertValidTargetsFile(targetsFlag);
+  }
+  // `--record` is the emit seam for results measured OUTSIDE this
+  // process — the arena harness runs the trial and hands the row back;
+  // bro validates it against the published shape and appends the JSONL
+  // (spec bro-l8c4f.9 — emit paired results to
+  // .evidence/benchmark/paired-results.jsonl).
+  if (recordFlag !== undefined) {
+    benchmarkRecord(recordFlag, outFlag ?? pairedResultsPath(dir), corpus);
+    return;
   }
   // the spec's own contract — no claims without a baseline. Emitting
   // zero-metric 'pass' rows would fabricate a baseline into the shared

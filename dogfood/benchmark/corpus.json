@@ -23,6 +23,162 @@
         "abandonedWorkCount": 0,
         "mergedFindingsWithoutFollowup": 0
       }
+    },
+    {
+      "taskId": "bro-rw8z3",
+      "bead": "bro-rw8z3",
+      "pr": 1080,
+      "mergeCommit": "df591536bdec60bfb83aa7d74fda927914887e5c",
+      "revision": "fa0e8f13230ecc2f5b69fe0ae1d8292db65caa05",
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (medium feature, 4 files +723): hooks waste-guard — deterministic tool-call discipline (dup-cache, verify-gate, batch nudge). Starting state is the parent of the PR #1080 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "waste-guard hook behavior lands per the reference PR #1080 diff",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 2700000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 80,
+        "tokens": { "input": 250000, "output": 60000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
+    },
+    {
+      "taskId": "bro-9ti7h",
+      "bead": "bro-9ti7h",
+      "pr": 1088,
+      "mergeCommit": "f1db81a4b6025cfc4fb967227c17bb00a030a22a",
+      "revision": "c4c5b5d36c0ffb81b70157c97b15462843dace19",
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (focused fix, 4 files +453): acp event archive self-caps at 4 MiB keeping the newest 2 MiB. Starting state is the parent of the PR #1088 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "acp event archive rotation lands per the reference PR #1088 diff",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 1500000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 50,
+        "tokens": { "input": 150000, "output": 40000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
+    },
+    {
+      "taskId": "bro-v96mp",
+      "bead": "bro-v96mp",
+      "pr": 1090,
+      "mergeCommit": "b419cebe37de142cb5be3a9ee59e327891b14385",
+      "revision": "75cd50ad31a657a1013e1259dce3f0fe2ffa93d2",
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (large multi-package fix, 19 files +1362/-159): pin worker TMPDIR under the worktree gitdir + small-fs disk floor across cli/loop/rig. Starting state is the parent of the PR #1090 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "worker TMPDIR pinning + disk floor land per the reference PR #1090 diff",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 3600000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 100,
+        "tokens": { "input": 400000, "output": 90000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
+    },
+    {
+      "taskId": "bro-0w2tg",
+      "bead": "bro-0w2tg",
+      "pr": 1096,
+      "mergeCommit": "5671a2f5383156febf302465c5a64d5519359a6f",
+      "revision": "2082504e63f37d7330b58a37d43005b3281b81c3",
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (big focused fix, 2 files +1755): acp-proxy pump writes awaited — outbound backpressure against a stalled peer. Starting state is the parent of the PR #1096 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "awaited pump writes / backpressure lands per the reference PR #1096 diff",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 2700000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 80,
+        "tokens": { "input": 300000, "output": 80000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
+    },
+    {
+      "taskId": "bro-wb8wf",
+      "bead": "bro-wb8wf",
+      "pr": 1098,
+      "mergeCommit": "c6dda84c8eb744ebfbc63e4cdf9d77f0aef7f002",
+      "revision": "69282ed94097c78e2c512021bf95f167f0d3c422",
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (focused fix, 3 files +691): tmp-sweep never deletes across a mount boundary — a stale tmp dir containing a mount must not lose foreign-fs content. Starting state is the parent of the PR #1098 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "mount-boundary guard lands per the reference PR #1098 diff",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": { "input": 120000, "output": 30000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
+    },
+    {
+      "taskId": "bro-9vf6b",
+      "bead": "bro-9vf6b",
+      "pr": 1113,
+      "mergeCommit": "9283f3decade84e8fdad03320faa69a6f3220e64",
+      "revision": "f127c8ec1d627bcb8a93ff85f73600bc8f3d9a19",
+      "models": ["claude", "opencode"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "History task (multi-plugin fix, 12 files +1475/-228): surface a rate-limited diagnostic when the stop-gate probe cannot run (CLI missing/timeout), keeping fail-open. Starting state is the parent of the PR #1113 merge; the reference is the PR diff; the checks are the PR's tests.",
+      "successCriteria": [
+        "stop-probe outage diagnostic lands per the reference PR #1113 diff",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
+      ],
+      "targets": {
+        "timeToGreenMs": 3000000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 90,
+        "tokens": { "input": 350000, "output": 85000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
     }
   ]
 }
