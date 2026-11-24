@@ -21,7 +21,7 @@ import type {
   TaskStoreAsync,
 } from '@broject/core';
 import { gitTry } from '@broject/core';
-import { glab, glabJson, glabJsonAsync, glabPaged, glabPagedAsync, glabTry } from './glab.ts';
+import { glab, glabJson, glabPaged, glabTry } from './glab.ts';
 import type { GlabOpts } from './glab.ts';
 import { hostFor } from './reviews.ts';
 
@@ -37,14 +37,16 @@ function remoteUrl(dir: string): string | undefined {
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
 }
 
-/** host + path split for GitLab remotes — https, ssh:// and scp-style */
+/** host + path split for GitLab remotes — https, ssh:// and scp-style.
+ *  An ssh:// `user@` prefix is not part of the host (the port stays —
+ *  self-hosted URLs still build). */
 function remoteParts(url: string): { host: string; path: string } | null {
   const m =
     /^(?:https?|ssh):\/\/([^/]+)\/(.+?)\/?$/i.exec(url) ?? /^[^@\s]+@([^:/]+):(.+?)\/?$/.exec(url);
   if (!m) {
     return null;
   }
-  return { host: m[1]!.toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
+  return { host: m[1]!.replace(/^[^@]+@/, '').toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
 }
 
 interface ResolvedProject {
@@ -93,9 +95,12 @@ interface GitLabIssue {
   labels?: string[];
   milestone?: { title?: string } | null;
   references?: { full?: string };
-  blocking_issues_count?: number;
-  blocked_issues_count?: number;
-  has_blocked_issues?: boolean;
+  /** Premium flag: this issue has open incoming blockers. Absent on
+   *  free instances — the `blocked` label is the manual marker there.
+   *  `blocking_issues_count` is NOT the blocked signal: it counts the
+   *  open issues THIS issue blocks (outgoing — a blocker is itself
+   *  ready work), so reading it as "blocked" inverts the map. */
+  blocked?: boolean;
 }
 
 const actorCache = new Map<string, string>();
@@ -116,10 +121,6 @@ function glabActor(dir: string): string {
   return a;
 }
 
-async function glabActorAsync(dir: string): Promise<string> {
-  return glabActor(dir);
-}
-
 function labelsOf(i: GitLabIssue): string[] {
   return i.labels ?? [];
 }
@@ -136,16 +137,9 @@ function isBlocked(i: GitLabIssue, labels: string[]): boolean {
   if (labels.includes(BLOCKED_LABEL)) {
     return true;
   }
-  if (isInteger(i.blocking_issues_count) && i.blocking_issues_count > 0) {
-    return true;
-  }
-  if (isInteger(i.blocked_issues_count) && i.blocked_issues_count > 0) {
-    return true;
-  }
-  if (i.has_blocked_issues === true) {
-    return true;
-  }
-  return false;
+  // `blocked` is premium-only — free-tier payloads omit it, so incoming
+  // blockers are invisible there; the label is the only marker.
+  return i.blocked === true;
 }
 
 function statusOf(i: GitLabIssue, labels: string[], assignees: string[]): string {
@@ -221,6 +215,9 @@ function assertNoNewline(v: string, name: string): void {
     throw new Error(`gitlab tasks: invalid ${name} (newlines not allowed)`);
   }
 }
+
+const glabDetail = (r: { code: number; out: string; err: string }): string =>
+  r.err || r.out || `exit ${r.code}`;
 
 // --- id resolution -------------------------------------------------------------
 
@@ -474,12 +471,77 @@ const CLAIM_CAPABILITY = {
   authority: 'service',
 } as const satisfies ClaimCapability;
 
-function claimSync(dir: string, id: string): void {
-  const ref = parseIssueRef(dir, id);
-  const n = getIssueSync(dir, ref);
-  if (n === undefined) {
-    throw new Error(`gitlab tasks: issue ${id} not found`);
+/** login → numeric user id via `users?username=` — the same lookup the
+ *  claim path uses for the actor. undefined when the lookup resolves
+ *  nothing (empty result or a missing/zero id). */
+function userIdOf(dir: string, username: string): number | undefined {
+  const users = glabJson<Array<{ id?: number; username?: string }>>(
+    ['api', `users?username=${encodeURIComponent(username)}`],
+    gopts(dir)
+  );
+  const id = users[0]?.id;
+  return typeof id === 'number' && id > 0 ? id : undefined;
+}
+
+/** The claim's commit flag lands last: re-read the label set (a raced
+ *  label would be lost to a stale PUT), then write `+bro:claimed`. The
+ *  write is checked — an assignee without the flag is half a claim and
+ *  must fail loud, not slide. */
+function writeClaimLabel(
+  dir: string,
+  ref: { projectPath: string; iid: number },
+  id: string,
+  fallbackLabels: string[]
+): void {
+  const cur = getIssueSync(dir, ref);
+  const curLabels = cur ? labelsOf(cur) : fallbackLabels;
+  const r = glabTry(
+    [
+      'api',
+      '-X',
+      'PUT',
+      api(ref.projectPath, `issues/${ref.iid}`),
+      '-f',
+      `labels=${[...curLabels, CLAIMED_LABEL].join(',')}`,
+    ],
+    gopts(dir)
+  );
+  if (r.code !== 0) {
+    throw new Error(
+      `gitlab tasks: claim of ${id} assigned the actor but the ${CLAIMED_LABEL} label write failed — issue may be assigned without the commit flag (${glabDetail(r)})`
+    );
   }
+}
+
+function releaseContestedClaim(
+  dir: string,
+  ref: { projectPath: string; iid: number },
+  others: string[]
+): void {
+  const keepIds = others.flatMap(u => {
+    try {
+      const uid = userIdOf(dir, u);
+      return uid === undefined ? [] : [uid];
+    } catch {
+      return [];
+    }
+  });
+  if (keepIds.length !== others.length) {
+    return;
+  }
+  const args = ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`)];
+  for (const uid of keepIds) {
+    args.push('-f', `assignee_ids[]=${uid}`);
+  }
+  glabTry(args, gopts(dir));
+}
+
+function claimOpenIssue(
+  dir: string,
+  id: string,
+  ref: { projectPath: string; iid: number },
+  n: GitLabIssue
+): void {
   if (n.state === 'closed') {
     throw new Error(`gitlab tasks: ${id} is closed — only open issues are claimable`);
   }
@@ -496,73 +558,76 @@ function claimSync(dir: string, id: string): void {
     );
   }
   ensureLabel(dir, ref.projectPath, CLAIMED_LABEL);
-  // add assignee - need assignee_id; try to find user
+  assignClaim({ dir, id, ref, me, assignees, labels });
+}
+
+interface ClaimContext {
+  dir: string;
+  id: string;
+  ref: { projectPath: string; iid: number };
+  me: string;
+  assignees: string[];
+  labels: string[];
+}
+
+function assignClaim({ dir, id, ref, me, assignees, labels }: ClaimContext): void {
+  assignActor(dir, id, ref, me);
+  finalizeClaim({ dir, id, ref, me, assignees, labels });
+}
+
+function assignActor(
+  dir: string,
+  id: string,
+  ref: { projectPath: string; iid: number },
+  me: string
+): void {
   try {
-    const users = glabJson<Array<{ id: number; username: string }>>(
-      ['api', `users?username=${encodeURIComponent(me)}`],
-      gopts(dir)
-    );
-    if (users.length > 0 && users[0]?.id) {
-      glab(
-        [
-          'api',
-          '-X',
-          'PUT',
-          api(ref.projectPath, `issues/${ref.iid}`),
-          '-f',
-          `assignee_id=${users[0].id}`,
-        ],
-        gopts(dir)
-      );
-    } else {
+    const myId = userIdOf(dir, me);
+    if (myId === undefined) {
       throw new Error(`gitlab tasks: could not resolve user ID for ${me} — cannot claim`);
     }
+    glab(
+      ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `assignee_id=${myId}`],
+      gopts(dir)
+    );
   } catch (err) {
     if (err instanceof Error && err.message.includes('could not resolve user ID')) {
       throw err;
     }
     throw new Error(`gitlab tasks: failed to assign ${me} to ${id} — cannot claim`);
   }
+}
+
+function finalizeClaim({ dir, id, ref, me, assignees, labels }: ClaimContext): void {
   const check = getIssueSync(dir, ref);
   const checkAssignees = check ? assigneesOf(check) : assignees;
   const others = checkAssignees.filter(a => a !== me);
   if (others.length === 0) {
-    const cur2 = getIssueSync(dir, ref);
-    const curLabels = cur2 ? labelsOf(cur2) : labels;
-    glabTry(
-      [
-        'api',
-        '-X',
-        'PUT',
-        api(ref.projectPath, `issues/${ref.iid}`),
-        '-f',
-        `labels=${[...curLabels, CLAIMED_LABEL].join(',')}`,
-      ],
-      gopts(dir)
-    );
+    writeClaimLabel(dir, ref, id, labels);
     return;
   }
   const winner = [...others, me].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0]!;
   if (winner !== me) {
-    glabTry(
-      ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'assignee_id=0'],
-      gopts(dir)
-    );
+    // Remove ONLY myself — `assignee_id=0` reads as "unassign ALL" and
+    // would wipe the winner's assignment too. `assignee_ids[]` replaces
+    // the whole set, so the request must carry every non-me assignee
+    // (the winner ∈ others): resolve each login to its numeric id.
+    releaseContestedClaim(dir, ref, others);
+    // An unresolvable login leaves the assignment untouched: staying
+    // assigned is untidy but never strips the winner. Either way the
+    // race was lost — the contested throw goes out.
     throw new Error(`gitlab tasks: ${id} claim contested — ${winner} holds it`);
   }
-  const cur2 = getIssueSync(dir, ref);
-  const curLabels = cur2 ? labelsOf(cur2) : labels;
-  glabTry(
-    [
-      'api',
-      '-X',
-      'PUT',
-      api(ref.projectPath, `issues/${ref.iid}`),
-      '-f',
-      `labels=${[...curLabels, CLAIMED_LABEL].join(',')}`,
-    ],
-    gopts(dir)
-  );
+  writeClaimLabel(dir, ref, id, labels);
+}
+
+function claimSync(dir: string, id: string): void {
+  const ref = parseIssueRef(dir, id);
+  const n = getIssueSync(dir, ref);
+  if (n === undefined) {
+    throw new Error(`gitlab tasks: issue ${id} not found`);
+  }
+  claimOpenIssue(dir, id, ref, n);
 }
 
 function reopenSync(dir: string, id: string): void {
@@ -572,17 +637,25 @@ function reopenSync(dir: string, id: string): void {
     throw new Error(`gitlab tasks: issue ${id} not found`);
   }
   if (cur.state !== 'opened') {
-    glabTry(
+    const r = glabTry(
       ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'state_event=reopen'],
       gopts(dir)
     );
+    if (r.code !== 0) {
+      throw new Error(`gitlab tasks: failed to reopen ${id} — ${glabDetail(r)}`);
+    }
   }
-  glabTry(
+  const ur = glabTry(
     ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'assignee_id=0'],
     gopts(dir)
   );
+  if (ur.code !== 0) {
+    throw new Error(
+      `gitlab tasks: reopen of ${id} succeeded but unassign failed — issue may be reopened+assigned (${glabDetail(ur)})`
+    );
+  }
   const labels = labelsOf(cur).filter(l => l !== CLAIMED_LABEL && l !== BLOCKED_LABEL);
-  glabTry(
+  const lr = glabTry(
     [
       'api',
       '-X',
@@ -593,6 +666,11 @@ function reopenSync(dir: string, id: string): void {
     ],
     gopts(dir)
   );
+  if (lr.code !== 0) {
+    throw new Error(
+      `gitlab tasks: reopen of ${id} released assignees but the label write failed — ${CLAIMED_LABEL}/${BLOCKED_LABEL} may still be set (${glabDetail(lr)})`
+    );
+  }
 }
 
 function closeSync(dir: string, id: string, reason?: string): void {
@@ -644,7 +722,10 @@ function linkSync(dir: string, from: string, to: string, rel: string = 'related'
     );
   }
   if (rel === 'blocked' || rel === 'blocks' || rel === 'blocked-by') {
-    // "blocked" means source is blocked by target -> source.blocks target
+    // Direction follows the core contract — link(a, b, 'blocked') means
+    // "a is blocked by b", posted on a's links as `is_blocked_by`
+    // (target b). 'blocks' is the reverse: a blocks b → `blocks`.
+    const linkType = rel === 'blocks' ? 'blocks' : 'is_blocked_by';
     try {
       glab(
         [
@@ -655,7 +736,7 @@ function linkSync(dir: string, from: string, to: string, rel: string = 'related'
           '-f',
           `target_issue_iid=${t.iid}`,
           '-f',
-          `link_type=blocks`,
+          `link_type=${linkType}`,
         ],
         gopts(dir)
       );
@@ -672,7 +753,7 @@ function linkSync(dir: string, from: string, to: string, rel: string = 'related'
             '-f',
             `target_issue_iid=${t.iid}`,
             '-f',
-            `link_type=blocks`,
+            `link_type=${linkType}`,
           ],
           gopts(dir)
         );

@@ -104,15 +104,16 @@ function remoteUrl(dir: string): string | undefined {
 }
 
 /** host + path split for GitLab remotes — https, ssh:// and scp-style
- *  `git@host:path.git`. Nested groups keep their slashes; the port, when
- *  present, stays on the host so self-hosted URLs still build. */
+ *  `git@host:path.git`. Nested groups keep their slashes; an ssh://
+ *  `user@` prefix is not part of the host; the port, when present,
+ *  stays on the host so self-hosted URLs still build. */
 function remoteParts(url: string): { host: string; path: string } | null {
   const m =
     /^(?:https?|ssh):\/\/([^/]+)\/(.+?)\/?$/i.exec(url) ?? /^[^@\s]+@([^:/]+):(.+?)\/?$/.exec(url);
   if (!m) {
     return null;
   }
-  return { host: m[1]!.toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
+  return { host: m[1]!.replace(/^[^@]+@/, '').toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
 }
 
 /** The GitLab host a dir points at — the origin remote's authority, the
