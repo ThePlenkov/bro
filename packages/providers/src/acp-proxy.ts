@@ -618,6 +618,21 @@ type PumpOpts = {
   log: (line: string) => void;
 };
 
+interface PromptInjectionParams {
+  message: AnyMessage;
+  params: Record<string, unknown>;
+  sessionId: string;
+  session: ProxySession;
+}
+
+interface PermissionSettlementParams {
+  message: AnyMessage;
+  id: JsonRpcId;
+  session: ProxySession;
+  sessionId: string;
+  outcome: AcpProxyPermissionVerdict | undefined;
+}
+
 type PumpIntakeState = 'saturated' | 'empty' | 'held';
 
 /** A pre-done read — where a wait still needs a promise while the
@@ -1034,20 +1049,20 @@ export async function acpProxy(
    *  marks it at write time, so a prompt cancelled mid-collection
    *  doesn't lose the session's start context. An empty join injects
    *  nothing — byte-identical forwarding is the default. */
-  const injectPrompt = async (
-    m: AnyMessage,
-    params: Record<string, unknown>,
-    sessionId: string,
-    ses: ProxySession
-  ): Promise<{ m: AnyMessage; sessionCtxSettled: boolean }> => {
+  const injectPrompt = async ({
+    message,
+    params,
+    sessionId,
+    session,
+  }: PromptInjectionParams): Promise<{ m: AnyMessage; sessionCtxSettled: boolean }> => {
     const text = promptText(params);
     const [sessionCtx, promptCtx] = await Promise.all([
-      ses.sessionCtxDone
+      session.sessionCtxDone
         ? Promise.resolve<{ text?: string; settled: boolean }>({
             settled: true,
           })
-        : seamSessionCall(opts.seam?.sessionContext, ses, sessionId),
-      seamCall(opts.seam?.promptContext, ses, sessionId, text),
+        : seamSessionCall(opts.seam?.sessionContext, session, sessionId),
+      seamCall(opts.seam?.promptContext, session, sessionId, text),
     ]);
     // an unsettled collection still contributes what it has — the hook
     // emits partial output the same way — but the slot stays open so
@@ -1055,15 +1070,15 @@ export async function acpProxy(
     // context closes only when a settled run crosses downstream). The
     // advisory buffer drains here too — guard `say` lines and gate
     // hints ride the crossed prompt as the same advisory text block.
-    const advisory = ses.advisory.splice(0);
+    const advisory = session.advisory.splice(0);
     const combined = [sessionCtx.text, promptCtx, ...advisory]
       .filter(s => s !== undefined && s !== '')
       .join('\n');
-    if (combined === '') return { m, sessionCtxSettled: sessionCtx.settled };
+    if (combined === '') return { m: message, sessionCtxSettled: sessionCtx.settled };
     const blocks = Array.isArray(params['prompt']) ? params['prompt'] : [];
     const block: ContentBlock = { type: 'text', text: combined };
     return {
-      m: { ...m, params: { ...params, prompt: [block, ...blocks] } },
+      m: { ...message, params: { ...params, prompt: [block, ...blocks] } },
       sessionCtxSettled: sessionCtx.settled,
     };
   };
@@ -1315,7 +1330,12 @@ export async function acpProxy(
   }): Promise<void> => {
     const { m, id, own, params, sessionId, ses } = context;
     const first = !ses.seenPrompt;
-    const injected = await injectPrompt(m, params, sessionId, ses);
+    const injected = await injectPrompt({
+      message: m,
+      params,
+      sessionId,
+      session: ses,
+    });
     if (!crossable(id, own)) return;
     if (own.prompt !== undefined) own.prompt.first = first;
     ses.seenPrompt = true;
@@ -1773,26 +1793,21 @@ export async function acpProxy(
    *  The pending entry is re-read: a cancel/close/teardown racing the
    *  eval already settled the ask, and the verdict lands on an empty
    *  slot. */
-  const settlePermission = (
-    m: AnyMessage,
-    id: JsonRpcId,
-    ses: ProxySession,
-    sessionId: string,
-    outcome: AcpProxyPermissionVerdict | undefined
-  ): void => {
+  const settlePermission = (params: PermissionSettlementParams): void => {
+    const { message, id, session, sessionId, outcome } = params;
     const req = pendingA2C.get(id);
     if (req?.permission === undefined) {
       return; // a cancel/close/teardown already answered it
     }
     if (outcome?.hints !== undefined) {
-      ses.advisory.push(...outcome.hints);
+      session.advisory.push(...outcome.hints);
     }
     const verdict = outcome?.verdict ?? 'ask';
     if (verdict === 'ask' || upDead.fired) {
       // forward the ask verbatim — the client's own answer relays back
       // through the pending entry (held flips: the ask crossed)
       req.permission.held = false;
-      writeUp(m);
+      writeUp(message);
       return;
     }
     pendingA2C.delete(id);
@@ -1800,7 +1815,7 @@ export async function acpProxy(
     const title = perm.title ?? perm.toolCallId ?? 'permission request';
     const allow = verdict === 'allow' ? pickPermissionOption(perm.options, 'allow') : undefined;
     if (allow !== undefined) {
-      notePermission(ses, {
+      notePermission(session, {
         title,
         toolCallId: perm.toolCallId,
         decidedBy: 'proxy',
@@ -1819,7 +1834,7 @@ export async function acpProxy(
       (verdict === 'allow' ? 'policy allowed but no allow option was offered' : undefined);
     const reject = pickPermissionOption(perm.options, 'reject');
     if (reject !== undefined) {
-      notePermission(ses, {
+      notePermission(session, {
         title,
         toolCallId: perm.toolCallId,
         decidedBy: 'proxy',
@@ -1831,7 +1846,7 @@ export async function acpProxy(
     } else {
       // no reject option offered — the denyPermission shape: the ask
       // ends cancelled, never an invented reject
-      notePermission(ses, {
+      notePermission(session, {
         title,
         toolCallId: perm.toolCallId,
         decidedBy: 'proxy',
@@ -1905,7 +1920,7 @@ export async function acpProxy(
         } catch (e) {
           log(`acp proxy: permission eval failed (session ${sessionId}) — ${errText(e)}`);
         }
-        settlePermission(m, id, ses, sessionId, outcome);
+        settlePermission({ message: m, id, session: ses, sessionId, outcome });
       } finally {
         // the slot frees with the settle — a forwarded ask's own write
         // depth took it over, an answered one left nothing on the leg
