@@ -458,6 +458,27 @@ const providerApiSchema = js.obj(
   { required: ['type', 'baseUrl', 'models'] }
 );
 
+/** Opt-in ACP worker MCP servers (spec bro-l8c4f.14) — stdio
+ *  descriptors only; HTTP/SSE/ACP transports are admitted solely when
+ *  the session negotiates the capability, which the headless worker
+ *  does not wire. `name`/`command`/`args` are wire-required; `env`
+ *  defaults to `[]` in the parser. Values ride a 0600 artifact — never
+ *  argv or diagnostics. */
+const mcpStdioSchema = js.obj(
+  {
+    type: { enum: ['stdio'] },
+    name: js.str,
+    command: js.str,
+    args: { type: 'array', items: { type: 'string' } },
+    env: {
+      type: 'array',
+      items: js.obj({ name: js.str, value: { type: 'string' } }, { required: ['name', 'value'] }),
+    },
+    _meta: { type: 'object' },
+  },
+  { required: ['name', 'command', 'args'] }
+);
+
 const providerAcpSchema = js.obj(
   {
     type: { const: 'acp' },
@@ -469,6 +490,7 @@ const providerAcpSchema = js.obj(
     account: js.str,
     autoApprove: js.bool,
     wallPause: js.bool,
+    mcpServers: { type: 'array', items: mcpStdioSchema },
   },
   { required: ['type', 'command'] }
 );

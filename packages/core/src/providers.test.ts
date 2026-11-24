@@ -578,6 +578,8 @@ describe('parseProviderEntry', () => {
     // required stdio wire fields fail loud at parse for the same reason —
     // ACP session/new would reject them as an opaque session-start error
     for (const mcpServers of [
+      [{ type: 'stdio', command: 'c', args: [] }], // no name
+      [{ type: 'stdio', name: 7, command: 'c', args: [] }], // numeric name
       [{ type: 'stdio', name: 'x', args: [] }], // no command
       [{ type: 'stdio', name: 'x', command: 7, args: [] }], // numeric command
       [{ type: 'stdio', name: 'x', command: 'c', args: 'mcp' }], // string args
@@ -585,6 +587,17 @@ describe('parseProviderEntry', () => {
     ]) {
       assert.equal(parseProviderEntry('p', { type: 'acp', command: 'kilo acp', mcpServers }), null);
     }
+
+    // an absent `env` normalizes to the wire-required empty array — a
+    // catch-wrapped agent-side parse would silently drop the entry
+    const noEnv = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo acp',
+      mcpServers: [{ type: 'stdio', name: 'x', command: 'c', args: [] }],
+    });
+    assert.deepEqual((noEnv as { mcpServers?: unknown[] } | null)?.mcpServers, [
+      { type: 'stdio', name: 'x', command: 'c', args: [], env: [] },
+    ]);
 
     const absent = parseProviderEntry('p', { type: 'acp', command: 'kilo acp' });
     assert.equal((absent as { mcpServers?: unknown[] } | null)?.mcpServers, undefined);

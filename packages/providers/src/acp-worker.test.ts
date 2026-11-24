@@ -311,6 +311,7 @@ describe('runAcpWorker', () => {
       assert.equal(Array.isArray(got) ? got.length : -1, 1);
       assert.equal((got?.[0] as { name?: string } | undefined)?.name, 'bro');
       assert.equal((got?.[0] as { command?: string } | undefined)?.command, 'bro');
+      assert.deepEqual((got?.[0] as { env?: unknown } | undefined)?.env, []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -346,6 +347,37 @@ describe('runAcpWorker', () => {
       assert.match(msg, /stdio descriptor/i);
       assert.doesNotMatch(msg, /SECRET_TOKEN|Authorization/);
       assert.deepEqual(fake.sessionRequests, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a nameless stdio descriptor fails before session/new — the wire requires it', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [{ type: 'stdio', command: 'c', args: [] }],
+    });
+    try {
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 1);
+      assert.match(lines.join('\n'), /mcpServers\[0\]\.name must be a non-empty string/);
+      assert.deepEqual(fake.sessionRequests, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an absent env reaches the wire as [] — the ACP schema requires the array', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [{ type: 'stdio', name: 'x', command: 'c', args: [] }],
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      const got = fake.sessionRequests[0]?.mcpServers;
+      assert.deepEqual((got?.[0] as { env?: unknown } | undefined)?.env, []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

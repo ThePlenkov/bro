@@ -166,7 +166,9 @@ so an unreachable GitHub API refuses rather than overspends.
 The named provider registry — `{ "<name>": { "type": "api"\|"acp"\|"cli",
 …connection } }`. Consumers pick by name; the entry's kind fixes the
 connection shape (`api`: `baseUrl` + `apiKeyEnv`/`apiKeyCommand` +
-`models` allowlist; `acp`/`cli`: `command` + `model`). See
+`models` allowlist; `acp`/`cli`: `command` + `model`). An `acp` entry
+may opt fleet workers into MCP servers via `mcpServers` (stdio
+descriptors, `env` credentials ride a 0600 file). See
 [Providers](/docs/commands/providers).
 
 ### `judge`

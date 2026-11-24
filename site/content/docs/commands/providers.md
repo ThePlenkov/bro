@@ -56,6 +56,18 @@ reports them (a misnamed
 - An `acp` entry's call grade is decided by the served model —
   `typesafe/jev-*` (or bare `jev-*`) is typed transport; anything else
   is prose and stamps `provider:<name>:prose` in `decidedBy`.
+- An `acp` entry may also carry `mcpServers` — an opt-in list of MCP
+  servers handed to fleet worker sessions at `session/new` (absent or
+  `[]` keeps the worker tool-less). Stdio descriptors only —
+  `{ "name", "command", "args", "env"? }` with `type` defaulting to
+  `"stdio"`; HTTP/SSE transports are refused until the session
+  negotiates the capability. Descriptors reach the worker as a 0600
+  artifact (`BRO_MCP_FILE`), never argv, and `env` values never reach
+  diagnostics — the file may carry credentials. The BRO read planes are
+  one descriptor away: `{ "name": "bro", "command": "bro", "args":
+  ["mcp"], "env": [] }` gives the worker the same board/fleet/tasks
+  context an interactive agent gets (narrow with `mcp.planes`). The
+  judge path stays tool-less.
 
 ## Consumer wiring
 

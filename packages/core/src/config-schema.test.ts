@@ -142,6 +142,47 @@ describe('configDiagnostics', () => {
     assert.deepEqual(configDiagnostics(dir), []);
   });
 
+  test('acp mcpServers validate as stdio descriptors — malformed entries diagnose (spec bro-l8c4f.14)', () => {
+    const clean = dirWith('bro.config.json', {
+      providers: {
+        kilo: {
+          type: 'acp',
+          command: 'kilo acp',
+          mcpServers: [
+            { type: 'stdio', name: 'bro', command: 'bro', args: ['mcp'], env: [] },
+            { name: 'x', command: 'c', args: [] }, // type defaults to stdio
+          ],
+        },
+      },
+    });
+    assert.deepEqual(configDiagnostics(clean), []);
+
+    const bad = dirWith('bro.config.json', {
+      providers: {
+        kilo: {
+          type: 'acp',
+          command: 'kilo acp',
+          mcpServers: [{ type: 'stdio', command: 'c', args: [] }],
+        },
+      },
+    });
+    const diags = configDiagnostics(bad);
+    assert.equal(diags.length, 1);
+    assert.match(diags[0]!.path, /providers\.kilo\.mcpServers\[0\]/);
+    // a non-stdio transport fails the entry schema outright — the
+    // headless worker wires no negotiated capability for it
+    const http = dirWith('bro.config.json', {
+      providers: {
+        kilo: {
+          type: 'acp',
+          command: 'kilo acp',
+          mcpServers: [{ type: 'http', name: 'x', url: 'https://x', headers: [] }],
+        },
+      },
+    });
+    assert.ok(configDiagnostics(http).length > 0);
+  });
+
   test('diagnostics carry layer + file provenance per hit', () => {
     const dir = tmpDir('bro-schema-');
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ sdd: { mode: 'gtae' } }));

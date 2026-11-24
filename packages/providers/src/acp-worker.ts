@@ -176,7 +176,10 @@ function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] 
     if (dErr !== undefined) {
       throw dErr;
     }
-    out.push(v);
+    // wire-required `env` defaults to [] — the ACP schema requires the
+    // array, and a catch-wrapped agent-side parse would silently drop a
+    // descriptor missing it (a restriction reading as a no-op)
+    out.push(v.env === undefined ? { ...v, env: [] } : v);
   }
   return out;
 }
@@ -194,15 +197,20 @@ function mcpTransportErr(t: string, i: number, by: string): AcpWorkerError {
   );
 }
 
-/** A stdio descriptor is `{command, args, env?}` — session/new validates
- *  the same wire shape, but a missing or mistyped field dies there as an
- *  opaque session-start failure instead of naming the bad key. Values
- *  are never echoed into messages. */
+/** A stdio descriptor is `{name, command, args, env?}` — session/new
+ *  validates the same wire shape (`McpServerStdio` requires all of
+ *  name/command/args/env), but a missing or mistyped field dies there
+ *  as an opaque session-start failure — or a silent entry drop under a
+ *  catch-wrapped parse — instead of naming the bad key. Values are
+ *  never echoed into messages. */
 function stdioDescriptorErr(
   v: Record<string, unknown>,
   i: number,
   by: string
 ): AcpWorkerError | undefined {
+  if (typeof v.name !== 'string' || v.name === '') {
+    return new AcpWorkerError(`${by}: mcpServers[${i}].name must be a non-empty string`);
+  }
   if (typeof v.command !== 'string' || v.command === '') {
     return new AcpWorkerError(`${by}: mcpServers[${i}].command must be a non-empty string`);
   }
