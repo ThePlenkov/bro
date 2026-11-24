@@ -3,8 +3,6 @@
  */
 import { type SpawnOptions, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { hostname } from 'node:os';
-import { VERSION } from '../version.ts';
 import {
   accessSync,
   closeSync,
@@ -22,6 +20,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   type AccountWall,
@@ -31,10 +30,10 @@ import {
   AgentNotFound,
   type AgentRegistryEntry,
   type AgentState,
-  admitProviderSlot,
   admitSessionSlot,
   agentEntryBlocked,
   agentExitFileName,
+  agentRegistryLockDepth,
   agentsSection,
   appendPrivateFileSync,
   BATCH_MARKER_ENV,
@@ -67,9 +66,6 @@ import {
   handleOwner,
   isAgentCause,
   isAgentLearnCheck,
-  laneBudgetKey,
-  laneBudgetRefund,
-  rateDeathBackoff,
   isBatchSpawn,
   isQualifiedRouteId,
   JudgeUnavailable,
@@ -77,11 +73,13 @@ import {
   type LeaseHolder,
   type LeaseStore,
   type ListResult,
+  laneBudgetKey,
+  laneBudgetRefund,
   loadConfig,
   localLeaseStore,
-  mainWorktreeRoot,
   type MatrixVerdict,
   type ModelRoute,
+  mainWorktreeRoot,
   mintAgentId,
   mintRunId,
   mkdirPrivateSync,
@@ -94,40 +92,35 @@ import {
   patchAgentRegistry,
   patchAgentRegistryIf,
   pidAlive,
-  projectId,
+  planesStartingSessions,
   probeStep,
   procStat,
-  providerCallGrade,
+  projectId,
   providerAccount,
+  providerCallGrade,
+  providerCapCensus,
+  providerCapRefusal,
+  providerSlotsDir,
   providerWallOwners,
-  readAgentRegistry,
-  readLedgerWalls,
-  recordWall,
-  agentRegistryLockDepth,
   type ResolvedClass,
   type RoutingTable,
+  rateDeathBackoff,
+  readAgentRegistry,
+  readLedgerWalls,
   rebindStep,
+  recordWall,
   releaseSessionSlot,
   releaseSessionStart,
-  retagSessionSlots,
   requireProviderSurface,
   resolveModelRoute,
   resolveStepClass,
-  scanProc,
+  retagSessionSlots,
   SESSION_SLOT_TTL_MS,
-  sessionAdmissionLock,
-  sessionCapRefusal,
-  sessionCapViews,
-  planesStartingSessions,
-  providerCapCensus,
-  providerCapHeldRefusal,
-  providerCapRefusal,
-  providerSlotsDir,
   type SessionPlane,
-  sessionReservationsDir,
   SpawnError,
   type SpawnSpec,
   type SpawnWorker,
+  sessionCapViews,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
@@ -138,13 +131,10 @@ import {
   walkChain,
   wallText,
   withAgentRegistryLock,
-  withFileLock,
   worktreeGitDir,
   writeAgentRegistry,
   writePrivateFileSync,
 } from '@broject/core';
-import { expandAgentCmd, LEARN_RETRO_CLOSEOUT, type LoopConfig, loopSection } from '@broject/loop';
-import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
@@ -159,24 +149,60 @@ import {
   devinSessionPlane,
   listDevinSessions,
 } from '@broject/devin';
-import { assertMutableConfig } from '../config-policy.ts';
+import { expandAgentCmd, LEARN_RETRO_CLOSEOUT, type LoopConfig, loopSection } from '@broject/loop';
+import { type AcpSeam, type FetchFn, otelEvent } from '@broject/providers';
 import { enterWorktree } from '../commands/work.ts';
-import { checkRunLearnEvidence } from './learn-evidence.ts';
+import { assertMutableConfig } from '../config-policy.ts';
 import {
   COPILOT_COUNT_TTL_MS,
   copilotCountFile,
   readCopilotCount,
   writeCopilotCount,
 } from '../session-planes/copilot.ts';
+import { VERSION } from '../version.ts';
+import {
+  copilotEntryRepo,
+  copilotHasPullArtifact,
+  copilotHeadRef,
+  copilotRemoteRepo,
+} from './copilot-refs.ts';
+import { copilotSweepLandedSlots } from './copilot-slots.ts';
+import {
+  type CopilotSession,
+  type CopilotTask,
+  copilotLatestSession,
+  copilotSessionError,
+  copilotTaskIdOf,
+  copilotTaskState,
+} from './copilot-tasks.ts';
+import { checkRunLearnEvidence } from './learn-evidence.ts';
+import { entryPidStart, signalUnitGroups } from './proc-units.ts';
+import {
+  admitPlanefreeProviderLane,
+  claimGatePlaneStarts,
+  type ProviderGateAdmit,
+  rejudgeSharedProviderLane,
+} from './provider-admit.ts';
+import {
+  admitSpawnedCommandStarts,
+  EMPTY_KEYS,
+  type ProviderGate,
+  providerGatePayload,
+} from './session-admit.ts';
+import { restoreRegistryRow, rollbackSpawnClaim } from './spawn-rollback.ts';
+import { markStoppedEntry, pollUntilGone } from './stop-entry.ts';
+import {
+  agentsHome,
+  dropWorkMarker,
+  SAFE_AGENT_ID,
+  touchWorkMarker,
+  writeWorkMarker,
+} from './work-markers.ts';
 // external-activity planes self-register on import — the spawn guard
 // reads every ecosystem's "an agent bro does not own is working" probe
 import '../session-planes/markers.ts';
 import '../session-planes/opencode.ts';
 
-export * from '@broject/core';
-export { otelEvent } from '@broject/providers';
-export type { AcpSeam, FetchFn } from '@broject/providers';
-export { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
 export { spawn, spawnSync } from 'node:child_process';
 export { createHash } from 'node:crypto';
 export {
@@ -197,58 +223,10 @@ export {
   writeFileSync,
 } from 'node:fs';
 export { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-
-export {
-  AgentNotFound,
-  agentEntryBlocked,
-  agentExitFileName,
-  agentsSection,
-  bdActor,
-  admitSessionSlot,
-  BATCH_MARKER_ENV,
-  isBatchSpawn,
-  claimStep,
-  classifyExitCause,
-  classifyExitCauseParts,
-  appendPrivateFileSync,
-  cliCommandModel,
-  commandCliName,
-  DEFAULT_CONFIG,
-  deriveProviderWalls,
-  emitLifecycle,
-  entryRunId,
-  ghHost,
-  gitTry,
-  isAgentCause,
-  JudgeUnavailable,
-  loadConfig,
-  mintAgentId,
-  mintRunId,
-  mkdirPrivateSync,
-  openPrivateAppendSync,
-  patchAgentRegistry,
-  probeStep,
-  procStat,
-  providerCallGrade,
-  rebindStep,
-  releaseSessionSlot,
-  requireProviderSurface,
-  resolveStepClass,
-  SESSION_SLOT_TTL_MS,
-  sessionPlane,
-  sessionPlaneForCli,
-  sessionQuotaConfig,
-  sessionSlotsDir,
-  SpawnError,
-  stepParent,
-  ProviderSurfaceError,
-  readAgentRegistry,
-  UnknownProviderError,
-  withAgentRegistryLock,
-  writeAgentRegistry,
-  writePrivateFileSync,
-  shQuote,
-};
+export * from '@broject/core';
+export { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
+export type { AcpSeam, FetchFn } from '@broject/providers';
+export { otelEvent } from '@broject/providers';
 export type {
   AgentCause,
   AgentConnector,
@@ -268,6 +246,58 @@ export type {
   SpawnSpec,
   SpawnWorker,
 };
+export {
+  AgentNotFound,
+  admitSessionSlot,
+  agentEntryBlocked,
+  agentExitFileName,
+  agentsSection,
+  appendPrivateFileSync,
+  BATCH_MARKER_ENV,
+  bdActor,
+  claimStep,
+  classifyExitCause,
+  classifyExitCauseParts,
+  cliCommandModel,
+  commandCliName,
+  DEFAULT_CONFIG,
+  deriveProviderWalls,
+  emitLifecycle,
+  entryRunId,
+  ghHost,
+  gitTry,
+  isAgentCause,
+  isBatchSpawn,
+  JudgeUnavailable,
+  loadConfig,
+  mintAgentId,
+  mintRunId,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  ProviderSurfaceError,
+  patchAgentRegistry,
+  probeStep,
+  procStat,
+  providerCallGrade,
+  readAgentRegistry,
+  rebindStep,
+  releaseSessionSlot,
+  requireProviderSurface,
+  resolveStepClass,
+  SESSION_SLOT_TTL_MS,
+  SpawnError,
+  sessionPlane,
+  sessionPlaneForCli,
+  sessionQuotaConfig,
+  sessionSlotsDir,
+  shQuote,
+  stepParent,
+  UnknownProviderError,
+  withAgentRegistryLock,
+  writeAgentRegistry,
+  writePrivateFileSync,
+};
+
 import '../session-planes/copilot.ts';
 import {
   type LaneAdmission,
@@ -1194,107 +1224,21 @@ export function eachAgentConnector(
 
 // --- native --------------------------------------------------------------------
 
-/** `<git-common-dir>/bro/agents/` — per-agent artifacts (prompt, log,
- *  exit status) live in the shared dir, not the worktree: a prompt file
- *  in the tree would be a dirty file the agent might commit. */
-function agentsHome(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const common = r.code === 0 ? r.out.trim() : '';
-  return common === '' ? null : join(common, 'bro', 'agents');
-}
-
-/** agentIds become filenames under shared dirs — a tampered registry
- *  entry's `../x` must not escape them. Minted ids are `<backend>-<hex>`;
- *  the pattern starts alnum so `.`/`..` segments can never form. */
-const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/** `<common>/bro/agents/<agentId>.prompt.md` — the spawn-time rendered
- *  instructions. Respawn of a custom-prompt agent (a fixer round's
- *  thread context, say) reuses it — the agentId survives process death,
- *  so the file does too. Null for an unsafe or unanchorable id. */
-export function agentPromptPath(dir: string, agentId: string): string | null {
-  const home = agentsHome(dir);
-  return home === null || !SAFE_AGENT_ID.test(agentId) ? null : join(home, `${agentId}.prompt.md`);
-}
-
-/** `<common>/bro/hooks/agent-<id>.work` — hooks markers are
- *  `<common>/bro/hooks/<session>.<aspect>`; the agent gets a synthetic
- *  session name so `otherLiveWork` (session-start parallel detection)
- *  reports it as live work on the molStep. Null outside a common dir. */
-function workMarkerPath(dir: string, agentId: string): string | null {
-  if (!SAFE_AGENT_ID.test(agentId)) {
-    return null;
-  }
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const common = r.code === 0 ? r.out.trim() : '';
-  return common === '' ? null : join(common, 'bro', 'hooks', `agent-${agentId}.work`);
-}
-
-function writeWorkMarker(dir: string, agentId: string, molStep: string, pid?: number): void {
-  try {
-    const marker = workMarkerPath(dir, agentId);
-    if (marker === null) {
-      return;
-    }
-    mkdirSync(dirname(marker), { recursive: true });
-    // stamp the agent's real pid (+start identity) so a dead agent's
-    // marker reads as residue immediately, not after the freshness
-    // window — mtime-only markers from a killed session used to occupy
-    // a worktree for a day (bro-b87b)
-    const start = typeof pid === 'number' && pid > 0 ? procStat(pid)?.start : undefined;
-    // no starttime = no reuse identity — better an ownerless marker on
-    // the mtime window than a tag a recycled pid can impersonate
-    const tag = start ? ` ${pid} ${start}` : '';
-    writeFileSync(marker, `${Date.now()}${tag}\n${molStep}\n`);
-  } catch {
-    // marker is advisory — never break a spawn over detection cosmetics
-  }
-}
-
-/** Unlink the .work marker — but revalidate the registry first: a
- *  respawn reuses the agentId, so a caller working from a stale snapshot
- *  (nativeState/recordedDeath list entries outside the registry lock)
- *  would unlink the fresh marker the new run just wrote (bro-78qb).
- *  Drop only when the registry no longer points a NEWER same-agentId
- *  spawn at this marker. */
-function dropWorkMarker(dir: string, molStep: string, entry: AgentRegistryEntry): void {
-  try {
-    // revalidate + unlink must not interleave with a respawn's registry
-    // write + marker write — same lock the spawner holds (re-entrant)
-    withAgentRegistryLock(dir, () => {
-      const cur = readAgentRegistry(dir)[molStep];
-      if (cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt !== entry.spawnedAt) {
-        return; // respawned — the live run owns the marker now
-      }
-      const marker = workMarkerPath(dir, entry.agentId);
-      if (marker !== null) {
-        rmSync(marker, { force: true });
-      }
-    });
-  } catch {
-    // best-effort
-  }
-}
-
-/** Marker mtime IS the liveness signal detection reads — refresh it
- *  while the agent is verifiably alive or a long-running worker goes
- *  stale (and a dead one's leftover marker stops looking live). */
-function touchWorkMarker(dir: string, agentId: string): void {
-  try {
-    const marker = workMarkerPath(dir, agentId);
-    if (marker !== null && existsSync(marker)) {
-      const now = new Date();
-      utimesSync(marker, now, now);
-    }
-  } catch {
-    // best-effort
-  }
-}
-
 // liveness comes from @broject/core's shared probe — kill(0) plus the
 // zombie and pid-reuse checks; re-exported so existing imports from
 // this module keep resolving
 export { pidAlive } from '@broject/core';
+export { settleAcpSessions } from './acp-settle.ts';
+export {
+  admitSpawnedCommandStarts,
+  EMPTY_KEYS,
+  type ProviderGate,
+  providerGateForKind,
+  providerGatePayload,
+} from './session-admit.ts';
+// the markers/home leaf moved to ./work-markers.ts — re-export the
+// public piece so existing imports from this module keep resolving
+export { agentPromptPath } from './work-markers.ts';
 
 /** Identity-pin env keys the connector owns — a caller-supplied value
  *  would redirect the claim store or re-badge the worker, so every
@@ -2289,11 +2233,6 @@ export function liveSessionKeysByKind(
   return out;
 }
 
-/** A kind with NO live workers — `liveByKind.get` misses it, but an
- *  absent key must still mean "close every segment": undefined opts the
- *  budget out of pruning entirely (closeDead needs a Set, even empty). */
-export const EMPTY_KEYS: ReadonlySet<string> = new Set();
-
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
  *  + beads claim), the claim/rebind, and the shared-dir artifacts
@@ -2729,217 +2668,6 @@ function releaseSpawnLease(dir: string, lease: Lease): void {
   }
 }
 
-/** The spawned command's cross-kind session claims — every session
- *  kind the command starts BEYOND the spawn's own quota lane (that
- *  lane's admit rides sessionQuota's admitSessionSlot itself). Each
- *  kind claims through its OWN admission mutex — the same lock
- *  admitSessionSlot holds — so a check-then-reserve cannot race a
- *  parallel start past the cap, and every claim lands on `out` so a
- *  refusal's rollback drops it with the rest (spec bro-x601l).
- *
- *  A provider-covered kind the spawned command starts WITHOUT a kind
- *  quota produces no sessionCapViews row, so the views loop never
- *  sees its starts — but every session it opens still draws on the
- *  provider lane (a provider cap of 1 must refuse a second start the
- *  quota layer never armed). A second pass over providerPlaneKinds
- *  claims what the provider pass did not already cover, judged on
- *  the same aggregate census. */
-export function admitSpawnedCommandStarts(args: {
-  spawnedCommand: string;
-  agents: Record<string, Record<string, unknown>> | undefined;
-  workerEnv: Record<string, string> | undefined;
-  molStep: string | undefined;
-  agentId: string;
-  scope: string;
-  liveByKind: Map<string, Set<string>>;
-  /** the starts the provider passes already claimed, per kind — the
-   *  union over every provider gate (one start claims once, so the
-   *  gates' counts never overlap) */
-  providerClaimedStarts: Map<string, number>;
-  /** the provider gates this spawn resolved — a cross-kind start on a
-   *  kind one covers still owes that lane's aggregate verdict */
-  providerGates: readonly ProviderGate[];
-  /** the spawn's own quota lane — its admit below covers the kind's
-   *  full lane; the cross-kind loops must not double-claim it */
-  quotaPlaneKind: string | undefined;
-  /** reports a work-budget segment an admit just opened — the caller
-   *  refunds them all when a later refusal unwinds the spawn */
-  budgetCharged?: (kind: string) => void;
-  out: string[];
-}): void {
-  const {
-    spawnedCommand,
-    agents,
-    workerEnv,
-    molStep,
-    agentId,
-    scope,
-    liveByKind,
-    providerClaimedStarts,
-    providerGates,
-    quotaPlaneKind,
-    budgetCharged,
-    out,
-  } = args;
-  const providerPlaneKinds = new Set(providerGates.flatMap(g => [...g.providerPlaneKinds]));
-  // a pre-flight refusal ahead of any claim; the authoritative
-  // count re-runs inside each kind's admission mutex below. Starts
-  // the provider pass already claimed sit INSIDE the view's live
-  // count — the pending starts are what is left, or one session's
-  // claims read as two and a rightful first spawn refuses.
-  for (const view of sessionCapViews(spawnedCommand, agents, workerEnv)) {
-    const pending = Math.max(0, view.starts - (providerClaimedStarts.get(view.kind) ?? 0));
-    const crossRefusal = sessionCapRefusal({ ...view, starts: pending });
-    if (crossRefusal !== undefined) {
-      throw new SpawnError(crossRefusal, 'cap');
-    }
-  }
-  const coveredKinds = new Set<string>();
-  for (const view of sessionCapViews(spawnedCommand, agents, workerEnv)) {
-    if (view.kind === quotaPlaneKind) {
-      continue; // admitSessionSlot below covers this kind's full lane
-    }
-    coveredKinds.add(view.kind);
-    const plane = sessionPlane(view.kind);
-    if (plane === undefined) {
-      continue;
-    }
-    // Admit through the kind's OWN admission mutex — the same lock
-    // admitSessionSlot holds — so a check-then-reserve here cannot
-    // race a parallel start into overshooting the cap. A kind's
-    // multi-start view claims one serialized slot per start; a
-    // refusal mid-way is rolled back by the catch below. Starts the
-    // provider pass already admitted are skipped — their claims
-    // already ride crossKindReservations.
-    const pending = view.starts - (providerClaimedStarts.get(view.kind) ?? 0);
-    for (let i = 0; i < pending; i++) {
-      const claimed = admitSessionSlot(plane, agents, {
-        key: agentId,
-        molStep,
-        workerEnv,
-        scope,
-        liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
-        // a kind a provider gate counts still owes the aggregate
-        // verdict — the spawned command can start more of the kind
-        // than the provider's own entry did, and the excess claims
-        // land on the SAME provider-counted ledger
-        ...providerGatePayload(providerGates, view.kind),
-        ...(budgetCharged === undefined ? {} : { budgetCharged }),
-      });
-      if (claimed !== undefined) {
-        out.push(claimed);
-      }
-    }
-  }
-  for (const kind of providerPlaneKinds) {
-    if (coveredKinds.has(kind) || kind === quotaPlaneKind) {
-      continue;
-    }
-    const plane = sessionPlane(kind);
-    if (plane === undefined) {
-      continue;
-    }
-    const starts = plane.startsSessions?.(spawnedCommand) ?? 0;
-    const pending = starts - (providerClaimedStarts.get(kind) ?? 0);
-    for (let i = 0; i < pending; i++) {
-      const claimed = admitSessionSlot(plane, agents, {
-        key: agentId,
-        molStep,
-        workerEnv,
-        scope,
-        liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
-        ...providerGatePayload(providerGates, kind),
-        ...(budgetCharged === undefined ? {} : { budgetCharged }),
-      });
-      if (claimed !== undefined) {
-        out.push(claimed);
-      }
-    }
-  }
-}
-
-/** The provider gate a session kind claims under — the first gate
- *  whose provider planes cover the kind (config order: the lane the
- *  kind's starts were attributed to). */
-export function providerGateForKind(
-  gates: readonly ProviderGate[],
-  kind: string
-): ProviderGate | undefined {
-  return gates.find(gate => gate.providerPlaneKinds.has(kind));
-}
-
-/** The provider verdict a cross-kind claim carries — the FIRST
- *  covering gate's lane and aggregate census (config order: the lane
- *  the kind's starts were attributed to — it also drives the claim's
- *  census dir), plus every OTHER gate covering the same kind. A kind
- *  two lanes share claims once but each account lane still owes ITS
- *  cap a verdict on the post-claim count — forwarding only the first
- *  gate would let a second lane's cap sit unjudged while the start
- *  lands (spec bro-x601l). Nothing when no gate claims the kind. */
-export function providerGatePayload(
-  gates: readonly ProviderGate[],
-  kind: string
-):
-  | {
-      providerCap: ProviderCapLane;
-      providerCensus: (() => number) | undefined;
-      /** every OTHER covering gate's verdict — judged inside the same
-       *  locked section, after the claim landed */
-      extraProviderVerdicts: {
-        providerCap: ProviderCapLane;
-        providerCensus: (() => number) | undefined;
-      }[];
-    }
-  | Record<string, never> {
-  const covering = gates.filter(gate => gate.providerPlaneKinds.has(kind));
-  const gate = covering.at(0);
-  return gate === undefined
-    ? {}
-    : {
-        providerCap: gate.providerCap,
-        providerCensus: gate.providerCensus,
-        extraProviderVerdicts: covering.slice(1).map(g => ({
-          providerCap: g.providerCap,
-          providerCensus: g.providerCensus,
-        })),
-      };
-}
-
-/** The provider lane a spawn must fit under — `fleet.providerCaps`
- *  resolved to its planes, aggregate census and pre-flight verdict
- *  (spec bro-x601l). ONE shape for every spawn path — the registry's
- *  prepareSpawn and the loop's raw-template lane derive it through
- *  this same call so the aggregate census cannot drift per call site
- *  (bro-9f78j). */
-export interface ProviderGate {
-  /** The armed lane — `provider` is the providers.<name> entry key. */
-  providerCap: ProviderCapLane;
-  /** The command the provider entry spawns sessions through — '' for
-   *  an api entry (no plane can claim its lane). */
-  providerCommand: string;
-  /** Every plane the provider command starts sessions on — a
-   *  multi-plane command draws one session per plane on the same
-   *  account lane. */
-  providerPlanes: readonly SessionPlane[];
-  /** The lane's AGGREGATE census — the combined count over every
-   *  plane the provider's command claims. Runs INSIDE each plane's
-   *  locked section, after its claim landed, so earlier claims sit
-   *  inside the count. undefined when the lane is plane-less (its
-   *  census is the registry's occupants plus the provider-namespaced
-   *  claim ledger). */
-  providerCensus: (() => number) | undefined;
-  /** The kinds whose census dirs the provider cap counts — a
-   *  cross-kind claim on one still owes the aggregate verdict. */
-  providerPlaneKinds: ReadonlySet<string>;
-  /** The spawn's quota lane kind — the provider pass skips it (the
-   *  quota admit carries the verdict instead of claiming twice). */
-  quotaPlaneKind: string | undefined;
-  /** True when the provider's own session plane IS the quota lane's —
-   *  the verdict then rides the quota admit instead of claiming the
-   *  lane twice. */
-  quotaCoversProvider: boolean;
-}
-
 /** The sessions a command will start on a provider gate's planes —
  *  the count the gate judges and the pass claims. A plane-less
  *  provider admits one session (its ledger has no plane starts to
@@ -3072,6 +2800,23 @@ export function providerGateOf(args: {
   };
 }
 
+/** admitProviderGateStarts' argument bundle — the shared
+ *  ProviderGateAdmit claim context plus the repo/env facts the
+ *  plane-less lane's census needs. */
+interface GateAdmitArgs extends ProviderGateAdmit {
+  /** The repo the plane-less census reads — the registry's live
+   *  occupants on this provider entry, re-read INSIDE the provider
+   *  mutex (the namespaced claim ledger is counted inside the
+   *  locked section itself). */
+  dir: string;
+  /** The connector's agents home the census probes — prepareSpawn's
+   *  `home`. Defaults to `agentsHome(dir)`. */
+  home?: string | null;
+  env: AgentConnectorEnv;
+  /** plane-less ledger claims — the caller owns their custody */
+  ledgerOut: string[];
+}
+
 /** The provider lane's claims — every session the provider's own
  *  command starts draws on the lane: one claim per plane per start,
  *  each judged inside the kind's mutex with the aggregate verdict
@@ -3086,45 +2831,7 @@ export function providerGateOf(args: {
  *  read as two. */
 export function admitProviderGateStarts(
   gate: ProviderGate,
-  args: {
-    /** The repo the plane-less census reads — the registry's live
-     *  occupants on this provider entry, re-read INSIDE the provider
-     *  mutex (the namespaced claim ledger is counted inside the
-     *  locked section itself). */
-    dir: string;
-    /** The connector's agents home the census probes — prepareSpawn's
-     *  `home`. Defaults to `agentsHome(dir)`. */
-    home?: string | null;
-    env: AgentConnectorEnv;
-    agents: Record<string, Record<string, unknown>> | undefined;
-    workerEnv: Record<string, string> | undefined;
-    molStep: string | undefined;
-    key: string;
-    scope: string;
-    liveByKind: Map<string, Set<string>>;
-    /** reports a work-budget segment an admit just opened — the caller
-     *  refunds them all when a later refusal unwinds the spawn */
-    budgetCharged?: (kind: string) => void;
-    /** The command whose starts this spawn admits — the spawn's own
-     *  template when a command line launches the provider's sessions;
-     *  the provider's own command when unset (a spawn whose command
-     *  line only DRIVES the provider's — `bro acp-worker --command
-     *  'devin acp'` hides `devin` behind an argument the planes'
-     *  grammar cannot see — opens the sessions the entry command
-     *  starts). */
-    startsCommand?: string;
-    /** Starts an earlier provider pass already claimed for this
-     *  spawn, per kind — a gate whose plane an earlier gate covers
-     *  shares that gate's claims: the sessions sit inside this lane's
-     *  aggregate census, so this lane's cap still judges them, but no
-     *  second slot lands (one session claimed twice reads as two
-     *  starts — valid work refused or headroom burned). */
-    claimedStarts?: ReadonlyMap<string, number>;
-    /** per-plane claims — the caller's rollback/custody set */
-    out: string[];
-    /** plane-less ledger claims — the caller owns their custody */
-    ledgerOut: string[];
-  }
+  args: GateAdmitArgs
 ): Map<string, number> {
   const providerClaimedStarts = new Map<string, number>();
   // a covered plane whose every start an earlier pass claimed: no new
@@ -3136,60 +2843,12 @@ export function admitProviderGateStarts(
     if (plane.kind === gate.quotaPlaneKind) {
       continue;
     }
-    // every session this spawn's command would start draws on the lane
-    // — a multi-start command claims one slot per start, each judged
-    // inside the kind's mutex like the cross-kind pass. Starts an
-    // earlier provider pass already claimed on this kind are shared,
-    // not re-claimed — their sessions still count in this lane's
-    // aggregate census through the claims that already sit there.
-    const starts = plane.startsSessions?.(args.startsCommand ?? gate.providerCommand) ?? 1;
-    const already =
-      (args.claimedStarts?.get(plane.kind) ?? 0) + (providerClaimedStarts.get(plane.kind) ?? 0);
-    const pending = Math.max(0, starts - already);
-    if (pending < starts) {
+    const shared = claimGatePlaneStarts(gate, plane, args, providerClaimedStarts);
+    if (shared) {
       sharedPlane ??= plane;
     }
-    for (let i = 0; i < pending; i++) {
-      const claimed = admitSessionSlot(plane, args.agents, {
-        key: args.key,
-        molStep: args.molStep,
-        workerEnv: args.workerEnv,
-        scope: args.scope,
-        liveKeys: args.liveByKind.get(plane.kind) ?? EMPTY_KEYS,
-        providerCap: gate.providerCap,
-        providerCensus: gate.providerCensus,
-        ...(args.budgetCharged === undefined ? {} : { budgetCharged: args.budgetCharged }),
-      });
-      if (claimed !== undefined) {
-        args.out.push(claimed);
-        providerClaimedStarts.set(plane.kind, (providerClaimedStarts.get(plane.kind) ?? 0) + 1);
-      }
-    }
   }
-  const providerCensus = gate.providerCensus;
-  if (
-    sharedPlane !== undefined &&
-    providerClaimedStarts.size === 0 &&
-    providerCensus !== undefined
-  ) {
-    // every start this lane covers was claimed by an earlier pass, so
-    // no claim of ours ran the verdict — re-judge this lane's cap on
-    // the census the shared claims already sit in, inside a covered
-    // plane's admission mutex (the lock that serializes every other
-    // contender's claim against the same count)
-    const resDir =
-      gate.providerCap.reservationsDir ?? sessionReservationsDir(sharedPlane.kind, args.agents);
-    withFileLock(
-      sessionAdmissionLock(sharedPlane.kind, resDir),
-      () => {
-        const refusal = providerCapHeldRefusal(gate.providerCap, providerCensus());
-        if (refusal !== undefined) {
-          throw new SpawnError(refusal, 'cap', 'provider_cap');
-        }
-      },
-      { label: `${sharedPlane.kind} provider lane re-check` }
-    );
-  }
+  rejudgeSharedProviderLane(gate, sharedPlane, providerClaimedStarts, args.agents);
   if (gate.providerPlanes.length === 0) {
     // no plane counts this provider's command — the census is the
     // registry's live occupants on this provider entry plus the
@@ -3209,29 +2868,21 @@ export function admitProviderGateStarts(
     // the orders invert (loop holds provider, spawn holds registry)
     // and the two waits outlast only on LOCK_WAIT_MS.
     const censusHome = args.home === undefined ? agentsHome(args.dir) : args.home;
-    const admission = withAgentRegistryLock(args.dir, () =>
-      admitProviderSlot(
-        gate.providerCap,
-        () =>
-          providerRegistryCensus(
-            args.dir,
-            censusHome,
-            readAgentRegistry(args.dir),
-            args.env,
-            gate.providerCap.provider
-          ),
-        {
-          key: args.key,
-          lane: isBatchSpawn(args.workerEnv) ? 'batch' : 'interactive',
-        }
-      )
-    );
-    if (admission !== undefined) {
-      if (admission.refusal !== undefined) {
-        throw new SpawnError(admission.refusal, 'cap', admission.capCause);
-      }
-      args.ledgerOut.push(...admission.paths);
-    }
+    admitPlanefreeProviderLane({
+      dir: args.dir,
+      workerEnv: args.workerEnv,
+      key: args.key,
+      providerCap: gate.providerCap,
+      census: () =>
+        providerRegistryCensus(
+          args.dir,
+          censusHome,
+          readAgentRegistry(args.dir),
+          args.env,
+          gate.providerCap.provider
+        ),
+      ledgerOut: args.ledgerOut,
+    });
   }
   return providerClaimedStarts;
 }
@@ -3593,6 +3244,11 @@ function prepareSpawn(
     throw err;
   }
   let charged: LaneAdmission['admitted'];
+  // the attempt token — minted HERE so the catch's registry rollback
+  // can CAS on it: a respawn reuses the agentId but never the runId,
+  // which is what lets the restore tell "the row this spawn wrote"
+  // from a successor's that landed first (spec bro-l8c4f.5)
+  const runId = mintRunId();
   try {
     // the rate gate charges LAST — after every admission that can
     // still refuse (spec bro-y3jvd): a batch spawn pays its request
@@ -3628,6 +3284,7 @@ function prepareSpawn(
         previousAssignee,
         existing,
         lease: workLease.lease,
+        runId,
       }
     );
     // the committed row now counts the lane itself — the in-flight
@@ -3682,6 +3339,7 @@ function prepareSpawn(
       previousAssignee,
       existing,
       claimAs: opts.claimAs,
+      runId,
     });
     throw err;
   }
@@ -3692,7 +3350,8 @@ function prepareSpawn(
  *  claim is only rewritten while it still carries an assignee this
  *  spawn wrote (a claim another actor moved meanwhile is theirs, not
  *  ours to unbind), and the registry row is only restored/removed while
- *  it still names this spawn's agentId. Every step is best-effort — a
+ *  it still carries this spawn's runId (a same-agentId respawn's row is
+ *  a successor's, not ours). Every step is best-effort — a
  *  rollback that fails leaves the 'lost' registry entry the ordering
  *  comment above promises, never a second thrown error masking the
  *  first. */
@@ -3707,54 +3366,25 @@ function rollbackSpawnWrite(
     previousAssignee: string | undefined;
     existing: AgentRegistryEntry | undefined;
     claimAs: string | undefined;
+    runId: string;
   }
 ): void {
   // the claim — a phantom step carries none, so there is nothing to unbind
   if (!run.phantom) {
-    try {
-      const now = probeStep(spec.beadsDir, spec.molStep);
-      const store = taskStoreAt(spec.beadsDir);
-      if (run.claimed && run.previousAssignee !== undefined) {
-        // rebind: the bookkeeping wrote `actor`, then `claimAs` when the
-        // caller pinned one — restore the pre-spawn assignee only while
-        // the step still carries a name this spawn wrote (a claim another
-        // actor moved meanwhile is theirs, not ours to unbind)
-        if (now?.assignee === run.actor || now?.assignee === run.claimAs) {
-          store.update(spec.molStep, { assignee: run.previousAssignee });
-        }
-      } else if (!run.claimed) {
-        // fresh claim: reopen only while the step still sits in the
-        // in_progress/our-actor state this spawn's claimStep produced
-        if (now?.status === 'in_progress' && now.assignee === bdActor(spec.beadsDir)) {
-          store.reopen(spec.molStep);
-        }
-      }
-    } catch {
-      // best-effort — the 'lost' entry below still names the failed run
-    }
+    rollbackSpawnClaim(spec.beadsDir, spec.molStep, run);
   }
   // the registry row this spawn wrote over `existing` — restore the row
   // it replaced (a respawn keeps its predecessor's facts), or drop the
   // fresh row so no dead spawn entry lingers. Only while the row still
-  // names OUR agentId — a respawn that already landed owns it now.
-  try {
-    withAgentRegistryLock(dir, () => {
-      const reg = readAgentRegistry(dir);
-      const cur = reg[spec.molStep];
-      if (cur === undefined || cur.agentId !== run.agentId) {
-        return;
-      }
-      if (run.existing !== undefined) {
-        reg[spec.molStep] = run.existing;
-      } else {
-        delete reg[spec.molStep];
-      }
-      writeAgentRegistry(dir, reg);
-    });
-  } catch {
-    // best-effort — a row we cannot roll back is the same 'lost' entry
-    // the ordering already tolerates
-  }
+  // carries OUR runId — a respawn reuses the agentId but mints a fresh
+  // token, so a successor's row is never ours to unbind.
+  restoreRegistryRow({
+    dir,
+    molStep: spec.molStep,
+    agentId: run.agentId,
+    runId: run.runId,
+    existing: run.existing,
+  });
 }
 
 function outgoingAttemptOf(
@@ -3827,6 +3457,10 @@ function commitSpawn(
     previousAssignee?: string;
     existing: AgentRegistryEntry | undefined;
     lease: Lease;
+    /** the attempt token the caller minted — respawns reuse the
+     *  agentId but never the runId, so it doubles as the rollback's
+     *  CAS identity on the row this commit writes */
+    runId: string;
   }
 ): {
   promptFile: string;
@@ -3836,15 +3470,14 @@ function commitSpawn(
   runId: string;
 } {
   mkdirPrivateSync(home);
-  const { agentId, existing, lease } = run;
+  const { agentId, existing, lease, runId } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
   const captureStderr = backend !== 'gascity' && backend !== 'copilot' && backend !== 'devin';
   const stderrLog = captureStderr ? join(home, `${agentId}.stderr`) : undefined;
-  // every attempt mints its own runId — respawns reuse the agentId but
+  // every attempt carries its own runId — respawns reuse the agentId but
   // never the attempt artifacts: an old wrapper's late writes land in
   // its own runId's files, never the live run's (spec bro-l8c4f.5)
-  const runId = mintRunId();
   const exitFile = join(home, agentExitFileName(agentId, runId));
   rmSync(exitFile, { force: true });
   // a pre-handshake run's legacy exit file would alias nothing the new
@@ -4502,119 +4135,6 @@ function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpe
   return home;
 }
 
-/** The registry's recorded starttime for entry.pid — undefined when
- *  the entry predates identity recording or the read failed; pidAlive
- *  then skips the reuse check rather than guess. */
-const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
-  typeof entry.pidStart === 'string' && entry.pidStart !== '' ? entry.pidStart : undefined;
-
-/** The wrapper's death is not its unit's death: a TERM-resistant
- *  descendant survives the group signal, so the stop may only record
- *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
- *  alone (bro-l8c4f.3). The probes live in core — pidAlive for the
- *  wrapper, groupMemberAlive (over one shared scanProc) for the group.
- *  Off /proc the group probe cannot tell the wrapper's zombie from a
- *  live member — there the caller's pid check is the probe, and a
- *  descendant that outlives its wrapper is a documented blind spot
- *  (failing open would spin the whole kill-wait on EVERY stop and the
- *  `stopped` marker would never land). */
-
-/** The wrapper's process-TREE snapshot — every descendant pid plus its
- *  /proc starttime, walked over ppid links. A descendant that escaped
- *  the process GROUP (setsid, its own session) is invisible to
- *  groupMemberAlive but stays in this list: the tree link breaks when
- *  the wrapper dies and the survivor reparents to init, so the
- *  snapshot must be taken while the parentage is still intact, and
- *  pid+starttime identity is what keeps a recycled pid from faking
- *  death. Empty where /proc is absent (non-Linux). */
-function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
-  return unitSnapshot(root).members;
-}
-
-/** The pre-signal unit snapshot — the wrapper's process tree plus
- *  every process GROUP the tree spans, off one /proc scan. A payload
- *  that leads its own session or process group escapes
- *  kill(-wrapperPgid): a fork-style `systemd-run --scope` gives the
- *  scoped child its own pid (spec bro-ybo8z — exec-style systemd-run
- *  keeps the wrapper's pid and needs nothing extra), and a setsid'd
- *  descendant was already unreachable. `down` signals each distinct
- *  pgid a live member belongs to — `{root group} ∪ {member groups}` —
- *  which for the common single-group tree is the group it always was.
- *  Members keep the same {pid,start} shape descendantsOf reports;
- *  zombies claim no group. */
-function unitSnapshot(root: number): {
-  members: Array<{ pid: number; start?: string }>;
-  groups: Set<number>;
-} {
-  const scan = scanProc();
-  const members: Array<{ pid: number; start?: string }> = [];
-  const groups = new Set<number>();
-  if (scan === null) {
-    return { members, groups };
-  }
-  const { byPid, children } = procTreeIndex(scan.entries);
-  const seen = new Set<number>([root]);
-  const queue = [root];
-  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
-    for (const c of children.get(cur) ?? []) {
-      if (seen.has(c)) {
-        continue;
-      }
-      seen.add(c);
-      queue.push(c);
-      const e = byPid.get(c);
-      members.push({ pid: c, start: e?.start === '' ? undefined : e?.start });
-      if (e !== undefined && e.state !== 'Z' && e.pgrp > 0) {
-        groups.add(e.pgrp);
-      }
-    }
-  }
-  return { members, groups };
-}
-
-/** ppid → children index plus pid → row, built over one /proc scan —
- *  the tree walk's lookup tables. */
-function procTreeIndex(entries: ProcEntry[]): {
-  byPid: Map<number, ProcEntry>;
-  children: Map<number, number[]>;
-} {
-  const byPid = new Map<number, ProcEntry>();
-  const children = new Map<number, number[]>();
-  for (const e of entries) {
-    byPid.set(e.pid, e);
-    // push into the existing list — copying the array per entry makes
-    // the /proc scan O(N²) on busy hosts (status/stop call it per probe)
-    const list = children.get(e.ppid);
-    if (list === undefined) {
-      children.set(e.ppid, [e.pid]);
-    } else {
-      list.push(e.pid);
-    }
-  }
-  return { byPid, children };
-}
-
-/** Pre-signal group ownership re-check — a pgid captured by the unit
- *  snapshot may have been emptied and recycled between scan and kill,
- *  and kill(-g) would then land SIGTERM on an unrelated process group.
- *  A group is still ours while a live member recorded in the snapshot
- *  sits in it carrying its recorded starttime (the pid+start identity
- *  pin the liveness probes use); members recorded without a starttime
- *  stay fail-open the way pidAlive does. */
-function unitOwnsGroup(
-  scan: { entries: ProcEntry[] },
-  g: number,
-  recorded: ReadonlyMap<number, string | undefined>
-): boolean {
-  return scan.entries.some(
-    e =>
-      e.pgrp === g &&
-      e.state !== 'Z' &&
-      recorded.has(e.pid) &&
-      (recorded.get(e.pid) === undefined || e.start === recorded.get(e.pid))
-  );
-}
-
 /** Live state for a registry entry under this backend. */
 function nativeIsRunning(dir: string, entry: AgentRegistryEntry): boolean {
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined;
@@ -4768,120 +4288,6 @@ export function workerWithResume(
     return worker;
   }
   return { ...worker, argv: [...worker.argv, '--resume', resumeSessionId] };
-}
-
-/** Settle recorded acp sessions at PR completion — run each unique
- *  provider `sessionRm` template detached, then clear `acpSessionId` on
- *  the matched registry entries (spec bro-5qsnr §5). Matching is by
- *  molStep name or path-resolved worktree. Returns the settled session
- *  ids for the caller's log line. Failures are advisory — never a
- *  settle blocker. */
-export function settleAcpSessions(
-  dir: string,
-  env: AgentConnectorEnv,
-  opts: { worktree?: string; molSteps?: string[] } = {}
-): string[] {
-  const settled: string[] = [];
-  try {
-    const registry = readAgentRegistry(dir);
-    const molSteps = new Set(opts.molSteps ?? []);
-    const worktreeArg = opts.worktree;
-    const worktreeResolved = worktreeArg !== undefined ? resolve(worktreeArg) : undefined;
-    let worktreeReal: string | undefined;
-    if (worktreeResolved !== undefined) {
-      try {
-        worktreeReal = realpathSync(worktreeResolved);
-      } catch {
-        worktreeReal = worktreeResolved;
-      }
-    }
-
-    const matched: Array<[string, AgentRegistryEntry]> = [];
-    for (const [molStep, entry] of Object.entries(registry)) {
-      let match = false;
-      if (molSteps.size > 0 && molSteps.has(molStep)) {
-        match = true;
-      }
-      if (
-        !match &&
-        worktreeResolved !== undefined &&
-        typeof entry.worktree === 'string' &&
-        entry.worktree !== ''
-      ) {
-        const entryResolved = resolve(entry.worktree);
-        let entryReal: string;
-        try {
-          entryReal = realpathSync(entryResolved);
-        } catch {
-          entryReal = entryResolved;
-        }
-        if (entryReal === worktreeReal || entryResolved === worktreeResolved) {
-          match = true;
-        }
-      }
-      if (match) {
-        matched.push([molStep, entry]);
-      }
-    }
-
-    // unique session ids → their minting provider
-    const idProvider = new Map<string, string>();
-    for (const [, entry] of matched) {
-      if (
-        typeof entry.acpSessionId === 'string' &&
-        entry.acpSessionId !== '' &&
-        typeof entry.provider === 'string' &&
-        entry.provider !== '' &&
-        !idProvider.has(entry.acpSessionId)
-      ) {
-        idProvider.set(entry.acpSessionId, entry.provider);
-      }
-    }
-
-    const providers = env.providers ?? {};
-    for (const [sessionId, providerName] of idProvider) {
-      if (!/^[\w.-]+$/.test(sessionId)) {
-        continue;
-      }
-      const prov = providers[providerName];
-      if (prov === undefined || prov.type !== 'acp') {
-        continue;
-      }
-      const template = prov.sessionRm;
-      if (template === undefined || template === '') {
-        continue;
-      }
-      const rm = template.replaceAll('{sessionId}', sessionId);
-      try {
-        const child = spawn('/bin/sh', ['-c', rm], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        child.unref();
-      } catch {
-        // advisory — a failed settle never blocks
-      }
-      settled.push(sessionId);
-    }
-
-    // clear acpSessionId on matched entries
-    for (const [molStep, entry] of matched) {
-      if (typeof entry.acpSessionId !== 'string' || entry.acpSessionId === '') {
-        continue;
-      }
-      try {
-        if (registry[molStep] !== undefined) {
-          patchAgentRegistry(dir, molStep, { acpSessionId: undefined });
-        }
-      } catch {
-        // advisory
-      }
-    }
-
-    return settled;
-  } catch {
-    return settled;
-  }
 }
 
 /** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
@@ -5491,103 +4897,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           : adoptNativeHandle(dir, home, molStep, entry);
       const pid = adopted?.pid ?? entryPid;
       const start = adopted !== undefined ? (adopted.start ?? undefined) : entryPidStart(entry);
-      // The unit check lives outside the signal block: a repeated `down`
-      // can find the wrapper already dead while a descendant still holds
-      // the group — the lock guard below must see it even when no signal
-      // was sent. `unit` stays empty without a live wrapper (the tree
-      // link is already broken by then — the snapshot only works
-      // pre-death).
-      let unit: Array<{ pid: number; start?: string }> = [];
-      const unitAlive = () =>
-        pid !== undefined &&
-        (pidAlive(pid, start) ||
-          groupMemberAlive(pid, start) ||
-          unit.some(d => pidAlive(d.pid, d.start)));
-      if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
-        // the tree snapshot rides BEFORE the signal: a descendant that
-        // escaped the group (setsid — or a scope payload a fork-style
-        // systemd-run gave its own pid to, bro-ybo8z) is invisible to
-        // groupMemberAlive, and once the wrapper dies it reparents to
-        // init — the pre-signal pid+starttime pin is the only handle
-        // left on it. The signal goes to every group the tree spans:
-        // a scoped payload's own pgid gets SIGTERM too.
-        const snap = unitSnapshot(pid);
-        unit = snap.members;
-        const groups = new Set<number>([pid, ...snap.groups]);
-        // pid → recorded starttime for every pid the snapshot owns —
-        // the identity table the per-group re-check below signals
-        // against (a recycled pgid holds none of these pids)
-        const recorded = new Map<number, string | undefined>([[pid, start]]);
-        for (const m of unit) {
-          recorded.set(m.pid, m.start);
-        }
-        for (const g of groups) {
-          // re-verify the group is still ours before signaling: between
-          // snapshot and kill the group could have emptied and its pgid
-          // been recycled, and kill(-g) would then hit an unrelated
-          // process group. The wrapper's own group gets the weaker
-          // groupMemberAlive re-check when no recorded member answers:
-          // a descendant that already outlived the wrapper is absent
-          // from the pre-death snapshot yet still holds the group, and
-          // skipping it would leak the unit's last writer. Off /proc
-          // (scan null) no re-check is possible — the legacy signal
-          // stands, same as before.
-          const fresh = scanProc();
-          if (
-            fresh !== null &&
-            !unitOwnsGroup(fresh, g, recorded) &&
-            !(g === pid && groupMemberAlive(pid, start))
-          ) {
-            continue;
-          }
-          try {
-            // a lane-paused group (spec bro-y3jvd) pends every signal —
-            // SIGCONT first or the TERM below waits on a stopped process
-            process.kill(-g, 'SIGCONT');
-          } catch {
-            // not stopped, or already gone — the TERM below decides
-          }
-          try {
-            process.kill(-g, 'SIGTERM'); // detached → own process group
-          } catch {
-            // No fallback to kill(pid): a native child is always its own
-            // group leader, so a failed group signal means the group was
-            // emptied or recycled — signaling a bare pid could hit an
-            // unrelated process.
-          }
-        }
-        // let the signal land before recording the stop — `stopped` on a
-        // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless).
-        // The unit, not the wrapper, is the wait: a TERM-resistant
-        // descendant outlives the sh-wrapper it was spawned under, and
-        // `stopped` over it would free a respawn onto a live writer
-        // (bro-l8c4f.3)
-        const deadline = Date.now() + 2_000;
-        while (unitAlive() && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25));
-        }
-      }
+      // signal every process group the unit spans, then wait for the
+      // unit to die — the returned probe answers unit liveness for the
+      // lock-time re-check even when no signal was sent (a repeated
+      // `down` can find the wrapper dead while a descendant still
+      // holds the group)
+      const unitAlive = await signalUnitGroups(pid, start);
       // a respawn during the kill wait re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
       // 'stopped' + the marker drop land on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
-        const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt ||
-          unitAlive()
-        ) {
-          return; // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true });
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry);
-      });
+      markStoppedEntry({ dir, molStep, entry, id, stillLive: unitAlive });
     },
 
     capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
@@ -6024,40 +5343,18 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         tmuxRun(socket, ['kill-session', '-t', name]);
         // let the kill land before recording the stop — 'stopped' on a
         // still-live session would let a respawn run alongside it
-        const deadline = Date.now() + 2_000;
-        while (tmuxProbe(socket, name).live === 'running' && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25)); // NOSONAR — bounded kill-wait poll
-        }
+        await pollUntilGone(() => tmuxProbe(socket, name).live === 'running');
       }
       // a respawn during the kill wait re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
       // 'stopped' + the marker drop land on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
-        const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
-          return; // respawned — the live run owns the entry
-        }
-        if (name !== undefined) {
-          const p = tmuxProbe(socket, name);
-          if (p.live === 'running') {
-            return; // still alive — the live run owns the entry
-          }
-          if (p.live === 'unknown') {
-            // an unverifiable probe must not record 'stopped' on a
-            // session that may still be live — fail loudly instead
-            throw new Error(`cannot verify ${id}'s tmux session stopped — ${p.err}`);
-          }
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true });
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry);
+      markStoppedEntry({
+        dir,
+        molStep,
+        entry,
+        id,
+        what: 'tmux session',
+        probe: name === undefined ? undefined : () => tmuxProbe(socket, name),
       });
     },
 
@@ -7642,40 +6939,18 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         dockerRun(['rm', '-f', target]);
         // let the rm land before recording the stop — 'stopped' on a
         // still-live container would let a respawn run beside it
-        const deadline = Date.now() + 2_000;
-        while (dockerInspect(name).live === 'running' && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25)); // NOSONAR — bounded kill-wait poll
-        }
+        await pollUntilGone(() => dockerInspect(name).live === 'running');
       }
       // a respawn during the rm re-probes and re-pins the entry under
       // the registry lock — re-verify under the SAME lock or 'stopped'
       // lands on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
-        const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
-          return; // respawned — the live run owns the entry
-        }
-        if (name !== undefined) {
-          const p = dockerInspect(name);
-          if (p.live === 'running') {
-            return; // still alive — the live run owns the entry
-          }
-          if (p.live === 'unknown') {
-            // an unverifiable probe must not record 'stopped' on a
-            // container that may still be live — fail loudly instead
-            throw new Error(`cannot verify ${id}'s container stopped — ${p.err}`);
-          }
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true });
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry);
+      markStoppedEntry({
+        dir,
+        molStep,
+        entry,
+        id,
+        what: 'container',
+        probe: name === undefined ? undefined : () => dockerInspect(name),
       });
     },
 
@@ -7768,126 +7043,6 @@ function ghRun(args: string[], timeoutMs = 30_000): GhResult {
  *  can read as on the documented surface (queued → in_progress →
  *  terminal; idle and waiting_for_user are suspended-but-alive). */
 const COPILOT_LIVE_STATES = new Set(['queued', 'in_progress', 'idle', 'waiting_for_user']);
-
-/** Task ids are server-minted UUIDs; the registry pin is trusted only
- *  when it can't smuggle a path/query segment into the REST URL. */
-const COPILOT_SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/** The loosely-typed REST task — fields narrow at use, so a preview
- *  schema drift degrades a read instead of crashing it. */
-interface CopilotTask {
-  id?: unknown;
-  state?: unknown;
-  artifacts?: unknown;
-  sessions?: unknown;
-}
-
-interface CopilotSession {
-  id?: unknown;
-  state?: unknown;
-  workflow_run_id?: unknown;
-  error?: unknown;
-  head_ref?: unknown;
-  created_at?: unknown;
-  updated_at?: unknown;
-}
-
-function copilotTaskIdOf(entry: AgentRegistryEntry): string | undefined {
-  const id = entry.taskId;
-  return typeof id === 'string' && COPILOT_SAFE_TASK_ID.test(id) ? id : undefined;
-}
-
-function copilotTaskState(task: CopilotTask): string {
-  return typeof task.state === 'string' ? task.state : '';
-}
-
-function copilotTaskSessions(task: CopilotTask): CopilotSession[] {
-  return Array.isArray(task.sessions)
-    ? task.sessions.filter((s): s is CopilotSession => typeof s === 'object' && s !== null)
-    : [];
-}
-
-/** The latest session a task reports — sessions accumulate across
- *  retries/steers; the newest carries the live state, the workflow run
- *  and the error the terminal verdict classifies. */
-function copilotLatestSession(task: CopilotTask): CopilotSession | undefined {
-  const sessions = copilotTaskSessions(task);
-  let latest: CopilotSession | undefined;
-  let stamp = '';
-  for (const s of sessions) {
-    const at =
-      typeof s.updated_at === 'string'
-        ? s.updated_at
-        : typeof s.created_at === 'string'
-          ? s.created_at
-          : '';
-    if (latest === undefined || at >= stamp) {
-      latest = s;
-      stamp = at;
-    }
-  }
-  return latest;
-}
-
-/** The remote branch the session pushes — `branch` artifacts carry
- *  `base_ref`/`head_ref` at creation; session objects repeat them. */
-function copilotHeadRef(task: CopilotTask): string | undefined {
-  if (Array.isArray(task.artifacts)) {
-    for (const a of task.artifacts) {
-      const ref = a as { type?: unknown; data?: { head_ref?: unknown } };
-      if (ref?.type === 'branch' && typeof ref.data?.head_ref === 'string') {
-        return ref.data.head_ref;
-      }
-    }
-  }
-  for (const s of copilotTaskSessions(task)) {
-    if (typeof s.head_ref === 'string' && s.head_ref !== '') {
-      return s.head_ref;
-    }
-  }
-  return undefined;
-}
-
-function copilotHasPullArtifact(task: CopilotTask): boolean {
-  return (
-    Array.isArray(task.artifacts) &&
-    task.artifacts.some(a => (a as { type?: unknown })?.type === 'pull')
-  );
-}
-
-/** Error text a failed session left behind — the terminal verdict's
- *  classifyExitCause input (a rate-limit wall reads 'rate_limited',
- *  not 'crash'). */
-function copilotSessionError(task: CopilotTask): string {
-  const err = copilotLatestSession(task)?.error;
-  const msg = (err as { message?: unknown })?.message;
-  return typeof msg === 'string' ? msg : '';
-}
-
-/** The 'owner/repo' a registry entry's task lives on — pinned at
- *  spawn; the worktree's origin is the fallback for entries predating
- *  the pin. */
-function copilotEntryRepo(entry: AgentRegistryEntry): string | undefined {
-  if (typeof entry.taskRepo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(entry.taskRepo)) {
-    return entry.taskRepo;
-  }
-  return typeof entry.worktree === 'string' ? copilotRemoteRepo(entry.worktree) : undefined;
-}
-
-/** `git@host:o/r(.git)`, `https://host/o/r(.git)`, `ssh://…/o/r` →
- *  `o/r` — the last two path segments of any origin form GitHub
- *  accepts. */
-function copilotParseRemote(url: string): string | undefined {
-  const m = /([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?\/?$/.exec(
-    url.trim()
-  );
-  return m === null ? undefined : `${m[1]}/${m[2]}`;
-}
-
-function copilotRemoteRepo(dir: string): string | undefined {
-  const url = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
-  return url.code === 0 ? copilotParseRemote(url.out) : undefined;
-}
 
 /** The PR the task opened — resolved via the pushes' head_ref, the
  *  same join `gh agent-task view` hydrates internally. Absent until a
@@ -8231,36 +7386,6 @@ function copilotSessionQuota(env: AgentConnectorEnv): SessionQuotaLane | undefin
     );
   }
   return { plane, agents: env.agents };
-}
-
-/** Retire `.slot` reservations whose remote task already landed in the
- *  refreshed live set — the admission contract a landed spawn must not
- *  double-count (live + reservation) under. The correlation needs the
- *  repo's registry (agentId → taskId), so the sweep rides connector
- *  reads rather than the host-wide plane: each repo sweeps its own
- *  slots, and a cross-repo spawn's reservation gets retired by that
- *  repo's next refresh — the TTL bounds whatever remains. */
-function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string>): void {
-  let names: string[];
-  try {
-    names = readdirSync(slotsDir);
-  } catch {
-    return; // no/unreadable dir — the tally reports its own verdict
-  }
-  for (const e of Object.values(readAgentRegistry(dir))) {
-    if (e.backend !== 'copilot' || typeof e.taskId !== 'string' || !live.has(e.taskId)) {
-      continue;
-    }
-    for (const name of names) {
-      if (name.startsWith(`${e.agentId}-`) && name.endsWith('.slot')) {
-        try {
-          rmSync(join(slotsDir, name), { force: true });
-        } catch {
-          // a racing reaper already got it
-        }
-      }
-    }
-  }
 }
 
 /** Refresh the count cache the copilot plane serves — best-effort and
