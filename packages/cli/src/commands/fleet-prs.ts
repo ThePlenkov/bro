@@ -90,12 +90,12 @@ function lsRemoteHeads(root: string, prefix: string): string[] | null {
       .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
       .filter(Boolean);
   }
-  // no origin at all is a complete answer (the fleet is local-only);
-  // an unreachable remote is 'unknown'
-  if (/does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)) {
-    return [];
-  }
-  return null;
+  // stderr cannot tell "no origin configured" from "origin's URL is
+  // dead" — both read 'does not appear to be a git repository'. Ask
+  // the remote's config instead: no origin at all is a complete
+  // answer (the fleet is local-only); a configured remote that
+  // cannot answer is 'unknown'.
+  return gitTry(['-C', root, 'remote', 'get-url', 'origin']).code === 0 ? null : [];
 }
 
 /** Remote heads for every fleet prefix — LOCAL refs alone undercount:
