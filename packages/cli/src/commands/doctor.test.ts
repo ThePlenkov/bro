@@ -1655,7 +1655,6 @@ describe('bro doctor', () => {
       dir => {
         const c = byName(runDoctorChecks(dir), 'mesh-peers');
         assert.equal(c.status, 'warn');
-        assert.match(c.detail ?? '', /github-derived without login/);
       }
     );
     // github-derived peer with login set is ok
@@ -1705,6 +1704,28 @@ describe('bro doctor', () => {
       }
     );
   });
+
+  test('mesh peer warning names the alias and both repair paths', () =>
+    withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              badlogin: { rig: 'mesh://acme/other', remote: 'https://github.com/acme/other.git' },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.match(
+          `${c.detail} ${c.hint}`,
+          /github-derived without login: badlogin.*set "login".*transport.*beads-remote/
+        );
+      }
+    ));
 
   test('debt-sonarcloud: absent when the source is unconfigured', () =>
     withEnv({ config: { debt: { sources: ['review-threads'] } }, bins: ['gh'] }, dir => {
