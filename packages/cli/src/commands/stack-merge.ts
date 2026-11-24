@@ -38,7 +38,7 @@ import { retireMerged, syncStack } from './stack-sync.ts';
 import { defaultBranchName, mainWorktree, type WorktreeInfo } from './work.ts';
 
 /** Per-merge context — resolved once, read by every step. */
-interface MergeCtx {
+export interface MergeCtx {
   /** The main worktree's path — config, ledger, and worktree table root. */
   root: string;
   /** The repo's default branch — the merge chain's declared base. */
@@ -211,9 +211,13 @@ function reportSlotHeld(holder: string): void {
 
 /** The gated critical section — the exit gates, the connector's
  *  merge, the PR-less retirement, and the post-merge cascade (the
- *  same pass `bro stack sync` runs). False when a gate refused or no
- *  connector could land the chain. */
-async function landMergeChain(
+ *  same pass `bro stack sync` runs). False when a gate refused, no
+ *  connector could land the chain, or the merge ABORTED before the
+ *  first member landed: an empty `merged` is an attempted merge that
+ *  failed (a dirty worktree, a trunk the primary worktree is not on),
+ *  and automation reads the exit code — reporting success there would
+ *  claim a landed chain that never moved. */
+export async function landMergeChain(
   name: string,
   mergeable: MemberView[],
   opts: StackMergeOpts,
@@ -234,6 +238,9 @@ async function landMergeChain(
     return false;
   }
   printLines(report.lines);
+  if (report.merged.length === 0) {
+    return false;
+  }
   printLines(retireLanded(mergeable, report.merged, ctx.root));
   printLines(syncStack(ctx.root, name));
   return true;
