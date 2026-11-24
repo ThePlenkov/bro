@@ -710,6 +710,11 @@ function removeSync(dir: string, id: string): void {
 
 // --- relations/deps ------------------------------------------------------------
 
+function isTargetProjectRequiredError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message.trim() : String(err).trim();
+  return /(?:^|: )target_project_id is required$/i.test(message);
+}
+
 function linkSync(dir: string, from: string, to: string, rel: string = 'related'): void {
   const f = parseIssueRef(dir, from);
   const t = parseIssueRef(dir, to);
@@ -740,7 +745,10 @@ function linkSync(dir: string, from: string, to: string, rel: string = 'related'
         ],
         gopts(dir)
       );
-    } catch {
+    } catch (err) {
+      if (!isTargetProjectRequiredError(err)) {
+        throw err;
+      }
       try {
         glab(
           [
@@ -776,7 +784,10 @@ function linkSync(dir: string, from: string, to: string, rel: string = 'related'
         ],
         gopts(dir)
       );
-    } catch {
+    } catch (err) {
+      if (!isTargetProjectRequiredError(err)) {
+        throw err;
+      }
       try {
         glab(
           [
