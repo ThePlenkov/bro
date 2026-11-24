@@ -140,6 +140,7 @@ import {
   reapLoopLitter,
   removeMergedWorktree,
   type LitterReap,
+  type WorktreeInfo,
 } from './work.ts';
 import { type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
@@ -474,6 +475,33 @@ async function mergeGreen(ctx: Ctx, pr: number): Promise<boolean> {
   }
 }
 
+/** The worktree half of the post-merge retirement: drop the merged
+ *  worktree when it is not the main checkout, or free the branch when
+ *  the MAIN checkout itself sits on the merged branch. */
+function retireLandingWorktree(
+  ctx: Ctx,
+  state: PrActState,
+  here: WorktreeInfo,
+  main: WorktreeInfo
+): void {
+  if (here.path !== main.path) {
+    removeMergedWorktree(here.path, here, main);
+    return;
+  }
+  if (here.branch !== state.headRef) {
+    return;
+  }
+  // the merged branch is checked out in the MAIN worktree — the
+  // delete below can never land while it is, so switch the main
+  // checkout to the default branch first (same move as
+  // cleanupAfterMerge; a dirty main keeps the branch, never data)
+  const def = defaultBranch();
+  const res = gitTry(['-C', main.path, 'switch', def]);
+  if (res.code !== 0) {
+    say(ctx, `drive: could not switch ${main.path} to ${def} (${res.err})`);
+  }
+}
+
 /** Post-merge local retirement — same guards as `act merge --cleanup`:
  *  the worktree only goes when verifiably clean, the branch only when
  *  its tip is the merged head. Never throws into the pass. */
@@ -481,21 +509,9 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
   try {
     const all = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out);
     const main = all[0];
-    if (worktree !== undefined && main) {
-      const here = all.find(w => w.path === worktree);
-      if (here && here.path !== main.path) {
-        removeMergedWorktree(worktree, here, main);
-      } else if (here && here.branch === state.headRef) {
-        // the merged branch is checked out in the MAIN worktree — the
-        // delete below can never land while it is, so switch the main
-        // checkout to the default branch first (same move as
-        // cleanupAfterMerge; a dirty main keeps the branch, never data)
-        const def = defaultBranch();
-        const res = gitTry(['-C', main.path, 'switch', def]);
-        if (res.code !== 0) {
-          say(ctx, `drive: could not switch ${main.path} to ${def} (${res.err})`);
-        }
-      }
+    const here = worktree === undefined ? undefined : all.find(w => w.path === worktree);
+    if (main && here) {
+      retireLandingWorktree(ctx, state, here, main);
     }
     deleteMergedLocalBranch(state.headRef, state.headSha);
   } catch (err) {
