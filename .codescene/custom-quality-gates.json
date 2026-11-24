@@ -1215,6 +1215,11 @@
       "matching_content_path": "scripts/bench-hooks.ts"
     },
     {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/agent-connectors.ts"
+    },
+    {
       "quality_gates": {
         "new_code_health": true
       },
