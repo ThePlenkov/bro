@@ -603,6 +603,285 @@ const outbound = (
   };
 };
 
+type PumpOpts = {
+  stream: Stream;
+  route: (m: AnyMessage) => void;
+  tag: string;
+  out: Outbound;
+  ctrl: (m: AnyMessage) => boolean;
+  held: AnyMessage[];
+  precede?: (heldMsg: AnyMessage, ctrl: AnyMessage) => boolean;
+  isDone: () => boolean;
+  done: Promise<void>;
+  log: (line: string) => void;
+};
+
+type PumpIntakeState = 'saturated' | 'empty' | 'held';
+
+/** A pre-done read — where a wait still needs a promise while the
+ *  intake is paused or spent, this resolves immediately so the
+ *  loop falls through to its own break conditions. */
+const PUMP_READ_DONE = Promise.resolve<ReadableStreamReadResult<AnyMessage>>({
+  value: undefined,
+  done: true,
+});
+
+/** Execute one pump's bounded intake state machine. Keeping the machine
+ *  a class makes the orchestration seam explicit and keeps each intake
+ *  state independently testable by inspection: saturated waits for room,
+ *  empty reads directly, and held races room against more input. */
+class PumpMachine {
+  private readonly reader: ReadableStreamDefaultReader<AnyMessage>;
+  private readonly wakes = new Set<() => void>();
+  private read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined;
+  private eof = false;
+  /** Intake paused at the read bound with NO read outstanding — the
+   *  prefetched one already landed in the hold. Distinct from EOF:
+   *  the loop still owes the room wait, just no second read. */
+  private intakePaused = false;
+  /** Controls routed past a FULL ledger — accepted in-flight work
+   *  neither `held` nor the ledger's own hold count sees. Enough of
+   *  them pause the read side exactly like a saturated hold: a
+   *  cancel or response flood meets the wire's bound instead of
+   *  writing past it without limit (local cancellation never blocks
+   *  — every consumed control still settles the instant it routes;
+   *  the bound gates only consuming MORE). The charge decays on the
+   *  leg's NEXT write settle, not on room(): bypassed work is
+   *  ordinary depth once issued, and holds can keep the ledger
+   *  "full" while the wire drains fine — counting until room would
+   *  park the read behind work the charge no longer represents
+   *  (the exact deadlock this bound exists to prevent). */
+  private bypassed = 0;
+  /** ONE outstanding room() subscription at a time — the parked wait
+   *  re-arms on every intake result, and a waiter that loses the
+   *  race stays registered until the next release, so re-arming per
+   *  read grew the ledger's waiter set alongside the hold it exists
+   *  to bound. A pending room promise is reused across iterations;
+   *  its own settle clears the slot so a stale resolution can never
+   *  fake room later. */
+  private roomWait: Promise<'room'> | undefined;
+
+  constructor(private readonly opts: PumpOpts) {
+    this.reader = opts.stream.readable.getReader();
+    this.read = this.reader.read();
+    void opts.done.then(() => {
+      for (const w of this.wakes) w();
+      this.wakes.clear();
+    });
+  }
+
+  /** `p`, or early resolve on shutdown — `undefined` marks the wake. */
+  private untilStop<T>(p: Promise<T>): Promise<T | undefined> {
+    // a wait may end early — a rejection on the abandoned branch
+    // must still count as handled
+    void p.catch(() => {});
+    if (this.opts.isDone()) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise<T | undefined>(resolve => {
+      const wake = (): void => resolve(undefined);
+      this.wakes.add(wake);
+      void p.then(
+        v => {
+          this.wakes.delete(wake);
+          resolve(v);
+        },
+        () => {
+          this.wakes.delete(wake);
+          resolve(undefined);
+        }
+      );
+    });
+  }
+
+  private deliver(m: AnyMessage): void {
+    try {
+      this.opts.route(m);
+    } catch (e) {
+      this.opts.log(
+        `acp proxy: dropped ${this.opts.tag} ${wire(m).method ?? 'message'}: ${errText(e)}`
+      );
+    }
+  }
+
+  /** FIFO one-shot — the oldest outstanding charge ends on each
+   *  settle; a bypass whose route wrote nothing decays on whatever
+   *  lands next, which errs toward holding the bound, never
+   *  toward unbounded intake. */
+  private bypass(): void {
+    this.bypassed++;
+    void this.opts.out.nextSettle().then(() => {
+      this.bypassed = Math.max(0, this.bypassed - 1);
+    });
+  }
+
+  private roomReady(): Promise<'room'> {
+    this.roomWait ??= this.opts.out.room().then(() => {
+      this.roomWait = undefined;
+      return 'room' as const;
+    });
+    return this.roomWait;
+  }
+
+  /** Route one consumed message — data intake joins the hold; a
+   *  control message routes NOW: it only ever stops or finishes
+   *  work the wire already accepted, so parking it behind the gate
+   *  could deadlock the release it carries. The hold drains ahead
+   *  of it only as far as the ledger's own gate allows — flushing
+   *  the whole hold on every control is the amplifier that let a
+   *  data/cancel alternation outrun the bound. Past the gate the
+   *  control overtakes the queue, and the route-side sweeps settle
+   *  its targets out of the hold it jumped. */
+  private accept(m: AnyMessage): void {
+    const { ctrl, held, out, precede } = this.opts;
+    if (!ctrl(m)) {
+      held.push(m);
+      return;
+    }
+    while (held.length > 0 && out.spare()) {
+      this.deliver(held.shift() as AnyMessage);
+    }
+    if (out.spare()) {
+      this.bypassed = 0;
+      this.deliver(m);
+      return;
+    }
+    // routed past a saturated ledger — first pull whatever ordering
+    // owes ahead of this control: a response must not overtake held
+    // messages of the session it ends. The pulled writes ISSUE
+    // first — still a bypass, never awaited — so the control's
+    // liveness is untouched and only the wire order is repaired
+    if (precede !== undefined) {
+      let keep = 0;
+      for (let i = 0; i < held.length; i++) {
+        const h = held[i] as AnyMessage;
+        if (precede(h, m)) {
+          this.bypass();
+          this.deliver(h);
+        } else {
+          held[keep++] = h;
+        }
+      }
+      held.length = keep;
+    }
+    // routed past a saturated ledger — count it: the hold and the
+    // bypass together are the intake in flight, and their sum is
+    // the read-side bound below
+    this.bypass();
+    this.deliver(m);
+  }
+
+  /** Handle a saturated intake, returning whether the loop should continue. */
+  private async waitForIntakeRoom(): Promise<boolean> {
+    const r: 'room' | { readonly read: ReadableStreamReadResult<AnyMessage> } | undefined =
+      this.read === undefined
+        ? await this.untilStop(this.roomReady())
+        : await this.untilStop(
+            Promise.race([this.roomReady(), this.read.then(v => ({ read: v }) as const)])
+          );
+    if (r === undefined) return false;
+    if (r === 'room') {
+      this.bypassed = 0;
+      this.intakePaused = false;
+      this.read ??= this.reader.read();
+      return true;
+    }
+    this.read = undefined;
+    this.intakePaused = true;
+    if (r.read.done) this.eof = true;
+    else this.accept(r.read.value);
+    return true;
+  }
+
+  /** Read directly when there is no held work to drain. */
+  private async readWithoutHeld(): Promise<boolean> {
+    const r: ReadableStreamReadResult<AnyMessage> | undefined = await this.untilStop(
+      this.read ?? PUMP_READ_DONE
+    );
+    if (r === undefined) return false;
+    this.read = r.done ? undefined : this.reader.read();
+    if (r.done) this.eof = true;
+    else this.accept(r.value);
+    return true;
+  }
+
+  /** Race room, more input, and shutdown while draining held work. */
+  private async readWithHeld(): Promise<boolean> {
+    const r = await this.untilStop(
+      Promise.race([
+        this.roomReady(),
+        (this.read ?? PUMP_READ_DONE).then(v => ({ read: v }) as const),
+      ])
+    );
+    if (r === undefined) return false;
+    if (r === 'room') return true;
+    this.read = r.read.done ? undefined : this.reader.read();
+    if (r.read.done) this.eof = true;
+    else this.accept(r.read.value);
+    return true;
+  }
+
+  private stateFor(): PumpIntakeState | 'done' {
+    if (this.opts.isDone() || this.eof || (this.read === undefined && !this.intakePaused)) {
+      return 'done';
+    }
+    if (this.opts.held.length + this.bypassed >= ACP_PROXY_READ_HIGH_WATER) {
+      return 'saturated';
+    }
+    return this.opts.held.length === 0 ? 'empty' : 'held';
+  }
+
+  /** Run the intake loop to shutdown/EOF, flush the hold, peek at an
+   *  already-resolved read, then release the reader on a dead leg. */
+  async run(): Promise<void> {
+    const handlers: Record<PumpIntakeState, () => Promise<boolean>> = {
+      saturated: () => this.waitForIntakeRoom(),
+      empty: () => this.readWithoutHeld(),
+      held: () => this.readWithHeld(),
+    };
+    const { held, out } = this.opts;
+    for (;;) {
+      while (held.length > 0 && out.spare()) this.deliver(held.shift() as AnyMessage);
+      const state = this.stateFor();
+      if (state === 'done') break;
+      if (!(await handlers[state]())) break;
+    }
+    // flush the hold — a message the pump accepted is never dropped
+    // unrouted: registered now, its pending entry exists before the
+    // teardown sweep reads the table it answers from
+    while (held.length > 0) {
+      this.deliver(held.shift() as AnyMessage);
+    }
+    // a read issued before the pause may already have RESOLVED — its
+    // message left the transport (the peer's write completed) yet
+    // never routed: skipping it would strand an accepted request
+    // outside the table the teardown sweep answers. The race is a
+    // peek, not a wait — an already-settled read's race subscription
+    // was queued first so it wins; a still-pending read accepted
+    // nothing and loses nothing
+    if (this.read !== undefined) {
+      const r = await Promise.race([this.read, Promise.resolve(undefined)]).catch(() => undefined);
+      if (r !== undefined) {
+        if (r.done) {
+          this.eof = true;
+        } else {
+          this.deliver(r.value);
+        }
+      }
+    }
+    // a leg ended by shutdown — never by its own EOF — cancels its
+    // reader so the peer's queued writes learn the wire is gone
+    // instead of parking on the stall. The release starts with the
+    // call; the sweep's wait only needs the drain above, so the
+    // settle never needs an await here
+    if (!this.eof) {
+      void this.reader.cancel().catch(() => {});
+    }
+  }
+}
+
+const runPump = (opts: PumpOpts): Promise<void> => new PumpMachine(opts).run();
+
 /**
  * The message pump — runs until either leg closes. Returns the process
  * exit code: 0 when the client ended the wire (clean), 1 when the
@@ -762,7 +1041,9 @@ export async function acpProxy(
     const text = promptText(params);
     const [sessionCtx, promptCtx] = await Promise.all([
       ses.sessionCtxDone
-        ? Promise.resolve<{ text?: string; settled: boolean }>({ settled: true })
+        ? Promise.resolve<{ text?: string; settled: boolean }>({
+            settled: true,
+          })
         : seamSessionCall(opts.seam?.sessionContext, ses, sessionId),
       seamCall(opts.seam?.promptContext, ses, sessionId, text),
     ]);
@@ -797,7 +1078,12 @@ export async function acpProxy(
     const pendingRequest: PendingRequest = {
       method,
       ...(OPEN_METHODS.has(method)
-        ? { bind: { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) } }
+        ? {
+            bind: {
+              cwd: str(params?.['cwd']),
+              sessionId: str(params?.['sessionId']),
+            },
+          }
         : {}),
       ...(method === 'session/close' && sessionId !== undefined ? { close: sessionId } : {}),
     };
@@ -840,6 +1126,38 @@ export async function acpProxy(
    *  per-prompt flag would lose every prompt queued behind the first
    *  (the cancel path aborts held prompts by deleting their pending
    *  entry). */
+  /** The pending entry a stamped prompt registers before it queues —
+   *  the slot charge and the payload cell live on it so a settle can
+   *  free the slot (release) or drop the payload (detach). */
+  const promptEntry = (
+    sessionId: string,
+    cell: { m?: AnyMessage; params?: Record<string, unknown> },
+    parentCtx?: NonNullable<Parameters<typeof otelSpan>[2]>['parent']
+  ): PendingRequest => ({
+    method: 'session/prompt',
+    prompt: {
+      sessionId,
+      span: otelSpan('acp.proxy.turn', { 'acp.session': sessionId }, { parent: parentCtx }),
+      // charge the down leg's bound AT ACCEPT — a prompt waiting on the
+      // seam has no wire depth yet, so without the hold a prompt flood
+      // parks nothing while pending/writeQ/held grow past the mark.
+      // The slot lives on the entry: a session/cancel settling this
+      // prompt while it still waits in the writeQ frees the slot at
+      // settle (abortHeld), not whenever the seam ahead of it returns.
+      release: downOut.hold(),
+      // the queued cross reads its payload through a cell the settle
+      // path clears via `detach` — a prompt cancelled while still
+      // queued behind a stuck writeQ is discharged from `pending`, and
+      // without the detach its message and params would stay retained
+      // by this closure for the life of the queue (the chain itself
+      // can't be unlinked, the payload it would act on can)
+      detach: () => {
+        cell.m = undefined;
+        cell.params = undefined;
+      },
+    },
+  });
+
   const onPromptRequest = (m: AnyMessage, id: JsonRpcId): void => {
     const target = promptSession(m);
     if (target === undefined) {
@@ -847,45 +1165,15 @@ export async function acpProxy(
       writeDown(m);
       return;
     }
-    const turn = otelSpan(
-      'acp.proxy.turn',
-      {
-        'acp.session': target.sessionId,
-      },
-      { parent: target.ses.span?.ctx }
-    );
-    // charge the down leg's bound AT ACCEPT — a prompt waiting on the
-    // seam has no wire depth yet, so without the hold a prompt flood
-    // parks nothing while pending/writeQ/held grow past the mark.
-    // The slot lives on the entry: a session/cancel settling this
-    // prompt while it still waits in the writeQ frees the slot at
-    // settle (abortHeld), not whenever the seam ahead of it returns.
-    const release = downOut.hold();
-    // the queued cross reads its payload through a cell the settle
-    // path clears via `detach` — a prompt cancelled while still
-    // queued behind a stuck writeQ is discharged from `pending`, and
-    // without the detach its message and params would stay retained
-    // by this closure for the life of the queue (the chain itself
-    // can't be unlinked, the payload it would act on can)
     const cell: { m?: AnyMessage; params?: Record<string, unknown> } = {
       m,
       params: target.params,
     };
-    const entry: PendingRequest = {
-      method: 'session/prompt',
-      prompt: {
-        sessionId: target.sessionId,
-        span: turn,
-        release,
-        detach: () => {
-          cell.m = undefined;
-          cell.params = undefined;
-        },
-      },
-    };
+    const entry = promptEntry(target.sessionId, cell, target.ses.span?.ctx);
     pending.set(id, entry);
     target.ses.held.add(id);
     const { sessionId, ses } = target;
+    const release = entry.prompt?.release;
     // the entry is captured AT ENQUEUE — if a cancel discharges the
     // id and a new request reuses it before this queued write runs,
     // `pending.get(id)` inside crossPrompt would return the NEW
@@ -897,9 +1185,17 @@ export async function acpProxy(
       const cp = cell.params;
       cell.m = undefined;
       cell.params = undefined;
-      return cm === undefined || cp === undefined
+      return cm === undefined || cp === undefined || release === undefined
         ? Promise.resolve()
-        : crossPrompt({ m: cm, id, own: entry, release, params: cp, sessionId, ses });
+        : crossPrompt({
+            m: cm,
+            id,
+            own: entry,
+            release,
+            params: cp,
+            sessionId,
+            ses,
+          });
     };
     target.ses.writeQ = target.ses.writeQ.then(queued, queued);
   };
@@ -1375,7 +1671,10 @@ export async function acpProxy(
       method: 'session/update',
       params: {
         sessionId,
-        update: { sessionUpdate: 'available_commands_update', availableCommands: commands },
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: commands,
+        },
       },
     }) as AnyMessage;
 
@@ -1539,7 +1838,11 @@ export async function acpProxy(
       held: true,
       options: permissionOptionsOf(params),
     };
-    const entry: PendingA2C = { method: PERMISSION_METHOD, sessionId, permission: perm };
+    const entry: PendingA2C = {
+      method: PERMISSION_METHOD,
+      sessionId,
+      permission: perm,
+    };
     pendingA2C.set(id, entry);
     const fn = opts.seam?.permission;
     const cwd = ses?.cwd;
@@ -1948,7 +2251,10 @@ export async function acpProxy(
           result: {
             ...result,
             agentInfo: overlayInfo,
-            _meta: { ...meta, bro: { ...bro, downstreamAgent: result['agentInfo'] } },
+            _meta: {
+              ...meta,
+              bro: { ...bro, downstreamAgent: result['agentInfo'] },
+            },
           },
         } as AnyMessage;
       }
@@ -2067,7 +2373,7 @@ export async function acpProxy(
    *  outstanding at the exit: one that already resolved IS an
    *  accepted message (its sender's write completed), so it is routed
    *  into the same table rather than dropped with the pump. */
-  const pump = async (
+  const pump = (
     stream: Stream,
     route: (m: AnyMessage) => void,
     tag: string,
@@ -2075,230 +2381,19 @@ export async function acpProxy(
     ctrl: (m: AnyMessage) => boolean,
     held: AnyMessage[],
     precede?: (heldMsg: AnyMessage, ctrl: AnyMessage) => boolean
-  ): Promise<void> => {
-    const reader = stream.readable.getReader();
-    const wakes = new Set<() => void>();
-    void wireDoneLatch.promise.then(() => {
-      for (const w of wakes) w();
-      wakes.clear();
+  ): Promise<void> =>
+    runPump({
+      stream,
+      route,
+      tag,
+      out,
+      ctrl,
+      held,
+      precede,
+      isDone: () => wireDone,
+      done: wireDoneLatch.promise,
+      log,
     });
-    /** `p`, or early resolve on shutdown — `undefined` marks the wake. */
-    const untilStop = <T>(p: Promise<T>): Promise<T | undefined> => {
-      // a wait may end early — a rejection on the abandoned branch
-      // must still count as handled
-      void p.catch(() => {});
-      if (wireDone) {
-        return Promise.resolve(undefined);
-      }
-      return new Promise<T | undefined>(resolve => {
-        const wake = (): void => resolve(undefined);
-        wakes.add(wake);
-        void p.then(
-          v => {
-            wakes.delete(wake);
-            resolve(v);
-          },
-          () => {
-            wakes.delete(wake);
-            resolve(undefined);
-          }
-        );
-      });
-    };
-    const deliver = (m: AnyMessage): void => {
-      try {
-        route(m);
-      } catch (e) {
-        log(`acp proxy: dropped ${tag} ${wire(m).method ?? 'message'}: ${errText(e)}`);
-      }
-    };
-    let read: Promise<ReadableStreamReadResult<AnyMessage>> | undefined = reader.read();
-    let eof = false;
-    /** Intake paused at the read bound with NO read outstanding — the
-     *  prefetched one already landed in the hold. Distinct from EOF:
-     *  the loop still owes the room wait, just no second read. */
-    let intakePaused = false;
-    /** A pre-done read — where a wait still needs a promise while the
-     *  intake is paused or spent, this resolves immediately so the
-     *  loop falls through to its own break conditions. */
-    const READ_DONE = Promise.resolve<ReadableStreamReadResult<AnyMessage>>({
-      value: undefined,
-      done: true,
-    });
-    /** Controls routed past a FULL ledger — accepted in-flight work
-     *  neither `held` nor the ledger's own hold count sees. Enough of
-     *  them pause the read side exactly like a saturated hold: a
-     *  cancel or response flood meets the wire's bound instead of
-     *  writing past it without limit (local cancellation never blocks
-     *  — every consumed control still settles the instant it routes;
-     *  the bound gates only consuming MORE). The charge decays on the
-     *  leg's NEXT write settle, not on room(): bypassed work is
-     *  ordinary depth once issued, and holds can keep the ledger
-     *  "full" while the wire drains fine — counting until room would
-     *  park the read behind work the charge no longer represents
-     *  (the exact deadlock this bound exists to prevent). */
-    let bypassed = 0;
-    const bypass = (): void => {
-      bypassed++;
-      // FIFO one-shot — the oldest outstanding charge ends on each
-      // settle; a bypass whose route wrote nothing decays on whatever
-      // lands next, which errs toward holding the bound, never
-      // toward unbounded intake
-      void out.nextSettle().then(() => {
-        bypassed = Math.max(0, bypassed - 1);
-      });
-    };
-    /** ONE outstanding room() subscription at a time — the parked wait
-     *  re-arms on every intake result, and a waiter that loses the
-     *  race stays registered until the next release, so re-arming per
-     *  read grew the ledger's waiter set alongside the hold it exists
-     *  to bound. A pending room promise is reused across iterations;
-     *  its own settle clears the slot so a stale resolution can never
-     *  fake room later. */
-    let roomWait: Promise<'room'> | undefined;
-    const roomReady = (): Promise<'room'> => {
-      roomWait ??= out.room().then(() => {
-        roomWait = undefined;
-        return 'room' as const;
-      });
-      return roomWait;
-    };
-    /** Route one consumed message — data intake joins the hold; a
-     *  control message routes NOW: it only ever stops or finishes
-     *  work the wire already accepted, so parking it behind the gate
-     *  could deadlock the release it carries. The hold drains ahead
-     *  of it only as far as the ledger's own gate allows — flushing
-     *  the whole hold on every control is the amplifier that let a
-     *  data/cancel alternation outrun the bound. Past the gate the
-     *  control overtakes the queue, and the route-side sweeps settle
-     *  its targets out of the hold it jumped. */
-    const accept = (m: AnyMessage): void => {
-      if (!ctrl(m)) {
-        held.push(m);
-        return;
-      }
-      while (held.length > 0 && out.spare()) {
-        deliver(held.shift() as AnyMessage);
-      }
-      if (out.spare()) {
-        bypassed = 0;
-        deliver(m);
-        return;
-      }
-      // routed past a saturated ledger — first pull whatever ordering
-      // owes ahead of this control: a response must not overtake held
-      // messages of the session it ends. The pulled writes ISSUE
-      // first — still a bypass, never awaited — so the control's
-      // liveness is untouched and only the wire order is repaired
-      if (precede !== undefined) {
-        let keep = 0;
-        for (let i = 0; i < held.length; i++) {
-          const h = held[i] as AnyMessage;
-          if (precede(h, m)) {
-            bypass();
-            deliver(h);
-          } else {
-            held[keep++] = h;
-          }
-        }
-        held.length = keep;
-      }
-      // routed past a saturated ledger — count it: the hold and the
-      // bypass together are the intake in flight, and their sum is
-      // the read-side bound below
-      bypass();
-      deliver(m);
-    };
-    /** Handle a saturated intake, returning whether the loop should continue. */
-    const waitForIntakeRoom = async (): Promise<boolean> => {
-      const r: 'room' | { readonly read: ReadableStreamReadResult<AnyMessage> } | undefined =
-        read === undefined
-          ? await untilStop(roomReady())
-          : await untilStop(Promise.race([roomReady(), read.then(v => ({ read: v }) as const)]));
-      if (r === undefined) return false;
-      if (r === 'room') {
-        bypassed = 0;
-        intakePaused = false;
-        read ??= reader.read();
-        return true;
-      }
-      read = undefined;
-      intakePaused = true;
-      if (r.read.done) eof = true;
-      else accept(r.read.value);
-      return true;
-    };
-
-    /** Read directly when there is no held work to drain. */
-    const readWithoutHeld = async (): Promise<boolean> => {
-      const r: ReadableStreamReadResult<AnyMessage> | undefined = await untilStop(
-        read ?? READ_DONE
-      );
-      if (r === undefined) return false;
-      read = r.done ? undefined : reader.read();
-      if (r.done) eof = true;
-      else accept(r.value);
-      return true;
-    };
-
-    /** Race room, more input, and shutdown while draining held work. */
-    const readWithHeld = async (): Promise<boolean> => {
-      const r = await untilStop(
-        Promise.race([roomReady(), (read ?? READ_DONE).then(v => ({ read: v }) as const)])
-      );
-      if (r === undefined) return false;
-      if (r === 'room') return true;
-      read = r.read.done ? undefined : reader.read();
-      if (r.read.done) eof = true;
-      else accept(r.read.value);
-      return true;
-    };
-
-    for (;;) {
-      while (held.length > 0 && out.spare()) deliver(held.shift() as AnyMessage);
-      if (wireDone || eof || (read === undefined && !intakePaused)) break;
-      if (held.length + bypassed >= ACP_PROXY_READ_HIGH_WATER) {
-        if (!(await waitForIntakeRoom())) break;
-        continue;
-      }
-      if (held.length === 0) {
-        if (!(await readWithoutHeld())) break;
-        continue;
-      }
-      if (!(await readWithHeld())) break;
-    }
-    // flush the hold — a message the pump accepted is never dropped
-    // unrouted: registered now, its pending entry exists before the
-    // teardown sweep reads the table it answers from
-    while (held.length > 0) {
-      deliver(held.shift() as AnyMessage);
-    }
-    // a read issued before the pause may already have RESOLVED — its
-    // message left the transport (the peer's write completed) yet
-    // never routed: skipping it would strand an accepted request
-    // outside the table the teardown sweep answers. The race is a
-    // peek, not a wait — an already-settled read's race subscription
-    // was queued first so it wins; a still-pending read accepted
-    // nothing and loses nothing
-    if (read !== undefined) {
-      const r = await Promise.race([read, Promise.resolve(undefined)]).catch(() => undefined);
-      if (r !== undefined) {
-        if (r.done) {
-          eof = true;
-        } else {
-          deliver(r.value);
-        }
-      }
-    }
-    // a leg ended by shutdown — never by its own EOF — cancels its
-    // reader so the peer's queued writes learn the wire is gone
-    // instead of parking on the stall. The release starts with the
-    // call; the sweep's wait only needs the drain above, so the
-    // settle never needs an await here
-    if (!eof) {
-      void reader.cancel().catch(() => {});
-    }
-  };
 
   /** The control plane each direction's pump bypasses the route gate
    *  for — intake that only ever stops or finishes work already
@@ -2404,7 +2499,10 @@ export async function acpProxy(
           writeUp({
             jsonrpc: '2.0',
             id: req.gateFor,
-            error: { code: -32603, message: 'acp proxy: downstream agent closed' },
+            error: {
+              code: -32603,
+              message: 'acp proxy: downstream agent closed',
+            },
           } as AnyMessage);
         }
         continue;
@@ -2474,7 +2572,12 @@ export async function acpProxy(
   // may pend forever on a pure-JS sink, so it must not be awaited).
   for (const { w, out, dead, writable } of [
     { w: upWriter, out: upOut, dead: upDead, writable: upstream.writable },
-    { w: downWriter, out: downOut, dead: downDead, writable: downstream.writable },
+    {
+      w: downWriter,
+      out: downOut,
+      dead: downDead,
+      writable: downstream.writable,
+    },
   ]) {
     if (dead.fired) {
       void w.abort().catch(() => {});

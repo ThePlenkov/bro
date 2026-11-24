@@ -1391,8 +1391,13 @@
     },
     {
       "quality_gates": "bare_minimum",
-      "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/agent-connectors.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires). ACP pump state-machine redesign removed the targeted complex method; remaining findings are pre-existing advisory debt.",
+      "matching_content_path": "packages/providers/src/acp-proxy.ts"
     },
     {
       "quality_gates": {
