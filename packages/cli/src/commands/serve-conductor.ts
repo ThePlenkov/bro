@@ -947,16 +947,14 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
     // fingerprint namespace and collide with another conversation
     return `h:${named.slice(0, 200)}`;
   }
-  const native = body.metadata?.user_id?.trim();
-  if (native !== undefined && native !== '') {
-    return `h:${native.slice(0, 200)}`;
-  }
   const first = body.messages?.[0];
   if (first === undefined) {
     return undefined;
   }
   const fp = createHash('sha256')
-    .update(`${prefixText(body)}\n${stopKeyOf(stopSeqsOf(body) ?? [])}\n${turnHashInput(first)}`)
+    .update(
+      `${body.metadata?.user_id ?? ''}\n${prefixText(body)}\n${stopKeyOf(stopSeqsOf(body) ?? [])}\n${turnHashInput(first)}`
+    )
     .digest('hex');
   return `f:${fp}`;
 }
@@ -2988,6 +2986,8 @@ interface CatalogCache {
   /** the read in flight — a burst of clients waits on ONE read, never
    *  one read each. */
   inflight?: Promise<void>;
+  /** Monotonically advances on reload so stale reads cannot publish. */
+  generation: number;
 }
 
 /** The catalog's freshness — what a refresh reports. */
@@ -5463,6 +5463,7 @@ async function readLaneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneC
     lane.entry === wire.cfg.backend && wire.cfg.catalog !== undefined
       ? wire.cfg.catalog
       : { name: lane.primary, entry: lane.cfg.entry };
+  const generation = wire.catalog.generation;
   try {
     // the LANE's budget bounds its own catalog read — the operator's
     // timeout, not a constant baked into the provider layer. A cold acp
@@ -5480,7 +5481,9 @@ async function readLaneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneC
     }));
     // a success is the only thing worth caching — a failure answers
     // fresh on the next read so a recovering lane re-advertises at once
-    lane.catalogCache = { at: Date.now(), rows: routed };
+    if (wire.catalog.generation === generation) {
+      lane.catalogCache = { at: Date.now(), rows: routed };
+    }
     return { rows: routed };
   } catch (err) {
     // the lane names itself — by its ADVERTISED route, the public name a
@@ -5553,15 +5556,30 @@ function firstSegment(id: string): string {
  *  The LANE rides the row as its own field: the reader must not have
  *  to guess it back out of the id, whose head is a formatted string and
  *  the model's own name may carry a slash of its own. */
-function servedRow(m: RoutedModel): Record<string, unknown> {
-  return {
-    type: 'model',
+type ServedRow = (model: RoutedModel) => Record<string, unknown>;
+
+const anthropicServedRow: ServedRow = m => ({
+  type: 'model',
+  id: m.id,
+  display_name: displayName(m),
+  description: providerPath(m),
+  ...(m.prefix === undefined ? {} : { source: m.prefix }),
+  created_at: '2025-01-01T00:00:00Z',
+});
+
+const servedRowHandlers: Record<string, ServedRow> = {
+  default: anthropicServedRow,
+  openai: m => ({
     id: m.id,
-    display_name: displayName(m),
-    description: providerPath(m),
-    ...(m.prefix === undefined ? {} : { source: m.prefix }),
-    created_at: '2025-01-01T00:00:00Z',
-  };
+    object: 'model',
+    created: 1_735_689_600,
+    owned_by: m.prefix ?? 'bro',
+  }),
+};
+
+function servedRow(m: RoutedModel, surface: string | undefined): Record<string, unknown> {
+  const handler = Object.getOwnPropertyDescriptor(servedRowHandlers, surface ?? 'default')?.value;
+  return typeof handler === 'function' ? handler(m) : anthropicServedRow(m);
 }
 
 /** The row's SECOND line — the path that serves it: the lane's prefix and
@@ -5585,6 +5603,7 @@ function providerPath(m: RoutedModel): string {
  *  is not cached, so a provider that comes back heals the gateway by
  *  itself instead of waiting for a reload. */
 async function refreshCatalog(wire: WireCtx): Promise<CatalogSnapshot> {
+  const generation = wire.catalog.generation;
   // the LANES, not the routes: a lane reached by two routes is read once
   // and advertised once, under its primary route
   const lanes = await Promise.all([...wire.lanes.values()].map(lane => laneCatalog(lane, wire)));
@@ -5593,18 +5612,27 @@ async function refreshCatalog(wire: WireCtx): Promise<CatalogSnapshot> {
   const cache = wire.catalog;
   // every lane failed — the catalog stays EMPTY and the next request
   // retries, so a provider that comes back heals the gateway by itself
-  cache.rows = failures.length === lanes.length ? undefined : rows;
-  cache.failures = failures;
-  cache.fetchedAtMs = Date.now();
-  return { models: cache.rows?.length ?? 0, fetchedAtMs: cache.fetchedAtMs, failures };
+  if (cache.generation === generation) {
+    cache.rows = failures.length === lanes.length ? undefined : rows;
+    cache.failures = failures;
+    cache.fetchedAtMs = Date.now();
+  }
+  return {
+    models: cache.rows?.length ?? 0,
+    fetchedAtMs: cache.fetchedAtMs ?? Date.now(),
+    failures,
+  };
 }
 
 /** Explicit operator reload bypasses each lane's read cache. */
 function invalidateCatalog(wire: WireCtx): void {
+  wire.catalog.generation += 1;
   for (const lane of wire.lanes.values()) {
     lane.catalogCache = undefined;
+    lane.catalogInflight = undefined;
   }
   wire.catalog.rows = undefined;
+  wire.catalog.inflight = undefined;
 }
 
 /** The cached rows — read them ONCE if nobody has yet. A burst of
@@ -5630,7 +5658,11 @@ async function ensureCatalog(wire: WireCtx): Promise<void> {
  *  The rows are CACHED: the read happens at start and on an operator's
  *  explicit reload, never per request — a client asking what the gateway
  *  serves must not cost a provider round trip. */
-async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+async function models(
+  res: ServerResponse,
+  wire: WireCtx,
+  surface: string | undefined
+): Promise<void> {
   await ensureCatalog(wire);
   const rows = wire.catalog.rows ?? [];
   const failures = wire.catalog.failures;
@@ -5638,6 +5670,9 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   // signal whether the catalog is short (200) or the gateway is down
   // (502). A 502 without it says "down" but not "which lane, why".
   const laneError = failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
+  if (wire.catalog.fetchedAtMs !== undefined) {
+    res.setHeader('x-bro-catalog-fetched-at', String(wire.catalog.fetchedAtMs));
+  }
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
   if (failures.length > 0 && failures.length === wire.lanes.size) {
@@ -5645,7 +5680,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
-  const data = rows.map(servedRow);
+  const data = rows.map(row => servedRow(row, surface));
   // a lane that FAILED is not silently absent from the union: the
   // degradation rides the response, so a client reading a shorter
   // catalog can tell it apart from the whole truth. A lane that merely
@@ -5699,7 +5734,7 @@ export interface ConductorProxy {
   /** Warm the catalog in the background — the serve does it at start, so
    *  the first client read finds the rows already there instead of
    *  waiting on a cold provider enumeration. */
-  warmCatalog(): void;
+  warmCatalog(): Promise<void>;
 }
 
 /** A terminal created by one provider must be readable whichever
@@ -5919,7 +5954,7 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     link,
     lanes,
     routes,
-    catalog: { failures: [] },
+    catalog: { failures: [], generation: 0 },
   };
   return Object.assign(conductorDispatch(wire, chains, cfg), {
     terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
@@ -5929,8 +5964,10 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     },
     // the warm read runs in the background: a failed enumeration leaves
     // the cache empty and the next client read retries it
-    warmCatalog: (): void => {
-      void refreshCatalog(wire).catch(() => undefined);
+    warmCatalog: (): Promise<void> => {
+      return refreshCatalog(wire)
+        .then(() => undefined)
+        .catch(() => undefined);
     },
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
@@ -5981,7 +6018,7 @@ function conductorDispatch(
         await countTokens(req, res);
         return;
       case 'GET /v1/models':
-        await models(res, wire);
+        await models(res, wire, surface);
         return;
       default:
         apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`);

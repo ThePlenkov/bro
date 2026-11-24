@@ -555,6 +555,8 @@ const ROUTES = [
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
+  'ALL /anthropic/v1/*',
+  'ALL /openai/v1/*',
   'ALL /api/v1/acp',
 ];
 
@@ -989,8 +991,15 @@ function routeApiBranch(
   if (api[0] === 'agents') {
     return routeAgentsBranch(method, api, rawBody, deps);
   }
-  if (api[0] === 'models' && api[1] === 'reload' && api.length === 2) {
-    return routeModelsReload(method, deps);
+  const taggedBranches: Record<
+    string,
+    (requestMethod: string, requestDeps: ServeDeps) => ServeResponse | Promise<ServeResponse>
+  > = {
+    'models/reload': routeModelsReload,
+  };
+  const tagged = api.length === 2 ? taggedBranches[`${api[0]}/${api[1]}`] : undefined;
+  if (tagged !== undefined) {
+    return tagged(method, deps);
   }
   if (api[0] === 'webhooks') {
     return routeWebhook(method, api, rawBody, deps, headers);

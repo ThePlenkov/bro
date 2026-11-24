@@ -3914,13 +3914,21 @@ describe('the catalog cache — one provider read, not one per request', () => {
   test('the warm read fills the cache before any client asks', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
     const conductor = conductorProxy(CFG, { acp: { peer: fake.app } });
-    conductor.warmCatalog();
+    let warmed = false;
+    const warm = conductor.warmCatalog().then(() => {
+      warmed = true;
+    });
+    await warm;
+    assert.equal(warmed, true);
+    const readsAfterWarm = fake.sessions.length;
+    assert.ok(readsAfterWarm > 0, 'warming reads the provider before resolving');
     const { url, close } = await listen(deps({ provider: conductor }));
     try {
       const r = await fetch(`${url}/v1/models`, { headers: auth });
       assert.equal(r.status, 200);
       const ids = ((await r.json()) as { data: { id: string }[] }).data.map(x => x.id);
       assert.deepEqual(ids, ['dv-acp/swe-x', 'dv-acp/swe-y']);
+      assert.equal(fake.sessions.length, readsAfterWarm, 'the request uses the warmed cache');
     } finally {
       await close();
     }
