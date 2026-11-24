@@ -50,6 +50,7 @@ describe('act connector — stale supervisor restart hints', () => {
     deadSupervisor(dir, 'drive', false)
     const stale = (await start(dir)).find((l) => l.includes('stale act watch'))
     assert.ok(stale)
+    assert.match(stale, /stale act watch on .* — run `bro act status 7` before anything else/)
     assert.match(stale, /`bro drive --every --no-merge`/)
   })
 

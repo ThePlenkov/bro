@@ -164,10 +164,11 @@ function staleWatchLine({ watch, file, reported }: ListedWatch): string | null {
   const restart = kind === 'loop' ? 'bro loop' : `bro ${kind} --every${noMerge}`;
   return (
     `stale act watch on ${watch.link}${mode} — ` +
+    `run \`bro act status ${watch.pr}\` before anything else; ` +
     (kind === 'wait'
       ? 'the watching session died; `bro act rearm` resurrects it, '
       : `the '${kind}' supervisor died — restart it (\`${restart}\`); `) +
-    `\`bro act status --pr ${watch.pr}\` inspects`
+    `the status output is the work item`
   );
 }
 
