@@ -145,8 +145,10 @@ function collectBranchFleetPrs(
   return true;
 }
 
-/** The run's mutable queue state — the gate stack, the outcome tally,
- *  and the claim bookkeeping the tick helpers share. */
+/** The open-fleet-PR census — the review backend's own listing when it
+ *  offers one, else a per-branch scan over every local worktree, bare
+ *  loop/* branch, and remote fleet head. `null` answers 'unknown': an
+ *  incomplete scan is a gate failure, never a partial pass. */
 export function listOpenFleetPrs(ctx: FleetPrsCtx): FleetPrRow[] | null {
   const listed = fleetPrsFromBackend(ctx);
   if (listed !== undefined) {
