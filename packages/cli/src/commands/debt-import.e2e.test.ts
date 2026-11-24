@@ -189,6 +189,18 @@ describe('bro debt import e2e', () => {
     });
   });
 
+  test('a ..-prefixed filename inside the root still imports', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      // '..ids.sarif' lives inside the checkout — `..` containment is a
+      // segment test, not a prefix, so the name alone must not refuse it
+      writeFileSync(join(main, '..ids.sarif'), SARIF([RES('r1', 'm', 'f.ts', 'fp-dd')]));
+      const r = runCli(['debt', 'import', '..ids.sarif', '--repo', 'a/b'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(harvestRows(main)[0]!.thread_id, /^sverka:a%2Fb:eslint:r1:/);
+    });
+  });
+
   test('a positional resolves repo-root-relative from a subdirectory cwd', () => {
     const { root, main } = fixture();
     inside(main, root, () => {
