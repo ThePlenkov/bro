@@ -29,6 +29,59 @@ function api(handlers: Map<string, (event: unknown, ctx: OmpContext) => unknown>
 }
 
 describe('omp mode bridges', () => {
+  test('returns the in-flight bead names for plan review', async () => {
+    const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+    installModeBridges(api(handlers), {
+      board: () => ({
+        beads: { inProgress: [{ id: 'bro-plan', title: 'Ship the plan' }] },
+      }),
+    });
+
+    const handler = handlers.get('plan_review_requested');
+    assert.ok(handler);
+    const result = await handler({}, context());
+    assert.match(
+      (result as { additionalContext: string }).additionalContext,
+      /bro-plan \(Ship the plan\)/
+    );
+    assert.match((result as { additionalContext: string }).additionalContext, /bro spec check/);
+  });
+
+  test('returns the bead and drill frame for a goal update', async () => {
+    const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+    installModeBridges(api(handlers), {
+      board: () => ({
+        beads: { inProgress: [{ id: 'bro-goal', title: 'Finish the goal' }] },
+        drill: { frame: { id: 'drill-7', title: 'Trace the bridge', depth: 2 } },
+      }),
+    });
+
+    const handler = handlers.get('goal_updated');
+    assert.ok(handler);
+    const result = await handler({ goal: { objective: 'make the effect visible' } }, context());
+    const additionalContext = (result as { additionalContext: string }).additionalContext;
+    assert.match(additionalContext, /drill frame drill-7 — Trace the bridge/);
+    assert.match(additionalContext, /bro-goal \(Finish the goal\)/);
+    assert.match(additionalContext, /bro work goal/);
+  });
+
+  test('warns about workers already running before spawning a subagent', async () => {
+    const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+    installModeBridges(api(handlers), {
+      board: () => ({
+        fleet: { agents: [{ id: 'worker-3', state: 'running' }] },
+      }),
+    });
+
+    const handler = handlers.get('before_subagent_spawn');
+    assert.ok(handler);
+    const result = await handler({}, context());
+    assert.match(
+      (result as { additionalContext: string }).additionalContext,
+      /worker-3.*claim a bead/
+    );
+  });
+
   test('injects routing and review debt through prompt submission', async () => {
     const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
     const source: ModeBridgeSource = {
