@@ -310,6 +310,11 @@ function prAttention(prs: WatchPrGate[]): string[] {
     } else if (g.ok === false) {
       out.push(`PR ${g.link} blocked — ${(g.blockers ?? []).join('; ')}`);
     }
+    if (g.ownership === 'human' && (g.openThreads ?? 0) > 0) {
+      out.push(
+        `PR ${g.link} needs act — ${g.openThreads} unresolved review thread(s); run bro act ${g.pr}`
+      );
+    }
     for (const a of g.alerts ?? []) {
       out.push(`PR ${g.link} — ${a}`);
     }

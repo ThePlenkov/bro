@@ -41,6 +41,7 @@ import {
   type CheckInfo,
   type ReviewFacade,
   type ReviewThread,
+  prOwnership,
   readAgentRegistry,
   SpawnError,
   stampPrOwnership,
@@ -313,6 +314,11 @@ const ALERT_VERDICTS = new Set([
   'no-worktree',
   'error',
 ]);
+
+/** A PR without a bro ownership marker belongs to its human author.  Drive
+ * can still report its review debt, but must never turn that visibility pass
+ * into a fixer spawn. */
+const HUMAN_THREAD_VERDICT = 'human-threads';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -1684,6 +1690,76 @@ async function greenVerdict(
  *  non-OPEN PR (sessions + fixer close), else evaluate the exit gate —
  *  ok → ownership stamp + greenVerdict, blocked → ownership stamp +
  *  blockedVerdict. Alerts ride the verdict for the pass to surface. */
+function humanThreadSweep(
+  ctx: DriveCtx,
+  pr: number,
+  state: PrActState,
+  link: string
+): PrVerdict | undefined {
+  let ownership: ReturnType<typeof prOwnership> = 'human';
+  try {
+    ownership = prOwnership(ctx.deps.rev.labels({ repo: ctx.repo, pr }));
+  } catch {
+    // A labels read failure must not turn a normal gate into a human-owned
+    // row (or suppress its existing remediation path).
+    ownership = 'managed';
+  }
+  return ownership === 'human' && state.openThreads > 0
+    ? {
+        pr,
+        link,
+        verdict: HUMAN_THREAD_VERDICT,
+        detail: `${state.openThreads} unresolved review thread(s) — run bro act ${pr}`,
+      }
+    : undefined;
+}
+
+async function serviceGate(
+  ctx: DriveCtx,
+  pr: number,
+  state: PrActState,
+  link: string,
+  fixer: TaskRow | undefined,
+  gate: ExitGate
+): Promise<PrVerdict> {
+  const worktree = ctx.work.worktreeByBranch.get(state.headRef);
+  const occCtx: OccupancyCtx = {
+    agents: ctx.work.agents,
+    fixerBead: fixer?.id,
+    branch: state.headRef,
+    worktree,
+    workDetails: ctx.work.workDetails,
+    claims: ctx.work.claims,
+    scanProc: agentProcessesIn,
+    pr,
+    watches: ctx.work.watches,
+  };
+  const occ = occupied(occCtx);
+  const withAlerts = (v: PrVerdict): PrVerdict => {
+    if (gate.alerts.length > 0) {
+      v.alerts = gate.alerts;
+    }
+    return v;
+  };
+  if (gate.ok) {
+    const g = greenOccupancy(occCtx, ctx.occTtlMs);
+    stampDriveOwnership(ctx, pr, state, g.fresh);
+    return withAlerts(await greenVerdict(ctx, pr, link, g, worktree, fixer));
+  }
+  stampDriveOwnership(ctx, pr, state, occ);
+  return withAlerts(
+    await blockedVerdict(ctx, {
+      pr,
+      link,
+      state,
+      gate,
+      occ,
+      worktree,
+      fixer,
+    })
+  );
+}
+
 async function drivePr(ctx: DriveCtx, pr: number): Promise<PrVerdict> {
   const link = ctx.deps.rev.prLink(ctx.repo, pr);
   let state: PrActState;
@@ -1727,44 +1803,8 @@ async function drivePr(ctx: DriveCtx, pr: number): Promise<PrVerdict> {
     return { pr, link, verdict: 'settled', detail: state.state.toLowerCase() };
   }
   const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval });
-  const worktree = ctx.work.worktreeByBranch.get(state.headRef);
-  const occCtx: OccupancyCtx = {
-    agents: ctx.work.agents,
-    fixerBead: fixer?.id,
-    branch: state.headRef,
-    worktree,
-    workDetails: ctx.work.workDetails,
-    claims: ctx.work.claims,
-    scanProc: agentProcessesIn,
-    pr,
-    watches: ctx.work.watches,
-  };
-  const occ = occupied(occCtx);
-  const withAlerts = (v: PrVerdict): PrVerdict => {
-    if (gate.alerts.length > 0) {
-      v.alerts = gate.alerts;
-    }
-    return v;
-  };
-  if (gate.ok) {
-    const g = greenOccupancy(occCtx, ctx.occTtlMs);
-    // an adopted PR is an orphan — the TTL'd verdict, not the raw
-    // occupancy read, decides who keeps their claim (bro-ihnlv)
-    stampDriveOwnership(ctx, pr, state, g.fresh);
-    return withAlerts(await greenVerdict(ctx, pr, link, g, worktree, fixer));
-  }
-  stampDriveOwnership(ctx, pr, state, occ);
-  return withAlerts(
-    await blockedVerdict(ctx, {
-      pr,
-      link,
-      state,
-      gate,
-      occ,
-      worktree,
-      fixer,
-    })
-  );
+  const humanThreads = humanThreadSweep(ctx, pr, state, link);
+  return humanThreads ?? serviceGate(ctx, pr, state, link, fixer, gate);
 }
 
 /** branch → worktree path across every checkout — over the injected

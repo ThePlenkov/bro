@@ -450,6 +450,7 @@ interface World {
   worktreeList: { branch?: string; path: string }[] | null;
   threads: ReviewThread[];
   checks: CheckInfo[];
+  labels: string[];
 }
 
 function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}): World {
@@ -494,6 +495,7 @@ function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}
     worktreeList: null,
     threads: [],
     checks: [],
+    labels: ['bro-managed'],
   };
   const rev = {
     prLink: (_repo: string, pr: number) => `[#${pr}](https://github.com/o/r/pull/${pr})`,
@@ -509,7 +511,7 @@ function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}
     checks: () => w.checks,
     reviewedShas: () => [],
     prsForBranch: (branch: string) => w.prsByBranch[branch] ?? [],
-    labels: () => [],
+    labels: () => w.labels,
     createLabel: () => {},
     addLabel: () => {},
     removeLabel: () => {},
@@ -641,6 +643,22 @@ describe('drivePolicy.onPark — the human-alert settle', () => {
 });
 
 describe('drivePolicy.onGate — the gate verdict', () => {
+  test('human-owned review debt is reported without spawning a fixer', async () => {
+    const w = world();
+    w.labels = [];
+    w.threads = [
+      {
+        id: 'thread-1',
+        resolved: false,
+        comment: { body: 'please fix', path: 'src/a.ts', line: 1 },
+      } as ReviewThread,
+    ];
+    const v = await drivePolicy.onGate(w.ctx, 7);
+    assert.equal(v.verdict, 'human-threads');
+    assert.match(v.detail ?? '', /1 unresolved review thread\(s\).*bro act 7/);
+    assert.equal(w.spawned.length, 0);
+  });
+
   test('a probe failure is the alert-worthy probe-failed verdict', async () => {
     const w = world();
     w.metaQueue = [new Error('host unreachable')];
