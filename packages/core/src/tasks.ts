@@ -911,6 +911,68 @@ function makeStore(x: StoreExec): TaskStore {
   };
 }
 
+/** Remote-atomic claim (spec specs/bro-4i4q4.md) — `claim()` is
+ *  exclusive only inside this replica (`claimCapability`:
+ *  authority 'store'); independently syncing replicas each hold a
+ *  separate authority, so the claim is real once it lands on the
+ *  shared head. Publish via `sync()`, then read the merged truth:
+ *  in_progress + our assignee = won; anything else = raced — the head
+ *  carries another owner and the row is theirs, so we must NOT
+ *  reopen. A `sync` failure leaves an invisible local draft — undo it
+ *  best-effort and rethrow: a claim that cannot be published must not
+ *  pretend to exist. A verify failure after a successful publish is
+ *  the same shape one step later — pull the claim back best-effort
+ *  (reopen + republish) so the shared head never keeps an orphaned
+ *  assignee, then rethrow. Backends without `sync` write through to
+ *  the service already — skip the publish and verify by re-read. */
+export function claimRemote(ts: TaskStore, id: string): boolean {
+  ts.claim(id);
+  if (ts.sync === undefined) {
+    return wonRow(ts, ts.get(id));
+  }
+  try {
+    ts.sync();
+  } catch (err) {
+    undoClaim(ts, id, false);
+    throw err;
+  }
+  try {
+    return wonRow(ts, ts.get(id));
+  } catch (err) {
+    undoClaim(ts, id, true);
+    throw err;
+  }
+}
+
+/** Undo a claim we can no longer stand behind — best-effort: the
+ *  original error is the verdict, never the undo's. `published` also
+ *  re-syncs so the undo reaches the shared head; a republish may
+ *  itself race the merged row (bd merge semantics, spec non-goal),
+ *  but an orphaned assignee on the head is the worse outcome. */
+function undoClaim(ts: TaskStore, id: string, published: boolean): void {
+  try {
+    ts.reopen(id);
+    if (published) {
+      ts.sync?.();
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** The merged head's verdict on our claim. */
+function wonRow(ts: TaskStore, row: TaskRow | undefined): boolean {
+  if (row === undefined) {
+    return false;
+  }
+  if ((row.status ?? '').toLowerCase() !== 'in_progress') {
+    return false;
+  }
+  const actor = ts.actor?.() ?? '';
+  // '' = unverifiable identity — the claim marker's word stands
+  return actor === '' || (row.assignee ?? '').trim() === actor;
+}
+
 /** The beads-backed TaskStore. `dir` selects the store via cwd —
  *  callers that need the global store resolve it themselves
  *  (`resolveGlobalDir` lives in the cli layer). */

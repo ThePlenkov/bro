@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   bdActor,
+  claimRemote,
   getTasks,
   getTasksAsync,
   taskStore,
@@ -30,7 +31,7 @@ case "$1" in
         elif [ "$FAKE_BD_SHOW" = "broken" ]; then echo 'database is locked' >&2; exit 1;
         elif [ "$FAKE_BD_SHOW" = "allmiss" ]; then echo '{"error":"no issues found matching the provided IDs","schema_version":1}';
         elif [ "$FAKE_BD_SHOW" = "partial" ]; then echo '[{"id":"t2","status":"open"}]';
-        elif [ "$FAKE_BD_DRIFT" = "norow" ]; then echo '[{"name":"t1"}]'; else echo '[{"id":"t1","status":"in_progress"}]'; fi ;;
+        elif [ "$FAKE_BD_DRIFT" = "norow" ]; then echo '[{"name":"t1"}]'; else printf '[{"id":"t1","status":"in_progress","assignee":"%s"}]\n' "$FAKE_BD_ASSIGNEE"; fi ;;
   create) if [ "$FAKE_BD_CREATE_EMPTY" = "1" ]; then echo '[]'; else echo '{"id":"t9","status":"open"}'; fi ;;
   dep) echo '[{"issue_id":"t2","depends_on_id":"t1","type":"parent-child"}]' ;;
   config) if [ "$FAKE_BD_CONFIG_FAIL" = "1" ]; then echo 'db gone' >&2; exit 1; fi
@@ -38,7 +39,8 @@ case "$1" in
   dolt) if [ "$FAKE_BD_NO_DOLT" = "1" ]; then exit 1; fi
         if [ "$3" = "list" ]; then printf '%s\n' "\${FAKE_BD_REMOTES:-[]}"; fi ;;
   where) printf '{"path":"%s"}\n' "$FAKE_BD_BEADS" ;;
-  sync) printf '%s\n' "$FAKE_BD_SYNC_OUT" ;;
+  sync) if [ "$FAKE_BD_SYNC_FAIL" = "1" ]; then echo 'dolt push rejected' >&2; exit 1; fi
+        printf '%s\n' "$FAKE_BD_SYNC_OUT" ;;
   update|close|reopen|note|link) : ;;
   delete) : ;;
 esac
@@ -552,5 +554,48 @@ describe('actor resolution', { skip: WIN32 }, () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('claimRemote', { skip: WIN32 }, () => {
+  const SYNC_ENV = {
+    FAKE_BD_NO_DOLT: '1',
+    FAKE_BD_SYNC_OUT: 'synced',
+    BEADS_ACTOR: 'worker-1',
+  };
+
+  test('won — the merged head still names us after publish', () => {
+    withFakeBd({ ...SYNC_ENV, FAKE_BD_ASSIGNEE: 'worker-1' }, log => {
+      assert.equal(claimRemote(taskStore(), 't1'), true);
+      const calls = logLines(log);
+      assert.ok(
+        calls.some(l => l.includes('update t1 --claim')),
+        calls.join('\n')
+      );
+      assert.ok(
+        calls.some(l => l.startsWith('sync')),
+        calls.join('\n')
+      );
+    });
+  });
+
+  test('raced — the merged head carries another owner; never reopen their claim', () => {
+    withFakeBd({ ...SYNC_ENV, FAKE_BD_ASSIGNEE: 'worker-2' }, log => {
+      assert.equal(claimRemote(taskStore(), 't1'), false);
+      assert.ok(
+        !logLines(log).some(l => l.includes('--status open')),
+        'a raced claim must not reopen the winner row'
+      );
+    });
+  });
+
+  test('unprovable — sync failure undoes the local draft and rethrows', () => {
+    withFakeBd({ ...SYNC_ENV, FAKE_BD_SYNC_FAIL: '1' }, log => {
+      assert.throws(() => claimRemote(taskStore(), 't1'), /sync failed/);
+      assert.ok(
+        logLines(log).some(l => l.includes('update t1 --status open')),
+        'an unpublished claim must be undone locally'
+      );
+    });
   });
 });

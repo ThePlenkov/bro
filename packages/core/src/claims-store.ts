@@ -31,7 +31,7 @@ import {
   type LedgerStore,
 } from './ledger-store.ts';
 import { pidAlive } from './proc.ts';
-import { taskStore, type TaskRow, type TaskStore } from './tasks.ts';
+import { claimRemote, taskStore, type TaskRow, type TaskStore } from './tasks.ts';
 import {
   CLAIM_DEFAULT_TTL_MS,
   type ClaimFacade,
@@ -148,6 +148,13 @@ function taskConflict(resource: string, assignee: string): ClaimRow {
     leaseUntil: null,
     claimedAt: 0,
   };
+}
+
+/** Remote-atomic task claim (spec bro-4i4q4): publish + verify on
+ *  the shared head — a raced verdict names the standing holder;
+ *  thrown store/sync errors propagate as infra, never a fake refusal. */
+function remoteTaskClaim(ts: TaskStore, resource: string, id: string, actor: string): ClaimResult {
+  return claimRemote(ts, id) ? { ok: true } : taskClaimAfterRefusal(ts, resource, id, actor);
 }
 
 /** The store refused between our read and its write — re-read the
@@ -327,12 +334,7 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     if (assignee !== '') {
       return { ok: false, conflict: taskConflict(resource, assignee) };
     }
-    try {
-      ts.claim(id);
-      return { ok: true };
-    } catch {
-      return taskClaimAfterRefusal(ts, resource, id, actor);
-    }
+    return remoteTaskClaim(ts, resource, id, actor);
   };
 
   const taskRelease = async (
