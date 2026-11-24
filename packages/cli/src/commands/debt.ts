@@ -19,9 +19,10 @@ import {
   reviewHost,
 } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
-import { dateFlag, enumFlag, parseCollectArgs, readOption, usage } from './debt-args.ts';
+import { parseCollectArgs, readOption, usage } from './debt-args.ts';
 import { collectReviewThreads } from './debt-scan.ts';
 import { cmdImport } from './debt-import.ts';
+import { cmdList, cmdNext, cmdPrs, cmdStats, cmdStatus, cmdTrend } from './debt-query.ts';
 import {
   cmdSync,
   collectDebtSources,
@@ -32,25 +33,16 @@ import {
   applyDebtLabel,
   applyDebtVerdicts,
   buildSummary,
-  buildTrend,
-  claimDebtRecord,
   clearDebtLabels,
   DEBT_ROW_STATUSES,
   DEBT_STATES,
   ensureDebtLabels,
-  groupStats,
   parseSources,
-  partitionByProcessed,
-  prDebtState,
   readDebtRecords,
-  readThreadBounds,
   writeSummary,
   type DebtPrState,
-  type DebtRecord,
   type DebtStatus,
   type DebtVerdict,
-  type StatsGroupBy,
-  type TrendGranularity,
 } from '@broject/debt';
 
 export { parseCollectArgs } from './debt-args.ts';
@@ -101,213 +93,6 @@ async function cmdCollect(
     return;
   }
   refreshDebtLedger();
-}
-
-// --- status ----------------------------------------------------------------
-
-function cmdStatus(): void {
-  const records = readDebtRecords();
-  const summary = buildSummary(records);
-
-  const byStatus: Record<string, number> = {};
-  for (const row of records) {
-    byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
-  }
-
-  console.log(`rows: ${records.length} total`);
-  for (const [status, count] of Object.entries(byStatus).sort()) {
-    console.log(`  ${status}: ${count}`);
-  }
-  if (summary.open_count > 0) {
-    console.log(`\nopen by area:`);
-    for (const [area, count] of Object.entries(summary.by_area).sort((a, b) => b[1] - a[1])) {
-      console.log(`  ${area}: ${count}`);
-    }
-    console.log(`open by author:`);
-    for (const [author, count] of Object.entries(summary.by_author).sort((a, b) => b[1] - a[1])) {
-      console.log(`  ${author}: ${count}`);
-    }
-    if (summary.duplicate_fingerprints.length > 0) {
-      console.log(`duplicate fingerprints: ${summary.duplicate_fingerprints.length}`);
-    }
-    console.log(`oldest open: ${summary.oldest_open}`);
-  }
-
-  // Best-effort: count merged PRs still lacking a debt:* label. Skipped
-  // silently when no repo resolves (not in a clone, host unreachable).
-  try {
-    const rev = reviewHost(undefined, loadBroConfig().connectors);
-    const merged = rev.mergedPrs(rev.resolveRepo([]), { limit: 100 });
-    const { pending } = partitionByProcessed(merged);
-    console.log(`\nunprocessed merged PRs: ${pending.length} (of last ${merged.length})`);
-  } catch {
-    // no repo context — ledger stats above still stand on their own
-  }
-}
-
-// --- stats -----------------------------------------------------------------
-
-const STATS_BY: readonly StatsGroupBy[] = ['author', 'source', 'area'];
-
-function cmdStats(argv: string[]): void {
-  const json = argv.includes('--json');
-  let by: StatsGroupBy = 'author';
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--by') {
-      const value = readOption(argv, i);
-      if (!value || !(STATS_BY as readonly string[]).includes(value)) {
-        console.error(`error: --by must be one of ${STATS_BY.join('|')}, got "${value}"`);
-        process.exit(2);
-      }
-      by = value as StatsGroupBy;
-      i += 1;
-    }
-  }
-
-  const rows = groupStats(readDebtRecords(), by);
-  if (json) {
-    console.log(JSON.stringify(rows, null, 2));
-    return;
-  }
-  const label = by === 'author' ? 'reviewer' : by;
-  console.log(`${label}\ttotal\topen\tclaimed\tdone\twontfix\tdup\tfix%`);
-  for (const r of rows) {
-    const rate = r.fixRate === null ? '—' : `${Math.round(r.fixRate * 100)}%`;
-    console.log(
-      `${r.key}\t${r.total}\t${r.open}\t${r.claimed}\t${r.done}\t${r.wontfix}\t${r.duplicate}\t${rate}`
-    );
-  }
-  console.error(`debt stats: ${rows.length} ${label}(s)`);
-}
-
-// --- trend -----------------------------------------------------------------
-
-const TREND_GRANULARITIES: readonly TrendGranularity[] = ['week', 'day'];
-
-function cmdTrend(argv: string[]): void {
-  const json = argv.includes('--json');
-  let by: StatsGroupBy | null = null;
-  let granularity: TrendGranularity = 'week';
-  let since: string | null = null;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!;
-    if (arg === '--by') {
-      by = enumFlag(arg, readOption(argv, i), STATS_BY);
-      i += 1;
-    } else if (arg === '--bucket') {
-      granularity = enumFlag(arg, readOption(argv, i), TREND_GRANULARITIES);
-      i += 1;
-    } else if (arg === '--since') {
-      since = dateFlag(arg, readOption(argv, i));
-      i += 1;
-    }
-  }
-
-  const points = buildTrend(readDebtRecords(), readThreadBounds(), {
-    by,
-    granularity,
-    since,
-  });
-  if (json) {
-    console.log(JSON.stringify(points, null, 2));
-    return;
-  }
-  console.log('bucket\tkey\topened\tclosed\topen');
-  for (const p of points) {
-    console.log(`${p.bucket}\t${p.key}\t${p.opened}\t${p.closed}\t${p.open}`);
-  }
-  console.error(`debt trend: ${points.length} point(s)`);
-}
-
-// --- prs -------------------------------------------------------------------
-
-function cmdPrs(argv: string[]): void {
-  const positional: string[] = [];
-  let limit = 50;
-  let showAll = false;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!;
-    if (arg === '--all') {
-      showAll = true;
-      continue;
-    }
-    if (arg === '--limit') {
-      const value = readOption(argv, i);
-      if (value !== null) {
-        limit = Number(value);
-        i += 1;
-      }
-      continue;
-    }
-    positional.push(arg);
-  }
-  const rev = reviewHost(undefined, loadBroConfig().connectors);
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
-  const repo = rev.resolveRepo(positional);
-
-  const prs = rev.mergedPrs(repo, { limit });
-  const rows = prs
-    .map(pr => ({ pr, state: prDebtState(pr.labels) ?? 'none' }))
-    .filter(row => showAll || row.state === 'none');
-  for (const { pr, state } of rows) {
-    console.log(`${pr.number}\t${state}\t${pr.mergedAt}\t${pr.author}`);
-  }
-  const pending = prs.filter(pr => prDebtState(pr.labels) === null).length;
-  console.error(`debt prs: ${pending} unprocessed of ${prs.length} merged PR(s)`);
-}
-
-// --- list ------------------------------------------------------------------
-
-function rowMatchesFilters(
-  row: DebtRecord,
-  filters: Record<string, string | number | null>
-): boolean {
-  if (filters.status !== null && row.status !== filters.status) return false;
-  if (filters.area !== null && row.area !== filters.area) return false;
-  if (filters.author !== null && row.author !== filters.author) return false;
-  if (filters.priority !== null && row.priority !== filters.priority) return false;
-  if (filters.pr !== null && row.source_pr !== filters.pr) return false;
-  // legacy rows predate sources — they belong to review-threads
-  if (filters.source !== null && (row.source ?? 'review-threads') !== filters.source) return false;
-  return true;
-}
-
-function cmdList(argv: string[]): void {
-  const filters: Record<string, string | number | null> = {
-    status: 'open',
-    area: null,
-    author: null,
-    priority: null,
-    pr: null,
-    source: null,
-  };
-  let limit = 50;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!;
-    const value = readOption(argv, i);
-    if (arg === '--limit') {
-      if (value !== null) {
-        limit = Number(value);
-        i += 1;
-      }
-      continue;
-    }
-    const key = arg.replace(/^--/, '');
-    if (key in filters && value !== null) {
-      filters[key] = key === 'pr' ? Number(value) : value;
-      i += 1;
-    }
-  }
-
-  const rows = readDebtRecords()
-    .filter(row => rowMatchesFilters(row, filters))
-    .slice(0, limit);
-  for (const row of rows) {
-    console.log(
-      `${row.thread_id.slice(0, 12)}\t#${row.source_pr}\t${row.status}\t${row.priority}\t${row.area}\t${row.author}\t${row.body_preview}`
-    );
-  }
-  console.error(`debt list: ${rows.length} row(s)`);
 }
 
 // --- mark ------------------------------------------------------------------
@@ -416,75 +201,6 @@ export function applyVerdicts(verdicts: DebtVerdict[]): void {
     console.error(`warning: thread id(s) not in ledger: ${missing.join(', ')}`);
     process.exitCode = 1;
   }
-}
-
-// --- next ------------------------------------------------------------------
-
-const PRIORITY_RANK: Record<DebtRecord['priority'], number> = {
-  blocking: 0,
-  human: 1,
-  nit: 2,
-  scan: 3,
-  noise: 4,
-};
-
-function cmdNext(argv: string[]): void {
-  const json = argv.includes('--json');
-  const claim = argv.includes('--claim');
-  const filters: Record<string, string | null> = { area: null, author: null };
-  for (let i = 0; i < argv.length; i += 1) {
-    const key = argv[i]!.replace(/^--/, '');
-    if (key in filters) {
-      const value = readOption(argv, i);
-      if (value !== null) {
-        filters[key] = value;
-        i += 1;
-      }
-    }
-  }
-
-  let row = readDebtRecords()
-    .filter(r => r.status === 'open')
-    .filter(r => filters.area === null || r.area === filters.area)
-    .filter(r => filters.author === null || r.author === filters.author)
-    .sort(
-      (a, b) =>
-        PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
-        a.harvested_at.localeCompare(b.harvested_at)
-    )[0];
-
-  if (!row) {
-    console.error('debt next: no open findings');
-    process.exitCode = 1;
-    return;
-  }
-  if (claim) {
-    // Atomic compare-and-swap: the claim is written only if the row is
-    // still open under the lock — a concurrent claimer loses and reruns.
-    const claimed = claimDebtRecord(row.thread_id);
-    if (!claimed) {
-      // CAS lost — report the actual status, not just "claimed": the row
-      // may have been marked done/wontfix/duplicate by another process.
-      const current = readDebtRecords().find(r => r.thread_id === row!.thread_id);
-      console.error(
-        `debt next: ${row.thread_id.slice(0, 12)} no longer open ` +
-          `(status=${current?.status ?? 'gone'}) — rerun`
-      );
-      process.exitCode = 1;
-      return;
-    }
-    row = claimed;
-    writeSummary(buildSummary(readDebtRecords()));
-    console.error(`debt next: ${row.thread_id.slice(0, 12)} → claimed`);
-  }
-  if (json) {
-    console.log(JSON.stringify(row));
-    return;
-  }
-  console.log(`${row.thread_id}\t#${row.source_pr}\t${row.priority}\t${row.area}\t${row.author}`);
-  console.log(`${row.path}:${row.line ?? '?'}`);
-  console.log(row.body);
-  console.log(row.thread_url);
 }
 
 // --- watch -----------------------------------------------------------------
