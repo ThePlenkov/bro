@@ -659,8 +659,12 @@ function createBroDriver(host, api, deps = {}) {
 	bind(host.events.beforeAgentStart, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const nudge = promptNudges.get(sessionId);
+		let nudge = promptNudges.get(sessionId);
 		promptNudges.delete(sessionId);
+		if (nudge === void 0 && host.events.userInput === void 0) nudge = probe("prompt-submit", {
+			session_id: sessionId,
+			prompt: host.promptOf(event)
+		}, cwd).then(contextOf);
 		const parts = [];
 		const hydrationText = await consumeHydration(sessionId, cwd);
 		if (hydrationText !== "") parts.push(hydrationText);

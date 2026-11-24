@@ -583,8 +583,14 @@ export function createBroDriver<Ctx>(
   bind(host.events.beforeAgentStart, async (event, ctx) => {
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
-    const nudge = promptNudges.get(sessionId);
+    let nudge = promptNudges.get(sessionId);
     promptNudges.delete(sessionId);
+    // Hosts without a user-input event (omp) never populate the cache —
+    // keep the pre-capture behavior: probe prompt-submit at start.
+    if (nudge === undefined && host.events.userInput === undefined) {
+      const prompt = host.promptOf(event);
+      nudge = probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf);
+    }
 
     const parts: string[] = [];
     const hydrationText = await consumeHydration(sessionId, cwd);
