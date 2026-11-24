@@ -640,6 +640,53 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/webui.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from webui.ts: the agents-union ingest and queue render segment preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/webui-agents.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from webui.ts: the DOM/format helper segment preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/webui-dom.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from webui.ts: the gates render segment preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/webui-gates.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from webui.ts: the live activity feed and poll-loop segment preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/webui-live.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from webui.ts: the agent-log pane segment preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/webui-log.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from webui.ts: the ticks/mailbox/fleet/mols render segment preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/webui-ticks.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/work.ts"
     },
     {
