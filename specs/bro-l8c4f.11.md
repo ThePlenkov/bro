@@ -47,8 +47,11 @@ Traced on `origin/main` at spec time:
   inside `shadowNotes()`, called only after the
   `judgeConfig(dir).judge.mode !== 'shadow'` early-return — shadow
   annotation is config opt-in, off by default.
-- `packages/cli/src/plugins.ts` — the dispatcher wiring; `act`/`debt`
-  registration pulls no proxy dependency.
+- `packages/cli/src/plugins.ts` — the dispatcher wiring. `act`/`debt`
+  import `loadBroConfig` from it, and it statically loads `serve.ts` →
+  `serve-provider.ts`, so the import *graph* does reach the proxy plane.
+  The boundary is references, not graph reach: neither command names
+  the arming surface, which is what the regression test pins.
 
 So the acceptance claim is *true in code today*: the wedge needs no
 model transport. What was missing is the contract saying so — the

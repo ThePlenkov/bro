@@ -97,7 +97,9 @@ live under [`bro fleet serve`](/docs/commands/status#provider-plane--proxy-and-c
   env var holding the key; registry entries do the same via `apiKeyEnv`
   / `apiKeyCommand` (a secret-store lookup). No config field holds a
   key — `apiKey` in config is a parse error, and an `apiKeyCommand`
-  that smuggles a key value is refused.
+  smuggling a recognizable key format (`sk-…`, `ts_live|test_…`,
+  `Bearer …`) is refused — a format sniff, so keep the command a pure
+  lookup.
 - **Loopback + browser guards.** 127.0.0.1 bind only, no `--host`;
   loopback `Host`/`Origin` checks keep browsers out; `redirect:
   'manual'` on upstream fetches means a cross-origin redirect never
@@ -113,7 +115,9 @@ live under [`bro fleet serve`](/docs/commands/status#provider-plane--proxy-and-c
 
 - **State files** — `serve.json` (repo) and `provider.json`
   (`$XDG_STATE_HOME/bro/`) record `{pid, url, dir, startedAt, token}` at
-  mode 0600. They are the only persistence the transport owns.
+  mode 0600. With the conductor's `serve-turns.jsonl` journal (routing,
+  model, and session-reuse metadata, tail-capped by the janitor), they
+  are the only persistence the transport owns.
 - **The byte proxy retains nothing** — request and response bodies
   stream through; nothing is buffered to disk or logged.
 - **The conductor retains conversations in memory only** — a retained

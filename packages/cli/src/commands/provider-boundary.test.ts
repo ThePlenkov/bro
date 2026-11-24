@@ -66,6 +66,11 @@ test("act resolves the judge facade only behind judge.mode === 'shadow'", () => 
     guardAt > shadowAt && guardAt < callAt,
     "the judge.mode !== 'shadow' early-return must precede the facade resolve — annotation is opt-in, never default"
   );
+  const returnAt = body.indexOf('return', guardAt);
+  assert.ok(
+    returnAt > guardAt && returnAt < callAt,
+    'the shadow guard must bail out — a non-returning condition would resolve the facade by default while passing the ordering check'
+  );
 });
 
 test('debt has no judge facade call site at all', () => {
