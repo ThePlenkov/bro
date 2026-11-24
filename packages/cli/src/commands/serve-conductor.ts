@@ -947,10 +947,6 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
     // fingerprint namespace and collide with another conversation
     return `h:${named.slice(0, 200)}`;
   }
-  const native = body.metadata?.user_id?.trim();
-  if (native !== undefined && native !== '') {
-    return `h:${native.slice(0, 200)}`;
-  }
   const first = body.messages?.[0];
   if (first === undefined) {
     return undefined;
@@ -5553,7 +5549,15 @@ function firstSegment(id: string): string {
  *  The LANE rides the row as its own field: the reader must not have
  *  to guess it back out of the id, whose head is a formatted string and
  *  the model's own name may carry a slash of its own. */
-function servedRow(m: RoutedModel): Record<string, unknown> {
+function servedRow(m: RoutedModel, surface: string | undefined): Record<string, unknown> {
+  if (surface === 'openai') {
+    return {
+      id: m.id,
+      object: 'model',
+      created: 1_735_689_600,
+      owned_by: m.prefix ?? 'bro',
+    };
+  }
   return {
     type: 'model',
     id: m.id,
@@ -5603,8 +5607,10 @@ async function refreshCatalog(wire: WireCtx): Promise<CatalogSnapshot> {
 function invalidateCatalog(wire: WireCtx): void {
   for (const lane of wire.lanes.values()) {
     lane.catalogCache = undefined;
+    lane.catalogInflight = undefined;
   }
   wire.catalog.rows = undefined;
+  wire.catalog.inflight = undefined;
 }
 
 /** The cached rows — read them ONCE if nobody has yet. A burst of
@@ -5630,7 +5636,11 @@ async function ensureCatalog(wire: WireCtx): Promise<void> {
  *  The rows are CACHED: the read happens at start and on an operator's
  *  explicit reload, never per request — a client asking what the gateway
  *  serves must not cost a provider round trip. */
-async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+async function models(
+  res: ServerResponse,
+  wire: WireCtx,
+  surface: string | undefined
+): Promise<void> {
   await ensureCatalog(wire);
   const rows = wire.catalog.rows ?? [];
   const failures = wire.catalog.failures;
@@ -5638,6 +5648,9 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   // signal whether the catalog is short (200) or the gateway is down
   // (502). A 502 without it says "down" but not "which lane, why".
   const laneError = failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
+  if (wire.catalog.fetchedAtMs !== undefined) {
+    res.setHeader('x-bro-catalog-fetched-at', String(wire.catalog.fetchedAtMs));
+  }
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
   if (failures.length > 0 && failures.length === wire.lanes.size) {
@@ -5645,7 +5658,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
-  const data = rows.map(servedRow);
+  const data = rows.map(row => servedRow(row, surface));
   // a lane that FAILED is not silently absent from the union: the
   // degradation rides the response, so a client reading a shorter
   // catalog can tell it apart from the whole truth. A lane that merely
@@ -5699,7 +5712,7 @@ export interface ConductorProxy {
   /** Warm the catalog in the background — the serve does it at start, so
    *  the first client read finds the rows already there instead of
    *  waiting on a cold provider enumeration. */
-  warmCatalog(): void;
+  warmCatalog(): Promise<void>;
 }
 
 /** A terminal created by one provider must be readable whichever
@@ -5929,8 +5942,10 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     },
     // the warm read runs in the background: a failed enumeration leaves
     // the cache empty and the next client read retries it
-    warmCatalog: (): void => {
-      void refreshCatalog(wire).catch(() => undefined);
+    warmCatalog: (): Promise<void> => {
+      return refreshCatalog(wire)
+        .then(() => undefined)
+        .catch(() => undefined);
     },
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
@@ -5981,7 +5996,7 @@ function conductorDispatch(
         await countTokens(req, res);
         return;
       case 'GET /v1/models':
-        await models(res, wire);
+        await models(res, wire, surface);
         return;
       default:
         apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`);

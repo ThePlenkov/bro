@@ -555,6 +555,8 @@ const ROUTES = [
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
+  'ALL /anthropic/v1/*',
+  'ALL /openai/v1/*',
   'ALL /api/v1/acp',
 ];
 

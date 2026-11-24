@@ -29,13 +29,12 @@ export function resolveSurface(pathname: string): {
   surface: ApiSurface | undefined;
   path: string;
 } {
-  for (const surface of API_SURFACES) {
-    const mount = surfaceMount(surface);
-    if (pathname === mount || pathname.startsWith(`${mount}/`)) {
-      return { surface, path: pathname.slice(mount.length) };
-    }
-  }
-  return { surface: undefined, path: pathname };
+  const match = API_SURFACES.map(surface => ({ surface, mount: surfaceMount(surface) })).find(
+    ({ mount }) => pathname === mount || pathname.startsWith(`${mount}/`)
+  );
+  return match === undefined
+    ? { surface: undefined, path: pathname }
+    : { surface: match.surface, path: pathname.slice(match.mount.length) };
 }
 
 /** The endpoints each surface owns. A mounted base speaks ONE dialect:
@@ -56,7 +55,10 @@ export const SURFACE_ENDPOINTS: Record<ApiSurface, readonly string[]> = {
  *  mounted '/<surface>/v1/…' are. */
 export function isProviderPath(pathname: string): boolean {
   const { surface, path } = resolveSurface(pathname);
-  return path.startsWith('/v1/') && (surface === undefined || surface === 'anthropic' || surface === 'openai');
+  return (
+    path.startsWith('/v1/') &&
+    (surface === undefined || surface === 'anthropic' || surface === 'openai')
+  );
 }
 
 /** The path the wire's own endpoint sits at, under its mount — the
