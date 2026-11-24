@@ -869,6 +869,52 @@ describe('benchmark (bro-l8c4f.9)', () => {
     }
   });
 
+  test('run --record rejects non-finite costUsd — Infinity must not stringify to null', async () => {
+    const fx = fixture();
+    try {
+      plantCorpus(fx.main);
+      const recordPath = join(fx.main, 'record.json');
+      const out = join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl');
+      // 1e400 parses to Infinity — without the finite check it would
+      // serialize as null and silently become "unknown cost". The literal
+      // must be raw JSON text: JSON.stringify(Infinity) emits null itself.
+      const text = JSON.stringify(validRow()).replace('"costUsd":1.23', '"costUsd":1e400');
+      assert.ok(text.includes('1e400'), 'fixture must carry the literal');
+      writeFileSync(recordPath, text);
+      const r = await invoke(['run', '--record', recordPath]);
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /costUsd/);
+      assert.ok(!existsSync(out));
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('run --record separates rows when the sink lacks a trailing newline', async () => {
+    const fx = fixture();
+    try {
+      plantCorpus(fx.main);
+      const recordPath = join(fx.main, 'record.json');
+      const outDir = join(fx.main, '.evidence', 'benchmark');
+      mkdirSync(outDir, { recursive: true });
+      const out = join(outDir, 'paired-results.jsonl');
+      // an existing sink whose last line has no newline — naive append
+      // would fuse `}{` and corrupt both rows for line readers
+      writeFileSync(out, '{"stale":true}');
+      writeFileSync(recordPath, JSON.stringify(validRow()));
+      const r = await invoke(['run', '--record', recordPath]);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      const lines = readFileSync(out, 'utf8')
+        .split('\n')
+        .filter(l => l.length > 0);
+      assert.equal(lines.length, 2);
+      assert.deepEqual(JSON.parse(lines[0]!), { stale: true });
+      assert.equal((JSON.parse(lines[1]!) as Record<string, unknown>).taskId, 'bro-rw8z3');
+    } finally {
+      fx.restore();
+    }
+  });
+
   test('run --record rejects off-schema rows and rows outside the corpus', async () => {
     const fx = fixture();
     try {

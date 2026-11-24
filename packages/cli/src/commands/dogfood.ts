@@ -1016,8 +1016,11 @@ export function pairedResultError(row: unknown): string | null {
   if (r.costUsd === undefined) {
     return 'costUsd: required — a number >= 0 or null';
   }
-  if (r.costUsd !== null && (typeof r.costUsd !== 'number' || r.costUsd < 0)) {
-    return 'costUsd: expected a number >= 0 or null';
+  if (
+    r.costUsd !== null &&
+    (typeof r.costUsd !== 'number' || !Number.isFinite(r.costUsd) || r.costUsd < 0)
+  ) {
+    return 'costUsd: expected a finite number >= 0 or null';
   }
   if (!Number.isInteger(r.repeat) || (r.repeat as number) < 1) {
     return 'repeat: expected an integer >= 1';
@@ -1041,7 +1044,11 @@ function pairedResultsPath(dir: string): string {
  *  leaves the file untouched rather than half-written. */
 function appendPairedResults(out: string, rows: PairedResult[]): void {
   mkdirSync(dirname(out), { recursive: true });
-  appendFileSync(out, rows.map(r => `${JSON.stringify(r)}\n`).join(''));
+  // a nonempty sink without a trailing newline would fuse the last old
+  // row and the first new one into `}{` — JSONL readers parse neither
+  const existing = existsSync(out) ? readFileSync(out, 'utf8') : '';
+  const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+  appendFileSync(out, `${separator}${rows.map(r => `${JSON.stringify(r)}\n`).join('')}`);
 }
 
 /** `--record` input — one JSON object, a JSON array, or JSONL (one
