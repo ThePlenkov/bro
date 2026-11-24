@@ -121,6 +121,41 @@ describe('filelock', () => {
     }
   });
 
+  test('waits for a live legacy file holder, then acquires the directory lock', async () => {
+    const { dir, done } = tmp();
+    try {
+      const lock = join(dir, 'x.lock');
+      const ready = join(dir, 'legacy-ready');
+      const released = join(dir, 'legacy-released');
+      const script = join(dir, 'legacy.ts');
+      writeFileSync(
+        script,
+        `import { unlinkSync, writeFileSync } from 'node:fs'\n` +
+          `const lock = ${JSON.stringify(lock)}\n` +
+          `writeFileSync(lock, process.pid + ':old-binary')\n` +
+          `writeFileSync(${JSON.stringify(ready)}, '')\n` +
+          `setTimeout(() => {\n` +
+          `  unlinkSync(lock)\n` +
+          `  writeFileSync(${JSON.stringify(released)}, '')\n` +
+          `}, 250)\n`
+      );
+      const child = spawn('npx', ['tsx', script], { stdio: 'ignore' });
+      try {
+        assert.ok(await waitFor(ready), 'legacy holder never started');
+        const acquired = acquireFileLock(lock, { waitMs: 5_000 });
+        assert.equal(existsSync(released), true, 'new binary skipped the legacy file');
+        assert.equal(lockHolderPid(lock), process.pid);
+        acquired();
+      } finally {
+        if (child.exitCode === null) {
+          child.kill();
+        }
+      }
+    } finally {
+      done();
+    }
+  });
+
   test('a live OLD-DEBT dir hold (`pid` entry) is honored, a dead one stolen', () => {
     const { dir, done } = tmp();
     try {

@@ -377,10 +377,12 @@ const stealLegacyFile = (lock: string): boolean => {
   return dropped;
 };
 
-/** `lock` is occupied — steal whichever instance shape proves stale;
- *  a live one is left strictly alone (the acquire loop just retries
- *  until waitMs). A symlink/fifo/socket can't be a lock instance —
- *  lstat refuses to classify it and the path is left untouched. */
+/** `lock` is occupied — steal whichever instance shape proves stale.
+ *  In particular, a live legacy FILE is deliberately left in place:
+ *  pre-directory binaries still own that path and must be allowed to
+ *  release it before a new binary publishes the directory shape. A
+ *  symlink/fifo/socket can't be a lock instance — lstat refuses to
+ *  classify it and the path is left untouched. */
 const contend = (lock: string): void => {
   const st = lstatOrNull(lock);
   if (st === null) {
