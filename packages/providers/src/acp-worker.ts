@@ -103,6 +103,26 @@ export interface AcpWorkerSpec {
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/** MCP env values are credentials by convention. ACP peers are untrusted
+ *  diagnostics sources, so never copy one into the worker log or span
+ *  attributes when a peer includes it in an error message. */
+function safeErrMsg(err: unknown, mcpServers: unknown[] = []): string {
+  let message = errMsg(err);
+  const secrets = mcpServers.flatMap(server => {
+    if (!isPlainObject(server)) return [];
+    const env = Array.isArray(server.env) ? server.env : [];
+    return env.flatMap(entry =>
+      isPlainObject(entry) && typeof entry.value === 'string' && entry.value !== ''
+        ? [entry.value]
+        : []
+    );
+  });
+  for (const secret of secrets) {
+    message = message.split(secret).join('[REDACTED]');
+  }
+  return message;
+}
+
 /** Startup/config failures — bad handshake, interactive auth, a model
  *  the agent can't apply. Same honest-error class as acp.ts's
  *  AcpConfigError: name the refusal, never run unpinned. */
@@ -373,7 +393,7 @@ async function openSession(
         });
       } catch (err) {
         log(
-          `session ${resumeId} resume failed — ${errMsg(err)}; starting a fresh session (mcpServers forwarded)`
+          `session ${resumeId} resume failed — ${safeErrMsg(err, mcpServers)}; starting a fresh session (mcpServers forwarded)`
         );
       }
     } else {
@@ -387,7 +407,7 @@ async function openSession(
     .start()
     .catch((err: unknown) => {
       const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
-      throw new AcpWorkerError(`${by}: agent refused session${hint} — ${errMsg(err)}`);
+      throw new AcpWorkerError(`${by}: agent refused session${hint} — ${safeErrMsg(err, mcpServers)}`);
     });
 }
 
@@ -453,6 +473,7 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
   let cx: ClientContext | undefined;
   let sessionId: string | undefined;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const diagnosticMcpServers = Array.isArray(spec.mcpServers) ? spec.mcpServers : [];
   const grace = spec.cancelGraceMs ?? 1500;
   const onSignal = (sig: 'SIGTERM' | 'SIGINT'): void => {
     log(`${sig} — sending session/cancel (${grace}ms grace)`);
@@ -492,7 +513,7 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         },
       })
       .catch((err: unknown) => {
-        endOpen({ error: errMsg(err) }, 'error');
+        endOpen({ error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
         throw err;
       });
     if (init.protocolVersion !== PROTOCOL_VERSION) {
@@ -544,8 +565,8 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         by
       );
     } catch (err) {
-      endSess({ error: errMsg(err) }, 'error');
-      endTurn({ error: errMsg(err) }, 'error');
+      endSess({ error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
+      endTurn({ error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
       throw err;
     }
     // openSession owns the resume-or-new decision (bro-5qsnr); a throw
@@ -559,8 +580,8 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       log,
       by
     ).catch((err: unknown) => {
-      endSess({ error: errMsg(err) }, 'error');
-      endTurn({ error: errMsg(err) }, 'error');
+      endSess({ error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
+      endTurn({ error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
       throw err;
     });
     sessionId = session.sessionId;
@@ -586,7 +607,7 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
             value: spec.model,
           })
           .catch((err: unknown) => {
-            throw new AcpWorkerError(`${by}: agent refused model '${spec.model}' — ${errMsg(err)}`);
+            throw new AcpWorkerError(`${by}: agent refused model '${spec.model}' — ${safeErrMsg(err, diagnosticMcpServers)}`);
           });
         const served = res.configOptions?.find(o => o.id === modelOpt.id)?.currentValue;
         const reported = typeof served === 'string' ? served : spec.model;
@@ -657,12 +678,12 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       });
       return r.stopReason === 'end_turn' ? 0 : 1;
     } catch (err) {
-      endSess({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
+      endSess({ 'acp.session_id': session.sessionId, error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
       endTurn(
         {
           'acp.session_id': session.sessionId,
           ...(reportedModel === undefined ? {} : { 'acp.model': reportedModel }),
-          error: errMsg(err),
+          error: safeErrMsg(err, diagnosticMcpServers),
         },
         'error'
       );
@@ -718,14 +739,14 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     } catch (err) {
       const tail = stderr();
       throw new AcpWorkerError(
-        `${by} unavailable — ${errMsg(err)}${tail === '' ? '' : ` (${tail})`}`
+        `${by} unavailable — ${safeErrMsg(err, diagnosticMcpServers)}${tail === '' ? '' : ` (${tail})`}`
       );
     }
   } catch (err) {
     // covers connectWith/transport failures op never reached —
     // initialize/protocol/refusal paths already ended their spans
-    endOpen({ error: errMsg(err) }, 'error');
-    log(`acp-worker failed — ${errMsg(err)}`);
+    endOpen({ error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
+    log(`acp-worker failed — ${safeErrMsg(err, diagnosticMcpServers)}`);
     return 1;
   } finally {
     if (wireSignals) {

@@ -449,6 +449,31 @@ describe('runAcpWorker', () => {
     }
   });
 
+  test('a peer error cannot leak configured MCP env values into diagnostics', async () => {
+    const secret = 'mcp-secret-value';
+    const fake = fakeAcpAgent({ failNewMessage: `server failed with ${secret}` });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [
+        {
+          type: 'stdio',
+          name: 'x',
+          command: 'c',
+          args: [],
+          env: [{ name: 'TOKEN', value: secret }],
+        },
+      ],
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 1);
+      const diagnostics = lines.join('\n');
+      assert.doesNotMatch(diagnostics, new RegExp(secret));
+      assert.match(diagnostics, /\[REDACTED\]/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a resumeSessionId rides session/load — the SAME session id records back (bro-5qsnr)', async () => {
     const fake = fakeAcpAgent({
       replyText: 'done',
