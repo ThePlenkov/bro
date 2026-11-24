@@ -105,6 +105,18 @@ interface Captured {
   readyArgs: string;
 }
 
+/** Point-assign a process.env map, returning the prior values to
+ *  restore — undefined deletes the key, matching the flag semantics
+ *  the fake reads. */
+function applyEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const prev = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  return prev;
+}
+
 function withFakeBd(
   ready: unknown[],
   fn: (c: Captured) => Promise<void>,
@@ -155,10 +167,7 @@ function withFakeBd(
       });
     } finally {
       console.log = orig;
-      for (const [k, v] of Object.entries(prev)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
+      applyEnv(prev);
       rmSync(dir, { recursive: true, force: true });
     }
   };

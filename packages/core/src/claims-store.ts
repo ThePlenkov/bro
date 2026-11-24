@@ -150,6 +150,13 @@ function taskConflict(resource: string, assignee: string): ClaimRow {
   };
 }
 
+/** Remote-atomic task claim (spec bro-4i4q4): publish + verify on
+ *  the shared head — a raced verdict names the standing holder;
+ *  thrown store/sync errors propagate as infra, never a fake refusal. */
+function remoteTaskClaim(ts: TaskStore, resource: string, id: string, actor: string): ClaimResult {
+  return claimRemote(ts, id) ? { ok: true } : taskClaimAfterRefusal(ts, resource, id, actor);
+}
+
 /** The store refused between our read and its write — re-read the
  *  holder so the conflict names who actually won. */
 function taskClaimAfterRefusal(
@@ -327,13 +334,7 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     if (assignee !== '') {
       return { ok: false, conflict: taskConflict(resource, assignee) };
     }
-    // remote-atomic claim (spec bro-4i4q4): publish + verify on the
-    // shared head — a raced verdict names the standing holder; thrown
-    // store/sync errors propagate as infra, never as a fake refusal
-    if (!claimRemote(ts, id)) {
-      return taskClaimAfterRefusal(ts, resource, id, actor);
-    }
-    return { ok: true };
+    return remoteTaskClaim(ts, resource, id, actor);
   };
 
   const taskRelease = async (
