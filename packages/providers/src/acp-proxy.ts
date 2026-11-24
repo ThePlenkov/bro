@@ -2209,78 +2209,63 @@ export async function acpProxy(
       bypass();
       deliver(m);
     };
-    for (;;) {
-      // route what room allows — the fast path is a synchronous check;
-      // a dead leg reads as room so the hold flushes before the exit
-      while (held.length > 0 && out.spare()) {
-        deliver(held.shift() as AnyMessage);
+    /** Handle a saturated intake, returning whether the loop should continue. */
+    const waitForIntakeRoom = async (): Promise<boolean> => {
+      const r: 'room' | { readonly read: ReadableStreamReadResult<AnyMessage> } | undefined =
+        read === undefined
+          ? await untilStop(roomReady())
+          : await untilStop(Promise.race([roomReady(), read.then(v => ({ read: v }) as const)]));
+      if (r === undefined) return false;
+      if (r === 'room') {
+        bypassed = 0;
+        intakePaused = false;
+        read ??= reader.read();
+        return true;
       }
-      if (wireDone || eof || (read === undefined && !intakePaused)) {
-        break;
-      }
-      // the hold AND the bypassed controls are the intake in flight —
-      // a saturated SUM pauses the read side. While a read is still
-      // outstanding the wait is room OR that read: a read issued
-      // before the pause is accepted work in flight, so its
-      // rejection must be handled inside the wait (a parked promise
-      // with no handler is an unhandled rejection that outlives the
-      // pump), and its EOF or message is already on the wire — the
-      // bound spends the ONE prefetch slot for exactly this. Once it
-      // lands the intake pauses outright: a paused pump issues no
-      // new read until room re-opens it.
-      if (held.length + bypassed >= ACP_PROXY_READ_HIGH_WATER) {
-        const r: 'room' | { readonly read: ReadableStreamReadResult<AnyMessage> } | undefined =
-          read === undefined
-            ? await untilStop(roomReady())
-            : await untilStop(Promise.race([roomReady(), read.then(v => ({ read: v }) as const)]));
-        if (r === undefined) break;
-        if (r === 'room') {
-          bypassed = 0;
-          intakePaused = false;
-          // intake re-opens — the one prefetch read goes back out so
-          // an EOF queued behind the flood still surfaces early
-          read ??= reader.read();
-          continue;
-        }
-        // the prefetch landed while saturated — accepted work joins
-        // the hold, and the intake pauses (no new read) until room
-        read = undefined;
-        intakePaused = true;
-        if (r.read.done) {
-          eof = true;
-        } else {
-          accept(r.read.value);
-        }
-        continue;
-      }
-      if (held.length === 0) {
-        // nothing to route — the intake read is the only wait worth
-        // taking (room opening would find an empty hold anyway)
-        const r: ReadableStreamReadResult<AnyMessage> | undefined = await untilStop(
-          read ?? READ_DONE
-        );
-        if (r === undefined) break;
-        read = r.done ? undefined : reader.read();
-        if (r.done) {
-          eof = true;
-        } else {
-          accept(r.value);
-        }
-        continue;
-      }
-      // parked with a hold to drain — room, more input, or shutdown,
-      // whichever moves first; intake keeps running either way
+      read = undefined;
+      intakePaused = true;
+      if (r.read.done) eof = true;
+      else accept(r.read.value);
+      return true;
+    };
+
+    /** Read directly when there is no held work to drain. */
+    const readWithoutHeld = async (): Promise<boolean> => {
+      const r: ReadableStreamReadResult<AnyMessage> | undefined = await untilStop(
+        read ?? READ_DONE
+      );
+      if (r === undefined) return false;
+      read = r.done ? undefined : reader.read();
+      if (r.done) eof = true;
+      else accept(r.value);
+      return true;
+    };
+
+    /** Race room, more input, and shutdown while draining held work. */
+    const readWithHeld = async (): Promise<boolean> => {
       const r = await untilStop(
         Promise.race([roomReady(), (read ?? READ_DONE).then(v => ({ read: v }) as const)])
       );
-      if (r === undefined) break;
-      if (r === 'room') continue;
+      if (r === undefined) return false;
+      if (r === 'room') return true;
       read = r.read.done ? undefined : reader.read();
-      if (r.read.done) {
-        eof = true;
-      } else {
-        accept(r.read.value);
+      if (r.read.done) eof = true;
+      else accept(r.read.value);
+      return true;
+    };
+
+    for (;;) {
+      while (held.length > 0 && out.spare()) deliver(held.shift() as AnyMessage);
+      if (wireDone || eof || (read === undefined && !intakePaused)) break;
+      if (held.length + bypassed >= ACP_PROXY_READ_HIGH_WATER) {
+        if (!(await waitForIntakeRoom())) break;
+        continue;
       }
+      if (held.length === 0) {
+        if (!(await readWithoutHeld())) break;
+        continue;
+      }
+      if (!(await readWithHeld())) break;
     }
     // flush the hold — a message the pump accepted is never dropped
     // unrouted: registered now, its pending entry exists before the
