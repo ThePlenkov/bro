@@ -336,10 +336,13 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd);
   const at = '(^|[;&|\\n])\\s*';
   const bro = BRO_CMD;
-  if (new RegExp(`${at}${bro}\\s+act\\b`).test(c)) {
+  // the registered spellings carry their group word — `bro review act`,
+  // `bro work drill` (specs/bro-npx); the bare forms stay matched, the
+  // group hosts swallow unmatched argv so `bro act` still dispatches
+  if (new RegExp(`${at}${bro}\\s+(?:review\\s+)?act\\b`).test(c)) {
     return 'act';
   }
-  if (new RegExp(`${at}${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
+  if (new RegExp(`${at}${bro}\\s+(?:work\\s+)?(?:drill|wtf)\\b`).test(c)) {
     return 'drill';
   }
   if (new RegExp(String.raw`${at}${bro}\s+work\b`).test(c)) {

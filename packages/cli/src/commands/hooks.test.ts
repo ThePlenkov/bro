@@ -268,12 +268,20 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('gh pr view 42'), 'act');
     assert.equal(classifyArmCommand('git push -u origin feat/x'), 'act');
     assert.equal(classifyArmCommand('cd x && gh pr checks'), 'act');
+    // the registered spellings carry the group word (specs/bro-npx)
+    assert.equal(classifyArmCommand('bro review act status'), 'act');
+    assert.equal(classifyArmCommand('bro review act threads 33'), 'act');
+    assert.equal(classifyArmCommand('bro review act wait 33 --merge'), 'act');
   });
 
   test('arms drill on drill/wtf commands', () => {
     assert.equal(classifyArmCommand('bro drill down "x"'), 'drill');
     assert.equal(classifyArmCommand('bro wtf "why"'), 'drill');
     assert.equal(classifyArmCommand('bro drill up --result "done"'), 'drill');
+    // the registered spellings carry the group word (specs/bro-npx)
+    assert.equal(classifyArmCommand('bro work drill down "x"'), 'drill');
+    assert.equal(classifyArmCommand('bro work drill up --result "done"'), 'drill');
+    assert.equal(classifyArmCommand('bro work wtf "why"'), 'drill');
   });
 
   test('arms work on worktree-mutating commands', () => {
