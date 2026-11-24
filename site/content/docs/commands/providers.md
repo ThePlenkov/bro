@@ -75,6 +75,11 @@ reports them (a misnamed
   endpoint — the `bro fleet serve` byte-proxy or the real upstream —
   never on this path.
 
+The registry is the config-plane half of model transport — the
+`/v1/*` listener that serves interactive clients is its own opt-in
+plane; see [provider](/docs/commands/provider) for the boundary
+contract (credential, retention, approval).
+
 No defaults, no hardcoding: absent `providers` means provider behavior
 is off — a consumer naming a missing entry errors rather than silently
 vendoring a fallback.
