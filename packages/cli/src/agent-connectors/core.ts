@@ -175,6 +175,7 @@ import {
   providerGatePayload,
   type ProviderGate,
 } from './session-admit.ts';
+import { restoreRegistryRow, rollbackSpawnClaim } from './spawn-rollback.ts';
 import {
   COPILOT_COUNT_TTL_MS,
   copilotCountFile,
@@ -3365,50 +3366,18 @@ function rollbackSpawnWrite(
 ): void {
   // the claim — a phantom step carries none, so there is nothing to unbind
   if (!run.phantom) {
-    try {
-      const now = probeStep(spec.beadsDir, spec.molStep);
-      const store = taskStoreAt(spec.beadsDir);
-      if (run.claimed && run.previousAssignee !== undefined) {
-        // rebind: the bookkeeping wrote `actor`, then `claimAs` when the
-        // caller pinned one — restore the pre-spawn assignee only while
-        // the step still carries a name this spawn wrote (a claim another
-        // actor moved meanwhile is theirs, not ours to unbind)
-        if (now?.assignee === run.actor || now?.assignee === run.claimAs) {
-          store.update(spec.molStep, { assignee: run.previousAssignee });
-        }
-      } else if (!run.claimed) {
-        // fresh claim: reopen only while the step still sits in the
-        // in_progress/our-actor state this spawn's claimStep produced
-        if (now?.status === 'in_progress' && now.assignee === bdActor(spec.beadsDir)) {
-          store.reopen(spec.molStep);
-        }
-      }
-    } catch {
-      // best-effort — the 'lost' entry below still names the failed run
-    }
+    rollbackSpawnClaim(spec.beadsDir, spec.molStep, run);
   }
   // the registry row this spawn wrote over `existing` — restore the row
   // it replaced (a respawn keeps its predecessor's facts), or drop the
   // fresh row so no dead spawn entry lingers. Only while the row still
   // names OUR agentId — a respawn that already landed owns it now.
-  try {
-    withAgentRegistryLock(dir, () => {
-      const reg = readAgentRegistry(dir);
-      const cur = reg[spec.molStep];
-      if (cur === undefined || cur.agentId !== run.agentId) {
-        return;
-      }
-      if (run.existing !== undefined) {
-        reg[spec.molStep] = run.existing;
-      } else {
-        delete reg[spec.molStep];
-      }
-      writeAgentRegistry(dir, reg);
-    });
-  } catch {
-    // best-effort — a row we cannot roll back is the same 'lost' entry
-    // the ordering already tolerates
-  }
+  restoreRegistryRow({
+    dir,
+    molStep: spec.molStep,
+    agentId: run.agentId,
+    existing: run.existing,
+  });
 }
 
 function outgoingAttemptOf(
