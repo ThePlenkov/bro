@@ -3,11 +3,13 @@
 [![npm](https://img.shields.io/npm/v/@broject/gitlab)](https://www.npmjs.com/package/@broject/gitlab)
 
 The GitLab connector for `bro` — the `reviews` facade (MR state, threads,
-checks, merge) implemented over the `glab` CLI. Registers like any
-connector: built-in today, but nothing GitLab-specific lives in core.
+checks, merge) implemented over the `glab` CLI, plus an opt-in `tasks`
+facade over GitLab Issues (`connectors.tasks = "gitlab"`). Registers like
+any connector: built-in today, but nothing GitLab-specific lives in core.
 
 > You probably want the CLI instead — `bro` ships this connector already.
-> Install this only when writing a `reviews` backend for another forge.
+> Install this only when writing a `reviews`/`tasks` backend for another
+> forge.
 
 ## Install
 
@@ -24,7 +26,9 @@ Requires Node ≥ 22.18 and an authenticated `glab`. ESM only.
 - `gitlabTasksAsync` — async TaskStore over GitLab Issues
 - `gitlabConnector` — the `Connector` impl registered into bro
 - gitlab.com auto-detects from the origin remote; self-hosted instances
-  resolve via `connectors.reviews` config
+  resolve via `connectors.reviews`/`GITLAB_HOST`. The `tasks` facade is
+  name-only opt-in — `"connectors": {"tasks": "gitlab"}`; a gitlab remote
+  alone never selects it.
 
 ## Links
 
