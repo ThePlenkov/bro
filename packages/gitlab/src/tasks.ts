@@ -513,6 +513,29 @@ function writeClaimLabel(
   }
 }
 
+function releaseContestedClaim(
+  dir: string,
+  ref: { projectPath: string; iid: number },
+  others: string[]
+): void {
+  const keepIds = others.flatMap(u => {
+    try {
+      const uid = userIdOf(dir, u);
+      return uid === undefined ? [] : [uid];
+    } catch {
+      return [];
+    }
+  });
+  if (keepIds.length !== others.length) {
+    return;
+  }
+  const args = ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`)];
+  for (const uid of keepIds) {
+    args.push('-f', `assignee_ids[]=${uid}`);
+  }
+  glabTry(args, gopts(dir));
+}
+
 function claimSync(dir: string, id: string): void {
   const ref = parseIssueRef(dir, id);
   const n = getIssueSync(dir, ref);
@@ -564,28 +587,7 @@ function claimSync(dir: string, id: string): void {
     // would wipe the winner's assignment too. `assignee_ids[]` replaces
     // the whole set, so the request must carry every non-me assignee
     // (the winner ∈ others): resolve each login to its numeric id.
-    const keepIds: number[] = [];
-    let resolvable = true;
-    for (const u of others) {
-      try {
-        const uid = userIdOf(dir, u);
-        if (uid === undefined) {
-          resolvable = false;
-          break;
-        }
-        keepIds.push(uid);
-      } catch {
-        resolvable = false;
-        break;
-      }
-    }
-    if (resolvable) {
-      const args = ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`)];
-      for (const uid of keepIds) {
-        args.push('-f', `assignee_ids[]=${uid}`);
-      }
-      glabTry(args, gopts(dir));
-    }
+    releaseContestedClaim(dir, ref, others);
     // An unresolvable login leaves the assignment untouched: staying
     // assigned is untidy but never strips the winner. Either way the
     // race was lost — the contested throw goes out.
