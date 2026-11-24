@@ -934,7 +934,7 @@
     "benchmark": {
       "name": "benchmark",
       "group": "self",
-      "summary": "Paired native-vs-BRO workflow outcome benchmarks",
+      "summary": "Paired bare-vs-BRO workflow outcome benchmarks",
       "spellings": ["benchmark", "self benchmark"],
       "aliases": [],
       "hidden": false,

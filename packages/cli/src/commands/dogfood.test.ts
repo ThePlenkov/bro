@@ -11,8 +11,9 @@ import { dirname, join } from 'node:path';
 import { AgentNotFound, testGit } from '@broject/core';
 import type { AgentInfo, SpawnSpec } from '@broject/core';
 import { registerAgentConnector } from '../agent-connectors.ts';
-import { listScenarios, runDogfoodCommand } from './dogfood.ts';
+import { listScenarios, pairedResultError, runDogfoodCommand } from './dogfood.ts';
 import { capture, initRepo, installFakeBd, scrubEnv } from './testrepo.ts';
+import { Ajv } from 'ajv';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -567,6 +568,78 @@ describe('benchmark (bro-l8c4f.9)', () => {
     return d;
   })();
 
+  /** runBenchmarkCommand with exits and console captured — the
+   *  dispatcher contract is CommandError, so the code rides the error
+   *  and the message is what process.exit would have seen. */
+  const invoke = async (args: string[]) => {
+    const origExit = process.exit;
+    const origErr = console.error;
+    const origLog = console.log;
+    const err: string[] = [];
+    const out: string[] = [];
+    console.error = (...a: unknown[]) => err.push(a.map(String).join(' '));
+    console.log = (...a: unknown[]) => out.push(a.map(String).join(' '));
+    process.exit = ((code?: number) => {
+      throw Object.assign(new Error('exit'), { exitCode: code ?? 0 });
+    }) as typeof process.exit;
+    try {
+      const { runBenchmarkCommand } = await import('./dogfood.ts');
+      await runBenchmarkCommand(args);
+      // returned without exiting — the command completed
+      return { code: 0, out, err };
+    } catch (e: any) {
+      if (e?.name === 'CommandError' || e?.constructor?.name === 'CommandError') {
+        if (e.message) err.push(String(e.message));
+        return { code: typeof e.code === 'number' ? e.code : 1, out, err };
+      }
+      return { code: e?.exitCode ?? -1, out, err };
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
+      console.log = origLog;
+    }
+  };
+
+  /** Plant the published corpus inside a fixture repo — the command
+   *  resolves `dogfood/benchmark/corpus.json` under the repo toplevel. */
+  const plantCorpus = (main: string): string => {
+    const benchDir = join(main, 'dogfood', 'benchmark');
+    mkdirSync(benchDir, { recursive: true });
+    const corpusPath = join(benchDir, 'corpus.json');
+    writeFileSync(
+      corpusPath,
+      readFileSync(join(repoRoot, 'dogfood', 'benchmark', 'corpus.json'), 'utf8')
+    );
+    return corpusPath;
+  };
+
+  /** A schema-valid paired-result row for the committed corpus — every
+   *  declared metric present, override per case. */
+  const validRow = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    taskId: 'bro-rw8z3',
+    revision: 'fa0e8f13230ecc2f5b69fe0ae1d8292db65caa05',
+    runId: 'run-1',
+    variant: 'bro',
+    model: 'claude',
+    startedAt: '2026-11-24T00:00:00.000Z',
+    finishedAt: '2026-11-24T00:20:00.000Z',
+    timeToGreenMs: 1200000,
+    humanInterventions: 0,
+    controlPlaneCalls: 42,
+    tokens: { input: 200000, output: 50000, cacheRead: 0, cacheWrite: 0 },
+    duplicateWorkCount: 0,
+    abandonedWorkCount: 0,
+    mergedFindingsWithoutFollowup: 0,
+    costUsd: 1.23,
+    contextPeakTokens: 180000,
+    toolCalls: 87,
+    actRounds: 2,
+    wallMs: 1210000,
+    repeat: 1,
+    outcome: 'pass',
+    ...over,
+  });
+
   test('corpus is published with pinned revisions and model/CI pins', () => {
     const corpus = JSON.parse(
       readFileSync(join(repoRoot, 'dogfood', 'benchmark', 'corpus.json'), 'utf8')
@@ -609,42 +682,12 @@ describe('benchmark (bro-l8c4f.9)', () => {
       // the command resolves the corpus inside the CURRENT repo — the
       // fixture's toplevel is its own repo, so plant what each arm needs
       const benchDir = join(fx.main, 'dogfood', 'benchmark');
-      const corpusPath = join(benchDir, 'corpus.json');
-      const invoke = async (args: string[]) => {
-        const origExit = process.exit;
-        const origErr = console.error;
-        const err: string[] = [];
-        console.error = (...a: unknown[]) => err.push(a.map(String).join(' '));
-        process.exit = ((code?: number) => {
-          throw Object.assign(new Error('exit'), { exitCode: code ?? 0 });
-        }) as typeof process.exit;
-        try {
-          const { runBenchmarkCommand } = await import('./dogfood.ts');
-          await runBenchmarkCommand(args);
-          return { code: -1, err };
-        } catch (e: any) {
-          // CommandError is the dispatcher contract now — the code rides
-          // the error, the message is what process.exit would have seen
-          if (e?.name === 'CommandError' || e?.constructor?.name === 'CommandError') {
-            if (e.message) err.push(String(e.message));
-            return { code: typeof e.code === 'number' ? e.code : 1, err };
-          }
-          return { code: e?.exitCode ?? -1, err };
-        } finally {
-          process.exit = origExit;
-          console.error = origErr;
-        }
-      };
       // no corpus on disk → named, not an unhandled throw
       const missing = await invoke(['run']);
       assert.equal(missing.code, 1);
       assert.match(missing.err.join('\n'), /no benchmark corpus found/);
       // valid corpus → the honest refusal; nothing is written
-      mkdirSync(benchDir, { recursive: true });
-      writeFileSync(
-        corpusPath,
-        readFileSync(join(repoRoot, 'dogfood', 'benchmark', 'corpus.json'), 'utf8')
-      );
+      const corpusPath = plantCorpus(fx.main);
       const r = await invoke(['run']);
       assert.equal(r.code, 1, r.err.join('\n'));
       assert.match(r.err.join('\n'), /not implemented/);
@@ -674,6 +717,231 @@ describe('benchmark (bro-l8c4f.9)', () => {
       const noId = await invoke(['run']);
       assert.equal(noId.code, 1);
       assert.match(noId.err.join('\n'), /missing required taskId\/revision/);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('corpus carries >=5 history tasks, each a closed bead + merged PR pin', () => {
+    const corpus = JSON.parse(
+      readFileSync(join(repoRoot, 'dogfood', 'benchmark', 'corpus.json'), 'utf8')
+    ) as any;
+    const history = corpus.tasks.filter((t: any) => typeof t.pr === 'number');
+    assert.ok(history.length >= 5, `expected >=5 history tasks, got ${history.length}`);
+    for (const t of history) {
+      // the pin triple is complete: bead id, merged PR + merge commit,
+      // and the starting revision the run replays from
+      assert.match(t.taskId, /^bro-/, `${t.taskId}: history tasks key off the bead`);
+      assert.equal(t.bead, t.taskId);
+      assert.match(t.mergeCommit, /^[0-9a-f]{40}$/, `${t.taskId}: mergeCommit pin`);
+      assert.match(t.revision, /^[0-9a-f]{40}$/, `${t.taskId}: revision pin`);
+      assert.notEqual(t.mergeCommit, t.revision);
+      assert.ok(Array.isArray(t.successCriteria) && t.successCriteria.length > 0);
+      const targets = t.targets;
+      assert.ok(
+        targets && typeof targets === 'object',
+        `${t.taskId}: targets set before measurement`
+      );
+      for (const k of [
+        'timeToGreenMs',
+        'humanInterventions',
+        'controlPlaneCalls',
+        'duplicateWorkCount',
+        'abandonedWorkCount',
+        'mergedFindingsWithoutFollowup',
+      ]) {
+        assert.ok(Number.isInteger(targets[k]) && targets[k] >= 0, `${t.taskId}: targets.${k}`);
+      }
+      for (const k of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+        assert.ok(
+          Number.isInteger(targets.tokens?.[k]) && targets.tokens[k] >= 0,
+          `${t.taskId}: targets.tokens.${k}`
+        );
+      }
+    }
+  });
+
+  // --- schema fixtures (update 2026-11-08): the published draft-07 schema
+  // and the runtime validator in dogfood.ts must agree fixture-for-fixture —
+  // ajv stays test-only, the CLI validates hand-rolled.
+
+  const compiled = () => {
+    const schema = JSON.parse(
+      readFileSync(
+        join(repoRoot, 'packages', 'cli', 'schemas', 'benchmark', 'paired-results.schema.json'),
+        'utf8'
+      )
+    ) as Record<string, unknown>;
+    // strict:false — the date-time format annotation is documentation;
+    // ajv-formats is not a dependency, so format checks stay off
+    return new Ajv({ allErrors: true, strict: false }).compile(schema);
+  };
+
+  test('schema accepts bare/bro/native variants with all declared metrics', () => {
+    const validate = compiled();
+    for (const variant of ['bare', 'bro', 'native']) {
+      const row = validRow({ variant });
+      assert.equal(validate(row), true, `${variant}: ${JSON.stringify(validate.errors)}`);
+      assert.equal(pairedResultError(row), null, `${variant}: runtime validator must accept`);
+    }
+  });
+
+  test('schema rejects unknown fields and invalid ranges — both layers', () => {
+    const validate = compiled();
+    const invalid: Record<string, unknown>[] = [
+      validRow({ variant: 'hosted' }),
+      validRow({ outcome: 'flaky' }),
+      validRow({ wallMs: -1 }),
+      validRow({ actRounds: -1 }),
+      validRow({ repeat: 0 }),
+      validRow({ repeat: 1.5 }),
+      validRow({ costUsd: -0.5 }),
+      validRow({ costUsd: 'unknown' }),
+      validRow({ toolCalls: 1.5 }),
+      validRow({ contextPeakTokens: 'lots' }),
+      validRow({ tokens: { input: 1, output: 2, cacheRead: 0 } }),
+      validRow({ tokens: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, bonus: 1 } }),
+      { ...validRow(), surprise: true },
+      { ...validRow(), runId: '' },
+    ];
+    for (const row of invalid) {
+      assert.equal(validate(row), false, `schema must reject ${JSON.stringify(row)}`);
+      assert.notEqual(
+        pairedResultError(row),
+        null,
+        `runtime validator must reject ${JSON.stringify(row)}`
+      );
+    }
+  });
+
+  test('schema preserves explicit null costUsd — unknown is not 0', () => {
+    const validate = compiled();
+    const row = validRow({ costUsd: null });
+    assert.equal(validate(row), true, JSON.stringify(validate.errors));
+    assert.equal(pairedResultError(row), null);
+    // a JSON round-trip keeps null null — the emit path cannot coerce it
+    const round = JSON.parse(JSON.stringify(row)) as { costUsd: unknown };
+    assert.equal(round.costUsd, null);
+    // …while a MISSING costUsd key is a different verdict: required
+    const missing = validRow();
+    delete missing.costUsd;
+    assert.equal(validate(missing), false);
+    assert.notEqual(pairedResultError(missing), null);
+  });
+
+  test('run --record appends validated rows to the paired-results JSONL', async () => {
+    const fx = fixture();
+    try {
+      plantCorpus(fx.main);
+      const recordPath = join(fx.main, 'record.json');
+      writeFileSync(
+        recordPath,
+        JSON.stringify([validRow({ costUsd: null }), validRow({ variant: 'bare', repeat: 2 })])
+      );
+      const r = await invoke(['run', '--record', recordPath]);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      const out = join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl');
+      const lines = readFileSync(out, 'utf8').trim().split('\n');
+      assert.equal(lines.length, 2);
+      const [first, second] = lines.map(l => JSON.parse(l) as Record<string, unknown>);
+      assert.equal(first!.variant, 'bro');
+      // the new metrics ride the emitted line — null cost survives
+      assert.equal(first!.costUsd, null);
+      assert.equal(first!.contextPeakTokens, 180000);
+      assert.equal(first!.toolCalls, 87);
+      assert.equal(first!.actRounds, 2);
+      assert.equal(first!.wallMs, 1210000);
+      assert.equal(second!.variant, 'bare');
+      assert.equal(second!.repeat, 2);
+      // a second record appends — the sink is the shared paired journal
+      writeFileSync(recordPath, JSON.stringify(validRow({ variant: 'native', repeat: 3 })));
+      const r2 = await invoke(['run', '--record', recordPath]);
+      assert.equal(r2.code, 0, r2.err.join('\n'));
+      assert.equal(readFileSync(out, 'utf8').trim().split('\n').length, 3);
+      // --out overrides the default sink
+      const custom = join(fx.main, 'elsewhere.jsonl');
+      writeFileSync(recordPath, JSON.stringify(validRow()));
+      const r3 = await invoke(['run', '--record', recordPath, '--out', custom]);
+      assert.equal(r3.code, 0, r3.err.join('\n'));
+      assert.equal(readFileSync(custom, 'utf8').trim().split('\n').length, 1);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('run --record rejects non-finite costUsd — Infinity must not stringify to null', async () => {
+    const fx = fixture();
+    try {
+      plantCorpus(fx.main);
+      const recordPath = join(fx.main, 'record.json');
+      const out = join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl');
+      // 1e400 parses to Infinity — without the finite check it would
+      // serialize as null and silently become "unknown cost". The literal
+      // must be raw JSON text: JSON.stringify(Infinity) emits null itself.
+      const text = JSON.stringify(validRow()).replace('"costUsd":1.23', '"costUsd":1e400');
+      assert.ok(text.includes('1e400'), 'fixture must carry the literal');
+      writeFileSync(recordPath, text);
+      const r = await invoke(['run', '--record', recordPath]);
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /costUsd/);
+      assert.ok(!existsSync(out));
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('run --record separates rows when the sink lacks a trailing newline', async () => {
+    const fx = fixture();
+    try {
+      plantCorpus(fx.main);
+      const recordPath = join(fx.main, 'record.json');
+      const outDir = join(fx.main, '.evidence', 'benchmark');
+      mkdirSync(outDir, { recursive: true });
+      const out = join(outDir, 'paired-results.jsonl');
+      // an existing sink whose last line has no newline — naive append
+      // would fuse `}{` and corrupt both rows for line readers
+      writeFileSync(out, '{"stale":true}');
+      writeFileSync(recordPath, JSON.stringify(validRow()));
+      const r = await invoke(['run', '--record', recordPath]);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      const lines = readFileSync(out, 'utf8')
+        .split('\n')
+        .filter(l => l.length > 0);
+      assert.equal(lines.length, 2);
+      assert.deepEqual(JSON.parse(lines[0]!), { stale: true });
+      assert.equal((JSON.parse(lines[1]!) as Record<string, unknown>).taskId, 'bro-rw8z3');
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('run --record rejects off-schema rows and rows outside the corpus', async () => {
+    const fx = fixture();
+    try {
+      plantCorpus(fx.main);
+      const recordPath = join(fx.main, 'record.json');
+      const out = join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl');
+      // a schema violation dies named and appends nothing
+      writeFileSync(recordPath, JSON.stringify(validRow({ repeat: 0 })));
+      const bad = await invoke(['run', '--record', recordPath]);
+      assert.equal(bad.code, 1);
+      assert.match(bad.err.join('\n'), /invalid paired result row: repeat/);
+      assert.ok(!existsSync(out));
+      // a row tied to no corpus task is not a paired measurement
+      writeFileSync(recordPath, JSON.stringify(validRow({ taskId: 'bro-nope0' })));
+      const foreign = await invoke(['run', '--record', recordPath]);
+      assert.equal(foreign.code, 1);
+      assert.match(foreign.err.join('\n'), /not a corpus task/);
+      // the revision pin is checked too — a row on another base fabricates the pair
+      writeFileSync(recordPath, JSON.stringify(validRow({ revision: 'deadbeef' })));
+      const drift = await invoke(['run', '--record', recordPath]);
+      assert.equal(drift.code, 1);
+      assert.match(drift.err.join('\n'), /revision must be the pinned/);
+      assert.ok(!existsSync(out));
+      // an unreadable record path dies named
+      const gone = await invoke(['run', '--record', join(fx.main, 'nope.json')]);
+      assert.equal(gone.code, 1);
+      assert.match(gone.err.join('\n'), /cannot read benchmark record file/);
     } finally {
       fx.restore();
     }

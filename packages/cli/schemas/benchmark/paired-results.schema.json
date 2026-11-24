@@ -19,13 +19,19 @@
     "duplicateWorkCount",
     "abandonedWorkCount",
     "mergedFindingsWithoutFollowup",
+    "costUsd",
+    "contextPeakTokens",
+    "toolCalls",
+    "actRounds",
+    "wallMs",
+    "repeat",
     "outcome"
   ],
   "properties": {
     "taskId": { "type": "string", "minLength": 1 },
     "revision": { "type": "string", "minLength": 1 },
     "runId": { "type": "string", "minLength": 1 },
-    "variant": { "type": "string", "enum": ["native", "bro"] },
+    "variant": { "type": "string", "enum": ["bare", "bro", "native"] },
     "model": { "type": "string", "minLength": 1 },
     "startedAt": { "type": "string", "format": "date-time" },
     "finishedAt": { "type": "string", "format": "date-time" },
@@ -46,6 +52,12 @@
     "duplicateWorkCount": { "type": "integer", "minimum": 0 },
     "abandonedWorkCount": { "type": "integer", "minimum": 0 },
     "mergedFindingsWithoutFollowup": { "type": "integer", "minimum": 0 },
+    "costUsd": { "type": ["number", "null"], "minimum": 0 },
+    "contextPeakTokens": { "type": "integer", "minimum": 0 },
+    "toolCalls": { "type": "integer", "minimum": 0 },
+    "actRounds": { "type": "integer", "minimum": 0 },
+    "wallMs": { "type": "integer", "minimum": 0 },
+    "repeat": { "type": "integer", "minimum": 1 },
     "outcome": { "type": "string", "enum": ["pass", "fail", "partial"] },
     "notes": { "type": "string" }
   }
