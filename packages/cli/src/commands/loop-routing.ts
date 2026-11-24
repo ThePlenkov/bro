@@ -59,6 +59,18 @@ export async function resolveLoopLane(
   if (sel.agent !== undefined && !agentIsProvider) {
     return templateEscape(sel, cfg, env);
   }
+  return resolveProviderLane({ env, sel, cfg, route, matrix, agentIsProvider });
+}
+
+async function resolveProviderLane(args: {
+  env: AgentConnectorEnv;
+  sel: LoopLaneSel;
+  cfg: LoopConfig;
+  route?: ResolvedClass;
+  matrix?: MatrixLanePick;
+  agentIsProvider: boolean;
+}): Promise<LoopLane> {
+  const { env, sel, cfg, route, matrix, agentIsProvider } = args;
   const { provider, model, autoApprove, profileSourced, flagProvider } = lanePicks(
     env,
     sel,
