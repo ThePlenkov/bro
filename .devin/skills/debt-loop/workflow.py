@@ -218,30 +218,33 @@ verification, notes.
     )
 
 
-def build_groups(rows):
-    """Group rows into fix-group prompts + the stale triage set.
+def _group_key(row):
+    """Fix-group slug for a row; None for stale-prs and ungrouped rows.
 
-    Every row lands in at most one group — dependabot/stale-prs never reach
-    the fix predicates, and overlapping GROUP_DEFS are first-match, so a
-    code-scanning row under site/ can't be assigned twice."""
-    stale = [r for r in rows if r.get("source") == "stale-prs"]
-    deps = [r for r in rows if r.get("source") == "dependabot"]
-    buckets = {slug: [] for slug, _, _ in GROUP_DEFS}
+    First-match wins, so a row lands in at most one fix group."""
+    if row.get("source") == "stale-prs":
+        return None
+    if row.get("source") == "dependabot":
+        return "deps"
+    for slug, pred, _ in GROUP_DEFS:
+        if pred(row):
+            return slug
+    return None
+
+
+def build_groups(rows):
+    """Group rows into fix-group prompts + the stale triage set."""
+    grouped = {}
     for r in rows:
-        if r.get("source") in ("stale-prs", "dependabot"):
-            continue
-        for slug, pred, _ in GROUP_DEFS:
-            if pred(r):
-                buckets[slug].append(r)
-                break
+        key = _group_key(r)
+        if key is not None:
+            grouped.setdefault(key, []).append(r)
+    stale = [r for r in rows if r.get("source") == "stale-prs"]
     headers = {slug: header for slug, _, header in GROUP_DEFS}
     groups = {
-        slug: fix_prompt(slug, headers[slug], sel)
-        for slug, sel in buckets.items()
-        if sel
+        slug: (deps_prompt(sel) if slug == "deps" else fix_prompt(slug, headers[slug], sel))
+        for slug, sel in grouped.items()
     }
-    if deps:
-        groups["deps"] = deps_prompt(deps)
     return groups, stale
 
 
