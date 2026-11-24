@@ -168,16 +168,15 @@ export interface DriveArgs {
 
 interface EveryToken {
   raw: string;
-  inline: boolean;
-  value?: string;
+  value: string | null;
 }
 
 function everyToken(argv: string[]): EveryToken | undefined {
   const every = argv
     .filter(a => /^--every(?:=|$)/.test(a))
     .map(raw => {
-      const inline = raw.startsWith('--every=');
-      return { raw, inline, value: inline ? raw.slice('--every='.length) : undefined };
+      const value = /^--every(?:=(.*))?$/.exec(raw)?.[1] ?? null;
+      return { raw, value };
     });
   if (every.length > 1) {
     console.error('error: --every may be given only once');
@@ -187,11 +186,8 @@ function everyToken(argv: string[]): EveryToken | undefined {
 }
 
 function everyValue(argv: string[], token: EveryToken): string | undefined {
-  if (token.inline) {
-    return token.value;
-  }
   const next = argv[argv.indexOf(token.raw) + 1];
-  return next !== undefined && !next.startsWith('--') ? next : undefined;
+  return token.value ?? (next?.startsWith('--') ? undefined : next);
 }
 
 function everyArgument(argv: string[], defaultEverySec: number): number | undefined {
