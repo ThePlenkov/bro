@@ -22,10 +22,22 @@ def find_repo():
     return os.path.abspath(found)
 
 
-REPO_DIR = find_repo()
+# Repo paths resolve lazily in main() — find_repo() raises RuntimeError for a
+# missing checkout, and evaluating it at import would crash the workflow
+# runner before register_workflow/log even exist.
 REPO = "github.com/ThePlenkov/bro"
-HARVEST_DIR = os.path.join(REPO_DIR, ".agents", "review-debt", "harvests")
-WORKTREES = os.path.join(os.path.dirname(REPO_DIR), os.path.basename(REPO_DIR) + "-worktrees")
+REPO_DIR = None
+HARVEST_DIR = None
+WORKTREES = None
+
+
+def resolve_paths():
+    global REPO_DIR, HARVEST_DIR, WORKTREES
+    REPO_DIR = find_repo()
+    HARVEST_DIR = os.path.join(REPO_DIR, ".agents", "review-debt", "harvests")
+    WORKTREES = os.path.join(
+        os.path.dirname(REPO_DIR), os.path.basename(REPO_DIR) + "-worktrees"
+    )
 
 META = {
     "name": "debt-loop",
@@ -93,10 +105,14 @@ LAND_SCHEMA = {
 
 def open_rows_in(path):
     rows = []
-    for line in open(path):
-        line = line.strip()
-        if line and json.loads(line).get("status") == "open":
-            rows.append(json.loads(line))
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("status") == "open":
+                rows.append(row)
     return rows
 
 
@@ -122,7 +138,8 @@ def fmt_rows(rows):
     return "\n".join(fmt_row(r) for r in rows)
 
 
-FIX_COMMON = f"""
+def fix_common():
+    return f"""
 Repo: {REPO}, already cloned at {REPO_DIR} on THIS machine (shared VM — do not
 clone). You are a fixer agent closing collected review debt.
 
@@ -156,6 +173,7 @@ Structured output: branch, pr_url, fixed_ids[], skipped_ids[], verification
 (commands + result), notes.
 """
 
+
 # (slug, row predicate, findings-section header). Rows matching the predicate
 # form one fix group on FIX_COMMON.
 GROUP_DEFS = [
@@ -171,7 +189,7 @@ GROUP_DEFS = [
 
 def fix_prompt(slug, header, rows):
     return (
-        FIX_COMMON.replace("{slug}", slug)
+        fix_common().replace("{slug}", slug)
         + f"\nFindings ({len(rows)}) — {header}:\n"
         + fmt_rows(rows)
     )
@@ -201,16 +219,29 @@ verification, notes.
 
 
 def build_groups(rows):
-    """Group rows into fix-group prompts + the stale triage set."""
-    groups = {}
-    for slug, pred, header in GROUP_DEFS:
-        sel = [r for r in rows if pred(r)]
-        if sel:
-            groups[slug] = fix_prompt(slug, header, sel)
+    """Group rows into fix-group prompts + the stale triage set.
+
+    Every row lands in at most one group — dependabot/stale-prs never reach
+    the fix predicates, and overlapping GROUP_DEFS are first-match, so a
+    code-scanning row under site/ can't be assigned twice."""
+    stale = [r for r in rows if r.get("source") == "stale-prs"]
     deps = [r for r in rows if r.get("source") == "dependabot"]
+    buckets = {slug: [] for slug, _, _ in GROUP_DEFS}
+    for r in rows:
+        if r.get("source") in ("stale-prs", "dependabot"):
+            continue
+        for slug, pred, _ in GROUP_DEFS:
+            if pred(r):
+                buckets[slug].append(r)
+                break
+    headers = {slug: header for slug, _, header in GROUP_DEFS}
+    groups = {
+        slug: fix_prompt(slug, headers[slug], sel)
+        for slug, sel in buckets.items()
+        if sel
+    }
     if deps:
         groups["deps"] = deps_prompt(deps)
-    stale = [r for r in rows if r.get("source") == "stale-prs"]
     return groups, stale
 
 
@@ -276,6 +307,7 @@ def report_results(results, groups, stale):
 
 async def main():
     await register_workflow(META)
+    resolve_paths()
     rows = load_rows()
     groups, stale = build_groups(rows)
     log(f"open debt rows: {len(rows)} across {len(groups)} fix groups + {len(stale)} stale")
