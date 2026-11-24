@@ -166,43 +166,58 @@ export interface DriveArgs {
   connector?: string;
 }
 
+interface EveryToken {
+  raw: string;
+  value: string | null;
+}
+
+function everyToken(argv: string[]): EveryToken | undefined {
+  const every = argv
+    .filter(a => /^--every(?:=|$)/.test(a))
+    .map(raw => {
+      const value = /^--every(?:=(.*))?$/.exec(raw)?.[1] ?? null;
+      return { raw, value };
+    });
+  if (every.length > 1) {
+    console.error('error: --every may be given only once');
+    process.exit(2);
+  }
+  return every[0];
+}
+
+function everyValue(argv: string[], token: EveryToken): string | undefined {
+  const next = argv[argv.indexOf(token.raw) + 1];
+  return token.value ?? (next?.startsWith('--') ? undefined : next);
+}
+
+function everyArgument(argv: string[], defaultEverySec: number): number | undefined {
+  const token = everyToken(argv);
+  if (!token) {
+    return undefined;
+  }
+  const everyRaw = everyValue(argv, token);
+  if (everyRaw !== undefined && everyRaw.trim() === '') {
+    console.error('error: --every requires a value');
+    process.exit(2);
+  }
+  const everySec = everyRaw === undefined ? defaultEverySec : Number(everyRaw);
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    throw new Error(
+      `--every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? defaultEverySec}"`
+    );
+  }
+  return everySec;
+}
+
 export function driveArgs(argv: string[], defaultEverySec = 300): DriveArgs {
   const base: DriveArgs = {
     json: argv.includes('--json'),
     merge: !argv.includes('--no-merge'),
     connector: flag(argv, '--connector'),
   };
-  const every = argv.filter(a => a === '--every' || a.startsWith('--every='));
-  if (every.length > 1) {
-    console.error('error: --every may be given only once');
-    process.exit(2);
-  }
-  if (every.length === 0) {
+  const everySec = everyArgument(argv, defaultEverySec);
+  if (everySec === undefined) {
     return base;
-  }
-  const tok = every[0]!;
-  let everyRaw: string | undefined;
-  if (tok === '--every') {
-    // a bare --every takes the configured cadence — flagValue's contract
-    // (next token must not look like an option) still applies when a
-    // value follows
-    const next = argv[argv.indexOf(tok) + 1];
-    everyRaw =
-      next !== undefined && next.trim() !== '' && !next.startsWith('--') ? next : undefined;
-  } else {
-    everyRaw = tok.slice('--every='.length);
-    if (everyRaw === '') {
-      console.error('error: --every requires a value');
-      process.exit(2);
-    }
-  }
-  const everySec = everyRaw === undefined ? defaultEverySec : Number(everyRaw);
-  // the same 0.1s floor fleet applies — a sub-floor cadence is a busy
-  // loop hammering the review host, not a poll
-  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
-    throw new Error(
-      `--every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? defaultEverySec}"`
-    );
   }
   return { ...base, everySec };
 }
@@ -552,23 +567,7 @@ function lanePauseTick(ctx: Ctx): void {
  *  awaited close still lands before the pass's enumeration, so a reaped
  *  branch never reaches openFleetPrs — only the event loop is freed,
  *  not the ordering. */
-async function litterSweep(ctx: Ctx): Promise<void> {
-  const entry = SELF_ENTRY;
-  if (entry === null) {
-    // imported by a test harness — no CLI argv to respawn; run in-pass.
-    // The child path's claims leg comes via `work prune --loop`; the
-    // in-pass tick prefetches the same union leg from the ctx's own
-    // facade — marker-only on an absent ledger OR a failed read, the
-    // same `undefined` litterClaims returns (bro-izpyk.10)
-    const claims =
-      ctx.claims === undefined
-        ? undefined
-        : await ctx.claims
-            .list(ctx.project === undefined ? {} : { project: ctx.project })
-            .catch(() => undefined);
-    sayLitterSweep(ctx, litterSweepTick(ctx, claims));
-    return;
-  }
+async function runLitterSweepChild(ctx: Ctx, entry: string): Promise<void> {
   await new Promise<void>(resolvePromise => {
     const child = spawn(process.execPath, [entry, 'work', 'prune', '--loop'], {
       cwd: ctx.mainRoot,
@@ -598,6 +597,26 @@ async function litterSweep(ctx: Ctx): Promise<void> {
     child.on('error', err => done(errText(err)));
     child.on('close', code => done(code === 0 ? undefined : `exit ${code ?? '?'}`));
   });
+}
+
+async function litterSweep(ctx: Ctx): Promise<void> {
+  const entry = SELF_ENTRY;
+  if (entry === null) {
+    // imported by a test harness — no CLI argv to respawn; run in-pass.
+    // The child path's claims leg comes via `work prune --loop`; the
+    // in-pass tick prefetches the same union leg from the ctx's own
+    // facade — marker-only on an absent ledger OR a failed read, the
+    // same `undefined` litterClaims returns (bro-izpyk.10)
+    const claims =
+      ctx.claims === undefined
+        ? undefined
+        : await ctx.claims
+            .list(ctx.project === undefined ? {} : { project: ctx.project })
+            .catch(() => undefined);
+    sayLitterSweep(ctx, litterSweepTick(ctx, claims));
+    return;
+  }
+  await runLitterSweepChild(ctx, entry);
 }
 
 /** The in-pass sweep primitive — the same reapLoopLitter the loop
@@ -667,6 +686,23 @@ function sayLitterSweep(ctx: Ctx, rep: LitterReap): void {
  *  with no writes is the steady state, not an event. */
 let herdrWasReachable: boolean | undefined;
 let projectionFailedQuiet = false;
+function reportProjectorResult(ctx: Ctx, result: ReturnType<typeof projectFleet>): void {
+  if (result.reachable !== herdrWasReachable) {
+    herdrWasReachable = result.reachable;
+    if (!result.reachable) {
+      say(ctx, 'herdr: unreachable — fleet labels paused');
+    } else if (result.writes > 0 || result.workspaces > 0) {
+      say(ctx, `herdr: projecting ${result.workspaces} managed workspace(s)`);
+    }
+  }
+  if (result.degraded !== undefined) {
+    say(ctx, `herdr: ${result.degraded} read failed — pass degraded`);
+  }
+  if (result.writes > 0) {
+    say(ctx, `herdr: ${result.writes} label write(s)`);
+  }
+}
+
 function herdrProjectorTick(ctx: Ctx): void {
   // the event trigger re-arms lazily here — a broker that came up since
   // the last pass restores event mode without a daemon restart
@@ -675,21 +711,7 @@ function herdrProjectorTick(ctx: Ctx): void {
   // path the same way — armed once, loop mode only
   armProjectorWatches(ctx);
   try {
-    const r = projectFleet(ctx.mainRoot);
-    if (r.reachable !== herdrWasReachable) {
-      herdrWasReachable = r.reachable;
-      if (!r.reachable) {
-        say(ctx, 'herdr: unreachable — fleet labels paused');
-      } else if (r.writes > 0 || r.workspaces > 0) {
-        say(ctx, `herdr: projecting ${r.workspaces} managed workspace(s)`);
-      }
-    }
-    if (r.degraded !== undefined) {
-      say(ctx, `herdr: ${r.degraded} read failed — pass degraded`);
-    }
-    if (r.writes > 0) {
-      say(ctx, `herdr: ${r.writes} label write(s)`);
-    }
+    reportProjectorResult(ctx, projectFleet(ctx.mainRoot));
     projectionFailedQuiet = false;
   } catch (err) {
     // a failed projection retries next pass — never a pass failure;
@@ -914,15 +936,7 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
     process.exit(2);
   }
   const everyRaw = flag(argv, '--every');
-  const everySec = everyRaw === undefined ? drive.intervalSec : Number(everyRaw);
-  // the shared floor still matters: the armed cadence lands verbatim in
-  // the marker and every rearmed spawn — a 0.05s drive is a busy loop
-  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
-    console.error(
-      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
-    );
-    process.exit(2);
-  }
+  const everySec = scheduleInterval(everyRaw, drive.intervalSec);
   const r = installDrive(dir, { everySec, print: argv.includes('--print') });
   console.log(r.detail);
   if (r.state === 'error') {
@@ -930,34 +944,25 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
   }
 }
 
-export async function runDriveCommand(argv: string[]): Promise<void> {
-  if (hasHelpFlag(argv)) {
-    usage(0);
+function scheduleInterval(raw: string | undefined, fallback: number): number {
+  const everySec = raw === undefined ? fallback : Number(raw);
+  // the shared floor still matters: the armed cadence lands verbatim in
+  // the marker and every rearmed spawn — a 0.05s drive is a busy loop
+  if (Number.isFinite(everySec) && everySec >= MIN_INTERVAL_SEC && everySec <= MAX_INTERVAL_SEC) {
+    return everySec;
   }
-  const main = mainWorktree();
-  const broCfg = loadBroConfig(main.path);
-  const drive =
-    ((broCfg as Record<string, unknown>).drive as DriveConfig | undefined) ??
-    driveSection(undefined);
-  if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    // uninstall and `install --print` never touch the store — uninstall
-    // is the cleanup path a broken beads setup still needs, --print a
-    // pure preview. The real install spawns the supervisor, which needs
-    // the store itself, so only that path keeps the gate.
-    if (argv[0] === 'install' && !argv.includes('--print')) {
-      checkBeads();
-    }
-    runDriveSched(argv, main.path, drive);
-    return;
-  }
-  checkBeads();
-  let args: DriveArgs;
-  try {
-    args = driveArgs(argv, drive.intervalSec);
-  } catch (err) {
-    console.error(`error: ${errText(err)}`);
-    process.exit(2);
-  }
+  console.error(
+    `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${raw ?? everySec}"`
+  );
+  process.exit(2);
+}
+
+async function runSupervisedDrive(
+  main: { path: string },
+  broCfg: ReturnType<typeof loadBroConfig>,
+  drive: DriveConfig,
+  args: DriveArgs
+): Promise<void> {
   // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID — they must
   // never arm a supervisor cadence; the orchestrator session owns it
   // and runs single passes on its pulse window end.
@@ -1003,23 +1008,68 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
       (env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
       { signal: abort.signal, onLost: () => releaseSupervisor() }
     );
-    const driveLock = driveLockPath(main.path);
-    if (driveLock !== null) {
-      releaseSupervisor = await awaitFileLock(driveLock, {
-        label: 'drive supervisor lock',
-        onStandby: pid =>
-          console.error(
-            `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-          ),
-      });
-    }
+    releaseSupervisor = await acquireDriveLock(main.path);
     await runDrive(main.path, broCfg, drive, args);
   } finally {
-    process.removeListener('SIGINT', onInt);
-    process.removeListener('SIGTERM', onTerm);
-    process.removeListener('exit', onExit);
-    releaseAll();
+    removeDriveListeners(onInt, onTerm, onExit, releaseAll);
   }
+}
+
+function removeDriveListeners(
+  onInt: () => void,
+  onTerm: () => void,
+  onExit: () => void,
+  release: () => void
+): void {
+  process.removeListener('SIGINT', onInt);
+  process.removeListener('SIGTERM', onTerm);
+  process.removeListener('exit', onExit);
+  release();
+}
+
+async function acquireDriveLock(root: string): Promise<() => void> {
+  const lock = driveLockPath(root);
+  if (lock === null) {
+    return () => {};
+  }
+  return await awaitFileLock(lock, {
+    label: 'drive supervisor lock',
+    onStandby: pid =>
+      console.error(
+        `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+      ),
+  });
+}
+
+export async function runDriveCommand(argv: string[]): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    usage(0);
+  }
+  const main = mainWorktree();
+  const broCfg = loadBroConfig(main.path);
+  const drive =
+    ((broCfg as Record<string, unknown>).drive as DriveConfig | undefined) ??
+    driveSection(undefined);
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    // uninstall and `install --print` never touch the store — uninstall
+    // is the cleanup path a broken beads setup still needs, --print a
+    // pure preview. The real install spawns the supervisor, which needs
+    // the store itself, so only that path keeps the gate.
+    if (argv[0] === 'install' && !argv.includes('--print')) {
+      checkBeads();
+    }
+    runDriveSched(argv, main.path, drive);
+    return;
+  }
+  checkBeads();
+  let args: DriveArgs;
+  try {
+    args = driveArgs(argv, drive.intervalSec);
+  } catch (err) {
+    console.error(`error: ${errText(err)}`);
+    process.exit(2);
+  }
+  await runSupervisedDrive(main, broCfg, drive, args);
 }
 
 // --- the deps wiring -------------------------------------------------------------
