@@ -203,17 +203,8 @@ export function deadLoopPostTool(
   sessionId: string,
   input: { tool_name?: unknown; tool_input?: unknown }
 ): string[] {
-  if (sessionId === '') {
-    return [];
-  }
-  const loop = trailingLoop(dir, sessionId);
+  const loop = matchingLoop(dir, sessionId, input);
   if (loop === null) {
-    return [];
-  }
-  // the journal tail and the live payload must agree — a signature
-  // that only repeats in the journal (e.g. foreign writes) is not
-  // THIS session's loop
-  if (deadSignature(input) !== loop.signature) {
     return [];
   }
   const prior = readMarker(dir, sessionId);
@@ -229,12 +220,31 @@ export function deadLoopPostTool(
   if (fresh && prior?.signature === loop.signature) {
     return [];
   }
-  const what = loop.signature.split('|').slice(1).join('|') || loop.signature;
+  return fresh && prior?.signature === loop.signature ? [] : [loopWarning(loop)];
+}
+
+function matchingLoop(
+  dir: string,
+  sessionId: string,
+  input: { tool_name?: unknown; tool_input?: unknown }
+): { signature: string; count: number; failing: boolean } | null {
+  if (sessionId === '') {
+    return null;
+  }
+  const loop = trailingLoop(dir, sessionId);
+  // The journal and live payload must agree: foreign writes cannot arm
+  // this session's gate.
+  return loop !== null && deadSignature(input) === loop.signature ? loop : null;
+}
+
+function loopWarning(loop: { signature: string; count: number; failing: boolean }): string {
+  const [tool, ...detail] = loop.signature.split('|');
+  const what = detail.join('|') || loop.signature;
   const fail = loop.failing ? ' (failing)' : '';
-  return [
-    `⚠ dead loop detected: the same ${loop.signature.split('|')[0]} call\`${what}\`${fail} repeated ${loop.count}× in a row. ` +
-      `Stop retrying it — change approach, gather missing info, or ask the user.`,
-  ];
+  return (
+    `⚠ dead loop detected: the same ${tool} call\`${what}\`${fail} repeated ${loop.count}× in a row. ` +
+    'Stop retrying it — change approach, gather missing info, or ask the user.'
+  );
 }
 
 /** pre-tool stage: the gate. Returns the veto reason when this call's

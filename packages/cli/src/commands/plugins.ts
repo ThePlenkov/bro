@@ -550,25 +550,7 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
       ? ([preferredSingleScope(surfaces)] as PluginScope[])
       : scopes;
   const collapsed = effective !== scopes;
-  const outcomes: Outcome[] = [];
-  for (const scope of effective) {
-    for (const [idx, surface] of surfaces.entries()) {
-      const owner = idx === 0 ? client : { ...client, registration: undefined };
-      outcomes.push(
-        surface.kind === 'file'
-          ? installOne(name, scope, surface, owner, opts)
-          : installBundle(name, scope, surface.files, surface.dirs[scope], opts)
-      );
-    }
-    // a module from an earlier layout is still loaded by the host — it
-    // goes when the current layout lands
-    for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
-      const outcome = legacyOutcome(name, scope, legacy, opts);
-      if (outcome !== null) {
-        outcomes.push(outcome);
-      }
-    }
-  }
+  const outcomes = installScopes(name, effective, client, surfaces, opts);
   if (client.singleScope !== undefined) {
     const notes: string[] = [];
     if (collapsed) {
@@ -610,6 +592,39 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
     }
   }
   return outcomes;
+}
+
+function installScopes(
+  name: string,
+  scopes: PluginScope[],
+  client: ClientSpec,
+  surfaces: Surface[],
+  opts: MutateOpts
+): Outcome[] {
+  const outcomes: Outcome[] = [];
+  for (const scope of scopes) {
+    for (const [idx, surface] of surfaces.entries()) {
+      const owner = idx === 0 ? client : { ...client, registration: undefined };
+      outcomes.push(installSurface(name, scope, surface, owner, opts));
+    }
+    for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
+      const outcome = legacyOutcome(name, scope, legacy, opts);
+      if (outcome !== null) outcomes.push(outcome);
+    }
+  }
+  return outcomes;
+}
+
+function installSurface(
+  name: string,
+  scope: PluginScope,
+  surface: Surface,
+  owner: ClientSpec,
+  opts: MutateOpts
+): Outcome {
+  return surface.kind === 'file'
+    ? installOne(name, scope, surface, owner, opts)
+    : installBundle(name, scope, surface.files, surface.dirs[scope], opts);
 }
 
 /** Remove a bro copy sitting in a scope the install did not choose —

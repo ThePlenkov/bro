@@ -53,21 +53,18 @@ export async function runRpcPrompt(
       const line = buf.slice(0, idx).trim();
       buf = buf.slice(idx + 1);
       if (line === '') continue;
-      try {
-        const rec = JSON.parse(line) as Record<string, unknown>;
-        records.push(rec);
-        if (rec.type === 'response' && rec.command === 'prompt') {
-          disposition = (rec.data as { disposition?: string } | undefined)?.disposition ?? null;
-          success = typeof rec.success === 'boolean' ? rec.success : null;
-          answered = true;
-          poke();
-        }
-        if (rec.type === 'agent_settled') {
-          settled = true;
-          poke();
-        }
-      } catch {
-        // non-JSON noise on stdout — ignore
+      const rec = parseRecord(line);
+      if (rec === null) continue;
+      records.push(rec);
+      if (rec.type === 'response' && rec.command === 'prompt') {
+        disposition = (rec.data as { disposition?: string } | undefined)?.disposition ?? null;
+        success = typeof rec.success === 'boolean' ? rec.success : null;
+        answered = true;
+        poke();
+      }
+      if (rec.type === 'agent_settled') {
+        settled = true;
+        poke();
       }
     }
   });
@@ -94,4 +91,12 @@ export async function runRpcPrompt(
   clearTimeout(guard);
   kill();
   return { disposition, success, records, stderr };
+}
+
+function parseRecord(line: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
