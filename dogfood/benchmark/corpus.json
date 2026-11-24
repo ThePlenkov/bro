@@ -223,15 +223,28 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "Remote-atomic bead claim: publish via bd sync and verify the merged head carries our assignee; integrate into bro next and bro claim task:*.",
+      "description": "History task (core + cli, 2 files +~200): remote-atomic bead claim \u2014 publish via bd sync then verify the merged head; bro next and bro claim integrate it. Starting state is the parent of the PR #1124 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
-        "claimRemote returns true on won claim, false on raced",
-        "tasks.test.ts claimRemote suite passes",
-        "next.test.ts claim path passes"
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
       ],
       "targets": {
-        "timeToGreenMs": 600000
-      }
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-4i4q4",
+      "mergeCommit": "b5d8f3c48f23c54dd0d1592d102b716a8df5cf94"
     },
     {
       "taskId": "bro-gqn54",
@@ -241,15 +254,28 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "Close the post-arm thread race in bro merge: pinned direct merge on the gate-verified sha; settle loop re-reads threads and disarms automerge on new unresolved threads.",
+      "description": "History task (merge verb, 1 file +~120): close the post-arm thread race \u2014 pinned direct merge on the gate-verified sha and settle-loop disarm on new unresolved threads. Starting state is the parent of the PR #1114 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
-        "land phase merges pinned head",
-        "new post-arm thread disarms and re-enters gate",
-        "merge spec updated"
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
       ],
       "targets": {
-        "timeToGreenMs": 480000
-      }
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-gqn54",
+      "mergeCommit": "7ffe23e22098128fee528bb8f4b7e36260453a60"
     },
     {
       "taskId": "bro-merge-review-race",
@@ -259,15 +285,28 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "Merge gate must not arm while a fresh Devin Review run is in flight: pending AI-reviewer check-runs block the gate until they settle.",
+      "description": "History task (exit gate, 1 file +~60): merge gate must not arm while a Devin Review run is in flight \u2014 pending reviewer check-runs block until settled. Starting state is the parent of the PR #1100 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
-        "reviewersPending counted from pending reviewer check-runs",
-        "exit gate recheck blocker when reviewers pending",
-        "green gate only after review settles"
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
       ],
       "targets": {
-        "timeToGreenMs": 480000
-      }
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-merge-review-race",
+      "mergeCommit": "69282ed94097c78e2c512021bf95f167f0d3c422"
     },
     {
       "taskId": "bro-ezboq",
@@ -277,15 +316,28 @@
       "ci": {
         "required": ["npm run build", "npm run typecheck", "npm test"]
       },
-      "description": "serve: per-lane quota gate for acp turns \u2014 pace spend before the provider wall (serve.limits parser, laneGateTake, 429+retry-after).",
+      "description": "History task (serve, 2 files +~150): per-lane quota gate for acp turns \u2014 serve.limits parser, laneGateTake admission, 429 with retry-after. Starting state is the parent of the PR #1066 merge; the reference is the PR diff; the checks are the PR's tests.",
       "successCriteria": [
-        "lane admission enforces configured caps",
-        "429 carries retry-after",
-        "serve conductor tests pass"
+        "the reference PR diff lands semantically equivalent",
+        "the PR's added/changed tests pass",
+        "repo CI green at the result"
       ],
       "targets": {
-        "timeToGreenMs": 600000
-      }
+        "timeToGreenMs": 1200000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 40,
+        "tokens": {
+          "input": 120000,
+          "output": 30000,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      },
+      "bead": "bro-ezboq",
+      "mergeCommit": "3b3395483d5bd7a9ab2854104300a190a2656fca"
     }
   ]
 }
