@@ -214,11 +214,25 @@ export function classify(
 
 /** A failed claim is a race only when the bead actually moved on
  *  (claimed/closed elsewhere); a bd outage must surface, not silently
- *  drain the queue into a fake idle. */
+ *  drain the queue into a fake idle. A non-open row that carries OUR
+ *  assignee is a claim we published but could not verify (spec
+ *  bro-4i4q4) — the infra error must surface, not masquerade as a
+ *  race, or we'd skip a bead we own while the head waits for work
+ *  that never starts. Actor '' is unverifiable — we cannot attribute
+ *  the holder, so nothing is provably raced. */
 function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
   try {
-    const status = storeFor(dir, opts).get(b.id)?.status;
-    return typeof status === 'string' && status !== 'open';
+    const ts = storeFor(dir, opts);
+    const row = ts.get(b.id);
+    if (row === undefined) {
+      return true; // the row vanished — moved on
+    }
+    const status = (row.status ?? '').toLowerCase();
+    if (status === 'open') {
+      return false;
+    }
+    const actor = ts.actor?.() ?? '';
+    return actor !== '' && (row.assignee ?? '').trim() !== actor;
   } catch {
     return false; // show failed too — bd is down; the claim error is the diagnostic
   }

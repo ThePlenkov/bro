@@ -920,23 +920,48 @@ function makeStore(x: StoreExec): TaskStore {
  *  carries another owner and the row is theirs, so we must NOT
  *  reopen. A `sync` failure leaves an invisible local draft — undo it
  *  best-effort and rethrow: a claim that cannot be published must not
- *  pretend to exist. Backends without `sync` write through to the
- *  service already — skip the publish and verify by re-read. */
+ *  pretend to exist. A verify failure after a successful publish is
+ *  the same shape one step later — pull the claim back best-effort
+ *  (reopen + republish) so the shared head never keeps an orphaned
+ *  assignee, then rethrow. Backends without `sync` write through to
+ *  the service already — skip the publish and verify by re-read. */
 export function claimRemote(ts: TaskStore, id: string): boolean {
   ts.claim(id);
-  if (ts.sync !== undefined) {
-    try {
-      ts.sync();
-    } catch (err) {
-      try {
-        ts.reopen(id);
-      } catch {
-        /* the sync error is the verdict, not the undo */
-      }
-      throw err;
-    }
+  if (ts.sync === undefined) {
+    return wonRow(ts, ts.get(id));
   }
-  const row = ts.get(id);
+  try {
+    ts.sync();
+  } catch (err) {
+    undoClaim(ts, id, false);
+    throw err;
+  }
+  try {
+    return wonRow(ts, ts.get(id));
+  } catch (err) {
+    undoClaim(ts, id, true);
+    throw err;
+  }
+}
+
+/** Undo a claim we can no longer stand behind — best-effort: the
+ *  original error is the verdict, never the undo's. `published` also
+ *  re-syncs so the undo reaches the shared head; a republish may
+ *  itself race the merged row (bd merge semantics, spec non-goal),
+ *  but an orphaned assignee on the head is the worse outcome. */
+function undoClaim(ts: TaskStore, id: string, published: boolean): void {
+  try {
+    ts.reopen(id);
+    if (published) {
+      ts.sync?.();
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** The merged head's verdict on our claim. */
+function wonRow(ts: TaskStore, row: TaskRow | undefined): boolean {
   if (row === undefined) {
     return false;
   }
