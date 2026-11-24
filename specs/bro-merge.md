@@ -33,14 +33,19 @@ bro merge <PR> [--squash|--merge|--rebase] [--bead ID] [--no-retro]
    does not write fixes — the calling agent (or a fixer) owns
    remediation. The command is re-entrant: every finished phase is a
    no-op on re-run, so `bro merge` after fixing resumes, never restarts.
-4. **green → automerge.** `enableAutoMerge` on the host for the strategy
-   given. Hosts without auto-merge fall back to the pinned direct merge
-   (`mergePr` with `expectedHeadSha` — the sha the gate evaluated, never
-   a newer head) with a warn line.
+4. **green → pinned direct merge.** `mergePr` with `expectedHeadSha` —
+   the sha the gate evaluated, never a newer head — lands while the
+   gate proof is fresh, leaving no window for post-arm threads. A
+   refused direct merge (auto-merge-only repos, host quirks) falls
+   back to `enableAutoMerge` for the strategy given; a configured
+   external merge queue owns the landing outright.
 5. **settle** — the same poll loop runs until MERGED, CLOSED, or
-   `--timeout`. `--detach` is deferred: `act wait --merge --detach`
-   already covers the backgroundable shape; merge gains detach when a
-   real need appears.
+   `--timeout`. While auto-merge is armed, each poll re-reads the
+   thread set: threads posted after arming disarm `--auto`
+   (`gh pr merge --disable-auto`) and re-enter the gate — the armed
+   path can never land blind to a new finding. `--detach` is
+   deferred: `act wait --merge --detach` already covers the
+   backgroundable shape; merge gains detach when a real need appears.
 6. **retro** — on MERGED, the cycle's evidence becomes a
    `retrospect record`: resolved thread titles, blockers observed during
    the run, fix rounds, elapsed time, plus one `sink: backlog` action
@@ -61,15 +66,18 @@ bro merge <PR> [--squash|--merge|--rebase] [--bead ID] [--no-retro]
 
 ## Non-negotiables
 
-- **The gate is the merge precondition.** Every merge path — automerge
-  or pinned fallback — lands only after `evaluateExitGate` returns
-  `blockers: []` on the head being merged. A head that moved since the
-  gate ran fails closed (`expectedHeadSha`), same as `landPr`.
+- **The gate is the merge precondition.** Every merge path — direct
+  pinned or armed auto-merge — lands only after `evaluateExitGate`
+  returns `blockers: []` on the head being merged. A head that moved
+  since the gate ran fails closed (`expectedHeadSha`), same as
+  `landPr`, and threads arriving after an arm re-open the gate
+  instead of landing with it.
 - **Human-owned PRs warn, not block** — `prOwnership`, same as `act`.
 - **Idempotent phases.** Re-running `bro merge` on a ready, green, or
   already-merging PR must not repeat a side effect.
 - **Host calls fail loud** — the host's own error text reaches stderr;
-  no silent fallbacks except the documented automerge→pinned-merge one.
+  no silent fallbacks except the documented direct-merge→auto-merge
+  one.
 - **Infra failures don't block** — an unreachable retro store, a failed
   marker write, or a dead wake source warn and continue; the merge
   verdict is the contract.
