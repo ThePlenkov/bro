@@ -149,6 +149,19 @@ describe('bro debt import e2e', () => {
     });
   });
 
+  test('a positional escaping the repo root is refused', () => {
+    const { root, main } = fixture();
+    inside(main, root, () => {
+      // ../outside.sarif resolves outside the checkout — importing it
+      // would pull arbitrary file contents into the synced ledger
+      writeFileSync(join(root, 'outside.sarif'), SARIF([RES('r1', 'm', 'f.ts')]));
+      const r = runCli(['debt', 'import', '../outside.sarif', '--repo', 'a/b'], { cwd: main });
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /outside the repo root/);
+      assert.equal(harvestRows(main).length, 0);
+    });
+  });
+
   test('repo identity falls back to the origin remote', () => {
     const { root, main } = fixture();
     inside(main, root, () => {

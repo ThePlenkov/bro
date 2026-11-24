@@ -9,7 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   dataRefCommit,
   dataRefPush,
@@ -1443,11 +1443,19 @@ function resolveImportRepo(flag: string | undefined, root: string): string {
 }
 
 /** Positional must be a readable file — a directory is a usage error
- *  pointing at the dir-scan; an unreadable path is a hard failure. */
+ *  pointing at the dir-scan; an unreadable path is a hard failure.
+ *  The resolved path must stay inside the repo root — an escaping
+ *  positional would import arbitrary file contents into the ledger. */
 function assertImportableFile(root: string, f: string): void {
+  const abs = resolve(root, f);
+  const rel = relative(root, abs);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    console.error(`error: ${f} resolves outside the repo root`);
+    process.exit(2);
+  }
   let st: ReturnType<typeof statSync>;
   try {
-    st = statSync(resolve(root, f));
+    st = statSync(abs);
   } catch (err) {
     console.error(`error: cannot read ${f} — ${err instanceof Error ? err.message : err}`);
     process.exit(1);
