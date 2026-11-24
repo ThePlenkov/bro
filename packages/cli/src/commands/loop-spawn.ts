@@ -84,8 +84,8 @@ export function spawnAgent(
     let logFd: number | null = null;
     if (log !== null) {
       try {
-        mkdirPrivateSync(dirname(log));
-        logFd = openPrivateAppendSync(log);
+        mkdirPrivateSync({ path: dirname(log) });
+        logFd = openPrivateAppendSync({ path: log });
       } catch {
         logFd = null;
       }

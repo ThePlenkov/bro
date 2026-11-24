@@ -118,7 +118,7 @@ export function writeStateFile(path: string, state: ServeState): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   rmSync(tmp, { force: true });
-  writePrivateFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+  writePrivateFileSync({ path: tmp, data: `${JSON.stringify(state, null, 2)}\n` });
   renameSync(tmp, path);
 }
 

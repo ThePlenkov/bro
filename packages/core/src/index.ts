@@ -784,6 +784,9 @@ export {
   openPrivateAppendSync,
   PRIVATE_DIR_MODE,
   PRIVATE_FILE_MODE,
+  type PrivateFileData,
+  type PrivateFileWrite,
+  type PrivatePath,
   writePrivateFileSync,
 } from './private-files.ts';
 export {

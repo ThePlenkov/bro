@@ -93,9 +93,9 @@ function outboxNeedsNewline(path: string): boolean {
 function appendOutbox(path: string, row: OutboxRow): void {
   // owner-only like the agents registry — the intents name decisions,
   // beads and verdicts (the same privacy plane the spec draws)
-  mkdirPrivateSync(dirname(path));
+  mkdirPrivateSync({ path: dirname(path) });
   const prefix = outboxNeedsNewline(path) ? '\n' : '';
-  appendPrivateFileSync(path, `${prefix}${JSON.stringify(row)}\n`);
+  appendPrivateFileSync({ path: path, data: `${prefix}${JSON.stringify(row)}\n` });
 }
 
 function readOutbox(path: string): { intents: OutcomeIntent[]; delivered: Set<string> } {
