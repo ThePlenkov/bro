@@ -823,16 +823,18 @@ describe('mainWorktreeRoot', () => {
 
   test('a bare repo is no anchor — worktree list reports bare, answer is null', () => {
     const root = mkdtempSync(join(tmpdir(), 'bro-git-bare-'));
+    const source = makeRepo();
     const linked = mkdtempSync(join(tmpdir(), 'bro-git-barew-'));
     try {
       const bare = join(root, 'repo.git');
-      git(root, ['init', '-q', '--bare', '-b', 'main', bare]);
+      git(root, ['clone', '--bare', source, bare]);
       git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare']);
       // from the linked checkout: no main worktree exists, so null —
       // the caller keeps its own dir rather than anchoring to git storage
       assert.equal(mainWorktreeRoot(linked), null);
     } finally {
       rmSync(root, { recursive: true, force: true });
+      rmSync(source, { recursive: true, force: true });
       rmSync(linked, { recursive: true, force: true });
     }
   });
@@ -870,15 +872,17 @@ describe('gitWorktreeRoots', () => {
 
   test('a bare repo record is dropped, its linked worktrees kept', () => {
     const root = mkdtempSync(join(tmpdir(), 'bro-git-rootbare-'));
+    const source = makeRepo();
     const linked = mkdtempSync(join(tmpdir(), 'bro-git-rootbarew-'));
     try {
       const bare = join(root, 'repo.git');
-      git(root, ['init', '-q', '--bare', '-b', 'main', bare]);
+      git(root, ['clone', '--bare', source, bare]);
       git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare']);
       assert.deepEqual(gitWorktreeRoots(bare), [linked]);
       assert.deepEqual(gitWorktreeRoots(linked), [linked]);
     } finally {
       rmSync(root, { recursive: true, force: true });
+      rmSync(source, { recursive: true, force: true });
       rmSync(linked, { recursive: true, force: true });
     }
   });

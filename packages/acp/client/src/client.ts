@@ -200,6 +200,7 @@ export interface QueuedPrompt {
  * turn ends.
  */
 export class AcpClient {
+  private readonly opts: AcpClientOptions;
   private child: ChildProcess | undefined;
   private nextId = 1;
   private readonly pending = new Map<
@@ -218,7 +219,9 @@ export class AcpClient {
   private turnTimer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
 
-  constructor(private readonly opts: AcpClientOptions) {}
+  constructor(opts: AcpClientOptions) {
+    this.opts = opts;
+  }
 
   /** The client's state — a UI renders this, never guesses it. */
   get status(): ClientState {

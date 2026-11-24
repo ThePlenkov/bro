@@ -41,5 +41,5 @@ anything else that matched is left as a prompt.
 
 A chained command (`bro act status && …`) is not auto-approved.
 
-Requires Node ≥ 22.18. The hook resolves a built checkout, then `bro` on
+Requires Node ≥ 26.13. The hook resolves a built checkout, then `bro` on
 PATH, then `npx -y @broject/bro@0.3.0`.

@@ -4928,8 +4928,10 @@ export type SpawnAbandonAt = 'reservation' | 'os-spawn' | 'publication';
  *  real crash leaves behind. */
 export class SpawnAbandoned extends Error {
   override name = 'SpawnAbandoned';
-  constructor(readonly at: SpawnAbandonAt) {
+  readonly at: SpawnAbandonAt;
+  constructor(at: SpawnAbandonAt) {
     super(`spawn abandoned at ${at} (test seam)`);
+    this.at = at;
   }
 }
 

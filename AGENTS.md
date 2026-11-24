@@ -136,7 +136,7 @@ Developing bro itself: see CONTRIBUTING.md.
   fix here. And never iterate by pushing and waiting for the App's
   verdict: `npm run check:codescene` runs the same `cs delta` locally
   and lists every finding in one pass — fix them all, then push once.
-- **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
+- **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥26.13 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).
 - **Plugin-shaped growth** — each capability ships as a CLI subcommand +
@@ -355,7 +355,7 @@ nohup: an unregistered worker has no claim, no `.exit` record, no
 
 ## Cursor Cloud specific instructions
 
-- **Node on PATH:** the platform shim may expose Node <22.18. `scripts/cloud-agent-install.sh` installs Node ≥22.18 into `/usr/local/bin` but cannot change the calling shell's PATH — run `export PATH="/usr/local/bin:$PATH"` in your current shell before `node`, `npm`, or `bro`.
+- **Node on PATH:** the platform shim may expose Node <26.13. `scripts/cloud-agent-install.sh` installs Node ≥26.13 into `/usr/local/bin` but cannot change the calling shell's PATH — run `export PATH="/usr/local/bin:$PATH"` in your current shell before `node`, `npm`, or `bro`.
 - **Bootstrap:** `bash scripts/cloud-agent-install.sh` (same as `.cursor/environment.json` `install`) — `npm ci`, checksum-verified `bd` binary into `/usr/local/bin` when missing.
 - **Verify like CI:** `npm run build`, `npm run typecheck`, `npm test` (root `package.json`; matches `.github/workflows/ci.yml` plus `check:plugins` / `check:embedded`).
 - **Smoke the CLI:** after build, `./packages/cli/dist/index.js doctor` and `./packages/cli/dist/index.js debt status` (needs `gh` authenticated).

@@ -20,7 +20,7 @@ claim, the analyst's verdict.
 
 ## Coverage notes
 
-- **Hermetic suites** (fake acp peer, `tsx --test`):
+- **Hermetic suites** (fake acp peer, `node --test`):
   `serve-conductor.test.ts` — anthropic plane + retention;
   `serve-conductor-openai.test.ts` — both OpenAI dialects
   (responses + chat/completions); anthropic feature-gap cases
