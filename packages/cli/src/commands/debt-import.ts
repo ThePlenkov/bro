@@ -3,7 +3,7 @@
  *  past the CodeScene file-size bar. */
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { gitTry, normalizeRemote, remoteUrl, resolveRepo } from '@broject/core';
 import {
   importSarifFiles,
@@ -50,7 +50,9 @@ function resolveImportRepo(flag: string | undefined, root: string): string {
  *  pointing at the dir-scan; an unreadable path is a hard failure.
  *  The canonical path must stay inside the canonical repo root — a
  *  lexical check alone is symlink-blind, and an escaping positional
- *  would import arbitrary file contents into the ledger. */
+ *  would import arbitrary file contents into the ledger. `..` is a
+ *  path segment test, not a prefix: a file literally named
+ *  `..ids.sarif` inside the root is legitimate. */
 function assertImportableFile(root: string, f: string): void {
   let st: ReturnType<typeof statSync>;
   try {
@@ -66,7 +68,7 @@ function assertImportableFile(root: string, f: string): void {
     process.exit(2);
   }
   const rel = relative(realpathSync(root), realpathSync(f));
-  if (rel.startsWith('..') || isAbsolute(rel)) {
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     console.error(`error: ${f} resolves outside the repo root`);
     process.exit(2);
   }
