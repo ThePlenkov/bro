@@ -701,6 +701,7 @@ describe('gascity connector', () => {
       return {
         status: result.status,
         stdout: (result.stdout || '').trim().slice(0, 500),
+        stdoutFull: (result.stdout || '').trim(),
         stderr: (result.stderr || '').trim().slice(0, 500),
       };
     };
@@ -713,7 +714,7 @@ describe('gascity connector', () => {
       let ok = result.status === 0;
       if (ok && expectJson !== undefined) {
         try {
-          ok = expectJson(JSON.parse(result.stdout));
+          ok = expectJson(JSON.parse(result.stdoutFull));
         } catch {
           ok = false;
         }
