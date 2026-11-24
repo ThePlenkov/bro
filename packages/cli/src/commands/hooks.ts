@@ -2828,21 +2828,11 @@ function emitPreToolDeny(reason: string): void {
  *  the call runs untouched (fail-open, like every hook). */
 async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-  const deadLoopBlock = deadLoopPreTool(process.cwd(), sessionId, input);
-  if (deadLoopBlock !== null) {
-    emitPreToolDeny(deadLoopBlock);
-    return;
-  }
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
-  // the waste-guard runs before connector verdicts — a deterministic
-  // duplicate/unchanged-verify veto costs no model call (spec
-  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls.
-  // pre-tool only checks — the marker commit lands at post-tool, so a
-  // call vetoed here or below can never shadow its own retry
-  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput });
-  if (wasteBlock !== undefined) {
-    emitPreToolDeny(wasteBlock);
+  const earlyBlock = preToolEarlyBlock(sessionId, input, tool, toolInput);
+  if (earlyBlock !== null) {
+    emitPreToolDeny(earlyBlock);
     return;
   }
   const verdicts = await preToolVerdicts(
@@ -2855,6 +2845,23 @@ async function emitPreTool(input: HookInput): Promise<void> {
     emitPreToolDeny(block);
     return;
   }
+  emitPreToolAdvisories(input, verdicts);
+}
+
+function preToolEarlyBlock(
+  sessionId: string,
+  input: HookInput,
+  tool: string,
+  toolInput: Record<string, unknown>
+): string | null {
+  const deadLoopBlock = deadLoopPreTool(process.cwd(), sessionId, input);
+  if (deadLoopBlock !== null) return deadLoopBlock;
+  // The waste guard runs before connector verdicts: a deterministic
+  // duplicate veto costs no model call and fails open on state errors.
+  return wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput }) ?? null;
+}
+
+function emitPreToolAdvisories(input: HookInput, verdicts: PreToolVerdict[]): void {
   const merged: Record<string, unknown> = {};
   for (const v of verdicts) {
     if (v.input !== undefined) {

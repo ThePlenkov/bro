@@ -145,15 +145,8 @@ export function run(
   const cwd = opts.cwd ?? process.cwd();
   const env = { ...(opts.env ?? process.env), PWD: cwd };
   return new Promise(resolve => {
-    const child = spawn(cmd, args, {
-      cwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      // own process group so the timeout kill takes grandchildren
-      // (bd/dolt/gh a hook may spawn) down with the child
-      detached: process.platform !== 'win32',
-    });
+    const child = spawnChild(cmd, args, cwd, env);
+
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -186,6 +179,16 @@ export function run(
     child.on('close', code => finish(code));
     child.stdin.on('error', () => {});
     child.stdin.end(opts.input ?? '');
+  });
+}
+
+function spawnChild(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) {
+  return spawn(cmd, args, {
+    cwd,
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+    detached: process.platform !== 'win32',
   });
 }
 
