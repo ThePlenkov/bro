@@ -522,13 +522,35 @@ const beadsConnector: Connector = {
         // the close verb belongs to the SERVING backend — a zero-install
         // rig has no bd, so naming it would leave the gate un-clearable
         const verb = name === 'beads' ? '`bd close <id>`' : '`bro task close <id>`';
+        // a claimed bead with an unmerged PR closes through the landing,
+        // not by hand — surface the exact wiring so the correct path is
+        // the easiest one to run (bro-tw20r). The probe is one light
+        // host call, and only when an OWN claim blocks the stop at all
+        // (kilo on #1194); the generic close-or-release stays the
+        // fallback for bead-only work
         const out: GateContribution[] = [];
         if (own.length > 0) {
+          let wiring = '';
+          try {
+            const rev = reviewHost(ctx.dir, loadConfig(ctx.dir).connectors);
+            const cur =
+              rev.currentPrAsync === undefined
+                ? await Promise.resolve(rev.currentPr())
+                : await rev.currentPrAsync();
+            if (cur && cur.state === 'OPEN' && own[0].id !== undefined) {
+              wiring =
+                ` — or wire the landing: \`bro act wait ${cur.pr} --bead ${own[0].id} --merge --cleanup\` ` +
+                '(the bead closes when the commits land, never at handoff)';
+            }
+          } catch {
+            // probe failure must never invent a blocker cost — the generic
+            // close-or-release tail already covers the stop
+          }
           out.push({
             aspect: 'task',
             block:
               `bro: claimed beads open: ${own.slice(0, 5).map(fmt).join(', ')} — ` +
-              `close (${verb}) or release the claim before stopping`,
+              `close (${verb}) or release the claim before stopping${wiring}`,
           });
         }
         if (foreign.length > 0) {
