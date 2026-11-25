@@ -44,10 +44,12 @@ genuine hourly budget re-burn.
   bare seconds (a protocol value, not fuzzy prose).
 - New `clockReset` extractor for the quoted clock mark — `at
   HH:MM(:SS)?` with optional `UTC`/`GMT`/`Z` zone (absent → UTC; bro
-  stamps UTC everywhere). It runs FIRST in `parseResetAt`: the clock
-  mark is authoritative over the same message's "in N minutes"
-  paraphrase. A mark followed by a `YYYY-MM-DD` date is left to
-  `isoReset` (already exact).
+  stamps UTC everywhere). It runs after the exact forms
+  (`retry-after`, HTTP-date, `isoReset`, `epochReset` — protocol-exact
+  values win) and BEFORE `relReset` in `parseResetAt`: the clock mark is
+  authoritative over the same message's "in N minutes" paraphrase. A
+  mark followed by a `YYYY-MM-DD` date is left to `isoReset` (already
+  exact).
 - Day-ambiguous marks resolve to the NEAREST of yesterday's/today's/
   tomorrow's occurrence at `now` — a previous-evening mark resolves to
   yesterday: a mark already past reads as the lifted wall —
