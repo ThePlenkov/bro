@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { rowVerdict } from './verdict.ts';
+import { eventsVerdict, rowVerdict } from './verdict.ts';
 
 test('an auto-approved permission row is idle, not blocked', () => {
   assert.deepEqual(
@@ -30,4 +30,22 @@ test('a denied permission row remains blocked', () => {
       mode: 'permission — denied · since 01 Jan 12:00',
     }
   );
+});
+
+test('an archive with no row preserves an unknown worker verdict', () => {
+  assert.deepEqual(eventsVerdict({ state: 'unknown' }, undefined), {
+    led: { state: 'unknown' },
+    mode: 'session events',
+  });
+});
+
+test('an archive with no row preserves a proven worker verdict', () => {
+  assert.deepEqual(eventsVerdict({ state: 'working' }, undefined), {
+    led: { state: 'working' },
+    mode: 'session events',
+  });
+  assert.deepEqual(eventsVerdict({ state: 'idle' }, undefined), {
+    led: { state: 'idle' },
+    mode: 'session events',
+  });
 });

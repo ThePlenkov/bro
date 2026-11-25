@@ -71,7 +71,10 @@ export function eventsVerdict(
   }
   if (row !== undefined) return { led: row.led, mode: row.mode };
   return {
-    led: { state: workerLed.state === 'working' ? 'working' : 'idle' },
+    // No archive row is evidence of nothing. In particular, an unknown
+    // worker must not be presented as cleanly idle just because the
+    // archive has not produced a verdict yet.
+    led: { state: workerLed.state },
     mode: 'session events',
   };
 }
