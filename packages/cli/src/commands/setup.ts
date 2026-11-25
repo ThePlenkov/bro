@@ -554,6 +554,17 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   // so re-reading it would make that new hash the expected value and
   // silently advance the lock instead of reporting drift.
   const drift = checkSkillLock(locked, { skillsDir });
+  if (dryRun) {
+    // the spec's dry-run contract: name EVERY locked skill, its source,
+    // and whether the installed copy matches — a bare count or the
+    // drifted subset never says what would be installed (bro-53bp9)
+    const drifted = new Map(drift.map(d => [d.name, d.kind]));
+    for (const skill of locked.values()) {
+      const state = drifted.get(skill.name) ?? 'matches';
+      console.error(`  would install ${skill.name} (${skill.source}) — installed copy: ${state}`);
+    }
+    return;
+  }
   reportSkillDrift(locked, drift);
 }
 
