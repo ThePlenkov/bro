@@ -85,6 +85,7 @@ import { runLearnCommand } from './commands/learn.ts';
 import { runLoopCommand } from './commands/loop.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runMergeCommand } from './commands/merge.ts';
+import { runTestCommand } from './commands/test.ts';
 import { runMeshCommand } from './commands/mesh.ts';
 import { runModeCommand } from './commands/mode.ts';
 import { runMsgCommand } from './commands/msg.ts';
@@ -274,6 +275,22 @@ export const PLUGINS: BroPlugin[] = [
         0: 'MERGED — cycle complete',
         1: 'blocked gate, closed-unmerged PR, timeout, or merge failure',
         2: 'usage',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'test',
+    group: 'flow',
+    summary: 'Scoped dev-side test lane — substring filters over the tsx harness (bro-6xjvb)',
+    run: argv => runTestCommand(argv),
+    contract: {
+      flags: {
+        '--e2e': 'include the process-spawning e2e files in the selectable inventory',
+      },
+      exits: {
+        0: 'selected tests passed',
+        1: 'a selected test failed',
+        2: 'usage — no filter, or no file matches',
       },
     },
   }),
