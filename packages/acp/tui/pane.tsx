@@ -163,6 +163,45 @@ function findToolVi(store: PaneStore, toolCallId: string): unknown {
   return undefined;
 }
 
+/** The `Jump to latest ↓` chip — shows only while the scrollback
+ *  sits off the bottom. */
+function FollowChip(props: {
+  atBottom: () => boolean;
+  scroller: () => ScrollBoxRenderable | undefined;
+}) {
+  return (
+    <Show when={!props.atBottom()}>
+      <JumpChip onJump={() => props.scroller()?.scrollTo?.(Infinity)} />
+    </Show>
+  );
+}
+
+/** The composer's strip — unset keeps the pane read-only. */
+function ComposerStrip(props: { composer?: ComposerProps }) {
+  return (
+    <Show when={props.composer !== undefined}>
+      <ComposerBar {...(props.composer as ComposerProps)} />
+    </Show>
+  );
+}
+
+/** Follow-the-bottom wiring — the scroller ref, the animation-tick
+ *  frame counter, and the `atBottom` probe the Jump chip and the
+ *  feed's autoscroll both read. */
+function useFollowScroller() {
+  const [frame, setFrame] = createSignal(0);
+  onAnimationTick(10, () => setFrame(f => f + 1));
+  const [scroller, setScroller] = createSignal<ScrollBoxRenderable>();
+  /** off-bottom → their `Jump to latest ↓` chip shows */
+  const atBottom = () => {
+    frame();
+    const s = scroller();
+    if (s === undefined || s.scrollHeight === undefined) return true;
+    return s.scrollTop + s.height >= s.scrollHeight - 1;
+  };
+  return { frame, setFrame, scroller, setScroller, atBottom };
+}
+
 /** The whole pane — header bar, the sticky-bottom scrollback of
  *  session items, footer. */
 export function PaneView(props: {
@@ -179,16 +218,8 @@ export function PaneView(props: {
   composer?: ComposerProps;
 }) {
   useRenderer();
-  const [frame, setFrame] = createSignal(0);
-  onAnimationTick(10, () => setFrame(f => f + 1));
-  const [scroller, setScroller] = createSignal<ScrollBoxRenderable>();
-  /** off-bottom → their `Jump to latest ↓` chip shows */
-  const atBottom = () => {
-    frame();
-    const s = scroller();
-    if (s === undefined || s.scrollHeight === undefined) return true;
-    return s.scrollTop + s.height >= s.scrollHeight - 1;
-  };
+  const follow = useFollowScroller();
+  const { frame, setFrame, scroller, setScroller, atBottom } = follow;
   /** permission rows name their tool — look the call up by id. */
   const findTool = (toolCallId: string): unknown => findToolVi(props.store, toolCallId);
   return (
@@ -213,14 +244,10 @@ export function PaneView(props: {
         }}
         onToggleRow={props.onToggleRow}
       />
-      <Show when={!atBottom()}>
-        <JumpChip onJump={() => scroller()?.scrollTo?.(Infinity)} />
-      </Show>
+      <FollowChip atBottom={atBottom} scroller={scroller} />
       {/* identity + keys — pinned at the bottom, OUTSIDE the scrollbox,
        *  so they never move while the feed scrolls */}
-      <Show when={props.composer !== undefined}>
-        <ComposerBar {...(props.composer as ComposerProps)} />
-      </Show>
+      <ComposerStrip composer={props.composer} />
       <HeaderBar meta={props.store.state.meta} />
       <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>
