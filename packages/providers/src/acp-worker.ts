@@ -385,12 +385,25 @@ async function openSession(
               cwd: spec.cwd,
               mcpServers: mcpServers as never,
             });
-        log(`resumes session ${resumeId}`);
-        return attachSession(ctx, {
-          sessionId: resumeId,
-          modes: res.modes,
-          configOptions: res.configOptions,
-        });
+        // a requested model must be pinnable on the reopened session —
+        // the load response is its only config-option source, so a
+        // resume without a model option would throw the unpinned-model
+        // refusal AFTER openSession, past the cold fallback this
+        // function documents. Route that case to the cold path here:
+        // the fresh session's own configOptions face the same check.
+        const modelOption = (res.configOptions ?? []).find(o => o.category === 'model');
+        if (spec.model !== undefined && modelOption === undefined) {
+          log(
+            `session ${resumeId} resumed but advertises no model config option — cannot pin '${spec.model}'; starting a fresh session (mcpServers forwarded)`
+          );
+        } else {
+          log(`resumes session ${resumeId}`);
+          return attachSession(ctx, {
+            sessionId: resumeId,
+            modes: res.modes,
+            configOptions: res.configOptions,
+          });
+        }
       } catch (err) {
         log(
           `session ${resumeId} resume failed — ${safeErrMsg(err, mcpServers)}; starting a fresh session (mcpServers forwarded)`
@@ -407,7 +420,9 @@ async function openSession(
     .start()
     .catch((err: unknown) => {
       const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
-      throw new AcpWorkerError(`${by}: agent refused session${hint} — ${safeErrMsg(err, mcpServers)}`);
+      throw new AcpWorkerError(
+        `${by}: agent refused session${hint} — ${safeErrMsg(err, mcpServers)}`
+      );
     });
 }
 
@@ -607,7 +622,9 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
             value: spec.model,
           })
           .catch((err: unknown) => {
-            throw new AcpWorkerError(`${by}: agent refused model '${spec.model}' — ${safeErrMsg(err, diagnosticMcpServers)}`);
+            throw new AcpWorkerError(
+              `${by}: agent refused model '${spec.model}' — ${safeErrMsg(err, diagnosticMcpServers)}`
+            );
           });
         const served = res.configOptions?.find(o => o.id === modelOpt.id)?.currentValue;
         const reported = typeof served === 'string' ? served : spec.model;
@@ -678,7 +695,10 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       });
       return r.stopReason === 'end_turn' ? 0 : 1;
     } catch (err) {
-      endSess({ 'acp.session_id': session.sessionId, error: safeErrMsg(err, diagnosticMcpServers) }, 'error');
+      endSess(
+        { 'acp.session_id': session.sessionId, error: safeErrMsg(err, diagnosticMcpServers) },
+        'error'
+      );
       endTurn(
         {
           'acp.session_id': session.sessionId,
