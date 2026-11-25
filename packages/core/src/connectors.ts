@@ -534,7 +534,7 @@ const beadsConnector: Connector = {
             rev.currentPrAsync === undefined
               ? await Promise.resolve(rev.currentPr())
               : await rev.currentPrAsync();
-          if (cur && cur.state === 'OPEN') {
+          if (cur && cur.state === 'OPEN' && own.length > 0 && own[0].id !== undefined) {
             wiring =
               ` — or wire the landing: \`bro act wait ${cur.pr} --bead ${own[0].id} --merge --cleanup\` ` +
               '(the bead closes when the commits land, never at handoff)';
