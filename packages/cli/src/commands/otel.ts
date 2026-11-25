@@ -11,7 +11,15 @@
  *                              (telemetry is operator config — the toggle
  *                              lands local, never the committed file)
  */
-import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { CommandError, EXIT, gitBin, hasHelpFlag, type ExitCode } from '@broject/core';
@@ -76,9 +84,17 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
   // (bro-mrc4n). .gitignore normally keeps it untracked; a force-added
   // file is operator error, not a state to write into.
   try {
+    // scrub the ambient git pins — an inherited GIT_DIR/GIT_WORK_TREE
+    // would point ls-files at another repository and let a tracked
+    // config slip the check (PR #1212 review)
+    const env = { ...process.env };
+    delete env.GIT_DIR;
+    delete env.GIT_WORK_TREE;
+    delete env.GIT_INDEX_FILE;
     execFileSync(gitBin(), ['ls-files', '--error-unmatch', 'bro.config.local.json'], {
       cwd: dir,
       stdio: 'pipe',
+      env,
     });
     throw new CommandError(
       'error: bro.config.local.json is tracked in git — the trust policy cannot arm telemetry from a committed layer; untrack it (git rm --cached) or edit the committed config directly',
@@ -108,14 +124,19 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
   // mid-write crash; operator config loses every sibling section.
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
-  // preserve the existing file's mode across the rename — exporter
-  // headers can carry tokens, and a fresh tempfile wears the umask
-  // default (0644 under 022), silently widening a 0600 config
-  // (bro-kztfl)
-  if (existsSync(path)) {
-    chmodSync(tmp, statSync(path).mode & 0o777);
+  try {
+    // preserve the existing file's mode across the rename — exporter
+    // headers can carry tokens, and a fresh tempfile wears the umask
+    // default (0644 under 022), silently widening a 0600 config
+    // (bro-kztfl)
+    if (existsSync(path)) {
+      chmodSync(tmp, statSync(path).mode & 0o777);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
   }
-  renameSync(tmp, path);
   console.log(`otel.enabled=${enabled} → ${path}`);
 }
 
