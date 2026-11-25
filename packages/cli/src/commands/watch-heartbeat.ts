@@ -74,21 +74,25 @@ interface RawHeartbeat {
  *  pieces a summary needs. Null on any malformation — a corrupt
  *  heartbeat reads the same as none. */
 function parseHeartbeat(file: string): RawHeartbeat | null {
-  let raw: { ts?: unknown; attention?: unknown; clock?: { skewed?: unknown } };
+  let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(file, 'utf8'));
   } catch {
     return null;
   }
-  const ms = typeof raw.ts === 'string' ? Date.parse(raw.ts) : Number.NaN;
-  if (!Number.isFinite(ms) || !Array.isArray(raw.attention)) {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const obj = raw as { ts?: unknown; attention?: unknown; clock?: { skewed?: unknown } };
+  const ms = typeof obj.ts === 'string' ? Date.parse(obj.ts) : Number.NaN;
+  if (!Number.isFinite(ms) || !Array.isArray(obj.attention)) {
     return null;
   }
   return {
-    ts: raw.ts as string,
+    ts: obj.ts as string,
     ms,
-    attention: raw.attention.length,
-    writerSkewed: raw.clock?.skewed === true,
+    attention: obj.attention.length,
+    writerSkewed: obj.clock?.skewed === true,
   };
 }
 
