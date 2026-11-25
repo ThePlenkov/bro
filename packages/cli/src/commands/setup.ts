@@ -585,7 +585,11 @@ function installLockedSkillsPreservingLock(dir: string, locked: Map<string, Lock
     return;
   }
   try {
-    writeFileSync(lockPath, originalLock);
+    // tmp+rename — an interrupted direct write would leave a torn lockfile,
+    // and a torn lock is worse than the installer's rewrite it replaces
+    const tmpLock = `${lockPath}.tmp-${process.pid}`;
+    writeFileSync(tmpLock, originalLock);
+    renameSync(tmpLock, lockPath);
   } catch {
     // best-effort — see the doc comment
   }
