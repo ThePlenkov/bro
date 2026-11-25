@@ -600,12 +600,16 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
       // entries whose name/source fail the install-time SKILL_ARG guard are
       // skipped; a drifted copy is KEPT, not replaced — the install path
       // refuses to clobber drift (bro-emlsg), so the dry-run verb must say so
+      // precedence mirrors the real install path: the drift-keep happens
+      // BEFORE the SKILL_ARG guard ever runs — a drifted copy is kept even
+      // when its lock entry would also fail validation
       const valid = SKILL_ARG.test(skill.source) && SKILL_ARG.test(skill.name);
-      const verb = !valid
-        ? 'would skip (invalid name/source)'
-        : state === 'drifted'
+      const verb =
+        state === 'drifted'
           ? 'would keep (drifted — not replaced)'
-          : 'would install';
+          : !valid
+            ? 'would skip (invalid name/source)'
+            : 'would install';
       console.error(`  ${verb} ${skill.name} (${skill.source}) — installed copy: ${state}`);
     }
     return;
