@@ -973,6 +973,28 @@ function installModeBridges(pi, source) {
 		const ids = running.map((a) => a.id ?? "?");
 		return { additionalContext: `bro: ${running.length} worker(s) already running (${ids.join(", ")}) — claim a bead before editing, so two workers never touch one unit of work.` };
 	});
+	/**
+	* Prewalk and Advisor do not expose separate omp extension events. Their
+	* real shared seam is prompt submission: return a hidden context message
+	* there rather than inventing model-handoff/advisor event names.
+	*/
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (source.modeContext === void 0) return;
+		let results;
+		try {
+			results = await Promise.all([source.modeContext("prewalk", ctx.cwd), source.modeContext("advisor", ctx.cwd)]);
+		} catch {
+			return;
+		}
+		const [routing, debt] = results;
+		const parts = [routing, debt].filter((part) => part !== null && part.trim() !== "");
+		if (parts.length === 0) return;
+		return { message: {
+			customType: "bro-mode-context",
+			content: parts.join("\n\n"),
+			display: false
+		} };
+	});
 }
 
 //#endregion
@@ -1065,7 +1087,23 @@ function broExtension(pi) {
 	/** The mode bridges — bro's durable state handed to omp's native Plan,
 	*  Goal and Vibe modes. See omp-modes.ts for why bro adds state
 	*  rather than a second implementation of each mode. */
-	installModeBridges(pi, { board: () => driver.board });
+	installModeBridges(pi, {
+		board: () => driver.board,
+		async modeContext(kind, cwd) {
+			const args = kind === "prewalk" ? [
+				"fleet",
+				"status",
+				"--json"
+			] : [
+				"debt",
+				"next",
+				"--json"
+			];
+			const result = await driver.run(args, cwd);
+			if (result.code !== 0 || result.stdout.trim() === "") return null;
+			return `bro ${kind === "prewalk" ? "provider routing" : "review debt"} (read-only):\n${result.stdout.trim()}`;
+		}
+	});
 }
 /**
 * Adapter ownership sentinel — `bro plugins install|uninstall` refuses a
