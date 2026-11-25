@@ -4,7 +4,7 @@
  * the plugins/work imports the verbs need so any act module can pull it
  * in without closing a module cycle.
  */
-import { printUsage, type ExitCode, type PrTarget, type ReviewFacade } from '@broject/core';
+import { flag, printUsage, type ExitCode, type PrTarget, type ReviewFacade } from '@broject/core';
 
 export function usage(exitCode: ExitCode = 2): never {
   printUsage(
@@ -72,8 +72,11 @@ function prArgFrom(argv: string[]): string | null {
     }
     positional.push(arg);
   }
-  const prFlag = argv.indexOf('--pr');
-  return (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null;
+  // the shared flag parser — `--pr N` AND `--pr=N` spell the explicit
+  // target; indexOf('--pr') missed the `=` form and let a mutation fall
+  // through to the branch's PR (codeant on #1181). A bare `--pr` now
+  // fails as a usage error instead of silently dropping to implicit.
+  return flag(argv, '--pr') ?? positional[0] ?? null;
 }
 
 /** No explicit number — the current branch's OPEN PR, else the repo's

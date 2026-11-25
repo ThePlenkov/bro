@@ -258,7 +258,11 @@ export async function cmdMerge(argv: string[]): Promise<string | undefined> {
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
-      return mergeSettledState(ctx, state);
+      // awaited inside the slot — the harvest + outcome report must
+      // finish before finally releases it, or a second act merge on
+      // the same closed PR double-scans mid-harvest (pre-extraction
+      // ordering; coderabbit on #1181)
+      return await mergeSettledState(ctx, state);
     }
 
     const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
