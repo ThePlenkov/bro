@@ -598,6 +598,14 @@ describe('classifyExitCause', () => {
     // punctuation-separated wall words still reach billing — a colon is
     // a separator, not a wall between the keyword and its state
     assert.equal(classifyExitCause('billing: account disabled', 1).cause, 'quota');
+    // Vague billing states require a payment-domain object. A webhook
+    // missing an event id is an operational failure, not an account wall.
+    assert.equal(classifyExitCause('billing webhook missing event id', 1).cause, 'crash');
+    assert.equal(classifyExitCause('billing payment missing', 1).cause, 'quota');
+    assert.equal(classifyExitCause('invoice invalid for billing account', 1).cause, 'quota');
+    // Account information is also a billing wall even without a payment
+    // noun: the operator must repair the billing profile.
+    assert.equal(classifyExitCause('billing info missing', 1).cause, 'quota');
     assert.equal(classifyExitCause('401 Unauthorized: invalid api key', 1).cause, 'auth');
     assert.equal(classifyExitCause('token expired — not authenticated', 1).cause, 'auth');
     assert.equal(classifyExitCause('error: expired API key', 1).cause, 'auth');

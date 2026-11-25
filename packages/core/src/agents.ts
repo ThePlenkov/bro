@@ -80,9 +80,17 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
       /insufficient[_ ]?(?:credits?|funds?|balance)/i,
       // 'billing' only counts beside an account-wall word — a transient
       // billing-service error is a crash, not the quota block that only
-      // a manual `bro agents down` lifts
-      /\bbilling\b(?:\W+\w+){0,5}\W+\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
-      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b(?:\W+\w+){0,5}\W+\bbilling\b/i,
+      // a manual `bro agents down` lifts. Vague states need a payment
+      // object as well: a failed billing webhook must not become a wall,
+      // while "billing info missing" remains a real account wall.
+      /\bbilling\b(?:\W+\w+){0,5}\W+\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|inactiv\w*)/i,
+      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|inactiv\w*)\b(?:\W+\w+){0,5}\W+\bbilling\b/i,
+      /\bbilling\b(?:\W+\w+){0,5}\W+\b(?:missing|invalid)\b(?:\W+\w+){0,3}\W+\b(?:payment|invoice|subscription)\b/i,
+      /\bbilling\b(?:\W+\w+){0,5}\W+\b(?:payment|invoice|subscription)\b(?:\W+\w+){0,3}\W+\b(?:missing|invalid)\b/i,
+      /\b(?:missing|invalid)\b(?:\W+\w+){0,3}\W+\b(?:payment|invoice|subscription)\b(?:\W+\w+){0,5}\W+\bbilling\b/i,
+      /\b(?:payment|invoice|subscription)\b(?:\W+\w+){0,3}\W+\b(?:missing|invalid)\b(?:\W+\w+){0,5}\W+\bbilling\b/i,
+      /\bbilling\b(?:\W+\w+){0,5}\W+\binfo\b\W+\b(?:missing|invalid)\b/i,
+      /\b(?:missing|invalid)\b\W+\binfo\b(?:\W+\w+){0,5}\W+\bbilling\b/i,
       /out of (?:credits?|funds?)/i,
       /spend(?:ing)? limit/i,
       /(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
