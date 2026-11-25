@@ -335,7 +335,11 @@ describe('initBeadsStealth — shared store resolution (bro-mjlzp)', () => {
     const linked = join(base, 'linked');
     mkdirSync(main, { recursive: true });
     const git = (args: string[]): void => {
-      execFileSync('git', args, { cwd: main, stdio: 'pipe' });
+      // CI runners carry no identity — pin one per command, never global
+      execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@x', ...args], {
+        cwd: main,
+        stdio: 'pipe',
+      });
     };
     git(['init', '-q']);
     git(['commit', '-q', '--allow-empty', '-m', 'x']);
