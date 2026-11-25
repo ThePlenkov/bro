@@ -26,6 +26,7 @@ import { AcpLaneCooldown, otelJournal, type AcpTerminals } from '@broject/provid
 import {
   admitLaneCap,
   admitLaneCapUnlocked,
+  CATALOG_TTL_MS,
   conductorConfig,
   conductorProxy,
   parseReply,
@@ -4008,6 +4009,32 @@ describe('the catalog cache — one provider read, not one per request', () => {
       assert.deepEqual(snapshot.failures, []);
       assert.ok(fake.sessions.length > read, 'the reload reads the lanes again');
     } finally {
+      await close();
+    }
+  });
+
+  test('an expired merged catalog refreshes without making every read cold', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    );
+    const realNow = Date.now;
+    try {
+      const first = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(first.status, 200);
+      const readsBeforeExpiry = fake.sessions.length;
+      const fetchedAt = Number(first.headers.get('x-bro-catalog-fetched-at'));
+
+      Date.now = () => realNow() + CATALOG_TTL_MS + 1;
+      const refreshed = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(refreshed.status, 200);
+      assert.ok(fake.sessions.length > readsBeforeExpiry, 'expired catalog must refresh');
+      assert.ok(
+        Number(refreshed.headers.get('x-bro-catalog-fetched-at')) > fetchedAt,
+        'refresh must publish a new catalog timestamp'
+      );
+    } finally {
+      Date.now = realNow;
       await close();
     }
   });

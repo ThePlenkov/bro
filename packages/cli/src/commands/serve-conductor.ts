@@ -5553,7 +5553,7 @@ interface LaneCatalog {
  *  collapse to one per window. Deliberately short: the catalog is live
  *  data (the agent's own model options), and 60 s kills the burst a
  *  client startup makes without going stale enough to matter. */
-const CATALOG_TTL_MS = 60_000;
+export const CATALOG_TTL_MS = 60_000;
 
 /** One lane's catalog rows — its own entry, or the catalog override for
  *  the DEFAULT lane. A lane that cannot be read yields a failure, not a
@@ -5765,7 +5765,13 @@ function invalidateCatalog(wire: WireCtx): void {
  *  clients waits on the SAME read; none of them spends its own. */
 async function ensureCatalog(wire: WireCtx): Promise<void> {
   const cache = wire.catalog;
-  if (cache.rows !== undefined) return;
+  if (
+    cache.rows !== undefined &&
+    cache.fetchedAtMs !== undefined &&
+    Date.now() - cache.fetchedAtMs < CATALOG_TTL_MS
+  ) {
+    return;
+  }
   const pending = cache.inflight ?? refreshCatalog(wire).then(() => undefined);
   cache.inflight = pending;
   try {
