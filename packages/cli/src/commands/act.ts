@@ -262,16 +262,22 @@ function parseBatchRows(file: string): { rows: { id: string; body: string }[]; t
     .filter(l => l.trim().length > 0);
   const rows: { id: string; body: string }[] = [];
   const tabless: string[] = [];
+  let blankId = 0;
   for (const line of lines) {
     const tab = line.indexOf('\t');
     if (tab === -1) {
-      tabless.push(line);
+      // no structural tab — the whole line is the id, and whitespace
+      // around it is noise (the trimEnd above keeps leading spaces so
+      // the tab test stays honest; the id itself must not carry them —
+      // kody on #1203)
+      tabless.push(line.trim());
       continue;
     }
     const id = line.slice(0, tab).trim();
     // a tab-only line has no thread to act on — an empty id would hit
     // the host API as a malformed mutation (amazon-q on #1203)
     if (id === '') {
+      blankId += 1;
       continue;
     }
     rows.push({
@@ -281,6 +287,11 @@ function parseBatchRows(file: string): { rows: { id: string; body: string }[]; t
         .replaceAll(String.raw`\n`, '\n')
         .replaceAll(String.raw`\t`, '\t'),
     });
+  }
+  if (blankId > 0) {
+    // silent skips read as success — the operator must know rows were
+    // dropped, or a malformed batch file looks fully applied (kody)
+    console.error(`act: note — ${blankId} blank-id row(s) skipped in the batch file`);
   }
   return { rows, tabless };
 }
