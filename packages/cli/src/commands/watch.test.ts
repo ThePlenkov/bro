@@ -118,6 +118,13 @@ describe('attentionOf', () => {
     ]);
   });
 
+  test('a human-owned PR with review debt is actionable', () => {
+    const g = prGate({ ownership: 'human', openThreads: 3 });
+    assert.deepEqual(attentionOf([], [], [g]), [
+      'PR [#12](https://github.com/o/r/pull/12) needs act — 3 unresolved review thread(s); run bro act 12',
+    ]);
+  });
+
   test('a mol whose load threw is attention, not a silent drop', () => {
     const m = mol({ state: 'error — bd gone' });
     assert.deepEqual(attentionOf([m], [], []), ['mol m-1 unreadable — error — bd gone']);
