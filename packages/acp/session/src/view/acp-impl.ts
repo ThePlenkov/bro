@@ -1020,12 +1020,47 @@ export class AcpImpl implements PaneImpl {
     ops.push({ op: 'tool', item: { id: last.id, arg } });
   }
 
-  drain(): Op[] /* NOSONAR typescript:S3776 */ {
-    if (this.session.items === this.prev && this.ops.length === 0) return this.ops;
+  /** Emit the session-level ops that never touch the item map —
+   *  the feed header's text patches (model/config/context changes)
+   *  and the `▸ N hidden` tally for updates their reducer drops.
+   *  These ride every drain: keying them on `items` identity would
+   *  drop a metadata-only or hidden-only batch whole (bro-rszje). */
+  drain(): Op[] {
     const ops = this.ops;
     this.ops = [];
     this.emitHeader(ops);
     const items = this.session.items;
+    if (items !== this.prev) this.diffItems(ops, items);
+    // the end-user filter's account of what the model dropped —
+    // one growing tally row, not per-kind noise
+    if (this.hidden > this.hiddenShown) {
+      const text = `▸ ${this.hidden} hidden`;
+      if (this.hiddenId === undefined) {
+        this.hiddenId = this.nextId++;
+        this.emitted.push(this.hiddenId);
+        ops.push({ op: 'append', item: { id: this.hiddenId, kind: 'note', text } });
+      } else {
+        ops.push({ op: 'text', id: this.hiddenId, text });
+      }
+      this.hiddenShown = this.hidden;
+    }
+    const over = this.emitted.length - MAX_ITEMS;
+    if (over > 0) {
+      ops.push({ op: 'evict', ids: this.emitted.splice(0, over) });
+    }
+    return ops;
+  }
+
+  /** Diff the session's item map against the last drain — every
+   *  changed item re-projects whole; order is append-only per their
+   *  reducer. Runs of ≥2 consecutive activity items collapse into
+   *  ONE `▸ N tool calls · …` group item (the confirmed live
+   *  density) — the run's leader keeps its slot and morphs in place
+   *  when the second member lands. */
+  private diffItems(
+    ops: Op[],
+    items: ReadonlyMap<string, TheirItem>
+  ): void /* NOSONAR typescript:S3776 */ {
     const memberGroup = buildRuns(this.session.order, items, this.internalSids);
     const storm = buildStorms(this.session.order, this.internalSids);
     // a changed member dirties its leader's tally — the group
@@ -1164,24 +1199,6 @@ export class AcpImpl implements PaneImpl {
       }
     }
     this.prev = items;
-    // the end-user filter's account of what the model dropped —
-    // one growing tally row, not per-kind noise
-    if (this.hidden > this.hiddenShown) {
-      const text = `▸ ${this.hidden} hidden`;
-      if (this.hiddenId === undefined) {
-        this.hiddenId = this.nextId++;
-        this.emitted.push(this.hiddenId);
-        ops.push({ op: 'append', item: { id: this.hiddenId, kind: 'note', text } });
-      } else {
-        ops.push({ op: 'text', id: this.hiddenId, text });
-      }
-      this.hiddenShown = this.hidden;
-    }
-    const over = this.emitted.length - MAX_ITEMS;
-    if (over > 0) {
-      ops.push({ op: 'evict', ids: this.emitted.splice(0, over) });
-    }
-    return ops;
   }
 
   /** The whole projection, formatted — the `--dump` readout. Items
