@@ -74,19 +74,20 @@ type DockerLaunchInput = {
  *  spelling (`--user X`, `--user=X`, `-u X`, glued `-uX`). Returns the raw
  *  value or undefined when no user flag rides the args. */
 function dockerUserOf(runArgs: string[]): string | undefined {
+  // docker applies the LAST repeated flag — validating the first would
+  // judge a principal the run never uses
+  let user: string | undefined;
   for (let i = 0; i < runArgs.length; i++) {
     const a = runArgs[i];
     if (a === '--user' || a === '-u') {
-      return runArgs[i + 1];
-    }
-    if (a.startsWith('--user=')) {
-      return a.slice('--user='.length);
-    }
-    if (a.startsWith('-u') && a.length > 2) {
-      return a.slice(2);
+      user = runArgs[i + 1];
+    } else if (a.startsWith('--user=')) {
+      user = a.slice('--user='.length);
+    } else if (a.startsWith('-u') && a.length > 2) {
+      user = a.slice(2);
     }
   }
-  return undefined;
+  return user;
 }
 
 /** Refuse a numeric uid that can never traverse the mount permissions:
