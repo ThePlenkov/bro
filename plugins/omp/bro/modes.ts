@@ -115,7 +115,10 @@ function significantWords(text: string): Set<string> {
  *  sharing no significant word with the objective is a divergence the
  *  bridge must name, not bless — goal and bead otherwise drift apart
  *  silently. */
-function goalScopeContext(board: ReturnType<ModeBridgeSource['board']>, objective: string): string {
+function goalScopeContext(
+  board: ReturnType<ModeBridgeSource['board']>,
+  objective: string
+): string {
   const drill = board?.drill?.frame;
   const scope = drill
     ? `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ? untrusted(drill.title) : '(untitled)'}. `
