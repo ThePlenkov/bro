@@ -79,10 +79,24 @@ const at = (row: ArchiveRow): number => {
  *  user message the archive does not carry). */
 function eventsOf(row: ArchiveRow): ModelEvent[] {
   const t = at(row);
-  if (row.kind === 'update' && row.update !== undefined) {
-    return [{ type: 'session_update', update: row.update as SessionUpdate, at: t }];
+  switch (row.kind) {
+    case 'update':
+      return row.update !== undefined
+        ? [{ type: 'session_update', update: row.update as SessionUpdate, at: t }]
+        : [];
+    case 'turn':
+      return turnEvents(row, t);
+    case 'permission':
+      return permissionEvents(row, t);
+    default:
+      return [];
   }
-  if (row.kind === 'turn' && row.phase === 'start') {
+}
+
+/** A turn row → its lifecycle events: `turn_started` on open,
+ *  `prompt_response` (+ `prompt_error` on failure) on stop. */
+const turnEvents = (row: ArchiveRow, t: number): ModelEvent[] => {
+  if (row.phase === 'start') {
     // the archive's turn-open marker — `prompt_sent` would fabricate a
     // user message the journal does not carry; `turn_started` is the
     // lifecycle half only, but it is what lets the LED reach running.
@@ -91,69 +105,71 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
     if (t === 0) return [];
     return [{ type: 'turn_started', at: t }];
   }
-  if (row.kind === 'turn' && row.phase === 'stop') {
-    const events: ModelEvent[] = [
-      {
-        type: 'prompt_response',
-        stopReason: (row.stopReason ?? 'end_turn') as StopReason,
-        at: t,
-      },
-    ];
-    // a failed turn's error is NOT on prompt_response — the vendored
-    // reducer only makes `turn_end` markers from it. `prompt_error`
-    // yields the error marker that prints `── turn failed ──`.
-    if (row.error !== undefined && row.error !== '') {
-      events.push({ type: 'prompt_error', message: row.error, at: t });
-    }
-    return events;
+  if (row.phase !== 'stop') return [];
+  const events: ModelEvent[] = [
+    {
+      type: 'prompt_response',
+      stopReason: (row.stopReason ?? 'end_turn') as StopReason,
+      at: t,
+    },
+  ];
+  // a failed turn's error is NOT on prompt_response — the vendored
+  // reducer only makes `turn_end` markers from it. `prompt_error`
+  // yields the error marker that prints `── turn failed ──`.
+  if (row.error !== undefined && row.error !== '') {
+    events.push({ type: 'prompt_error', message: row.error, at: t });
   }
-  if (row.kind === 'permission') {
-    const toolCallId = (row.toolCallId ?? 'unknown') as never;
-    // The ASK opens the record; `phase: 'answer'` closes it. The
-    // headless driver's journal has ONE row that carries the verdict
-    // and no phase — for that shape the row opens AND closes, which is
-    // what keeps the archive's single-row permission working.
-    const events: ModelEvent[] = [];
-    if (row.phase !== 'answer') {
-      events.push({
-        type: 'permission_opened',
-        toolCallId,
-        request: {
-          sessionId: 'archive' as never,
-          toolCall: {
-            toolCallId,
-            title: row.title ?? 'permission',
-            status: 'in_progress',
-          },
-          options: (row.options ?? []) as never,
-        },
-        at: t,
-      });
-    }
-    // ONLY an explicit answer closes the record. The headless
-    // driver's row carries a verdict TOO, but that verdict is the
-    // driver's, not the pane's — the archive's ask stays OPEN, which
-    // is what makes the pane say 'blocked · permission' (the row IS
-    // the pane's blocked signal, spec bro-l8wqu).
-    const verdict = row.phase === 'answer' ? row.verdict : undefined;
-    if (verdict !== undefined && verdict !== '') {
-      if (verdict === 'cancelled') {
-        events.push({ type: 'permission_cancelled', toolCallId, at: t });
-      } else {
-        events.push({
-          type: 'permission_answered',
+  return events;
+};
+
+/** A permission row → open + close events. The ASK opens the record;
+ *  `phase: 'answer'` closes it. The headless driver's journal has
+ *  ONE row that carries the verdict and no phase — for that shape
+ *  the row opens AND closes, which is what keeps the archive's
+ *  single-row permission working. */
+const permissionEvents = (row: ArchiveRow, t: number): ModelEvent[] => {
+  const toolCallId = (row.toolCallId ?? 'unknown') as never;
+  const events: ModelEvent[] = [];
+  if (row.phase !== 'answer') {
+    events.push({
+      type: 'permission_opened',
+      toolCallId,
+      request: {
+        sessionId: 'archive' as never,
+        toolCall: {
           toolCallId,
-          optionId: row.optionId ?? verdict,
-          optionKind: (row.optionKind ??
-            (verdict === 'approved' ? 'allow_once' : 'reject_once')) as never,
-          at: t,
-        });
-      }
-    }
-    return events;
+          title: row.title ?? 'permission',
+          status: 'in_progress',
+        },
+        options: (row.options ?? []) as never,
+      },
+      at: t,
+    });
   }
-  return [];
-}
+  const close = permissionClose(row, toolCallId, t);
+  if (close !== undefined) events.push(close);
+  return events;
+};
+
+/** The record's close event, or undefined when it stays open. ONLY
+ *  an explicit answer closes the record. The headless driver's row
+ *  carries a verdict TOO, but that verdict is the driver's, not the
+ *  pane's — the archive's ask stays OPEN, which is what makes the
+ *  pane say 'blocked · permission' (the row IS the pane's blocked
+ *  signal, spec bro-l8wqu). */
+const permissionClose = (row: ArchiveRow, toolCallId: never, t: number): ModelEvent | undefined => {
+  const verdict = row.phase === 'answer' ? row.verdict : undefined;
+  if (verdict === undefined || verdict === '') return undefined;
+  if (verdict === 'cancelled') return { type: 'permission_cancelled', toolCallId, at: t };
+  return {
+    type: 'permission_answered',
+    toolCallId,
+    optionId: row.optionId ?? verdict,
+    optionKind: (row.optionKind ??
+      (verdict === 'approved' ? 'allow_once' : 'reject_once')) as never,
+    at: t,
+  };
+};
 
 /** Their tool status → ours (their 'cancelled' reads as our failed). */
 const TOOL_STATUS: Record<string, ToolStatus> = {
@@ -163,17 +179,23 @@ const TOOL_STATUS: Record<string, ToolStatus> = {
 };
 const toolStatus = (s: string): ToolStatus => TOOL_STATUS[s] ?? 'live';
 
-/** One tool_call → our card. `arg` comes from the feed's rawInput
- *  stash — their item deliberately drops it. `folded` marks the
- *  pane's default; the dump path passes false (a dump is the full
- *  readout, the fold is pane state). */
-const toolItem = (
-  item: ToolCallItem,
-  id: number,
-  args: ReadonlyMap<string, string>,
-  folded: boolean,
-  stamp?: string
-): ToolItem => {
+/** The fields every projection needs beyond the item itself — our
+ *  numeric `id`, the feed's `args` rawInput stash, the fold policy
+ *  (`folded` marks the pane's default; the dump path passes false —
+ *  a dump is the full readout, the fold is pane state), and the
+ *  birth row's `stamp`/`judge`/`by`. */
+interface ProjCtx {
+  id: number;
+  args: ReadonlyMap<string, string>;
+  folded: boolean;
+  stamp?: string;
+  judge?: boolean;
+  by?: string;
+}
+
+/** Their content entries → our card content — text verbatim, diffs
+ *  remapped to old/cur, a missing terminal noted by call id. */
+const toolContentOf = (item: ToolCallItem): ToolItem['content'] => {
   const content: ToolItem['content'] = [];
   for (const c of item.content) {
     switch (c.type) {
@@ -198,9 +220,21 @@ const toolItem = (
   if (content.length === 0 && item.rawOutputText !== null) {
     content.push({ kind: 'text', text: item.rawOutputText });
   }
-  const arg = args.get(item.toolCallId);
+  return content;
+};
+
+/** The running-turn mode — `turn since <start>` when the clock is
+ *  real, else the bare posture word. */
+const runMode = (s: Session): string =>
+  s.turn !== null && s.turn.startedAt > 0 ? `turn since ${fmtWhen(s.turn.startedAt)}` : 'turn';
+
+/** One tool_call → our card. `arg` comes from the feed's rawInput
+ *  stash — their item deliberately drops it. */
+const toolItem = (item: ToolCallItem, ctx: ProjCtx): ToolItem => {
+  const content = toolContentOf(item);
+  const arg = ctx.args.get(item.toolCallId);
   return {
-    id,
+    id: ctx.id,
     kind: 'tool',
     toolCallId: item.toolCallId,
     title: item.title === '' ? (item.toolName ?? 'tool') : item.title,
@@ -208,9 +242,9 @@ const toolItem = (
     arg: arg === '' ? undefined : arg,
     status: toolStatus(item.toolStatus),
     bodyLanded: content.length > 0,
-    collapsed: folded && content.length > 0,
+    collapsed: ctx.folded && content.length > 0,
     content,
-    at: stamp,
+    at: ctx.stamp,
     vi: item,
   };
 };
@@ -273,46 +307,93 @@ const markerItem = (item: MarkerItem, id: number): SideItem | undefined => {
     : { id, kind: 'note', text: item.text, vi: item };
 };
 
-/** Their item → ours (numeric id assigned by the diff). `folded`
- *  carries the pane's fold policy — the dump path projects open.
- *  `stamp`/`judge` come from the feed's birth-row records. */
-const project = (
-  item: TheirItem,
-  id: number,
-  args: ReadonlyMap<string, string>,
-  folded = true,
-  stamp?: string,
-  judge?: boolean,
-  by?: string
-): Item | undefined => {
-  const base = { at: stamp, ...(by !== undefined ? { by } : {}) };
-  switch (item.kind) {
-    case 'agent_message':
-      return {
-        id,
-        kind: 'message',
-        text: item.text,
-        ...base,
-        ...(judge === true ? { judge: true } : {}),
-      };
-    case 'user_message':
-      // our model dims user_message chunks like thoughts — parity;
-      // no `vi` — their line language has no user-bubble row here
-      return { id, kind: 'thought', text: item.text, ...base };
-    case 'thought':
-      return { id, kind: 'thought', text: item.text, ...base, vi: item };
-    case 'tool_call':
-      return { ...toolItem(item, id, args, folded, stamp), ...(by !== undefined ? { by } : {}) };
-    case 'plan':
-      return { ...planItem(item, id), ...base };
-    case 'permission_record':
-      return { ...permissionItem(item, id), ...base };
-    case 'marker': {
-      const m = markerItem(item, id);
-      return m === undefined ? undefined : { ...m, ...base };
-    }
-  }
-};
+/** The stamp/by pair every projection shares — `by` absent when
+ *  the birth row carried no origin. */
+const projBase = (ctx: ProjCtx): { at?: string; by?: string } => ({
+  at: ctx.stamp,
+  ...(ctx.by !== undefined ? { by: ctx.by } : {}),
+});
+
+type Projector = (item: never, ctx: ProjCtx) => Item | undefined;
+
+/** Everything the dump helpers share — the line sink, the order,
+ *  the run/storm membership maps, the tool lookup, and the last
+ *  ▸-tally index (a turn_end folds duration/ctx into its arg). */
+interface DumpRun {
+  out: string[];
+  ord: readonly string[];
+  memberGroup: ReadonlyMap<string, string>;
+  storm: ReadonlyMap<string, string>;
+  find: (toolCallId: string) => unknown;
+  lastRun: number;
+}
+
+/** The kind dispatch — one projector per vendored item kind.
+ *  `stamp`/`judge`/`by` come from the feed's birth-row records,
+ *  `ctx.folded` carries the pane's fold policy (the dump path
+ *  projects open). */
+const PROJECTORS = new Map<TheirItem['kind'], Projector>([
+  [
+    'agent_message',
+    (item: Extract<TheirItem, { kind: 'agent_message' }>, ctx) => ({
+      id: ctx.id,
+      kind: 'message',
+      text: item.text,
+      ...projBase(ctx),
+      ...(ctx.judge === true ? { judge: true } : {}),
+    }),
+  ],
+  // our model dims user_message chunks like thoughts — parity; no
+  // `vi` — their line language has no user-bubble row here
+  [
+    'user_message',
+    (item: Extract<TheirItem, { kind: 'user_message' }>, ctx) => ({
+      id: ctx.id,
+      kind: 'thought',
+      text: item.text,
+      ...projBase(ctx),
+    }),
+  ],
+  [
+    'thought',
+    (item: Extract<TheirItem, { kind: 'thought' }>, ctx) => ({
+      id: ctx.id,
+      kind: 'thought',
+      text: item.text,
+      ...projBase(ctx),
+      vi: item,
+    }),
+  ],
+  [
+    'tool_call',
+    (item: ToolCallItem, ctx) => ({
+      ...toolItem(item, ctx),
+      ...(ctx.by !== undefined ? { by: ctx.by } : {}),
+    }),
+  ],
+  ['plan', (item: PlanItem, ctx) => ({ ...planItem(item, ctx.id), ...projBase(ctx) })],
+  [
+    'permission_record',
+    (item: PermissionRecordItem, ctx) => ({
+      ...permissionItem(item, ctx.id),
+      ...projBase(ctx),
+    }),
+  ],
+  [
+    'marker',
+    (item: MarkerItem, ctx) => {
+      const m = markerItem(item, ctx.id);
+      return m === undefined ? undefined : { ...m, ...projBase(ctx) };
+    },
+  ],
+]);
+
+/** Their item → ours (numeric id assigned by the diff). */
+const project = (item: TheirItem, ctx: ProjCtx): Item | undefined =>
+  (PROJECTORS.get(item.kind) as ((i: TheirItem, c: ProjCtx) => Item | undefined) | undefined)?.(
+    item,
+    ctx
+  );
 
 /** Activity kinds — the members a `▸ N …` run line collapses.
  *  agent/user text, markers and prompts stay their own rows. */
@@ -331,24 +412,15 @@ const buildRuns = (
   order: readonly string[],
   items: ReadonlyMap<string, TheirItem>,
   internal?: ReadonlySet<string>
-): Map<string, string> => {
-  const out = new Map<string, string>();
-  let run: string[] = [];
-  const flush = (): void => {
-    const lead = run[0];
-    if (run.length >= 2 && lead !== undefined) {
-      for (const sid of run) out.set(sid, lead);
-    }
-    run = [];
-  };
-  for (const sid of order) {
-    const item = items.get(sid);
-    if (item !== undefined && ACTIVITY.has(item.kind) && internal?.has(sid) !== true) run.push(sid);
-    else flush();
-  }
-  flush();
-  return out;
-};
+): Map<string, string> =>
+  collectRuns(
+    order,
+    sid => {
+      const item = items.get(sid);
+      return item !== undefined && ACTIVITY.has(item.kind) && internal?.has(sid) !== true;
+    },
+    2
+  );
 
 /** Runs of consecutive internal sids in session order → member sid →
  *  its storm's leader (first sid). Unlike activity runs even ONE sid
@@ -357,19 +429,37 @@ const buildRuns = (
 const buildStorms = (
   order: readonly string[],
   internal: ReadonlySet<string>
+): Map<string, string> => collectRuns(order, sid => internal.has(sid), 1);
+
+/** Session order → the consecutive member runs it contains. */
+const splitRuns = (order: readonly string[], isMember: (sid: string) => boolean): string[][] => {
+  const groups: string[][] = [];
+  let cur: string[] = [];
+  for (const sid of order) {
+    if (!isMember(sid)) {
+      cur = [];
+      continue;
+    }
+    if (cur.length === 0) groups.push(cur);
+    cur.push(sid);
+  }
+  return groups;
+};
+
+/** Runs of ≥`minRun` consecutive member sids in session order →
+ *  member sid → its run's leader (first sid). */
+const collectRuns = (
+  order: readonly string[],
+  isMember: (sid: string) => boolean,
+  minRun: number
 ): Map<string, string> => {
   const out = new Map<string, string>();
-  let run: string[] = [];
-  const flush = (): void => {
+  for (const run of splitRuns(order, isMember)) {
     const lead = run[0];
-    if (lead !== undefined) for (const sid of run) out.set(sid, lead);
-    run = [];
-  };
-  for (const sid of order) {
-    if (internal.has(sid)) run.push(sid);
-    else flush();
+    if (run.length >= minRun && lead !== undefined) {
+      for (const sid of run) out.set(sid, lead);
+    }
   }
-  flush();
   return out;
 };
 
@@ -440,41 +530,50 @@ const tally = (members: readonly TheirItem[]): string => {
 /** The collapsed run as a ToolItem — `arg` carries the confirmed
  *  `N tool calls · N thought · Ns` tally, `runs` the members for the
  *  expanded body; it morphs in place when the run grows. */
-const runItem = (
-  members: readonly TheirItem[],
-  id: number,
-  folded: boolean,
-  stamp: string | undefined,
-  by: string | undefined
-): ToolItem => /* NOSONAR typescript:S3776 */ {
-  let started: number | undefined;
-  let ended: number | undefined;
-  let live = false;
-  let failed = false;
+interface RunStats {
+  started?: number;
+  ended?: number;
+  live: boolean;
+  failed: boolean;
+}
+
+/** The run's tool-call rollup — earliest start, latest end, any
+ *  in-flight, any failed. */
+const runStats = (members: readonly TheirItem[]): RunStats => {
+  const t: RunStats = { live: false, failed: false };
   for (const m of members) {
-    if (m.kind === 'tool_call') {
-      if (m.startedAt !== null) started = Math.min(started ?? m.startedAt, m.startedAt);
-      if (m.endedAt !== null) ended = Math.max(ended ?? m.endedAt, m.endedAt);
-      if (m.toolStatus === 'in_progress' || m.toolStatus === 'pending') live = true;
-      if (m.toolStatus === 'failed') failed = true;
-    }
+    if (m.kind !== 'tool_call') continue;
+    if (m.startedAt !== null) t.started = Math.min(t.started ?? m.startedAt, m.startedAt);
+    if (m.endedAt !== null) t.ended = Math.max(t.ended ?? m.endedAt, m.endedAt);
+    if (m.toolStatus === 'in_progress' || m.toolStatus === 'pending') t.live = true;
+    if (m.toolStatus === 'failed') t.failed = true;
   }
-  const secs =
-    !live && started !== undefined && ended !== undefined && ended > started
-      ? ` · ${((ended - started) / 1000).toFixed(1)}s`
-      : '';
+  return t;
+};
+
+/** The ` · 12.3s` duration part — only when the whole run settled
+ *  and the window is real. */
+const runSecs = (t: RunStats): string => {
+  const done = !t.live && t.started !== undefined && t.ended !== undefined && t.ended > t.started;
+  if (!done) return '';
+  return ` · ${(((t.ended ?? 0) - (t.started ?? 0)) / 1000).toFixed(1)}s`;
+};
+
+const runItem = (members: readonly TheirItem[], ctx: ProjCtx): ToolItem => {
+  const t = runStats(members);
+  const by = ctx.by !== undefined ? ` · ${ctx.by}` : '';
   return {
-    id,
+    id: ctx.id,
     kind: 'tool',
-    toolCallId: `run:${id}`,
+    toolCallId: `run:${ctx.id}`,
     title: 'activity',
-    arg: `${tally(members)}${secs}${by !== undefined ? ` · ${by}` : ''}`,
-    status: live ? 'live' : failed ? 'failed' : 'completed',
+    arg: `${tally(members)}${runSecs(t)}${by}`,
+    status: t.live ? 'live' : t.failed ? 'failed' : 'completed',
     bodyLanded: true,
-    collapsed: folded,
+    collapsed: ctx.folded,
     content: [],
-    at: stamp,
-    ...(by !== undefined ? { by } : {}),
+    at: ctx.stamp,
+    ...(ctx.by !== undefined ? { by: ctx.by } : {}),
     runs: members,
   };
 };
@@ -498,52 +597,88 @@ const stormItem = (
   memberSids: readonly string[],
   items: ReadonlyMap<string, TheirItem>,
   byMap: ReadonlyMap<string, string>,
-  id: number,
-  folded: boolean,
-  stamp: string | undefined,
-  by: string | undefined
+  ctx: ProjCtx
 ): ToolItem => {
-  // NOSONAR — moved vendored render code; the storm fold keeps its shape
-  const members: TheirItem[] = [];
-  let calls = 0;
-  let fails = 0;
-  let live = false;
-  const origins: string[] = [];
-  for (const sid of memberSids) {
-    const m = items.get(sid);
-    const o = byMap.get(sid);
-    if (o !== undefined && o !== '' && !origins.includes(o)) origins.push(o);
-    if (m === undefined) continue;
-    members.push(m);
-    if (m.kind === 'marker') {
-      // a finished turn journals TWO markers — the end_turn plus,
-      // on failure, the error — so calls counts ends, not markers
-      if (m.markerKind === 'turn_end') calls++;
-      if (m.markerKind === 'error') fails++;
-    }
-  }
-  // a trailing non-marker member = a turn still in flight
-  const last = members[members.length - 1];
-  live = last !== undefined && last.kind !== 'marker';
-  if (live) calls++;
-  const org =
-    origins.length <= 3
-      ? origins.join(', ')
-      : `${origins.slice(0, 2).join(', ')} +${origins.length - 2}`;
+  const s = stormStats(memberSids, items, byMap);
+  const org = stormOrg(s.origins);
   return {
-    id,
+    id: ctx.id,
     kind: 'tool',
-    toolCallId: `storm:${id}`,
+    toolCallId: `storm:${ctx.id}`,
     title: 'internal',
-    arg: `${calls} internal ${calls === 1 ? 'call' : 'calls'}${fails > 0 ? ` · ${fails} failed` : ''}${org !== '' ? ` · ${org}` : ''}`,
-    status: fails > 0 ? 'failed' : 'completed',
+    arg: `${s.calls} internal ${s.calls === 1 ? 'call' : 'calls'}${s.fails > 0 ? ` · ${s.fails} failed` : ''}${org !== '' ? ` · ${org}` : ''}`,
+    status: s.fails > 0 ? 'failed' : 'completed',
     bodyLanded: true,
-    collapsed: folded,
+    collapsed: ctx.folded,
     content: [],
-    at: stamp,
-    ...(by !== undefined ? { by } : {}),
-    runs: members,
+    at: ctx.stamp,
+    ...(ctx.by !== undefined ? { by: ctx.by } : {}),
+    runs: s.members,
   };
+};
+
+/** marker kind → the storm counter it bumps. A finished turn
+ *  journals TWO markers — the end_turn plus, on failure, the
+ *  error — so calls counts ends, not markers. */
+const STORM_TALLY = new Map<string, 'calls' | 'fails'>([
+  ['turn_end', 'calls'],
+  ['error', 'fails'],
+]);
+
+/** The ` · a, b +2` origin clause — up to three first-seen origins,
+ *  the rest counted. */
+const stormOrg = (origins: readonly string[]): string =>
+  origins.length <= 3
+    ? origins.join(', ')
+    : `${origins.slice(0, 2).join(', ')} +${origins.length - 2}`;
+
+interface StormTally {
+  members: TheirItem[];
+  origins: string[];
+  calls: number;
+  fails: number;
+}
+
+/** A prompt's dump lines — `▸ ` per text line, or the unavailable
+ *  marker when the journal carried none. */
+const promptRows = (text: string): string[] =>
+  text === '' ? ['▸ prompt unavailable'] : text.split('\n').map(l => `▸ ${l}`);
+
+const pushOnce = (list: string[], s: string): void => {
+  if (!list.includes(s)) list.push(s);
+};
+
+/** One member sid's contribution — its first-seen origin, the item,
+ *  and the marker kind's tally bump. */
+const stormMember = (
+  sid: string,
+  items: ReadonlyMap<string, TheirItem>,
+  byMap: ReadonlyMap<string, string>,
+  t: StormTally
+): void => {
+  const o = byMap.get(sid);
+  if (o !== undefined && o !== '') pushOnce(t.origins, o);
+  const m = items.get(sid);
+  if (m === undefined) return;
+  t.members.push(m);
+  const tally = m.kind === 'marker' ? STORM_TALLY.get(m.markerKind) : undefined;
+  if (tally !== undefined) t[tally]++;
+};
+
+/** The storm's rollup — member items, the turn-call tally (turn_end
+ *  markers plus a live in-flight turn), failures, and the first-seen
+ *  origin list. */
+const stormStats = (
+  memberSids: readonly string[],
+  items: ReadonlyMap<string, TheirItem>,
+  byMap: ReadonlyMap<string, string>
+): StormTally => {
+  const t: StormTally = { members: [], origins: [], calls: 0, fails: 0 };
+  for (const sid of memberSids) stormMember(sid, items, byMap, t);
+  // a trailing non-marker member = a turn still in flight
+  const last = t.members[t.members.length - 1];
+  if (last !== undefined && last.kind !== 'marker') t.calls++;
+  return t;
 };
 
 /** The vendored session behind the seam — fold-by-default, per the
@@ -757,52 +892,39 @@ export class AcpImpl implements PaneImpl {
    *  blocked, requires_action is the permission posture. */
   get verdict(): { led: PaneLed; mode: string } | undefined {
     const s = this.session;
-    // terminal postures carry the status-entry stamp — "since" is the
-    // question a finished/blocked row must answer (a live turn's clock
-    // is its own startedAt, already painted)
-    const since = (base: string, ts: string | undefined): string => {
-      const when = ts === undefined ? '' : fmtWhen(ts);
-      return when === '' ? base : `${base} · since ${when}`;
-    };
     if (s.replaying) return { led: { state: 'working' }, mode: 'replaying' };
     if (s.connection === 'disconnected') {
       return {
         led: { state: 'blocked' },
-        mode: since('agent exited', this.lastActivityTs ?? this.lastStopTs),
+        mode: this.since('agent exited', this.lastActivityTs ?? this.lastStopTs),
       };
     }
-    switch (s.state) {
-      case 'requires_action':
-        return {
-          led: { state: 'blocked' },
-          mode: since('permission', this.actionTs),
-        };
-      case 'running':
-        return {
-          led: { state: 'working' },
-          mode:
-            s.turn !== null && s.turn.startedAt > 0
-              ? `turn since ${fmtWhen(s.turn.startedAt)}`
-              : 'turn',
-        };
-      default: {
-        if (this.lastStopError) {
-          return {
-            led: { state: 'blocked' },
-            mode: since('turn error', this.lastStopTs),
-          };
-        }
-        let mode = 'idle';
-        if (this.lastStopTs !== undefined) {
-          mode = `since ${fmtWhen(this.lastStopTs)}`;
-        } else if (s.stopReason !== null) {
-          // a stamp-less stop has no honest clock — last activity is
-          // a mid-turn row, not the completion time
-          mode = 'turn complete';
-        }
-        return { led: { state: 'idle' }, mode };
-      }
+    if (s.state === 'requires_action') {
+      return { led: { state: 'blocked' }, mode: this.since('permission', this.actionTs) };
     }
+    if (s.state === 'running') return { led: { state: 'working' }, mode: runMode(s) };
+    return this.idleVerdict(s);
+  }
+
+  /** `base · since <when>` — terminal postures carry the status-entry
+   *  stamp; "since" is the question a finished/blocked row must answer
+   *  (a live turn's clock is its own startedAt, already painted). */
+  private since(base: string, ts: string | undefined): string {
+    const when = ts === undefined ? '' : fmtWhen(ts);
+    return when === '' ? base : `${base} · since ${when}`;
+  }
+
+  /** The settled-state verdict — a failed stop is blocked, a stamped
+   *  stop reports its completion time, a stamp-less one has no honest
+   *  clock (last activity is a mid-turn row, not the completion). */
+  private idleVerdict(s: Session): { led: PaneLed; mode: string } {
+    if (this.lastStopError) {
+      return { led: { state: 'blocked' }, mode: this.since('turn error', this.lastStopTs) };
+    }
+    let mode = 'idle';
+    if (this.lastStopTs !== undefined) mode = `since ${fmtWhen(this.lastStopTs)}`;
+    else if (s.stopReason !== null) mode = 'turn complete';
+    return { led: { state: 'idle' }, mode };
   }
 
   /** Diff the session against the last drain — every changed item
@@ -811,6 +933,33 @@ export class AcpImpl implements PaneImpl {
    *  `▸ N tool calls · …` group item (the confirmed live density) —
    *  the run's leader keeps its slot and morphs in place when the
    *  second member lands. */
+  /** The birth-row records → a ProjCtx for `project`/`runItem`/`stormItem`. */
+  private projCtx(sid: string, id: number): ProjCtx {
+    return {
+      id,
+      args: this.args,
+      folded: true,
+      stamp: this.tsMap.get(sid),
+      judge: this.judgeSids.has(sid),
+      by: this.byMap.get(sid),
+    };
+  }
+
+  /** The sid's current projection — the storm tally, the run tally,
+   *  or the item's own row. */
+  private projectNext(
+    sid: string,
+    item: TheirItem,
+    id: number,
+    group: { members?: TheirItem[]; stormSids?: string[] }
+  ): Item | undefined {
+    const ctx = this.projCtx(sid, id);
+    if (group.stormSids !== undefined)
+      return stormItem(group.stormSids, this.session.items, this.byMap, ctx);
+    if (group.members !== undefined) return runItem(group.members, ctx);
+    return project(item, ctx);
+  }
+
   /** The session model id — the legacy model state first, then a
    *  `model` config option (the vendored UI's own preference). */
   private sessionModel(): string | undefined {
@@ -953,28 +1102,7 @@ export class AcpImpl implements PaneImpl {
         id = this.nextId++;
         this.ids.set(sid, id);
         this.emitted.push(id);
-        const next =
-          stormSids !== undefined
-            ? stormItem(
-                stormSids,
-                items,
-                this.byMap,
-                id,
-                true,
-                this.tsMap.get(sid),
-                this.byMap.get(sid)
-              )
-            : members !== undefined
-              ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
-              : project(
-                  item,
-                  id,
-                  this.args,
-                  true,
-                  this.tsMap.get(sid),
-                  this.judgeSids.has(sid),
-                  this.byMap.get(sid)
-                );
+        const next = this.projectNext(sid, item, id, { members, stormSids });
         if (next === undefined) continue;
         // an internal failure's banner carries its origin — inside a
         // storm the head can't be trusted to name it
@@ -1005,15 +1133,7 @@ export class AcpImpl implements PaneImpl {
           }
           if (!seen.has(key)) {
             seen.add(key);
-            const row = project(
-              item,
-              this.nextId++,
-              this.args,
-              true,
-              this.tsMap.get(sid),
-              this.judgeSids.has(sid),
-              this.byMap.get(sid)
-            );
+            const row = project(item, this.projCtx(sid, this.nextId++));
             if (row !== undefined && row.kind === 'turn' && item.kind === 'marker') {
               row.text = stormErrText(item, this.byMap.get(sid));
             }
@@ -1029,28 +1149,7 @@ export class AcpImpl implements PaneImpl {
         continue;
       }
       if (id === undefined) continue;
-      const next =
-        stormSids !== undefined
-          ? stormItem(
-              stormSids,
-              items,
-              this.byMap,
-              id,
-              true,
-              this.tsMap.get(sid),
-              this.byMap.get(sid)
-            )
-          : members !== undefined
-            ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
-            : project(
-                item,
-                id,
-                this.args,
-                true,
-                this.tsMap.get(sid),
-                this.judgeSids.has(sid),
-                this.byMap.get(sid)
-              );
+      const next = this.projectNext(sid, item, id, { members, stormSids });
       if (next === undefined) continue;
       if (members !== undefined && next.kind === 'tool') {
         this.lastActivity = { id, arg: next.arg ?? '' };
@@ -1099,151 +1198,212 @@ export class AcpImpl implements PaneImpl {
       if (item?.kind === 'tool_call') toolsByCall.set(item.toolCallId, item);
     }
     const find = (toolCallId: string): unknown => toolsByCall.get(toolCallId);
-    /** the last ▸ line's index — a turn_end folds duration/ctx into
-     *  its arg instead of a row (same as the drain path) */
-    let lastRun = -1;
     // prompt items interleave at the order position they landed —
     // per-turn prompts stay chronological through the readout
-    let pi = 0;
-    const emitPrompts = (pos: number): void => {
-      while (pi < this.prompts.length && (this.prompts[pi]?.pos ?? 0) <= pos) {
-        const p = this.prompts[pi];
-        pi++;
-        if (p === undefined) continue;
-        if (p.item.text === '') out.push('▸ prompt unavailable');
-        else for (const l of p.item.text.split('\n')) out.push(`▸ ${l}`);
-      }
-    };
+    const pi = { n: 0 };
     const ord = this.session.order;
-    const memberGroup = buildRuns(ord, this.session.items, this.internalSids);
-    const storm = buildStorms(ord, this.internalSids);
+    const d: DumpRun = {
+      out,
+      ord,
+      memberGroup: buildRuns(ord, this.session.items, this.internalSids),
+      storm: buildStorms(ord, this.internalSids),
+      find,
+      lastRun: -1,
+    };
     for (let i = 0; i < ord.length; i++) {
-      emitPrompts(i);
-      const sid = ord[i];
-      if (sid === undefined) continue;
-      const item = this.session.items.get(sid);
-      if (item === undefined) continue;
-      const errorMarker = item.kind === 'marker' && item.markerKind === 'error';
-      const stormLeader = storm.get(sid);
-      if (stormLeader !== undefined && stormLeader !== sid && !errorMarker) continue;
-      const leader = memberGroup.get(sid);
-      if (leader !== undefined && leader !== sid) continue;
-      let id = this.ids.get(sid);
-      if (id === undefined) {
-        id = this.nextId++;
-        this.ids.set(sid, id);
-      }
-      // no row — duration/ctx fold into the preceding ▸ line's arg
-      if (item.kind === 'marker' && item.markerKind === 'turn_end') {
-        if (lastRun >= 0) {
-          const dur = item.durationMs > 0 ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : '';
-          const u = item.usage;
-          const ctx =
-            u !== null && u !== undefined && u.size > 0 ? ` · ctx ${fmtUsage(u.used, u.size)}` : '';
-          out[lastRun] = `${out[lastRun]}${dur}${ctx}`;
-        }
-        continue;
-      }
-      if (leader === sid) {
-        // the ▸-tally line; members hang under it in the │ gutter
-        const members = runMembers(ord, this.session.items, sid);
-        lastRun = out.length;
-        out.push(`▸ ${runItem(members, id, false, undefined, this.byMap.get(sid)).arg}`);
-        for (const m of members) {
-          const ml = lineText(
-            acpLine(
-              m,
-              116,
-              0,
-              find,
-              m.kind === 'tool_call' ? this.args.get(m.toolCallId) : undefined
-            )
-          );
-          out.push(`│  ${ml === '' ? m.kind : ml.trimEnd()}`);
-        }
-        continue;
-      }
-      if (stormLeader === sid) {
-        // the ▸-storm line — same grammar; internal members show
-        // their own one-liners under the gutter
-        const memberSids = stormMembers(ord, this.internalSids, sid);
-        const st = stormItem(
-          memberSids,
-          this.session.items,
-          this.byMap,
-          id,
-          false,
-          undefined,
-          this.byMap.get(sid)
-        );
-        out.push(`▸ ${st.arg}`);
-        for (const msid of memberSids) {
-          const m = this.session.items.get(msid);
-          if (m === undefined) continue;
-          const ml = lineText(
-            acpLine(
-              m,
-              116,
-              0,
-              find,
-              m.kind === 'tool_call' ? this.args.get(m.toolCallId) : undefined
-            )
-          );
-          out.push(`│  ${ml === '' ? m.kind : ml.trimEnd()}`);
-        }
-        continue;
-      }
-      // an internal error marker prints its origin inline — inside a
-      // storm the lone banner can't be attributed otherwise
-      const line =
-        errorMarker && this.internalSids.has(sid) && item.kind === 'marker'
-          ? stormErrText(item, this.byMap.get(sid))
-          : lineText(
-              acpLine(
-                item,
-                120,
-                0,
-                find,
-                item.kind === 'tool_call' ? this.args.get(item.toolCallId) : undefined
-              )
-            );
-      if (line !== '') {
-        out.push(line);
-        if (item.kind === 'tool_call') {
-          for (const l of dumpContent(
-            toolItem(item, id, this.args, false, this.tsMap.get(sid)).content
-          )) {
-            out.push(`│  ${l}`);
-          }
-        }
-        continue;
-      }
-      const p = project(
-        item,
-        id,
-        this.args,
-        false,
-        this.tsMap.get(sid),
-        this.judgeSids.has(sid),
-        this.byMap.get(sid)
-      );
-      if (p === undefined) continue;
-      // judge replies print the verdict control, not the JSON wall —
-      // the same shape classification the pane's VerdictRow uses;
-      // the badge is the call's model/provider, never a brand literal
-      if ('text' in p) {
-        const v = verdictOf(p.text);
-        if (v !== undefined) {
-          out.push(`⛨ ${v.model ?? p.by ?? 'verdict'} · ${v.summary}`);
-          for (const [q, f] of v.fields) out.push(`   ${q} ${f}`);
-          continue;
-        }
-      }
-      out.push(...dumpItems([p]));
+      this.emitDumpPrompts(out, i, pi);
+      this.dumpSid(d, i);
     }
-    emitPrompts(Number.MAX_SAFE_INTEGER);
+    this.emitDumpPrompts(out, Number.MAX_SAFE_INTEGER, pi);
     if (this.hidden > 0) out.push(`▸ ${this.hidden} hidden`);
     return out;
+  }
+
+  /** Every prompt whose order position passed — its ▸ lines, or the
+   *  unavailable marker. `pi` is the shared cursor across calls. */
+  private emitDumpPrompts(out: string[], pos: number, pi: { n: number }): void {
+    while (pi.n < this.prompts.length && (this.prompts[pi.n]?.pos ?? 0) <= pos) {
+      const p = this.prompts[pi.n++];
+      if (p !== undefined) out.push(...promptRows(p.item.text));
+    }
+  }
+
+  /** One order position of the readout — membership skip, the id
+   *  slot, then the row kind's emitter. */
+  private dumpSid(d: DumpRun, i: number): void {
+    const sid = d.ord[i];
+    const item = sid === undefined ? undefined : this.session.items.get(sid);
+    if (item === undefined || sid === undefined) return;
+    if (this.dumpSkips(d, sid, item)) return;
+    this.dumpEmit(d, sid, item, this.dumpItemId(sid));
+  }
+
+  /** Membership dedup — a storm member stays silent unless it is an
+   *  error marker; a run member always does. */
+  private dumpSkips(d: DumpRun, sid: string, item: TheirItem): boolean {
+    if (this.stormSkips(d, sid, item)) return true;
+    const leader = d.memberGroup.get(sid);
+    return leader !== undefined && leader !== sid;
+  }
+
+  /** A storm member emits no row of its own — except the error
+   *  marker, whose banner can't be attributed from the ▸ tally. */
+  private stormSkips(d: DumpRun, sid: string, item: TheirItem): boolean {
+    const stormLeader = d.storm.get(sid);
+    return stormLeader !== undefined && stormLeader !== sid && !this.isStormErr(sid, item);
+  }
+
+  /** True for an internal error marker — its banner can't be
+   *  attributed inside a storm, so it prints its origin inline. */
+  private isStormErr(
+    sid: string,
+    item: TheirItem
+  ): item is Extract<MarkerItem, { markerKind: 'error' }> {
+    return item.kind === 'marker' && item.markerKind === 'error' && this.internalSids.has(sid);
+  }
+
+  /** The sid's numeric slot — minted on first sight. */
+  private dumpItemId(sid: string): number {
+    let id = this.ids.get(sid);
+    if (id === undefined) {
+      id = this.nextId++;
+      this.ids.set(sid, id);
+    }
+    return id;
+  }
+
+  /** The row kind's emitter — turn_end folds, run/storm leaders
+   *  tally, the rest is an ordinary row. */
+  private dumpEmit(d: DumpRun, sid: string, item: TheirItem, id: number): void {
+    if (item.kind === 'marker' && item.markerKind === 'turn_end') {
+      this.dumpTurnEnd(item, d);
+      return;
+    }
+    if (d.memberGroup.get(sid) === sid) {
+      d.lastRun = this.dumpRun(d, sid, runMembers(d.ord, this.session.items, sid), id);
+      return;
+    }
+    if (d.storm.get(sid) === sid) {
+      this.dumpStorm(d, sid, stormMembers(d.ord, this.internalSids, sid), id);
+      return;
+    }
+    this.dumpRow(d, sid, item, id);
+  }
+
+  /** Birth-row records → a ProjCtx for the dump projection
+   *  (folded=false — a dump is the full readout, the fold is pane
+   *  state; `stamp` stays unset like the old dump calls for run and
+   *  storm rows). */
+  private dumpCtx(sid: string, id: number, stamp?: string): ProjCtx {
+    return {
+      id,
+      args: this.args,
+      folded: false,
+      stamp,
+      judge: this.judgeSids.has(sid),
+      by: this.byMap.get(sid),
+    };
+  }
+
+  /** A turn_end marker → ` · 45.4s · ctx 38k/200k` patched onto the
+   *  latest ▸ tally line. */
+  private dumpTurnEnd(item: Extract<MarkerItem, { markerKind: 'turn_end' }>, d: DumpRun): void {
+    if (d.lastRun < 0) return;
+    const dur = item.durationMs > 0 ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : '';
+    const u = item.usage;
+    const ctx =
+      u !== null && u !== undefined && u.size > 0 ? ` · ctx ${fmtUsage(u.used, u.size)}` : '';
+    d.out[d.lastRun] = `${d.out[d.lastRun]}${dur}${ctx}`;
+  }
+
+  /** One member's one-liner under the │ gutter — the item's acpLine
+   *  at dump width, or its bare kind when the line is empty. */
+  private dumpMemberLine(d: DumpRun, m: TheirItem): string {
+    const ml = lineText(
+      acpLine(m, {
+        width: 116,
+        frame: 0,
+        findTool: d.find,
+        arg: m.kind === 'tool_call' ? this.args.get(m.toolCallId) : undefined,
+      })
+    );
+    return `│  ${ml === '' ? m.kind : ml.trimEnd()}`;
+  }
+
+  /** The ▸-tally line; members hang under it in the │ gutter.
+   *  Returns the out index of the tally for turn_end folds. */
+  private dumpRun(d: DumpRun, sid: string, members: TheirItem[], id: number): number {
+    const n = d.out.length;
+    d.out.push(`▸ ${runItem(members, this.dumpCtx(sid, id)).arg}`);
+    for (const m of members) d.out.push(this.dumpMemberLine(d, m));
+    return n;
+  }
+
+  /** The ▸-storm line — same grammar; internal members show their
+   *  own one-liners under the gutter. */
+  private dumpStorm(d: DumpRun, sid: string, memberSids: string[], id: number): void {
+    const st = stormItem(memberSids, this.session.items, this.byMap, this.dumpCtx(sid, id));
+    d.out.push(`▸ ${st.arg}`);
+    for (const msid of memberSids) {
+      const m = this.session.items.get(msid);
+      if (m !== undefined) d.out.push(this.dumpMemberLine(d, m));
+    }
+  }
+
+  /** The ordinary rows — the acpLine one-liner (plus a tool's body),
+   *  else the projection's own dump (verdict controls included). */
+  private dumpRow(d: DumpRun, sid: string, item: TheirItem, id: number): void {
+    const line = this.dumpRowLine(d, sid, item);
+    if (line !== '') {
+      d.out.push(line);
+      this.dumpToolBody(d, sid, item, id);
+      return;
+    }
+    this.dumpProjected(d, sid, item, id);
+  }
+
+  /** The sid's one-liner — an internal error marker prints its
+   *  origin inline (inside a storm the lone banner can't be
+   *  attributed otherwise); every other row is its acpLine. */
+  private dumpRowLine(d: DumpRun, sid: string, item: TheirItem): string {
+    if (this.isStormErr(sid, item)) {
+      return stormErrText(item, this.byMap.get(sid));
+    }
+    return lineText(
+      acpLine(item, {
+        width: 120,
+        frame: 0,
+        findTool: d.find,
+        arg: item.kind === 'tool_call' ? this.args.get(item.toolCallId) : undefined,
+      })
+    );
+  }
+
+  /** A tool call's body under the │ gutter — the full readout. */
+  private dumpToolBody(d: DumpRun, sid: string, item: TheirItem, id: number): void {
+    if (item.kind !== 'tool_call') return;
+    const ctx = this.dumpCtx(sid, id, this.tsMap.get(sid));
+    for (const l of dumpContent(toolItem(item, ctx).content)) {
+      d.out.push(`│  ${l}`);
+    }
+  }
+
+  /** The projection fallback — judge replies print the verdict
+   *  control, not the JSON wall (the same shape classification the
+   *  pane's VerdictRow uses; the badge is the call's model/provider,
+   *  never a brand literal). */
+  private dumpProjected(d: DumpRun, sid: string, item: TheirItem, id: number): void {
+    const p = project(item, this.dumpCtx(sid, id, this.tsMap.get(sid)));
+    if (p === undefined) return;
+    if ('text' in p) {
+      const v = verdictOf(p.text);
+      if (v !== undefined) {
+        d.out.push(`⛨ ${v.model ?? p.by ?? 'verdict'} · ${v.summary}`);
+        for (const [q, f] of v.fields) d.out.push(`   ${q} ${f}`);
+        return;
+      }
+    }
+    d.out.push(...dumpItems([p]));
   }
 
   /** The item's full raw text for Ctrl+C — the impl's line language
@@ -1251,20 +1411,29 @@ export class AcpImpl implements PaneImpl {
    *  line, a tool its one-liner + full body, a verdict its control
    *  text, everything else its raw text. */
   copyText(item: Item): string {
-    const line = (vi: unknown): string => lineText(acpLine(vi, 400, 0, () => undefined));
-    if ('runs' in item && item.runs !== undefined) {
-      const members = (item.runs as readonly unknown[]).map(m => line(m)).filter(l => l !== '');
-      return [`▸ ${item.runs.length} activity`, ...members].join('\n');
-    }
+    const line = (vi: unknown): string =>
+      lineText(acpLine(vi, { width: 400, frame: 0, findTool: () => undefined }));
+    if ('runs' in item && item.runs !== undefined) return copyRuns(item, line);
     if ('vi' in item && item.vi !== undefined) {
-      const body =
-        'content' in item && Array.isArray(item.content) ? dumpContent(item.content) : [];
-      return [line(item.vi), ...body].join('\n');
+      return [line(item.vi), ...copyBody(item)].join('\n');
     }
     const v = 'text' in item ? verdictOf(item.text) : undefined;
-    if (v !== undefined) {
-      return [`⛨ jev · ${v.summary}`, ...v.fields.map(([q, f]) => `${q} ${f}`)].join('\n');
-    }
+    if (v !== undefined) return copyVerdict(v);
     return 'text' in item ? item.text : '';
   }
 }
+
+/** A run's copy — the ▸-tally headline plus each member's line. */
+const copyRuns = (item: Item, line: (vi: unknown) => string): string => {
+  const runs = (item as ToolItem).runs ?? [];
+  const members = runs.map(m => line(m)).filter(l => l !== '');
+  return [`▸ ${runs.length} activity`, ...members].join('\n');
+};
+
+/** A tool's body lines below its one-liner. */
+const copyBody = (item: Item): string[] =>
+  'content' in item && Array.isArray(item.content) ? dumpContent(item.content) : [];
+
+/** The verdict control's copy — badge plus typed fields. */
+const copyVerdict = (v: NonNullable<ReturnType<typeof verdictOf>>): string =>
+  [`⛨ jev · ${v.summary}`, ...v.fields.map(([q, f]) => `${q} ${f}`)].join('\n');

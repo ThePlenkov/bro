@@ -155,36 +155,31 @@ export function mdPlain(text: string): string[] {
   return out;
 }
 
-/** HTML-looking tags out of a line — a linear scan, no regex: `<`
- *  opens a tag that runs to `>`; an unclosed `<` keeps its char (it
- *  was never a tag) so ordinary text like `a < b` survives. */
-const stripTags = (s: string): string => {
-  let out = '';
-  let i = 0;
-  for (;;) {
-    const open = s.indexOf('<', i);
-    if (open === -1) return out + s.slice(i);
-    out += s.slice(i, open);
-    const close = s.indexOf('>', open + 1);
-    if (close === -1) return out + s.slice(open);
-    i = close + 1;
-  }
-};
-
-/** `<!-- ... -->` comments out of a line — a linear scan, no regex:
- *  an unterminated comment eats to end-of-line and no `<!--` can
- *  survive the pass (the scanner's injection/ReDoS flags). */
-const stripHtmlComments = (s: string): string => {
+/** `open…close` spans out of a line — a linear scan, no regex (the
+ *  scanner's injection/ReDoS flags). `keepUnclosed` preserves the
+ *  tail from an unterminated `open` (a lone `<` was never a tag, so
+ *  `a < b` survives); without it the tail is eaten to end-of-line
+ *  (an unterminated `<!--` can never survive the pass). */
+const stripDelims = (s: string, open: string, close: string, keepUnclosed: boolean): string => {
   let out = '';
   let rest = s;
   for (;;) {
-    const open = rest.indexOf('<!--');
-    if (open === -1) return out + rest;
-    out += rest.slice(0, open);
-    const close = rest.indexOf('-->', open + 4);
-    rest = close === -1 ? '' : rest.slice(close + 3);
+    const i = rest.indexOf(open);
+    if (i === -1) return out + rest;
+    out += rest.slice(0, i);
+    const j = rest.indexOf(close, i + open.length);
+    if (j === -1) return keepUnclosed ? out + rest.slice(i) : out;
+    rest = rest.slice(j + close.length);
   }
 };
+
+/** HTML-looking tags out of a line — `<` opens a tag that runs to
+ *  `>`; an unclosed `<` keeps its char so ordinary text survives. */
+const stripTags = (s: string): string => stripDelims(s, '<', '>', true);
+
+/** `<!-- ... -->` comments out of a line — an unterminated comment
+ *  eats to end-of-line so no `<!--` can survive the pass. */
+const stripHtmlComments = (s: string): string => stripDelims(s, '<!--', '-->', false);
 
 /** Markdown source for the `<markdown>` renderable — the renderable
  *  prints raw HTML tags literally, so review-tool furniture
@@ -222,21 +217,31 @@ export function mdSource(text: string): string {
  *  then the arg's first line unless it merely repeats the title or
  *  is the call's cwd. Diff content tallies as `+a −b`. */
 export function toolTail(item: ToolItem): { kind: string; arg: string; tally: string } {
-  const kind =
-    item.toolKind !== undefined && item.toolKind !== '' && item.toolKind !== 'execute'
-      ? ` [${item.toolKind}]`
-      : '';
-  let arg = argHead(item);
+  return { kind: tailKind(item), arg: tailArg(item), tally: tailTally(item) };
+}
+
+/** Kinds that add no signal — a `command`/`grep` title already says
+ *  `execute`, and the empty kind says nothing. */
+const TAIL_KIND_DROP: ReadonlySet<string> = new Set(['', 'execute']);
+
+const tailKind = (item: ToolItem): string => {
+  const k = item.toolKind;
+  return k === undefined || TAIL_KIND_DROP.has(k) ? '' : ` [${k}]`;
+};
+
+/** The arg's first line — dropped when it merely repeats the title
+ *  or is an `execute` call's cwd. */
+const tailArg = (item: ToolItem): string => {
+  const head = argHead(item);
+  if (head === '') return '';
   const first = item.arg !== undefined ? firstLine(item.arg) : '';
-  if (
-    arg === '' ||
-    item.title.includes(first) ||
-    (item.toolKind === 'execute' && first.startsWith('/'))
-  ) {
-    arg = '';
-  } else {
-    arg = ` ${arg}`;
-  }
+  if (item.title.includes(first)) return '';
+  if (item.toolKind === 'execute' && first.startsWith('/')) return '';
+  return ` ${head}`;
+};
+
+/** The diff tally — ` +a −b` when the body carries hunks. */
+const tailTally = (item: ToolItem): string => {
   let add = 0;
   let del = 0;
   for (const c of item.content) {
@@ -245,9 +250,8 @@ export function toolTail(item: ToolItem): { kind: string; arg: string; tally: st
       add += (c.cur ?? '').split('\n').filter(l => l !== '').length;
     }
   }
-  const tally = add + del > 0 ? ` +${add} −${del}` : '';
-  return { kind, arg, tally };
-}
+  return add + del > 0 ? ` +${add} −${del}` : '';
+};
 export function printLines(item: Item): string[] /* NOSONAR typescript:S3776 */ {
   const rows = (lines: string[]): string[] => lines;
   const folded = item.collapsed === true;
