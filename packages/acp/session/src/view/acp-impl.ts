@@ -33,7 +33,6 @@ import {
   type ToolCallItem,
 } from '@broject/acp-model';
 import type { ArchiveRow, PaneLed } from '../archive/index.ts';
-import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../wire/fmt.ts';
 import {
   dumpContent,
   dumpItems,
@@ -46,6 +45,7 @@ import {
   type ToolStatus,
 } from '../model/items.ts';
 import { isJudgeTurn, verdictOf } from '../model/verdict.ts';
+import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../wire/fmt.ts';
 import { planBox, type SessionUpdateLike, type ToolWire, toolArg } from '../wire/index.ts';
 import { acpLine, lineText } from './acp-lines.ts';
 import type { FoldPolicy, PaneImpl } from './impl.ts';
@@ -486,14 +486,17 @@ const stormMembers = (
 const runMembers = (
   order: readonly string[],
   items: ReadonlyMap<string, TheirItem>,
+  internal: ReadonlySet<string>,
   leader: string
 ): TheirItem[] => {
   const start = order.indexOf(leader);
   if (start < 0) return [];
   const out: TheirItem[] = [];
   for (let i = start; i < order.length; i++) {
-    const item = items.get(order[i] ?? '');
-    if (item === undefined || !ACTIVITY.has(item.kind)) break;
+    const sid = order[i];
+    const item = items.get(sid ?? '');
+    if (sid === undefined || internal.has(sid) || item === undefined || !ACTIVITY.has(item.kind))
+      break;
     out.push(item);
   }
   return out;
@@ -1111,7 +1114,9 @@ export class AcpImpl implements PaneImpl {
       const was = this.prev.get(sid);
       const nowGrouped = memberGroup.has(sid);
       const nowStorm = stormLeader === sid;
-      const members = nowGrouped ? runMembers(this.session.order, items, sid) : undefined;
+      const members = nowGrouped
+        ? runMembers(this.session.order, items, this.internalSids, sid)
+        : undefined;
       const stormSids = nowStorm
         ? stormMembers(this.session.order, this.internalSids, sid)
         : undefined;
@@ -1297,7 +1302,12 @@ export class AcpImpl implements PaneImpl {
       return;
     }
     if (d.memberGroup.get(sid) === sid) {
-      d.lastRun = this.dumpRun(d, sid, runMembers(d.ord, this.session.items, sid), id);
+      d.lastRun = this.dumpRun(
+        d,
+        sid,
+        runMembers(d.ord, this.session.items, this.internalSids, sid),
+        id
+      );
       return;
     }
     if (d.storm.get(sid) === sid) {

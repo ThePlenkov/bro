@@ -220,4 +220,27 @@ describe('the pane impl seam', () => {
     const tools = impl.drain().filter(o => o.op === 'tool');
     assert.equal(tools.length, 1);
   });
+
+  test('an internal activity sid stops the preceding activity run', async () => {
+    const impl = await pickImpl('acp', {});
+    const tool = (toolCallId: string, by: string) => ({
+      kind: 'update' as const,
+      by,
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId,
+        title: toolCallId,
+        status: 'completed' as const,
+      },
+    });
+
+    impl.feed(tool('agent-1', 'acp'));
+    impl.feed(tool('agent-2', 'acp'));
+    impl.feed(tool('internal-1', 'conductor:judge'));
+
+    const text = impl.dump().join('\n');
+    assert.match(text, /▸ 2 tool calls/);
+    assert.doesNotMatch(text, /▸ 3 tool calls/);
+    assert.match(text, /▸ 1 internal call/);
+  });
 });
