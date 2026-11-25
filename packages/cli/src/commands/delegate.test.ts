@@ -408,8 +408,16 @@ describe('bro fleet delegate — --detach', () => {
       JSON.stringify({
         agents: { native: { command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' } },
         providers: {
-          alt: { type: 'cli', command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' },
-          sweeps: { type: 'cli', command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' },
+          alt: {
+            type: 'cli',
+            command: 'node -e "setTimeout(()=>{},30000)" {promptFile}',
+            model: 'alt-1',
+          },
+          sweeps: {
+            type: 'cli',
+            command: 'node -e "setTimeout(()=>{},30000)" {promptFile}',
+            model: 'sweep-1',
+          },
           orca: ORCA,
         },
         fleet: {
@@ -464,7 +472,11 @@ describe('bro fleet delegate — --detach', () => {
         JSON.stringify({
           agents: { native: { command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' } },
           providers: {
-            sweeps: { type: 'cli', command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' },
+            sweeps: {
+              type: 'cli',
+              command: 'node -e "setTimeout(()=>{},30000)" {promptFile}',
+              model: 'sweep-1',
+            },
             orca: ORCA,
           },
           fleet: {

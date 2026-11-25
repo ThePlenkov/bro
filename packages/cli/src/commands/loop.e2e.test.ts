@@ -1270,8 +1270,8 @@ const routedLane = (
 ): Fixture =>
   loopFixture(rows, { agent: 'false', ...loopCfg }, 'land', host => ({
     providers: {
-      sweeper: { type: 'cli', command: `node ${host.agent}` },
-      regular: { type: 'cli', command: `node ${host.agent}` },
+      sweeper: { type: 'cli', command: `node ${host.agent}`, model: 'sweep-1' },
+      regular: { type: 'cli', command: `node ${host.agent}`, model: 'reg-1' },
     },
     fleet: { routing },
   }));
@@ -1518,7 +1518,7 @@ http.createServer((req, res) => {
     loopFixture(rows, { agent: 'false', ...loopCfg }, 'land', host => ({
       agents: { native: { provider: 'regular' } },
       providers: {
-        regular: { type: 'cli', command: `node ${host.agent}` },
+        regular: { type: 'cli', command: `node ${host.agent}`, model: 'reg-1' },
         maxlane: { type: 'cli', command: `node ${host.agent}` },
         judge: {
           type: 'api',

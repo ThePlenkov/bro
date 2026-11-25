@@ -1225,7 +1225,7 @@ describe('bro agents up — class routing', () => {
             command: 'node {promptFile} -m {model}',
             account: 'local-account',
           },
-          alt: { type: 'cli', command: 'node {promptFile}' },
+          alt: { type: 'cli', command: 'node {promptFile}', model: 'alt-1' },
         },
         fleet: {
           routing: {
@@ -1399,7 +1399,7 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
         agents: { native: { command: 'node {promptFile}' } },
         providers: {
           local: { type: 'cli', command: 'node {promptFile} -m {model}' },
-          alt: { type: 'cli', command: 'node {promptFile}' },
+          alt: { type: 'cli', command: 'node {promptFile}', model: 'alt-1' },
           orca,
         },
         fleet: {
@@ -1677,7 +1677,7 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
         providers: {
           // the STATIC lane — nothing in the matrix binds it, so any
           // pick leaking into the spawn shows up as provider/model drift
-          alt: { type: 'cli', command: 'node {promptFile}' },
+          alt: { type: 'cli', command: 'node {promptFile}', model: 'alt-1' },
           // matrix-only bindings — 'cheap' pins local, 'max' pins the
           // sweeps profile (local + sweep-1); shadow must reach neither
           local: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'local-1' },
@@ -1775,7 +1775,7 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
         // 'alt' (agents.native.provider), never cheap's 'local' or
         // max's sweeps profile (local + sweep-1)
         assert.equal(entry.provider, 'alt');
-        assert.equal(entry.model, undefined);
+        assert.equal(entry.model, 'alt-1'); // the provider's own pin, never a matrix pick
         const rows = matrixRows(fx);
         assert.equal(rows.length, 1);
         const v = rows[0]!;
@@ -1942,7 +1942,7 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
         JSON.stringify({
           agents: { native: { command: 'node {promptFile}', provider: 'alt' } },
           providers: {
-            alt: { type: 'cli', command: 'node {promptFile}' },
+            alt: { type: 'cli', command: 'node {promptFile}', model: 'alt-1' },
             local: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'local-1' },
             // openai-compat wire → prose call grade — enforce needs typed
             orca: {
@@ -2044,7 +2044,7 @@ describe('bro agents up — fleet.matrix (spec bro-v0pvd.1)', () => {
         JSON.stringify({
           agents: { native: { command: 'node {promptFile}', provider: 'alt' } },
           providers: {
-            alt: { type: 'cli', command: 'node {promptFile}' },
+            alt: { type: 'cli', command: 'node {promptFile}', model: 'alt-1' },
             local: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'local-1' },
             orca: ORCA_TYPED,
           },

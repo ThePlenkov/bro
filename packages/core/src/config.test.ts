@@ -1098,3 +1098,48 @@ describe('repoOptedIn', () => {
     assert.equal(repoOptedIn(dir), false);
   });
 });
+
+describe('fleet.routing model pin (bro-1lvvx)', () => {
+  const PROVIDER = { type: 'acp', command: 'x', model: 'pinned-model' };
+  const UNPINNED_PROVIDER = { type: 'acp', command: 'x' };
+
+  test('a chain entry with provider but no model and no provider model is dropped', () => {
+    const cfg = load({
+      providers: { x: UNPINNED_PROVIDER },
+      fleet: { routing: { minimax: { chain: [{ provider: 'x' }] } } },
+    });
+    assert.equal(cfg.fleet.routing.minimax, undefined);
+  });
+
+  test('an inline model pin keeps the entry', () => {
+    const cfg = load({
+      providers: { x: UNPINNED_PROVIDER },
+      fleet: { routing: { minimax: { chain: [{ provider: 'x', model: 'm1' }] } } },
+    });
+    assert.equal(cfg.fleet.routing.minimax?.chain.length, 1);
+  });
+
+  test('the provider entry model satisfies the pin', () => {
+    const cfg = load({
+      providers: { x: PROVIDER },
+      fleet: { routing: { minimax: { chain: [{ provider: 'x' }] } } },
+    });
+    assert.equal(cfg.fleet.routing.minimax?.chain.length, 1);
+  });
+
+  test('a mixed chain drops only the unpinned entries', () => {
+    const cfg = load({
+      providers: { x: PROVIDER, y: UNPINNED_PROVIDER },
+      fleet: {
+        routing: {
+          minimax: { chain: [{ provider: 'y' }, { provider: 'x' }, { provider: 'y', model: 'm' }] },
+        },
+      },
+    });
+    assert.equal(cfg.fleet.routing.minimax?.chain.length, 2);
+    assert.deepEqual(
+      cfg.fleet.routing.minimax?.chain.map(e => e.provider),
+      ['x', 'y']
+    );
+  });
+});
