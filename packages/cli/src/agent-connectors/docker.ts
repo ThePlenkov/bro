@@ -93,30 +93,20 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     try {
       dockerRun(['rm', '-f', name]);
       writeDockerEnvFile(envFile, spec);
-      const worker = workerWithResume(spec.worker, resumeSessionId);
-      warnNoPromptFile(worker, command);
-      const cliBadge = workerCliBadge(worker, command);
-      const runLine = workerRunLine(worker, command);
-      const wrapper =
-        stderrLog !== undefined
-          ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
-          : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`;
-      const res = dockerRun(
-        dockerRunArgv(
-          name,
-          spec,
-          dockerMounts(spec),
-          envFile,
-          agentId,
-          promptFile,
-          cliBadge,
-          mol,
-          runArgs,
-          image,
-          wrapper,
-          getCredentialScope(env, 'docker').strictEnv
-        )
-      );
+      const res = runDockerCommand({
+        name,
+        spec,
+        envFile,
+        agentId,
+        promptFile,
+        log,
+        stderrLog,
+        exitFile,
+        resumeSessionId,
+        mol,
+        image,
+        runArgs,
+      });
       rmSync(envFile, { force: true });
       if (res.code !== 0) {
         const why = res.err !== '' ? res.err : `exited ${res.code}`;
@@ -132,6 +122,95 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
       throw err;
     }
+  };
+
+  const runDockerCommand = (input: {
+    name: string;
+    spec: SpawnSpec;
+    envFile: string;
+    agentId: string;
+    promptFile: string;
+    log: string;
+    stderrLog: string | undefined;
+    exitFile: string;
+    resumeSessionId: string | undefined;
+    mol: string;
+    image: string;
+    runArgs: string[];
+  }) => {
+    const {
+      name,
+      spec,
+      envFile,
+      agentId,
+      promptFile,
+      log,
+      stderrLog,
+      exitFile,
+      resumeSessionId,
+      mol,
+      image,
+      runArgs,
+    } = input;
+    const worker = workerWithResume(spec.worker, resumeSessionId);
+    warnNoPromptFile(worker, command);
+    const cliBadge = workerCliBadge(worker, command);
+    const runLine = workerRunLine(worker, command);
+    const wrapper = dockerOutputWrapper(runLine, log, stderrLog, exitFile);
+    return dockerRun(
+      dockerLaunchArgs({
+        name,
+        spec,
+        envFile,
+        agentId,
+        promptFile,
+        cliBadge,
+        mol,
+        runArgs,
+        image,
+        wrapper,
+      })
+    );
+  };
+
+  const dockerOutputWrapper = (
+    runLine: string,
+    log: string,
+    stderrLog: string | undefined,
+    exitFile: string
+  ): string =>
+    stderrLog === undefined
+      ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`
+      : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`;
+
+  const dockerLaunchArgs = (input: {
+    name: string;
+    spec: SpawnSpec;
+    envFile: string;
+    agentId: string;
+    promptFile: string;
+    cliBadge: string | undefined;
+    mol: string;
+    runArgs: string[];
+    image: string;
+    wrapper: string;
+  }): string[] => {
+    const { name, spec, envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper } =
+      input;
+    return dockerRunArgv(
+      name,
+      spec,
+      dockerMounts(spec),
+      envFile,
+      agentId,
+      promptFile,
+      cliBadge,
+      mol,
+      runArgs,
+      image,
+      wrapper,
+      getCredentialScope(env, 'docker').strictEnv
+    );
   };
 
   const releaseDockerSpawn = (input: {
@@ -155,26 +234,77 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     throw err;
   };
 
+  const completeDockerSpawn = (input: {
+    spec: SpawnSpec;
+    home: string;
+    image: string;
+    mol: string;
+    dockerPidIsLocal: boolean;
+    prepared: ReturnType<typeof prepareSpawn>;
+  }): AgentInfo => {
+    const { spec, home, image, mol, dockerPidIsLocal, prepared } = input;
+    const {
+      agentId,
+      promptFile,
+      log,
+      stderrLog,
+      exitFile,
+      runId,
+      lease,
+      reservation,
+      resumeSessionId,
+      crossKindReservations,
+    } = prepared;
+    const name = `bro-${agentId}`;
+    try {
+      const containerId = launchDockerContainer({
+        spec,
+        home,
+        agentId,
+        promptFile,
+        log,
+        stderrLog,
+        exitFile,
+        resumeSessionId,
+        name,
+        mol: mol!,
+        image,
+      });
+      const insp = dockerInspect(name);
+      const spawned = patchAgentRegistry(dir, spec.molStep, {
+        containerId,
+        ...(insp.pid !== undefined ? { pid: insp.pid, pidStart: null } : {}),
+      });
+      rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {});
+      if (dockerPidIsLocal && insp.pid !== undefined) {
+        retagSessionSlots([reservation, ...crossKindReservations], insp.pid);
+      }
+      writeWorkMarker(dir, agentId, spec.molStep, insp.pid);
+      return toDockerInfo(dir, home, spec.molStep, spawned);
+    } catch (err) {
+      return releaseDockerSpawn({
+        err,
+        reservation,
+        crossKindReservations,
+        lease,
+        molStep: spec.molStep,
+      });
+    }
+  };
+
   return {
     name: 'docker',
 
     // NOSONAR — connector contract is async; the critical section is intentionally centralized
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
-      // NOSONAR — connector contract is async; the work is one sync critical section
-      // policy BEFORE the daemon probe and image pull/build — a refused
-      // spawn must not pay (or log) a docker fetch it will never use
       assertMutableConfig(dir);
       const home = spawnHome(dir, 'docker', command, spec);
       const daemon = dockerDaemonUp();
       if (!daemon.up) {
         throw new SpawnError(`docker unavailable — ${daemon.err}`, 'unavailable');
       }
-      // image resolution outside the lock: a first devcontainer build
-      // pays minutes — holding the registry lock through it would
-      // serialize every concurrent spawn behind one `docker build`
       const image = dockerImageFor(spec, knobs);
       const mol = stepParent(spec.beadsDir, spec.molStep);
-      // only a LOCAL daemon's State.Pid is probeable from this host
       const dockerPidIsLocal =
         process.env.DOCKER_HOST === undefined && process.env.DOCKER_CONTEXT === undefined;
       return withAgentRegistryLock(dir, () => {
@@ -184,6 +314,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           log,
           stderrLog,
           exitFile,
+          runId,
           lease,
           reservation,
           resumeSessionId,
@@ -196,8 +327,6 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             }
             const p = dockerInspect(n);
             if (p.live === 'unknown') {
-              // an unverifiable liveness probe must not let a duplicate
-              // spawn run beside a worker that may still be alive
               throw new SpawnError(
                 `cannot verify ${spec.molStep}'s container — ${p.err}`,
                 'unavailable'
@@ -216,41 +345,25 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           spawnCommand: command,
           external: externalGuardOf(env),
         });
-        const name = `bro-${agentId}`;
-        try {
-          const containerId = launchDockerContainer({
-            spec,
-            home,
+        return completeDockerSpawn({
+          spec,
+          home,
+          image: image!,
+          mol: mol!,
+          dockerPidIsLocal,
+          prepared: {
             agentId,
             promptFile,
             log,
             stderrLog,
             exitFile,
-            resumeSessionId,
-            name,
-            mol: mol!,
-            image,
-          });
-          const insp = dockerInspect(name);
-          const spawned = patchAgentRegistry(dir, spec.molStep, {
-            containerId,
-            ...(insp.pid !== undefined ? { pid: insp.pid, pidStart: null } : {}),
-          });
-          rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {});
-          if (dockerPidIsLocal && insp.pid !== undefined) {
-            retagSessionSlots([reservation, ...crossKindReservations], insp.pid);
-          }
-          writeWorkMarker(dir, agentId, spec.molStep, insp.pid);
-          return toDockerInfo(dir, home, spec.molStep, spawned);
-        } catch (err) {
-          return releaseDockerSpawn({
-            err,
-            reservation,
-            crossKindReservations,
+            runId,
             lease,
-            molStep: spec.molStep,
-          });
-        }
+            reservation,
+            resumeSessionId,
+            crossKindReservations,
+          },
+        });
       });
     },
 

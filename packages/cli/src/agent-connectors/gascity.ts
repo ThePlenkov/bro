@@ -166,14 +166,9 @@ async function listGascityAgents(dir: string, configDir: () => string | null): P
     // not verifiably running → degrade and omit them: an unlisted
     // agent renders 'unknown' in fleet, a 'lost' one would look like
     // a dead fleet.
-    const missing = entries.some(
-      ([molStep, e]) => gcSessionFor(e, molStep, sessions) === undefined
-    );
-    if (missing && gcSupervisorRunning() !== true) {
+    if (hasUnverifiableAgents(entries, sessions)) {
       return {
-        agents: entries
-          .filter(([molStep, e]) => gcSessionFor(e, molStep, sessions) !== undefined)
-          .map(([molStep, e]) => gascityInfo(molStep, e, sessions, 'lost')),
+        agents: knownGascityAgents(entries, sessions),
         degraded: 'gc supervisor not running — agent liveness unknown',
       };
     }
@@ -181,6 +176,25 @@ async function listGascityAgents(dir: string, configDir: () => string | null): P
   } catch (err) {
     return { agents: [], degraded: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function hasUnverifiableAgents(
+  entries: [string, AgentRegistryEntry][],
+  sessions: GcSession[]
+): boolean {
+  return (
+    entries.some(([molStep, entry]) => gcSessionFor(entry, molStep, sessions) === undefined) &&
+    gcSupervisorRunning() !== true
+  );
+}
+
+function knownGascityAgents(
+  entries: [string, AgentRegistryEntry][],
+  sessions: GcSession[]
+): AgentInfo[] {
+  return entries
+    .filter(([molStep, entry]) => gcSessionFor(entry, molStep, sessions) !== undefined)
+    .map(([molStep, entry]) => gascityInfo(molStep, entry, sessions, 'lost'));
 }
 
 function gascityInfo(

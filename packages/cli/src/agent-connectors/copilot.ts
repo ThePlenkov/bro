@@ -56,15 +56,21 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   const targetRepo = (spec: SpawnSpec): { owner: string; repo: string; slug: string } => {
     const slug = knobString('repo') ?? copilotRemoteRepo(spec.repoRoot);
     const m = slug === undefined ? null : /^([\w.-]+)\/([\w.-]+)$/.exec(slug);
-    if (m?.[1] === undefined || m?.[2] === undefined || slug === undefined) {
+    if (!isRepoMatch(m, slug)) {
       throw new SpawnError(
         `no repository to dispatch the copilot task against — set agents.copilot.repo ` +
           `('owner/repo') or an origin remote on ${spec.repoRoot}`,
         'config'
       );
     }
-    return { owner: m[1], repo: m[2], slug };
+    return { owner: m[1], repo: m[2], slug: slug! };
   };
+
+  const isRepoMatch = (
+    match: RegExpExecArray | null,
+    slug: string | undefined
+  ): match is RegExpExecArray & { 1: string; 2: string } =>
+    slug !== undefined && match?.[1] !== undefined && match[2] !== undefined;
 
   /** The REST POST — `gh agent-task create` prints only a human URL;
    *  the task object's `id` has to come back typed or the registry
@@ -90,13 +96,15 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ],
       60_000
     );
-    if (res.missing) {
-      throw new SpawnError('gh not on PATH', 'unavailable');
-    }
-    if (res.code !== 0) {
-      throw dispatchFailure(target.slug, res.err !== '' ? res.err : `gh api exited ${res.code}`);
-    }
-    const orphan = `the task may still have been created; check \`gh agent-task list\` on ${target.slug}`;
+    return parseDispatchResult(res, target.slug);
+  };
+
+  const parseDispatchResult = (
+    res: ReturnType<typeof ghRun>,
+    slug: string
+  ): { task: CopilotTask; taskId: string } => {
+    validateDispatchResponse(res, slug);
+    const orphan = `the task may still have been created; check \`gh agent-task list\` on ${slug}`;
     let task: CopilotTask;
     try {
       task = JSON.parse(res.out) as CopilotTask;
@@ -106,11 +114,16 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         'unavailable'
       );
     }
-    const taskId = typeof task.id === 'string' ? task.id : undefined;
-    if (taskId === undefined) {
+    if (typeof task.id !== 'string')
       throw new SpawnError(`copilot task dispatch returned no task id — ${orphan}`, 'unavailable');
+    return { task, taskId: task.id };
+  };
+
+  const validateDispatchResponse = (res: ReturnType<typeof ghRun>, slug: string): void => {
+    if (res.missing) throw new SpawnError('gh not on PATH', 'unavailable');
+    if (res.code !== 0) {
+      throw dispatchFailure(slug, res.err !== '' ? res.err : `gh api exited ${res.code}`);
     }
-    return { task, taskId };
   };
 
   const copilotTaskBody = (spec: SpawnSpec): Record<string, unknown> => ({
@@ -159,23 +172,34 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       return;
     }
     const repo = copilotEntryRepo(entry);
-    const runId = copilotLatestSession(f.task!)?.workflow_run_id;
+    cancelCopilotRun(repo, f.task!);
+    const after = copilotFetchTask(taskId);
+    warnIfCopilotSurvives({ molStep, taskId, repo, entry, after });
+  };
+
+  const cancelCopilotRun = (repo: string | undefined, task: CopilotTask): void => {
+    const runId = copilotLatestSession(task)?.workflow_run_id;
     if (repo !== undefined && typeof runId === 'number') {
       ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`]);
     }
-    const after = copilotFetchTask(taskId);
-    if (!after.ok || COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
-      const url =
-        copilotSessionUrl(repo, entry.pr, entry.sessionId) ?? `https://${ghHost()}/copilot/agents`;
-      console.error(
-        after.ok
-          ? `warning: copilot session for ${molStep} is still live — there is no ` +
-              `CLI/REST cancel; stop it in the web UI (${url})`
-          : `warning: cannot re-check copilot task ${taskId} after cancel — ` +
-              `${after.err ?? 'gh api failed'}; the session may still be live — ` +
-              `stop it in the web UI (${url})`
-      );
-    }
+  };
+
+  const warnIfCopilotSurvives = (input: {
+    molStep: string;
+    taskId: string;
+    repo: string | undefined;
+    entry: AgentRegistryEntry;
+    after: ReturnType<typeof copilotFetchTask>;
+  }): void => {
+    const { molStep, taskId, repo, entry, after } = input;
+    if (after.ok && !COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) return;
+    const url =
+      copilotSessionUrl(repo, entry.pr, entry.sessionId) ?? `https://${ghHost()}/copilot/agents`;
+    console.error(
+      after.ok
+        ? `warning: copilot session for ${molStep} is still live — there is no CLI/REST cancel; stop it in the web UI (${url})`
+        : `warning: cannot re-check copilot task ${taskId} after cancel — ${after.err ?? 'gh api failed'}; the session may still be live — stop it in the web UI (${url})`
+    );
   };
 
   const preflightCopilot = (
@@ -224,13 +248,14 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     };
   };
 
-  const releaseCopilotSpawn = (
-    err: unknown,
-    spec: SpawnSpec,
-    reservation: Parameters<typeof releaseSessionSlot>[0] | undefined,
-    crossKindReservations: Parameters<typeof releaseSessionStart>[0],
-    lease: Parameters<typeof releaseSpawnLease>[1]
-  ): never => {
+  const releaseCopilotSpawn = (input: {
+    err: unknown;
+    spec: SpawnSpec;
+    reservation: Parameters<typeof releaseSessionSlot>[0] | undefined;
+    crossKindReservations: Parameters<typeof releaseSessionStart>[0];
+    lease: Parameters<typeof releaseSpawnLease>[1];
+  }): never => {
+    const { err, spec, reservation, crossKindReservations, lease } = input;
     copilotRefreshCount(dir, env);
     if (reservation !== undefined) releaseSessionSlot(reservation);
     releaseSessionStart(crossKindReservations);
@@ -305,7 +330,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         try {
           return finishCopilotSpawn(spec, home, target, agentId);
         } catch (err) {
-          return releaseCopilotSpawn(err, spec, reservation, crossKindReservations, lease);
+          return releaseCopilotSpawn({ err, spec, reservation, crossKindReservations, lease });
         }
       });
     },
@@ -364,9 +389,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
       const [molStep, entry] = hit;
       const taskId = copilotTaskIdOf(entry);
-      if (entry.stopped !== true && taskId !== undefined) {
-        copilotCancelRemote(molStep, entry, taskId);
-      }
+      cancelCopilotIfNeeded(molStep, entry, taskId);
       // a respawn during the cancel re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
       // 'stopped' lands on a live, respawned entry. Remote-liveness
@@ -375,11 +398,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // and the warn above reports the survivor
       withAgentRegistryLock(dir, () => {
         const cur = readAgentRegistry(dir)[molStep];
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
+        if (!sameCopilotRun(cur, entry)) {
           return; // respawned — the live run owns the entry
         }
         try {
@@ -392,5 +411,24 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     },
 
     capabilities: () => ({ attach: true, respawn: true, workers: false, supervisor: 'none' }),
+  };
+
+  const shouldCancelCopilot = (entry: AgentRegistryEntry, taskId: string | undefined): boolean =>
+    entry.stopped !== true && taskId !== undefined;
+
+  const sameCopilotRun = (
+    current: AgentRegistryEntry | undefined,
+    original: AgentRegistryEntry
+  ): boolean =>
+    current !== undefined &&
+    current.agentId === original.agentId &&
+    current.spawnedAt === original.spawnedAt;
+
+  const cancelCopilotIfNeeded = (
+    molStep: string,
+    entry: AgentRegistryEntry,
+    taskId: string | undefined
+  ): void => {
+    if (shouldCancelCopilot(entry, taskId)) copilotCancelRemote(molStep, entry, taskId!);
   };
 }
