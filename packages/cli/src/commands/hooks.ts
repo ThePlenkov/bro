@@ -1520,6 +1520,10 @@ interface PerfRow extends ProbeTiming {
   /** Total-row marker: stdout bytes the event emitted — the injected
    *  context size, the quota-cost dimension of hooks. */
   bytes?: number;
+  /** Cmd rows: the numeric exit code and subcommand — verdict exits
+   *  (act gate-red = 1) separate from crashes only through these. */
+  code?: number;
+  sub?: string;
   deadline?: boolean;
 }
 
@@ -1624,7 +1628,7 @@ function appendJournal(path: string, line: string, waitMs = 0): void {
  *  locked append) inside the exit handler of a latency-critical
  *  process. `bro telemetry`, the user-facing alias for `hooks perf`,
  *  still journals under its own cmd name. */
-export function journalCommand(cmd: string, ms: number, exitCode: number): void {
+export function journalCommand(cmd: string, ms: number, exitCode: number, sub?: string): void {
   try {
     if (cmd === 'hooks' || process.env.BRO_TELEMETRY === '0') {
       return;
@@ -1639,6 +1643,12 @@ export function journalCommand(cmd: string, ms: number, exitCode: number): void 
       probe: 'run',
       connector: cmd,
       ms,
+      // the numeric code rides alongside `failed` — an exit-1 semantic
+      // verdict (act's gate-red) is not a crash, and only the number
+      // lets the aggregate separate the two (drill 7c1a9d: 49 of 79
+      // "failures" were verdicts)
+      code: exitCode,
+      ...(sub !== undefined ? { sub } : {}),
       ...(exitCode !== 0 ? { failed: true as const } : {}),
     };
     // A contended lock must not stall the exit handler — the fallback
