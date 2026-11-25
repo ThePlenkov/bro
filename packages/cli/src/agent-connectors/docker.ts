@@ -100,7 +100,12 @@ function assertDockerUserCompatible(runArgs: string[]): void {
     return;
   }
   const uid = Number(user.split(':')[0]);
-  const hostUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+  // no getuid → no POSIX modes either (win32) — the whole EACCES premise
+  // is absent there, so validating would only false-positive
+  if (typeof process.getuid !== 'function') {
+    return;
+  }
+  const hostUid = process.getuid();
   if (uid !== 0 && uid !== hostUid) {
     throw new SpawnError(
       `agents.docker.runArgs pins --user uid ${uid} — the mounted agents dir is 0700 uid ${hostUid}, ` +
