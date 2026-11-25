@@ -902,6 +902,45 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', `🤖 ${basename(root)}`]);
   });
 
+  test('an acp agentId with path traversal cannot escape the events directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-acp-traversal-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    mkdirSync(join(root, '.git', 'bro', 'agents'), { recursive: true });
+    writeFileSync(
+      join(root, 'bro.config.json'),
+      JSON.stringify({ providers: { oc: { type: 'acp', command: 'opencode acp' } } })
+    );
+    writeFileSync(
+      join(root, '.git', 'bro', 'agents.json'),
+      JSON.stringify({
+        'mol-1': {
+          agentId: '../outside',
+          backend: 'acp',
+          worktree: root,
+          provider: 'oc',
+          acpSessionId: 'ses_1',
+          spawnedAt: new Date(NOW).toISOString(),
+        },
+      })
+    );
+    const stateDir = stateDirOf();
+    const scope = createHash('sha1').update(join(root, '.git')).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({ workspaces: { [root]: { ws: 'w1', label: 'old', managed: true } } })
+    );
+    fleetPass(root, stateDir, {
+      scenario: {
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'old' }],
+      },
+      state: {},
+    });
+    const st = readFleetState(fleetStatusPath(join(root, '.git'), root));
+    assert.equal(st?.events, undefined);
+    assert.equal(existsSync(join(root, '.git', 'bro', 'outside.events.jsonl')), false);
+  });
+
   test('a corrupt registry skips every write of the pass (bro-u0yjy)', () => {
     const root = mkdtempSync(join(tmpdir(), 'proj-corrupt-'));
     execFileSync('git', ['init', '-q'], { cwd: root });

@@ -15,7 +15,7 @@
  * — assembled into the `Planes` the tick injects into the kit.
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   gitCommonDir,
   gitTry,
@@ -221,6 +221,12 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
       const hasAcpSession = typeof e.acpSessionId === 'string' && e.acpSessionId !== '';
       const acp =
         (e.provider !== undefined && p.providers[e.provider]?.type === 'acp') || hasAcpSession;
+      const safeAgentId =
+        typeof e.agentId === 'string' &&
+        e.agentId !== '.' &&
+        e.agentId !== '..' &&
+        basename(e.agentId) === e.agentId &&
+        !e.agentId.includes('\\');
       return {
         key,
         live,
@@ -236,7 +242,7 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
         ...(hasAcpSession ? { acpSessionId: e.acpSessionId } : {}),
         ...(typeof e.log === 'string' ? { log: e.log } : {}),
         ...(acp ? { acp: true } : {}),
-        ...(acp && p.eventsHome !== null && typeof e.agentId === 'string' && e.agentId !== ''
+        ...(acp && p.eventsHome !== null && safeAgentId
           ? { events: join(p.eventsHome, `${e.agentId}.events.jsonl`) }
           : {}),
         at: parseTs(e.spawnedAt),
