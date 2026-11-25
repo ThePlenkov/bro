@@ -833,6 +833,9 @@ export class AcpImpl implements PaneImpl {
     }
     if (row.kind === 'turn') {
       if (row.phase === 'start') {
+        // A turn_end belongs to the activity in this turn, not to a
+        // singleton tool from the preceding one.
+        this.lastActivity = undefined;
         this.judgeNow = isJudgeTurn(undefined, row.by);
         this.curBy = headBy(row.by);
         this.curShortBy = shortBy(row.by);
@@ -1213,7 +1216,7 @@ export class AcpImpl implements PaneImpl {
             }
           }
         }
-        if (members !== undefined && next.kind === 'tool') {
+        if (next.kind === 'tool') {
           this.lastActivity = { id, arg: next.arg ?? '' };
         }
         continue;
@@ -1221,7 +1224,7 @@ export class AcpImpl implements PaneImpl {
       if (id === undefined) continue;
       const next = this.projectNext(sid, item, id, { members, stormSids });
       if (next === undefined) continue;
-      if (members !== undefined && next.kind === 'tool') {
+      if (next.kind === 'tool') {
         this.lastActivity = { id, arg: next.arg ?? '' };
       }
       if (next.kind === 'tool') {
@@ -1412,6 +1415,7 @@ export class AcpImpl implements PaneImpl {
   private dumpRow(d: DumpRun, sid: string, item: TheirItem, id: number): void {
     const line = this.dumpRowLine(d, sid, item);
     if (line !== '') {
+      if (ACTIVITY.has(item.kind)) d.lastRun = d.out.length;
       d.out.push(line);
       this.dumpToolBody(d, sid, item, id);
       return;

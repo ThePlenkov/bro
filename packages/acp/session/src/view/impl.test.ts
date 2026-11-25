@@ -319,4 +319,38 @@ describe('the pane impl seam', () => {
     assert.match(dump, /write \/first/);
     assert.match(dump, /write \/second/);
   });
+
+  test('a singleton tool receives the turn duration and context usage', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.beginLive();
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:01Z',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 't1',
+        title: 'ls',
+        status: 'completed',
+      } as never,
+    });
+    impl.drain();
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:02Z',
+      update: {
+        sessionUpdate: 'usage_update',
+        used: 38000,
+        size: 200000,
+      } as never,
+    });
+    impl.feed({ kind: 'turn', phase: 'stop', ts: '2026-01-01T00:00:06Z' });
+    const tool = impl.drain().find(o => o.op === 'tool');
+    assert.equal(tool?.op, 'tool');
+    if (tool?.op === 'tool') {
+      assert.match(tool.item.arg ?? '', /6\.0s/);
+      assert.match(tool.item.arg ?? '', /ctx 38k\/200k/);
+    }
+    assert.match(impl.dump().join('\n'), /6\.0s/);
+  });
 });
