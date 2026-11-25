@@ -1,6 +1,6 @@
 /** `bro otel` — status | test | on | off (spec: specs/bro-xgejl.md). */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { runOtelCommand } from './otel.ts';
@@ -191,5 +191,48 @@ describe('bro otel test', () => {
     assert.equal(r.exit, 0);
     assert.match(r.out.join('\n'), /otel\.enabled=false.*would-be/);
     assert.match(r.out.join('\n'), /"event": "hook\.stop"/);
+  });
+});
+
+describe('bro otel on|off — trust and permission guards', () => {
+  test('a TRACKED bro.config.local.json refuses the toggle (bro-mrc4n)', () => {
+    const dir = repo();
+    writeFileSync(join(dir, 'bro.config.local.json'), '{}\n');
+    git(['add', 'bro.config.local.json'], dir);
+    git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x'], dir);
+    const r = capture(dir, ['on']);
+    assert.equal(r.exit, 2);
+    assert.match(r.err.join('\n'), /tracked in git/);
+    // untouched — the toggle never landed in the distrusted layer
+    assert.equal(readFileSync(join(dir, 'bro.config.local.json'), 'utf8'), '{}\n');
+  });
+
+  test('rewrite preserves the existing file mode (bro-kztfl)', () => {
+    const dir = repo();
+    const path = join(dir, 'bro.config.local.json');
+    writeFileSync(path, JSON.stringify({ otel: { enabled: false } }));
+    chmodSync(path, 0o600);
+    const r = capture(dir, ['on']);
+    assert.equal(r.exit, 0);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  });
+});
+
+describe('bro otel status — kill switch (bro-onxxg)', () => {
+  test('BRO_TELEMETRY=0 reports emission off even with config enabled', () => {
+    const dir = repo();
+    writeFileSync(join(dir, 'bro.config.local.json'), JSON.stringify({ otel: { enabled: true } }));
+    const prev = process.env.BRO_TELEMETRY;
+    process.env.BRO_TELEMETRY = '0';
+    try {
+      const r = capture(dir, ['status', '--json']);
+      assert.equal(r.exit, 0);
+      const report = JSON.parse(r.out.join('\n'));
+      assert.equal(report.enabled, false);
+      assert.equal(report.killSwitch, true);
+    } finally {
+      if (prev === undefined) delete process.env.BRO_TELEMETRY;
+      else process.env.BRO_TELEMETRY = prev;
+    }
   });
 });

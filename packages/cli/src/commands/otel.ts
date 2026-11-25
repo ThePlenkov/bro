@@ -11,9 +11,25 @@
  *                              (telemetry is operator config — the toggle
  *                              lands local, never the committed file)
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { CommandError, EXIT, hasHelpFlag, type ExitCode } from '@broject/core';
+import {
+  CommandError,
+  EXIT,
+  GIT_REPO_ENV,
+  gitBin,
+  hasHelpFlag,
+  type ExitCode,
+} from '@broject/core';
 import { otelEndpoint } from '@broject/providers';
 import {
   hookEventName,
@@ -69,6 +85,34 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
     );
   }
   const path = join(dir, 'bro.config.local.json');
+  // a TRACKED bro.config.local.json cannot arm telemetry — the trust
+  // policy only honors the untracked local layer, so writing the toggle
+  // there would report success while the facade keeps ignoring it
+  // (bro-mrc4n). .gitignore normally keeps it untracked; a force-added
+  // file is operator error, not a state to write into.
+  try {
+    // scrub the ambient git pins — an inherited GIT_DIR/GIT_WORK_TREE
+    // would point ls-files at another repository and let a tracked
+    // config slip the check (PR #1212 review)
+    const env = { ...process.env };
+    for (const k of GIT_REPO_ENV) {
+      delete env[k];
+    }
+    delete env.GIT_INDEX_FILE;
+    execFileSync(gitBin(), ['ls-files', '--error-unmatch', 'bro.config.local.json'], {
+      cwd: dir,
+      stdio: 'pipe',
+      env,
+    });
+    throw new CommandError(
+      'error: bro.config.local.json is tracked in git — the trust policy cannot arm telemetry from a committed layer; untrack it (git rm --cached) or edit the committed config directly',
+      EXIT.usage
+    );
+  } catch (e) {
+    if (e instanceof CommandError) throw e;
+    // non-zero exit = untracked (the good path); spawn failure = not a
+    // git repo, in which case there is no committed layer to distrust.
+  }
   let cfg: Record<string, unknown> = {};
   if (existsSync(path)) {
     try {
@@ -87,8 +131,20 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
   // temp + rename — a direct overwrite can leave a truncated file on a
   // mid-write crash; operator config loses every sibling section.
   const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
-  renameSync(tmp, path);
+  try {
+    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
+    // preserve the existing file's mode across the rename — exporter
+    // headers can carry tokens, and a fresh tempfile wears the umask
+    // default (0644 under 022), silently widening a 0600 config
+    // (bro-kztfl)
+    if (existsSync(path)) {
+      chmodSync(tmp, statSync(path).mode & 0o777);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   console.log(`otel.enabled=${enabled} → ${path}`);
 }
 
@@ -167,11 +223,21 @@ function printStatusReport(report: StatusReport, cfg: ResolvedOtelConfig): void 
 function cmdStatus(run: { dir: string; json: boolean }): void {
   const cfg = otelConfig({ dir: run.dir });
   const report = buildStatusReport({ cfg, dir: run.dir });
+  // the facade's first gate is the BRO_TELEMETRY kill switch — status
+  // must report what emission will actually do, not the config layer
+  // alone (bro-onxxg)
+  const killed = process.env.BRO_TELEMETRY === '0';
+  if (killed) {
+    report.enabled = false;
+  }
   if (run.json) {
-    console.log(JSON.stringify(report, null, 2));
+    console.log(JSON.stringify({ ...report, killSwitch: killed }, null, 2));
     return;
   }
-  printStatusReport(report, cfg);
+  if (killed) {
+    console.log('note: BRO_TELEMETRY=0 — emission is off regardless of config');
+  }
+  printStatusReport(report, { ...cfg, enabled: cfg.enabled && !killed });
 }
 
 // --- test ----------------------------------------------------------------------
