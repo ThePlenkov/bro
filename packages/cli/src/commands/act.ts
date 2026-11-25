@@ -29,15 +29,14 @@ import {
   type ReviewFacade,
   type ReviewThread,
   reviewHost,
-  type VetoReview,
 } from '@broject/core';
 import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@broject/judge';
 import { loadBroConfig } from '../plugins.ts';
 import { commentArg, resolvePr, threadArg, usage } from './act-args.ts';
+import { cmdDismiss } from './act-dismiss.ts';
 import { claimStore, cmdMerge, dropActState } from './act-land.ts';
-import { printStatus, vetoBodyNote } from './act-report.ts';
+import { printStatus } from './act-report.ts';
 import { cmdRearm, cmdWait } from './act-wait.ts';
-import { flag } from './args.ts';
 
 export type { ResolvedTarget, ResolveMode } from './act-args.ts';
 export { mergeMethod, resolvePr } from './act-args.ts';
@@ -326,136 +325,6 @@ function cmdReply(argv: string[]): void {
   // first-hit wins) so the silent resolve's 'fixed' can't mask it
   disposition(id, /deferred to \S+/i.test(comment!) ? 'deferred' : 'replied');
   dropActState();
-}
-
-/** The dismissal note the host records — `--message` overrides; the
- *  default names the rule that made the veto dismissible so the PR's
- *  review history reads honestly afterwards. */
-const DEFAULT_DISMISS_MESSAGE = 'stale review — all referenced threads resolved (bro act dismiss)';
-
-/**
- * `bro act dismiss` — clear STALE standing veto reviews
- * (reviewDecision=CHANGES_REQUESTED whose referenced threads are all
- * resolved+outdated — bro-n1foa). The stale filter is the safety: a
- * live veto is refused by construction, never by a flag the caller
- * must remember — re-review is the reviewer's call, dismissal is only
- * ever offered on settled evidence. Strict PR resolution: a mutation
- * never guesses which PR's reviews to clear.
- */
-async function cmdDismiss(argv: string[]): Promise<void> {
-  const cfg = loadBroConfig();
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors });
-  const rev = reviewHost(undefined, cfg.connectors);
-  const t = resolvePr(rev, argv, 'strict');
-  if (rev.vetoReviews === undefined || rev.dismissReview === undefined) {
-    console.error(
-      `error: ${rev.prLink(t.repo, t.pr)} — this review host cannot enumerate or dismiss reviews`
-    );
-    process.exitCode = 1;
-    return;
-  }
-  // a mutation validates its target's lifecycle — dismissing reviews on
-  // a merged/closed PR clears nothing that still gates and only looks
-  // like it did something
-  const meta = rev.prMetaAsync !== undefined ? await rev.prMetaAsync(t) : rev.prMeta(t);
-  if (meta.state !== 'OPEN') {
-    console.error(
-      `error: ${rev.prLink(t.repo, t.pr)} is ${meta.state} — only OPEN PRs carry a live veto`
-    );
-    process.exitCode = 1;
-    return;
-  }
-  // fresh probe, never the shared feed — the enumeration IS the
-  // decision input, same rule as the merge gate (bro-0tcrl)
-  const vetoes = await rev.vetoReviews(t);
-  const stale = vetoes.filter(v => v.stale);
-  // stale ⇒ ≥1 referenced thread — the count is always real here
-  const describe = (v: VetoReview): string =>
-    `${v.author}'s review ${v.id} — ${v.threads} thread(s) resolved+outdated`;
-  if (argv.includes('--dry-run')) {
-    if (stale.length === 0) {
-      console.log(
-        vetoes.length === 0
-          ? 'act dismiss: no standing veto reviews'
-          : `act dismiss: ${vetoes.length} veto(s) stand, none stale — nothing to dismiss`
-      );
-      return;
-    }
-    for (const v of stale) {
-      console.log(`would dismiss ${describe(v)}${vetoBodyNote(v)}`);
-    }
-    return;
-  }
-  if (stale.length === 0) {
-    console.log(
-      vetoes.length === 0
-        ? 'act dismiss: no standing veto reviews'
-        : `act dismiss: ${vetoes.length} veto(s) stand but none are stale — wait for re-review`
-    );
-    return;
-  }
-  // re-read immediately before mutating: a thread reopened (or a fresh
-  // objection posted) between the first probe and the dismissal loop
-  // must not be cleared off a stale snapshot — the window can't fully
-  // close without a host lock, but this narrows it to the mutation
-  // call itself (coderabbit on PR #1020). The fresh veto objects are
-  // the ones dismissed — author/threads may have moved too.
-  const fresh = await rev.vetoReviews(t);
-  const stillStale = new Map(fresh.filter(v => v.stale).map(v => [v.id, v]));
-  const toDismiss = stale
-    .map(v => stillStale.get(v.id))
-    .filter((v): v is VetoReview => v !== undefined);
-  for (const v of stale) {
-    if (!stillStale.has(v.id)) {
-      console.log(`act: ${describe(v)} no longer stale on re-read — skipped`);
-    }
-  }
-  if (toDismiss.length === 0) {
-    console.log('act dismiss: no veto still stale — nothing dismissed');
-    return;
-  }
-  const message = flag(argv, '--message') ?? DEFAULT_DISMISS_MESSAGE;
-  let failed = 0;
-  for (const candidate of toDismiss) {
-    // re-probe before EACH mutation, not only once before the loop: a
-    // thread reopened by an earlier dismissal in this same batch must
-    // not be cleared off the batch snapshot — the residual window
-    // narrows to this entry's own probe→mutation gap (no host lock
-    // closes it fully; codeant/coderabbit on PR #1020). The fresh
-    // veto object is the one dismissed — author/threads may have moved.
-    const probed = await rev.vetoReviews(t);
-    const v = probed.find(c => c.id === candidate.id && c.stale);
-    if (v === undefined) {
-      console.log(`act: ${describe(candidate)} no longer stale on re-read — skipped`);
-      continue;
-    }
-    // the body surfaces BEFORE the mutation — a body-level objection is
-    // invisible to the thread rule, so the operator/agent deciding the
-    // dismissal reads the whole review here
-    console.log(`dismissing ${describe(v)}${vetoBodyNote(v)}`);
-    try {
-      rev.dismissReview?.(t, v.id, message);
-      console.log(`act: dismissed ${describe(v)}`);
-      emitLifecycle(process.cwd(), {
-        kind: 'verdict',
-        pr: t.pr,
-        to: 'dismissed',
-        detail: { via: 'act', review: v.id, author: v.author },
-      });
-    } catch (err) {
-      failed += 1;
-      console.error(
-        `act: dismissing ${describe(v)} failed — ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  }
-  // a dismissal moves reviewDecision — the shared feed's next read
-  // must fetch, not serve the pre-dismissal veto for up to a TTL
-  dropActState(t);
-  if (failed > 0) {
-    console.error(`act dismiss: ${failed} of ${toDismiss.length} dismissal(s) failed`);
-    process.exitCode = 1;
-  }
 }
 
 // a Map keeps the dispatch table off dynamic object indexing — a
