@@ -120,6 +120,11 @@ import {
   projectBeads,
   type ReconcileBead,
 } from '@broject/loop';
+import {
+  releaseRemoteCeiling,
+  reserveRemoteCeiling,
+  stampRemoteCeiling,
+} from '../ceiling-remote.ts';
 import { rigNext } from '../next.ts';
 import type { Policy } from '../policy.ts';
 import { processesRootedIn, worktreeHasLiveSession } from '../proc-owner.ts';
@@ -3488,7 +3493,16 @@ function sweepCeilingReservations(dir: string, fleet: FleetPrRow[]): number {
 /** Write one reservation under the caller's lock — null when the file
  *  can't be proven to exist (the slot then counts as held, not free). */
 
-function reserveCeilingSlot(ctx: LoopCtx, dir: string): string | null {
+function reserveCeilingSlot(ctx: LoopCtx, dir: string, open: number): string | null {
+  const remote = reserveRemoteCeiling(
+    ctx.root,
+    ctx.cfg.maxOpenTotal,
+    open,
+    ctx.deps.now(),
+    process.pid
+  );
+  if (remote === 'remote-held') return null;
+  if (remote !== null) return remote;
   try {
     mkdirSync(dir, { recursive: true });
     const p = join(dir, `${CEILING_RES_PREFIX}${process.pid}-${ctx.deps.now()}.json`);
@@ -3509,6 +3523,10 @@ function reserveCeilingSlot(ctx: LoopCtx, dir: string): string | null {
  *  'worker still spawning' from 'listing already counts this slot'. */
 
 function stampCeilingReservation(file: string, branch: string): void {
+  if (file.startsWith('remote:')) {
+    stampRemoteCeiling(file, branch);
+    return;
+  }
   try {
     const res = JSON.parse(readFileSync(file, 'utf8')) as CeilingRes;
     res.branch = branch;
@@ -3520,6 +3538,10 @@ function stampCeilingReservation(file: string, branch: string): void {
 
 function releaseCeilingFile(file: string | null): void {
   if (file === null) {
+    return;
+  }
+  if (file.startsWith('remote:')) {
+    releaseRemoteCeiling(file);
     return;
   }
   try {
@@ -3632,7 +3654,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
         // stack admits nothing this pass, so it reserves nothing —
         // the listing above still served the hold line
         if (!stackFull && resDir !== null) {
-          ceilingRes = reserveCeilingSlot(ctx, resDir);
+          ceilingRes = reserveCeilingSlot(ctx, resDir, open);
           if (ceilingRes === null) {
             if (!ctx.claimsHeld) {
               ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
