@@ -46,6 +46,7 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   renameSync,
+  rmSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -710,8 +711,13 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
   // same lock (bro-gyvfp), and a torn write would read as invalid policy
   withFileLock(`${path}.lock`, () => {
     const tmp = `${path}.tmp.${process.pid}`;
-    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
-    renameSync(tmp, path);
+    try {
+      writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
+      renameSync(tmp, path);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      throw err;
+    }
   });
   return path;
 }
