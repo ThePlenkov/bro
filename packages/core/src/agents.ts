@@ -813,8 +813,13 @@ export function rateDeathBackoff(
 ): { streak: number; resetAt: string | undefined } {
   const spawned = typeof entry.spawnedAt === 'string' ? Date.parse(entry.spawnedAt) : Number.NaN;
   const prev = typeof entry.rateStreak === 'number' ? entry.rateStreak : 0;
+  // a negative span is not an instant death — a skewed exit stamp or a
+  // spawn stamp written after the fact must not fabricate backoff
   const fast =
-    cause === 'rate_limited' && Number.isFinite(spawned) && exitAt - spawned < INSTANT_DEATH_MS;
+    cause === 'rate_limited' &&
+    Number.isFinite(spawned) &&
+    exitAt - spawned >= 0 &&
+    exitAt - spawned < INSTANT_DEATH_MS;
   if (!fast) {
     return { streak: 0, resetAt };
   }
