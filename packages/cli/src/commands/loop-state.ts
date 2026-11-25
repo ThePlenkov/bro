@@ -21,6 +21,7 @@
  * files no live registry entry claims.
  */
 import {
+  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -195,7 +196,14 @@ function fileView(home: string, f: string, now: number): LoopRunView {
   }
   const rec = readRecord(path, slug);
   const pid = rec?.pid ?? null;
-  const live = pid !== null && pidAlive(pid, rec?.pidStart);
+  // liveness is keyed on the recorded pid AND the run's worktree: the
+  // pid belongs to the shared loop supervisor, which outlives every
+  // individual run — a finished run whose --cleanup deleted the worktree
+  // kept rendering 'running' for hours off the supervisor's live pid
+  // (bro-4q6n9). No worktree = nowhere to run in = dead, whatever the
+  // pid says.
+  const worktreeGone = rec !== null && rec.worktree !== '' && !existsSync(rec.worktree);
+  const live = pid !== null && pidAlive(pid, rec?.pidStart) && !worktreeGone;
   return {
     beadId: rec?.beadId ?? slug,
     beadIds: rec?.beadIds,
@@ -254,8 +262,11 @@ export function reapLoopRuns(dir: string): void {
     }
     const path = join(home, f);
     const rec = readRecord(path, f.slice(0, -'.json'.length));
-    // unparseable or dead-owned — both are residue, not a live record
-    if (rec === null || !pidAlive(rec.pid, rec.pidStart)) {
+    // unparseable, dead-owned, or its worktree reaped from under it —
+    // all residue, not a live record. The worktree check is the
+    // shared-supervisor case: the pid outlives the run (bro-4q6n9).
+    const worktreeGone = rec !== null && rec.worktree !== '' && !existsSync(rec.worktree);
+    if (rec === null || !pidAlive(rec.pid, rec.pidStart) || worktreeGone) {
       try {
         rmSync(path, { force: true });
       } catch {
