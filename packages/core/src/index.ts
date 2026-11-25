@@ -22,6 +22,7 @@ export {
   stateCommonDir,
   stateCommonDirAsync,
   GIT_SYNC_PROBE_TIMEOUT_MS,
+  GIT_REPO_ENV,
   gitBin,
   gitLogPathRecords,
   gitDriftRef,

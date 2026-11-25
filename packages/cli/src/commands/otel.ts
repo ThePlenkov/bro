@@ -22,7 +22,14 @@ import {
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { CommandError, EXIT, gitBin, hasHelpFlag, type ExitCode } from '@broject/core';
+import {
+  CommandError,
+  EXIT,
+  GIT_REPO_ENV,
+  gitBin,
+  hasHelpFlag,
+  type ExitCode,
+} from '@broject/core';
 import { otelEndpoint } from '@broject/providers';
 import {
   hookEventName,
@@ -88,8 +95,9 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
     // would point ls-files at another repository and let a tracked
     // config slip the check (PR #1212 review)
     const env = { ...process.env };
-    delete env.GIT_DIR;
-    delete env.GIT_WORK_TREE;
+    for (const k of GIT_REPO_ENV) {
+      delete env[k];
+    }
     delete env.GIT_INDEX_FILE;
     execFileSync(gitBin(), ['ls-files', '--error-unmatch', 'bro.config.local.json'], {
       cwd: dir,
