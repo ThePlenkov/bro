@@ -87,7 +87,7 @@ async function dismissCandidate(
   // dismissal reads the whole review here
   console.log(`dismissing ${describeVeto(v)}${vetoBodyNote(v)}`);
   try {
-    rev.dismissReview?.(t, v.id, message);
+    rev.dismissReview!(t, v.id, message);
     console.log(`act: dismissed ${describeVeto(v)}`);
     emitLifecycle(process.cwd(), {
       kind: 'verdict',
