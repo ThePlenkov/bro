@@ -123,9 +123,10 @@ the skills repo's is the *method*.
 ## Consequence
 
 The skills repo keeps what is portable and agent-agnostic (the discipline) and
-loses what is host-specific (the scripts). bro gains the two guards that were
-prose and are now mechanical — which is the point: **prose that reached the agent
-and did not bind; the mechanism must.**
+loses what is host-specific (the scripts). bro gains the **reopened-thread**
+guard — prose that is now mechanical, which is the point: **prose that reached
+the agent and did not bind; the mechanism must.** The same-rule and empty-loop
+guards stay future work, named in the scope section below.
 
 ## What this change actually ships
 
