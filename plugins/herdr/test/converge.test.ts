@@ -394,7 +394,7 @@ describe('renderer panes', () => {
     assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p1');
   });
 
-  test('a stale managed record cannot pane a user-reopened workspace', () => {
+  test('an externally reopened workspace is re-adopted — the binding follows the live id (bro-0knei)', () => {
     reset({ panes: [{ pane_id: 'pUser' }] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const p = boundTree(tree);
@@ -404,10 +404,11 @@ describe('renderer panes', () => {
     s.workspaces[tree] = { ws: 'wOld', label: '[silent1h] old', managed: true };
     saveState(scope, s);
     converge(p);
-    assert.equal(called('pane', 'run').length, 0);
-    assert.equal(called('pane', 'split').length, 0);
-    assert.equal(loadState(scope).renderers[tree], undefined);
-    assert.equal(loadState(scope).statuses[tree], undefined);
+    // the stale wOld binding is adopted to the live wUser id — the
+    // managed lifecycle continues across an external close→reopen
+    // instead of silently dropping projection + panes forever
+    assert.equal(loadState(scope).workspaces[tree]?.ws, 'wUser');
+    assert.equal(loadState(scope).workspaces[tree]?.managed, true);
   });
 
   test('a user-opened workspace gets no panes, no tokens, no rename', () => {

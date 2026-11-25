@@ -218,7 +218,14 @@ function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | u
 
   const rec = ctx.state.workspaces[path];
   const live = ctx.wsById.get(openId);
-  if (rec !== undefined && live === undefined) {
+  if (rec !== undefined && live !== undefined && rec.ws !== openId) {
+    // the workspace was closed externally and reopened under a NEW id —
+    // openByPath already follows the live binding, so the record must
+    // adopt it: a stale rec.ws fails every rec.ws===live-wsId guard
+    // downstream and the workspace silently loses panes + projection
+    // until the binding disappears entirely (bro-0knei)
+    ctx.state.workspaces[path] = { ...rec, ws: openId, label: live.label ?? '' };
+  } else if (rec !== undefined && live === undefined) {
     delete ctx.state.workspaces[path];
   } else if (rec === undefined) {
     // a workspace the user opened — observe, never touch its label
