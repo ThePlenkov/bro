@@ -88,22 +88,25 @@ export function fileResolveLog(file: string): ResolveLedger {
     record(ev) {
       try {
         mkdirSync(dirname(file), { recursive: true });
-        const existing = parseEvents(file);
-        const already = existing.some(
-          e => e.repo === ev.repo && e.pr === ev.pr && e.thread === ev.thread
-        );
-        if (already) {
-          return;
-        }
-        const line = JSON.stringify({ ts: Date.now(), ...ev });
+        // the duplicate check, the append, and the compaction share one
+        // lock — outside it two concurrent records both read, both miss
+        // the dupe, and both append the same thread event (bro-o05ji)
         withFileLock(
           `${file}.lock`,
           () => {
+            const existing = parseEvents(file);
+            const already = existing.some(
+              e => e.repo === ev.repo && e.pr === ev.pr && e.thread === ev.thread
+            );
+            if (already) {
+              return;
+            }
+            const line = JSON.stringify({ ts: Date.now(), ...ev });
             appendFileSync(file, `${line}\n`, 'utf8');
+            compactLedger(file);
           },
           { label: 'act-resolve-ledger' }
         );
-        compactLedger(file);
       } catch {
         // recording is best-effort — a failed write means the reopen
         // is not detected, never a crash
