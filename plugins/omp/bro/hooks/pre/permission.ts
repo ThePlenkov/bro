@@ -100,7 +100,7 @@ function pushArgsOf(segment: string): string[] | null {
   // bare `git` token exactly like `'git` does (the substitution sigil
   // precedes the word with no space)
   const tokens = segment
-    .replace(/[('"\`$]/g, ' ')
+    .replace(/[()'"\`$]/g, ' ')
     .split(/\s+/)
     .filter(t => t !== '');
   for (let i = 0; i < tokens.length; i += 1) {
@@ -118,9 +118,12 @@ function pushArgsOf(segment: string): string[] | null {
         j += VALUE_OPTS.has(word) ? 2 : 1;
         continue;
       }
-      break; // a non-option before `push` — not a push invocation
+      break; // a non-option before `push` — not THIS call's push
     }
-    return null;
+    // not a push from THIS git — but the shell still runs a nested
+    // substitution later in the segment: `git log "$(git push -f)"` is
+    // a force push. Keep scanning the remaining tokens (macroscope).
+    continue;
   }
   return null;
 }
