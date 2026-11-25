@@ -3343,6 +3343,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
   permissionAnswerEmitted = false;
+  emitBytesTotal = 0;
   hookMode = undefined;
   hookHost = undefined;
   hookProjectId = undefined;
