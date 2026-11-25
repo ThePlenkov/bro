@@ -51,20 +51,28 @@ export function markExitedMirrors(p: Planes, state: PluginState, sessionLive: Se
       retireMirror(step, { ws: rec.workspace, worktreePath: rec.worktree, state });
       continue;
     }
-    const a = live.get(step);
-    if (a !== undefined && a.state === 'running') continue;
-
-    if (paneGone(rec.pane_id)) {
-      delete state.mirrors[step];
-      continue;
-    }
-    if (rec.marked !== true) {
-      const cause = a?.cause !== undefined ? ` (${a.cause})` : '';
-      herdrTry(['pane', 'rename', rec.pane_id, `✖ bro: ${step}${cause}`]);
-      state.mirrors[step] = { ...rec, marked: true };
-      log(`mark ${rec.pane_id} — ${step} exited${cause}`);
-    }
+    markOneExited(step, rec, live.get(step), state);
   }
+}
+
+/** One stale record — a running worker keeps its mirror, a vanished
+ *  pane drops the record, anything else gets the ✖ mark once. */
+function markOneExited(
+  step: string,
+  rec: PluginState['mirrors'][string],
+  a: StatusAgent | undefined,
+  state: PluginState
+): void {
+  if (a !== undefined && a.state === 'running') return;
+  if (paneGone(rec.pane_id)) {
+    delete state.mirrors[step];
+    return;
+  }
+  if (rec.marked === true) return;
+  const cause = a?.cause !== undefined ? ` (${a.cause})` : '';
+  herdrTry(['pane', 'rename', rec.pane_id, `✖ bro: ${step}${cause}`]);
+  state.mirrors[step] = { ...rec, marked: true };
+  log(`mark ${rec.pane_id} — ${step} exited${cause}`);
 }
 
 interface MirrorJob extends MirrorSource {
@@ -111,22 +119,24 @@ function mirrorJobFor(a: StatusAgent, p: Planes): MirrorJob | undefined {
 
 /** A mirror pane tailing each live native agent's log, inside the
  *  workspace its worktree resolved to. */
-export function convergeMirrors(
-  p: Planes,
-  wsForPath: Map<string, string>,
-  openByPath: Map<string, string>,
-  state: PluginState,
-  sessionLive: Set<string>
-): void {
-  for (const a of p.status.fleet.agents) {
-    const job = mirrorJobFor(a, p);
+export interface MirrorConvergeSpec {
+  p: Planes;
+  wsForPath: Map<string, string>;
+  openByPath: Map<string, string>;
+  state: PluginState;
+  sessionLive: Set<string>;
+}
+
+export function convergeMirrors(s: MirrorConvergeSpec): void {
+  for (const a of s.p.status.fleet.agents) {
+    const job = mirrorJobFor(a, s.p);
     if (job === undefined) continue;
-    const ws = wsForPath.get(job.worktreePath) ?? openByPath.get(job.worktreePath);
+    const ws = s.wsForPath.get(job.worktreePath) ?? s.openByPath.get(job.worktreePath);
     if (ws === undefined) continue;
     // a live session pane shows exactly one pane — the view folds
     // the native-log tail in (spec bro-l8wqu)
-    const ctx = { ws, worktreePath: job.worktreePath, state };
-    if (sessionLive.has(job.worktreePath)) retireMirror(a.id, ctx);
+    const ctx = { ws, worktreePath: job.worktreePath, state: s.state };
+    if (s.sessionLive.has(job.worktreePath)) retireMirror(a.id, ctx);
     else ensureMirror(job, ctx);
   }
 }

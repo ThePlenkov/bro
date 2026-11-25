@@ -184,18 +184,7 @@ function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): bo
   }
   const next = splitPane(paneId, ctx);
   if (next !== undefined && armSession(ctx, next)) {
-    if (!herdrOk(['pane', 'close', paneId])) {
-      // the stale pane survived — remember it so a later pass retries;
-      // each rebind can leave another, so the field is a list
-      // (armSession already carried the prior ledger forward)
-      const r = ctx.state.sessions[ctx.path];
-      if (r !== undefined) {
-        ctx.state.sessions[ctx.path] = {
-          ...r,
-          closePending: [...(r.closePending ?? []), paneId],
-        };
-      }
-    }
+    if (!herdrOk(['pane', 'close', paneId])) rememberPendingClose(ctx, paneId);
     log(`session pane ${paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`);
     return paneLive(ctx);
   }
@@ -208,6 +197,18 @@ function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): bo
   }
   log(`session pane ${paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
   return false;
+}
+
+/** The stale pane survived a rebind close — remember it so a later
+ *  pass retries; each rebind can leave another, so the field is a
+ *  list (armSession already carried the prior ledger forward). */
+function rememberPendingClose(ctx: RenderCtx, paneId: string): void {
+  const r = ctx.state.sessions[ctx.path];
+  if (r === undefined) return;
+  ctx.state.sessions[ctx.path] = {
+    ...r,
+    closePending: [...(r.closePending ?? []), paneId],
+  };
 }
 
 /** One workspace's session-pane convergence — the decision lives in
@@ -264,9 +265,8 @@ export function retireSession(ctx: RenderCtx): void {
   // stale archives linger forever past the retire (label-checked the
   // same as retryClose: a recycled id is never ours to kill)
   for (const id of rec?.closePending ?? []) {
-    if (id !== closeId && panes.some(p => p.pane_id === id && p.label === SESSION_LABEL)) {
-      herdrTry(['pane', 'close', id]);
-    }
+    const ours = id !== closeId && panes.some(p => p.pane_id === id && p.label === SESSION_LABEL);
+    if (ours) herdrTry(['pane', 'close', id]);
   }
   delete ctx.state.sessions[ctx.path];
 }
