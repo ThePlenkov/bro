@@ -98,9 +98,24 @@ export interface ModeBridgeSource {
 const beadName = (b: { id?: string; title?: string }): string =>
   b.title ? `${b.id ?? '?'} (${untrusted(b.title)})` : (b.id ?? '?');
 
+/** Significant objective words — lowercase, deduplicated, length >= 4 so
+ *  glue words never count as evidence of a match. */
+function significantWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(w => w.length >= 4)
+  );
+}
+
 /** The goal_updated context line — drill scope, the beads the objective
- *  belongs to, and the claim advice, assembled flat. */
-function goalScopeContext(board: ReturnType<ModeBridgeSource['board']>): string {
+ *  belongs to, and the claim advice, assembled flat. The objective
+ *  itself rides along as the claim hint (bro-4tj8z): a claimed bead
+ *  sharing no significant word with the objective is a divergence the
+ *  bridge must name, not bless — goal and bead otherwise drift apart
+ *  silently. */
+function goalScopeContext(board: ReturnType<ModeBridgeSource['board']>, objective: string): string {
   const drill = board?.drill?.frame;
   const scope = drill
     ? `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ? untrusted(drill.title) : '(untitled)'}. `
@@ -110,15 +125,26 @@ function goalScopeContext(board: ReturnType<ModeBridgeSource['board']>): string 
   // this objective is about, and the exit gate judges the claim.
   const claims = board?.beads?.inProgress ?? [];
   const named = claims.map(beadName).join(', ');
+  const objWords = significantWords(objective);
+  const matches = claims.filter(b =>
+    [...significantWords(b.title ?? '')].some(w => objWords.has(w))
+  );
+  const divergent = claims.length > 0 && objWords.size > 0 && matches.length === 0;
   const bead =
     claims.length === 0
       ? ''
       : `bro scope: this objective belongs to the bead(s) in flight — ${named}. `;
+  const divergence = divergent
+    ? 'bro: WARNING — no claimed bead shares a significant word with this objective; ' +
+      'goal and bead may have diverged. Claim the bead this objective is actually about ' +
+      'or correct the goal before the exit gate judges the wrong work. '
+    : '';
   const advice =
     claims.length === 0
-      ? 'bro: claim a bead for this objective (`bro flow next`) so the exit gate can judge it;'
+      ? `bro: claim the bead this objective belongs to (\`bro flow next\` — verify the pick matches ` +
+        'the objective before accepting it) so the exit gate can judge it;'
       : 'bro: the exit gate judges this objective against that bead;';
-  return `${scope}${bead}${advice} \`bro work goal\` carries the condition across sessions.`;
+  return `${scope}${bead}${divergence}${advice} \`bro work goal\` carries the condition across sessions.`;
 }
 
 /** Void bridge events cannot hand context back through a result —
@@ -180,7 +206,7 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
     if (board === null) {
       return undefined;
     }
-    return inject(pi, `${UNTRUSTED_NOTE}${goalScopeContext(board)}`);
+    return inject(pi, `${UNTRUSTED_NOTE}${goalScopeContext(board, objective)}`);
   });
 
   /**
