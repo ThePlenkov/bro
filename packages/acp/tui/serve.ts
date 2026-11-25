@@ -30,6 +30,17 @@ export interface ServedPane {
 }
 
 /**
+ * Return a key name only when it can use a plain-key binding.
+ *
+ * OpenTUI reports Ctrl+letter as the same `name` as the letter itself.
+ * Keeping the modifier check at the binding boundary prevents a control
+ * chord from falling through to (for example) the `a` or `z` binding.
+ */
+export function unmodifiedKeyName(key: Pick<KeyEvent, 'name' | 'ctrl'>): string | undefined {
+  return key.ctrl === true ? undefined : key.name;
+}
+
+/**
  * The pane's copy gesture — OSC 52 AND the direct clipboard bridge.
  *
  * The OSC 52 escape may not survive the pty → mux → terminal chain,
@@ -89,29 +100,30 @@ export async function serve(opts: ServeOpts): Promise<ServedPane> {
     renderer.keyInput.on('keypress', key => keys(pane, key));
   } else {
     renderer.keyInput.on('keypress', key => /* NOSONAR typescript:S3776 */ {
+      const name = unmodifiedKeyName(key);
       if (key.ctrl && key.name === 'c') {
         copyRow(pane, copy);
         if (toastTimer !== undefined) clearTimeout(toastTimer);
         toastTimer = setTimeout(() => pane.toast?.(''), 1500);
-      } else if (key.name === 'j') pane.writer.select(1);
-      else if (key.name === 'k') pane.writer.select(-1);
+      } else if (name === 'j') pane.writer.select(1);
+      else if (name === 'k') pane.writer.select(-1);
       // ±3 — the opencode wheel step (CustomSpeedScroll(3)); ?1007
       // delivers the wheel as these same arrow keys, so one detent
       // feels like a real scroll, not a crawl
-      else if (key.name === 'up') pane.scroll?.(-3);
-      else if (key.name === 'down') pane.scroll?.(3);
-      else if (key.name === 'pageup') pane.scrollPage?.(-1);
-      else if (key.name === 'pagedown') pane.scrollPage?.(1);
-      else if (key.name === 'home') pane.scrollEdge?.(0);
-      else if (key.name === 'end') pane.scrollEdge?.(1);
-      else if (key.name === 'a') pane.writer.toggleAll(true);
-      else if (key.name === 'z') pane.writer.toggleAll(false);
+      else if (name === 'up') pane.scroll?.(-3);
+      else if (name === 'down') pane.scroll?.(3);
+      else if (name === 'pageup') pane.scrollPage?.(-1);
+      else if (name === 'pagedown') pane.scrollPage?.(1);
+      else if (name === 'home') pane.scrollEdge?.(0);
+      else if (name === 'end') pane.scrollEdge?.(1);
+      else if (name === 'a') pane.writer.toggleAll(true);
+      else if (name === 'z') pane.writer.toggleAll(false);
       else if (
-        key.name === 'return' ||
-        key.name === 'enter' ||
-        key.name === 'c' ||
-        key.name === 'space' ||
-        key.name === ' '
+        name === 'return' ||
+        name === 'enter' ||
+        name === 'c' ||
+        name === 'space' ||
+        name === ' '
       )
         pane.writer.toggle();
     });
