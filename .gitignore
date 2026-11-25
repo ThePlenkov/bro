@@ -29,4 +29,5 @@ drills/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.beads/dolt-mirror*/
 *.gate.lock*
