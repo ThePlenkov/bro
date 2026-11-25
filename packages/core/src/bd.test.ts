@@ -1,17 +1,20 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   BdCompatError,
   checkBeads,
   isBdCompatError,
   isBdNotFound,
   probeBdCompat,
-} from './bd.ts'
+  initBeadsStealth,
+} from './bd.ts';
 
-const WIN32 = process.platform === 'win32'
+const WIN32 = process.platform === 'win32';
 
 /** Scripted bd — env knobs drive each failure mode. With no knob set it
  *  answers a healthy store: version, array-shaped reads, schema 1. */
@@ -32,25 +35,25 @@ case "$1" in
     echo "{\\"schema_version\\":\${FAKE_BD_SCHEMA:-1}}" ;;
   *) exit 1 ;;
 esac
-`
+`;
 
 function withFakeBd(env: Record<string, string>, fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-compat-'))
-  writeFileSync(join(dir, 'bd'), FAKE_BD)
-  chmodSync(join(dir, 'bd'), 0o755)
-  const prevPath = process.env.PATH
-  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
-  process.env.PATH = `${dir}:${prevPath}`
-  Object.assign(process.env, env)
+  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-compat-'));
+  writeFileSync(join(dir, 'bd'), FAKE_BD);
+  chmodSync(join(dir, 'bd'), 0o755);
+  const prevPath = process.env.PATH;
+  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+  process.env.PATH = `${dir}:${prevPath}`;
+  Object.assign(process.env, env);
   try {
-    fn()
+    fn();
   } finally {
-    process.env.PATH = prevPath
+    process.env.PATH = prevPath;
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -62,60 +65,60 @@ const FAKE_TIMEOUT = `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "timeout (GNU coreutils) 9.4"; exit 0; fi
 printf "%s\\n" "$FAKE_TIMEOUT_MISS" >&2
 exit "$FAKE_TIMEOUT_CODE"
-`
+`;
 
 function withFakeTimeout(env: Record<string, string>, fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-gnu-timeout-'))
-  writeFileSync(join(dir, 'timeout'), FAKE_TIMEOUT)
-  chmodSync(join(dir, 'timeout'), 0o755)
-  const prevPath = process.env.PATH
-  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
-  process.env.PATH = dir
-  Object.assign(process.env, env)
+  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-gnu-timeout-'));
+  writeFileSync(join(dir, 'timeout'), FAKE_TIMEOUT);
+  chmodSync(join(dir, 'timeout'), 0o755);
+  const prevPath = process.env.PATH;
+  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+  process.env.PATH = dir;
+  Object.assign(process.env, env);
   try {
-    fn()
+    fn();
   } finally {
-    process.env.PATH = prevPath
+    process.env.PATH = prevPath;
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
 /** PATH with no bd at all — only the real git must stay reachable. */
 function withoutBd(fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-absent-'))
-  const prevPath = process.env.PATH
-  process.env.PATH = dir
+  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-absent-'));
+  const prevPath = process.env.PATH;
+  process.env.PATH = dir;
   try {
-    fn()
+    fn();
   } finally {
-    process.env.PATH = prevPath
-    rmSync(dir, { recursive: true, force: true })
+    process.env.PATH = prevPath;
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
 describe('probeBdCompat', { skip: WIN32 }, () => {
   test('healthy bd — ok, version parsed, store reachable', () => {
     withFakeBd({}, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, true)
-      assert.equal(c.missing, false)
-      assert.equal(c.version, '1.3.0')
-      assert.equal(c.store, 'reachable')
-      assert.deepEqual(c.problems, [])
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, true);
+      assert.equal(c.missing, false);
+      assert.equal(c.version, '1.3.0');
+      assert.equal(c.store, 'reachable');
+      assert.deepEqual(c.problems, []);
+    });
+  });
 
   test('no bd on PATH — missing, not drift', () => {
     withoutBd(() => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.equal(c.missing, true)
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.equal(c.missing, true);
+    });
+  });
 
   test('missing bd under the timeout supervisor still classifies as missing', () => {
     // PATH carries only a symlink to the real GNU timeout — bd absent.
@@ -124,121 +127,121 @@ describe('probeBdCompat', { skip: WIN32 }, () => {
     // classify the setup gap exactly like a bare spawn.
     const timeoutPath = ['/usr/bin/timeout', '/bin/timeout', '/usr/local/bin/timeout'].find(
       existsSync
-    )
+    );
     if (timeoutPath === undefined) {
-      return // no GNU timeout on this host — bare spawn already yields ENOENT
+      return; // no GNU timeout on this host — bare spawn already yields ENOENT
     }
-    const dir = mkdtempSync(join(tmpdir(), 'bro-bd-supervised-miss-'))
-    symlinkSync(timeoutPath, join(dir, 'timeout'))
-    const prevPath = process.env.PATH
-    process.env.PATH = dir
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bd-supervised-miss-'));
+    symlinkSync(timeoutPath, join(dir, 'timeout'));
+    const prevPath = process.env.PATH;
+    process.env.PATH = dir;
     try {
-      const c = probeBdCompat()
-      assert.equal(c.missing, true)
-      assert.equal(c.broken, false)
+      const c = probeBdCompat();
+      assert.equal(c.missing, true);
+      assert.equal(c.broken, false);
     } finally {
-      process.env.PATH = prevPath
-      rmSync(dir, { recursive: true, force: true })
+      process.env.PATH = prevPath;
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a UTF-8-quoted GNU supervisor miss still classifies as missing', () => {
     // Under a UTF-8 locale gnulib quote() emits U+2018/U+2019 around the
     // command name — the normalizer must not pin ASCII quotes or the
     // miss lands as broken, not missing (CI: ubuntu-latest, LANG=C.UTF-8).
-    const miss = `timeout: failed to run command ${String.fromCodePoint(0x2018)}bd${String.fromCodePoint(0x2019)}: No such file or directory`
+    const miss = `timeout: failed to run command ${String.fromCodePoint(0x2018)}bd${String.fromCodePoint(0x2019)}: No such file or directory`;
     withFakeTimeout({ FAKE_TIMEOUT_MISS: miss, FAKE_TIMEOUT_CODE: '127' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.missing, true)
-      assert.equal(c.broken, false)
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.missing, true);
+      assert.equal(c.broken, false);
+    });
+  });
 
   test('an EACCES supervisor miss is broken, not missing', () => {
     // "failed to run command 'bd': Permission denied" — the errno text
     // is not ENOENT, so normalizing to missing would lie about the gap.
-    const denied = `timeout: failed to run command 'bd': Permission denied`
+    const denied = `timeout: failed to run command 'bd': Permission denied`;
     withFakeTimeout({ FAKE_TIMEOUT_MISS: denied, FAKE_TIMEOUT_CODE: '126' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.missing, false)
-      assert.equal(c.broken, true)
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.missing, false);
+      assert.equal(c.broken, true);
+    });
+  });
 
   test('non-array --json payload is drift', () => {
     withFakeBd({ FAKE_BD_SHAPE_DRIFT: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.ok(c.problems.some((p) => /expected an array/.test(p)))
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.ok(c.problems.some(p => /expected an array/.test(p)));
+    });
+  });
 
   test('rows without a string id are drift', () => {
     withFakeBd({ FAKE_BD_ROW_DRIFT: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.ok(c.problems.some((p) => /string `id`/.test(p)))
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.ok(c.problems.some(p => /string `id`/.test(p)));
+    });
+  });
 
   test('rejected --json flag is drift', () => {
     withFakeBd({ FAKE_BD_FLAG_DRIFT: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.ok(c.problems.some((p) => /unknown flag/.test(p)))
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.ok(c.problems.some(p => /unknown flag/.test(p)));
+    });
+  });
 
   test('a newer store schema_version is drift', () => {
     withFakeBd({ FAKE_BD_SCHEMA: '2' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.ok(c.problems.some((p) => /schema_version 2/.test(p)))
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.ok(c.problems.some(p => /schema_version 2/.test(p)));
+    });
+  });
 
   test('missing bd info subcommand is drift', () => {
     withFakeBd({ FAKE_BD_INFO_MISSING: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.ok(c.problems.some((p) => /`bd info`/.test(p)))
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.ok(c.problems.some(p => /`bd info`/.test(p)));
+    });
+  });
 
   test('no store — ok but inconclusive, not drift', () => {
     withFakeBd({ FAKE_BD_NO_STORE: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, true)
-      assert.equal(c.store, 'absent')
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, true);
+      assert.equal(c.store, 'absent');
+    });
+  });
 
   test('a bd that cannot answer --version is broken, not drift', () => {
     withFakeBd({ FAKE_BD_VERSION_FAIL: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, false)
-      assert.equal(c.broken, true)
-      assert.equal(c.missing, false)
-    })
-  })
+      const c = probeBdCompat();
+      assert.equal(c.ok, false);
+      assert.equal(c.broken, true);
+      assert.equal(c.missing, false);
+    });
+  });
 
   test('a transient read failure is a store error, not drift', () => {
     withFakeBd({ FAKE_BD_READY_FAIL: '1' }, () => {
-      const c = probeBdCompat()
-      assert.equal(c.ok, true)
-      assert.equal(c.store, 'error')
-      assert.match(c.storeErr ?? '', /database is locked/)
-      assert.deepEqual(c.problems, [])
-    })
-  })
-})
+      const c = probeBdCompat();
+      assert.equal(c.ok, true);
+      assert.equal(c.store, 'error');
+      assert.match(c.storeErr ?? '', /database is locked/);
+      assert.deepEqual(c.problems, []);
+    });
+  });
+});
 
 describe('isBdNotFound', () => {
   test('malformed thrown values are non-matches, never a throw', () => {
-    assert.equal(isBdNotFound(null), false)
-    assert.equal(isBdNotFound(undefined), false)
-    assert.equal(isBdNotFound('Issue b1 not found'), true)
-    assert.equal(isBdNotFound(new Error('Issue b1 not found')), true)
+    assert.equal(isBdNotFound(null), false);
+    assert.equal(isBdNotFound(undefined), false);
+    assert.equal(isBdNotFound('Issue b1 not found'), true);
+    assert.equal(isBdNotFound(new Error('Issue b1 not found')), true);
     assert.equal(
       isBdNotFound(
         Object.assign(new Error('exit 1'), {
@@ -246,7 +249,7 @@ describe('isBdNotFound', () => {
         })
       ),
       true
-    )
+    );
     // `bd mol show <id>` reports an absent molecule on stdout's error payload
     assert.equal(
       isBdNotFound(
@@ -255,68 +258,120 @@ describe('isBdNotFound', () => {
         })
       ),
       true
-    )
-    assert.equal(isBdNotFound(new Error("molecule 'bd-x' not found")), true)
-    assert.equal(isBdNotFound(new Error('database is locked')), false)
-  })
-})
+    );
+    assert.equal(isBdNotFound(new Error("molecule 'bd-x' not found")), true);
+    assert.equal(isBdNotFound(new Error('database is locked')), false);
+  });
+});
 
 describe('isBdCompatError', { skip: WIN32 }, () => {
   test('classifies drift vs operational failures', () => {
-    assert.equal(isBdCompatError(new BdCompatError('x')), true)
-    assert.equal(isBdCompatError(new Error('Error: unknown flag: --json')), true)
-    assert.equal(isBdCompatError(new Error('bd returned malformed JSON — x')), true)
-    assert.equal(isBdCompatError(new Error('Error: no beads database found')), false)
-    assert.equal(isBdCompatError(new Error('socket hang up')), false)
-  })
-})
+    assert.equal(isBdCompatError(new BdCompatError('x')), true);
+    assert.equal(isBdCompatError(new Error('Error: unknown flag: --json')), true);
+    assert.equal(isBdCompatError(new Error('bd returned malformed JSON — x')), true);
+    assert.equal(isBdCompatError(new Error('Error: no beads database found')), false);
+    assert.equal(isBdCompatError(new Error('socket hang up')), false);
+  });
+});
 
 describe('checkBeads', { skip: WIN32 }, () => {
   test('drift throws a named compat error', () => {
     withFakeBd({ FAKE_BD_SHAPE_DRIFT: '1' }, () => {
-      assert.throws(() => checkBeads(), (err: unknown) => {
-        assert.ok(err instanceof BdCompatError)
-        assert.match(err.message, /drifted off the contract/)
-        return true
-      })
-    })
-  })
+      assert.throws(
+        () => checkBeads(),
+        (err: unknown) => {
+          assert.ok(err instanceof BdCompatError);
+          assert.match(err.message, /drifted off the contract/);
+          return true;
+        }
+      );
+    });
+  });
 
   test('missing bd throws the install hint', () => {
     withoutBd(() => {
-      assert.throws(() => checkBeads(), /bd not found/)
-    })
-  })
+      assert.throws(() => checkBeads(), /bd not found/);
+    });
+  });
 
   test('absent store keeps the bd-init guidance', () => {
     withFakeBd({ FAKE_BD_NO_STORE: '1' }, () => {
-      assert.throws(() => checkBeads(), /bd list failed.*bd init/s)
-    })
-  })
+      assert.throws(() => checkBeads(), /bd list failed.*bd init/s);
+    });
+  });
 
   test('broken bd fails as operational, not compat', () => {
     withFakeBd({ FAKE_BD_VERSION_FAIL: '1' }, () => {
       assert.throws(
         () => checkBeads(),
         (err: unknown) => {
-          assert.ok(!(err instanceof BdCompatError))
-          assert.match((err as Error).message, /bd unusable/)
-          return true
+          assert.ok(!(err instanceof BdCompatError));
+          assert.match((err as Error).message, /bd unusable/);
+          return true;
         }
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('transient read failure is operational, not compat', () => {
     withFakeBd({ FAKE_BD_READY_FAIL: '1' }, () => {
       assert.throws(
         () => checkBeads(),
         (err: unknown) => {
-          assert.ok(!(err instanceof BdCompatError))
-          assert.match((err as Error).message, /store probe failed.*database is locked/s)
-          return true
+          assert.ok(!(err instanceof BdCompatError));
+          assert.match((err as Error).message, /store probe failed.*database is locked/s);
+          return true;
         }
-      )
-    })
-  })
-})
+      );
+    });
+  });
+});
+
+describe('initBeadsStealth — shared store resolution (bro-mjlzp)', () => {
+  /** main repo + a linked worktree; `.beads` lives only in main. */
+  function fixture(): { main: string; linked: string; cleanup: () => void } {
+    const base = mkdtempSync(join(tmpdir(), 'bro-bd-init-'));
+    const main = join(base, 'main');
+    const linked = join(base, 'linked');
+    mkdirSync(main, { recursive: true });
+    const git = (args: string[]): void => {
+      execFileSync('git', args, { cwd: main, stdio: 'pipe' });
+    };
+    git(['init', '-q']);
+    git(['commit', '-q', '--allow-empty', '-m', 'x']);
+    git(['worktree', 'add', '-q', linked]);
+    mkdirSync(join(main, '.beads'));
+    return {
+      main,
+      linked,
+      cleanup: () => {
+        try {
+          execFileSync('git', ['-C', main, 'worktree', 'remove', '--force', linked], {
+            stdio: 'pipe',
+          });
+        } catch {
+          // residue is tmpdir's problem
+        }
+        rmSync(base, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test('a linked worktree sees the shared store — no re-init against the shared server', () => {
+    if (WIN32) {
+      return; // git worktree fixture assumes a posix fs layout
+    }
+    const fx = fixture();
+    const cwd = process.cwd();
+    try {
+      process.chdir(fx.linked);
+      // cwd-local .beads is absent — but the common-dir resolution finds
+      // main's, so no init runs at all
+      assert.equal(existsSync(join(fx.linked, '.beads')), false);
+      assert.equal(initBeadsStealth(), false);
+    } finally {
+      process.chdir(cwd);
+      fx.cleanup();
+    }
+  });
+});

@@ -472,8 +472,14 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
 /** Only a real `.beads` *directory* counts — a file or dangling path must
  *  not suppress init (it would fail loudly rather than be repaired). */
 function beadsDirExists(): boolean {
+  // the store is shared: linked worktrees resolve `.beads` beside the
+  // COMMON git dir (the main checkout), not their own root — a cwd-local
+  // probe misses it and the re-init dies against the already-initialized
+  // shared dolt server (bro-mjlzp)
+  const resolved = beadsDir(process.cwd());
+  const probe = resolved ?? join(process.cwd(), '.beads');
   try {
-    return statSync(join(process.cwd(), '.beads')).isDirectory();
+    return statSync(probe).isDirectory();
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') {
@@ -492,8 +498,13 @@ export function initBeadsStealth(): boolean {
   if (beadsDirExists()) {
     return false;
   }
+  // init where the store must land — the main checkout root, so a first
+  // init invoked from a linked worktree provisions the shared location,
+  // not a worktree-private one the other checkouts would never resolve
+  const resolved = beadsDir(process.cwd());
+  const initCwd = resolved !== null ? dirname(resolved) : undefined;
   try {
-    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet']);
+    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], initCwd);
     return true;
   } catch (err) {
     // Two first-time inits can race: both pass the existence check, the
