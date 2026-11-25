@@ -567,6 +567,38 @@ function installLockedSkills(
   }
 }
 
+/** Install, then put the committed lockfile back: `npx skills add` rewrites
+ *  skills-lock.json with freshly fetched hashes, which would silently advance
+ *  the lock on disk — later checks accept changed upstream content instead of
+ *  reporting drift (bro-illox). The in-memory drift check compares against the
+ *  original either way; a failed restore just leaves the installer's rewrite. */
+function installLockedSkillsPreservingLock(
+  dir: string,
+  locked: Map<string, LockedSkill>,
+  skillsDir: string
+): void {
+  const lockPath = join(dir, 'skills-lock.json');
+  let originalLock: string | null = null;
+  try {
+    originalLock = readFileSync(lockPath, 'utf8');
+  } catch {
+    originalLock = null;
+  }
+  installLockedSkills(dir, locked, skillsDir);
+  if (originalLock === null) {
+    return;
+  }
+  try {
+    // tmp+rename — an interrupted direct write would leave a torn lockfile,
+    // and a torn lock is worse than the installer's rewrite it replaces
+    const tmpLock = `${lockPath}.tmp-${process.pid}`;
+    writeFileSync(tmpLock, originalLock);
+    renameSync(tmpLock, lockPath);
+  } catch {
+    // best-effort — see the doc comment
+  }
+}
+
 function reportSkillDrift(locked: Map<string, LockedSkill>, drift: SkillDrift[]): void {
   if (drift.length === 0) {
     console.error(`  ${locked.size} locked skill(s) match the lock`);
@@ -588,7 +620,7 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   const skillsDir = join(dir, '.agents', 'skills');
 
   if (!checkOnly && !dryRun) {
-    installLockedSkills(dir, locked, skillsDir);
+    installLockedSkillsPreservingLock(dir, locked, skillsDir);
   }
 
   // Compare against the original committed lock snapshot, not a re-read:
