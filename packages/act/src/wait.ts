@@ -18,7 +18,15 @@ export interface GateWaitResult {
  *  (bro-w0lil: wrapped verdict lines rendered unclickable). Falls back
  *  to the link verbatim when the shape is not the markdown form. */
 export function bareUrl(link: string): string {
-  return link.match(/\]\(([^)]+)\)/)?.[1] ?? link;
+  // no regex — the input is uncontrolled text and a polynomial pattern
+  // is a scanner finding (CodeQL js/polynomial-redos); index arithmetic
+  // is linear by construction
+  const open = link.indexOf('](');
+  const close = link.lastIndexOf(')');
+  if (open >= 0 && close > open + 2) {
+    return link.slice(open + 2, close);
+  }
+  return link;
 }
 
 /** An external wake source — a subscription distilled to "something
