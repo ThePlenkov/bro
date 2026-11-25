@@ -12,7 +12,6 @@
 import {
   type GateWaitResult,
   type PrActState,
-  gatePending,
   prStateCache,
   resolveLedger,
   waitForGate,
@@ -429,17 +428,15 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
  *  — re-entry resumes, finished phases no-op. */
 async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
   let res = await waitForGate(ctx.fetcher, ctx.opts);
-  if (!res.gate.ok && res.state.state === 'OPEN') {
+  if (!res.gate.ok && !res.timedOut && res.state.state === 'OPEN') {
     // a settled-blocked verdict is a decision point, and the feed is a
     // pollers' cache (bro-amnmo): a thread resolved since the last fetch
-    // must not end the run on a stale read — re-probe uncached once, and
-    // re-enter the wait when the fresh state no longer settles blocked
+    // must not end the run on a stale read — invalidate and run the wait
+    // again so its first read is fresh. A genuinely blocked PR costs one
+    // extra fetch (the re-run settles immediately); a stale one re-enters
+    // the full transition logic — BEHIND branch-updates included
     ctx.cache?.invalidate(ctx.t);
-    const fresh = await fetchBounded(ctx);
-    res = { ...fresh, timedOut: res.timedOut, polls: res.polls };
-    if (fresh.gate.ok || fresh.state.state !== 'OPEN' || gatePending(fresh.state)) {
-      res = await waitForGate(ctx.fetcher, ctx.opts);
-    }
+    res = await waitForGate(ctx.fetcher, ctx.opts);
   }
   const verdict = gateVerdict(ctx, res);
   if (!res.gate.ok && res.state.state === 'OPEN') {
