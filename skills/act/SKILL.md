@@ -188,6 +188,13 @@ default store, so standard installs already have it).
   `bro review act threads <PR>` as a separate command (never `status && threads`
   — a failing exit must not hide the threads). `gh pr checks --watch` is
   the fallback only where bro isn't installed.
+- **A user-requested merge waits in-session to a verdict.** When the
+  ask IS the merge (or the verdict), the wait runs as a visible native
+  background task and the turn holds until it settles — MERGED, or
+  BLOCKED with the blockers acted on — before ending. Arming an
+  invisible detached watcher and ending the turn on "watcher armed"
+  is the defect this policy exists to prevent: the operator watches
+  the UI, not `ps`, and a dangling PR is lost work (wtf bro-pr4).
 - **A background task dies when your turn ends** — it is only watching
   while you are. Never end a reply that promises "will report when it
   lands" on a session-bound watcher: keep polling inside the reply until
