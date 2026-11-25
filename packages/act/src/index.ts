@@ -51,3 +51,4 @@ export {
 export type { ListedWatch, PendingWatch, RearmPlan } from './pending-watch.ts';
 export { checkHistory, checkHistoryPath, fileCheckHistory } from './check-history.ts';
 export type { CheckHistory, CheckObservation } from './check-history.ts';
+export { bareUrl } from './wait.ts';

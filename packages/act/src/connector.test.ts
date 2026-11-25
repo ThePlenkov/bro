@@ -1,34 +1,34 @@
-import { after, describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { actConnector } from './connector.ts'
-import { scrubEnv, testGit } from '@broject/core'
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { actConnector } from './connector.ts';
+import { scrubEnv, testGit } from '@broject/core';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv())
+after(scrubEnv());
 
-const dirs: string[] = []
+const dirs: string[] = [];
 after(() => {
   for (const d of dirs) {
-    rmSync(d, { recursive: true, force: true })
+    rmSync(d, { recursive: true, force: true });
   }
-})
+});
 
 function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-act-conn-'))
-  testGit(['init', '-q', dir])
-  dirs.push(dir)
-  return dir
+  const dir = mkdtempSync(join(tmpdir(), 'bro-act-conn-'));
+  testGit(['init', '-q', dir]);
+  dirs.push(dir);
+  return dir;
 }
 
 /** A dead-pid supervisor heartbeat — the state a killed `bro <kind>`
  *  leaves behind for the next session start. */
 function deadSupervisor(dir: string, kind: string, merge: boolean): void {
-  const wd = join(dir, '.git', 'bro', 'watches')
-  mkdirSync(wd, { recursive: true })
+  const wd = join(dir, '.git', 'bro', 'watches');
+  mkdirSync(wd, { recursive: true });
   writeFileSync(
     join(wd, `7-${kind}-2000000000.json`),
     JSON.stringify({
@@ -39,35 +39,35 @@ function deadSupervisor(dir: string, kind: string, merge: boolean): void {
       startedAt: Date.now(),
       timeoutMin: 45,
     })
-  )
+  );
 }
 
-const start = (dir: string) => actConnector.hooks!({ dir }).sessionStart!({ dir })
+const start = (dir: string) => actConnector.hooks!({ dir }).sessionStart!({ dir });
 
 describe('act connector — stale supervisor restart hints', () => {
   test('a dead --no-merge drive marker restarts with --no-merge', async () => {
-    const dir = repo()
-    deadSupervisor(dir, 'drive', false)
-    const stale = (await start(dir)).find((l) => l.includes('stale act watch'))
-    assert.ok(stale)
-    assert.match(stale, /stale act watch on .* — run `bro act status 7` before anything else/)
-    assert.match(stale, /`bro drive --every --no-merge`/)
-  })
+    const dir = repo();
+    deadSupervisor(dir, 'drive', false);
+    const stale = (await start(dir)).find(l => l.includes('stale act watch'));
+    assert.ok(stale);
+    assert.match(stale, /\nstale act watch — run `bro act status 7` before anything else/);
+    assert.match(stale, /`bro drive --every --no-merge`/);
+  });
 
   test('a dead merge drive marker restarts plain --every', async () => {
-    const dir = repo()
-    deadSupervisor(dir, 'drive', true)
-    const stale = (await start(dir)).find((l) => l.includes('stale act watch'))
-    assert.ok(stale)
-    assert.match(stale, /`bro drive --every`/)
-    assert.ok(!stale.includes('--no-merge'))
-  })
+    const dir = repo();
+    deadSupervisor(dir, 'drive', true);
+    const stale = (await start(dir)).find(l => l.includes('stale act watch'));
+    assert.ok(stale);
+    assert.match(stale, /`bro drive --every`/);
+    assert.ok(!stale.includes('--no-merge'));
+  });
 
   test('a dead loop marker restarts as `bro loop`', async () => {
-    const dir = repo()
-    deadSupervisor(dir, 'loop', true)
-    const stale = (await start(dir)).find((l) => l.includes('stale act watch'))
-    assert.ok(stale)
-    assert.match(stale, /`bro loop`/)
-  })
-})
+    const dir = repo();
+    deadSupervisor(dir, 'loop', true);
+    const stale = (await start(dir)).find(l => l.includes('stale act watch'));
+    assert.ok(stale);
+    assert.match(stale, /`bro loop`/);
+  });
+});

@@ -7,6 +7,7 @@
  */
 import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core';
 import { checkHistory } from './check-history.ts';
+import { bareUrl } from './wait.ts';
 import { evaluateExitGate } from './exit-gate.ts';
 import { mergeSlotHolderAsync } from './merge-slot.ts';
 import {
@@ -148,7 +149,7 @@ function staleWatchLine({ watch, file, reported }: ListedWatch): string | null {
     // name the blockers; a fresh `bro act wait` supersedes it
     const list = (watch.blockers ?? []).join('; ');
     return (
-      `act wait on ${watch.link} settled BLOCKED${list === '' ? '' : ` — ${list}`} — ` +
+      `${bareUrl(watch.link)}\nact wait settled BLOCKED${list === '' ? '' : ` — ${list}`} — ` +
       `\`bro act threads ${watch.pr}\` lists them`
     );
   }
@@ -163,7 +164,7 @@ function staleWatchLine({ watch, file, reported }: ListedWatch): string | null {
   const noMerge = watch.merge ? '' : ' --no-merge';
   const restart = kind === 'loop' ? 'bro loop' : `bro ${kind} --every${noMerge}`;
   return (
-    `stale act watch on ${watch.link}${mode} — ` +
+    `${bareUrl(watch.link)}\nstale act watch${mode} — ` +
     `run \`bro act status ${watch.pr}\` before anything else; ` +
     (kind === 'wait'
       ? 'the watching session died; `bro act rearm` resurrects it, '

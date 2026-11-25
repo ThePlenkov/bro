@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
+  bareUrl,
   checkHistory,
   type ExitGate,
   evaluateExitGate,
@@ -250,11 +251,11 @@ export function waitOpts(
     },
     onPoll: (s, g) =>
       console.error(
-        `${label} ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+        `${bareUrl(rev.prLink(t.repo, s.pr))}\n${label}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
       ),
     onError: (err, n) =>
       console.error(
-        `${label} ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+        `${bareUrl(rev.prLink(t.repo, t.pr))}\n${label}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
       ),
     ...(updateBranch ? { updateBranch } : {}),
   };

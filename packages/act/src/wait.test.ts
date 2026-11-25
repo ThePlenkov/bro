@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { bareUrl } from './wait.ts';
+import { describe, it, test } from 'node:test';
 import { evaluateExitGate } from './exit-gate.ts';
 import type { PrActState } from './types.ts';
 import { openActState as open } from './act-fixtures.ts';
@@ -299,4 +300,16 @@ test('a BEHIND update resets the green clock — the new head re-earns the windo
   // green read, so settling takes the window past THAT point
   assert.equal(res.gate.ok, true);
   assert.ok(res.polls >= 4, `expected re-earned window polls, got ${res.polls}`);
+});
+
+describe('bareUrl (bro-w0lil)', () => {
+  it('extracts the URL from the facade markdown form', () => {
+    assert.equal(bareUrl('[#7](https://github.com/o/r/pull/7)'), 'https://github.com/o/r/pull/7');
+  });
+  it('passes a non-markdown link through verbatim', () => {
+    assert.equal(
+      bareUrl('https://gitlab.example/o/r/-/merge_requests/7'),
+      'https://gitlab.example/o/r/-/merge_requests/7'
+    );
+  });
 });
