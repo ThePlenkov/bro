@@ -31,7 +31,7 @@
  *     takes the host's session down with it, and bro's policy is
  *     advisory everywhere except the stop gate.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +72,73 @@ export const HOOK_TIMEOUT_MS = 15_000;
 export const REHYDRATION_TIMEOUT_MS = 45_000;
 /** Cap on a hook's stdout — a runaway child must not eat the heap. */
 export const MAX_OUTPUT = 1 << 20;
+/** A hung CLI must not wedge an adapter: `/bro`, `bro_status` and the
+ *  bro tool are interactive reads, and a wedged dolt lock can stall
+ *  them forever. The kill takes the detached process group down. */
+export const RUN_TIMEOUT_MS = 60_000;
+/** How long a failed CLI resolution stays cached before a retry —
+ *  PATH, a local install or npx can appear mid-session, but
+ *  re-probing the npx rung on every keystroke would be worse than
+ *  the outage. */
+export const RESOLVE_RETRY_MS = 60_000;
+const HOOKS_COMMAND = 'hooks';
+const STATUS_COMMAND = 'status';
+const JSON_FLAG = '--json';
+const NPX_COMMAND = 'npx';
+const NPX_YES_FLAG = '-y';
+const NPX_OFFLINE_FLAG = '--prefer-offline';
+const BRO_MARKERS = [
+  'bro.config.ts',
+  'bro.config.json',
+  'bro.config.local.ts',
+  'bro.config.local.json',
+  '.beads',
+] as const;
+
+/** The curated command family — first-class slash aliases for bro's
+ *  workflow verbs. `verb` is the CLI argv head; `name` is the slash
+ *  name, renamed to `bro:<name>` when the host owns it natively
+ *  (AGT-1 §command family — a host-native command always wins).
+ *  `/wtf` passes any args through untouched — the wtf routine owns
+ *  multilingual frustration input itself. */
+export const BRO_COMMANDS: ReadonlyArray<{
+  name: string;
+  verb: string;
+  description: string;
+}> = [
+  { name: 'act', verb: 'act', description: 'bro act — PR review gate, threads, resolve' },
+  {
+    name: 'wtf',
+    verb: 'wtf',
+    description: 'bro wtf — frustration → retrospect capture, any language',
+  },
+  {
+    name: 'retro',
+    verb: 'retrospect',
+    description: 'bro retrospect — learn + backlog review',
+  },
+  { name: 'learn', verb: 'learn', description: 'bro learn — lessons and backlog' },
+  {
+    name: 'drill',
+    verb: 'drill',
+    description: 'bro drill — deep research routine, scoped investigation',
+  },
+  {
+    name: 'judge',
+    verb: 'judge',
+    description: 'bro judge — typed decision on session state',
+  },
+  {
+    name: 'loop',
+    verb: 'loop',
+    description: 'bro loop — iterations with exit condition or formula',
+  },
+  {
+    name: 'goal',
+    verb: 'goal',
+    description: 'bro goal — goal tracking, hooks remind every turn',
+  },
+];
 
 /**
  * `node` on PATH, not process.execPath — a host may ship as a compiled
@@ -170,10 +237,16 @@ export async function exitsZero(cmd: string, args: string[]): Promise<boolean> {
 /** Options for the CLI ladder. */
 export interface ResolveOptions {
   /** A caller-pinned CLI (config `options.command`) — wins over the
-   *  local dist, because the operator asked for that binary. */
-  command?: string;
+   *  local dist, because the operator asked for that binary. A string
+   *  splits on whitespace (`"node /x/bro.js"`); an object form carries
+   *  argv verbatim for hosts whose config spells cmd+args separately. */
+  command?: string | { cmd: string; args?: unknown };
   /** The pinned npx spec — the published version of this adapter. */
   npxPin?: string;
+  /** Ordered npx fallback specs, tried after `bro` on PATH fails the
+   *  hooks probe. When set it supersedes `npxPin` — a host that wants
+   *  a pinned-then-latest ladder lists both. */
+  npxSpecs?: readonly string[];
 }
 
 /**
@@ -185,22 +258,33 @@ export interface ResolveOptions {
  */
 export async function resolveCommand(opts: ResolveOptions = {}): Promise<Command | null> {
   return (
-    (await resolvePinnedCommand(opts.command)) ??
-    (await resolveLocalCommand()) ??
-    (await resolvePathCommand()) ??
-    (await resolveNpxCommand(opts.npxPin))
+    (await pinnedCommand(opts.command)) ??
+    (await checkoutResolved()) ??
+    (await pathResolved()) ??
+    (await npxResolved(opts))
   );
 }
 
-async function resolvePinnedCommand(command: string | undefined): Promise<Command | null> {
-  if (command === undefined || command === '') {
+async function pinnedCommand(pinned: ResolveOptions['command']): Promise<Command | null> {
+  if (typeof pinned === 'string') {
+    return pinnedStringCommand(pinned);
+  }
+  if (typeof pinned !== 'object' || pinned === null) {
     return null;
   }
-  const [cmd, ...args] = command.split(/\s+/).filter(part => part !== '');
+  const cmd = typeof pinned.cmd === 'string' ? pinned.cmd : '';
+  const args = Array.isArray(pinned.args)
+    ? pinned.args.filter((a): a is string => typeof a === 'string')
+    : [];
+  return cmd !== '' && (await exitsZero(cmd, [...args, 'hooks'])) ? { cmd, args } : null;
+}
+
+async function pinnedStringCommand(pinned: string): Promise<Command | null> {
+  const [cmd, ...args] = pinned.split(/\s+/).filter(p => p !== '');
   return cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks'])) ? { cmd, args } : null;
 }
 
-async function resolveLocalCommand(): Promise<Command | null> {
+async function checkoutResolved(): Promise<Command | null> {
   for (const entry of [siblingCli(), checkoutCli()]) {
     if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
       return { cmd: jsRuntime(), args: [entry] };
@@ -209,14 +293,21 @@ async function resolveLocalCommand(): Promise<Command | null> {
   return null;
 }
 
-async function resolvePathCommand(): Promise<Command | null> {
+async function pathResolved(): Promise<Command | null> {
   return (await exitsZero('bro', ['hooks'])) ? { cmd: 'bro', args: [] } : null;
 }
 
-async function resolveNpxCommand(npxPin: string | undefined): Promise<Command | null> {
-  return npxPin !== undefined && (await exitsZero('npx', ['--version']))
-    ? { cmd: 'npx', args: ['-y', '--prefer-offline', npxPin] }
-    : null;
+async function npxResolved(opts: ResolveOptions): Promise<Command | null> {
+  const specs = opts.npxSpecs ?? (opts.npxPin !== undefined ? [opts.npxPin] : []);
+  if (specs.length === 0 || !(await exitsZero(NPX_COMMAND, ['--version']))) {
+    return null;
+  }
+  for (const spec of specs) {
+    if (await exitsZero(NPX_COMMAND, [NPX_YES_FLAG, NPX_OFFLINE_FLAG, spec, HOOKS_COMMAND])) {
+      return { cmd: NPX_COMMAND, args: [NPX_YES_FLAG, NPX_OFFLINE_FLAG, spec] };
+    }
+  }
+  return null;
 }
 
 /**
@@ -271,16 +362,6 @@ export interface HookResult {
   failure: HookFailure | null;
 }
 
-/** All inputs that travel together for one hook protocol invocation. */
-export interface HookCallOptions {
-  command: Command;
-  event: string;
-  payload: unknown;
-  cwd: string;
-  timeoutMs: number;
-  extraEnv?: Record<string, string>;
-}
-
 /** The one-line cause a diagnostic surfaces for a failed hook call. */
 export function hookFailureText(failure: HookFailure): string {
   switch (failure.kind) {
@@ -304,8 +385,16 @@ export function hookFailureText(failure: HookFailure): string {
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
  * `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
  */
-export async function callHook(options: HookCallOptions): Promise<HookControl | null> {
-  return (await callHookDetailed(options)).control;
+export interface HookCall {
+  event: string;
+  payload: unknown;
+  cwd: string;
+  timeoutMs: number;
+  extraEnv?: Record<string, string>;
+}
+
+export async function callHook(command: Command, call: HookCall): Promise<HookControl | null> {
+  return (await callHookDetailed(command, call)).control;
 }
 
 /**
@@ -314,13 +403,14 @@ export async function callHook(options: HookCallOptions): Promise<HookControl | 
  * fail-open, but the second must not pass invisibly. A clean exit with
  * empty stdout is silence (failure null) — only real outage kinds set it.
  */
-export async function callHookDetailed(options: HookCallOptions): Promise<HookResult> {
+export async function callHookDetailed(command: Command, call: HookCall): Promise<HookResult> {
+  const { event, payload, cwd, timeoutMs, extraEnv } = call;
   // serialize before spawning: a payload JSON.stringify rejects means the
   // hook can never run — that is its own outage class, not a spawn error
   // and never healthy silence (and this function resolves, never throws)
   let input: string | undefined;
   try {
-    input = JSON.stringify(options.payload);
+    input = JSON.stringify(payload);
   } catch {
     return { control: null, failure: { kind: 'input' } };
   }
@@ -332,9 +422,9 @@ export async function callHookDetailed(options: HookCallOptions): Promise<HookRe
   const { promise, resolve } = Promise.withResolvers<HookResult>();
   let child: ChildProcess;
   try {
-    child = spawn(options.command.cmd, [...options.command.args, 'hooks', options.event], {
-      cwd: options.cwd,
-      env: options.extraEnv === undefined ? undefined : { ...process.env, ...options.extraEnv },
+    child = spawn(command.cmd, [...command.args, HOOKS_COMMAND, event], {
+      cwd,
+      env: extraEnv === undefined ? undefined : { ...process.env, ...extraEnv },
       stdio: ['pipe', 'pipe', 'ignore'],
       windowsHide: true,
       detached: process.platform !== 'win32',
@@ -349,8 +439,8 @@ export async function callHookDetailed(options: HookCallOptions): Promise<HookRe
       resolve(result);
     }
   };
-  const timer = killAfter(child, options.timeoutMs, () =>
-    settle({ control: null, failure: { kind: 'timeout', timeoutMs: options.timeoutMs } })
+  const timer = killAfter(child, timeoutMs, () =>
+    settle({ control: null, failure: { kind: 'timeout', timeoutMs } })
   );
   let out = '';
   child.stdout?.setEncoding('utf8');
@@ -386,6 +476,11 @@ export async function callHookDetailed(options: HookCallOptions): Promise<HookRe
  * Scan for the first parseable control line — unrelated chatter on
  * stdout must not swallow the answer.
  */
+/** Non-null plain object — the control-line shape. */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 export function parseControl(out: string): HookControl | null {
   for (const line of out.split('\n')) {
     const text = line.trim();
@@ -394,7 +489,7 @@ export function parseControl(out: string): HookControl | null {
     }
     try {
       const parsed = JSON.parse(text) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (isRecord(parsed)) {
         return parsed as HookControl;
       }
     } catch {
@@ -420,16 +515,9 @@ export function contextOf(control: HookControl | null): string {
  * keep the list in sync with CONFIG_LAYER_FILES.
  */
 export function broEnabled(startDir: string): boolean {
-  const markers = [
-    'bro.config.ts',
-    'bro.config.json',
-    'bro.config.local.ts',
-    'bro.config.local.json',
-    '.beads',
-  ];
   let dir = startDir;
   for (;;) {
-    if (markers.some(m => existsSync(join(dir, m)))) {
+    if (BRO_MARKERS.some(marker => existsSync(join(dir, marker)))) {
       return true;
     }
     const parent = dirname(dir);
@@ -446,7 +534,7 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
   const { promise, resolve } = Promise.withResolvers<BoardStatus | null>();
   let child: ChildProcess;
   try {
-    child = spawn(command.cmd, [...command.args, 'status', '--json'], {
+    child = spawn(command.cmd, [...command.args, STATUS_COMMAND, JSON_FLAG], {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
@@ -501,8 +589,16 @@ export function clip(text: string, width: number): string {
  * any host can render.
  */
 export function boardLines(s: BoardStatus): string[] {
+  const running = runningAgents(s);
+  return [`bro · ${boardParts(s, running).join(' · ')}`, ...beadLines(s), ...agentLines(running)];
+}
+
+function runningAgents(s: BoardStatus) {
+  return (s.fleet?.agents ?? []).filter(a => a.state === 'running');
+}
+
+function boardParts(s: BoardStatus, running: ReturnType<typeof runningAgents>): string[] {
   const beads = s.beads?.inProgress ?? [];
-  const running = (s.fleet?.agents ?? []).filter(a => a.state === 'running');
   const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : '';
   const parts = [
     `◐ ${beads.length} bead${beads.length === 1 ? '' : 's'}`,
@@ -515,16 +611,19 @@ export function boardLines(s: BoardStatus): string[] {
   if ((s.dirty ?? 0) > 0) {
     parts.push(`dirty ${s.dirty}`);
   }
-  const lines = [`bro · ${parts.join(' · ')}`];
-  for (const b of beads.slice(0, 3)) {
-    const link = b.link ? `  ${b.link}` : '';
-    lines.push(`  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${link}`);
-  }
-  for (const a of running.slice(0, 2)) {
-    const step = a.step ? `  ${a.step}` : '';
-    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`);
-  }
-  return lines;
+  return parts;
+}
+
+function beadLines(s: BoardStatus): string[] {
+  return (s.beads?.inProgress ?? [])
+    .slice(0, 3)
+    .map(b => `  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${b.link ? `  ${b.link}` : ''}`);
+}
+
+function agentLines(running: ReturnType<typeof runningAgents>): string[] {
+  return running
+    .slice(0, 2)
+    .map(a => `  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${a.step ? `  ${a.step}` : ''}`);
 }
 
 /** The footer crumb — the one-glance form of the same board. */
@@ -532,4 +631,134 @@ export function statusCrumb(s: BoardStatus): string {
   const beads = s.beads?.inProgress?.length ?? 0;
   const running = (s.fleet?.agents ?? []).filter(a => a.state === 'running').length;
   return `bro ◐${beads} ⬢${running}`;
+}
+
+/** A finished arbitrary bro invocation — the read-verb/tool path, not
+ *  the hook protocol. `code` is null when the child never produced an
+ *  exit status (spawn error or timeout — `error` says which). */
+export interface RunResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+}
+
+export interface RunOptions {
+  cwd?: string;
+  input?: string;
+  timeoutMs: number;
+}
+
+/** Spawn `command args`, capture stdout+stderr, kill the process group
+ *  on timeout. Never rejects — every failure mode lands in `error` or
+ *  a null `code`, because a read-verb caller's only question is what
+ *  printed. The nonzero exit IS the answer for gate verbs like
+ *  `act status`, so the code travels in the result. */
+export function runCommand(
+  command: string,
+  args: string[],
+  options: RunOptions
+): Promise<RunResult> {
+  return new Promise(resolve => {
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, {
+        cwd: options.cwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+      });
+    } catch (error) {
+      resolve({
+        code: null,
+        stdout: '',
+        stderr: '',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    runCollect(child, options, resolve);
+  });
+}
+
+function runCollect(
+  child: ChildProcess,
+  options: RunOptions,
+  resolve: (r: RunResult) => void
+): void {
+  const settle = once(resolve);
+  let stdout = '';
+  let stderr = '';
+  const timer = killAfter(child, options.timeoutMs, () =>
+    settle({
+      code: null,
+      stdout,
+      stderr,
+      error: `timed out after ${options.timeoutMs}ms`,
+    })
+  );
+  child.stdout?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    stdout = appendOutput(stdout, chunk);
+  });
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', (chunk: string) => {
+    stderr = appendOutput(stderr, chunk);
+  });
+  child.on('error', error => {
+    clearTimeout(timer);
+    settle({ code: null, stdout, stderr, error: error.message });
+  });
+  child.on('close', code => {
+    clearTimeout(timer);
+    settle({ code, stdout, stderr, error: null });
+  });
+  child.stdin?.on('error', () => {});
+  child.stdin?.end(options.input ?? '');
+}
+
+function once(resolve: (result: RunResult) => void): (result: RunResult) => void {
+  let settled = false;
+  return result => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    resolve(result);
+  };
+}
+
+function appendOutput(buffer: string, chunk: string): string {
+  const remaining = MAX_OUTPUT - buffer.length;
+  return remaining > 0 ? buffer + chunk.slice(0, remaining) : buffer;
+}
+
+/**
+ * The lazy, retrying CLI resolver every adapter shares: resolution
+ * costs spawn probes, so it runs on first use and a *failed* answer
+ * expires after RESOLVE_RETRY_MS instead of poisoning the instance —
+ * PATH, a local install or npx can appear mid-session.
+ */
+export function createCommandResolver(opts: ResolveOptions = {}): () => Promise<Command | null> {
+  let resolved: Promise<Command | null> | undefined;
+  let failedAt: number | undefined;
+  const cacheFresh = (): boolean => {
+    if (resolved === undefined) {
+      return false;
+    }
+    return failedAt === undefined || Date.now() - failedAt < RESOLVE_RETRY_MS;
+  };
+  return () => {
+    if (cacheFresh() && resolved !== undefined) {
+      return resolved;
+    }
+    failedAt = undefined;
+    resolved = resolveCommand(opts).then(cmd => {
+      if (cmd === null) {
+        failedAt = Date.now();
+      }
+      return cmd;
+    });
+    return resolved;
+  };
 }

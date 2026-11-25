@@ -190,7 +190,7 @@ function specStoreOver(
         get(protocol, parent) === undefined &&
         findSpec(root, specDir, parent) !== undefined;
       const doc = create(protocol, {
-        template: 'brotocol/spec@1',
+        template: 'brotocol/spec@2',
         id,
         values: { title: opts.title ?? '', status: 'draft' },
         ...(parent === undefined || legacyParent ? {} : { parent }),

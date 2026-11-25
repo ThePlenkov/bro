@@ -30,14 +30,30 @@
  * exit, or bad output degrades to no context / no gate / no re-prompt.
  * Nothing here throws into opencode. Spawns are async (server event loop).
  */
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BRO_COMMANDS,
+  callHookDetailed,
+  contextOf,
+  createCommandResolver,
+  HOOK_TIMEOUT_MS,
+  type HookControl,
+  hookFailureText,
+  hookEmitEnv,
+  REHYDRATION_TIMEOUT_MS,
+  RUN_TIMEOUT_MS,
+  runCommand,
+} from '@broject/adapter-core/core';
 import { Plugin } from '@opencode/plugin';
 import { Bro, type BroBoard, emptyBoard, parseBoard } from './rpc.ts';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
+const DEFAULT_STOP_REASON = 'unfinished bro work';
+const BLOCKED_TOOL_REASON = 'blocked by bro';
+const DEFAULT_COMMAND_OUTPUT = '(no output)';
+const BRO_AGENT = 'opencode';
 
 /** `["@broject/bro", { command: … }]` — opencode's tuple plugin form. */
 interface PluginOptions {
@@ -48,342 +64,30 @@ interface PluginOptions {
   skillsDir?: string;
 }
 
-/** Control object from `bro hooks <event>`. */
-interface HookControl {
-  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown };
-  decision?: string;
-  reason?: unknown;
+interface StorageLike {
+  get?(key: string): Promise<unknown>;
+  set?(key: string, value: unknown): Promise<void>;
 }
 
-interface Command {
-  cmd: string;
-  args: string[];
+function makePersistence(storage: StorageLike | undefined): BroCoreInput['persist'] {
+  if (!storage?.get || !storage.set) return undefined;
+  return {
+    load: () => storage.get?.('stop-gated') ?? Promise.resolve(undefined),
+    save: ids => Promise.resolve(storage.set?.('stop-gated', [...ids])).then(() => undefined),
+  };
 }
 
-/** Per-probe budget for the events that ride on a turn. A wedged connector
- *  already costs up to 4s each and bro runs probes sequentially, so this is an
- *  outer bound, not the expected wait — on timeout the event degrades to "no
- *  context", which is the fail-open answer anyway. */
-const HOOK_TIMEOUT_MS = 15_000;
-
-/** Rehydration gets a longer budget because it shells out to `bd ready` and
- *  scans the worktree set — measured at 20-40s in a loaded repo. It is primed
- *  on `session.created` (see below) so that cost overlaps the user's first
- *  prompt instead of serializing after it. */
-const REHYDRATION_TIMEOUT_MS = 45_000;
-
-/** How often a dead stop probe may warn. The gate is fail-open by
- *  contract — a missing CLI or a broken hook must be LOUD once (the
- *  operator cannot otherwise tell "nothing armed" from "the gate never
- *  ran"), then quiet: a persistently-broken install cannot spam a
- *  warning at every idle event. */
-const GATE_DIAG_INTERVAL_MS = 15 * 60_000;
-
-const MAX_OUTPUT = 1 << 20;
-
-/** The runtime that executes the sibling CLI.
- *
- *  NOT `process.execPath`. opencode ships as a compiled binary, so inside its
- *  own plugin process `process.execPath` IS opencode — spawning it with
- *  `hooks <event>` starts a TUI instead of running the hook, and the plugin
- *  fails open into silence. `node` on PATH is the right ask anyway: it is what
- *  bro itself requires (`engines.node >= 22.18`), it is what hooks/run.sh
- *  resolves, and the CLI is plain ESM JS, so any runtime will do. */
-export function jsRuntime(): string {
-  return process.platform === 'win32' ? 'node.exe' : 'node';
-}
-
-/**
- * The CLI shipped beside this module: installed as
- * `node_modules/@broject/bro/dist/{opencode,index}.js`, built in a checkout as
- * `packages/cli/dist/{opencode,index}.js`. Same package, so the hook policy
- * can never be a different version than the plugin calling it.
- */
-function siblingCli(): string | null {
-  for (const rel of ['./index.js', '../dist/index.js']) {
-    const candidate = fileURLToPath(new URL(rel, import.meta.url));
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-/** Walk up from this module for a checkout build — a bro.ts materialized
- * into `.opencode/plugins/` or `plugins/opencode/bro/` inside a bro
- * clone resolves the clone's own `packages/cli/dist/index.js`, so hook
- * behavior tracks the checkout. Same walk `.kilo/plugin/bro.ts` and
- * `hooks/run.sh` already do. */
-function checkoutCli(): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (;;) {
-    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js');
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      return null;
-    }
-    dir = parent;
-  }
-}
-
-/** Last-resort npx package spec, pinned to this module's own version —
- * gen-plugins lists this file in VERSIONED_SOURCES, so the pin is
- * rewritten to plugin.json's version on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.3.0';
+/** Last-resort npx fallback specs, pinned first then latest — gen-plugins
+ *  lists this file in VERSIONED_SOURCES, so the pin is rewritten to
+ *  plugin.json's version on every gen/release run. */
+const NPX_SPECS = ['@broject/bro@0.3.0', '@broject/bro'];
 
 /** Env stamped on every `bro hooks` spawn so the CLI's adapter emit
  *  path journals this session into the hook spool — the in-process
  *  adapters bypass run.sh, which owns the shell-side writer
- *  (specs/bro-izpyk.9.md). `BRO_HOOK_HOST` is both the launch marker
- *  and the ledger host name; a CLI that predates the marker ignores
+ *  (specs/bro-izpyk.9.md). A CLI that predates the marker ignores
  *  the env, so old↔new mixes degrade to the pre-emit status quo. */
-const HOOK_ENV: Record<string, string> = {
-  BRO_HOOK_HOST: 'opencode',
-  BRO_HOOK_PROOT: dirname(fileURLToPath(import.meta.url)),
-  BRO_HOOK_ADAPTER: NPX_PIN.slice(NPX_PIN.lastIndexOf('@') + 1),
-};
-
-/** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
- * probe serves both launch tiers: `hooks` with no event answers "is this
- * a bro that speaks the hook contract" — a bare `bro hooks` returns before
- * it reads stdin, and an older build without the subcommand exits nonzero.
- * A spawn error, timeout, or nonzero exit is "no" — selecting
- * a command that cannot launch is worse than falling through to the next
- * tier. */
-function exitsZero(cmd: string, args: string[]): Promise<boolean> {
-  return new Promise(resolve => {
-    let child: ChildProcess;
-    try {
-      // PATH lookup is the point of both tiers — the probe verifies the
-      // answer before any hook trusts it
-      child = spawn(cmd, args, {
-        stdio: ['pipe', 'ignore', 'ignore'],
-        windowsHide: true,
-        detached: process.platform !== 'win32',
-      }); // NOSONAR typescript:S4036
-    } catch {
-      resolve(false);
-      return;
-    }
-    const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve(code === 0);
-    });
-    child.stdin?.on('error', () => {});
-    child.stdin?.end('');
-  });
-}
-
-/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
- * command is a silent no-op, so exit 0 is the probe — an older bro without
- * the subcommand fails it instead of failing every hook. Same discriminator
- * hooks/run.sh uses. */
-function hasHooksCommand(): Promise<boolean> {
-  return exitsZero('bro', ['hooks']);
-}
-
-/** SIGKILL a hung child on a timer. The spawns below are detached, so the
- * child leads its own process group and `-pid` takes a spawned `gh`/`bd`
- * down with it — a lone child.kill would leave them orphaned. */
-function killAfter(
-  child: ChildProcess,
-  ms: number,
-  onTimeout: () => void
-): ReturnType<typeof setTimeout> {
-  const timer = setTimeout(() => {
-    try {
-      if (child.pid !== undefined) {
-        process.kill(-child.pid, 'SIGKILL');
-      }
-    } catch {
-      // no group to kill (not detached, already gone, or windows)
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // already gone
-      }
-    }
-    onTimeout();
-  }, ms);
-  timer.unref?.();
-  return timer;
-}
-
-async function resolveCommand(options: PluginOptions | undefined): Promise<Command | null> {
-  const override = options?.command;
-  if (typeof override === 'string' && override.trim() !== '') {
-    return { cmd: override, args: [] };
-  }
-  if (override && typeof override === 'object' && typeof override.cmd === 'string') {
-    return {
-      cmd: override.cmd,
-      args: Array.isArray(override.args)
-        ? override.args.filter((a): a is string => typeof a === 'string')
-        : [],
-    };
-  }
-  // local-dist tiers: the bundled sibling (npm `plugin` config-entry form)
-  // first, then the checkout walk-up for a materialized module inside a
-  // clone. The probe asks for the hook contract itself — `--version` would
-  // also pass on a stale dist that predates `bro hooks`, shadowing a
-  // working PATH `bro` while every hook fails open into silence. Each
-  // candidate is probed in order: a sibling that fails must not hide a
-  // working checkout build behind it.
-  for (const entry of [siblingCli(), checkoutCli()]) {
-    if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
-      return { cmd: jsRuntime(), args: [entry] };
-    }
-  }
-  // no local dist — fall back to PATH, and only to a bro that passes the
-  // hooks probe.
-  if (await hasHooksCommand()) {
-    return { cmd: 'bro', args: [] };
-  }
-  // last resort mirrors hooks/run.sh: the published package via npx,
-  // probed cheaply (the hook call itself carries the hook budget — a cold
-  // npx resolve degrades to no-context for that turn, not a hang)
-  if (await exitsZero('npx', ['--version'])) {
-    const specs = [NPX_PIN, '@broject/bro'];
-    for (const spec of specs) {
-      if (await exitsZero('npx', ['-y', '--prefer-offline', spec, 'hooks'])) {
-        return { cmd: 'npx', args: ['-y', '--prefer-offline', spec] };
-      }
-    }
-  }
-  return null;
-}
-
-/** One hook call's verdict — the control object bro answered, or the
- *  cause it could not answer with. `failure` is null for health: a
- *  control object, or bro's silence-as-no-opinion (clean exit, empty
- *  stdout). Every set failure is a real outage the stop gate must not
- *  let pass invisibly. */
-interface HookOutcome {
-  control: HookControl | null;
-  failure: string | null;
-}
-
-/** Run one bro hook event. Healthy silence resolves `{control:null,
- * failure:null}` — "bro had nothing to say" is not an outage. Every
- * failure mode names its cause instead, including "bro isn't there".
- *
- *  Async spawn, not spawnSync: opencode runs plugin hooks on the server's event
- *  loop, so a synchronous child would freeze the whole session — and bro's
- *  rehydration probes are measured in tens of seconds, not milliseconds. */
-function callHook(
-  command: Command,
-  event: string,
-  payload: unknown,
-  directory: string,
-  timeoutMs: number
-): Promise<HookOutcome> {
-  return new Promise(resolve => {
-    // serialize before spawning: a payload JSON.stringify rejects means the
-    // hook can never run — its own outage cause, not a spawn error, never
-    // healthy silence, and never a rejection escaping the executor
-    let input: string | undefined;
-    try {
-      input = JSON.stringify(payload);
-    } catch {
-      resolve({ control: null, failure: 'the hook payload could not be serialized' });
-      return;
-    }
-    // stringify returns undefined (not a throw) for undefined/functions/
-    // symbols — no JSON document exists to hand the child either way
-    if (input === undefined) {
-      resolve({ control: null, failure: 'the hook payload could not be serialized' });
-      return;
-    }
-    let child: ChildProcess;
-    try {
-      child = spawn(command.cmd, [...command.args, 'hooks', event], {
-        cwd: directory,
-        env: { ...process.env, ...HOOK_ENV },
-        stdio: ['pipe', 'pipe', 'ignore'],
-        // own process group so killAfter can take spawned children down too
-        windowsHide: true,
-        detached: process.platform !== 'win32',
-      });
-    } catch {
-      resolve({ control: null, failure: 'the hook process failed to spawn' });
-      return;
-    }
-    let settled = false;
-    const settle = (outcome: HookOutcome): void => {
-      if (!settled) {
-        settled = true;
-        resolve(outcome);
-      }
-    };
-    const timer = killAfter(child, timeoutMs, () =>
-      settle({ control: null, failure: `the hook timed out after ${timeoutMs}ms` })
-    );
-    let out = '';
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      const remaining = MAX_OUTPUT - out.length;
-      if (remaining > 0) {
-        out += chunk.slice(0, remaining);
-      }
-    });
-    child.on('error', () => {
-      clearTimeout(timer);
-      settle({ control: null, failure: 'the hook process failed to spawn' });
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      // `bro hooks` always exits 0; anything else means the run failed, and a
-      // failed run's stdout is not a control object even if it parses
-      if (code !== 0) {
-        settle({ control: null, failure: `the hook exited ${code ?? 'with no exit code'}` });
-        return;
-      }
-      const control = parseControl(out);
-      if (control === null && out.trim() !== '') {
-        settle({ control: null, failure: 'the hook answered with no control object' });
-        return;
-      }
-      settle({ control, failure: null });
-    });
-    // bro can exit before reading stdin (unrecognized event) — EPIPE here is
-    // bro's answer, not a crash
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(input);
-  });
-}
-
-/** bro prints a single control object per event, but scan for the first
- * parseable line so unrelated chatter on stdout can't swallow the answer. */
-function parseControl(out: string): HookControl | null {
-  for (const line of out.split('\n')) {
-    const text = line.trim();
-    if (!text) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(text) as unknown;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as HookControl;
-      }
-    } catch {
-      // not a control line — keep scanning
-    }
-  }
-  return null;
-}
-
-function contextOf(control: HookControl | null): string {
-  const text = control?.hookSpecificOutput?.additionalContext;
-  return typeof text === 'string' ? text.trim() : '';
-}
+const HOOK_ENV = hookEmitEnv('opencode', { npxPin: NPX_SPECS[0] });
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -393,6 +97,85 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isCleanSession(sessionID: unknown, clean: Set<string>): sessionID is string {
+  return typeof sessionID === 'string' && clean.delete(sessionID);
+}
+
+async function logControlHint(
+  control: HookControl | null,
+  log: (level: Level, message: string) => Promise<unknown>
+): Promise<void> {
+  const hint = contextOf(control);
+  if (hint) await log('info', hint);
+}
+
+async function logAlreadyGated(
+  reason: string,
+  log: (level: Level, message: string) => Promise<unknown>
+): Promise<void> {
+  await log(
+    'info',
+    `stop gate: already gated — not re-prompting (${reason || DEFAULT_STOP_REASON})`
+  );
+}
+
+function stopReason(control: HookControl | null): string {
+  return typeof control?.reason === 'string' ? control.reason.trim() : '';
+}
+
+interface SystemMessage {
+  push(value: { type: 'text'; text: string }): void;
+}
+
+function pushSystem(system: SystemMessage | undefined, text: string): void {
+  if (system) system.push({ type: 'text', text });
+}
+
+function mergedToolInput(control: HookControl, input: unknown): Record<string, unknown> | null {
+  const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
+  return override ? { ...asRecord(input), ...override } : null;
+}
+
+function assertToolAllowed(control: HookControl): void {
+  if (control.decision !== 'block' && control.decision !== 'deny') return;
+  throw new Error(stopReason(control) || BLOCKED_TOOL_REASON);
+}
+
+function permissionEffect(control: HookControl | null): 'allow' | 'deny' | undefined {
+  if (control?.decision === 'approve') return 'allow';
+  if (control?.decision === 'deny' || control?.decision === 'block') return 'deny';
+  return undefined;
+}
+
+interface StopGateOptions {
+  control: HookControl | null;
+  sessionID: string;
+  stillAlive(): boolean;
+  gated: Set<string>;
+  persistGated(): void;
+  log: (level: Level, message: string) => Promise<unknown>;
+  reprompt(sessionID: string, text: string): Promise<unknown>;
+}
+
+async function finishStopGate(options: StopGateOptions): Promise<void> {
+  const { control, sessionID, stillAlive, gated, persistGated, log, reprompt } = options;
+  const reason = stopReason(control);
+  if (gated.has(sessionID)) {
+    await logAlreadyGated(reason, log);
+    return;
+  }
+  gated.add(sessionID);
+  persistGated();
+  const message = reason || DEFAULT_STOP_REASON;
+  await log('warn', `stop gate: ${message}`);
+  if (!stillAlive()) return;
+  try {
+    await reprompt(sessionID, message);
+  } catch (err) {
+    await log('error', `stop gate could not re-prompt: ${errorText(err)}`);
+  }
 }
 
 /** Did the tool succeed? bro arms its gates and cites skills only on success,
@@ -435,50 +218,48 @@ function makeCore(input: BroCoreInput) {
   const options = input.options;
   const log = input.log;
   // resolved on first use, not at load — the PATH tier costs a spawn probe
-  // and opencode loads plugins even in repos where bro is inert.
-  let command: Promise<Command | null> | undefined;
+  // and opencode loads plugins even in repos where bro is inert. The
+  // shared resolver owns the ladder (pin → sibling → checkout → PATH →
+  // npx) and the retry-on-failure window every adapter uses.
+  const getCommand = createCommandResolver({
+    command: options?.command,
+    npxSpecs: NPX_SPECS,
+  });
 
   const notify = (level: Level, message: string): void => {
     log(level, message).catch(() => {});
   };
-
-  /** The stop gate's diagnostic budget. A failed stop probe is
-   *  indistinguishable from "nothing armed" — the gate is fail-open by
-   *  contract, so it must say once that it never ran, then stay quiet:
-   *  in-memory on purpose (the diagnostic itself cannot be allowed to
-   *  fail), one warn per interval for the plugin instance. */
-  let stopDiagAt = 0;
-  const probeFailed = (event: string, cause: string): void => {
-    notify('debug', `bro probe failed (${cause}) for event=${event}`);
-    if (event !== 'stop') {
-      return;
-    }
-    const now = Date.now();
-    if (now - stopDiagAt < GATE_DIAG_INTERVAL_MS) {
-      return;
-    }
-    stopDiagAt = now;
-    notify('warn', `bro stop gate did not run (${cause}) — the stop is unguarded`);
-  };
+  let lastStopWarning = 0;
 
   const probe = async (
     event: string,
     payload: unknown,
     timeoutMs = HOOK_TIMEOUT_MS
   ): Promise<HookControl | null> => {
-    command ??= resolveCommand(options);
-    const resolved = await command;
+    const resolved = await getCommand();
     if (!resolved) {
-      probeFailed(event, 'no bro CLI resolved');
+      notify('debug', `bro probe skipped (no cli) for event=${event}`);
       return null;
     }
-    const { control, failure } = await callHook(resolved, event, payload, directory, timeoutMs);
-    if (failure !== null) {
-      probeFailed(event, failure);
-    } else if (control === null) {
+    const result = await callHookDetailed(resolved, {
+      event,
+      payload,
+      cwd: directory,
+      timeoutMs,
+      extraEnv: HOOK_ENV,
+    });
+    if (result.failure !== null) {
+      const message = hookFailureText(result.failure);
+      if (event === 'stop' && Date.now() - lastStopWarning >= 15 * 60_000) {
+        lastStopWarning = Date.now();
+        notify('warn', `stop gate did not run (${message})`);
+      } else {
+        notify('debug', `probe failed (${message})`);
+      }
+    } else if (result.control === null) {
       notify('debug', `bro probe returned null for event=${event}`);
     }
-    return control;
+    return result.control;
   };
 
   /** Spawn `<bro> args` and capture stdout — the read-verb path tool
@@ -487,48 +268,21 @@ function makeCore(input: BroCoreInput) {
    * travels in the result because a nonzero exit IS the answer for
    * gate verbs like `act status`. */
   const exec = (args: string[]): Promise<{ code: number; out: string; err: string }> =>
-    new Promise(resolve => {
-      command ??= resolveCommand(options);
-      void command.then(resolved => {
-        if (resolved === null) {
-          resolve({ code: 127, out: '', err: 'no bro command resolved' });
-          return;
-        }
-        let child: ChildProcess;
-        try {
-          child = spawn(resolved.cmd, [...resolved.args, ...args], {
-            cwd: directory,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-            detached: process.platform !== 'win32',
-          });
-        } catch {
-          resolve({ code: 127, out: '', err: 'spawn failed' });
-          return;
-        }
-        let out = '';
-        let err = '';
-        const cap = (buf: string, chunk: string): string =>
-          buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
-        child.stdout?.setEncoding('utf8');
-        child.stdout?.on('data', (chunk: string) => {
-          out = cap(out, chunk);
-        });
-        child.stderr?.setEncoding('utf8');
-        child.stderr?.on('data', (chunk: string) => {
-          err = cap(err, chunk);
-        });
-        const finish = (code: number): void => resolve({ code, out: out.trim(), err: err.trim() });
-        const timer = killAfter(child, HOOK_TIMEOUT_MS, () => finish(124));
-        child.on('error', () => {
-          clearTimeout(timer);
-          finish(127);
-        });
-        child.on('close', code => {
-          clearTimeout(timer);
-          finish(code ?? 1);
-        });
+    getCommand().then(async resolved => {
+      if (resolved === null) {
+        return { code: 127, out: '', err: 'no bro command resolved' };
+      }
+      const result = await runCommand(resolved.cmd, [...resolved.args, ...args], {
+        cwd: directory,
+        timeoutMs: RUN_TIMEOUT_MS,
       });
+      const code =
+        result.code ?? (result.error !== null && result.error.startsWith('timed out') ? 124 : 127);
+      return {
+        code,
+        out: result.stdout.trim(),
+        err: (result.stderr !== '' ? result.stderr : (result.error ?? '')).trim(),
+      };
     });
 
   /** Rehydration is per session, not per turn: the context hook runs on every
@@ -610,39 +364,6 @@ function makeCore(input: BroCoreInput) {
   const live = new Map<string, number>();
   let liveSeq = 0;
 
-  /** `session.created` primes rehydration while opencode is still waiting on a
-   * prompt — the probe costs real seconds, and this is the only window where
-   * paying it doesn't sit on the critical path of a turn. */
-  const onSessionCreated = (props: Record<string, unknown>): void => {
-    const sessionID = props.sessionID;
-    if (typeof sessionID === 'string') {
-      live.set(sessionID, ++liveSeq);
-      void hydrate(sessionID, 'session-start');
-    }
-  };
-
-  /** `message.updated` arrives before the matching `session.idle` —
-   * `time.completed` with no `error` is what separates a finished turn from
-   * one the user aborted or the provider failed. The latest assistant update
-   * is the verdict: a clean step followed by one that aborts, errors, or is
-   * still streaming erases the earlier completion. */
-  const onMessageUpdated = (props: Record<string, unknown>): void => {
-    const info = asRecord(props.info);
-    if (info?.role !== 'assistant' || typeof info.sessionID !== 'string') {
-      return;
-    }
-    // a fresh token only when the session wasn't already live — minting
-    // one per update would invalidate an idle gate mid-flight for no reason
-    if (!live.has(info.sessionID)) {
-      live.set(info.sessionID, ++liveSeq);
-    }
-    if (asRecord(info.time)?.completed !== undefined && info.error === undefined) {
-      clean.add(info.sessionID);
-    } else {
-      clean.delete(info.sessionID);
-    }
-  };
-
   /** `session.deleted` retires the per-session structures — they live as
    * long as the plugin process, not the session, so without this a
    * long-lived server accumulates dead entries. */
@@ -675,12 +396,13 @@ function makeCore(input: BroCoreInput) {
     void hydrate(sessionID, 'post-compaction');
   };
 
-  /** `session.idle` is the stop gate. Gated sessions pass `stop_hook_active`,
-   * so bro skips its own re-evaluation — the one-shot guard is bro's, not
-   * duplicated here. */
+  /** Turn completion is the stop gate — `session.idle` on v1 hosts,
+   *  `session.execution.succeeded` on v2. Gated sessions pass
+   *  `stop_hook_active`, so bro skips its own re-evaluation — the
+   *  one-shot guard is bro's, not duplicated here. */
   const onSessionIdle = async (props: Record<string, unknown>): Promise<void> => {
     const sessionID = props.sessionID;
-    if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
+    if (!isCleanSession(sessionID, clean)) {
       return;
     }
     // the instance token is captured before any suspending await: a
@@ -693,12 +415,8 @@ function makeCore(input: BroCoreInput) {
       session_id: sessionID,
       stop_hook_active: gated.has(sessionID),
     });
-    const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
     if (control?.decision !== 'block') {
-      const hint = contextOf(control);
-      if (hint) {
-        await log('info', hint);
-      }
+      await logControlHint(control, log);
       return;
     }
     // the probe awaited real I/O — a session.deleted that interleaved retired
@@ -708,50 +426,55 @@ function makeCore(input: BroCoreInput) {
     if (!stillAlive()) {
       return;
     }
-    if (gated.has(sessionID)) {
-      // the repeat block still earns a trace — it's the answer to
-      // "why didn't the agent get re-prompted?"
-      await log(
-        'info',
-        `stop gate: already gated — not re-prompting (${reason || 'unfinished bro work'})`
-      );
-      return;
-    }
-    gated.add(sessionID);
-    persistGated();
-    const message = reason || 'unfinished bro work';
-    await log('warn', `stop gate: ${message}`);
-    // the log await is real I/O — a session.deleted landing inside it
-    // retires the instance, and prompting now could hit a session that
-    // reused the id
-    if (!stillAlive()) {
-      return;
-    }
-    try {
-      await input.reprompt(sessionID, message);
-    } catch (err) {
-      await log('error', `stop gate could not re-prompt: ${errorText(err)}`);
-    }
+    await finishStopGate({
+      control,
+      sessionID,
+      stillAlive,
+      gated,
+      persistGated,
+      log,
+      reprompt: input.reprompt,
+    });
   };
 
-  /** Dispatches the event stream into core handlers. */
+  /** Dispatches the v2 event stream into core handlers.
+   *
+   *  opencode ≥2.x never emits the v1 names — `session.idle` is declared
+   *  in the schema but nothing publishes it (opencode#55358), and
+   *  `session.created`/`message.updated`/`session.compacted` are absent
+   *  from the public stream (verified live on 2.2.7). The v2 lifecycle
+   *  is `session.execution.{started,succeeded,failed,interrupted}` plus
+   *  `session.compaction.*` and `session.deleted` (that name survived).
+   *  A succeeded execution is simultaneously the clean-turn verdict and
+   *  the idle moment, so it feeds both the `clean` set and the stop
+   *  gate in one step. */
   const onEvent = async (type: string, props: Record<string, unknown>): Promise<void> => {
+    const sessionID = typeof props.sessionID === 'string' ? props.sessionID : undefined;
+    // any session-scoped event proves liveness — mint the token only
+    // once, or every event would invalidate an in-flight idle gate
+    if (sessionID !== undefined && !live.has(sessionID)) {
+      live.set(sessionID, ++liveSeq);
+    }
     switch (type) {
-      case 'session.created':
-        onSessionCreated(props);
-        break;
-      case 'message.updated':
-        onMessageUpdated(props);
-        break;
-      case 'session.compacted':
+      case 'session.execution.started':
+        if (sessionID !== undefined) void hydrate(sessionID, 'session-start');
+        return;
+      case 'session.execution.succeeded':
+        if (sessionID === undefined) return;
+        clean.add(sessionID);
+        await onSessionIdle({ sessionID });
+        return;
+      case 'session.execution.failed':
+      case 'session.execution.interrupted':
+        if (sessionID !== undefined) clean.delete(sessionID);
+        return;
+      case 'session.compaction.succeeded':
+      case 'session.compaction.ended':
         onSessionCompacted(props);
-        break;
+        return;
       case 'session.deleted':
         onSessionDeleted(props);
-        break;
-      case 'session.idle':
-        await onSessionIdle(props);
-        break;
+        return;
     }
   };
 
@@ -988,6 +711,11 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
   },
 ];
 
+/** Tool registration options — `codemode: false` keeps the reads as
+ * direct `bro_*` function tools; the plugin SDK's `Info.options` type
+ * predates the field, so the literal is widened once here. */
+const BRO_TOOL_OPTIONS = { namespace: 'bro', codemode: false } as const;
+
 /** `/bro` arguments — whitespace-split with "…"/'…' holding a multiword
  * value together (`/bro learn capture "a note"` must not shred the
  * note into four argv entries). Unmatched quotes degrade to the plain
@@ -998,6 +726,82 @@ function splitArgs(input: string): string[] {
     args.push(m[1] ?? m[2] ?? m[3] ?? m[0]);
   }
   return args;
+}
+
+function cleanCommandOutput(body: string): string {
+  return body
+    .split('\n')
+    .filter(line => {
+      if (!line.trim()) return true;
+      const words = line.trim().toLowerCase().split(/\s+/);
+      return !(words[0] === 'bro' && words[1] === 'learn');
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function tryPrompt(
+  prompt: ((input: { sessionID: string; text: string }) => Promise<unknown>) | undefined,
+  sessionID: string,
+  text: string
+): Promise<boolean> {
+  if (!prompt) return false;
+  try {
+    await prompt({ sessionID, text });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface Notification {
+  sessionID?: string;
+  title: string;
+  message: string;
+  severity: 'error' | 'warning' | 'info';
+}
+
+function readNotification(input: unknown): Notification | null {
+  const { sessionID, text, title, variant } = asRecord(input) ?? {};
+  if (typeof text !== 'string' || text.trim() === '') return null;
+  return {
+    sessionID: validSessionID(sessionID),
+    title: validTitle(title),
+    message: warningMessage(text, variant),
+    severity: notificationSeverity(variant),
+  };
+}
+
+function validSessionID(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+function validTitle(value: unknown): string {
+  return typeof value === 'string' && value.trim() !== '' ? value : 'bro';
+}
+
+function warningMessage(text: string, variant: unknown): string {
+  return variant === 'error' || variant === 'warning' ? `⚠ ${text}` : text;
+}
+
+function notificationSeverity(variant: unknown): Notification['severity'] {
+  if (variant === 'error') return 'error';
+  if (variant === 'warning') return 'warning';
+  return 'info';
+}
+
+async function submitPrompt(options: {
+  switchAgent?: (input: { sessionID: string; agent: string }) => Promise<unknown>;
+  prompt?: (input: { sessionID: string; text: string }) => Promise<unknown>;
+  sessionID: string;
+  text: string;
+  agent?: string;
+}): Promise<boolean> {
+  const { switchAgent, prompt, sessionID, text, agent } = options;
+  if (agent) await switchAgent?.({ sessionID, agent });
+  await prompt?.({ sessionID, text });
+  return true;
 }
 
 /** Where the nudge lands on a tool result — `output`/`content` take text
@@ -1027,27 +831,70 @@ interface BroSkill {
   content: string;
 }
 
+interface SkillFileReader {
+  stat(path: string): { isFile(): boolean };
+  read(path: string, encoding: 'utf8'): string;
+}
+
+function readSkillFile(reader: SkillFileReader, root: string, entry: string): BroSkill | null {
+  const path = join(root, entry, 'SKILL.md');
+  try {
+    if (!reader.stat(path).isFile()) return null;
+    const content = reader.read(path, 'utf8');
+    const parsed = parseSkill(content);
+    if (!parsed) return null;
+    return {
+      id: entry,
+      name: parsed.name ?? entry,
+      description: parsed.description ?? '',
+      path,
+      content,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Parse a `SKILL.md` frontmatter block — `name`, `description`, and the
  * optional `autoinvoke` flag. A file without frontmatter is not a skill;
  * it is skipped rather than half-registered. */
 function parseSkill(markdown: string): { name?: string; description?: string } | null {
-  if (!markdown.startsWith('---')) {
-    return null;
-  }
-  const end = markdown.indexOf('\n---', 3);
-  if (end < 0) {
-    return null;
-  }
-  const front = markdown.slice(3, end);
-  const name = /^\s*name:\s*(.+)$/m.exec(front)?.[1]?.trim();
-  const description = /^\s*description:\s*(.+)$/m.exec(front)?.[1]?.trim();
-  if (!name || !description) {
-    return null;
-  }
+  const front = frontmatter(markdown);
+  if (front === null) return null;
+  const name = readFrontmatterValue(front, 'name');
+  const description = readFrontmatterValue(front, 'description');
+  if (!name || !description) return null;
   return {
     name: name.replace(/^["']|["']$/g, ''),
     description: description.replace(/^["']|["']$/g, ''),
   };
+}
+
+function frontmatter(markdown: string): string | null {
+  if (!markdown.startsWith('---')) return null;
+  const end = markdown.indexOf('\n---', 3);
+  return end < 0 ? null : markdown.slice(3, end);
+}
+
+function readFrontmatterValue(front: string, key: string): string | undefined {
+  const pattern = key === 'name' ? /^\s*name:\s*(\S[^\r\n]*)/m : /^\s*description:\s*(\S[^\r\n]*)/m;
+  return pattern.exec(front)?.[1]?.trim();
+}
+
+/** Auto-discovered skills roots must look like BRO's tree before they
+ *  are registered — the ancestor walk-up can land on a foreign `skills/`
+ *  dir (e.g. opencode's own `~/.config/opencode/skills`), and registering
+ *  somebody else's skills under bro's name is worse than registering
+ *  none. `sdd` is bro's canonical skill — every shipped tree carries it.
+ *  An explicit `skillsDir` is the operator's choice and skips the check. */
+const BRO_SKILLS_SENTINEL = 'sdd';
+
+export function isBroSkillsRoot(root: string): boolean {
+  try {
+    return statSync(join(root, BRO_SKILLS_SENTINEL, 'SKILL.md')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** The directories that may hold bro's skills, most specific first:
@@ -1101,14 +948,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
       const fn = session?.prompt?.bind(session) ?? session?.synthetic?.bind(session);
       return fn ? fn({ sessionID, text }) : Promise.resolve(undefined);
     },
-    persist:
-      ctx.storage?.get !== undefined && ctx.storage?.set !== undefined
-        ? {
-            load: () => ctx.storage?.get?.('stop-gated') ?? Promise.resolve(undefined),
-            save: ids =>
-              Promise.resolve(ctx.storage?.set?.('stop-gated', [...ids])).then(() => undefined),
-          }
-        : undefined,
+    persist: makePersistence(ctx.storage),
   });
 
   const pendingPromptContext = new Map<string, string>();
@@ -1130,15 +970,11 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
         return;
       }
       const text = await core.hydrate(sessionID, 'session-start');
-      if (text) {
-        event.system.push({ type: 'text', text });
-      }
-      if (sessionID) {
-        const pending = pendingPromptContext.get(sessionID);
-        if (pending && event.system !== undefined) {
-          event.system.push({ type: 'text', text: pending });
-          pendingPromptContext.delete(sessionID);
-        }
+      if (text) pushSystem(event.system, text);
+      const pending = pendingPromptContext.get(sessionID);
+      if (pending) {
+        pushSystem(event.system, pending);
+        pendingPromptContext.delete(sessionID);
       }
     })
   );
@@ -1191,14 +1027,9 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
       // bro's guard contract, translated: block becomes the throw that
       // vetoes the call; a tool_input override merges over the original
       // args — a connector rewriting `command` must not wipe `workdir`
-      const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
-      if (override) {
-        event.input = { ...asRecord(event.input), ...override };
-      }
-      if (control.decision === 'block' || control.decision === 'deny') {
-        const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
-        throw new Error(reason || 'blocked by bro');
-      }
+      const merged = mergedToolInput(control, event.input);
+      if (merged) event.input = merged;
+      assertToolAllowed(control);
     })
   );
 
@@ -1231,14 +1062,12 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
         tool_input: { command },
         session_id: event.sessionID,
       });
-      if (control?.decision === 'approve') {
-        event.effect = 'allow';
-      } else if (control?.decision === 'deny' || control?.decision === 'block') {
-        event.effect = 'deny';
-        const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
-        if (reason) {
-          event.message = reason;
-        }
+      const effect = permissionEffect(control);
+      if (!effect) return;
+      event.effect = effect;
+      const reason = stopReason(control);
+      if (reason) {
+        event.message = reason;
       }
     })
   );
@@ -1264,10 +1093,10 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           name: tool.name,
           description: tool.description,
           input: { type: 'object', properties: {}, additionalProperties: false },
-          options: { namespace: 'bro' },
+          options: BRO_TOOL_OPTIONS,
           execute: async () => {
             const { code, out, err } = await core.exec(tool.args);
-            const body = out || err || '(no output)';
+            const body = out || err || DEFAULT_COMMAND_OUTPUT;
             return { content: code === 0 ? body : `exit ${code}: ${body}` };
           },
         });
@@ -1287,21 +1116,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           return;
         }
         const { code, out, err } = await core.exec(argv);
-        let body = out || err || '(no output)';
-        body = body
-          .split('\n')
-          .filter(l => {
-            const t = l.trim().toLowerCase();
-            if (!t) return true;
-            // drop only the `bro learn ...` hint line itself — a
-            // substring match would eat real output that mentions it
-            const words = t.split(/\s+/);
-            if (words[0] === 'bro' && words[1] === 'learn') return false;
-            return true;
-          })
-          .join('\n')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
+        const body = cleanCommandOutput(out || err || DEFAULT_COMMAND_OUTPUT);
         const suffix = code === 0 ? '' : ` (exit ${code})`;
         await ctx.session.prompt({
           sessionID,
@@ -1317,15 +1132,23 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           await run(sessionID, verb, `bro ${verb.join(' ')}`);
         },
       });
-      editor.add?.({
-        name: 'act',
-        description: 'shortcut for `/bro act` — PR review gate/threads (bro act)',
-        execute: async ({ sessionID, prompt }) => {
-          const args = splitArgs(prompt?.text ?? '');
-          const verb = ['act', ...args];
-          await run(sessionID, verb, `bro ${verb.join(' ')}`);
-        },
-      });
+      // Command family — same table the pi/omp lineage registers. A
+      // host-native command of the same name always wins: opencode 2.x
+      // owns `/goal` natively (verified in the binary), so that alias
+      // lands on `bro:goal`; the rest keep bare names.
+      const natives = new Set(['goal']);
+      for (const c of BRO_COMMANDS) {
+        const name = natives.has(c.name) ? `bro:${c.name}` : c.name;
+        editor.add?.({
+          name,
+          description: c.description,
+          execute: async ({ sessionID, prompt }) => {
+            const args = splitArgs(prompt?.text ?? '');
+            const verb = [c.verb, ...args];
+            await run(sessionID, verb, `bro ${verb.join(' ')}`);
+          },
+        });
+      }
     })
   );
 
@@ -1358,26 +1181,18 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
     board: async () => boardSnapshot(),
 
     notify: async (input: unknown, _context?: RpcCallContext) => {
-      const { sessionID, text, title, variant } = asRecord(input) ?? {};
-      if (typeof text !== 'string' || text.trim() === '') {
-        return { delivered: false };
-      }
-      const body = typeof title === 'string' && title.trim() !== '' ? title : 'bro';
-      const message = variant === 'error' || variant === 'warning' ? `⚠ ${text}` : text;
-      if (typeof sessionID === 'string' && sessionID !== '') {
-        try {
-          await ctx.session?.prompt?.({ sessionID, text: `${body}: ${message}` });
-          return { delivered: true };
-        } catch {
-          // fall through to the broadcast below
-        }
+      const notification = readNotification(input);
+      if (!notification) return { delivered: false };
+      const { sessionID, title, message, severity } = notification;
+      if (sessionID && (await tryPrompt(ctx.session?.prompt, sessionID, `${title}: ${message}`))) {
+        return { delivered: true };
       }
       // no session — the event still reaches every TUI listening on the
       // contract, which is the point of an RPC event
       await emitRpc('attention', {
-        title: body,
+        title,
         message,
-        severity: variant === 'error' ? 'error' : variant === 'warning' ? 'warning' : 'info',
+        severity,
       });
       return { delivered: true };
     },
@@ -1391,10 +1206,13 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
         return { accepted: false };
       }
       try {
-        if (typeof agent === 'string' && agent !== '') {
-          await ctx.session?.switchAgent?.({ sessionID, agent });
-        }
-        await ctx.session?.prompt?.({ sessionID, text });
+        await submitPrompt({
+          switchAgent: ctx.session?.switchAgent,
+          prompt: ctx.session?.prompt,
+          sessionID,
+          text,
+          agent: typeof agent === 'string' && agent !== '' ? agent : undefined,
+        });
         return { accepted: true };
       } catch {
         return declaredError(context, 'no_session', 'session not available', { sessionID });
@@ -1483,7 +1301,13 @@ export async function collectBroSkills(options: PluginOptions | undefined): Prom
   const { readdirSync, readFileSync, statSync } = await import('node:fs');
   const out: BroSkill[] = [];
   const seen = new Set<string>();
+  const explicit = typeof options?.skillsDir === 'string' && options.skillsDir.trim() !== '';
   for (const root of skillRoots(options)) {
+    // auto-discovered roots must carry bro's sentinel skill — without
+    // it the walk-up found a foreign skills/ dir, not ours
+    if (!explicit && !isBroSkillsRoot(root)) {
+      continue;
+    }
     let entries: string[];
     try {
       if (!existsSync(root)) {
@@ -1494,32 +1318,14 @@ export async function collectBroSkills(options: PluginOptions | undefined): Prom
       continue;
     }
     for (const entry of entries) {
-      const path = join(root, entry, 'SKILL.md');
-      let content: string;
-      try {
-        if (!statSync(path).isFile()) {
-          continue;
-        }
-        content = readFileSync(path, 'utf8');
-      } catch {
-        continue;
-      }
-      const parsed = parseSkill(content);
-      if (parsed === null) {
-        continue;
-      }
+      const skill = readSkillFile({ stat: statSync, read: readFileSync }, root, entry);
+      if (!skill) continue;
       const id = entry;
       if (seen.has(id)) {
         continue;
       }
       seen.add(id);
-      out.push({
-        id,
-        name: parsed.name ?? entry,
-        description: parsed.description ?? '',
-        path,
-        content,
-      });
+      out.push(skill);
     }
     if (out.length > 0) {
       // the first root that yields skills wins — a materialized sibling

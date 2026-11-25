@@ -56,10 +56,10 @@
  */
 import {
   BOARD_KEY,
-  createBroDriver,
-  sharedBinding,
   type BroContext,
   type BroHostBinding,
+  createBroDriver,
+  sharedBinding,
 } from '@broject/adapter-core/host';
 
 // --- structural pi surface ----------------------------------------------
@@ -162,8 +162,38 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
     ...sharedBinding<ExtContext>({
       kind: 'pi',
       npxPin: NPX_PIN,
+      // pi's built-in slash commands (docs/slash-commands.md) — none of
+      // the bro family names collide today, but the list keeps the
+      // `bro:<name>` fallback honest if a future pi adds one.
+      nativeCommands: [
+        'settings',
+        'model',
+        'thinking',
+        'scoped-models',
+        'login',
+        'logout',
+        'llama',
+        'new',
+        'resume',
+        'name',
+        'session',
+        'tree',
+        'fork',
+        'clone',
+        'compact',
+        'import',
+        'copy',
+        'export',
+        'share',
+        'bug',
+        'trust',
+        'mcp',
+        'reload',
+        'hotkeys',
+        'changelog',
+        'quit',
+      ],
       stop: 'agent_before_settle',
-      userInput: 'input',
       on(event, handler) {
         pi.on(event as never, handler as never);
       },
