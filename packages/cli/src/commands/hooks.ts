@@ -342,7 +342,15 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   if (new RegExp(`${at}${bro}\\s+(?:review\\s+)?act\\b`).test(c)) {
     return 'act';
   }
-  if (new RegExp(`${at}${bro}\\s+(?:(?:work\\s+)?drill|(?:self\\s+)?wtf)\\b`).test(c)) {
+  // the bro command alternation is inlined: a regex literal keeps the
+  // static-analysis contract (a RegExp constructor with a non-literal
+  // value is a codacy finding) — the pattern is fixed text, the
+  // interpolation only ever spelled these same bytes
+  if (
+    /(^|[;&|\n])\s*(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+(?:(?:work\s+)?drill|(?:self\s+)?wtf)\b/.test(
+      c
+    )
+  ) {
     return 'drill';
   }
   if (new RegExp(String.raw`${at}${bro}\s+work\b`).test(c)) {
