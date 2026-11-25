@@ -353,15 +353,27 @@ interface WriteJob {
 }
 
 /** Push one workspace's diffs — the live label and tokens are the
- *  dedup record. A failing write skips that surface only. */
+ *  dedup record. The metadata token mirrors the label's bracket
+ *  contents, so a NEEDED rename that failed vetoes the metadata write:
+ *  tokens claiming a status the label doesn't show are a split-brain
+ *  workspace (bro-7tdbs). A failing write otherwise skips that surface
+ *  only. */
 function writeDiffs(j: WriteJob): number {
-  return renameDiff(j) + metaDiff(j);
+  const renamed = renameDiff(j);
+  if (renamed < 0) {
+    return 0;
+  }
+  return renamed + metaDiff(j);
 }
 
+/** 1 written, 0 nothing to write, -1 a needed write failed. */
 function renameDiff(j: WriteJob): number {
   const label = labelFor(j.ws.tree.path, j.proj);
   const changed = (j.ws.live.label ?? '') !== label;
-  return changed && callOk(['workspace', 'rename', j.ws.wsId, label]) ? 1 : 0;
+  if (!changed) {
+    return 0;
+  }
+  return callOk(['workspace', 'rename', j.ws.wsId, label]) ? 1 : -1;
 }
 
 function metaDiff(j: WriteJob): number {
