@@ -278,18 +278,13 @@ export function pulseNudge(
 export const watchConnector: Connector = {
   name: 'watch',
   hooks: () => ({
-    // session start is the first checkpoint — same rearm path as
-    // postTool: armed + dead → spawn the bounded window, don't ask
+    // Session start is the only rearm checkpoint. A watch window already
+    // performs its own repeated sweep; rearming from every postTool event
+    // made a dead/short-lived child start another full gh fleet sweep on
+    // every subsequent tool call (and multiplied that cost across sessions).
+    // An operator can start another bounded window explicitly after expiry.
     sessionStart(ctx) {
       return pulseCheckpoint(ctx.dir, 'session start', ctx.sessionId);
-    },
-    // every tool call is a checkpoint: an armed marker with a dead
-    // pulse gets a fresh bounded window spawned right here — the
-    // zero-cost rearm (shell, no LLM) that makes the cadence
-    // self-perpetuating while the orchestrator works. A standby child
-    // or a live pulse is quiet (bro-killn)
-    postTool(ctx) {
-      return pulseCheckpoint(ctx.dir, 'tool call', ctx.sessionId);
     },
   }),
   // mode gating (specs/bro-izpyk.2.md): supervisor rearm belongs to the
@@ -297,7 +292,6 @@ export const watchConnector: Connector = {
   // plan/review/observe never pay the checkpoint.
   activeIn: {
     sessionStart: ['code', 'orchestrate'],
-    postTool: ['code', 'orchestrate'],
   },
 };
 
