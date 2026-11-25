@@ -46,7 +46,9 @@ export async function runRpcPrompt(
   let stderr = '';
   let buf = '';
   const state = { changed: Promise.withResolvers<void>() };
-  const poke = () => state.changed.resolve();
+  const poke = (): void => {
+    state.changed.resolve();
+  };
   child.stdout?.on('data', (chunk: Buffer) => {
     buf += chunk.toString('utf8');
     for (;;) {
