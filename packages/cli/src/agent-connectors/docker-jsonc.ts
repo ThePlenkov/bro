@@ -61,22 +61,24 @@ export function jsoncCopyString(text: string, i: number, out: string[]): number 
  *  scanner copies significant chars only, tracking string state so a
  *  `//` inside a URL or a `,]` inside a string survives verbatim. */
 export function jsoncToJson(text: string): string {
-  const out: string[] = [];
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i]!;
-    if (c === '"') {
-      i = jsoncCopyString(text, i, out);
-    } else if (c === '/' && text[i + 1] === '/') {
-      i = jsoncSkipLineComment(text, i);
-    } else if (c === '/' && text[i + 1] === '*') {
-      i = jsoncSkipBlockComment(text, i);
-    } else if (c === ',' && ['}', ']'].includes(text[jsoncSkipTrivia(text, i + 1)] ?? '')) {
-      i++;
-    } else {
-      out.push(c);
-      i++;
-    }
-  }
-  return out.join('');
+  const scan = { text, out: [] as string[], index: 0 };
+  while (scan.index < scan.text.length) scan.index = jsoncCopyNext(scan);
+  return scan.out.join('');
+}
+
+function jsoncCopyNext(scan: { text: string; out: string[]; index: number }): number {
+  const { text, out, index: i } = scan;
+  const c = text[i]!;
+  const pair = text.slice(i, i + 2);
+  if (c === '"') return jsoncCopyString(text, i, out);
+  if (pair === '//') return jsoncSkipLineComment(text, i);
+  if (pair === '/*') return jsoncSkipBlockComment(text, i);
+  if (c === ',' && jsoncHasTrailingComma(scan)) return i + 1;
+  out.push(c);
+  return i + 1;
+}
+
+function jsoncHasTrailingComma(scan: { text: string; out: string[]; index: number }): boolean {
+  const next = scan.text[jsoncSkipTrivia(scan.text, scan.index + 1)];
+  return next === '}' || next === ']';
 }
