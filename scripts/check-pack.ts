@@ -3,10 +3,11 @@
  * 1. Generated pack.json exists and matches trees + package.json
  * 2. Tarball carries pack.json (npm pack --dry-run)
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { extractPackEntries } from './pack-entries.ts';
 
 const root = join(fileURLToPath(import.meta.url), '..', '..');
 const packDir = join(root, 'packages/pack');
@@ -75,9 +76,7 @@ try {
     }
   );
   const parsed = JSON.parse(out);
-  const entries: string[] = Array.isArray(parsed)
-    ? parsed.flatMap((p: { files?: { path?: string }[] }) => (p.files ?? []).map(f => f.path ?? ''))
-    : [];
+  const entries = extractPackEntries(parsed);
   if (!entries.includes('pack.json')) {
     console.error('npm pack --dry-run does not list pack.json in tarball');
     process.exit(1);
