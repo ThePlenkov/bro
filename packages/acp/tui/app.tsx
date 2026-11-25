@@ -592,12 +592,11 @@ function AcpRunRow(props: {
             <box flexDirection="row" flexShrink={0} width="100%">
               <text fg={theme.muted} attributes={TextAttributes.DIM} content={'│ '} />
               <AcpSegRow
-                segs={acpLine(
-                  m,
-                  props.width() - 2,
-                  props.item.status === 'live' ? props.frame() : 0,
-                  props.findTool
-                )}
+                segs={acpLine(m, {
+                  width: props.width() - 2,
+                  frame: props.item.status === 'live' ? props.frame() : 0,
+                  findTool: props.findTool,
+                })}
                 selected={false}
               />
             </box>
@@ -787,13 +786,12 @@ function ItemRow(props: {
     // must not re-derive its line 10x/s (addendum 14: the steady-state
     // sweep was the one proven hotspot, ~0.2ms/row/tick over all rows)
     const frame = props.item.kind === 'tool' && props.item.status === 'live' ? props.frame() : 0;
-    const line = acpLine(
-      vi,
-      props.width(),
+    const line = acpLine(vi, {
+      width: props.width(),
       frame,
-      props.findTool,
-      'arg' in props.item ? props.item.arg : undefined
-    );
+      findTool: props.findTool,
+      arg: 'arg' in props.item ? props.item.arg : undefined,
+    });
     return line.length > 0 ? line : null;
   });
   // a judge reply classifies on its own shape — every answer must

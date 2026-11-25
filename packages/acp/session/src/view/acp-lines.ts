@@ -94,17 +94,32 @@ const firstLine = (s: string): string => {
   return i < 0 ? s : s.slice(0, i);
 };
 
+/** The status cell — braille while in flight, the TOOL_GLYPH table
+ *  once settled (an unknown status reads as the bare `○` marker). */
+const toolGlyph = (status: string, frame: number): Segment => {
+  const g =
+    status === 'in_progress' || status === 'pending'
+      ? { text: LIVE[frame % LIVE.length] ?? '⠋', token: 'glyph.live' }
+      : (Object.getOwnPropertyDescriptor(TOOL_GLYPH, status)?.value ?? {
+          text: '○',
+          token: 'marker',
+        });
+  return { text: `${g.text} `, token: g.token };
+};
+
+/** An overflow row — the head clips to what the tail leaves. */
+const clippedHead = (head: string, tail: string, width: number): Segment[] => [
+  { text: clipTo(head, Math.max(0, width - tail.length)), token: 'title' },
+  { text: tail, token: 'tail' },
+];
+
 /** `✓ Bash arg …           #1` — the mass row: the status glyph
  *  inline, title + clipped arg dim, right-aligned tail. One compact
  *  row per call; output lives under it only when the card is open —
  *  never a box, never a rule, no `⏺` bullet (addendum 26). */
 const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string): Segment[] => {
-  const live = item.toolStatus === 'in_progress' || item.toolStatus === 'pending';
-  const g = live
-    ? { text: LIVE[frame % LIVE.length] ?? '⠋', token: 'glyph.live' }
-    : (TOOL_GLYPH[item.toolStatus] ?? { text: '○', token: 'marker' });
   const segs: Segment[] = [
-    { text: `${g.text} `, token: g.token },
+    toolGlyph(item.toolStatus, frame),
     { text: item.title === '' ? (item.toolName ?? 'tool') : item.title, token: 'arg' },
   ];
   if (item.toolKind !== undefined && item.toolKind !== null) {
@@ -114,13 +129,7 @@ const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string
   if (head1 !== '') segs.push({ text: `  ${head1}`, token: 'arg' });
   const tail = ` #${item.index}`;
   const head = lineText(segs);
-  if (head.length + tail.length > width) {
-    const room = Math.max(0, width - tail.length);
-    return [
-      { text: clipTo(head, room), token: 'title' },
-      { text: tail, token: 'tail' },
-    ];
-  }
+  if (head.length + tail.length > width) return clippedHead(head, tail, width);
   segs.push({ text: ' '.repeat(width - head.length - tail.length), token: 'marker' });
   segs.push({ text: tail, token: 'tail' });
   return segs;
@@ -202,27 +211,31 @@ const turnEndLine = (item: TurnEndMarker, _width: number): Segment[] => {
   ];
 };
 
+/** The row-dispatch context — `width`/`frame` drive geometry and the
+ *  live spinner, `findTool` resolves a permission's call, `arg` is
+ *  the feed's stashed rawInput their item dropped. */
+export interface LineCtx {
+  width: number;
+  frame: number;
+  findTool: (toolCallId: string) => unknown;
+  arg?: string;
+}
+
 /** The row dispatcher — their Item union → its one-line row, or []
  *  for kinds the segment language doesn't draw (messages render
  *  through the shared markdown path). */
-export const acpLine = (
-  vi: unknown,
-  width: number,
-  frame: number,
-  findTool: (toolCallId: string) => unknown,
-  arg?: string
-): readonly Segment[] => {
+export const acpLine = (vi: unknown, ctx: LineCtx): readonly Segment[] => {
   const item = vi as TheirItem;
-  const w = Math.max(20, width);
+  const w = Math.max(20, ctx.width);
   switch (item.kind) {
     case 'tool_call':
-      return toolLine(item, w, frame, arg);
+      return toolLine(item, w, ctx.frame, ctx.arg);
     case 'thought':
       return thoughtLine(item, w);
     case 'plan':
       return planLine(item, w);
     case 'permission_record':
-      return permissionLine(item, w, findTool);
+      return permissionLine(item, w, ctx.findTool);
     case 'marker':
       return item.markerKind === 'turn_end' ? turnEndLine(item, w) : [];
     default:
@@ -325,36 +338,29 @@ export const acpCardRows = /* NOSONAR typescript:S3776 */ (
  *  shared, vocabulary stays per-impl. */
 export type ItemGroup = 'user' | 'agent' | 'activity' | 'plan' | 'marker' | 'time';
 
+/** Their item kinds → the spacing group (activity is the default —
+ *  tool calls, thoughts, and every non-text kind stay tight). */
+const THEIR_GROUP: ReadonlyMap<TheirItem['kind'], ItemGroup> = new Map([
+  ['user_message', 'user'],
+  ['agent_message', 'agent'],
+  ['plan', 'plan'],
+  ['marker', 'marker'],
+  ['permission_record', 'marker'],
+]);
+
+/** Our item kinds → the spacing group when `vi` is absent. */
+const OUR_GROUP: ReadonlyMap<string, ItemGroup> = new Map([
+  ['prompt', 'user'],
+  ['message', 'agent'],
+  ['turn', 'marker'],
+  ['permission', 'marker'],
+  ['time', 'time'],
+]);
+
 export const itemGroup = (item: { kind: string; vi?: unknown }): ItemGroup => {
   const vi = item.vi as TheirItem | undefined;
-  if (vi !== undefined) {
-    switch (vi.kind) {
-      case 'user_message':
-        return 'user';
-      case 'agent_message':
-        return 'agent';
-      case 'plan':
-        return 'plan';
-      case 'marker':
-      case 'permission_record':
-        return 'marker';
-      default:
-        return 'activity';
-    }
-  }
-  switch (item.kind) {
-    case 'prompt':
-      return 'user';
-    case 'message':
-      return 'agent';
-    case 'turn':
-    case 'permission':
-      return 'marker';
-    case 'time':
-      return 'time';
-    default:
-      return 'activity';
-  }
+  if (vi !== undefined) return THEIR_GROUP.get(vi.kind) ?? 'activity';
+  return OUR_GROUP.get(item.kind) ?? 'activity';
 };
 
 /** Their spacing rule: a blank row before user/agent text and on any
