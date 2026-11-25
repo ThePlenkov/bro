@@ -263,7 +263,8 @@ async function main(): Promise<void> {
           edge: a => served.pane.scrollEdge?.(a.edge),
           quit: () => void shutdown(),
         };
-      (EFFECTS[action.kind] as ((a: LiveAction) => void) | undefined)?.(action);
+      // the kind union is exhaustive — a typed table lookup, never user input
+      (EFFECTS[action.kind] as ((a: LiveAction) => void) | undefined)?.(action); // nosemgrep
     },
   });
   pane = served.pane;
