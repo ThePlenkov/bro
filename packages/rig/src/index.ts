@@ -82,6 +82,7 @@ export {
   markerOwner,
   ownerTag,
   processesRootedIn,
+  worktreeHasLiveSession,
   registryEntryHoldsClaim,
   registryEntryState,
   type ProcHit,

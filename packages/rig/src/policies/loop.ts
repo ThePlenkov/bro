@@ -122,7 +122,7 @@ import {
 } from '@broject/loop';
 import { rigNext } from '../next.ts';
 import type { Policy } from '../policy.ts';
-import { processesRootedIn } from '../proc-owner.ts';
+import { processesRootedIn, worktreeHasLiveSession } from '../proc-owner.ts';
 import type { ReadyBead } from '../ready.ts';
 
 // --- the split context ---------------------------------------------------------
@@ -1315,13 +1315,14 @@ async function finalizeMerge(
   // a process rooted in the tree (a serve, a watcher, a leftover agent)
   // keeps it — removal would strand a zombie on deleted files (bro-1usa8)
   const rooted = processesRootedIn(item.worktreeDir);
-  if (rooted.length > 0) {
+  const sessionLive = worktreeHasLiveSession(item.worktreeDir);
+  if (rooted.length > 0 || sessionLive) {
     ctx.tails.push(
-      `worktree ${item.worktreeDir} kept — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
+      `worktree ${item.worktreeDir} kept — ${sessionLive ? 'a live session owns it' : `hosts live process(es): ${rooted.map(h => h.pid).join(', ')}`}; branch ${item.branch} kept with it`
     );
     ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
   }
-  if (rooted.length === 0) {
+  if (rooted.length === 0 && !sessionLive) {
     // an agent-initialized submodule inside the worktree blocks removal —
     // deinit first; either way a failed cleanup is loud, never silent
     gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
@@ -1340,6 +1341,7 @@ async function finalizeMerge(
               continue;
             }
             const r = processesRootedIn(t.path);
+            const liveSession = worktreeHasLiveSession(t.path);
             // same contract as the primary removal: a live process or
             // uncommitted work keeps the checkout — --force would burn
             // files nothing else holds (and strand the process on them)
@@ -1347,16 +1349,16 @@ async function finalizeMerge(
               r.length === 0
                 ? gitTry(['-C', t.path, 'status', '--porcelain'])
                 : { code: 1, out: '', err: '' };
-            if (r.length === 0 && st.code === 0 && st.out.trim() === '') {
+            if (r.length === 0 && !liveSession && st.code === 0 && st.out.trim() === '') {
               gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
               gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
-            } else if (r.length === 0) {
+            } else if (r.length === 0 && !liveSession) {
               ctx.tails.push(
                 `worktree ${t.path} kept — has uncommitted changes or status unreadable; branch ${item.branch} kept with it`
               );
             } else {
               ctx.tails.push(
-                `worktree ${t.path} kept — hosts live process(es): ${r.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
+                `worktree ${t.path} kept — ${liveSession ? 'a live session owns it' : `hosts live process(es): ${r.map(h => h.pid).join(', ')}`}; branch ${item.branch} kept with it`
               );
             }
           }
@@ -2085,18 +2087,19 @@ async function serviceGate(ctx: LoopCtx, m: LoopMember): Promise<ServiceVerdict>
       deleteRemoteBranch(ctx, m.item.branch, 'on PR close');
       try {
         const rooted = processesRootedIn(m.item.worktreeDir);
+        const sessionLive = worktreeHasLiveSession(m.item.worktreeDir);
         // a live process or uncommitted work keeps the checkout —
         // --force removes dirty trees, and those files have no other
         // copy (the base behavior kept the worktree on close)
         const st =
-          rooted.length === 0
+          rooted.length === 0 && !sessionLive
             ? gitTry(['-C', m.item.worktreeDir, 'status', '--porcelain'])
             : { code: 1, out: '', err: '' };
-        if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+        if (rooted.length === 0 && !sessionLive && st.code === 0 && st.out.trim() === '') {
           gitTry(['-C', m.item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
           gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', m.item.worktreeDir]);
           gitTry(['-C', ctx.root, 'branch', '-D', m.item.branch]);
-        } else if (rooted.length === 0) {
+        } else if (rooted.length === 0 && !sessionLive) {
           ctx.tails.push(
             `worktree ${m.item.worktreeDir} kept on PR close — has uncommitted changes or status unreadable; branch ${m.item.branch} kept with it`
           );
@@ -3013,14 +3016,20 @@ async function reconcileFleet(ctx: LoopCtx): Promise<void> {
               for (const t of trees) {
                 if (t.branch === row.headRef && t.path) {
                   const rooted = processesRootedIn(t.path);
+                  const sessionLive = worktreeHasLiveSession(t.path);
                   // a live process or uncommitted work keeps the
                   // checkout — --force removes dirty trees, and those
                   // files have no other copy
                   const st =
-                    rooted.length === 0
+                    rooted.length === 0 && !sessionLive
                       ? gitTry(['-C', t.path, 'status', '--porcelain'])
                       : { code: 1, out: '', err: '' };
-                  if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+                  if (
+                    rooted.length === 0 &&
+                    !sessionLive &&
+                    st.code === 0 &&
+                    st.out.trim() === ''
+                  ) {
                     gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
                     const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
                     if (rm.code !== 0) {
@@ -3030,8 +3039,8 @@ async function reconcileFleet(ctx: LoopCtx): Promise<void> {
                     }
                   } else {
                     ctx.tails?.push(
-                      rooted.length > 0
-                        ? `worktree ${t.path} kept (orphan reconcile) — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${row.headRef} kept with it`
+                      rooted.length > 0 || sessionLive
+                        ? `worktree ${t.path} kept (orphan reconcile) — ${sessionLive ? 'a live session owns it' : `hosts live process(es): ${rooted.map(h => h.pid).join(', ')}`}; branch ${row.headRef} kept with it`
                         : `worktree ${t.path} kept (orphan reconcile) — has uncommitted changes or status unreadable; branch ${row.headRef} kept with it`
                     );
                   }
