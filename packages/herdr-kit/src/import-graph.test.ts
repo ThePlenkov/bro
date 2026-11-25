@@ -10,7 +10,7 @@
  *     type-only externals — nothing else. */
 import assert from 'node:assert';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -55,8 +55,14 @@ test('the exec seam: only client/exec.ts spawns', () => {
 
 function checkLocalImport(f: string, spec: string): void {
   const layer = layerOf(f);
-  const targetLayer = layerOf(join(f, '..', spec));
-  if (targetLayer === layer || LAYERS[targetLayer] === undefined) return;
+  const target = resolve(dirname(f), spec);
+  const relativeTarget = relative(SRC, target);
+  const targetLayer = relativeTarget.split(sep)[0] ?? '';
+  assert.ok(
+    Object.hasOwn(LAYERS, targetLayer),
+    `${relative(SRC, f)} imports outside the known layers via '${spec}' (target layer ${targetLayer})`
+  );
+  if (targetLayer === layer) return;
   assert.ok(
     (LAYERS[layer] ?? []).includes(targetLayer),
     `${relative(SRC, f)} (layer ${layer}) must not import layer ${targetLayer}`
@@ -78,4 +84,18 @@ test('layer direction + bare-import whitelist', () => {
       else checkBareImport(f, spec);
     }
   }
+});
+
+test('rejects imports targeting an unknown root module', () => {
+  assert.throws(
+    () => checkLocalImport(join(SRC, 'client', 'index.ts'), '../new-root.ts'),
+    /target layer new-root\.ts/
+  );
+});
+
+test('rejects relative imports escaping the package', () => {
+  assert.throws(
+    () => checkLocalImport(join(SRC, 'client', 'index.ts'), '../../../outside.ts'),
+    /target layer \.\./
+  );
 });
