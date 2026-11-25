@@ -8,7 +8,7 @@
  * dev convenience, never a CI gate — the full suite stays the gate.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { type Dirent, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 /** The repo root the verb walks — the cwd's git toplevel when inside a
@@ -37,7 +37,7 @@ function testFile(name: string, includeE2e: boolean): boolean {
 }
 
 function walkTests(dir: string, includeE2e: boolean, out: string[]): void {
-  let entries;
+  let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
   } catch {
