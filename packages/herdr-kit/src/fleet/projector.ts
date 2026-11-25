@@ -4,6 +4,7 @@
  *  report-agent push). The bro-plane reads (act cache, loop runs,
  *  beads, proc probes, config) are injected by the caller — this
  *  module only ever talks to herdr and the fleet-state dir. */
+import { randomInt } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -343,7 +344,9 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   // rotate the starting target per pass: a prefix that repeatedly eats
   // the whole budget must not starve the suffix forever — a random
   // offset makes every workspace the head of some pass (cubic on #1240)
-  const offset = targets.length > 1 ? Math.floor(Math.random() * targets.length) : 0;
+  // crypto, not Math.random — the scanner's weak-randomness finding is
+  // noise for a rotation offset, but the strong primitive costs nothing
+  const offset = targets.length > 1 ? randomInt(targets.length) : 0;
   const ordered = [...targets.slice(offset), ...targets.slice(0, offset)];
   let done = 0;
   for (const t of ordered) {
