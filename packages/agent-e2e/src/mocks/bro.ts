@@ -90,20 +90,26 @@ process.stdin.on('end', () => {
     try { appendFileSync(JOURNAL, JSON.stringify(entry) + '\\n'); } catch {}
   };
   if (argv[0] === 'hooks') {
-    if (argv.length < 2) process.exit(0);
-    const event = argv[1];
-    journal({ kind: 'hook', event, argv, payload, cwd: process.cwd(), ts: Date.now() });
-    const reply = resolveHook(event, payload);
-    const ho = {};
-    if (reply.context) ho.additionalContext = reply.context;
-    if (reply.toolInput) ho.tool_input = reply.toolInput;
-    const control = {};
-    if (reply.decision) control.decision = reply.decision;
-    if (reply.reason) control.reason = reply.reason;
-    if (Object.keys(ho).length > 0) control.hookSpecificOutput = ho;
-    process.stdout.write(JSON.stringify(control) + '\\n');
-    process.exit(0);
+    replyHook(argv, payload, journal);
   }
+  replyCommand(argv, journal);
+});
+function replyHook(argv, payload, journal) {
+  if (argv.length < 2) process.exit(0);
+  const event = argv[1];
+  journal({ kind: 'hook', event, argv, payload, cwd: process.cwd(), ts: Date.now() });
+  const reply = resolveHook(event, payload);
+  const ho = {};
+  if (reply.context) ho.additionalContext = reply.context;
+  if (reply.toolInput) ho.tool_input = reply.toolInput;
+  const control = {};
+  if (reply.decision) control.decision = reply.decision;
+  if (reply.reason) control.reason = reply.reason;
+  if (Object.keys(ho).length > 0) control.hookSpecificOutput = ho;
+  process.stdout.write(JSON.stringify(control) + '\\n');
+  process.exit(0);
+}
+function replyCommand(argv, journal) {
   journal({ kind: 'command', argv, cwd: process.cwd(), ts: Date.now() });
   if (argv[0] === 'status' && argv.includes('--json')) {
     process.stdout.write(JSON.stringify(CONFIG.status ?? {}) + '\\n');
@@ -115,26 +121,26 @@ process.stdin.on('end', () => {
   if (cmd.stdout) process.stdout.write(cmd.stdout);
   if (cmd.stderr) process.stderr.write(cmd.stderr);
   process.exit(cmd.code ?? 0);
-});
+}
+function matchHookRule(rules, payload) {
+  const hit =
+    rules &&
+    rules.find(r => r.matchTool === undefined || r.matchTool === (payload && payload.tool_name));
+  return hit ? hit.reply ?? {} : null;
+}
 function resolveHook(event, payload) {
-  const rules = CONFIG.hookRules && CONFIG.hookRules[event];
-  if (rules) {
-    for (const r of rules) {
-      if (r.matchTool === undefined || r.matchTool === (payload && payload.tool_name)) {
-        return r.reply ?? {};
-      }
-    }
-  }
+  const ruled = matchHookRule(CONFIG.hookRules && CONFIG.hookRules[event], payload);
+  if (ruled !== null) return ruled;
   const seq = CONFIG.hookSeq && CONFIG.hookSeq[event];
-  if (seq && seq.length > 0) {
-    let counts = {};
-    try { counts = existsSync(COUNTERS) ? JSON.parse(readFileSync(COUNTERS, 'utf8')) : {}; } catch {}
-    const i = Math.min(counts[event] ?? 0, seq.length - 1);
-    counts[event] = (counts[event] ?? 0) + 1;
-    try { writeFileSync(COUNTERS, JSON.stringify(counts)); } catch {}
-    return seq[i] ?? {};
-  }
-  return {};
+  return seq && seq.length > 0 ? nextSeqReply(event, seq) : {};
+}
+function nextSeqReply(event, seq) {
+  let counts = {};
+  try { counts = existsSync(COUNTERS) ? JSON.parse(readFileSync(COUNTERS, 'utf8')) : {}; } catch {}
+  const i = Math.min(counts[event] ?? 0, seq.length - 1);
+  counts[event] = (counts[event] ?? 0) + 1;
+  try { writeFileSync(COUNTERS, JSON.stringify(counts)); } catch {}
+  return seq[i] ?? {};
 }
 `;
 
