@@ -968,6 +968,10 @@ export interface StopOutcome {
   cleared?: boolean;
   /** pid changed between list() and status() — a respawn raced us */
   respawned?: { from?: number; to?: number };
+  /** the connector stop() error when it threw — 'cannot verify …
+   *  stopped' carries real diagnostics the generic verdict hides
+   *  (bro-kqvpt); absent when stop() returned */
+  stopError?: string;
 }
 
 /** One post-stop status() re-probe — the verdict ladder (bro-l8c4f.3):
@@ -1039,16 +1043,20 @@ export async function stopAgent(
   // re-opens the double-spawn window: A stops → B legitimately
   // acquires the key → A's release deletes B's live row → C duplicates.
   const stoppedEntry = readAgentRegistry(dir)[current.molStep];
+  let stopError: string | undefined;
   try {
     await hit.conn.stop(hit.agent.id);
     if (stoppedEntry?.agentId === hit.agent.id && stoppedEntry.backend === hit.conn.name) {
       releaseEntryLease(dir, stoppedEntry);
     }
-  } catch {
+  } catch (err) {
     // a connector whose own liveness probe fails must not crash the
     // verdict path — the post-stop status read below carries the
     // outcome, and serve's 409 contract needs a verdict, not an
-    // exception escaping
+    // exception escaping. The error itself is kept: 'cannot verify …
+    // stopped' is exactly the diagnostic a still-running/unverified
+    // verdict otherwise hides (bro-kqvpt)
+    stopError = err instanceof Error ? err.message : String(err);
   }
   // stop() returning proves the REQUEST landed, not the death — a
   // TERM-resistant worker survives the connector's bounded kill-wait,
@@ -1080,6 +1088,7 @@ export async function stopAgent(
     terminal,
     cleared: current.state === 'blocked' ? true : undefined,
     respawned,
+    ...(stopError !== undefined ? { stopError } : {}),
   };
 }
 
@@ -1531,14 +1540,15 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
   // truthfulness (bro-l8c4f.3): only a confirmed-dead worker may read
   // as `stopped` — a survivor or an unverifiable death is an error the
   // operator must see before respawning anything
+  const stopNote = outcome.stopError !== undefined ? ` — stop() error: ${outcome.stopError}` : '';
   if (outcome.verdict === 'still-running') {
     die(
-      `${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running (pid ${agent.pid ?? 'unknown'}) — not safe to respawn`
+      `${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running (pid ${agent.pid ?? 'unknown'})${stopNote} — not safe to respawn`
     );
   }
   if (outcome.verdict === 'unverified') {
     die(
-      `${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unconfirmed: the backend reports ${agent.state}, death not verified — not safe to respawn`
+      `${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unconfirmed: the backend reports ${agent.state}, death not verified${stopNote} — not safe to respawn`
     );
   }
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`);
