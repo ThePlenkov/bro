@@ -597,11 +597,15 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
     const drifted = new Map(drift.map(d => [d.name, d.kind]));
     for (const skill of locked.values()) {
       const state = drifted.get(skill.name) ?? 'matches';
-      // `--lock` installs every entry unconditionally — installLockedSkills
-      // has no up-to-date skip — so the verb is uniform; only entries whose
-      // name/source fail the install-time SKILL_ARG guard deviate.
+      // entries whose name/source fail the install-time SKILL_ARG guard are
+      // skipped; a drifted copy is KEPT, not replaced — the install path
+      // refuses to clobber drift (bro-emlsg), so the dry-run verb must say so
       const valid = SKILL_ARG.test(skill.source) && SKILL_ARG.test(skill.name);
-      const verb = valid ? 'would install' : 'would skip (invalid name/source)';
+      const verb = !valid
+        ? 'would skip (invalid name/source)'
+        : state === 'drifted'
+          ? 'would keep (drifted — not replaced)'
+          : 'would install';
       console.error(`  ${verb} ${skill.name} (${skill.source}) — installed copy: ${state}`);
     }
     return;
