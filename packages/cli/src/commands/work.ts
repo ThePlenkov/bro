@@ -82,6 +82,7 @@ import {
   worktreeClaimInfo,
   worktreeGitDir,
   worktreeIdleMs,
+  worktreeHasLiveSession,
 } from '@broject/rig';
 import { parseStackBranch } from '@broject/stack';
 import { assertMutableConfig } from '../config-policy.ts';
@@ -774,7 +775,7 @@ export function finishWorktreeEnter(
               e => typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
             ) ||
             worktreeClaim(path) !== undefined ||
-            processesRootedIn(path).length > 0;
+            worktreeHasLiveSession(path);
           partialRemoved =
             !movedIn &&
             gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path]).code === 0;
@@ -1213,6 +1214,10 @@ export function removeMergedWorktree(
   if (rooted.length > 0) {
     const who = rooted.map(h => `${h.pid} (${h.cmd.slice(0, 80)})`).join(', ');
     console.error(`cleanup: ${root} hosts live process(es): ${who} — worktree kept`);
+    return false;
+  }
+  if (worktreeHasLiveSession(root)) {
+    console.error(`cleanup: ${root} is a live session's worktree — worktree kept`);
     return false;
   }
   // a registry-pinned agent occupant whose process runs OUTSIDE the

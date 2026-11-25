@@ -24,6 +24,7 @@ import {
   hasSubmodules,
   isLinkedGitDir,
   parseWorktreePorcelain,
+  removeMergedWorktree,
   resolveEnterBase,
   runWorkCommand,
   unquoteGitPath,
@@ -408,6 +409,43 @@ describe('work enter/leave occupancy warning (bro-bswx5)', () => {
       assert.ok(errs.some(e => e.includes('foreign-2') && e.includes('hands off')));
       assert.equal(existsSync(linked), false);
     });
+  });
+});
+
+describe('worktree cleanup liveness guard', () => {
+  test('merged cleanup keeps a checkout claimed by a live session marker', () => {
+    const { root, main } = initRepo('bro-live-cleanup-');
+    const target = join(root, 'live');
+    git(['worktree', 'add', target, '-b', 'work/live'], main);
+    const hooks = join(main, '.git', 'bro', 'hooks');
+    const st = procStat(process.pid);
+    assert.ok(st);
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(
+      join(hooks, 'live-session.work'),
+      `${Date.now()} ${process.pid} ${st.start}\ncheckout:${target}\n`
+    );
+    const kept = removeMergedWorktree(
+      target,
+      {
+        path: target,
+        head: git(['rev-parse', 'HEAD'], target),
+        branch: 'work/live',
+        bare: false,
+        detached: false,
+      },
+      {
+        path: main,
+        head: git(['rev-parse', 'HEAD'], main),
+        branch: 'main',
+        bare: false,
+        detached: false,
+      }
+    );
+    assert.equal(kept, false);
+    assert.ok(existsSync(target));
+    git(['worktree', 'remove', '--force', target], main);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

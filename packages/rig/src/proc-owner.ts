@@ -574,6 +574,19 @@ export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[
   return [];
 }
 
+/** True when removing this checkout would strand a live session.  A session
+ * can be visible either as a process whose cwd/argv is rooted in the tree or
+ * as a live hook claim that names the checkout while its process is elsewhere
+ * (for example, a herdr/tmux pane).  Cleanup callers must treat either plane
+ * as a hard veto. */
+export function worktreeHasLiveSession(worktree: string, procDir = '/proc'): boolean {
+  if (processesRootedIn(worktree, procDir).length > 0) {
+    return true;
+  }
+  const hooks = hooksDirOf(worktree);
+  return hooks !== null && checkoutOccupants(hooks, worktree).length > 0;
+}
+
 function agentProcessesInProcOverride(procDir: string, root: string): ProcHit[] {
   const hits: ProcHit[] = [];
   try {
