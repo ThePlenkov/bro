@@ -100,6 +100,15 @@ async function cmdThreads(argv: string[]): Promise<void> {
   // first; shadowNotes can open with a slow prMeta call, and starting
   // it before the row loop would still stall the listing. Annotations
   // land on stderr once the batch resolves.
+  const open = printThreadRows(threads);
+  const notes = await shadowNotes(rev, t, threads).catch(() => undefined);
+  printShadowNotes(threads, notes);
+  console.error(`act threads: ${open} unresolved`);
+}
+
+/** The TSV row per unresolved thread — the listing's stdout contract;
+ *  returns the unresolved count the summary line reports. */
+function printThreadRows(threads: ReviewThread[]): number {
   let open = 0;
   for (const thread of threads) {
     if (thread.resolved) {
@@ -113,7 +122,11 @@ async function cmdThreads(argv: string[]): Promise<void> {
     const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120);
     console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`);
   }
-  const notes = await shadowNotes(rev, t, threads).catch(() => undefined);
+  return open;
+}
+
+/** The shadow verdict under each row — stderr, never the TSV stream. */
+function printShadowNotes(threads: ReviewThread[], notes: Map<string, string> | undefined): void {
   for (const thread of threads) {
     const note = notes?.get(thread.id);
     if (note !== undefined) {
@@ -122,7 +135,6 @@ async function cmdThreads(argv: string[]): Promise<void> {
       console.error(`${thread.id} ${note}`);
     }
   }
-  console.error(`act threads: ${open} unresolved`);
 }
 
 /** Shadow-mode judge annotation for the threads listing — the
