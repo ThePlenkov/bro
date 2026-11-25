@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { initRepo, inside } from './testrepo.ts';
 import {
@@ -13,15 +13,23 @@ import {
   type LoopRunRecord,
 } from './loop-state.ts';
 
-const rec = (main: string, over: Partial<LoopRunRecord> = {}): LoopRunRecord => ({
-  beadId: 'bro-x1',
-  slug: 'bro-x1',
-  pid: process.pid,
-  startedAt: new Date().toISOString(),
-  worktree: join(main, 'wt'),
-  log: loopRunLog(main, 'bro-x1') ?? '',
-  ...over,
-});
+const rec = (main: string, over: Partial<LoopRunRecord> = {}): LoopRunRecord => {
+  const worktree = join(main, 'wt');
+  try {
+    mkdirSync(worktree, { recursive: true });
+  } catch {
+    // a nonexistent-parent fixture (outside-a-repo tests) stays unmade
+  }
+  return {
+    beadId: 'bro-x1',
+    slug: 'bro-x1',
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    worktree,
+    log: loopRunLog(main, 'bro-x1') ?? '',
+    ...over,
+  };
+};
 
 describe('loop run records', () => {
   test('the plane lives at <git-common>/bro/loop', () => {
@@ -155,6 +163,18 @@ describe('loop run records', () => {
       assert.equal(raw.pidStart, '123456');
       assert.equal(raw.log, rec(main).log);
       assert.equal(raw.beadId, 'bro-x1');
+    });
+  });
+  test('a deleted worktree reads dead even while the shared supervisor pid lives (bro-4q6n9)', () => {
+    const { root, main } = initRepo('bro-loopstate-');
+    inside(main, root, () => {
+      const r = rec(main, { startedAt: new Date(Date.now() - 10 * 60_000).toISOString() });
+      beginLoopRun(main, r);
+      assert.equal(collectLoopRuns(main)[0]?.state, 'running');
+      rmSync(r.worktree, { recursive: true, force: true });
+      assert.equal(collectLoopRuns(main)[0]?.state, 'dead');
+      reapLoopRuns(main);
+      assert.deepEqual(collectLoopRuns(main), []);
     });
   });
 });
