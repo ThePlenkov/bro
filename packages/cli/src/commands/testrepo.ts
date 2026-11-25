@@ -168,6 +168,14 @@ export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // interrupted sessions inside a fixture's 'nothing to resume').
   // Per-call tmpdir: each spawned CLI gets a fresh, swept state home.
   env.XDG_STATE_HOME = tmpDir('bro-e2e-state-');
+  // the CONFIG layer is machine state too: HOME rides the whitelist,
+  // so without a pin the child reads the operator's real
+  // ~/.config/bro/config.json — a provider entry missing its type
+  // (or any machine-specific key) leaks onto every fixture's stderr
+  // and the help-contract fails on the operator's machine, not on the
+  // code (bro-1yw09). `extra` spreads last, so a fixture that TESTS
+  // the global layer can still pin its own.
+  env.XDG_CONFIG_HOME = tmpDir('bro-e2e-config-');
   return { ...env, ...extra };
 }
 
