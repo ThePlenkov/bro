@@ -4,9 +4,16 @@
  *  report-agent push). The bro-plane reads (act cache, loop runs,
  *  beads, proc probes, config) are injected by the caller — this
  *  module only ever talks to herdr and the fleet-state dir. */
-import { randomInt } from 'node:crypto';
-import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { createHash, randomInt } from 'node:crypto';
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, join } from 'node:path';
 import type { PaneLed } from '@broject/acp-session';
 import { callJson, callOk, nextSeq, STATUS_IDENTITY } from '../client/index.ts';
@@ -146,6 +153,33 @@ function ledgerPaths(ctx: { root: string; common: string | null }): string[] {
     }
   }
   return paths;
+}
+
+/** Remove a workspace binding after its worktree has disappeared. The
+ * projector reads every possible ledger generation, so retire the row from
+ * every copy too; otherwise a legacy or host-side copy would resurrect the
+ * zombie on the next pass. */
+function dropLedgerRow(
+  ctx: { root: string; common: string | null },
+  path: string,
+  wsId: string
+): void {
+  for (const p of ledgerPaths(ctx)) {
+    try {
+      const parsed = JSON.parse(readFileSync(p, 'utf8')) as PluginLedgerFile;
+      if (parsed.workspaces === undefined) continue;
+      const entry = Object.entries(parsed.workspaces).find(([key]) => key === path);
+      const rec = entry?.[1];
+      if (rec?.managed !== true || rec.ws !== wsId) continue;
+      parsed.workspaces = Object.fromEntries(
+        Object.entries(parsed.workspaces).filter(([key]) => key !== path)
+      );
+      writeFileSync(p, JSON.stringify(parsed));
+    } catch {
+      // A concurrent plugin write or a missing legacy copy is harmless: the
+      // next projector pass can close the workspace again and retry cleanup.
+    }
+  }
 }
 
 /** The scored candidates a ledger gathers per key. */
@@ -376,7 +410,7 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
 function keepPaths(statusBase: string, trees: HerdrWorktree[]): Set<string> {
   return new Set(
     trees
-      .filter(t => t.open_workspace_id !== undefined)
+      .filter(t => t.open_workspace_id !== undefined && existsSync(t.path))
       .map(t => fleetStatusPath(statusBase, t.path))
   );
 }
@@ -387,7 +421,7 @@ function keepPaths(statusBase: string, trees: HerdrWorktree[]): Set<string> {
  *  tick it serves (bro-1fv9e) — whatever the budget doesn't reach is
  *  not lost, the next tick retries it. */
 interface WritePassJob<P extends { beads: { id: string }[] }> {
-  ctx: { now: number; writeBudgetMs?: number };
+  ctx: { root: string; common: string | null; now: number; writeBudgetMs?: number };
   deps: { input: (t: HerdrWorktree, planes: P) => TreeInput };
   targets: WsTarget[];
   planes: P;
@@ -415,6 +449,14 @@ function writePass<P extends { beads: { id: string }[] }>(
     if (Date.now() - passStart > (j.ctx.writeBudgetMs ?? WRITE_PASS_BUDGET_MS)) {
       truncated = ordered.length - done;
       break;
+    }
+    if (!existsSync(t.tree.path)) {
+      if (callOk(['workspace', 'close', t.wsId])) {
+        dropLedgerRow(j.ctx, t.tree.path, t.wsId);
+        j.keep.delete(fleetStatusPath(j.statusBase, t.tree.path));
+      }
+      done++;
+      continue;
     }
     const { projection, title, slug } = projectTree(j.deps.input(t.tree, j.planes));
     // an empty bead plane means the backend read failed or is empty —

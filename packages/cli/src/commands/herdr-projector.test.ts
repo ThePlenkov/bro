@@ -718,6 +718,33 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.equal(st?.title, 'Old Title');
   });
 
+  test('a managed workspace with a missing worktree is closed and removed from the ledger', () => {
+    const root = plainRoot();
+    const missing = join(root, 'gone');
+    const stateDir = stateDirOf();
+    const { calls } = fleetPass(root, stateDir, {
+      scenario: {
+        worktrees: [{ path: missing, open_workspace_id: 'w-gone' }],
+        workspaces: [{ workspace_id: 'w-gone', label: 'Old', tokens: {} }],
+      },
+      state: {
+        workspaces: {
+          [missing]: { ws: 'w-gone', label: 'Old', managed: true },
+        },
+      },
+    });
+    assert.ok(
+      calls.some(c => c.join(' ') === 'workspace close w-gone'),
+      'the orphaned workspace is closed'
+    );
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    const state = JSON.parse(readFileSync(join(stateDir, `state-${scope}.json`), 'utf8')) as {
+      workspaces: Record<string, unknown>;
+    };
+    assert.equal(state.workspaces[missing], undefined);
+    assert.ok(!calls.some(c => c[0] === 'workspace' && c[1] === 'rename'));
+  });
+
   test('a failed rename vetoes the metadata write (bro-7tdbs)', () => {
     const root = plainRoot();
     process.env.FAKE_HERDR_FAIL_RENAME = '1';
