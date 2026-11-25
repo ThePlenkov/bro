@@ -1200,13 +1200,18 @@ if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; 
   # live session: it weakens the fail-open contract. The end row still
   # lands — a pinned exit without it reads as a host kill in the spool.
   if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
+    # fail-open holds even under the pin (bro-xlv8g): the measurement
+    # signal is the HOOK_DISPATCH_ERR stderr marker the bench counts —
+    # never the exit code, which a host reads as a broken hook
     if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
       hook_spool_end "$_rc" watchdog
-      exit 1
+      printf '%s\n' "bro-hooks: dispatch failed $EVENT — watchdog deadline under NO_FALLBACK" >&2
+      exit 0
     fi
     if [ "$_rc" -ne 0 ]; then
       hook_spool_end "$_rc" nonzero
-      exit 1
+      printf '%s\n' "bro-hooks: dispatch failed $EVENT — exit $_rc under NO_FALLBACK" >&2
+      exit 0
     fi
     hook_spool_end "$_rc" ok
     exit 0
@@ -1227,7 +1232,8 @@ fi
 # pair the early start as no-cli rather than leaving a synthetic kill.
 if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
   hook_spool_end 0 no-cli
-  exit 1
+  printf '%s\n' "bro-hooks: dispatch failed $EVENT — no dist under NO_FALLBACK" >&2
+  exit 0
 fi
 if command -v bro >/dev/null 2>&1; then
   _rc=0
