@@ -44,7 +44,8 @@ export function git(args: string[], cwd: string): string {
   ) as NodeJS.ProcessEnv;
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = devNull;
-  return execFileSync('git', args, { cwd, env, encoding: 'utf8' });
+  // S4036 — exec an absolute path instead of searching PATH
+  return execFileSync(which('git', env) ?? 'git', args, { cwd, env, encoding: 'utf8' });
 }
 
 export interface E2eEnv {
