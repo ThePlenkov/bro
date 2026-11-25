@@ -79,7 +79,9 @@ function parseArgs(argv: readonly string[]): Args {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    const flag = VALUE_FLAGS[arg];
+    // own-property only — '--constructor' must hit the unknown-arg branch,
+    // not resolve Object's constructor through the prototype chain
+    const flag = Object.hasOwn(VALUE_FLAGS, arg) ? VALUE_FLAGS[arg] : undefined;
     if (flag !== undefined) {
       const value = argv[i + 1];
       if (value === undefined) throw new Error(`${arg} needs a value`);
