@@ -185,7 +185,7 @@ const SKILL_NAME = /^(?!\.)[^/\\\0]+$/;
 /** One lock entry — null when it carries no source or no hash. */
 function lockedSkill(entry: { name: string; value: unknown }): LockedSkill | null {
   const { name, value } = entry;
-  if (!SKILL_NAME.test(name) || name === '..') {
+  if (!SKILL_NAME.test(name)) {
     return null;
   }
   if (typeof value !== 'object' || value === null) {

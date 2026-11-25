@@ -215,6 +215,8 @@ describe('checkSkillLock', () => {
             '../etc': { source: 'a/b', computedHash: 'x' },
             'nested/path': { source: 'a/b', computedHash: 'x' },
             '..': { source: 'a/b', computedHash: 'x' },
+            '.': { source: 'a/b', computedHash: 'x' },
+            '.hidden': { source: 'a/b', computedHash: 'x' },
             '': { source: 'a/b', computedHash: 'x' },
             legit: { source: 'a/b', computedHash: 'x' },
           },
