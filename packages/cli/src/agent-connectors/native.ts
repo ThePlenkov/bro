@@ -886,10 +886,15 @@ function openNativeLogs(
   fd: number;
   errFd: number | undefined;
 } {
-  return {
-    fd: openPrivateAppendSync({ path: log }),
-    errFd: stderrLog === undefined ? undefined : openPrivateAppendSync({ path: stderrLog }),
-  };
+  const fd = openPrivateAppendSync({ path: log });
+  let errFd: number | undefined;
+  try {
+    errFd = stderrLog === undefined ? undefined : openPrivateAppendSync({ path: stderrLog });
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+  return { fd, errFd };
 }
 
 function closeNativeLogs(files: { fd: number; errFd: number | undefined }): void {

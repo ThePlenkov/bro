@@ -693,4 +693,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   };
 }
 
-registerAgentConnector('gascity', makeGascityConnector, {}, { builtin: true });
+registerAgentConnector(
+  'gascity',
+  makeGascityConnector,
+  { matchDir: gcMatchDir },
+  { builtin: true }
+);
