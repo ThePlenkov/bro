@@ -266,20 +266,24 @@ function AcpLineBlock(props: RowProps & { tool?: ToolItem; segs: readonly Segmen
   );
 }
 
+/** a foldable tool's body renders while it is open — a collapsed
+ *  one shows under selection until Enter/c pins the fold. */
+const toolBodyShown = (tool: ToolItem | undefined, selected: boolean): boolean =>
+  tool !== undefined && (!tool.collapsed || (selected && tool.foldTouched !== true));
+
+/** the foot's close target — only on an open foldable tool. */
+const toolCloseShown = (tool: ToolItem | undefined): boolean =>
+  tool !== undefined && tool.collapsed !== true;
+
 /** The vendored line's expandable tail — the peek/pinned body and
  *  the foot close target, shown only for a foldable tool. */
 function AcpLineTail(props: RowProps & { tool?: ToolItem }) {
   return (
     <>
-      <Show
-        when={
-          props.tool !== undefined &&
-          (!props.tool?.collapsed || (props.selected && props.tool?.foldTouched !== true))
-        }
-      >
+      <Show when={toolBodyShown(props.tool, props.selected)}>
         <AcpToolBody item={props.tool as ToolItem} syntax={props.syntax} width={props.width} />
       </Show>
-      <Show when={props.tool !== undefined && props.tool?.collapsed !== true}>
+      <Show when={toolCloseShown(props.tool)}>
         <box flexDirection="row" flexShrink={0} width="100%">
           <box flexGrow={1} />
           <FoldBtn open={true} onToggle={() => props.onToggleRow?.(props.item.id)} compact={true} />
