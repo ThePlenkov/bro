@@ -218,6 +218,58 @@ export function prLink(ownerRepo: string, pr: number, host?: string): string {
   return `[#${pr}](https://${host ?? ghHost()}/${ownerRepo}/pull/${pr})`;
 }
 
+/** OSC8 support is a property of the terminal the output lands in, not of
+ *  the process — the conservative check is a TTY plus a terminal known to
+ *  render hyperlinks (ghostty, WezTerm, iTerm2, kitty, foot, vscode).
+ *  Anything unknown gets the plain text, never escape junk. */
+export function supportsOsc8(
+  env: NodeJS.ProcessEnv = process.env,
+  isTTY: boolean = process.stdout.isTTY === true
+): boolean {
+  if (!isTTY) return false;
+  const termProgram = (env.TERM_PROGRAM ?? '').toLowerCase();
+  if (['ghostty', 'wezterm', 'iterm.app', 'vscode', 'warp', 'mintty'].includes(termProgram))
+    return true;
+  const term = (env.TERM ?? '').toLowerCase();
+  return (
+    term.includes('kitty') ||
+    term.includes('foot') ||
+    term.includes('ghostty') ||
+    term.includes('wezterm')
+  );
+}
+
+/** `\x1b]8;;url\x07text\x1b]8;;\x07` — the clickable form a supporting
+ *  terminal renders as `text`; everywhere else the plain `text` (or the
+ *  caller's own fallback) is what the user sees. */
+export function osc8Link(
+  url: string,
+  text: string,
+  env?: NodeJS.ProcessEnv,
+  isTTY?: boolean
+): string {
+  if (!supportsOsc8(env, isTTY)) return text;
+  // control bytes out of both halves before they ever reach the sequence —
+  // a BEL/ESC inside url or text would terminate/rewrite the hyperlink or
+  // inject terminal control of its own (review #1254)
+  const safeUrl = url.replace(/[\x00-\x1f\x7f]/g, '');
+  const safeText = text.replace(/[\x00-\x1f\x7f]/g, '');
+  return `\x1b]8;;${safeUrl}\x07${safeText}\x1b]8;;\x07`;
+}
+
+/** Terminal-facing variant of prLink: `#N` as a clickable OSC8 hyperlink in
+ *  supporting terminals, the markdown form everywhere else. prLink itself
+ *  stays markdown-only on purpose — its output lands in PR bodies, review
+ *  comments and commit messages, where escape bytes would be junk. Only
+ *  stdout-bound notes may use this variant (bro-8gh0t). */
+export function prLinkTerm(ownerRepo: string, pr: number, host?: string): string {
+  const h = host ?? ghHost();
+  const url = `https://${h}/${ownerRepo}/pull/${pr}`;
+  const fallback = `[#${pr}](${url})`;
+  if (!supportsOsc8()) return fallback;
+  return osc8Link(url, `#${pr}`);
+}
+
 /** `[#N](https://github.com/owner/repo/issues/N)` — the same clickable
  *  form for issue references (bead mirrors land as issues, and `Fixes
  *  #N` output must not be bare either). */
