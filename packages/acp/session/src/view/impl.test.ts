@@ -131,4 +131,93 @@ describe('the pane impl seam', () => {
     assert.equal(impl.verdict?.led.state, 'blocked');
     assert.equal(impl.verdict?.mode, asked);
   });
+
+  // bro-rszje — drain() must not key the whole emission on the item
+  // map's identity: session-level changes (hidden tally, header
+  // metadata) never touch `items` and used to drain to nothing.
+  test('an update their reducer drops still emits the hidden tally', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.beginLive();
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:00Z',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hi' },
+      } as never,
+    });
+    impl.drain();
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:05Z',
+      update: { sessionUpdate: 'a_kind_nobody_implements' } as never,
+    });
+    // items keeps its identity — the tally row is the only change
+    const notes = impl
+      .drain()
+      .flatMap(o => (o.op === 'append' && o.item.kind === 'note' ? [o.item.text] : []));
+    assert.deepEqual(notes, ['▸ 1 hidden']);
+  });
+
+  test('a metadata-only update re-projects the feed header', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.beginLive();
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:00Z',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hi' },
+      } as never,
+    });
+    impl.drain();
+    // a config_option_update changes session.configOptions only —
+    // items keeps its identity, but the header's model slot moved
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:10Z',
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            type: 'select',
+            currentValue: 'gpt-5',
+            options: [{ value: 'gpt-5', name: 'gpt-5' }],
+          },
+        ],
+      } as never,
+    });
+    const patches = impl.drain().flatMap(o => (o.op === 'text' ? [o.text] : []));
+    assert.equal(patches.length, 1);
+    assert.match(patches[0] ?? '', /gpt-5/);
+  });
+
+  test('a status-only tool update re-projects the row', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.beginLive();
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:00Z',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 't1',
+        title: 'ls',
+        status: 'in_progress',
+      } as never,
+    });
+    impl.drain();
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:05Z',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 't1',
+        status: 'completed',
+      } as never,
+    });
+    const tools = impl.drain().filter(o => o.op === 'tool');
+    assert.equal(tools.length, 1);
+  });
 });
