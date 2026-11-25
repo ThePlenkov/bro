@@ -561,7 +561,8 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
     const drifted = new Map(drift.map(d => [d.name, d.kind]));
     for (const skill of locked.values()) {
       const state = drifted.get(skill.name) ?? 'matches';
-      console.error(`  would install ${skill.name} (${skill.source}) — installed copy: ${state}`);
+      const verb = state === 'matches' ? 'skip (up-to-date)' : 'would install';
+      console.error(`  ${verb} ${skill.name} (${skill.source}) — installed copy: ${state}`);
     }
     return;
   }
