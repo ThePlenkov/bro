@@ -16,9 +16,9 @@ aliases:
 
 ## Problem
 
-OpenCode is the richest host — bro is a first-class *plugin* (server
-+ TUI + RPC contract), the only host where the surface plane is
-fully exercised: model tools, slash commands, skill registry, TUI
+OpenCode is the richest host — bro is a first-class *plugin*
+(server + TUI + RPC contract), the only host where the surface plane
+is fully exercised: model tools, slash commands, skill registry, TUI
 widgets, toasts, and a push channel. The spec pins the v2-only
 surface (v1 hooks dead upstream), the `/bro`+`/act` command pair,
 the 8-tool read namespace, and the RPC contract keeping TUI and
@@ -61,14 +61,14 @@ tools on one truth.
 
 ### `/bro` + stop-gate specifics
 
-- Stop: no pre-stop slot → `session.execution.succeeded` (v2's
++ Stop: no pre-stop slot → `session.execution.succeeded` (v2's
   completion event — `session.idle` is schema-declared but never
   published, opencode#55358) delivers the blocker as
   ONE synthesized prompt (`reprompt` via `session.prompt`/
   `synthetic`), later executions skipped via persisted `stop-gated`
   storage + `stop_hook_active`. `stopRefusal: 'reprompt'`.
   `execution.failed`/`.interrupted` never gate.
-- Hydration: `context` hook pushes the snapshot into `event.system`
++ Hydration: `context` hook pushes the snapshot into `event.system`
   once per session, re-pushed every model request (cache keeps it
   cheap); prompt nudges queue in `pendingPromptContext`.
 
@@ -94,34 +94,34 @@ legacy loose modules included); explicit scope flags honored.
 
 ## Requirements
 
-- **R1** — v2 surface only; no v1 event names.
-- **R2** — `rpc.ts` is the single typed boundary — TUI/server change
++ **R1** — v2 surface only; no v1 event names.
++ **R2** — `rpc.ts` is the single typed boundary — TUI/server change
   together; HTTP method stays reachable.
-- **R3** — Stop stays reprompt-once via `stop_hook_active` +
++ **R3** — Stop stays reprompt-once via `stop_hook_active` +
   persisted `stop-gated` set.
-- **R4** — 8 `bro_*` tools keep pinned argv — reads only — and must
++ **R4** — 8 `bro_*` tools keep pinned argv — reads only — and must
   reach the model as **direct function tools** (`codemode: false`);
   codemode-only exposure hides them from the tool catalog.
-- **R5** — `/bro` quote-aware splitting preserved (`learn capture
++ **R5** — `/bro` quote-aware splitting preserved (`learn capture
   "a note"` must not shred).
-- **R6** — Skills dedup: plugin-dir registration vs
++ **R6** — Skills dedup: plugin-dir registration vs
   `~/.agents/skills/` never double-register.
-- **R7** — `plugins/opencode/bro/` stays generated.
++ **R7** — `plugins/opencode/bro/` stays generated.
 
 ## Verify
 
-- `host-matrix.test.ts` opencode row; adapter tests; `check:plugins`.
-- `packages/agent-e2e` opencode e2e: real `opencode run` against an
++ `host-matrix.test.ts` opencode row; adapter tests; `check:plugins`.
++ `packages/agent-e2e` opencode e2e: real `opencode run` against an
   aimock provider — asserts journal traffic, mock reply in output,
   and ≥8 `bro_*` direct tools in the request's `tools` array.
   FakeBro scenarios: session-start context reaches the model request,
   stop gate blocks→reprompts→passes through `opencode serve`,
   pre-tool veto reaches the model as the tool result.
-- Live (dogfooded in SDD work): `opencode run` sessions — hydration
++ Live (dogfooded in SDD work): `opencode run` sessions — hydration
   context, board widget, `bro_*` tools callable, `/bro` output,
   attention toasts; `POST /api/rpc/bro/board` returns board JSON.
 
-- **Scenario map** (AGT-1 §Test scenarios): implemented e2e —
++ **Scenario map** (AGT-1 §Test scenarios): implemented e2e —
   S1 session-start ctx, S2 pre-tool veto, S3 stop gate (serve
   mode, v2 `session.execution.*` taxonomy) in
   `fakebro.e2e.test.ts` + `opencode.e2e.test.ts` (S-coverage:
@@ -140,24 +140,24 @@ legacy loose modules included); explicit scope flags honored.
 
 ## Changelog
 
-- 2026-11-12 — v1 draft.
-- 2026-11-12 — v2 rewrite: full asset inventory — /bro+/act commands,
++ 2026-11-12 — v1 draft.
++ 2026-11-12 — v2 rewrite: full asset inventory — /bro+/act commands,
   8 bro_* tools with pinned argv, skills dedup, RPC methods/events,
   TUI slots, shell.env.
-- 2026-11-12 — v3: `index.ts` now ships as a `bundleAdapter` bundle
++ 2026-11-12 — v3: `index.ts` now ships as a `bundleAdapter` bundle
   (adapter-core folded, `@opencode/plugin` external, `rpc.ts`
   inlined — the emitted `rpc.ts` remains for `tui.tsx`). Local
   spawn/probe/parse helpers deleted; the shared CLI ladder now probes
   a pinned `options.command` like every other tier, tool/command
   reads run under `RUN_TIMEOUT_MS` (60s, was 15s), and resolution
   retries a failed answer after `RESOLVE_RETRY_MS`.
-- 2026-11-13 — v4: e2e-caught conformance fix — `bro_*` tools were
++ 2026-11-13 — v4: e2e-caught conformance fix — `bro_*` tools were
   registered without `codemode: false`, so opencode exposed them only
   through the `execute` code-mode tool and the model-facing `tools`
   array carried zero `bro_*` entries. Tools now register with
   `codemode: false` → direct `bro_*` function tools; R4 hardened,
   Verify gains the agent-e2e journal assertion.
-- 2026-11-13 — v5: e2e-caught lifecycle fix — the event-stream stop
++ 2026-11-13 — v5: e2e-caught lifecycle fix — the event-stream stop
   gate listened for v1 names (`session.idle`, `message.updated`,
   `session.created`, `session.compacted`) that opencode v2 never
   publishes; the gate was dead in production. Bus handling moved to
@@ -168,18 +168,18 @@ legacy loose modules included); explicit scope flags honored.
   gains FakeBro (scripted `bro hooks` responder + journal) and the
   serve-mode driver; the stop-gate scenario now runs live against
   `opencode serve`.
-- 2026-11-12 — v6: Verify gains the AGT-1 scenario map — S1/S2/S3 implemented e2e today; S8 pending ScriptedCli wiring.
-- 2026-11-12 — v7: S8 lands at the bro layer — `deps.e2e.test.ts`
++ 2026-11-12 — v6: Verify gains the AGT-1 scenario map — S1/S2/S3 implemented e2e today; S8 pending ScriptedCli wiring.
++ 2026-11-12 — v7: S8 lands at the bro layer — `deps.e2e.test.ts`
   proves real `bro hooks` stays fail-open against a dead `bd`
   shim and journals the dep probe.
-- 2026-11-14 — v8: S4 `/bro` dispatch verified e2e — serve-mode
++ 2026-11-14 — v8: S4 `/bro` dispatch verified e2e — serve-mode
   `POST /api/session/{id}/command` leg of `bro-command.e2e.test.ts`
   asserts identical `bro <args>` argv in the FakeBro journal and the
   follow-up turn reaching aimock.
-- 2026-11-14 — v9: S4f command family verified e2e — opencode owns
++ 2026-11-14 — v9: S4f command family verified e2e — opencode owns
   `/goal` natively → `bro:goal`; `/wtf` bare. Same BRO_COMMANDS
   table as the pi/omp lineage (`bro-command.e2e.test.ts`).
-- 2026-11-14 — v10: live-dogfood fix (bro-tswwr) — `bro plugins
++ 2026-11-14 — v10: live-dogfood fix (bro-tswwr) — `bro plugins
   install opencode` now materializes the embedded skills tree into
   the bundle (`skills/<name>/<file>` from `dist/generated/
   skills-data.json`, live repo tree as pre-build fallback), so
@@ -189,7 +189,7 @@ legacy loose modules included); explicit scope flags honored.
   roots on `sdd/SKILL.md` — an explicit `skillsDir` stays
   authoritative. Verified live: `/api/skill` on `opencode serve`
   2.3.0 went 112→160 entries with the full bro tree registered.
-- 2026-11-14 — v11: single-scope install contract (bro-b7mae) —
++ 2026-11-14 — v11: single-scope install contract (bro-b7mae) —
   dual plugin-dir load verified empirically on opencode 2.3.0
   (`opencode run` executed probe plugins from both scopes, same
   `id:"bro"` twice); `ClientSpec.singleScope` now covers all four
