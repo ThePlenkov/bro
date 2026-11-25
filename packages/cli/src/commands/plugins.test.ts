@@ -88,9 +88,8 @@ type ClientMatrix = {
   foreignScope: 'global' | 'local';
 };
 
-function registerClientMatrix(config: ClientMatrix): void {
+function registerInstallAndRerun(config: ClientMatrix): void {
   const { client, fixture: makeFixture, assertInstalled } = config;
-
   test(`${client} install materializes the global plugin; a second run reports current`, () => {
     const f = makeFixture();
     const out = installClient(client, ['global', 'local'], f.opts);
@@ -108,7 +107,10 @@ function registerClientMatrix(config: ClientMatrix): void {
       ['current']
     );
   });
+}
 
+function registerListTest(config: ClientMatrix): void {
+  const { client, fixture: makeFixture } = config;
   test(`${client} list reports an installed global plugin`, () => {
     const f = makeFixture();
     installClient(client, ['global'], f.opts);
@@ -117,7 +119,10 @@ function registerClientMatrix(config: ClientMatrix): void {
     );
     assert.equal(row!.state, 'installed');
   });
+}
 
+function registerUninstallTest(config: ClientMatrix): void {
+  const { client, fixture: makeFixture } = config;
   test(`${client} uninstall removes the plugin`, () => {
     const f = makeFixture();
     installClient(client, ['global'], f.opts);
@@ -125,7 +130,10 @@ function registerClientMatrix(config: ClientMatrix): void {
     assert.equal(out[0]!.action, 'removed');
     assert.ok(!existsSync(f.globalPath));
   });
+}
 
+function registerForeignFileTest(config: ClientMatrix): void {
+  const { client, fixture: makeFixture } = config;
   test(`${client} refuses a foreign file without --force`, () => {
     const f = makeFixture();
     const foreignPath = config.foreignPath(f);
@@ -137,7 +145,10 @@ function registerClientMatrix(config: ClientMatrix): void {
     const forced = installClient(client, [config.foreignScope], { ...f.opts, force: true });
     assert.equal(forced[0]!.action, 'updated');
   });
+}
 
+function registerDryRunTest(config: ClientMatrix): void {
+  const { client, fixture: makeFixture } = config;
   test(`${client} dry-run writes nothing`, () => {
     const f = makeFixture();
     const out = installClient(client, ['global', 'local'], { ...f.opts, dryRun: true });
@@ -149,7 +160,10 @@ function registerClientMatrix(config: ClientMatrix): void {
     assert.ok(!existsSync(f.globalPath));
     assert.ok(!existsSync(f.localPath));
   });
+}
 
+function registerLocalScopeTest(config: ClientMatrix): void {
+  const { client, fixture: makeFixture, assertInstalled } = config;
   test(`${client} explicit --local installs the project copy`, () => {
     const f = makeFixture();
     const out = installClient(client, ['local'], f.opts);
@@ -160,6 +174,21 @@ function registerClientMatrix(config: ClientMatrix): void {
     assertInstalled(f.localPath);
     assert.ok(!existsSync(f.globalPath));
   });
+}
+
+const CLIENT_MATRIX_REGISTRARS = [
+  registerInstallAndRerun,
+  registerListTest,
+  registerUninstallTest,
+  registerForeignFileTest,
+  registerDryRunTest,
+  registerLocalScopeTest,
+];
+
+function registerClientMatrix(config: ClientMatrix): void {
+  for (const reg of CLIENT_MATRIX_REGISTRARS) {
+    reg(config);
+  }
 }
 
 describe('scopesOf', () => {
