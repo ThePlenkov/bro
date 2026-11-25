@@ -212,6 +212,16 @@ function disposition(threadId: string, outcome: string, pr?: number): void {
   }
 }
 
+/** Write one row into the resolve ledger. Best-effort by contract —
+ *  the reopen guard degrades, never crashes. */
+function ledgerRecord(repo: string, pr: number, threadId: string): void {
+  try {
+    resolveLedger(process.cwd())?.record({ repo, pr, thread: threadId });
+  } catch {
+    // recording is best-effort — the resolve itself already landed
+  }
+}
+
 /** Record a resolve in the ledger — the source of "this thread was
  *  resolved before" for the reopened-thread cycle-guard. Best-effort: a
  *  missing git dir or an unwritable ledger means the reopen is not
@@ -410,6 +420,15 @@ function resolveVerdict(rev: ReviewFacade, v: ActThreadVerdict, pr?: number): vo
   disposition(v.thread_id, v.comment ? 'rejected' : 'fixed', pr);
 }
 
+/** One plan verdict → one ledger row. No row without BOTH the plan's
+ *  PR and a resolvable repo — a half-keyed row poisons the reopen
+ *  guard worse than no row, and the write is best-effort anyway. */
+function ledgerRowFor(plan: ActPlan, v: ActThreadVerdict, ownerRepo: string | null): void {
+  if (plan.pr !== undefined && ownerRepo !== null) {
+    ledgerRecord(ownerRepo, plan.pr, v.thread_id);
+  }
+}
+
 /** Apply an `act` plan (`bro run act.toml`) — batch thread verdicts.
  *  One bad verdict doesn't abort the rest; failures list at the end. */
 export function applyActPlan(plan: ActPlan): void {
@@ -444,8 +463,15 @@ export function applyActPlan(plan: ActPlan): void {
         console.error(
           `act: deferred ${v.thread_id} → ${deferThread(rev, v, repoForDefers(), plan.pr)}`
         );
+        // a defer RESOLVES the thread on the host — and a plain resolve
+        // the same. Both rows feed the reopened-thread guard exactly
+        // like a CLI resolve does (bro-ux7cv): without them a plan batch
+        // is invisible to the guard, and a bot re-answering an old
+        // thread never trips the cycle detection.
+        ledgerRowFor(plan, v, repoForDefers());
       } else {
         resolveVerdict(rev, v, plan.pr);
+        ledgerRowFor(plan, v, repoForDefers());
       }
     } catch (err) {
       failed.push(v.thread_id);
