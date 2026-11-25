@@ -8,7 +8,7 @@
  * workspace(id,label) · mirror pane · PR.
  */
 import { existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import {
   type AgentEntry,
   broFleet,
@@ -124,7 +124,7 @@ function pidLive(reg: AgentEntry | undefined): boolean {
  *  against main, a bare name matches the bro-- prefixed or raw
  *  worktree name or the claim. */
 function markerMatches(d: string, w: StatusWorktree, main: string): boolean {
-  if (d.includes('/')) return resolve(main, d) === w.path;
+  if (dirname(d) !== '.') return resolve(main, d) === w.path;
   return w.name === `bro--${d}` || w.name === d || w.claim === d;
 }
 
