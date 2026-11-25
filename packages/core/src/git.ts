@@ -54,6 +54,7 @@ export function git(args: string[]): string {
   assertGitArgs(args);
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract (same as gh/bd)
+    shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     encoding: 'utf8',
@@ -78,6 +79,7 @@ export function gitTry(
   }
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
+    shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     encoding: 'utf8',
@@ -759,6 +761,7 @@ export function gitLogPathRecords(
   ];
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
+    shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     encoding: 'utf8',
