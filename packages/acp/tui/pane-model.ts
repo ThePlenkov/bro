@@ -42,6 +42,8 @@ export interface PaneStore {
 export interface PaneWriter {
   /** Fold an op batch into the pane's state. */
   apply(ops: readonly Op[]): void;
+  /** Drop all rows before attaching the pane to a different session. */
+  reset(meta?: Partial<PaneMeta>, foldAll?: boolean): void;
   /** Move the tool-card selection by `delta` places. */
   select(delta: number): void;
   /** Fold the selected card open or closed. */
@@ -173,6 +175,9 @@ export function createPane(
       apply(ops) {
         if (ops.length === 0) return;
         publish(retire(applyOps(plain, ops)));
+      },
+      reset(meta, foldAll) {
+        publish(emptyState({ ...plain.meta, ...meta }, foldAll ?? plain.foldAll));
       },
       select(delta) {
         const selected = moveSelection(plain, delta);

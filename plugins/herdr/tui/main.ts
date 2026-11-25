@@ -339,7 +339,7 @@ interface Feed {
   detach(): void;
 }
 
-function createFeed(impl: PaneImpl): Feed {
+function createFeed(getImpl: () => PaneImpl): Feed {
   let cur:
     | {
         key: string;
@@ -362,10 +362,10 @@ function createFeed(impl: PaneImpl): Feed {
     // the same prompt-sidecar fallback the arm-time replay does
     if (cur.seeded !== true) {
       cur.seeded = true;
-      feedArchive(impl, cur.eventsPath, rows);
+      feedArchive(getImpl(), cur.eventsPath, rows);
       return;
     }
-    for (const row of rows) impl.feed(row);
+    for (const row of rows) getImpl().feed(row);
   };
 
   const arm = (t: SessionTarget): void => {
@@ -387,11 +387,11 @@ function createFeed(impl: PaneImpl): Feed {
     }
     if (rows !== undefined) {
       cur.seeded = true;
-      feedArchive(impl, path, rows);
+      feedArchive(getImpl(), path, rows);
     }
     // the tail window is replayed history; appends after this are the
     // live tail — the impl's replay/live boundary
-    impl.beginLive();
+    getImpl().beginLive();
     try {
       cur.watcher = watch(path, () => pump());
     } catch {
@@ -443,12 +443,13 @@ function paneVerdict(
  *  state|mode|agent like session-view; every real move also lands
  *  on the header bar's chip. */
 function createReporter(
-  impl: PaneImpl,
+  getImpl: () => PaneImpl,
   pane: ServedPane['pane'],
   paneId: string
 ): (target: SessionTarget | undefined, armed: boolean) => void {
   let lastReport = '';
   return (target, armed) => {
+    const impl = getImpl();
     const v = paneVerdict(target, armed, impl.verdict);
     const agent = sessionAgentOf(target);
     const mark = `${v.led.state}|${v.mode}|${agent}`;
@@ -461,13 +462,6 @@ function createReporter(
 }
 
 // --- the TUI ---------------------------------------------------------------
-
-/** Re-arm the feed when the resolved attach identity moves. */
-const rearmFeed = (feed: Feed, target: SessionTarget | undefined): void => {
-  if (targetKey(target) === feed.key) return;
-  feed.detach();
-  if (target !== undefined) feed.arm(target);
-};
 
 /** The copy gesture's text — the impl's own copyText when it has one,
  *  the item's text slot otherwise. */
@@ -489,7 +483,7 @@ export async function runTui(argv: string[]): Promise<void> {
   const statePath = fleetStatusPath(bind.base, bind.ctxDir);
   mkdirSync(dirname(statePath), { recursive: true });
 
-  const impl = await pickImpl(implArg(argv));
+  let impl = await pickImpl(implArg(argv));
   impl.setContext?.({ worktree: bind.worktree, agent: bind.agent });
 
   // the shell — renderer + JSX preload + mount + keymap — is
@@ -498,24 +492,39 @@ export async function runTui(argv: string[]): Promise<void> {
   const { pane } = await serve({
     meta: { worktree: bind.worktree },
     foldAll: impl.fold === 'folded',
-    copyItem: copyTextOf(impl),
+    copyItem: item => copyTextOf(impl)(item),
     // no onRetire — the feed lives ENTIRELY in the scrollbox as
     // renderables: every row keeps markdown/color/expand chrome, and
     // scrolling is the scrollbox's scrollTop, not captured stdout.
     copy: sysCopy,
   });
 
-  const feed = createFeed(impl);
-  const report = createReporter(impl, pane, paneId);
+  const feed = createFeed(() => impl);
+  const report = createReporter(() => impl, pane, paneId);
+  let refreshing = false;
 
   /** The resolution poll pass — read the doc, re-arm the feed when
    *  the attach identity moves, report the verdict. */
-  const refresh = (): void => {
-    bind.reprobe();
-    const target =
-      bind.target ?? resolveTarget(readState(statePath), bind.ctxDir, providers(bind.ctxDir));
-    rearmFeed(feed, target);
-    report(target, feed.key !== undefined);
+  const refresh = async (): Promise<void> => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      bind.reprobe();
+      const target =
+        bind.target ?? resolveTarget(readState(statePath), bind.ctxDir, providers(bind.ctxDir));
+      if (targetKey(target) !== feed.key) {
+        feed.detach();
+        // A feed and its implementation are one session binding. Keeping
+        // either across an attach move leaks the previous agent's model.
+        impl = await pickImpl(implArg(argv));
+        impl.setContext?.({ worktree: bind.worktree, agent: bind.agent });
+        pane.writer.reset({ worktree: bind.worktree, agent: bind.agent }, impl.fold === 'folded');
+        if (target !== undefined) feed.arm(target);
+      }
+      report(target, feed.key !== undefined);
+    } finally {
+      refreshing = false;
+    }
   };
 
   process.on('exit', () => paneRelease(paneId, SESSION_IDENTITY));
@@ -524,15 +533,15 @@ export async function runTui(argv: string[]): Promise<void> {
   }
 
   try {
-    watch(dirname(statePath), () => refresh());
+    watch(dirname(statePath), () => void refresh());
   } catch {
     // the poll alone still rides
   }
 
-  refresh();
+  await refresh();
   setInterval(() => {
     feed.pump();
-    refresh();
+    void refresh();
   }, POLL_MS);
   // the tree commit — opencode's delta-buffer cadence
   setInterval(() => pane.writer.apply(impl.drain()), FLUSH_MS);
