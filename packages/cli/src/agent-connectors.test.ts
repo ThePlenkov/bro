@@ -495,6 +495,7 @@ describe('resolveAgentConnector', () => {
       assert.deepEqual(agentConnectorNames(), [
         'native',
         'tmux',
+        'herdr',
         'gascity',
         'docker',
         'copilot',
@@ -3392,7 +3393,7 @@ describe('eachAgentConnector', () => {
     );
     assert.deepEqual(
       conns.map(c => c.name),
-      ['native', 'tmux', 'gascity', 'docker', 'copilot', 'devin']
+      ['native', 'tmux', 'herdr', 'gascity', 'docker', 'copilot', 'devin']
     );
     assert.deepEqual(notes, ['explody: backend exploded']);
     assert.throws(

@@ -1,11 +1,13 @@
 export * from './agent-connectors/core.ts';
 export { makeNativeConnector } from './agent-connectors/native.ts';
 export { makeTmuxConnector } from './agent-connectors/tmux.ts';
+export { makeHerdrConnector } from './agent-connectors/herdr.ts';
 export { makeGascityConnector } from './agent-connectors/gascity.ts';
 export { makeDockerConnector } from './agent-connectors/docker.ts';
 export { makeCopilotConnector } from './agent-connectors/copilot.ts';
 import './agent-connectors/native.ts';
 import './agent-connectors/tmux.ts';
+import './agent-connectors/herdr.ts';
 import './agent-connectors/gascity.ts';
 import './agent-connectors/docker.ts';
 import './agent-connectors/copilot.ts';
