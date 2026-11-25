@@ -33,6 +33,8 @@ import type {
   PrTarget,
   ReviewComment,
   ReviewFacade,
+  ReactionKind,
+  ReactionResult,
   ReviewThread,
   ScanOpts,
   StackMembership,
@@ -1895,6 +1897,87 @@ function graphql(query: string, vars: Record<string, string>): void {
   }
 }
 
+function githubReaction(
+  target: PrTarget | string,
+  reaction: ReactionKind,
+  remove = false
+): ReactionResult {
+  const aliases: Record<string, string> = {
+    '+1': 'THUMBS_UP',
+    thumbs_up: 'THUMBS_UP',
+    '-1': 'THUMBS_DOWN',
+    thumbs_down: 'THUMBS_DOWN',
+    eyes: 'EYES',
+  };
+  const content =
+    typeof target === 'string'
+      ? target
+      : (() => {
+          const { owner, name } = parts(target.repo);
+          const result = ghJson<{ data?: { repository?: { pullRequest?: { id?: string } } } }>([
+            'api',
+            'graphql',
+            '-f',
+            'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}',
+            '-f',
+            `o=${owner}`,
+            '-f',
+            `r=${name}`,
+            '-F',
+            `n=${target.pr}`,
+          ]);
+          const id = result.data?.repository?.pullRequest?.id;
+          if (!id) throw new Error(`pull request #${target.pr} not found`);
+          return id;
+        })();
+  const kind = aliases[reaction];
+  if (!kind) throw new Error(`unsupported GitHub reaction "${reaction}"`);
+  if (remove) {
+    const found = ghJson<{
+      data?: {
+        node?: {
+          reactionGroups?: Array<{
+            content: string;
+            viewerHasReacted: boolean;
+            reactions?: { nodes?: Array<{ id: string }> };
+          }>;
+        };
+      };
+    }>([
+      'api',
+      'graphql',
+      '-f',
+      'query=query($id:ID!){node(id:$id){... on Reactable{reactionGroups{content viewerHasReacted reactions(first:1){nodes{id}}}}}}',
+      '-f',
+      `id=${content}`,
+    ]);
+    const group = found.data?.node?.reactionGroups?.find(
+      item => item.content === kind && item.viewerHasReacted
+    );
+    const id = group?.reactions?.nodes?.[0]?.id;
+    if (!id) return { artifact: content, reaction, removed: true, counts: {} };
+    graphql('mutation($id:ID!){removeReaction(input:{reactionId:$id}){reaction{id}}}', { id });
+    return { artifact: content, reaction, removed: true, counts: {} };
+  }
+  const result = ghJson<{
+    data?: { addReaction?: { reaction?: { content?: string } } };
+    errors?: unknown;
+  }>([
+    'api',
+    'graphql',
+    '-f',
+    'query=mutation($id:ID!,$content:ReactionContent!){addReaction(input:{subjectId:$id,content:$content}){reaction{content}}}',
+    '-f',
+    `id=${content}`,
+    '-f',
+    `content=${kind}`,
+  ]);
+  if (result.errors || !result.data?.addReaction?.reaction) {
+    throw new Error(`GitHub reaction failed: ${JSON.stringify(result.errors ?? result)}`);
+  }
+  return { artifact: content, reaction, removed: false, counts: {} };
+}
+
 /** The ReviewFacade bound to a dir — `gh repo view`/`gh pr view` run
  *  there so repo/PR detection follows the facade's repo, not cwd. */
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
@@ -2013,6 +2096,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
 
     prFiles,
     reviewThreads,
+    react: githubReaction,
     labels,
     prUpdatedAt,
     prBody(t) {

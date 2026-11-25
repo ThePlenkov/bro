@@ -108,6 +108,7 @@ import { runPulseCommand } from './commands/pulse.ts';
 import { runQueryCommand } from './commands/query.ts';
 import { runQueueCommand } from './commands/queue.ts';
 import { runRequestCommand } from './commands/request.ts';
+import { runReactCommand } from './commands/react.ts';
 import { runResumeCommand } from './commands/resume.ts';
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
 import { runRigCommand } from './commands/rig.ts';
@@ -141,6 +142,21 @@ import './connectors.ts';
 const TELEMETRY_USAGE = 'bro telemetry [--session <id>] [--json]   Hook + command latency report';
 
 export const PLUGINS: BroPlugin[] = [
+  definePlugin({
+    name: 'react',
+    group: 'review',
+    summary: 'React to a PR or review finding: <target> <+1|-1|emoji>',
+    run: runReactCommand,
+    skill: 'act',
+    contract: {
+      flags: {
+        '--remove': 'remove the reaction',
+        '--json': 'emit the reaction result as JSON',
+        '--tsv': 'emit a tab-separated result',
+      },
+      exits: { 0: 'reaction applied', 1: 'host rejected the reaction', 2: 'usage' },
+    },
+  }),
   // Contract `json` refs are enforced two ways: contract.test.ts proves
   // every ref resolves on disk; contract-schema.test.ts validates each
   // schema against the emitter's real --json output (and fails on field
