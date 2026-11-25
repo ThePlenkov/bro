@@ -1,17 +1,25 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { agentPlugins } from './agent-plugins.ts';
+import { clientInventory, connectorInventory, isInstalled } from './agents.ts';
 import { modelFamily, servedModels } from './catalog.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
-import { routerUrl } from './router-url.ts';
 import { configuredProviders } from './providers.ts';
-import { clientInventory, connectorInventory, isInstalled } from './agents.ts';
+import { routerUrl } from './router-url.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'brouter-test-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
+
+test('the protocol clients are mounted as brouter commands', () => {
+  assert.deepEqual(
+    agentPlugins().map(plugin => plugin.name),
+    ['ask', 'acp']
+  );
+});
 
 test('the family is read off the id text, never off the prefix', () => {
   assert.equal(modelFamily('opencode-acp/claude-opus-5-5-medium'), 'opus');

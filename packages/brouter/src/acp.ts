@@ -15,11 +15,17 @@
  */
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
+import type { AgentContext } from '@agentclientprotocol/sdk';
 import { agent, ndJsonStream } from '@agentclientprotocol/sdk';
-import { loadConfig } from '@broject/core';
 import type { ProviderEntry } from '@broject/core';
+import { loadConfig } from '@broject/core';
+import type {
+  AcpClientBridge,
+  AcpPeer,
+  AcpRetainedSession,
+  ProviderWireOpts,
+} from '@broject/providers';
 import { acpOpen, acpSessionRetain, promptText } from '@broject/providers';
-import type { AcpPeer, AcpRetainedSession, ProviderWireOpts } from '@broject/providers';
 import { acpEntry, resolveProvider } from './ask.ts';
 
 /** The acp entry — the provider kind the facade can drive. */
@@ -41,6 +47,34 @@ export interface AcpFacadeRequest {
  *  session id stays behind the facade. */
 export function localSessionId(): string {
   return randomUUID();
+}
+
+/** Build the target's client bridge around the downstream ACP connection.
+ *
+ * The target is opened before the downstream sends `initialize`, so this is
+ * deliberately a late-bound reference. Target calls cannot occur before the
+ * handshake completes, while calls during a prompt always have the real
+ * client's context — no headless fallback is invented by the facade.
+ */
+function clientBridge(getClient: () => AgentContext | undefined): AcpClientBridge {
+  const client = (): AgentContext => {
+    const value = getClient();
+    if (value === undefined) {
+      throw new Error('brouter acp: target called the client before downstream initialize');
+    }
+    return value;
+  };
+  return {
+    request: (method, params, signal) =>
+      client().request<unknown, Record<string, unknown>>(method, params, {
+        cancellationSignal: signal,
+      }),
+    notify: (method, params) => {
+      void client()
+        .notify(method, params)
+        .catch(() => undefined);
+    },
+  };
 }
 
 /** The handshake — the peer and the session it retains, with the
@@ -78,17 +112,28 @@ export async function runAcpFacade(request: AcpFacadeRequest, dir: string): Prom
   const provider = resolveProvider(providers, request.provider);
   const entry = acpEntry(providers, provider);
   const timeoutMs = request.timeoutMs ?? 120_000;
+  const app = agent({ name: 'brouter' });
+  let downstream: AgentContext | undefined;
   const wire = {
     ...(request.model === undefined ? {} : { model: request.model }),
-    ...(request.cwd === undefined ? {} : { acp: { cwd: request.cwd } }),
+    acp: {
+      ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+      bridge: clientBridge(() => downstream),
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: true,
+        elicitation: { form: {}, url: {} },
+      },
+    },
   };
 
   const { peer, session, keepAlive } = await openSession(provider, entry, wire, timeoutMs);
   const sessionId = localSessionId();
 
-  const app = agent({ name: 'brouter' });
-
-  app.onRequest('initialize', async () => peer.init);
+  app.onRequest('initialize', async ctx => {
+    downstream = ctx.client;
+    return peer.init;
+  });
 
   app.onRequest('session/new', async () => ({
     sessionId,

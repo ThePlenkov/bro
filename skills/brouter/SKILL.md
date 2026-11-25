@@ -41,17 +41,19 @@ client's filter.
 
 ## Commands
 
-| Command                                                                                   | What it does                                                                       |
-| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `brouter models [--json]`                                                                 | the served catalog, read off the running router                                    |
-| `brouter clients [--json]`                                                                | the agent clients — installed / configured / connector / ready                     |
-| `brouter client …`                                                                        | moved — prints `bro router client …` (@broject/client-adapters)                    |
-| `brouter store path \| migrate \| stats [--path P] [--json]`                              | the router's own ledger — where it lives, what it holds                            |
-| `brouter routes list \| validate [--routes P]`                                            | the route table — the routes, or the problems                                      |
-| `brouter health [--json] [--path P]`                                                      | what can serve right now — the walls and the open sessions                         |
-| `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why                   |
-| `brouter ask "<question>" [--provider P] [--model M] [--explain[=SLICES]]`                | ask one agent — `--explain` says which agent served, which model, and what it cost |
-| `bro router …`                                                                            | the same surfaces plus `client <id>` — bro's spelling (the wrapper)                |
+| Command                                                                                   | What it does                                                           |
+| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `brouter models [--json]`                                                                 | the served catalog, read off the running router                        |
+| `brouter clients [--json]`                                                                | the agent clients — installed / configured / connector / ready         |
+| `brouter client …`                                                                        | moved — prints `bro router client …` (@broject/client-adapters)        |
+| `brouter store path \| migrate \| stats [--path P] [--json]`                              | the router's own ledger — where it lives, what it holds                |
+| `brouter routes list \| validate [--routes P]`                                            | the route table — the routes, or the problems                          |
+| `brouter health [--json] [--path P]`                                                      | what can serve right now — the walls and the open sessions             |
+| `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why       |
+| `brouter ask "<question>" [--provider P] [--model M] [--timeout MS] [--json]`             | ask one ACP agent once; stdout is the answer (or structured JSON)      |
+| `brouter ask "<question>" [--explain[=SLICES]]`                                           | explain which agent served, which model, and what the turn cost        |
+| `brouter acp [--provider P] [--model M] [--timeout MS]`                                   | expose the configured ACP agent as a session-preserving stdio endpoint |
+| `bro router …`                                                                            | the same surfaces plus `client <id>` — bro's spelling (the wrapper)    |
 
 ## The explain surface
 
@@ -74,6 +76,12 @@ SLICES, not levels — the user asks questions, so the flag names them:
 - `brouter ask` routes through the table when one is declared: the chain's
   first acp entry serves, `--provider` still wins, and with no table the
   first acp entry answers. The explanation names WHICH rule fired.
+- `brouter ask` opens a fresh ACP session for each question. `--json` keeps
+  the answer pipeable as `{provider, model, stopReason, text}`.
+- `brouter acp` speaks ACP over stdin/stdout. Its target session survives
+  multiple `session/prompt` calls, updates are relayed, and target
+  permission, filesystem, terminal, and elicitation calls are forwarded to
+  the connected ACP client.
 
 ## The route table
 
