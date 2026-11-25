@@ -603,12 +603,13 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   // a local branch is sometimes exactly the intent.
   if (!branchExists && base !== undefined) {
     const up = gitTry(['rev-parse', '--abbrev-ref', `${base}@{upstream}`]);
-    if (up.code === 0) {
-      const ahead = gitTry(['rev-list', '--count', `${up.out.trim()}..${base}`]);
+    const upstream = up.out.trim();
+    if (up.code === 0 && upstream !== '') {
+      const ahead = gitTry(['rev-list', '--count', `${upstream}..${base}`]);
       const n = Number(ahead.out.trim());
       if (ahead.code === 0 && Number.isInteger(n) && n > 0) {
         console.error(
-          `work: note — base ${base} is ${n} commit(s) ahead of ${up.out.trim()}; ` +
+          `work: note — base ${base} is ${n} commit(s) ahead of ${upstream}; ` +
             'unpushed work rides into this worktree — push the base or pick another --base'
         );
       }
