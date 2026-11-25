@@ -808,8 +808,9 @@ const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g;
 //
 // The Messages API is stateless but claude resends full history anyway:
 // keep a retained acp session per conversation and feed ONLY the tail.
-// Identity: explicit `x-bro-session` for clients that can send it, else
-// a fingerprint of prefix+first turn. Correctness is never key-trusted —
+// Identity: explicit `x-bro-session` for clients that can send it, then the
+// native Anthropic `metadata.user_id`, else a fingerprint of prefix+first
+// turn. Correctness is never key-trusted —
 // a candidate re-proves the consumed prefix byte-for-byte (hash over the
 // first `consumed` serializations) before its tail is sliced, so an
 // edited or replayed history falls back to a fresh session instead of
@@ -935,9 +936,11 @@ function probeLabelOf(req: IncomingMessage): string | undefined {
 }
 
 /** Where the conversation id comes from: an explicit `x-bro-session`
- *  wins (clients that can pin); the fingerprint is the birth
- *  certificate — prefix + first turn — stable across the whole
- *  conversation since clients prepend, never rewrite the start. */
+ *  wins (clients that can pin), then Anthropic's native `metadata.user_id`.
+ *  The fingerprint is only the fallback birth certificate — prefix + first
+ *  turn — stable across the whole conversation since clients prepend, never
+ *  rewrite the start. The first turn is still re-proved before continuation;
+ *  identity selects a candidate but never grants it trust. */
 function conversationKey(req: IncomingMessage, body: MessagesRequest): string | undefined {
   const hdr = req.headers['x-bro-session'];
   const named = (Array.isArray(hdr) ? hdr[0] : hdr)?.trim();
@@ -951,10 +954,16 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   if (first === undefined) {
     return undefined;
   }
+  const native = body.metadata?.user_id?.trim();
+  if (native !== undefined && native !== '') {
+    // Keep the client identifier out of map keys, telemetry, and response
+    // headers while preserving its identity semantics across rewritten
+    // Anthropic histories.
+    const id = createHash('sha256').update(native).digest('hex');
+    return `n:${id}`;
+  }
   const fp = createHash('sha256')
-    .update(
-      `${body.metadata?.user_id ?? ''}\n${prefixText(body)}\n${stopKeyOf(stopSeqsOf(body) ?? [])}\n${turnHashInput(first)}`
-    )
+    .update(`${prefixText(body)}\n${stopKeyOf(stopSeqsOf(body) ?? [])}\n${turnHashInput(first)}`)
     .digest('hex');
   return `f:${fp}`;
 }

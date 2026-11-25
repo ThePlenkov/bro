@@ -1681,18 +1681,28 @@ describe('serve /v1/* — the conductor plane', () => {
 
 // bro-whn25 — the messages API is stateless but a claude client resends
 // full history anyway, so the conductor retains one acp session per
-// conversation and feeds it only the delta. Identity is the history
-// fingerprint; a pinned x-bro-session namespaces explicitly.
+// conversation and feeds it only the delta. Identity is the native
+// metadata.user_id when available; a pinned x-bro-session namespaces
+// explicitly, and the history fingerprint is the fallback.
 describe('serve /v1/* — retained acp sessions', () => {
   const post = (
     url: string,
     messages: unknown[],
-    opts: { headers?: Record<string, string>; model?: string } = {}
+    opts: {
+      headers?: Record<string, string>;
+      model?: string;
+      userId?: string;
+    } = {}
   ): Promise<Response> =>
     fetch(`${url}/v1/messages`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json', ...opts.headers },
-      body: JSON.stringify({ model: opts.model, messages, stream: false }),
+      body: JSON.stringify({
+        model: opts.model,
+        messages,
+        ...(opts.userId === undefined ? {} : { metadata: { user_id: opts.userId } }),
+        stream: false,
+      }),
     });
 
   /** Every case needs the same listener over a scripted acp peer — the
@@ -1779,6 +1789,27 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.equal((await post(url, more, { headers: { 'x-bro-session': 'a' } })).status, 200);
       assert.equal(fake.sessions.length, 2);
       assert.match(fake.prompts[2] ?? '', /more/);
+    }));
+
+  test('metadata.user_id is the native conversation identity', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const msgs = [{ role: 'user', content: 'same first turn' }];
+      assert.equal((await post(url, msgs, { userId: 'conversation-a' })).status, 200);
+      // The same first turn with another native identity is a different
+      // conversation; a first-turn fingerprint alone would collide here.
+      assert.equal((await post(url, msgs, { userId: 'conversation-b' })).status, 200);
+      assert.equal(fake.sessions.length, 2);
+
+      const more = [
+        ...msgs,
+        { role: 'assistant', content: 'x' },
+        { role: 'user', content: 'next turn' },
+      ];
+      assert.equal((await post(url, more, { userId: 'conversation-a' })).status, 200);
+      assert.equal(fake.sessions.length, 2);
+      assert.equal(fake.prompts.length, 3);
+      assert.match(fake.prompts[2] ?? '', /next turn/);
+      assert.doesNotMatch(fake.prompts[2] ?? '', /same first turn/);
     }));
 
   test('a named session outlives the anonymous TTL — probes reuse across cadence', () => {
