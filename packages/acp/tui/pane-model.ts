@@ -235,7 +235,9 @@ export function createPane(
         let any = false;
         for (const id of plain.order) {
           const item = byId[id];
-          if (item === undefined || !isFoldable(item) || item.collapsed !== open) continue;
+          if (item === undefined) continue;
+          if (!isFoldable(item)) continue;
+          if (item.collapsed !== open) continue;
           byId[id] = { ...item, collapsed: !open, foldTouched: true };
           any = true;
         }
