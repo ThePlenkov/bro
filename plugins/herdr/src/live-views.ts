@@ -113,7 +113,7 @@ function handleAttempt(dir: string, stem: string): number | undefined {
 /** The pane command — the OpenTUI viewer bound to the archive
  *  directly; the line-mode session-view stays the bun-less fallback
  *  keyed on the agent's worktree. argv building is the kit's. */
-function viewCommand(a: LiveAgent): string {
+function viewCommand(a: LiveAgent): string | undefined {
   const b = existsSync(TUI_MAIN) ? bun() : undefined;
   return liveViewCommand(
     a,
@@ -167,13 +167,18 @@ export function convergeLiveViews /* NOSONAR typescript:S3776 */(
   // this is the exec half: probes in, herdr calls + state out.
   /** One open — fresh workspace → first pane → run → record. */
   const openView = (a: LiveAgent): void => {
+    const command = viewCommand(a);
+    if (command === undefined) {
+      log(`view ${a.id}: worktree unavailable; skipping line-mode view`);
+      return;
+    }
     const ws = openViewWorkspace(a);
     if (ws === undefined) {
       log(`view ${a.id}: workspace open failed`);
       return;
     }
     const paneId = paneList(ws)[0]?.pane_id;
-    if (paneId === undefined || !herdrOk(['pane', 'run', paneId, viewCommand(a)])) {
+    if (paneId === undefined || !herdrOk(['pane', 'run', paneId, command])) {
       log(`view ${a.id}: pane run failed in ${ws}`);
       return;
     }
@@ -202,7 +207,8 @@ export function convergeLiveViews /* NOSONAR typescript:S3776 */(
         break;
       case 'rearm': {
         const a = live.find(x => x.id === act.id);
-        if (a !== undefined && herdrOk(['pane', 'run', act.rec.pane_id, viewCommand(a)])) {
+        const command = a === undefined ? undefined : viewCommand(a);
+        if (command !== undefined && herdrOk(['pane', 'run', act.rec.pane_id, command])) {
           break;
         }
         // a failed re-arm drops the record and falls through to the

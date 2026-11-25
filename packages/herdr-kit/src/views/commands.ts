@@ -33,20 +33,12 @@ export function sessionViewArgv(
 export function liveViewArgv(
   a: { events: string; id: string; worktree?: string },
   bins: ViewBins
-): string[] {
+): string[] | undefined {
   if (bins.bun !== undefined && bins.tui !== undefined) {
     return [bins.bun, 'run', bins.tui, '--events', a.events, '--agent', a.id];
   }
-  return [
-    bins.bro,
-    'herdr',
-    'session-view',
-    a.worktree ?? '.',
-    '--events',
-    a.events,
-    '--agent',
-    a.id,
-  ];
+  if (a.worktree === undefined) return undefined;
+  return [bins.bro, 'herdr', 'session-view', a.worktree, '--events', a.events, '--agent', a.id];
 }
 
 /** The pane command STRINGS — same argvs rendered with the caller's
@@ -69,9 +61,10 @@ export function liveViewCommand(
   a: { events: string; id: string; worktree?: string },
   bins: ViewBins,
   q: (s: string) => string
-): string {
+): string | undefined {
   if (bins.bun !== undefined && bins.tui !== undefined) {
     return `${q(bins.bun)} run ${q(bins.tui)} --events ${q(a.events)} --agent ${q(a.id)}`;
   }
-  return `${q(bins.bro)} herdr session-view ${q(a.worktree ?? '.')} --events ${q(a.events)} --agent ${q(a.id)}`;
+  if (a.worktree === undefined) return undefined;
+  return `${q(bins.bro)} herdr session-view ${q(a.worktree)} --events ${q(a.events)} --agent ${q(a.id)}`;
 }

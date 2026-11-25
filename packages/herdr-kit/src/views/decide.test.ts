@@ -223,8 +223,5 @@ test('view commands — verbs bare, values quoted, the two lanes', () => {
     ),
     "'bun' run '/main.ts' --events '/e.jsonl' --agent 'n1'"
   );
-  assert.equal(
-    liveViewCommand({ events: '/e.jsonl', id: 'n1' }, { bro: 'bro' }, q),
-    "'bro' herdr session-view '.' --events '/e.jsonl' --agent 'n1'"
-  );
+  assert.equal(liveViewCommand({ events: '/e.jsonl', id: 'n1' }, { bro: 'bro' }, q), undefined);
 });
