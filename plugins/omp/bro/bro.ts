@@ -974,6 +974,19 @@ function goalScopeContext(board) {
 	const named = claims.map(beadName).join(", ");
 	return `${scope}${claims.length === 0 ? "" : `bro scope: this objective belongs to the bead(s) in flight — ${named}. `}${claims.length === 0 ? "bro: claim a bead for this objective (`bro flow next`) so the exit gate can judge it;" : "bro: the exit gate judges this objective against that bead;"} \`bro work goal\` carries the condition across sessions.`;
 }
+/** Void bridge events cannot hand context back through a result —
+*  omp 18.12.6 types plan_review_requested/goal_updated/
+*  before_subagent_spawn as void listeners, so a returned
+*  additionalContext is silently discarded (bro-t1e5e). The supported
+*  injection channel is sendMessage; deliverAs nextTurn queues the
+*  context for the model's next turn without stealing the current one. */
+function inject(pi, content) {
+	pi.sendMessage({
+		customType: "bro-mode-context",
+		content,
+		display: false
+	}, { deliverAs: "nextTurn" });
+}
 function installModeBridges(pi, source) {
 	/**
 	* **Plan mode.** omp's Plan Review is the user's decision point; bro
@@ -990,7 +1003,7 @@ function installModeBridges(pi, source) {
 		const claims = board.beads?.inProgress ?? [];
 		if (claims.length === 0) return;
 		const named = claims.map(beadName).join(", ");
-		return { additionalContext: `${UNTRUSTED_NOTE}bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.` };
+		return inject(pi, `${UNTRUSTED_NOTE}bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.`);
 	});
 	/**
 	* **Goal mode.** bro's goal is a *judged* condition; omp's is a
@@ -1002,7 +1015,9 @@ function installModeBridges(pi, source) {
 		const update = event;
 		if (update.goal === null) return;
 		if ((update.goal.objective ?? update.goal.text ?? "") === "") return;
-		return { additionalContext: `${UNTRUSTED_NOTE}${goalScopeContext(source.board())}` };
+		const board = source.board();
+		if (board === null) return;
+		return inject(pi, `${UNTRUSTED_NOTE}${goalScopeContext(board)}`);
 	});
 	/**
 	* **Vibe mode / subagents.** Two workers must never edit one unit of
@@ -1015,7 +1030,7 @@ function installModeBridges(pi, source) {
 		const running = (board.fleet?.agents ?? []).filter((a) => a.state === "running");
 		if (running.length === 0) return;
 		const ids = running.map((a) => a.id ?? "?");
-		return { additionalContext: `bro: ${running.length} worker(s) already running (${ids.join(", ")}) — claim a bead before editing, so two workers never touch one unit of work.` };
+		return inject(pi, `bro: ${running.length} worker(s) already running (${ids.join(", ")}) — claim a bead before editing, so two workers never touch one unit of work.`);
 	});
 	/**
 	* Prewalk and Advisor do not expose separate omp extension events. Their
