@@ -457,6 +457,19 @@ async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
     process.exitCode = 1;
     return undefined;
   }
+  if (res.timedOut) {
+    // a green read the wait could not prove — the deadline expired
+    // inside the review-settle window (bro greenSettle). Landing here
+    // would reopen the review-vs-arm race the window exists to close;
+    // the run costs one re-entry once the window has held
+    console.error(
+      `merge: ${ctx.rev.prLink(ctx.t.repo, ctx.t.pr)} wait timed out before the green gate proved itself — ` +
+        're-run; finished phases no-op on re-entry'
+    );
+    emitVerdict(verdict, 'timeout', res.state, ctx.argv);
+    process.exitCode = 1;
+    return undefined;
+  }
   return res;
 }
 
