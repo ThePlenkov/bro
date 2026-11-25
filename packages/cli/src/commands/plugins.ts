@@ -213,7 +213,7 @@ function broSkillFiles(): SurfaceFile[] {
   }
   const skillMap = files;
   return Object.keys(skillMap)
-    .sort()
+    .sort((a, b) => a.localeCompare(b))
     .map(rel => ({ name: `skills/${rel}`, artifact: null, content: skillMap[rel] }));
 }
 
