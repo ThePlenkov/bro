@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { REPO, run, runBro, type E2eEnv, type RunResult } from '../env.ts';
+import { REPO, run, runBro, which, type E2eEnv, type RunResult } from '../env.ts';
 
 const PLUGIN_SRC = join(REPO, 'plugins', 'opencode', 'bro');
 
@@ -114,7 +114,8 @@ export async function startOpencodeServer(
   const port = opts.port ?? randomInt(16000, 18000);
   const url = `http://127.0.0.1:${port}`;
   const child: ChildProcess = spawn(
-    'opencode',
+    // S4036 — spawn the absolute path instead of searching PATH
+    which('opencode', e.env) ?? 'opencode',
     ['serve', '--hostname', '127.0.0.1', '--port', String(port)],
     {
       cwd: e.proj,
