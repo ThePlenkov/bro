@@ -238,12 +238,15 @@ function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): voi
   }
 }
 
-function cmdResolve(argv: string[]): void {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
-  const rev = reviewHost(undefined, loadBroConfig().connectors);
-  const id = threadArg(argv);
-  const comment = commentArg(argv);
-  const unresolve = argv.includes('--unresolve');
+/** One thread through the resolve/unresolve flow — the batch --file
+ *  path and the single --thread path share it exactly (bro-71a10). */
+function resolveOne(
+  rev: ReviewFacade,
+  argv: string[],
+  id: string,
+  comment: string | undefined,
+  unresolve: boolean
+): void {
   if (comment) {
     if (!unresolve) {
       // the verdict on a fix is the push — comments on resolved-as-fixed
@@ -277,6 +280,48 @@ function cmdResolve(argv: string[]): void {
       comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed'
     );
   }
+}
+
+/** Batch shape mirrors reply --file: one <thread_id> or
+ *  <thread_id><TAB><comment> per line — a resolve sweep over N threads
+ *  under one verdict comment is one command, not a hand-rolled loop
+ *  (bro-71a10). Commentless lines resolve silently (the fix verdict). */
+function cmdResolve(argv: string[]): void {
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const unresolve = argv.includes('--unresolve');
+  const fileIdx = argv.indexOf('--file');
+  if (fileIdx >= 0) {
+    const file = argv[fileIdx + 1];
+    if (!file) {
+      console.error('error: --file requires a path');
+      process.exit(2);
+    }
+    const lines = readFileSync(file, 'utf8')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+    let resolved = 0;
+    for (const line of lines) {
+      const tab = line.indexOf('\t');
+      const rowId = (tab === -1 ? line : line.slice(0, tab)).trim();
+      const rowComment =
+        tab === -1
+          ? undefined
+          : line
+              .slice(tab + 1)
+              .replaceAll(String.raw`\n`, '\n')
+              .replaceAll(String.raw`\t`, '\t');
+      resolveOne(rev, argv, rowId, rowComment, unresolve);
+      resolved += 1;
+    }
+    console.error(`act resolve: ${resolved} thread(s)`);
+    dropActState();
+    return;
+  }
+  const id = threadArg(argv);
+  const comment = commentArg(argv);
+  resolveOne(rev, argv, id, comment ?? undefined, unresolve);
   dropActState();
 }
 
