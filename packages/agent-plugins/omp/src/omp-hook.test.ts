@@ -67,4 +67,14 @@ describe('the omp force-push guard', () => {
     assert.equal(isForcePush('git push -fv origin main'), true);
     assert.equal(isForcePush('git push -fo ci.skip origin main'), true);
   });
+
+  void test('closing grouping furniture does not hide the flag', () => {
+    assert.equal(isForcePush('(git push origin main --force)'), true);
+    assert.equal(isForcePush('sh -c "git push --force"'), true);
+  });
+
+  void test('nested substitution inside another command is still a push', () => {
+    assert.equal(isForcePush('git log "$(git push --force origin main)"'), true);
+    assert.equal(isForcePush('echo $(git push -f)'), true);
+  });
 });
