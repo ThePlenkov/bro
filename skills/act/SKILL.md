@@ -29,6 +29,12 @@ default store, so standard installs already have it).
 
 ## Policy
 
+- **`--bead` only when the PR carries the implementation.** The bead close
+  on merge says the WORK landed — a spec-only, docs-only, or otherwise
+  non-implementation PR must merge beadless, or the implementation bead
+  closes without the feature behind it (bro-xocm2: a spec PR armed with
+  `--bead` was caught just before merge). When in doubt, arm without
+  `--bead` and close the bead manually when the implementation lands.
 - **Loop until the exit gate is green.** `bro review act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
   **Green means every non-AI check green** — `ci_pending` counts all
