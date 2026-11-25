@@ -6,7 +6,7 @@
  * branches became named helpers (settleMergedWait, settleUnlandedWait)
  * behind a shared WaitSettleCtx.
  */
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import {
   appendFileSync,
   closeSync,
@@ -163,9 +163,32 @@ export function gateStateFetcher(
       approvers: act.approvers,
       stateCache: cache,
       resolveLedger: ledger,
+      selfLogin: selfLoginMemo(),
     });
     return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) };
   };
+}
+
+/** The gh-token login, probed once per process — bro's own replies
+ *  carry it, and the reopen detector must not read them as human
+ *  objections (bro-c593y). Fail-open undefined: an unauthenticated gh
+ *  degrades the suppression, never the gate. */
+let selfLoginCache: string | null | undefined;
+function selfLoginMemo(): string | undefined {
+  if (selfLoginCache !== undefined) {
+    return selfLoginCache ?? undefined;
+  }
+  try {
+    const login = execFileSync('gh', ['api', 'user', '--jq', '.login'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10000,
+    }).trim();
+    selfLoginCache = login !== '' ? login : null;
+  } catch {
+    selfLoginCache = null;
+  }
+  return selfLoginCache ?? undefined;
 }
 
 /** The poll loop's knobs — cadence, wake subscription, the session

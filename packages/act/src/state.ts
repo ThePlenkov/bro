@@ -309,6 +309,10 @@ export interface FetchPrActStateOpts {
    *  caller has no ledger (no git dir): the guard then detects nothing
    *  (fail-open). */
   resolveLedger?: ResolveLedger | null;
+  /** The authenticated review-host login bro acts as — the reopen
+   *  detector suppresses comments by this actor (own replies unresolve
+   *  the thread host-side; bro-c593y). */
+  selfLogin?: string;
 }
 
 /** In-flight fetches by `repo#pr` + approval-probe inputs — same-process
@@ -585,7 +589,8 @@ async function fetchState(
     opts?.resolveLedger ?? null,
     target.repo,
     target.pr,
-    threads
+    threads,
+    opts?.selfLogin
   );
 
   // A docs-only PR churns reviewer threads on every push — the tighter
