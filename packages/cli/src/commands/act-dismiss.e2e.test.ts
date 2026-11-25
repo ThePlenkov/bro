@@ -22,6 +22,9 @@ function fixture() {
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      // no review bots in the fake host — the green-settle window would
+      // only burn the test timeout
+      act: { reviewSettleMinutes: 0 },
     })
   );
   return { root, main, state };

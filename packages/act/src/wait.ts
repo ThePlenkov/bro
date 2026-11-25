@@ -3,14 +3,14 @@
  * instead of a bespoke watcher prompt. `bro act wait` settles when nothing
  * is pending: gate OK, threads/failures to act on, or timeout.
  */
-import type { ExitGate, PrActState } from './types.ts'
-import { watchBegin, watchEnd, type PendingWatch } from './pending-watch.ts'
+import type { ExitGate, PrActState } from './types.ts';
+import { watchBegin, watchEnd, type PendingWatch } from './pending-watch.ts';
 
 export interface GateWaitResult {
-  state: PrActState
-  gate: ExitGate
-  timedOut: boolean
-  polls: number
+  state: PrActState;
+  gate: ExitGate;
+  timedOut: boolean;
+  polls: number;
 }
 
 /** An external wake source — a subscription distilled to "something
@@ -18,33 +18,43 @@ export interface GateWaitResult {
  *  a dead or absent source degrades to pure timer polling (spec
  *  specs/bro-huy5o.7.md). */
 export interface GateWake {
-  next(): Promise<void>
-  close(): void
+  next(): Promise<void>;
+  close(): void;
 }
 
 export interface WaitOptions {
-  intervalMs?: number
-  timeoutMs?: number
+  intervalMs?: number;
+  timeoutMs?: number;
   /** Armed once before the loop: each interval sleep then races the
    *  timer against `waker.next()`, so a webhook/check event polls early.
    *  A null or throwing arm leaves the loop exactly as it was —
    *  fail-open, polling stays the default. */
-  wake?: () => Promise<GateWake | null>
+  wake?: () => Promise<GateWake | null>;
   /** Repo dir + PR identity for the pending-watch marker: while the loop
    *  polls, `<git-common-dir>/bro/watches/<pr>-<pid>-<nonce>.json` proves a watch
    *  was promised; a dead pid at session start is the stale promise the
    *  act connector flags. Omit to wait markerless. */
-  watch?: { dir: string } & Omit<PendingWatch, 'pid' | 'startedAt'>
+  watch?: { dir: string } & Omit<PendingWatch, 'pid' | 'startedAt'>;
   /** Consecutive fetch failures tolerated before giving up — one transient
    *  gh/network blip must not kill a long-running watcher. Default 3. */
-  maxFetchErrors?: number
-  onPoll?: (state: PrActState, gate: ExitGate) => void
-  onError?: (err: unknown, consecutive: number) => void
+  maxFetchErrors?: number;
+  onPoll?: (state: PrActState, gate: ExitGate) => void;
+  onError?: (err: unknown, consecutive: number) => void;
   /** Called when the PR is settled but only because it's BEHIND the base
    *  (still mergeable — no conflicts). Return true to keep waiting: the
    *  update pushes a new head and checks re-run. This is the "Update
    *  branch" button wired into the wait loop. */
-  updateBranch?: (state: PrActState) => boolean | Promise<boolean>
+  updateBranch?: (state: PrActState) => boolean | Promise<boolean>;
+  /** Continuous-green settle window (ms). Reviews trigger without any
+   *  visible pending signal — Devin Review posts findings as comments,
+   *  never a check-run, and a bot re-armed by mark-ready registers its
+   *  run late — so a green read proves nothing about reviewers still
+   *  writing (wtf-merge-race: bro merge landed with the review
+   *  mid-flight). When set, a green gate only settles after the green
+   *  state has held continuously for this long; any pending or
+   *  non-green poll resets the clock. 0/omitted settles immediately —
+   *  the wait's plain contract. */
+  greenSettleMs?: number;
 }
 
 /** Still settling: pending CI/reviewers or GitHub computing mergeability.
@@ -55,67 +65,76 @@ export function gatePending(state: PrActState): boolean {
   return (
     state.state === 'OPEN' &&
     (state.ciPending > 0 || state.reviewersPending > 0 || state.mergeable === 'UNKNOWN')
-  )
+  );
 }
 
-const sleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms))
+const sleep = (ms: number): Promise<void> => new Promise<void>(r => setTimeout(r, ms));
 
 export async function waitForGate(
   fetch: () => Promise<{ state: PrActState; gate: ExitGate }>,
-  opts: WaitOptions = {},
+  opts: WaitOptions = {}
 ): Promise<GateWaitResult> {
-  const intervalMs = opts.intervalMs ?? 60_000
-  const maxErrors = opts.maxFetchErrors ?? 3
-  const deadline = Date.now() + (opts.timeoutMs ?? 45 * 60_000)
-  let marker: string | null = null
+  const intervalMs = opts.intervalMs ?? 60_000;
+  const maxErrors = opts.maxFetchErrors ?? 3;
+  const deadline = Date.now() + (opts.timeoutMs ?? 45 * 60_000);
+  let marker: string | null = null;
   if (opts.watch) {
     // strip dir — it selects the marker root, not part of the stored schema
-    const { dir, ...w } = opts.watch
-    marker = watchBegin(dir, w)
+    const { dir, ...w } = opts.watch;
+    marker = watchBegin(dir, w);
   }
   // arm the wake source before the first fetch — a source that can't
   // arm (broker down, not a repo) is just null and every nap below is
   // the plain timer it always was
-  let waker: GateWake | null = null
+  let waker: GateWake | null = null;
   try {
-    waker = (await opts.wake?.()) ?? null
+    waker = (await opts.wake?.()) ?? null;
   } catch {
-    waker = null
+    waker = null;
   }
   // sleep, or wake early on an event — a losing wake promise stays
   // pending and close() or a later event retires it harmlessly; a losing
   // sleep keeps its setTimeout ref'd up to intervalMs past settle, so a
   // waker win clears it
   const nap = (ms: number): Promise<void> => {
-    if (waker === null) return sleep(ms)
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const slept = new Promise<void>((r) => {
-      timer = setTimeout(r, ms)
-    })
-    const woke = waker.next().then(() => clearTimeout(timer))
-    return Promise.race([slept, woke])
-  }
-  let polls = 0
-  let fetchErrors = 0
-  let updatedSha = ''
+    if (waker === null) return sleep(ms);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const slept = new Promise<void>(r => {
+      timer = setTimeout(r, ms);
+    });
+    const woke = waker.next().then(() => clearTimeout(timer));
+    return Promise.race([slept, woke]);
+  };
+  let polls = 0;
+  let fetchErrors = 0;
+  let updatedSha = '';
+  let greenSince: number | null = null;
   try {
     for (;;) {
-      let result: { state: PrActState; gate: ExitGate }
+      let result: { state: PrActState; gate: ExitGate };
       try {
-        result = await fetch()
-        fetchErrors = 0
+        result = await fetch();
+        fetchErrors = 0;
       } catch (err) {
-        fetchErrors += 1
-        opts.onError?.(err, fetchErrors)
+        fetchErrors += 1;
+        opts.onError?.(err, fetchErrors);
         if (fetchErrors >= maxErrors || Date.now() >= deadline) {
-          throw err
+          throw err;
         }
-        await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
-        continue
+        await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+        continue;
       }
-      polls += 1
-      const { state, gate } = result
-      opts.onPoll?.(state, gate)
+      polls += 1;
+      const { state, gate } = result;
+      opts.onPoll?.(state, gate);
+      // continuous-green tracking for the settle window: a green reading
+      // starts the clock, any pending or non-green poll resets it. This
+      // must precede every continue below — the BEHIND update-branch
+      // paths skip the settle check, and a pending poll inside an update
+      // sequence (or the new head the update pushes) must reset the
+      // clock, not inherit the previous head's green age
+      const greenNow = !gatePending(state) && gate.ok && state.state === 'OPEN';
+      greenSince = greenNow ? (greenSince ?? Date.now()) : null;
       // BEHIND settles the wait, but it isn't a verdict — when it's the
       // ONLY blocker (gate.blockers is just the behind entry) and the
       // branch still merges cleanly, an update pushes a new head and the
@@ -138,26 +157,40 @@ export async function waitForGate(
           state.mergeable === 'MERGEABLE' &&
           gate.blockers.length === 1
         ) {
-          await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
-          continue
+          await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+          continue;
         }
         if (state.mergeable === 'MERGEABLE' && gate.blockers.length === 1) {
           if (await opts.updateBranch(state)) {
-            updatedSha = state.headSha
-            await nap(Math.min(5_000, Math.max(0, deadline - Date.now())))
-            continue
+            updatedSha = state.headSha;
+            await nap(Math.min(5_000, Math.max(0, deadline - Date.now())));
+            continue;
           }
         }
       }
       if (!gatePending(state) || Date.now() >= deadline) {
-        return { state, gate, timedOut: gatePending(state), polls }
+        const settleMs = opts.greenSettleMs ?? 0;
+        const greenAge = Date.now() - (greenSince ?? Date.now());
+        const greenUnproven = greenNow && settleMs > 0 && greenAge < settleMs;
+        if (greenUnproven && Date.now() < deadline) {
+          // the green is younger than the settle window — reviewers
+          // re-armed by a push or a ready-mark may still be writing;
+          // hold the verdict and let them break the green
+          await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+          continue;
+        }
+        // an unproven green at the deadline is not a settled verdict —
+        // it is the wait running out of time, or settleWait would merge
+        // before the review safety window completes (amazon-q/macroscope
+        // on #1193)
+        return { state, gate, timedOut: gatePending(state) || greenUnproven, polls };
       }
       // cap the sleep at the deadline — a full-interval nap can overshoot
       // the configured timeout by up to intervalMs
-      await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
+      await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
     }
   } finally {
-    waker?.close()
-    watchEnd(marker)
+    waker?.close();
+    watchEnd(marker);
   }
 }
