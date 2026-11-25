@@ -463,7 +463,6 @@ const {
   GC_PROMPT_TEMPLATE,
   gcConfigDir,
   gcEffectiveCommand,
-  makeGascityConnector,
   dockerRun,
   dockerDaemonUp,
   dockerLiveContainers,

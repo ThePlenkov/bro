@@ -95,44 +95,43 @@ async function spawnTmuxAgent(input: TmuxSpawnInput): Promise<AgentInfo> {
   let spawnLease: Lease | undefined;
   try {
     return withAgentRegistryLock(dir, () => {
-      const prepared = prepareTmuxSpawn({
-        dir,
-        env,
-        command,
-        socket,
-        spec,
-        home: home!,
-        mol: mol!,
-      });
+      const prepared = prepareTmuxSpawn({ ...input, home: home!, mol: mol! });
       spawnLease = prepared.lease;
-      launchTmuxSession({ ...input, home: home!, mol: mol! }, prepared);
-      const spawned = patchAgentRegistry(
-        dir,
-        spec.molStep,
-        prepared.panePid === undefined
-          ? {}
-          : {
-              pid: prepared.panePid,
-              pidStart: procStat(prepared.panePid)?.start ?? null,
-            }
-      );
-      const hasPanePid = prepared.panePid !== undefined;
-      rebindSpawnLease(
-        dir,
-        prepared.lease,
-        hasPanePid ? { host: hostname(), pid: prepared.panePid } : {}
-      );
-      if (hasPanePid) {
-        const panePid = prepared.panePid!;
-        retagSessionSlots([prepared.reservation, ...prepared.crossKindReservations], panePid);
-      }
-      writeWorkMarker(dir, prepared.agentId, spec.molStep, prepared.panePid);
-      return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
+      return completeTmuxSpawn({ ...input, home: home!, mol: mol! }, prepared);
     });
   } catch (err) {
     if (spawnLease !== undefined) releaseSpawnLease(dir, spawnLease);
     throw err;
   }
+}
+
+function completeTmuxSpawn(
+  input: TmuxSpawnInput & { home: string; mol: string },
+  prepared: TmuxPreparedSpawn
+): AgentInfo {
+  const { dir, spec, socket, home } = input;
+  launchTmuxSession(input, prepared);
+  const spawned = patchAgentRegistry(
+    dir,
+    spec.molStep,
+    prepared.panePid === undefined
+      ? {}
+      : {
+          pid: prepared.panePid,
+          pidStart: procStat(prepared.panePid)?.start ?? null,
+        }
+  );
+  const hasPanePid = prepared.panePid !== undefined;
+  rebindSpawnLease(
+    dir,
+    prepared.lease,
+    hasPanePid ? { host: hostname(), pid: prepared.panePid } : {}
+  );
+  if (hasPanePid) {
+    retagSessionSlots([prepared.reservation, ...prepared.crossKindReservations], prepared.panePid!);
+  }
+  writeWorkMarker(dir, prepared.agentId, spec.molStep, prepared.panePid);
+  return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
 }
 
 function prepareTmuxSpawn(
@@ -184,38 +183,65 @@ function launchTmuxSession(
   tmuxRun(socket, ['kill-session', '-t', session]);
   const envFile = join(home, `${agentId}.env`);
   try {
-    const launch = buildTmuxLaunch({ env, command, spec, prepared, envFile, workerTmp });
-    const res = tmuxRun(socket, [
-      'new-session',
-      '-d',
-      '-s',
+    launchTmuxProcess({
+      socket,
       session,
-      '-c',
-      spec.repoRoot,
-      ...launch.envArgs,
-      launch.paneCommand,
-    ]);
-    if (res.code !== 0) throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+      spec,
+      build: () => buildTmuxLaunch({ env, command, spec, prepared, envFile, workerTmp }),
+    });
   } catch (err) {
-    try {
-      rmSync(envFile, { force: true });
-    } catch {
-      /* preserve launch error */
-    }
-    if (reservation !== undefined) releaseSessionSlot(reservation);
-    releaseSessionStart(crossKindReservations);
-    try {
-      patchAgentRegistry(dir, spec.molStep, {
-        spawnError: err instanceof Error ? err.message : String(err),
-      });
-    } catch {
-      /* entry remains for diagnostics */
-    }
+    cleanupTmuxLaunch({ dir, spec, envFile, reservation, crossKindReservations, err });
     throw err;
   }
   const pane = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}']);
   const panePid = pane.code === 0 ? Number(pane.out.trim().split('\n')[0]) : Number.NaN;
   prepared.panePid = Number.isInteger(panePid) && panePid > 0 ? panePid : undefined;
+}
+
+function launchTmuxProcess(input: {
+  socket: string;
+  session: string;
+  spec: SpawnSpec;
+  build: () => { envArgs: string[]; paneCommand: string };
+}): void {
+  const { socket, session, spec, build } = input;
+  const launch = build();
+  const res = tmuxRun(socket, [
+    'new-session',
+    '-d',
+    '-s',
+    session,
+    '-c',
+    spec.repoRoot,
+    ...launch.envArgs,
+    launch.paneCommand,
+  ]);
+  if (res.code !== 0) throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+}
+
+function cleanupTmuxLaunch(input: {
+  dir: string;
+  spec: SpawnSpec;
+  envFile: string;
+  reservation: TmuxPreparedSpawn['reservation'];
+  crossKindReservations: TmuxPreparedSpawn['crossKindReservations'];
+  err: unknown;
+}): void {
+  const { dir, spec, envFile, reservation, crossKindReservations, err } = input;
+  try {
+    rmSync(envFile, { force: true });
+  } catch {
+    /* preserve launch error */
+  }
+  if (reservation !== undefined) releaseSessionSlot(reservation);
+  releaseSessionStart(crossKindReservations);
+  try {
+    patchAgentRegistry(dir, spec.molStep, {
+      spawnError: err instanceof Error ? err.message : String(err),
+    });
+  } catch {
+    /* entry remains for diagnostics */
+  }
 }
 
 function buildTmuxLaunch(input: {
@@ -299,27 +325,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
     async list() {
       // NOSONAR — connector contract is async; the body is sync
       try {
-        const ver = tmuxRun(socket, ['-V']);
-        if (ver.missing || ver.code !== 0) {
-          return { agents: [], degraded: ver.missing ? 'tmux not on PATH' : ver.err };
-        }
-        const home = agentsHome(dir);
-        const entries = Object.entries(readAgentRegistry(dir)).filter(
-          ([, e]) => e.backend === 'tmux'
-        );
-        // one server round-trip for the whole fleet instead of a
-        // has-session per entry — a name absent from a SUCCESSFUL
-        // listing is proof of dead, and so is a dead-server error (the
-        // server holds its sessions). Any other failure degrades the
-        // list rather than reporting live agents as corpses
-        const ls = tmuxRun(socket, ['list-sessions', '-F', '#{session_name}']);
-        if (ls.code !== 0 && !TMUX_DEAD_ERR.test(ls.err)) {
-          return { agents: [], degraded: ls.err !== '' ? ls.err : `tmux exited ${ls.code}` };
-        }
-        const live = new Set(ls.out.split('\n').filter(s => s !== ''));
-        return {
-          agents: entries.map(([molStep, e]) => toTmuxInfo(socket, dir, home, molStep, e, live)),
-        };
+        return listTmuxAgents(dir, socket);
       } catch (err) {
         return {
           agents: [],
@@ -365,4 +371,19 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
     capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
   };
+}
+
+function listTmuxAgents(dir: string, socket: string) {
+  const ver = tmuxRun(socket, ['-V']);
+  if (ver.missing || ver.code !== 0) {
+    return { agents: [], degraded: ver.missing ? 'tmux not on PATH' : ver.err };
+  }
+  const home = agentsHome(dir);
+  const entries = Object.entries(readAgentRegistry(dir)).filter(([, e]) => e.backend === 'tmux');
+  const ls = tmuxRun(socket, ['list-sessions', '-F', '#{session_name}']);
+  if (ls.code !== 0 && !TMUX_DEAD_ERR.test(ls.err)) {
+    return { agents: [], degraded: ls.err !== '' ? ls.err : `tmux exited ${ls.code}` };
+  }
+  const live = new Set(ls.out.split('\n').filter(s => s !== ''));
+  return { agents: entries.map(([molStep, e]) => toTmuxInfo(socket, dir, home, molStep, e, live)) };
 }
