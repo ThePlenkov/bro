@@ -468,8 +468,10 @@ function missingTables(tables: string[], files: Set<string>): string[] {
 }
 
 /** A dolt data ref already local in gitDir — rev-parse + one ls-tree +
- *  the manifest blob. Zero network: sync checks the mirror post-push,
- *  doctor checks FETCH_HEAD after its own fetch. */
+ *  the manifest blob. Sync checks the mirror post-push (zero network);
+ *  the doctor probe reads FETCH_HEAD inside a blob:none partial clone,
+ *  where the manifest ls-tree/show LAZY-FETCH over the network — the
+ *  ms budget exists because those reads can be network reads (kilo). */
 export function doltHeadHealth(gitDir: string, ref: string, ms: number = PROBE_MS): DoltHeadHealth {
   const head = gitTry(['-C', gitDir, 'rev-parse', '--verify', `${ref}^{commit}`], ms);
   if (head.code !== 0) {
