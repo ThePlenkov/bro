@@ -236,7 +236,10 @@ function rowFor(w: StatusWorktree, j: BoardJoins, now: number): Row | undefined 
     last: lastCell(reg),
     ws: wsCell(ws),
     mirror: mirrorCell(
-      j.mirrors.find(m => m.worktree === w.path),
+      // prefer the live record per worktree — insertion order otherwise
+      // lets a marked/exited mirror shadow the one that replaced it
+      j.mirrors.find(m => m.worktree === w.path && m.marked !== true) ??
+        j.mirrors.find(m => m.worktree === w.path),
       j.mirrorPanes
     ),
     pr: prCell(agent, j.fleetByStep),
