@@ -340,9 +340,15 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   // budget doesn't reach is not lost — the next tick retries it.
   const passStart = Date.now();
   let truncated = 0;
-  for (const t of targets) {
+  // rotate the starting target per pass: a prefix that repeatedly eats
+  // the whole budget must not starve the suffix forever — a random
+  // offset makes every workspace the head of some pass (cubic on #1240)
+  const offset = targets.length > 1 ? Math.floor(Math.random() * targets.length) : 0;
+  const ordered = [...targets.slice(offset), ...targets.slice(0, offset)];
+  let done = 0;
+  for (const t of ordered) {
     if (Date.now() - passStart > (ctx.writeBudgetMs ?? WRITE_PASS_BUDGET_MS)) {
-      truncated = targets.length - targets.indexOf(t);
+      truncated = ordered.length - done;
       break;
     }
     const { projection, title, slug } = projectTree(deps.input(t.tree, planes));
@@ -361,6 +367,7 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
     files += r.files;
     leds += r.leds;
     if (r.path !== undefined) keep.add(r.path);
+    done++;
   }
   pruneFleetStatus(statusBase, keep);
   return {
