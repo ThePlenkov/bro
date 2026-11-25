@@ -149,10 +149,16 @@ async function waitForDoc(
   stderrTail: () => string,
   timeoutMs: number
 ): Promise<void> {
+  // the url is the spawned server's own address — pin it to loopback so
+  // no externally-controlled endpoint is ever fetched
+  const docUrl = new URL('/doc', url);
+  if (docUrl.hostname !== '127.0.0.1' && docUrl.hostname !== 'localhost') {
+    throw new Error(`opencode serve on non-loopback host refused: ${docUrl.hostname}`);
+  }
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
-      const r = await fetch(`${url}/doc`);
+      const r = await fetch(docUrl);
       if (r.ok) {
         return;
       }
