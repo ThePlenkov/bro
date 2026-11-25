@@ -24,7 +24,7 @@ export function sizeOf(path: string): number {
 export function readTailSlice(
   path: string,
   from: number
-): { text: string; buf: Buffer; size: number } | undefined {
+): { buf: Buffer; size: number } | undefined {
   let fd: number;
   let size: number;
   try {
@@ -36,13 +36,31 @@ export function readTailSlice(
   try {
     const start = Math.min(Math.max(0, from), size);
     const len = size - start;
-    if (len === 0) return { text: '', buf: Buffer.alloc(0), size };
+    if (len === 0) return { buf: Buffer.alloc(0), size };
     const buf = Buffer.alloc(len);
     readSync(fd, buf, 0, len, start);
-    return { text: buf.toString('utf8'), buf, size };
+    return { buf, size };
   } finally {
     closeSync(fd);
   }
+}
+
+/** Read a slice and advance only through the caller's complete-byte
+ * boundary. The shared offset/truncation posture keeps live tail pumps
+ * from duplicating this bookkeeping in every consumer. */
+export function readTailPart(
+  path: string,
+  from: number,
+  complete: (buf: Buffer) => number
+): { buf: Buffer; size: number; end: number; offset: number } | undefined {
+  const slice = readTailSlice(path, from);
+  if (slice === undefined) return undefined;
+  const end = complete(slice.buf);
+  return {
+    ...slice,
+    end,
+    offset: end === 0 ? Math.min(from, slice.size) : from + end,
+  };
 }
 
 /** Every complete JSONL row in a slice — blank lines skip, a torn

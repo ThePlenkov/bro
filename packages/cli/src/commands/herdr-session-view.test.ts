@@ -360,6 +360,19 @@ function fixture(): {
 }
 
 describe('runSessionView --once', () => {
+  test('flushes an unterminated final log line when the worker is blocked', async () => {
+    const f = fixture();
+    const logPath = f.write('agent.log', 'session complete');
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(
+      statePath,
+      doc({ worktree: f.worktree, log: logPath, status: 'done', led: { state: 'blocked' } })
+    );
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    assert.match(f.stdout(), /session complete/);
+  });
+
   test('a log-only state tails the native log and reports log tail', async () => {
     const f = fixture();
     const logPath = f.write('agent.log', 'session ses_1 (cwd /x)\nmodel m\nhello-world\n');
