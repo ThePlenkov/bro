@@ -14,7 +14,7 @@ import {
   fmtWhen,
   PERMISSION_FALLBACK,
   parseArchiveRows,
-  readTailSlice,
+  readTailPart,
   rowVerdict,
   tailArchive,
   tailWindow,
@@ -77,6 +77,8 @@ interface Attach extends AttachState {
   /** The log tail's path + read offset — appends render from here. */
   logPath?: string;
   logOffset?: number;
+  /** Bytes after the last newline, held until the log completes. */
+  logRemainder?: string;
   /** The events tail's path + read offset — archive rows parse from
    *  here; shares the watcher/log pump plumbing. */
   eventsPath?: string;
@@ -161,18 +163,28 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
 
   /** One pump of the log tail — render whatever appended since the
    *  last read. Shared by the fs.watch handler and the refresh poll. */
-  const pumpLog = (a: Attach): void => {
+  const pumpLog = (a: Attach, complete = false): void => {
     if (a.logPath === undefined) return;
-    const more = readTailSlice(a.logPath, a.logOffset ?? 0);
+    const more = readTailPart(a.logPath, a.logOffset ?? 0, utf8End);
     if (more === undefined) return;
-    const end = utf8End(more.buf);
-    if (end === 0) {
-      a.logOffset = Math.min(a.logOffset ?? 0, more.size); // truncated — resync to the new EOF
+    if (more.end === 0) {
+      a.logOffset = more.offset;
+      if (complete && a.logRemainder !== undefined && a.logRemainder !== '') {
+        out(plain(a.logRemainder));
+        a.logRemainder = '';
+      }
       return;
     }
-    a.logOffset = (a.logOffset ?? 0) + end;
-    for (const line of more.buf.subarray(0, end).toString('utf8').split('\n')) {
+    a.logOffset = more.offset;
+    const text = `${a.logRemainder ?? ''}${more.buf.subarray(0, more.end).toString('utf8')}`;
+    const lines = text.split('\n');
+    a.logRemainder = lines.pop() ?? '';
+    for (const line of lines) {
       if (line !== '') out(plain(line));
+    }
+    if (complete && a.logRemainder !== '') {
+      out(plain(a.logRemainder));
+      a.logRemainder = '';
     }
   };
 
@@ -187,7 +199,9 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       return;
     }
     a.logOffset = window.offset;
-    for (const line of window.text.split('\n')) {
+    const lines = window.text.split('\n');
+    a.logRemainder = lines.pop() ?? '';
+    for (const line of lines) {
       if (line !== '') out(plain(line));
     }
     try {
@@ -256,21 +270,20 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
    *  next complete read picks it up. */
   const pumpEvents = (a: Attach, t: SessionTarget): void => {
     if (a.eventsPath === undefined) return;
-    const more = readTailSlice(a.eventsPath, a.eventsOffset ?? 0);
+    const more = readTailPart(a.eventsPath, a.eventsOffset ?? 0, completePart);
     if (more === undefined) return;
-    const end = completePart(more.buf);
-    if (end === 0) {
+    if (more.end === 0) {
       // nothing complete to consume — either a torn tail row still
       // being written (offset already sits on a line boundary, the
       // min is a no-op) or the archive self-capped under us and the
       // saved offset now points past the new EOF: resync so the rows
       // appended after the cap reach the pane instead of being
       // skipped forever (spec bro-9ti7h; pumpLog's own posture)
-      a.eventsOffset = Math.min(a.eventsOffset ?? 0, more.size);
+      a.eventsOffset = more.offset;
       return;
     }
-    a.eventsOffset = (a.eventsOffset ?? 0) + end;
-    for (const row of parseArchiveRows(more.buf.subarray(0, end).toString('utf8'))) {
+    a.eventsOffset = more.offset;
+    for (const row of parseArchiveRows(more.buf.subarray(0, more.end).toString('utf8'))) {
       eventRow(a, row, t);
     }
   };
@@ -577,6 +590,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     foldStatus(t);
     const key = targetKey(t);
     if (cur === undefined || key !== cur.key) {
+      if (cur?.mode === 'log') pumpLog(cur, true);
       if (t !== undefined) {
         arm(t);
       } else {
@@ -588,6 +602,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     // tailed streams can grow without a state-file move — pump every poll
     if (cur !== undefined && t !== undefined) {
       pumpLog(cur);
+      if (cur.mode === 'log' && t.workerLed.state === 'blocked') pumpLog(cur, true);
       pumpEvents(cur, t);
     }
   };
@@ -602,6 +617,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (cur !== undefined) {
       await Promise.race([cur.handshake, sleep(20_000)]);
       await sleep(300);
+      if (cur.mode === 'log') pumpLog(cur, true);
     }
     detach();
     renderer?.end();

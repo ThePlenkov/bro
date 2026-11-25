@@ -6,6 +6,7 @@ import { describe, test } from 'node:test';
 import { eventsFile, logStem, promptFile, proxyEventsFile } from './paths.ts';
 import {
   parseArchiveRows,
+  readTailPart,
   readTailSlice,
   TAIL_BYTES,
   tailArchive,
@@ -30,11 +31,28 @@ describe('readTailSlice', () => {
   test('reads from the offset through EOF', () => {
     const path = file('a.events.jsonl', '0123456789');
     const s = readTailSlice(path, 4);
-    assert.equal(s?.text, '456789');
+    assert.equal('text' in (s ?? {}), false);
     assert.equal(s?.size, 10);
     assert.equal(s?.buf.toString('utf8'), '456789');
-    assert.equal(readTailSlice(path, 50)?.text, '');
+    assert.equal(readTailSlice(path, 50)?.buf.length, 0);
     assert.equal(readTailSlice(join(tmpdir(), 'no-such', 'f'), 0), undefined);
+  });
+});
+
+describe('readTailPart', () => {
+  test('keeps the offset at a partial boundary until it completes', () => {
+    const path = file('partial.log', 'first\nlast');
+    const first = readTailPart(path, 6, complete => complete.lastIndexOf(0x0a) + 1);
+    assert.equal(first?.end, 0);
+    assert.equal(first?.offset, 6);
+    writeFileSync(path, 'first\nlast\n');
+    const second = readTailPart(
+      path,
+      first?.offset ?? 0,
+      complete => complete.lastIndexOf(0x0a) + 1
+    );
+    assert.equal(second?.end, 5);
+    assert.equal(second?.offset, 11);
   });
 });
 
@@ -60,7 +78,7 @@ describe('tailWindow', () => {
     // resume from the returned offset — a byte position — lands on a
     // real boundary and re-reads nothing
     const s = readTailSlice(path, w?.offset ?? -1);
-    assert.equal(s?.text, '');
+    assert.equal(s?.buf.length, 0);
     // and a whole-file window's offset is exactly the byte length
     const whole = tailWindow(path);
     assert.equal(whole?.offset, Buffer.byteLength('✓ one\n→ two\n✗ three\n'));
