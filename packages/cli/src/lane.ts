@@ -284,9 +284,10 @@ function freezeLane(
   },
   file: PauseFile,
   now: number
-): Array<{ pid: number; pidStart?: string }> {
+): Array<{ pid: number; pidStart?: string; budgetKind?: string; agentId: string }> {
   const { walled, env, budgeted, armed, scope } = lane;
-  const stopped: Array<{ pid: number; pidStart?: string }> = [];
+  const stopped: Array<{ pid: number; pidStart?: string; budgetKind?: string; agentId: string }> =
+    [];
   for (const [molStep, entry] of Object.entries(registry)) {
     const pid = freezablePid(entry, walled, env, budgeted);
     if (pid === undefined || file.paused[String(pid)] !== undefined) {
@@ -319,7 +320,12 @@ function freezeLane(
           // ledger hiccups must not cost the freeze
         }
       }
-      stopped.push({ pid, pidStart });
+      stopped.push({
+        pid,
+        pidStart,
+        ...(budgetKind === undefined ? {} : { budgetKind }),
+        agentId: entry.agentId,
+      });
     }
   }
   return stopped;
@@ -505,6 +511,16 @@ function reconcile(
         // no pause record covers
         if (pidAlive(g.pid, g.pidStart) || groupMemberAlive(g.pid, g.pidStart)) {
           sig(g.pid, 'SIGCONT');
+          // the freeze closed this group's budget segment — a rollback
+          // that only SIGCONTs leaves it paused forever and the spend
+          // stops decaying (same discipline as the thaw path)
+          if (g.budgetKind !== undefined) {
+            try {
+              laneBudgetResume(g.budgetKind, laneBudgetKey(scope, g.agentId), { now });
+            } catch {
+              // ledger hiccups must not cost the rollback
+            }
+          }
         }
       }
       throw error;
