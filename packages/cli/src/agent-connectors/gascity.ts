@@ -75,7 +75,7 @@ function createGcSession(input: { molStep: string; city: string }): string {
     ],
     timeoutMs: 120_000,
   });
-  if (created.code !== 0) throw new Error(`gc session new ${molStep} — ${gcErr(created)}`);
+  if (created.code !== 0) throw new Error(`gc session new ${input.molStep} — ${gcErr(created)}`);
   let value: { session_id?: string; ok?: boolean };
   try {
     value = JSON.parse(created.out) as { session_id?: string; ok?: boolean };
