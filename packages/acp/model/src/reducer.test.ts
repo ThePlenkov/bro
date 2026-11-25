@@ -6,8 +6,8 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createSession, reduce } from './index.ts';
 import type { ModelEvent } from './index.ts';
+import { createSession, reduce } from './index.ts';
 
 /** Wire-shape builders — the events are untyped archive rows, so each
  *  literal narrows through the cast once, here. */
@@ -16,6 +16,8 @@ const upd = (update: Record<string, unknown>, at: number): ModelEvent =>
   ({ type: 'session_update', update, at }) as ModelEvent;
 const chunk = (text: string, at: number): ModelEvent =>
   upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }, at);
+const messageChunk = (messageId: string, text: string, at: number): ModelEvent =>
+  upd({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text } }, at);
 
 test('an archive-sourced turn marks its items origin "other"', () => {
   let s = createSession();
@@ -56,6 +58,20 @@ test('a fresh turn_started seals the dropped turn — an id-less chunk never joi
     .filter(i => i.kind === 'agent_message')
     .map(i => (i.kind === 'agent_message' ? i.text : ''));
   assert.deepEqual(texts, ['hi', 'there']);
+});
+
+test('reopening an earlier message seals the text item that was live', () => {
+  let s = createSession();
+  s = reduce(s, started());
+  s = reduce(s, messageChunk('first', 'one', 1100));
+  s = reduce(s, messageChunk('second', 'two', 1200));
+  s = reduce(s, messageChunk('first', ' again', 1300));
+
+  const first = s.items.get('agent_message:first');
+  const second = s.items.get('agent_message:second');
+  assert.equal(first?.kind === 'agent_message' ? first.text : '', 'one again');
+  assert.equal(first?.status, 'live');
+  assert.equal(second?.status, 'final');
 });
 
 test('a sealed turn abandons its tool call — live status reads failed, never glows live', () => {
