@@ -21,6 +21,19 @@ const RUN_TIMEOUT_MS = 6e4;
 *  re-probing the npx rung on every keystroke would be worse than
 *  the outage. */
 const RESOLVE_RETRY_MS = 6e4;
+const HOOKS_COMMAND = "hooks";
+const STATUS_COMMAND$1 = "status";
+const JSON_FLAG$1 = "--json";
+const NPX_COMMAND = "npx";
+const NPX_YES_FLAG = "-y";
+const NPX_OFFLINE_FLAG = "--prefer-offline";
+const BRO_MARKERS = [
+	"bro.config.ts",
+	"bro.config.json",
+	"bro.config.local.ts",
+	"bro.config.local.json",
+	".beads"
+];
 /** The curated command family — first-class slash aliases for bro's
 *  workflow verbs. `verb` is the CLI argv head; `name` is the slash
 *  name, renamed to `bro:<name>` when the host owns it natively
@@ -191,17 +204,17 @@ async function pathResolved() {
 }
 async function npxResolved(opts) {
 	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
-	if (specs.length === 0 || !await exitsZero("npx", ["--version"])) return null;
-	for (const spec of specs) if (await exitsZero("npx", [
-		"-y",
-		"--prefer-offline",
+	if (specs.length === 0 || !await exitsZero(NPX_COMMAND, ["--version"])) return null;
+	for (const spec of specs) if (await exitsZero(NPX_COMMAND, [
+		NPX_YES_FLAG,
+		NPX_OFFLINE_FLAG,
 		spec,
-		"hooks"
+		HOOKS_COMMAND
 	])) return {
-		cmd: "npx",
+		cmd: NPX_COMMAND,
 		args: [
-			"-y",
-			"--prefer-offline",
+			NPX_YES_FLAG,
+			NPX_OFFLINE_FLAG,
 			spec
 		]
 	};
@@ -255,7 +268,7 @@ async function callHookDetailed(command, call) {
 	try {
 		child = spawn(command.cmd, [
 			...command.args,
-			"hooks",
+			HOOKS_COMMAND,
 			event
 		], {
 			cwd,
@@ -367,16 +380,9 @@ function contextOf(control) {
 * keep the list in sync with CONFIG_LAYER_FILES.
 */
 function broEnabled(startDir) {
-	const markers = [
-		"bro.config.ts",
-		"bro.config.json",
-		"bro.config.local.ts",
-		"bro.config.local.json",
-		".beads"
-	];
 	let dir = startDir;
 	for (;;) {
-		if (markers.some((m) => existsSync(join(dir, m)))) return true;
+		if (BRO_MARKERS.some((marker) => existsSync(join(dir, marker)))) return true;
 		const parent = dirname(dir);
 		if (parent === dir) return false;
 		dir = parent;
@@ -390,8 +396,8 @@ async function statusJson(command, cwd) {
 	try {
 		child = spawn(command.cmd, [
 			...command.args,
-			"status",
-			"--json"
+			STATUS_COMMAND$1,
+			JSON_FLAG$1
 		], {
 			cwd,
 			stdio: [
@@ -502,6 +508,15 @@ function createCommandResolver(opts = {}) {
 //#region packages/agent-plugins/adapter-core/src/host.ts
 /** The board's widget key — one slot, owned by bro. */
 const BOARD_KEY = "bro";
+const CONTEXT_MESSAGE_TYPE = "bro-context";
+const TEXT_CONTENT_TYPE = "text";
+const TUI_MODE = "tui";
+const SESSION_START_EVENT = "session-start";
+const POST_COMPACTION_EVENT = "post-compaction";
+const PRE_COMPACT_EVENT = "pre-compact";
+const PROMPT_SUBMIT_EVENT = "prompt-submit";
+const POST_TOOL_EVENT = "post-tool";
+const STOP_EVENT = "stop";
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -536,7 +551,7 @@ function sharedBinding(host) {
 			return ctx.cwd;
 		},
 		canPaint(ctx) {
-			return ctx.mode === "tui";
+			return ctx.mode === TUI_MODE;
 		},
 		paint: host.paint,
 		clear(ctx) {
@@ -554,7 +569,7 @@ function sharedBinding(host) {
 		},
 		inject(text) {
 			return { message: {
-				customType: "bro-context",
+				customType: CONTEXT_MESSAGE_TYPE,
 				content: text,
 				display: false
 			} };
@@ -563,7 +578,7 @@ function sharedBinding(host) {
 			const result = event;
 			const content = Array.isArray(result.content) ? [...result.content] : [];
 			content.push({
-				type: "text",
+				type: TEXT_CONTENT_TYPE,
 				text
 			});
 			return { content };
@@ -696,7 +711,7 @@ function createBroDriver(host, api) {
 		hydrationRetried = sessionId;
 		hydration = {
 			sessionId,
-			promise: probe("session-start", { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf)
+			promise: probe(SESSION_START_EVENT, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf)
 		};
 	};
 	/** Register one handler if the host has that event. */
@@ -706,17 +721,17 @@ function createBroDriver(host, api) {
 	};
 	bind(host.events.sessionStart, (_event, ctx) => {
 		gatedSession = void 0;
-		hydrate(ctx, "session-start");
+		hydrate(ctx, SESSION_START_EVENT);
 		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionCompact, (_event, ctx) => {
-		hydrate(ctx, "post-compaction");
+		hydrate(ctx, POST_COMPACTION_EVENT);
 		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionBeforeCompact, async (_event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const text = contextOf(await probe("pre-compact", { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS));
+		const text = contextOf(await probe(PRE_COMPACT_EVENT, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS));
 		if (text === "") return;
 		carry = {
 			sessionId,
@@ -734,7 +749,7 @@ function createBroDriver(host, api) {
 	bind(host.events.beforeAgentStart, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const nudge = probe("prompt-submit", {
+		const nudge = probe(PROMPT_SUBMIT_EVENT, {
 			session_id: sessionId,
 			prompt: host.promptOf(event)
 		}, cwd).then(contextOf);
@@ -749,7 +764,7 @@ function createBroDriver(host, api) {
 	bind(host.events.toolResult, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const tool = event;
-		const text = contextOf(await probe("post-tool", {
+		const text = contextOf(await probe(POST_TOOL_EVENT, {
 			session_id: host.sessionId(ctx),
 			tool_name: tool.toolName ?? "",
 			tool_input: tool.input ?? {},
@@ -769,7 +784,7 @@ function createBroDriver(host, api) {
 	};
 	const stopGate = async (event, ctx, sessionId) => {
 		if (host.stopAborted?.(event) === true) return;
-		const control = await probe("stop", {
+		const control = await probe(STOP_EVENT, {
 			session_id: sessionId,
 			stop_hook_active: alreadyGated(event, sessionId)
 		}, host.cwd(ctx));
@@ -1047,6 +1062,12 @@ function installModeBridges(pi, source) {
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = "@broject/bro@0.3.0";
+const JSON_FLAG = "--json";
+const PREWALK_KIND = "prewalk";
+const FLEET_COMMAND = "fleet";
+const STATUS_COMMAND = "status";
+const DEBT_COMMAND = "debt";
+const NEXT_COMMAND = "next";
 /**
 * The omp binding: the host's own shape, nothing else. Every
 * behavioral decision lives in the shared driver, so this file is the
@@ -1141,18 +1162,18 @@ function broExtension(pi) {
 	installModeBridges(pi, {
 		board: () => driver.board,
 		async modeContext(kind, cwd) {
-			const args = kind === "prewalk" ? [
-				"fleet",
-				"status",
-				"--json"
+			const args = kind === PREWALK_KIND ? [
+				FLEET_COMMAND,
+				STATUS_COMMAND,
+				JSON_FLAG
 			] : [
-				"debt",
-				"next",
-				"--json"
+				DEBT_COMMAND,
+				NEXT_COMMAND,
+				JSON_FLAG
 			];
 			const result = await driver.run(args, cwd);
 			if (result.code !== 0 || result.stdout.trim() === "") return null;
-			return `bro ${kind === "prewalk" ? "provider routing" : "review debt"} (read-only):\n${result.stdout.trim()}`;
+			return `bro ${kind === PREWALK_KIND ? "provider routing" : "review debt"} (read-only):\n${result.stdout.trim()}`;
 		}
 	});
 }

@@ -19,6 +19,10 @@ const RUN_TIMEOUT_MS = 6e4;
 *  re-probing the npx rung on every keystroke would be worse than
 *  the outage. */
 const RESOLVE_RETRY_MS = 6e4;
+const HOOKS_COMMAND = "hooks";
+const NPX_COMMAND = "npx";
+const NPX_YES_FLAG = "-y";
+const NPX_OFFLINE_FLAG = "--prefer-offline";
 /**
 * `node` on PATH, not process.execPath — a host may ship as a compiled
 * binary whose execPath IS that binary, so running it with our own
@@ -141,17 +145,17 @@ async function pathResolved() {
 }
 async function npxResolved(opts) {
 	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
-	if (specs.length === 0 || !await exitsZero("npx", ["--version"])) return null;
-	for (const spec of specs) if (await exitsZero("npx", [
-		"-y",
-		"--prefer-offline",
+	if (specs.length === 0 || !await exitsZero(NPX_COMMAND, ["--version"])) return null;
+	for (const spec of specs) if (await exitsZero(NPX_COMMAND, [
+		NPX_YES_FLAG,
+		NPX_OFFLINE_FLAG,
 		spec,
-		"hooks"
+		HOOKS_COMMAND
 	])) return {
-		cmd: "npx",
+		cmd: NPX_COMMAND,
 		args: [
-			"-y",
-			"--prefer-offline",
+			NPX_YES_FLAG,
+			NPX_OFFLINE_FLAG,
 			spec
 		]
 	};
@@ -213,7 +217,7 @@ async function callHookDetailed(command, call) {
 	try {
 		child = spawn(command.cmd, [
 			...command.args,
-			"hooks",
+			HOOKS_COMMAND,
 			event
 		], {
 			cwd,
@@ -350,14 +354,7 @@ function runCommand(command, args, options) {
 	});
 }
 function runCollect(child, options, resolve) {
-	let settled = false;
-	const settle = (result) => {
-		if (!settled) {
-			settled = true;
-			resolve(result);
-		}
-	};
-	const cap = (buf, chunk) => buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+	const settle = once(resolve);
 	let stdout = "";
 	let stderr = "";
 	const timer = killAfter(child, options.timeoutMs, () => settle({
@@ -366,17 +363,13 @@ function runCollect(child, options, resolve) {
 		stderr,
 		error: `timed out after ${options.timeoutMs}ms`
 	}));
-	wireCollect(child, options, (finish) => {
-		clearTimeout(timer);
-		settle(finish);
-	});
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
-		stdout = cap(stdout, chunk);
+		stdout = appendOutput(stdout, chunk);
 	});
 	child.stderr?.setEncoding("utf8");
 	child.stderr?.on("data", (chunk) => {
-		stderr = cap(stderr, chunk);
+		stderr = appendOutput(stderr, chunk);
 	});
 	child.on("error", (error) => {
 		clearTimeout(timer);
@@ -398,6 +391,18 @@ function runCollect(child, options, resolve) {
 	});
 	child.stdin?.on("error", () => {});
 	child.stdin?.end(options.input ?? "");
+}
+function once(resolve) {
+	let settled = false;
+	return (result) => {
+		if (settled) return;
+		settled = true;
+		resolve(result);
+	};
+}
+function appendOutput(buffer, chunk) {
+	const remaining = MAX_OUTPUT - buffer.length;
+	return remaining > 0 ? buffer + chunk.slice(0, remaining) : buffer;
 }
 /**
 * The lazy, retrying CLI resolver every adapter shares: resolution

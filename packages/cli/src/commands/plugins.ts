@@ -434,18 +434,24 @@ function surfaceContent(f: SurfaceFile): string | null {
 }
 
 function stateAt(surface: Surface, scope: PluginScope, reg: Registration | null): InstallState {
-  if (surface.kind === 'file') {
-    const path = surface.targets[scope];
-    if (!existsSync(path)) {
-      return 'absent';
-    }
-    if (surface.artifact === null) {
-      return 'present';
-    }
-    const current = readFileSync(path, 'utf8') === readFileSync(surface.artifact, 'utf8');
-    // a matching file with its manifest entry missing is "install me again"
-    return current && (reg === null || reg.registered) ? 'installed' : 'stale';
-  }
+  if (surface.kind === 'file') return fileStateAt(surface, scope, reg);
+  return bundleStateAt(surface, scope);
+}
+
+function fileStateAt(
+  surface: FileSurface,
+  scope: PluginScope,
+  reg: Registration | null
+): InstallState {
+  const path = surface.targets[scope];
+  if (!existsSync(path)) return 'absent';
+  if (surface.artifact === null) return 'present';
+  const current = readFileSync(path, 'utf8') === readFileSync(surface.artifact, 'utf8');
+  // a matching file with its manifest entry missing is "install me again"
+  return current && (reg === null || reg.registered) ? 'installed' : 'stale';
+}
+
+function bundleStateAt(surface: BundleSurface, scope: PluginScope): InstallState {
   const dir = surface.dirs[scope];
   if (!existsSync(dir)) {
     return 'absent';
@@ -640,8 +646,14 @@ function installSurface(
   owner: ClientSpec
 ): Outcome {
   return surface.kind === 'file'
-    ? installOne(ctx.name, scope, surface, owner, ctx.opts)
-    : installBundle(ctx.name, scope, surface.files, surface.dirs[scope], ctx.opts);
+    ? installOne({ name: ctx.name, scope, surface, client: owner, opts: ctx.opts })
+    : installBundle({
+        name: ctx.name,
+        scope,
+        files: surface.files,
+        dir: surface.dirs[scope],
+        opts: ctx.opts,
+      });
 }
 
 /** Sentinel gate: the path exists AND verifies as a bro adapter —
@@ -791,41 +803,36 @@ function crossScopeBroCopy(surfaces: Surface[], scopes: PluginScope[]): string |
   return null;
 }
 
-function installOne(
-  name: string,
-  scope: PluginScope,
-  surface: { kind: 'file'; artifact: string | null; targets: Record<PluginScope, string> },
-  client: ClientSpec,
-  opts: MutateOpts
-): Outcome {
-  const { artifact, targets } = surface;
-  if (artifact === null) {
-    throw new CommandError(
-      `plugins install: cannot resolve the ${name} adapter module`,
-      EXIT.error
-    );
-  }
-  const content = readFileSync(artifact, 'utf8');
-  const path = targets[scope];
-  // registration parses the manifest — a malformed one exits here,
-  // before the module file is touched
-  const reg = client.registration?.(scope, path, opts.env) ?? null;
+type FileSurface = Extract<Surface, { kind: 'file' }>;
+type BundleSurface = Extract<Surface, { kind: 'bundle' }>;
+
+interface FileMutation {
+  name: string;
+  scope: PluginScope;
+  surface: FileSurface;
+  client: ClientSpec;
+  opts: MutateOpts;
+}
+
+interface BundleMutation {
+  name: string;
+  scope: PluginScope;
+  files: SurfaceFile[];
+  dir: string;
+  opts: MutateOpts;
+}
+
+function installOne({ name, scope, surface, client, opts }: FileMutation): Outcome {
+  const { path, content, reg } = fileInstallInputs({ name, scope, surface, client, opts });
   const needsRegistration = reg !== null && !reg.registered;
   const prior = existsSync(path) ? readFileSync(path, 'utf8') : null;
-  if (prior === content && !needsRegistration) {
-    return { client: name, scope, action: 'current', path };
-  }
+  const current = currentInstall({ name, scope, path, prior, content, needsRegistration });
+  if (current !== null) return current;
   // a file already holding the slot that carries no bro sentinel is a
   // foreign plugin under our name — clobbering it needs --force. A
   // sentinel-bearing difference is a shipped version → plain update.
-  if (prior !== null && prior !== content && !isBroAdapter(prior) && !opts.force) {
-    return {
-      client: name,
-      scope,
-      action: 'refused',
-      path,
-      note: 'a foreign file holds this slot — pass --force to overwrite',
-    };
+  if (isForeignFile(prior, content, opts.force)) {
+    return refusedOutcome(name, scope, path);
   }
   if (opts.dryRun) {
     return {
@@ -850,42 +857,53 @@ function installOne(
   };
 }
 
-/** A bundle surface — a directory of modules installed as one unit. The
- *  outcome path is the directory; a refusal names the file that holds
- *  it. */
-function installBundle(
-  name: string,
-  scope: PluginScope,
-  files: SurfaceFile[],
-  dir: string,
-  opts: MutateOpts
-): Outcome {
-  const contents = files
-    .map(f => ({ name: f.name, content: surfaceContent(f) }))
-    .filter((c): c is { name: string; content: string } => c.content !== null);
-  if (contents.length === 0) {
+function fileInstallInputs({ name, scope, surface, client, opts }: FileMutation): {
+  path: string;
+  content: string;
+  reg: Registration | null;
+} {
+  if (surface.artifact === null) {
     throw new CommandError(
       `plugins install: cannot resolve the ${name} adapter module`,
       EXIT.error
     );
   }
+  const path = surface.targets[scope];
+  // registration parses the manifest — a malformed one exits here,
+  // before the module file is touched
+  return {
+    path,
+    content: readFileSync(surface.artifact, 'utf8'),
+    reg: client.registration?.(scope, path, opts.env) ?? null,
+  };
+}
+
+function currentInstall(input: {
+  name: string;
+  scope: PluginScope;
+  path: string;
+  prior: string | null;
+  content: string;
+  needsRegistration: boolean;
+}): Outcome | null {
+  return input.prior === input.content && !input.needsRegistration
+    ? { client: input.name, scope: input.scope, action: 'current', path: input.path }
+    : null;
+}
+
+/** A bundle surface — a directory of modules installed as one unit. The
+ *  outcome path is the directory; a refusal names the file that holds
+ *  it. */
+function installBundle({ name, scope, files, dir, opts }: BundleMutation): Outcome {
+  const contents = files
+    .map(f => ({ name: f.name, content: surfaceContent(f) }))
+    .filter((c): c is { name: string; content: string } => c.content !== null);
+  ensureBundleContents(name, contents);
   // a file already holding the slot that carries no bro sentinel is a
   // foreign plugin under our name — clobbering it needs --force
-  for (const c of contents) {
-    const path = join(dir, c.name);
-    if (!existsSync(path)) {
-      continue;
-    }
-    const prior = readFileSync(path, 'utf8');
-    if (prior !== c.content && !isBroAdapter(prior) && !opts.force) {
-      return {
-        client: name,
-        scope,
-        action: 'refused',
-        path,
-        note: 'a foreign file holds this slot — pass --force to overwrite',
-      };
-    }
+  const foreign = contents.find(c => isForeignBundleFile(dir, c, opts.force));
+  if (foreign !== undefined) {
+    return refusedOutcome(name, scope, join(dir, foreign.name));
   }
   const existed = existsSync(dir);
   if (opts.dryRun) {
@@ -897,20 +915,61 @@ function installBundle(
     };
   }
   let changed = !existed;
-  for (const c of contents) {
-    const path = join(dir, c.name);
-    if (existsSync(path) && readFileSync(path, 'utf8') === c.content) {
-      continue;
-    }
-    atomicWrite(path, c.content);
-    changed = true;
-  }
+  changed = writeBundleContents(dir, contents, changed);
   return {
     client: name,
     scope,
     action: changed ? (existed ? 'updated' : 'installed') : 'current',
     path: dir,
   };
+}
+
+function ensureBundleContents(name: string, contents: { name: string; content: string }[]): void {
+  if (contents.length === 0) {
+    throw new CommandError(
+      `plugins install: cannot resolve the ${name} adapter module`,
+      EXIT.error
+    );
+  }
+}
+
+function isForeignFile(prior: string | null, content: string, force: boolean): boolean {
+  return prior !== null && prior !== content && !isBroAdapter(prior) && !force;
+}
+
+function refusedOutcome(name: string, scope: PluginScope, path: string): Outcome {
+  return {
+    client: name,
+    scope,
+    action: 'refused',
+    path,
+    note: 'a foreign file holds this slot — pass --force to overwrite',
+  };
+}
+
+function isForeignBundleFile(
+  dir: string,
+  file: { name: string; content: string },
+  force: boolean
+): boolean {
+  const path = join(dir, file.name);
+  if (!existsSync(path)) return false;
+  const prior = readFileSync(path, 'utf8');
+  return isForeignFile(prior, file.content, force);
+}
+
+function writeBundleContents(
+  dir: string,
+  contents: { name: string; content: string }[],
+  changed: boolean
+): boolean {
+  for (const c of contents) {
+    const path = join(dir, c.name);
+    if (existsSync(path) && readFileSync(path, 'utf8') === c.content) continue;
+    atomicWrite(path, c.content);
+    changed = true;
+  }
+  return changed;
 }
 
 /** A loose file from an earlier layout. A foreign file is left alone —
@@ -943,8 +1002,8 @@ export function uninstallClient(name: string, scopes: PluginScope[], opts: Mutat
       const owner = idx === 0 ? client : { ...client, registration: undefined };
       outcomes.push(
         surface.kind === 'file'
-          ? uninstallOne(name, scope, surface, owner, opts)
-          : uninstallBundle(name, scope, surface.files, surface.dirs[scope], opts)
+          ? uninstallOne({ name, scope, surface, client: owner, opts })
+          : uninstallBundle({ name, scope, files: surface.files, dir: surface.dirs[scope], opts })
       );
     }
     for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
@@ -957,18 +1016,12 @@ export function uninstallClient(name: string, scopes: PluginScope[], opts: Mutat
   return outcomes;
 }
 
-function uninstallOne(
-  name: string,
-  scope: PluginScope,
-  surface: { kind: 'file'; artifact: string | null; targets: Record<PluginScope, string> },
-  client: ClientSpec,
-  opts: MutateOpts
-): Outcome {
+function uninstallOne({ name, scope, surface, client, opts }: FileMutation): Outcome {
   const path = surface.targets[scope];
   const clean = surfaceBytes(surface.artifact);
   const reg = client.registration?.(scope, path, opts.env) ?? null;
   if (!existsSync(path)) {
-    return absentOutcome(name, scope, path, reg, opts.dryRun);
+    return absentOutcome({ name, scope, path, reg, dryRun: opts.dryRun });
   }
   const wasRegistered = reg?.registered ?? false;
   const prior = readFileSync(path, 'utf8');
@@ -977,17 +1030,8 @@ function uninstallOne(
   // shape, and deletion is irreversible, so it refuses without --force
   // (sentinel alone only suffices when no artifact resolves to compare)
   const ours = clean === null ? isBroAdapter(prior) : prior === clean;
-  if (!opts.force && !ours) {
-    return {
-      client: name,
-      scope,
-      action: 'refused',
-      path,
-      note: isBroAdapter(prior)
-        ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
-        : 'not a bro adapter — pass --force to remove',
-    };
-  }
+  const refusal = removalRefusal({ name, scope, path, prior, force: opts.force, ours });
+  if (refusal !== null) return refusal;
   if (opts.dryRun) {
     return { client: name, scope, action: 'would-remove', path };
   }
@@ -1007,50 +1051,72 @@ function uninstallOne(
 /** A bundle surface — every module of the directory must be ours before
  *  the directory goes. Files we don't know (a user's own module beside
  *  ours) stay; the directory itself goes only when it is empty. */
-function uninstallBundle(
-  name: string,
-  scope: PluginScope,
-  files: SurfaceFile[],
-  dir: string,
-  opts: MutateOpts
-): Outcome {
+function uninstallBundle({ name, scope, files, dir, opts }: BundleMutation): Outcome {
   if (!existsSync(dir)) {
     return { client: name, scope, action: 'absent', path: dir };
   }
-  for (const f of files) {
-    const path = join(dir, f.name);
-    if (!existsSync(path)) {
-      continue;
-    }
-    const prior = readFileSync(path, 'utf8');
-    const clean = surfaceContent(f);
-    const ours = clean === null ? isBroAdapter(prior) : prior === clean;
-    if (!opts.force && !ours) {
-      return {
-        client: name,
-        scope,
-        action: 'refused',
-        path,
-        note: isBroAdapter(prior)
-          ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
-          : 'not a bro adapter — pass --force to remove',
-      };
-    }
+  const foreign = files.find(file => foreignRemoval(dir, file, opts.force));
+  if (foreign !== undefined) {
+    return refusedRemoval(
+      name,
+      scope,
+      join(dir, foreign.name),
+      readFileSync(join(dir, foreign.name), 'utf8')
+    );
   }
   if (opts.dryRun) {
     return { client: name, scope, action: 'would-remove', path: dir };
   }
-  for (const f of files) {
-    const path = join(dir, f.name);
-    if (existsSync(path)) {
-      rmSync(path);
-    }
+  removeBundleContents(dir, files);
+  pruneBundleDir(dir, files);
+  return { client: name, scope, action: 'removed', path: dir };
+}
+
+function removalRefusal(input: {
+  name: string;
+  scope: PluginScope;
+  path: string;
+  prior: string;
+  force: boolean;
+  ours: boolean;
+}): Outcome | null {
+  return !input.force && !input.ours
+    ? refusedRemoval(input.name, input.scope, input.path, input.prior)
+    : null;
+}
+
+function refusedRemoval(name: string, scope: PluginScope, path: string, prior: string): Outcome {
+  return {
+    client: name,
+    scope,
+    action: 'refused',
+    path,
+    note: isBroAdapter(prior)
+      ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
+      : 'not a bro adapter — pass --force to remove',
+  };
+}
+
+function foreignRemoval(dir: string, file: SurfaceFile, force: boolean): boolean {
+  const path = join(dir, file.name);
+  if (!existsSync(path)) return false;
+  const prior = readFileSync(path, 'utf8');
+  const clean = surfaceContent(file);
+  const ours = clean === null ? isBroAdapter(prior) : prior === clean;
+  return !force && !ours;
+}
+
+function removeBundleContents(dir: string, files: SurfaceFile[]): void {
+  for (const file of files) {
+    const path = join(dir, file.name);
+    if (existsSync(path)) rmSync(path);
   }
-  // nested bundle members (skills/<name>/…) leave empty dirs behind —
-  // rmdir deepest-first so a foreign file keeps its directory alive
+}
+
+function pruneBundleDir(dir: string, files: SurfaceFile[]): void {
   const dirs = new Set<string>();
-  for (const f of files) {
-    let rel = dirname(f.name);
+  for (const file of files) {
+    let rel = dirname(file.name);
     while (rel !== '.' && rel !== '') {
       dirs.add(rel);
       rel = dirname(rel);
@@ -1068,18 +1134,23 @@ function uninstallBundle(
   } catch {
     // not empty — something of the user's lives here, leave the directory
   }
-  return { client: name, scope, action: 'removed', path: dir };
 }
 
 /** The plugin file is already gone — an absent slot can still carry a
  *  dangling manifest entry, which gets swept here. */
-function absentOutcome(
-  name: string,
-  scope: PluginScope,
-  path: string,
-  reg: Registration | null,
-  dryRun: boolean
-): Outcome {
+function absentOutcome({
+  name,
+  scope,
+  path,
+  reg,
+  dryRun,
+}: {
+  name: string;
+  scope: PluginScope;
+  path: string;
+  reg: Registration | null;
+  dryRun: boolean;
+}): Outcome {
   const wasRegistered = reg?.registered ?? false;
   if (wasRegistered && !dryRun) {
     reg!.unregister();
@@ -1159,6 +1230,10 @@ export function runPluginsCommand(argv: string[], plugins: BroPlugin[]): void {
   if (hasHelpFlag(argv)) {
     printUsage(PLUGINS_USAGE, 0);
   }
+  runPluginSubcommand(sub, rest, plugins);
+}
+
+function runPluginSubcommand(sub: string | undefined, rest: string[], plugins: BroPlugin[]): void {
   switch (sub) {
     case undefined:
       printRegistry(plugins);
@@ -1179,22 +1254,25 @@ export function runPluginsCommand(argv: string[], plugins: BroPlugin[]): void {
     }
     case 'install':
     case 'uninstall': {
-      const name = clientArg(rest);
-      const opts: MutateOpts = {
-        dryRun: rest.includes('--dry-run'),
-        force: rest.includes('--force'),
-        cwd: process.cwd(),
-        env: process.env,
-      };
-      const mutate = sub === 'install' ? installClient : uninstallClient;
-      const outcomes = mutate(name, scopesOf(rest), opts);
-      printOutcomes(outcomes);
-      if (outcomes.some(o => o.action === 'refused')) {
-        throw new CommandError('plugins: refused', EXIT.error);
-      }
-      return;
+      return runMutation(sub, rest);
     }
     default:
       throw new CommandError(PLUGINS_USAGE, EXIT.usage);
+  }
+}
+
+function runMutation(sub: 'install' | 'uninstall', rest: string[]): void {
+  const name = clientArg(rest);
+  const opts: MutateOpts = {
+    dryRun: rest.includes('--dry-run'),
+    force: rest.includes('--force'),
+    cwd: process.cwd(),
+    env: process.env,
+  };
+  const mutate = sub === 'install' ? installClient : uninstallClient;
+  const outcomes = mutate(name, scopesOf(rest), opts);
+  printOutcomes(outcomes);
+  if (outcomes.some(o => o.action === 'refused')) {
+    throw new CommandError('plugins: refused', EXIT.error);
   }
 }

@@ -59,6 +59,15 @@ export { RESOLVE_RETRY_MS, RUN_TIMEOUT_MS };
 
 /** The board's widget key — one slot, owned by bro. */
 export const BOARD_KEY = 'bro';
+const CONTEXT_MESSAGE_TYPE = 'bro-context';
+const TEXT_CONTENT_TYPE = 'text';
+const TUI_MODE = 'tui';
+const SESSION_START_EVENT = 'session-start';
+const POST_COMPACTION_EVENT = 'post-compaction';
+const PRE_COMPACT_EVENT = 'pre-compact';
+const PROMPT_SUBMIT_EVENT = 'prompt-submit';
+const POST_TOOL_EVENT = 'post-tool';
+const STOP_EVENT = 'stop';
 
 /** The context shape this API lineage shares.
  *
@@ -144,7 +153,7 @@ export function sharedBinding<Ctx extends BroContext>(
       return ctx.cwd;
     },
     canPaint(ctx) {
-      return ctx.mode === 'tui';
+      return ctx.mode === TUI_MODE;
     },
     paint: host.paint,
     clear(ctx) {
@@ -163,16 +172,16 @@ export function sharedBinding<Ctx extends BroContext>(
     inject(text) {
       return {
         message: {
-          customType: 'bro-context',
+          customType: CONTEXT_MESSAGE_TYPE,
           content: text,
           display: false,
         },
       };
     },
     appendToolResult(event, text) {
-      const result = event as { content?: Array<{ type: 'text'; text: string }> };
+      const result = event as { content?: Array<{ type: typeof TEXT_CONTENT_TYPE; text: string }> };
       const content = Array.isArray(result.content) ? [...result.content] : [];
-      content.push({ type: 'text', text });
+      content.push({ type: TEXT_CONTENT_TYPE, text });
       return { content };
     },
     npxPin: host.npxPin,
@@ -479,9 +488,12 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     hydrationRetried = sessionId;
     hydration = {
       sessionId,
-      promise: probe('session-start', { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(
-        contextOf
-      ),
+      promise: probe(
+        SESSION_START_EVENT,
+        { session_id: sessionId },
+        cwd,
+        REHYDRATION_TIMEOUT_MS
+      ).then(contextOf),
     };
   };
 
@@ -497,12 +509,12 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     // a fresh session starts with a fresh gate — the prior session's
     // refusal must not skip this one's exit gate
     gatedSession = undefined;
-    hydrate(ctx, 'session-start');
+    hydrate(ctx, SESSION_START_EVENT);
     void refreshBoard(ctx).catch(() => {});
   });
 
   bind(host.events.sessionCompact, (_event, ctx) => {
-    hydrate(ctx, 'post-compaction');
+    hydrate(ctx, POST_COMPACTION_EVENT);
     void refreshBoard(ctx).catch(() => {});
   });
 
@@ -513,7 +525,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
     const text = contextOf(
-      await probe('pre-compact', { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS)
+      await probe(PRE_COMPACT_EVENT, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS)
     );
     if (text === '') {
       return;
@@ -537,7 +549,9 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
     const prompt = host.promptOf(event);
-    const nudge = probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf);
+    const nudge = probe(PROMPT_SUBMIT_EVENT, { session_id: sessionId, prompt }, cwd).then(
+      contextOf
+    );
 
     const parts: string[] = [];
     const hydrationText = await consumeHydration(sessionId, cwd);
@@ -561,7 +575,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     const tool = event as { toolName?: string; input?: unknown; isError?: boolean };
     const text = contextOf(
       await probe(
-        'post-tool',
+        POST_TOOL_EVENT,
         {
           session_id: host.sessionId(ctx),
           tool_name: tool.toolName ?? '',
@@ -602,7 +616,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return undefined;
     }
     const control = await probe(
-      'stop',
+      STOP_EVENT,
       {
         session_id: sessionId,
         stop_hook_active: alreadyGated(event, sessionId),
