@@ -241,10 +241,14 @@ export const actConnector: Connector = {
             aspect: 'act',
             block:
               `${line} (${watchNote}) — ` +
-              'list with `bro act threads` — fix inline or defer to a debt bead ' +
-              '(reply + resolve); when fix_rounds exceeds the round cap ' +
-              '(act.maxRounds — tighter on docs-only PRs) only defer ' +
-              'counts; recheck `bro act status`',
+              'two policies, never one: review threads — fix inline or defer ' +
+              'to a debt bead (reply + resolve), and past the round cap ' +
+              '(act.maxRounds — tighter on docs-only PRs) only defer counts. ' +
+              'The cap governs THREADS ONLY: a failing check is never covered ' +
+              'by it and stays work until green — and never explain a red ' +
+              'check away without running the local oracle at least once ' +
+              '(cs check / Sonar public API / Codacy annotations via gh). ' +
+              'List with `bro act threads`; recheck `bro act status`',
             passive: `${line} (${watchNote}; current branch — this session did not touch it)`,
           },
         ];
