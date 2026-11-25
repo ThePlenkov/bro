@@ -489,15 +489,19 @@ export class HelpDoc {
    *  `<placeholder>` is a positional argument (`<repo-or-alias>`,
    *  `<member>`), never a subcommand. */
   private collectSlots(acc: Subs, usage: Usage): void {
-    const angled = ANGLED_SLOT.exec(usage.tail);
+    // match within the single usage line — usage.tail spans the rest
+    // of the help text and \s crosses newlines, so a tail-anchored hit
+    // can "confirm" a word from an unrelated text line below
+    // (bro-e0fnw)
+    const angled = ANGLED_SLOT.exec(usage.line);
     if (angled !== null && angled[1]!.includes('|')) {
       acc.addAlt(angled[1]!, true);
     }
-    const spaced = SPACED_SLOT.exec(usage.tail);
+    const spaced = SPACED_SLOT.exec(usage.line);
     if (spaced !== null) {
       acc.addAlt(spaced[1]!, true);
     }
-    const word = WORD_SLOT.exec(usage.tail);
+    const word = WORD_SLOT.exec(usage.line);
     if (word !== null) {
       acc.add(word[1]!, true);
     }
@@ -601,7 +605,7 @@ export function extractDocLines(file: string): DocLine[] {
     if (!inFence) {
       continue;
     }
-    const m = /^\s*(?:npx(?:\s+-y)?\s+@broject\/bro|bro)\s*(.*)$/.exec(line);
+    const m = /^\s*(?:npx(?:\s+-y)?\s+@broject\/bro(?:@[\w.-]+)?|bro)(?=\s|$)(.*)$/.exec(line);
     if (!m) {
       continue;
     }
