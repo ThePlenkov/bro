@@ -236,9 +236,25 @@ export interface AgentEntry {
   [k: string]: unknown;
 }
 
+function isAgentEntry(value: unknown): value is AgentEntry {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  const stringFields = ['agentId', 'backend', 'provider', 'worktree', 'log', 'spawnedAt'];
+  if (
+    !stringFields.every(field => entry[field] === undefined || typeof entry[field] === 'string')
+  ) {
+    return false;
+  }
+  if (typeof entry.worktree !== 'string' || typeof entry.log !== 'string') return false;
+  return entry.pid === undefined || (typeof entry.pid === 'number' && Number.isInteger(entry.pid));
+}
+
 export function agentsJson(repo: string): Record<string, AgentEntry> {
   const gd = gitCommonDir(repo);
-  return gd === null ? {} : kitAgentsJson(gd);
+  if (gd === null) return {};
+  const parsed: unknown = kitAgentsJson(gd);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  return Object.fromEntries(Object.entries(parsed).filter(([, entry]) => isAgentEntry(entry)));
 }
 
 /** Live `.work` marker detail lines — the session-armed occupancy plane.
