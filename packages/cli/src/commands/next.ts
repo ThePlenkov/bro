@@ -318,6 +318,11 @@ export function claimUpTo(
   // mid-claim would otherwise commit a claim the validation never saw
   // (bro-gyvfp). The lock is per-config-file, uncontended in practice,
   // and re-entrant so a claim inside an outer section cannot deadlock.
+  // nothing to claim — no validation, no lock: a read-only checkout
+  // must still answer 'idle' (the lock is a mkdir the fs may refuse)
+  if (queue.length === 0) {
+    return [];
+  }
   return withConfigGateLock(root, () => {
     gateClaimQueue(queue, dir, skipPolicy);
     const picked: ReadyBead[] = [];
