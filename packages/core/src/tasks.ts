@@ -23,6 +23,7 @@
  * mol/wisp (molecules), provenance (evidence), kv/docs, config.
  * Those keep calling bd() until they get doc types.
  */
+import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   bd,
@@ -44,6 +45,43 @@ import {
   type DoltBridge,
 } from './dolt-bridge.ts';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, gitTryAsync } from './git.ts';
+
+/** The `bd sync` probe budget — a hardcoded 120s wall turned the fsck
+ *  incident into a crash loop: the operator's 2G store needs longer,
+ *  and the caller-side env pin (BEADS_FSCK_TIMEOUT) only helps when the
+ *  probe outlives it (bro-lvj0j). BRO_BD_SYNC_TIMEOUT_MS overrides; the
+ *  floor scales with the on-disk store so a big replica never hits the
+ *  default wall — ~30s per 500MB over the first gigabyte. */
+export function bdSyncTimeoutMs(storeDir?: string): number {
+  const env = Number(process.env.BRO_BD_SYNC_TIMEOUT_MS);
+  if (Number.isFinite(env) && env > 0) {
+    return env;
+  }
+  let floor = 120_000;
+  if (storeDir !== undefined) {
+    try {
+      let bytes = 0;
+      const walk = (dir: string): void => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          const p = join(dir, e.name);
+          if (e.isDirectory()) {
+            walk(p);
+          } else if (e.isFile()) {
+            bytes += statSync(p).size;
+          }
+        }
+      };
+      walk(storeDir);
+      const gib = bytes / (1024 * 1024 * 1024);
+      if (gib > 1) {
+        floor = Math.max(floor, 120_000 + Math.ceil((gib - 1) * 2) * 30_000);
+      }
+    } catch {
+      // unreadable store — the default wall applies
+    }
+  }
+  return floor;
+}
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
  *  several times per event in one process, and each probe is a sync
@@ -839,7 +877,7 @@ function makeStore(x: StoreExec): TaskStore {
           notes.push(`warning: bridge fetch ${b.mirror} failed — ${err}; the next sync retries`);
         }
       }
-      const r = x.probe(['sync', ...plan.args], 120_000);
+      const r = x.probe(['sync', ...plan.args], bdSyncTimeoutMs(x.storeDir));
       if (r.code !== 0) {
         if (/ENOENT/.test(r.err) || BD_NO_STORE.test(r.err)) {
           return ''; // no bd, or no routed store — state simply doesn't move
