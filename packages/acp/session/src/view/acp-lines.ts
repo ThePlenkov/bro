@@ -89,6 +89,15 @@ const TOOL_GLYPH: Record<string, { text: string; token: string }> = {
 const clipTo = (s: string, w: number): string =>
   s.length <= w ? s : `${s.slice(0, Math.max(0, w - 1))}…`;
 
+/** Split file content into lines without treating an intentional blank line as
+ *  absent. A final newline terminates the last line; it does not add another
+ *  line to the diff card. */
+const diffLines = (text: string): string[] => {
+  if (text === '') return [];
+  const lines = text.split('\n');
+  return lines.at(-1) === '' ? lines.slice(0, -1) : lines;
+};
+
 const firstLine = (s: string): string => {
   const i = s.indexOf('\n');
   return i < 0 ? s : s.slice(0, i);
@@ -288,8 +297,8 @@ export const acpCardRows = /* NOSONAR typescript:S3776 */ (
     if (c.type === 'diff') {
       blank();
       rows.push({ segments: [{ text: c.path, token: 'diff.path' }] });
-      const oldLines = (c.oldText ?? '').split('\n').filter(l => l !== '');
-      const newLines = c.newText.split('\n').filter(l => l !== '');
+      const oldLines = diffLines(c.oldText ?? '');
+      const newLines = diffLines(c.newText);
       oldLines.forEach((l, i) => {
         rows.push({
           fill: 'diff.del.bg',
