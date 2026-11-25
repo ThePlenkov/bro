@@ -488,6 +488,23 @@ describe('bro doctor', () => {
     }
   });
 
+  test('a host-shaped dolt remote is not probed without --network (bro-krpu5)', () =>
+    withEnv(
+      {
+        config: { stores: ['jsonl', 'beads'] },
+        beadsDir: true,
+        remote: true,
+        bins: ['bd', 'gh', 'bro'],
+        env: { FAKE_BD_DOLT: 'origin\tgit+https://169.254.169.254/x.git\n' },
+      },
+      dir => {
+        const checks = runDoctorChecks(dir);
+        const row = byName(checks, 'dolt-store');
+        assert.equal(row.status, 'skip');
+        assert.match(row.detail ?? '', /--network/);
+      }
+    ));
+
   test('missing bd fails when beads is an active store', () =>
     withEnv({ config: {}, beadsDir: true, bins: ['gh'] }, dir => {
       const checks = runDoctorChecks(dir);
