@@ -136,6 +136,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   const detach = (): void => {
     cur?.ac?.abort();
     cur?.watcher?.close();
+    renderer?.reset();
     cur = undefined;
   };
   let released = false;

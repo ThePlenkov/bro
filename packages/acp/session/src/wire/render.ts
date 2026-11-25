@@ -661,4 +661,14 @@ export class AcpRenderer {
     this.flush();
     this.flushNotices();
   }
+
+  /** Finish one target before the pane re-arms another. The output already
+   *   emitted belongs to the old target and stays in scrollback, but all
+   *   identity-based suppression state must start empty for the new feed. */
+  reset(): void {
+    this.end();
+    this.tools.clear();
+    this.notices.clear();
+    this.buf = undefined;
+  }
 }

@@ -478,3 +478,26 @@ describe('AcpRenderer — sidebands and markers', () => {
     assert.deepEqual(lines, ['[totally_new_kind]']);
   });
 });
+
+test('reset clears feed state before a target is re-armed', () => {
+  const out: string[] = [];
+  const r = new AcpRenderer(line => out.push(line), { color: false });
+
+  r.update(
+    upd('tool_call', {
+      toolCallId: 'shared-id',
+      title: 'old target',
+      status: 'completed',
+    })
+  );
+  r.reset();
+  r.update(
+    upd('tool_call', {
+      toolCallId: 'shared-id',
+      title: 'new target',
+      status: 'completed',
+    })
+  );
+
+  assert.deepEqual(out, ['✓ old target', '✓ new target']);
+});
