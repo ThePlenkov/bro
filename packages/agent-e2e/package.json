@@ -17,10 +17,7 @@
         "dependsOn": [
           "^build",
           "build",
-          {
-            "target": "test:e2e",
-            "projects": "@broject/bro"
-          }
+          "@broject/bro:test:e2e"
         ]
       }
     }
