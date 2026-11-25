@@ -79,6 +79,9 @@ function clockProbeArgs(dir: string): string[] {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       env: scrubGitEnv(),
+      // a cred-helper or transport stall must never freeze the loop —
+      // the probe budget already pins 45s, this lookup gets a fraction
+      timeout: 5_000,
     });
     const host = remoteHost(out);
     if (host !== undefined) {
@@ -110,7 +113,17 @@ function scrubGitEnv(): NodeJS.ProcessEnv {
  *  Undefined when no remote parses: the probe then falls back to gh's
  *  own default resolution. */
 export function remoteHost(url: string): string | undefined {
-  const m = /^(?:https?:\/\/|ssh:\/\/git@|git@)([^/:]+)/.exec(url.trim());
+  const u = url.trim();
+  if (/^https?:\/\//.test(u)) {
+    // URL parsing keeps userinfo out — https://token@github.com/o/r.git
+    // must yield github.com, never token@github.com
+    try {
+      return new URL(u).hostname;
+    } catch {
+      return undefined;
+    }
+  }
+  const m = /^(?:ssh:\/\/git@|git@)([^/:]+)/.exec(u);
   return m?.[1];
 }
 
