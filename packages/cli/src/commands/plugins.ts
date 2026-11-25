@@ -311,6 +311,43 @@ function ompAgentDir(env: NodeJS.ProcessEnv): string {
   return join(homedir(), '.omp', 'agent');
 }
 
+interface FileClientTarget {
+  artifact(cwd: string): string | null;
+  global(env: NodeJS.ProcessEnv): string;
+  local(cwd: string): string;
+}
+
+const FILE_CLIENT_TARGETS: Record<string, FileClientTarget> = {
+  kilo: {
+    artifact: kiloArtifact,
+    global: env => join(kiloConfigDir(env), 'plugin', 'bro.ts'),
+    local: cwd => join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
+  },
+  pi: {
+    artifact: piArtifact,
+    global: env =>
+      join(env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'extensions', 'bro.ts'),
+    local: cwd => join(gitRoot(cwd) ?? cwd, '.pi', 'extensions', 'bro.ts'),
+  },
+  omp: {
+    artifact: ompArtifact,
+    global: env => join(ompAgentDir(env), 'extensions', 'bro.ts'),
+    local: cwd => join(gitRoot(cwd) ?? cwd, '.omp', 'extensions', 'bro.ts'),
+  },
+};
+
+function fileClientSurface(client: string, cwd: string, env: NodeJS.ProcessEnv): Surface {
+  const target = FILE_CLIENT_TARGETS[client];
+  if (target === undefined) {
+    throw new CommandError(`plugins: no file target configured for "${client}"`, EXIT.error);
+  }
+  return {
+    kind: 'file',
+    artifact: target.artifact(cwd),
+    targets: { global: target.global(env), local: target.local(cwd) },
+  };
+}
+
 const CLIENTS: Record<string, ClientSpec> = {
   opencode: {
     // the v2 catalog plugin — a directory of three modules
@@ -325,19 +362,7 @@ const CLIENTS: Record<string, ClientSpec> = {
       'hooks, tools and commands would double-register (bro-b7mae)',
   },
   kilo: {
-    surfaces: (cwd, env) => [
-      {
-        kind: 'file',
-        artifact: kiloArtifact(cwd),
-        targets: {
-          // kilo scans <config>/plugin/*.ts — a kilo.json `plugin`
-          // array entry is NOT honored for file paths (verified against
-          // kilo 7.8.x: file:// and plain-path entries both load nothing)
-          global: join(kiloConfigDir(env), 'plugin', 'bro.ts'),
-          local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
-        },
-      },
-    ],
+    surfaces: (cwd, env) => [fileClientSurface('kilo', cwd, env)],
     // verified on kilo 7.8.27: `kilo run` executes BOTH the config-dir
     // and the project plugin files — the same no-dedupe collision class
     // as pi/omp (probe plugins logged GLOBAL+LOCAL on one load)
@@ -349,20 +374,7 @@ const CLIENTS: Record<string, ClientSpec> = {
     // pi discovers <cwd>/.pi/extensions/ locally and
     // <agentDir>/extensions/ globally; the agent dir is
     // $PI_CODING_AGENT_DIR or ~/.pi/agent
-    surfaces: (cwd, env) => [
-      {
-        kind: 'file',
-        artifact: piArtifact(cwd),
-        targets: {
-          global: join(
-            env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'),
-            'extensions',
-            'bro.ts'
-          ),
-          local: join(gitRoot(cwd) ?? cwd, '.pi', 'extensions', 'bro.ts'),
-        },
-      },
-    ],
+    surfaces: (cwd, env) => [fileClientSurface('pi', cwd, env)],
     singleScope:
       'pi loads project and global copies of the same extension without ' +
       'dedupe — tool names conflict (bro-b7mae)',
@@ -372,16 +384,7 @@ const CLIENTS: Record<string, ClientSpec> = {
     // <agentDir>/extensions/ globally — the same loose-extension shape
     // pi uses. The full plugin (skills, hooks, commands, WATCHDOG) is
     // omp's own package surface: `omp plugin install ./plugins/omp/bro`.
-    surfaces: (cwd, env) => [
-      {
-        kind: 'file',
-        artifact: ompArtifact(cwd),
-        targets: {
-          global: join(ompAgentDir(env), 'extensions', 'bro.ts'),
-          local: join(gitRoot(cwd) ?? cwd, '.omp', 'extensions', 'bro.ts'),
-        },
-      },
-    ],
+    surfaces: (cwd, env) => [fileClientSurface('omp', cwd, env)],
     singleScope:
       'omp loads project and global copies of the same extension without ' +
       'dedupe — tool names conflict (bro-b7mae)',
@@ -646,8 +649,16 @@ function installSurface(
   owner: ClientSpec
 ): Outcome {
   return surface.kind === 'file'
-    ? installOne({ name: ctx.name, scope, surface, client: owner, opts: ctx.opts })
-    : installBundle({
+    ? mutateFileSurface({
+        operation: 'install',
+        name: ctx.name,
+        scope,
+        surface,
+        client: owner,
+        opts: ctx.opts,
+      })
+    : mutateBundleSurface({
+        operation: 'install',
         name: ctx.name,
         scope,
         files: surface.files,
@@ -822,7 +833,22 @@ interface BundleMutation {
   opts: MutateOpts;
 }
 
-function installOne({ name, scope, surface, client, opts }: FileMutation): Outcome {
+type SurfaceOperation = 'install' | 'uninstall';
+
+interface SurfaceMutation {
+  operation: SurfaceOperation;
+  name: string;
+  scope: PluginScope;
+  opts: MutateOpts;
+}
+
+function mutateFileSurface(
+  input: SurfaceMutation & { surface: FileSurface; client: ClientSpec }
+): Outcome {
+  return input.operation === 'install' ? installFileSurface(input) : uninstallFileSurface(input);
+}
+
+function installFileSurface({ name, scope, surface, client, opts }: FileMutation): Outcome {
   const { path, content, reg } = fileInstallInputs({ name, scope, surface, client, opts });
   const needsRegistration = reg !== null && !reg.registered;
   const prior = existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -894,7 +920,13 @@ function currentInstall(input: {
 /** A bundle surface — a directory of modules installed as one unit. The
  *  outcome path is the directory; a refusal names the file that holds
  *  it. */
-function installBundle({ name, scope, files, dir, opts }: BundleMutation): Outcome {
+function mutateBundleSurface(input: SurfaceMutation & BundleMutation): Outcome {
+  return input.operation === 'install'
+    ? installBundleSurface(input)
+    : uninstallBundleSurface(input);
+}
+
+function installBundleSurface({ name, scope, files, dir, opts }: BundleMutation): Outcome {
   const contents = files
     .map(f => ({ name: f.name, content: surfaceContent(f) }))
     .filter((c): c is { name: string; content: string } => c.content !== null);
@@ -1003,8 +1035,22 @@ export function uninstallClient(name: string, scopes: PluginScope[], opts: Mutat
       const owner = idx === 0 ? client : { ...client, registration: undefined };
       outcomes.push(
         surface.kind === 'file'
-          ? uninstallOne({ name, scope, surface, client: owner, opts })
-          : uninstallBundle({ name, scope, files: surface.files, dir: surface.dirs[scope], opts })
+          ? mutateFileSurface({
+              operation: 'uninstall',
+              name,
+              scope,
+              surface,
+              client: owner,
+              opts,
+            })
+          : mutateBundleSurface({
+              operation: 'uninstall',
+              name,
+              scope,
+              files: surface.files,
+              dir: surface.dirs[scope],
+              opts,
+            })
       );
     }
     for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
@@ -1017,7 +1063,7 @@ export function uninstallClient(name: string, scopes: PluginScope[], opts: Mutat
   return outcomes;
 }
 
-function uninstallOne({ name, scope, surface, client, opts }: FileMutation): Outcome {
+function uninstallFileSurface({ name, scope, surface, client, opts }: FileMutation): Outcome {
   const path = surface.targets[scope];
   const clean = surfaceBytes(surface.artifact);
   const reg = client.registration?.(scope, path, opts.env) ?? null;
@@ -1052,7 +1098,7 @@ function uninstallOne({ name, scope, surface, client, opts }: FileMutation): Out
 /** A bundle surface — every module of the directory must be ours before
  *  the directory goes. Files we don't know (a user's own module beside
  *  ours) stay; the directory itself goes only when it is empty. */
-function uninstallBundle({ name, scope, files, dir, opts }: BundleMutation): Outcome {
+function uninstallBundleSurface({ name, scope, files, dir, opts }: BundleMutation): Outcome {
   if (!existsSync(dir)) {
     return { client: name, scope, action: 'absent', path: dir };
   }

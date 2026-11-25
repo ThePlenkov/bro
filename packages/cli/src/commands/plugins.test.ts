@@ -84,6 +84,8 @@ type ClientMatrix = {
   client: 'opencode' | 'kilo';
   fixture: () => ClientFixture;
   assertInstalled: (path: string) => void;
+  foreignPath: (fixture: ClientFixture) => string;
+  foreignScope: 'global' | 'local';
 };
 
 function registerClientMatrix(config: ClientMatrix): void {
@@ -126,11 +128,14 @@ function registerClientMatrix(config: ClientMatrix): void {
 
   test(`${client} refuses a foreign file without --force`, () => {
     const f = makeFixture();
-    mkdirSync(dirname(f.globalPath), { recursive: true });
-    writeFileSync(f.globalPath, '// someone else\n');
-    const out = installClient(client, ['global'], f.opts);
+    const foreignPath = config.foreignPath(f);
+    mkdirSync(dirname(foreignPath), { recursive: true });
+    writeFileSync(foreignPath, '// someone else\n');
+    const out = installClient(client, [config.foreignScope], f.opts);
     assert.equal(out[0]!.action, 'refused');
-    assert.equal(readFileSync(f.globalPath, 'utf8'), '// someone else\n');
+    assert.equal(readFileSync(foreignPath, 'utf8'), '// someone else\n');
+    const forced = installClient(client, [config.foreignScope], { ...f.opts, force: true });
+    assert.equal(forced[0]!.action, 'updated');
   });
 
   test(`${client} dry-run writes nothing`, () => {
@@ -275,49 +280,36 @@ describe('isBroAdapter', () => {
 });
 
 describe('plugins install/uninstall/list', () => {
-  test('install materializes the v2 catalog plugin; a second run reports current', () => {
-    const f = fixture();
-    // bare install collapses to one scope — opencode 2.3.0 loads plugin
-    // modules from both scopes without dedupe, identical id `bro`
-    // double-registers hooks/tools/commands/RPC (bro-b7mae, verified
-    // with `opencode run` probe plugins)
-    const out = installClient('opencode', ['global', 'local'], f.opts);
-    assert.deepEqual(
-      out.map(o => `${o.action}:${o.path}`),
-      [`installed:${f.globalDir}`]
-    );
-    assert.match(out[0]!.note ?? '', /without dedupe/);
-    // the catalog plugin is ONE directory of three modules — the server
-    // entrypoint, the TUI half and the contract they share. Install
-    // ships the bundled catalog bytes, not the adapter sources: the
-    // sources import workspace packages a host runtime cannot resolve.
-    const shipped = readFileSync(join(repoRoot, 'plugins/opencode/bro/index.ts'), 'utf8');
-    const shippedTui = readFileSync(join(repoRoot, 'plugins/opencode/bro/tui.tsx'), 'utf8');
-    const shippedRpc = readFileSync(join(repoRoot, 'plugins/opencode/bro/rpc.ts'), 'utf8');
-    assert.equal(readFileSync(join(f.globalDir, 'index.ts'), 'utf8'), shipped);
-    assert.equal(readFileSync(join(f.globalDir, 'tui.tsx'), 'utf8'), shippedTui);
-    assert.equal(readFileSync(join(f.globalDir, 'rpc.ts'), 'utf8'), shippedRpc);
-    // the TUI half's own `./rpc.ts` import resolves inside the directory
-    assert.match(shippedTui, /from\s+['"]\.\/rpc\.ts['"]/);
-    // the embedded skills tree materializes beside the modules — the
-    // plugin's collectBroSkills reads `<bundle>/skills/` first, so an
-    // installed copy registers bro's skills instead of stumbling onto a
-    // foreign skills/ dir (bro-tswwr)
-    const shippedSkill = readFileSync(join(repoRoot, 'skills', 'sdd', 'SKILL.md'), 'utf8');
-    assert.equal(
-      readFileSync(join(f.globalDir, 'skills', 'sdd', 'SKILL.md'), 'utf8'),
-      shippedSkill
-    );
-    assert.equal(
-      readFileSync(join(f.globalDir, 'skills', 'act', 'SKILL.md'), 'utf8'),
-      readFileSync(join(repoRoot, 'skills', 'act', 'SKILL.md'), 'utf8')
-    );
-    assert.ok(!existsSync(f.localDir));
+  registerClientMatrix({
+    client: 'opencode',
+    fixture: () => {
+      const f = fixture();
+      return { cwd: f.cwd, opts: f.opts, globalPath: f.globalDir, localPath: f.localDir };
+    },
+    assertInstalled: assertBundleMatches,
+    foreignPath: f => join(f.localPath, 'index.ts'),
+    foreignScope: 'local',
+  });
 
-    const again = installClient('opencode', ['global', 'local'], f.opts);
+  test('opencode uninstall skips absent and refuses foreign without --force', () => {
+    const f = fixture();
+    installClient('opencode', ['global'], f.opts);
+    mkdirSync(f.localDir, { recursive: true });
+    writeFileSync(join(f.localDir, 'index.ts'), '// foreign plugin');
+    const refused = uninstallClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
-      again.map(o => o.action),
-      ['current']
+      refused.map(o => o.action),
+      ['removed', 'refused']
+    );
+    assert.ok(!existsSync(f.globalDir));
+    assert.ok(existsSync(join(f.localDir, 'index.ts')));
+
+    const forced = uninstallClient('opencode', ['local'], { ...f.opts, force: true });
+    assert.equal(forced[0]!.action, 'removed');
+    assert.ok(!existsSync(join(f.localDir, 'index.ts')));
+    assert.deepEqual(
+      uninstallClient('opencode', ['global', 'local'], f.opts).map(o => o.action),
+      ['absent', 'absent']
     );
   });
 
@@ -466,59 +458,6 @@ describe('plugins install/uninstall/list', () => {
     assert.equal(out[0]!.action, 'updated');
   });
 
-  test('--dry-run writes nothing', () => {
-    const f = fixture();
-    // bare install collapses to one scope (bro-b7mae) — dry-run reports
-    // the single would-install and still writes nothing
-    const out = installClient('opencode', ['global', 'local'], { ...f.opts, dryRun: true });
-    assert.deepEqual(
-      out.map(o => o.action),
-      ['would-install']
-    );
-    assert.ok(!existsSync(f.globalDir));
-    assert.ok(!existsSync(f.localDir));
-  });
-
-  test('install refuses a foreign file at our slot without --force', () => {
-    const f = fixture();
-    mkdirSync(f.localDir, { recursive: true });
-    writeFileSync(join(f.localDir, 'index.ts'), '// user-written plugin, no bro sentinel');
-    const out = installClient('opencode', ['local'], f.opts);
-    assert.equal(out[0]!.action, 'refused');
-    assert.equal(
-      readFileSync(join(f.localDir, 'index.ts'), 'utf8'),
-      '// user-written plugin, no bro sentinel'
-    );
-    const forced = installClient('opencode', ['local'], { ...f.opts, force: true });
-    assert.equal(forced[0]!.action, 'updated');
-  });
-
-  test('uninstall removes ours, skips absent, refuses foreign without --force', () => {
-    const f = fixture();
-    installClient('opencode', ['global'], f.opts);
-    mkdirSync(f.localDir, { recursive: true });
-    writeFileSync(join(f.localDir, 'index.ts'), '// foreign plugin');
-    const refused = uninstallClient('opencode', ['global', 'local'], f.opts);
-    assert.deepEqual(
-      refused.map(o => o.action),
-      // the global catalog plugin is removed, then the foreign local
-      // module refuses
-      ['removed', 'refused']
-    );
-    assert.ok(!existsSync(f.globalDir));
-    assert.ok(existsSync(join(f.localDir, 'index.ts')));
-
-    const forced = uninstallClient('opencode', ['local'], { ...f.opts, force: true });
-    assert.equal(forced[0]!.action, 'removed');
-    assert.ok(!existsSync(join(f.localDir, 'index.ts')));
-
-    const gone = uninstallClient('opencode', ['global', 'local'], f.opts);
-    assert.deepEqual(
-      gone.map(o => o.action),
-      ['absent', 'absent']
-    );
-  });
-
   test('uninstall refuses a stale/edited adapter without --force', () => {
     const f = fixture();
     mkdirSync(f.globalDir, { recursive: true });
@@ -660,96 +599,26 @@ function kiloFixture(): {
 }
 
 describe('plugins install/uninstall/list — kilo', () => {
-  test('global install materializes the module into the scanned plugin dir', () => {
+  registerClientMatrix({
+    client: 'kilo',
+    fixture: kiloFixture,
+    assertInstalled: path => {
+      assert.equal(
+        readFileSync(path, 'utf8'),
+        readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8')
+      );
+    },
+    foreignPath: f => f.globalPath,
+    foreignScope: 'global',
+  });
+
+  test('kilo install does not create kilo.json', () => {
     const f = kiloFixture();
-    const out = installClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'installed');
-    // materialized content is the bundled catalog adapter — the src
-    // tree imports @broject/adapter-core, unresolvable in kilo
-    const shipped = readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8');
-    assert.equal(readFileSync(f.globalPath, 'utf8'), shipped);
-    // kilo.json is never touched — the plugin/ dir is the whole contract
+    installClient('kilo', ['global'], f.opts);
     assert.ok(
       !existsSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo', 'kilo.json')),
       'kilo.json must not be created for a file-plugin install'
     );
-  });
-
-  test('local install writes .kilo/plugin', () => {
-    const f = kiloFixture();
-    const out = installClient('kilo', ['local'], f.opts);
-    assert.equal(out[0]!.action, 'installed');
-    assert.equal(
-      readFileSync(f.localPath, 'utf8'),
-      readFileSync(join(repoRoot, 'plugins/kilo/bro/bro.ts'), 'utf8')
-    );
-  });
-
-  test('re-install reports current', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    const again = installClient('kilo', ['global'], f.opts);
-    assert.equal(again[0]!.action, 'current');
-  });
-
-  test('list reports an installed global module', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    const row = pluginRows(f.cwd, f.opts.env).find(
-      r => r.client === 'kilo' && r.scope === 'global'
-    );
-    assert.equal(row!.state, 'installed');
-  });
-
-  test('uninstall removes the module', () => {
-    const f = kiloFixture();
-    installClient('kilo', ['global'], f.opts);
-    const out = uninstallClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'removed');
-    assert.ok(!existsSync(f.globalPath));
-  });
-
-  test('a foreign file holding the slot is refused without --force', () => {
-    const f = kiloFixture();
-    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo', 'plugin'), { recursive: true });
-    writeFileSync(f.globalPath, '// someone else\n');
-    const out = installClient('kilo', ['global'], f.opts);
-    assert.equal(out[0]!.action, 'refused');
-    assert.equal(readFileSync(f.globalPath, 'utf8'), '// someone else\n');
-  });
-
-  test('--dry-run writes nothing', () => {
-    const f = kiloFixture();
-    // bare install collapses to one scope — kilo loads project+global
-    // plugin copies without dedupe (verified on 7.8.27, bro-b7mae)
-    const out = installClient('kilo', ['global', 'local'], { ...f.opts, dryRun: true });
-    assert.deepEqual(
-      out.map(o => o.action),
-      ['would-install']
-    );
-    assert.match(out[0]!.note ?? '', /without dedupe/);
-    assert.ok(!existsSync(f.globalPath));
-    assert.ok(!existsSync(f.localPath));
-  });
-
-  test('kilo bare install lands global only; explicit --local still works', () => {
-    const f = kiloFixture();
-    const out = installClient('kilo', ['global', 'local'], f.opts);
-    assert.deepEqual(
-      out.map(o => o.action),
-      ['installed']
-    );
-    assert.ok(existsSync(f.globalPath));
-    assert.ok(!existsSync(f.localPath));
-
-    const f2 = kiloFixture();
-    const local = installClient('kilo', ['local'], f2.opts);
-    assert.deepEqual(
-      local.map(o => o.action),
-      ['installed']
-    );
-    assert.ok(existsSync(f2.localPath));
-    assert.ok(!existsSync(f2.globalPath));
   });
 });
 
