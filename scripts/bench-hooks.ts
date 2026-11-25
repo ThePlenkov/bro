@@ -387,13 +387,16 @@ function rowKey(spec: RowSpec): string {
 /** Shared fatal-stop loop: attempt samples while none is fatal,
  *  handing each non-fatal attempt to `use`. Returns the fatal detail,
  *  '' when clean. */
-function runAttempts(
-  spec: RowSpec,
-  fx: Fixture,
-  count: number,
-  offset: number,
-  use: (a: Attempt, i: number) => void
-): string {
+interface AttemptsRun {
+  spec: RowSpec;
+  fx: Fixture;
+  count: number;
+  offset: number;
+  use: (a: Attempt, i: number) => void;
+}
+
+function runAttempts(run: AttemptsRun): string {
+  const { spec, fx, count, offset, use } = run;
   let fatalDetail = '';
   for (let i = offset; i < offset + count && fatalDetail === ''; i += 1) {
     const a = attempt(spec, rowInput(spec, i), fx);
@@ -409,10 +412,16 @@ function runAttempts(
 /** Warmup samples — failures are logged, never gated; a fatal attempt
  *  stops the phase early. Returns the fatal detail, '' when clean. */
 function warmupPhase(spec: RowSpec, fx: Fixture, lim: RunLimits): string {
-  return runAttempts(spec, fx, lim.warmup, 0, a => {
-    if (!a.ok) {
-      console.error(`bench-hooks: ${rowKey(spec)} warmup failed — ${a.detail}`);
-    }
+  return runAttempts({
+    spec,
+    fx,
+    count: lim.warmup,
+    offset: 0,
+    use: a => {
+      if (!a.ok) {
+        console.error(`bench-hooks: ${rowKey(spec)} warmup failed — ${a.detail}`);
+      }
+    },
   });
 }
 
@@ -426,9 +435,15 @@ interface Measured {
  *  attempt stops the phase early. */
 function measuredPhase(spec: RowSpec, fx: Fixture, lim: RunLimits): Measured {
   const out: Measured = { times: [], errors: 0, fatalDetail: '' };
-  out.fatalDetail = runAttempts(spec, fx, lim.runs, lim.warmup, (a, i) => {
-    out.times.push(a.ms);
-    out.errors += noteError(a, { key: rowKey(spec), i, prior: out.errors });
+  out.fatalDetail = runAttempts({
+    spec,
+    fx,
+    count: lim.runs,
+    offset: lim.warmup,
+    use: (a, i) => {
+      out.times.push(a.ms);
+      out.errors += noteError(a, { key: rowKey(spec), i, prior: out.errors });
+    },
   });
   return out;
 }
