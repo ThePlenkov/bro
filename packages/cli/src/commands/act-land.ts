@@ -8,6 +8,7 @@
  * conditional chunks the verbs used to carry inline.
  */
 import { basename, dirname } from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   acquireMergeSlot,
   checkHistory,
@@ -667,6 +668,22 @@ export function cleanupAfterMerge(headRef: string, headSha: string): void {
 
   if (here?.branch === headRef && !releaseMergedCheckout(root, here, main, gitDir, headRef)) {
     return;
+  }
+  // the watcher need not run inside the PR's worktree — a detached wait
+  // re-armed from the main checkout must still retire the linked tree
+  // the merged branch sits on, or worktree AND branch survive the
+  // cleanup (bro-23epf)
+  if (here?.branch !== headRef && main !== undefined) {
+    const holder = all.find(
+      w =>
+        w.branch === headRef &&
+        w.path !== main.path &&
+        w.prunable === undefined &&
+        existsSync(w.path)
+    );
+    if (holder !== undefined && !removeMergedWorktree(holder.path, holder, main)) {
+      return;
+    }
   }
   // merged branch checked out elsewhere, or not checked out at all —
   // deleteMergedLocalBranch reports the first and handles the second
