@@ -242,7 +242,11 @@ function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): voi
  *  expanded. Reply and resolve share one parser: the file shape is the
  *  same contract on both verbs (bro-71a10). Lines without the tab yield
  *  a null body — resolve reads them as silent fixes, reply skips them. */
-function parseBatchRows(file: string): { rows: { id: string; body: string }[]; tabless: string[] } {
+function parseBatchRows(file: string): {
+  rows: { id: string; body: string }[];
+  tabless: string[];
+  blankId: number;
+} {
   let text: string;
   try {
     text = readFileSync(file, 'utf8');
@@ -293,7 +297,7 @@ function parseBatchRows(file: string): { rows: { id: string; body: string }[]; t
     // dropped, or a malformed batch file looks fully applied (kody)
     console.error(`act: note — ${blankId} blank-id row(s) skipped in the batch file`);
   }
-  return { rows, tabless };
+  return { rows, tabless, blankId };
 }
 
 /** One thread through the resolve/unresolve flow — the batch --file
@@ -384,7 +388,7 @@ function cmdReply(argv: string[]): void {
       console.error('error: --file requires a path');
       process.exit(2);
     }
-    const { rows, tabless } = parseBatchRows(file);
+    const { rows, tabless, blankId } = parseBatchRows(file);
     const skipped = tabless.length;
     for (const row of rows) {
       rev.replyThread(row.id, row.body);
@@ -394,6 +398,11 @@ function cmdReply(argv: string[]): void {
     console.error(`act reply: ${rows.length} repl(ies)`);
     if (skipped > 0) {
       console.error(`warning: ${skipped} line(s) had no <thread_id><TAB><body> shape — skipped`);
+      process.exitCode = 1;
+    }
+    // a batch of ONLY malformed rows replied nothing at all — exiting 0
+    // would report success for a no-op (macroscope on #1203)
+    if (rows.length === 0 && blankId > 0) {
       process.exitCode = 1;
     }
     dropActState();
