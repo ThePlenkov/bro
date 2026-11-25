@@ -963,13 +963,14 @@ function writeBundleContents(
   contents: { name: string; content: string }[],
   changed: boolean
 ): boolean {
+  let anyWritten = changed;
   for (const c of contents) {
     const path = join(dir, c.name);
     if (existsSync(path) && readFileSync(path, 'utf8') === c.content) continue;
     atomicWrite(path, c.content);
-    changed = true;
+    anyWritten = true;
   }
-  return changed;
+  return anyWritten;
 }
 
 /** A loose file from an earlier layout. A foreign file is left alone —

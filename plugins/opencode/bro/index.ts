@@ -1329,7 +1329,7 @@ function frontmatter(markdown) {
 	return end < 0 ? null : markdown.slice(3, end);
 }
 function readFrontmatterValue(front, key) {
-	return (key === "name" ? /^\s*name:\s*(.+)$/m : /^\s*description:\s*(.+)$/m).exec(front)?.[1]?.trim();
+	return (key === "name" ? /^\s*name:\s*(\S[^\r\n]*)/m : /^\s*description:\s*(\S[^\r\n]*)/m).exec(front)?.[1]?.trim();
 }
 /** Auto-discovered skills roots must look like BRO's tree before they
 *  are registered — the ancestor walk-up can land on a foreign `skills/`
