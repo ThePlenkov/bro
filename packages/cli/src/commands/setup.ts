@@ -509,10 +509,26 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
       ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
       { cwd: dir, stdio: 'pipe' }
     );
-  } catch {
-    // one unreachable upstream does not stop the rest
-    console.error(`  ${skill.name}: could not fetch from ${skill.source}`);
+  } catch (e) {
+    // one unreachable upstream does not stop the rest — but the reason
+    // must surface: a silent "could not fetch" leaves the operator
+    // guessing between network, auth, and a gone upstream
+    // (bro-5oivv/bro-f9xsg/bro-0ap6j)
+    const detail = spawnErrorDetail(e);
+    console.error(`  ${skill.name}: could not fetch from ${skill.source} — ${detail}`);
   }
+}
+
+/** First useful line of a failed spawn — stderr's head when the child
+ *  spoke, else the errno-style message. */
+function spawnErrorDetail(e: unknown): string {
+  if (typeof e !== 'object' || e === null) {
+    return String(e);
+  }
+  const err = e as { stderr?: Buffer | string; message?: string };
+  const stderr = typeof err.stderr === 'string' ? err.stderr : (err.stderr?.toString('utf8') ?? '');
+  const line = stderr.split('\n').find(l => l.trim() !== '');
+  return (line ?? err.message ?? 'unknown error').trim().slice(0, 200);
 }
 
 function installLockedSkills(dir: string, locked: Map<string, LockedSkill>): void {
