@@ -514,7 +514,7 @@ function charWidth(cp: number): number {
     (cp >= 0xfe30 && cp <= 0xfe6f) ||
     (cp >= 0xff00 && cp <= 0xff60) ||
     (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x1f300 && cp <= 0x1f64f) ||
+    (cp >= 0x1f000 && cp <= 0x1faff) ||
     (cp >= 0x20000 && cp <= 0x2fffd) ||
     (cp >= 0x30000 && cp <= 0x3fffd)
   ) {

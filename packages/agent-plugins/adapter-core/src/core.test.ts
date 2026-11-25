@@ -66,6 +66,9 @@ test('clip: wide glyphs count as two columns, never overflow the width', () => {
   const clipped = clip('\u4e2d\u6587\u6d4b\u8bd5', 5);
   assert.equal(displayWidth(clipped), 5);
   assert.ok(clipped.endsWith('…'));
+  // emoji outside the old 1f300–1f64f range: rockets are width 2
+  assert.equal(displayWidth('\u{1F680}'), 2);
+  assert.equal(displayWidth(clip('\u{1F680}'.repeat(40), 64)), 63);
   // narrow text is unchanged
   assert.equal(clip('abc', 5), 'abc');
 });
