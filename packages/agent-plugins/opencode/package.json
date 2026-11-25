@@ -62,5 +62,5 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "bro's OpenCode plugin — server + TUI + RPC parts"
+  "description": "bro's OpenCode plugin \u2014 server + TUI + RPC parts"
 }

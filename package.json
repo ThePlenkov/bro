@@ -75,7 +75,8 @@
     "hono": "^4.13.21",
     "@hono/node-server": "^2.1.11",
     "effect": "^4.1.5",
-    "seroval": "^1.8.2"
+    "seroval": "^1.8.2",
+    "seroval-plugins@<1.7.5": "1.7.5"
   },
   "allowScripts": {
     "nx@23.2.1": true,
