@@ -174,6 +174,36 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
 const advertised = (value: unknown): boolean =>
   value !== undefined && value !== null && value !== false;
 
+/** The `initialize` reply — only the fields the handshake reads. */
+interface InitReply {
+  protocolVersion?: number;
+  agentCapabilities?: {
+    loadSession?: boolean;
+    promptCapabilities?: { image?: boolean; audio?: boolean; embeddedContext?: boolean };
+    sessionCapabilities?: { resume?: unknown };
+  };
+  agentInfo?: { name?: string; version?: string };
+}
+
+/** The capabilities out of the `initialize` reply. */
+function capabilitiesOf(init: InitReply): AgentCapabilities {
+  const ac = init.agentCapabilities;
+  return {
+    loadSession: ac?.loadSession === true,
+    // ACP's `sessionCapabilities` is a MAP of names to option bags:
+    // `resume: {}` means "yes, I support it" — the capability is the
+    // NAME being there. An explicit null/false is a no.
+    resume: advertised(ac?.sessionCapabilities?.resume),
+    promptImage: ac?.promptCapabilities?.image === true,
+    promptAudio: ac?.promptCapabilities?.audio === true,
+    promptEmbeddedContext: ac?.promptCapabilities?.embeddedContext === true,
+    ...(init.agentInfo?.name !== undefined ? { agentName: init.agentInfo.name } : {}),
+    ...(init.agentInfo?.version !== undefined ? { agentVersion: init.agentInfo.version } : {}),
+    protocolVersion: init.protocolVersion ?? PROTOCOL_VERSION,
+    raw: ac,
+  };
+}
+
 /** The default handshake budget — an agent that never answers must not pin the pane. */
 const INIT_MS = 20_000;
 /** The default turn budget — a wedged agent must not hang the composer forever. */
@@ -385,30 +415,8 @@ export class AcpClient {
         },
       },
       this.opts.initMs ?? INIT_MS
-    )) as {
-      protocolVersion?: number;
-      agentCapabilities?: {
-        loadSession?: boolean;
-        promptCapabilities?: { image?: boolean; audio?: boolean; embeddedContext?: boolean };
-        sessionCapabilities?: { resume?: unknown };
-      };
-      agentInfo?: { name?: string; version?: string };
-    };
-    const ac = init.agentCapabilities;
-    const caps: AgentCapabilities = {
-      loadSession: ac?.loadSession === true,
-      // ACP's `sessionCapabilities` is a MAP of names to option bags:
-      // `resume: {}` means "yes, I support it" — the capability is the
-      // NAME being there. An explicit null/false is a no.
-      resume: advertised(ac?.sessionCapabilities?.resume),
-      promptImage: ac?.promptCapabilities?.image === true,
-      promptAudio: ac?.promptCapabilities?.audio === true,
-      promptEmbeddedContext: ac?.promptCapabilities?.embeddedContext === true,
-      ...(init.agentInfo?.name !== undefined ? { agentName: init.agentInfo.name } : {}),
-      ...(init.agentInfo?.version !== undefined ? { agentVersion: init.agentInfo.version } : {}),
-      protocolVersion: init.protocolVersion ?? PROTOCOL_VERSION,
-      raw: ac,
-    };
+    )) as InitReply;
+    const caps = capabilitiesOf(init);
     if (caps.protocolVersion !== PROTOCOL_VERSION) {
       this.fail(
         `agent negotiated protocol ${caps.protocolVersion} — this client speaks v${PROTOCOL_VERSION} only`
@@ -449,6 +457,18 @@ export class AcpClient {
    * so and stays closed.
    */
   private async continueSession(cwd: string, sessionId: string): Promise<string> {
+    const result = (await this.request(
+      this.continueVerb(),
+      { sessionId, cwd, mcpServers: [] },
+      this.opts.initMs ?? INIT_MS
+    )) as { sessionId?: string };
+    return result.sessionId ?? sessionId;
+  }
+
+  /** The continue verb this agent advertised — resume needs
+   *  sessionCapabilities.resume, load needs loadSession; an
+   *  un-advertised verb is a refusal, named as such. */
+  private continueVerb(): 'session/resume' | 'session/load' {
     const resume = this.opts.useResume === true;
     if (resume && this.caps?.resume !== true) {
       throw new Error(
@@ -460,12 +480,7 @@ export class AcpClient {
         'acp client: the agent does not advertise loadSession — cannot continue the session'
       );
     }
-    const result = (await this.request(
-      resume ? 'session/resume' : 'session/load',
-      { sessionId, cwd, mcpServers: [] },
-      this.opts.initMs ?? INIT_MS
-    )) as { sessionId?: string };
-    return result.sessionId ?? sessionId;
+    return resume ? 'session/resume' : 'session/load';
   }
 
   /**
@@ -686,12 +701,12 @@ export class AcpClient {
   /** The dispatch — a response, a notification, or an inbound request. */
   private dispatch(msg: RpcMessage): void {
     // a response (no method) — settles a pending request
-    if (msg.method === undefined && msg.id !== undefined && msg.id !== null) {
+    if (msg.method === undefined && msg.id != null) {
       this.onResponse(msg);
       return;
     }
     // a notification
-    if (msg.id === undefined || msg.id === null) {
+    if (msg.id == null) {
       this.onNotification(msg);
       return;
     }

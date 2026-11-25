@@ -197,10 +197,15 @@ describe('a turn', () => {
     await h.client.prompt('do it');
     const kinds = h.rows.map(r => r.kind);
     assert.deepEqual(kinds, ['prompt', 'turn', 'update', 'turn']);
-    assert.equal(h.rows[0]?.kind === 'prompt' ? h.rows[0].text : '', 'do it');
-    assert.equal(h.rows[1]?.kind === 'turn' ? h.rows[1].phase : '', 'start');
-    assert.equal(h.rows[3]?.kind === 'turn' ? h.rows[3].phase : '', 'stop');
-    assert.equal(h.rows[3]?.kind === 'turn' ? h.rows[3].stopReason : '', 'end_turn');
+    const row = <K extends ClientRow['kind']>(
+      i: number,
+      kind: K
+    ): Extract<ClientRow, { kind: K }> | undefined =>
+      h.rows[i]?.kind === kind ? (h.rows[i] as Extract<ClientRow, { kind: K }>) : undefined;
+    assert.equal(row(0, 'prompt')?.text, 'do it');
+    assert.equal(row(1, 'turn')?.phase, 'start');
+    assert.equal(row(3, 'turn')?.phase, 'stop');
+    assert.equal(row(3, 'turn')?.stopReason, 'end_turn');
     await h.client.close();
   });
 
