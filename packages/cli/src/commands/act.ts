@@ -253,10 +253,13 @@ function parseBatchRows(file: string): { rows: { id: string; body: string }[]; t
     );
     process.exit(2);
   }
+  // trimEnd only: the leading tab of a blank-id row is STRUCTURAL —
+  // trimming it away would turn the row into a bare "tabless" id and
+  // silently resolve whatever the comment column named (codeant)
   const lines = text!
     .split('\n')
-    .map(l => l.trim())
-    .filter(l => l.length > 0);
+    .map(l => l.trimEnd())
+    .filter(l => l.trim().length > 0);
   const rows: { id: string; body: string }[] = [];
   const tabless: string[] = [];
   for (const line of lines) {
