@@ -159,45 +159,54 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	const pinned = opts.command;
-	if (typeof pinned === "string" && pinned.trim() !== "") {
-		const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
-		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	} else if (pinned !== void 0 && typeof pinned === "object" && pinned !== null) {
-		const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
-		const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
-		if (cmd !== "" && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	}
+	return await pinnedCommand(opts.command) ?? await checkoutResolved() ?? await pathResolved() ?? await npxResolved(opts);
+}
+async function pinnedCommand(pinned) {
+	if (typeof pinned === "string") return pinnedStringCommand(pinned);
+	if (typeof pinned !== "object" || pinned === null) return null;
+	const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
+	const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
+	return cmd !== "" && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function pinnedStringCommand(pinned) {
+	const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
+	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function checkoutResolved() {
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
 		cmd: jsRuntime(),
 		args: [entry]
 	};
-	if (await exitsZero("bro", ["hooks"])) return {
+	return null;
+}
+async function pathResolved() {
+	return await exitsZero("bro", ["hooks"]) ? {
 		cmd: "bro",
 		args: []
-	};
+	} : null;
+}
+async function npxResolved(opts) {
 	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
-	if (specs.length > 0 && await exitsZero("npx", ["--version"])) {
-		for (const spec of specs) if (await exitsZero("npx", [
+	if (specs.length === 0 || !await exitsZero("npx", ["--version"])) return null;
+	for (const spec of specs) if (await exitsZero("npx", [
+		"-y",
+		"--prefer-offline",
+		spec,
+		"hooks"
+	])) return {
+		cmd: "npx",
+		args: [
 			"-y",
 			"--prefer-offline",
-			spec,
-			"hooks"
-		])) return {
-			cmd: "npx",
-			args: [
-				"-y",
-				"--prefer-offline",
-				spec
-			]
-		};
-	}
+			spec
+		]
+	};
 	return null;
 }
 /**
@@ -236,7 +245,8 @@ function hookFailureText(failure) {
 * fail-open, but the second must not pass invisibly. A clean exit with
 * empty stdout is silence (failure null) — only real outage kinds set it.
 */
-async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
+async function callHookDetailed(command, call) {
+	const { event, payload, cwd, timeoutMs, extraEnv } = call;
 	let input;
 	try {
 		input = JSON.stringify(payload);
@@ -337,13 +347,17 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 * Scan for the first parseable control line — unrelated chatter on
 * stdout must not swallow the answer.
 */
+/** Non-null plain object — the control-line shape. */
+function isRecord(v) {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
 function parseControl(out) {
 	for (const line of out.split("\n")) {
 		const text = line.trim();
 		if (text === "") continue;
 		try {
 			const parsed = JSON.parse(text);
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+			if (isRecord(parsed)) return parsed;
 		} catch {}
 	}
 	return null;
@@ -384,51 +398,58 @@ function runCommand(command, args, options) {
 			});
 			return;
 		}
-		let settled = false;
-		const settle = (result) => {
-			if (!settled) {
-				settled = true;
-				resolve(result);
-			}
-		};
-		const cap = (buf, chunk) => buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
-		let stdout = "";
-		let stderr = "";
-		const timer = killAfter(child, options.timeoutMs, () => settle({
+		runCollect(child, options, resolve);
+	});
+}
+function runCollect(child, options, resolve) {
+	let settled = false;
+	const settle = (result) => {
+		if (!settled) {
+			settled = true;
+			resolve(result);
+		}
+	};
+	const cap = (buf, chunk) => buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+	let stdout = "";
+	let stderr = "";
+	const timer = killAfter(child, options.timeoutMs, () => settle({
+		code: null,
+		stdout,
+		stderr,
+		error: `timed out after ${options.timeoutMs}ms`
+	}));
+	wireCollect(child, options, (finish) => {
+		clearTimeout(timer);
+		settle(finish);
+	});
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk) => {
+		stdout = cap(stdout, chunk);
+	});
+	child.stderr?.setEncoding("utf8");
+	child.stderr?.on("data", (chunk) => {
+		stderr = cap(stderr, chunk);
+	});
+	child.on("error", (error) => {
+		clearTimeout(timer);
+		settle({
 			code: null,
 			stdout,
 			stderr,
-			error: `timed out after ${options.timeoutMs}ms`
-		}));
-		child.stdout?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk) => {
-			stdout = cap(stdout, chunk);
+			error: error.message
 		});
-		child.stderr?.setEncoding("utf8");
-		child.stderr?.on("data", (chunk) => {
-			stderr = cap(stderr, chunk);
-		});
-		child.on("error", (error) => {
-			clearTimeout(timer);
-			settle({
-				code: null,
-				stdout,
-				stderr,
-				error: error.message
-			});
-		});
-		child.on("close", (code) => {
-			clearTimeout(timer);
-			settle({
-				code,
-				stdout,
-				stderr,
-				error: null
-			});
-		});
-		child.stdin?.on("error", () => {});
-		child.stdin?.end(options.input ?? "");
 	});
+	child.on("close", (code) => {
+		clearTimeout(timer);
+		settle({
+			code,
+			stdout,
+			stderr,
+			error: null
+		});
+	});
+	child.stdin?.on("error", () => {});
+	child.stdin?.end(options.input ?? "");
 }
 /**
 * The lazy, retrying CLI resolver every adapter shares: resolution
@@ -439,8 +460,12 @@ function runCommand(command, args, options) {
 function createCommandResolver(opts = {}) {
 	let resolved;
 	let failedAt;
+	const cacheFresh = () => {
+		if (resolved === void 0) return false;
+		return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
+	};
 	return () => {
-		if (resolved !== void 0 && (failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS)) return resolved;
+		if (cacheFresh() && resolved !== void 0) return resolved;
 		failedAt = void 0;
 		resolved = resolveCommand(opts).then((cmd) => {
 			if (cmd === null) failedAt = Date.now();
@@ -840,7 +865,13 @@ function makeCore(input) {
 			notify("debug", `bro probe skipped (no cli) for event=${event}`);
 			return null;
 		}
-		const result = await callHookDetailed(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
+		const result = await callHookDetailed(resolved, {
+			event,
+			payload,
+			cwd: directory,
+			timeoutMs,
+			extraEnv: HOOK_ENV
+		});
 		if (result.failure !== null) {
 			const message = hookFailureText(result.failure);
 			if (event === "stop" && Date.now() - lastStopWarning >= 15 * 6e4) {

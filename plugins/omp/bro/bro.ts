@@ -157,45 +157,54 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	const pinned = opts.command;
-	if (typeof pinned === "string" && pinned.trim() !== "") {
-		const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
-		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	} else if (pinned !== void 0 && typeof pinned === "object" && pinned !== null) {
-		const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
-		const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
-		if (cmd !== "" && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	}
+	return await pinnedCommand(opts.command) ?? await checkoutResolved() ?? await pathResolved() ?? await npxResolved(opts);
+}
+async function pinnedCommand(pinned) {
+	if (typeof pinned === "string") return pinnedStringCommand(pinned);
+	if (typeof pinned !== "object" || pinned === null) return null;
+	const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
+	const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
+	return cmd !== "" && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function pinnedStringCommand(pinned) {
+	const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
+	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function checkoutResolved() {
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
 		cmd: jsRuntime(),
 		args: [entry]
 	};
-	if (await exitsZero("bro", ["hooks"])) return {
+	return null;
+}
+async function pathResolved() {
+	return await exitsZero("bro", ["hooks"]) ? {
 		cmd: "bro",
 		args: []
-	};
+	} : null;
+}
+async function npxResolved(opts) {
 	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
-	if (specs.length > 0 && await exitsZero("npx", ["--version"])) {
-		for (const spec of specs) if (await exitsZero("npx", [
+	if (specs.length === 0 || !await exitsZero("npx", ["--version"])) return null;
+	for (const spec of specs) if (await exitsZero("npx", [
+		"-y",
+		"--prefer-offline",
+		spec,
+		"hooks"
+	])) return {
+		cmd: "npx",
+		args: [
 			"-y",
 			"--prefer-offline",
-			spec,
-			"hooks"
-		])) return {
-			cmd: "npx",
-			args: [
-				"-y",
-				"--prefer-offline",
-				spec
-			]
-		};
-	}
+			spec
+		]
+	};
 	return null;
 }
 /**
@@ -217,13 +226,8 @@ function hookEmitEnv(kind, opts = {}) {
 	if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
 	return env;
 }
-/**
-* Run one `bro hooks <event>` with the payload on stdin; resolve null on
-* every failure mode — spawn error, timeout, nonzero exit, garbage out.
-* `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
-*/
-async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
-	return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+async function callHook(command, call) {
+	return (await callHookDetailed(command, call)).control;
 }
 /**
 * callHook with the failure class attached. The stop gate needs to tell
@@ -231,7 +235,8 @@ async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
 * fail-open, but the second must not pass invisibly. A clean exit with
 * empty stdout is silence (failure null) — only real outage kinds set it.
 */
-async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
+async function callHookDetailed(command, call) {
+	const { event, payload, cwd, timeoutMs, extraEnv } = call;
 	let input;
 	try {
 		input = JSON.stringify(payload);
@@ -332,13 +337,17 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 * Scan for the first parseable control line — unrelated chatter on
 * stdout must not swallow the answer.
 */
+/** Non-null plain object — the control-line shape. */
+function isRecord(v) {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
 function parseControl(out) {
 	for (const line of out.split("\n")) {
 		const text = line.trim();
 		if (text === "") continue;
 		try {
 			const parsed = JSON.parse(text);
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+			if (isRecord(parsed)) return parsed;
 		} catch {}
 	}
 	return null;
@@ -433,8 +442,18 @@ function clip(text, width) {
 * any host can render.
 */
 function boardLines(s) {
+	const running = runningAgents(s);
+	return [
+		`bro · ${boardParts(s, running).join(" · ")}`,
+		...beadLines(s),
+		...agentLines(running)
+	];
+}
+function runningAgents(s) {
+	return (s.fleet?.agents ?? []).filter((a) => a.state === "running");
+}
+function boardParts(s, running) {
 	const beads = s.beads?.inProgress ?? [];
-	const running = (s.fleet?.agents ?? []).filter((a) => a.state === "running");
 	const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : "";
 	const parts = [
 		`◐ ${beads.length} bead${beads.length === 1 ? "" : "s"}`,
@@ -443,16 +462,13 @@ function boardLines(s) {
 	];
 	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
 	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
-	const lines = [`bro · ${parts.join(" · ")}`];
-	for (const b of beads.slice(0, 3)) {
-		const link = b.link ? `  ${b.link}` : "";
-		lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${link}`);
-	}
-	for (const a of running.slice(0, 2)) {
-		const step = a.step ? `  ${a.step}` : "";
-		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
-	}
-	return lines;
+	return parts;
+}
+function beadLines(s) {
+	return (s.beads?.inProgress ?? []).slice(0, 3).map((b) => `  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${b.link ? `  ${b.link}` : ""}`);
+}
+function agentLines(running) {
+	return running.slice(0, 2).map((a) => `  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${a.step ? `  ${a.step}` : ""}`);
 }
 /** The footer crumb — the one-glance form of the same board. */
 function statusCrumb(s) {
@@ -467,8 +483,12 @@ function statusCrumb(s) {
 function createCommandResolver(opts = {}) {
 	let resolved;
 	let failedAt;
+	const cacheFresh = () => {
+		if (resolved === void 0) return false;
+		return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
+	};
 	return () => {
-		if (resolved !== void 0 && (failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS)) return resolved;
+		if (cacheFresh() && resolved !== void 0) return resolved;
 		failedAt = void 0;
 		resolved = resolveCommand(opts).then((cmd) => {
 			if (cmd === null) failedAt = Date.now();
@@ -595,7 +615,13 @@ function createBroDriver(host, api) {
 	const probe = async (event, payload, cwd, timeoutMs = HOOK_TIMEOUT_MS) => {
 		if (!broEnabled(cwd)) return null;
 		const cmd = await command();
-		return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+		return cmd === null ? null : callHook(cmd, {
+			event,
+			payload,
+			cwd,
+			timeoutMs,
+			extraEnv: host.hookEnv
+		});
 	};
 	const paint = (ctx) => {
 		if (!host.canPaint(ctx)) return;
@@ -656,19 +682,22 @@ function createBroDriver(host, api) {
 	*  picks the answer up, this turn never waits on it). */
 	const consumeHydration = async (sessionId, cwd) => {
 		const pending = hydration;
-		if (pending === void 0 || pending.sessionId !== sessionId || hydrated === sessionId) return "";
+		if (pending === void 0) return "";
+		if (pending.sessionId !== sessionId || hydrated === sessionId) return "";
 		hydrated = sessionId;
 		const text = (await pending.promise).trim();
 		if (text !== "") return text;
 		hydrated = void 0;
-		if (hydrationFailed === sessionId && hydrationRetried !== sessionId) {
-			hydrationRetried = sessionId;
-			hydration = {
-				sessionId,
-				promise: probe("session-start", { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf)
-			};
-		}
+		retryHydration(sessionId, cwd);
 		return "";
+	};
+	const retryHydration = (sessionId, cwd) => {
+		if (hydrationFailed !== sessionId || hydrationRetried === sessionId) return;
+		hydrationRetried = sessionId;
+		hydration = {
+			sessionId,
+			promise: probe("session-start", { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf)
+		};
 	};
 	/** Register one handler if the host has that event. */
 	const bind = (name, handler) => {
@@ -729,21 +758,28 @@ function createBroDriver(host, api) {
 		if (text === "") return;
 		return host.appendToolResult(event, text);
 	});
+	const alreadyGated = (event, sessionId) => gatedSession === sessionId || host.stopAlreadyRefused(event) === true;
+	const notifyHint = (ctx, control) => {
+		const hint = contextOf(control);
+		if (hint !== "") host.notify(ctx, hint, "info");
+	};
+	const stopReason = (control) => {
+		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
+		return reason === "" ? "unfinished bro work" : reason;
+	};
 	const stopGate = async (event, ctx, sessionId) => {
 		if (host.stopAborted?.(event) === true) return;
 		const control = await probe("stop", {
 			session_id: sessionId,
-			stop_hook_active: gatedSession === sessionId || host.stopAlreadyRefused(event)
+			stop_hook_active: alreadyGated(event, sessionId)
 		}, host.cwd(ctx));
 		if (control?.decision !== "block") {
-			const hint = contextOf(control);
-			if (hint !== "") host.notify(ctx, hint, "info");
+			notifyHint(ctx, control);
 			return;
 		}
 		gatedSession = sessionId;
-		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
 		refreshBoard(ctx).catch(() => {});
-		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
+		return host.refuseStop(stopReason(control));
 	};
 	/** In-flight stop probes by session id — two concurrent stops must
 	*  not both run the probe and both block: the second awaits the
@@ -823,7 +859,8 @@ function createBroDriver(host, api) {
 		},
 		loadMode: "essential",
 		approval: "read",
-		async execute(_id, _params, _signal, _onUpdate, ctx) {
+		async execute(...args) {
+			const ctx = args[4];
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
 				content: [{
@@ -854,10 +891,17 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		stdout: "",
 		stderr: "bro CLI not found"
 	};
-	const { promise, resolve } = Promise.withResolvers();
-	let child;
+	const child = spawnBro(command, args, cwd);
+	if (child === null) return {
+		code: 127,
+		stdout: "",
+		stderr: "spawn failed"
+	};
+	return collectBro(child, timeoutMs);
+}
+function spawnBro(command, args, cwd) {
 	try {
-		child = spawn(command.cmd, [...command.args, ...args], {
+		return spawn(command.cmd, [...command.args, ...args], {
 			cwd,
 			stdio: [
 				"ignore",
@@ -868,13 +912,11 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		resolve({
-			code: 127,
-			stdout: "",
-			stderr: "spawn failed"
-		});
-		return promise;
+		return null;
 	}
+}
+function collectBro(child, timeoutMs) {
+	const { promise, resolve } = Promise.withResolvers();
 	let out = "";
 	let err = "";
 	let settled = false;
@@ -885,10 +927,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		resolve(result);
 	};
 	const timer = setTimeout(() => {
-		try {
-			if (child.pid !== void 0 && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-			else child.kill("SIGKILL");
-		} catch {}
+		killTree(child);
 		settle({
 			code: 1,
 			stdout: out,
@@ -914,6 +953,12 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		stderr: err
 	}));
 	return promise;
+}
+function killTree(child) {
+	try {
+		if (child.pid !== void 0 && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+		else child.kill("SIGKILL");
+	} catch {}
 }
 
 //#endregion
@@ -1039,29 +1084,35 @@ function binding(pi) {
 /** JSON-schema → zod for the parameter shapes the shared driver
 *  declares. Unknown/unsupported nodes degrade to `z.any()` — a loose
 *  schema still validates, a wrong guess would reject real params. */
+function isPlainRecord(v) {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
 function schemaToZod(schema, z) {
-	if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return z.any();
+	if (!isPlainRecord(schema)) return z.any();
 	if (typeof schema.safeParse === "function") return schema;
-	const s = schema;
-	if (Array.isArray(s.enum) && s.enum.every((v) => typeof v === "string")) return z.enum(s.enum);
+	if (Array.isArray(schema.enum) && schema.enum.every((v) => typeof v === "string")) return z.enum(schema.enum);
+	return zodForType(schema, z);
+}
+function zodForType(s, z) {
 	switch (s.type) {
 		case "string": return z.string();
 		case "number":
 		case "integer": return z.number();
 		case "boolean": return z.boolean();
 		case "array": return z.array(schemaToZod(s.items, z));
-		case "object": {
-			const props = s.properties !== null && typeof s.properties === "object" ? s.properties : {};
-			const required = new Set(Array.isArray(s.required) ? s.required : []);
-			const shape = {};
-			for (const [key, sub] of Object.entries(props)) {
-				const built = schemaToZod(sub, z);
-				shape[key] = required.has(key) ? built : built?.optional?.() ?? built;
-			}
-			return z.object(shape);
-		}
+		case "object": return zodObject(s, z);
 		default: return z.any();
 	}
+}
+function zodObject(s, z) {
+	const props = isPlainRecord(s.properties) ? s.properties : {};
+	const required = new Set(Array.isArray(s.required) ? s.required : []);
+	const shape = {};
+	for (const [key, sub] of Object.entries(props)) {
+		const built = schemaToZod(sub, z);
+		shape[key] = required.has(key) ? built : built?.optional?.() ?? built;
+	}
+	return z.object(shape);
 }
 /** omp's registerTool wants a schema-builder product for `parameters`
 *  (zod/arktype/typebox — raw JSON schema is dropped silently, which is

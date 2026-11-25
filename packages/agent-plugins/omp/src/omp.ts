@@ -105,18 +105,25 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
 /** JSON-schema → zod for the parameter shapes the shared driver
  *  declares. Unknown/unsupported nodes degrade to `z.any()` — a loose
  *  schema still validates, a wrong guess would reject real params. */
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 function schemaToZod(schema: unknown, z: NonNullable<OmpApi['zod']>): unknown {
-  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) {
+  if (!isPlainRecord(schema)) {
     return z.any();
   }
   // already a schema-builder product (safeParse is zod's tell)
   if (typeof (schema as { safeParse?: unknown }).safeParse === 'function') {
     return schema;
   }
-  const s = schema as Record<string, unknown>;
-  if (Array.isArray(s.enum) && s.enum.every(v => typeof v === 'string')) {
-    return z.enum(s.enum as string[]);
+  if (Array.isArray(schema.enum) && schema.enum.every(v => typeof v === 'string')) {
+    return z.enum(schema.enum as string[]);
   }
+  return zodForType(schema, z);
+}
+
+function zodForType(s: Record<string, unknown>, z: NonNullable<OmpApi['zod']>): unknown {
   switch (s.type) {
     case 'string':
       return z.string();
@@ -127,22 +134,22 @@ function schemaToZod(schema: unknown, z: NonNullable<OmpApi['zod']>): unknown {
       return z.boolean();
     case 'array':
       return z.array(schemaToZod(s.items, z));
-    case 'object': {
-      const props =
-        s.properties !== null && typeof s.properties === 'object'
-          ? (s.properties as Record<string, unknown>)
-          : {};
-      const required = new Set(Array.isArray(s.required) ? (s.required as string[]) : []);
-      const shape: Record<string, unknown> = {};
-      for (const [key, sub] of Object.entries(props)) {
-        const built = schemaToZod(sub, z) as { optional?: () => unknown };
-        shape[key] = required.has(key) ? built : (built?.optional?.() ?? built);
-      }
-      return z.object(shape);
-    }
+    case 'object':
+      return zodObject(s, z);
     default:
       return z.any();
   }
+}
+
+function zodObject(s: Record<string, unknown>, z: NonNullable<OmpApi['zod']>): unknown {
+  const props = isPlainRecord(s.properties) ? s.properties : {};
+  const required = new Set(Array.isArray(s.required) ? (s.required as string[]) : []);
+  const shape: Record<string, unknown> = {};
+  for (const [key, sub] of Object.entries(props)) {
+    const built = schemaToZod(sub, z) as { optional?: () => unknown };
+    shape[key] = required.has(key) ? built : (built?.optional?.() ?? built);
+  }
+  return z.object(shape);
 }
 
 /** omp's registerTool wants a schema-builder product for `parameters`

@@ -244,35 +244,54 @@ export interface ResolveOptions {
  * bro is skipped rather than failing every hook.
  */
 export async function resolveCommand(opts: ResolveOptions = {}): Promise<Command | null> {
-  const pinned = opts.command;
-  if (typeof pinned === 'string' && pinned.trim() !== '') {
-    const [cmd, ...args] = pinned.split(/\s+/).filter(p => p !== '');
-    if (cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks']))) {
-      return { cmd, args };
-    }
-  } else if (pinned !== undefined && typeof pinned === 'object' && pinned !== null) {
-    const cmd = typeof pinned.cmd === 'string' ? pinned.cmd : '';
-    const args = Array.isArray(pinned.args)
-      ? pinned.args.filter((a): a is string => typeof a === 'string')
-      : [];
-    if (cmd !== '' && (await exitsZero(cmd, [...args, 'hooks']))) {
-      return { cmd, args };
-    }
+  return (
+    (await pinnedCommand(opts.command)) ??
+    (await checkoutResolved()) ??
+    (await pathResolved()) ??
+    (await npxResolved(opts))
+  );
+}
+
+async function pinnedCommand(pinned: ResolveOptions['command']): Promise<Command | null> {
+  if (typeof pinned === 'string') {
+    return pinnedStringCommand(pinned);
   }
+  if (typeof pinned !== 'object' || pinned === null) {
+    return null;
+  }
+  const cmd = typeof pinned.cmd === 'string' ? pinned.cmd : '';
+  const args = Array.isArray(pinned.args)
+    ? pinned.args.filter((a): a is string => typeof a === 'string')
+    : [];
+  return cmd !== '' && (await exitsZero(cmd, [...args, 'hooks'])) ? { cmd, args } : null;
+}
+
+async function pinnedStringCommand(pinned: string): Promise<Command | null> {
+  const [cmd, ...args] = pinned.split(/\s+/).filter(p => p !== '');
+  return cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks'])) ? { cmd, args } : null;
+}
+
+async function checkoutResolved(): Promise<Command | null> {
   for (const entry of [siblingCli(), checkoutCli()]) {
     if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
       return { cmd: jsRuntime(), args: [entry] };
     }
   }
-  if (await exitsZero('bro', ['hooks'])) {
-    return { cmd: 'bro', args: [] };
-  }
+  return null;
+}
+
+async function pathResolved(): Promise<Command | null> {
+  return (await exitsZero('bro', ['hooks'])) ? { cmd: 'bro', args: [] } : null;
+}
+
+async function npxResolved(opts: ResolveOptions): Promise<Command | null> {
   const specs = opts.npxSpecs ?? (opts.npxPin !== undefined ? [opts.npxPin] : []);
-  if (specs.length > 0 && (await exitsZero('npx', ['--version']))) {
-    for (const spec of specs) {
-      if (await exitsZero('npx', ['-y', '--prefer-offline', spec, 'hooks'])) {
-        return { cmd: 'npx', args: ['-y', '--prefer-offline', spec] };
-      }
+  if (specs.length === 0 || !(await exitsZero('npx', ['--version']))) {
+    return null;
+  }
+  for (const spec of specs) {
+    if (await exitsZero('npx', ['-y', '--prefer-offline', spec, 'hooks'])) {
+      return { cmd: 'npx', args: ['-y', '--prefer-offline', spec] };
     }
   }
   return null;
@@ -353,15 +372,16 @@ export function hookFailureText(failure: HookFailure): string {
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
  * `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
  */
-export async function callHook(
-  command: Command,
-  event: string,
-  payload: unknown,
-  cwd: string,
-  timeoutMs: number,
-  extraEnv?: Record<string, string>
-): Promise<HookControl | null> {
-  return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+export interface HookCall {
+  event: string;
+  payload: unknown;
+  cwd: string;
+  timeoutMs: number;
+  extraEnv?: Record<string, string>;
+}
+
+export async function callHook(command: Command, call: HookCall): Promise<HookControl | null> {
+  return (await callHookDetailed(command, call)).control;
 }
 
 /**
@@ -370,14 +390,8 @@ export async function callHook(
  * fail-open, but the second must not pass invisibly. A clean exit with
  * empty stdout is silence (failure null) — only real outage kinds set it.
  */
-export async function callHookDetailed(
-  command: Command,
-  event: string,
-  payload: unknown,
-  cwd: string,
-  timeoutMs: number,
-  extraEnv?: Record<string, string>
-): Promise<HookResult> {
+export async function callHookDetailed(command: Command, call: HookCall): Promise<HookResult> {
+  const { event, payload, cwd, timeoutMs, extraEnv } = call;
   // serialize before spawning: a payload JSON.stringify rejects means the
   // hook can never run — that is its own outage class, not a spawn error
   // and never healthy silence (and this function resolves, never throws)
@@ -449,6 +463,11 @@ export async function callHookDetailed(
  * Scan for the first parseable control line — unrelated chatter on
  * stdout must not swallow the answer.
  */
+/** Non-null plain object — the control-line shape. */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 export function parseControl(out: string): HookControl | null {
   for (const line of out.split('\n')) {
     const text = line.trim();
@@ -457,7 +476,7 @@ export function parseControl(out: string): HookControl | null {
     }
     try {
       const parsed = JSON.parse(text) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (isRecord(parsed)) {
         return parsed as HookControl;
       }
     } catch {
@@ -564,8 +583,16 @@ export function clip(text: string, width: number): string {
  * any host can render.
  */
 export function boardLines(s: BoardStatus): string[] {
+  const running = runningAgents(s);
+  return [`bro · ${boardParts(s, running).join(' · ')}`, ...beadLines(s), ...agentLines(running)];
+}
+
+function runningAgents(s: BoardStatus) {
+  return (s.fleet?.agents ?? []).filter(a => a.state === 'running');
+}
+
+function boardParts(s: BoardStatus, running: ReturnType<typeof runningAgents>): string[] {
   const beads = s.beads?.inProgress ?? [];
-  const running = (s.fleet?.agents ?? []).filter(a => a.state === 'running');
   const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : '';
   const parts = [
     `◐ ${beads.length} bead${beads.length === 1 ? '' : 's'}`,
@@ -578,16 +605,19 @@ export function boardLines(s: BoardStatus): string[] {
   if ((s.dirty ?? 0) > 0) {
     parts.push(`dirty ${s.dirty}`);
   }
-  const lines = [`bro · ${parts.join(' · ')}`];
-  for (const b of beads.slice(0, 3)) {
-    const link = b.link ? `  ${b.link}` : '';
-    lines.push(`  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${link}`);
-  }
-  for (const a of running.slice(0, 2)) {
-    const step = a.step ? `  ${a.step}` : '';
-    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`);
-  }
-  return lines;
+  return parts;
+}
+
+function beadLines(s: BoardStatus): string[] {
+  return (s.beads?.inProgress ?? [])
+    .slice(0, 3)
+    .map(b => `  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${b.link ? `  ${b.link}` : ''}`);
+}
+
+function agentLines(running: ReturnType<typeof runningAgents>): string[] {
+  return running
+    .slice(0, 2)
+    .map(a => `  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${a.step ? `  ${a.step}` : ''}`);
 }
 
 /** The footer crumb — the one-glance form of the same board. */
@@ -641,45 +671,52 @@ export function runCommand(
       });
       return;
     }
-
-    let settled = false;
-    const settle = (result: RunResult): void => {
-      if (!settled) {
-        settled = true;
-        resolve(result);
-      }
-    };
-    const cap = (buf: string, chunk: string): string =>
-      buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
-    let stdout = '';
-    let stderr = '';
-    const timer = killAfter(child, options.timeoutMs, () =>
-      settle({
-        code: null,
-        stdout,
-        stderr,
-        error: `timed out after ${options.timeoutMs}ms`,
-      })
-    );
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      stdout = cap(stdout, chunk);
-    });
-    child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk: string) => {
-      stderr = cap(stderr, chunk);
-    });
-    child.on('error', error => {
-      clearTimeout(timer);
-      settle({ code: null, stdout, stderr, error: error.message });
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      settle({ code, stdout, stderr, error: null });
-    });
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(options.input ?? '');
+    runCollect(child, options, resolve);
   });
+}
+
+function runCollect(
+  child: ChildProcess,
+  options: RunOptions,
+  resolve: (r: RunResult) => void
+): void {
+  let settled = false;
+  const settle = (result: RunResult): void => {
+    if (!settled) {
+      settled = true;
+      resolve(result);
+    }
+  };
+  const cap = (buf: string, chunk: string): string =>
+    buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+  let stdout = '';
+  let stderr = '';
+  const timer = killAfter(child, options.timeoutMs, () =>
+    settle({
+      code: null,
+      stdout,
+      stderr,
+      error: `timed out after ${options.timeoutMs}ms`,
+    })
+  );
+  child.stdout?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    stdout = cap(stdout, chunk);
+  });
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', (chunk: string) => {
+    stderr = cap(stderr, chunk);
+  });
+  child.on('error', error => {
+    clearTimeout(timer);
+    settle({ code: null, stdout, stderr, error: error.message });
+  });
+  child.on('close', code => {
+    clearTimeout(timer);
+    settle({ code, stdout, stderr, error: null });
+  });
+  child.stdin?.on('error', () => {});
+  child.stdin?.end(options.input ?? '');
 }
 
 /**
@@ -691,11 +728,14 @@ export function runCommand(
 export function createCommandResolver(opts: ResolveOptions = {}): () => Promise<Command | null> {
   let resolved: Promise<Command | null> | undefined;
   let failedAt: number | undefined;
+  const cacheFresh = (): boolean => {
+    if (resolved === undefined) {
+      return false;
+    }
+    return failedAt === undefined || Date.now() - failedAt < RESOLVE_RETRY_MS;
+  };
   return () => {
-    if (
-      resolved !== undefined &&
-      (failedAt === undefined || Date.now() - failedAt < RESOLVE_RETRY_MS)
-    ) {
+    if (cacheFresh() && resolved !== undefined) {
       return resolved;
     }
     failedAt = undefined;
