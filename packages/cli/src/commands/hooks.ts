@@ -233,6 +233,7 @@ let hookProjectId: string | null | undefined;
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out;
   const line = `${JSON.stringify(payload)}\n`;
+  emitBytesTotal += Buffer.byteLength(line);
   // synchronous — the answer must be on the wire before whatever
   // blocking I/O follows it (the deadline flush, exit); a buffered
   // write only queues behind it. The stream fallback covers a closed
@@ -1516,6 +1517,9 @@ interface PerfRow extends ProbeTiming {
   probe?: string;
   /** Total-row marker: how many probe rows the event produced. */
   probes?: number;
+  /** Total-row marker: stdout bytes the event emitted — the injected
+   *  context size, the quota-cost dimension of hooks. */
+  bytes?: number;
   deadline?: boolean;
 }
 
@@ -1531,6 +1535,12 @@ function perfFile(sessionId: string): string | null {
  *  and flush once at event end: one locked write per hook, not one
  *  per probe. */
 let perfBuf: PerfRow[] | null = null;
+
+/** Emitted stdout bytes for the in-flight event — summed across every
+ *  emit() the event performs, flushed onto its total row. The injected
+ *  context size is the quota cost of hooks (drill 4b7e19) and was
+ *  unmeasured until now. */
+let emitBytesTotal = 0;
 
 /** Build the collector's callback: stamps probe + event onto each
  *  timing row and buffers it for the event-end flush. Also opens the
@@ -1656,8 +1666,10 @@ function flushPerf(sessionId: string, event: string, t0: number, deadline = fals
       ms: Date.now() - t0,
       connector: '',
       probes: rows.length,
+      bytes: emitBytesTotal,
       ...(deadline ? { deadline: true } : {}),
     });
+    emitBytesTotal = 0;
     const fresh = !existsSync(path);
     appendJournal(path, `${rows.map(r => JSON.stringify(r)).join('\n')}\n`);
     if (fresh) {

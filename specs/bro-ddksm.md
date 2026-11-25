@@ -12,7 +12,12 @@ the per-request tax that remained.
 
 - `BRO_HOOKS=0` marks a process tree as a machine backend — no human
   session exists to rehydrate, gate, or notify, so every session-lifecycle
-  hook event is pure latency.
+  hook event is pure latency. Scope is exactly the acp machine-backend
+  turns below: fleet workers (native/tmux/docker spawns) DO fire devin
+  hooks — the pin does not ride their spawn env, by design, so a worker's
+  session-start/stop events probe and journal like any other session
+  (drill 4b7e19: `.git/bro/hooks/<session>.act` written mid-run by a
+  native worker). Any sizing assumption that workers skip hooks is wrong.
 - The acp provider binding pins it on every agent it spawns
   (`withAcp`, `acpOpen` — judge one-shots AND the conductor's pooled
   peer): `env: { BRO_HOOKS: '0', ...process.env }` — the pin is a
