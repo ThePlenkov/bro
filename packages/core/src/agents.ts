@@ -161,13 +161,24 @@ function skipBlank(text: string, i: number): number {
   return j;
 }
 
+/** Whitespace on the SAME line — unlike skipBlank this never crosses
+ *  a newline, so a duration phrase can't pair with numbers printed on
+ *  an unrelated later line. */
+function skipBlankInline(text: string, i: number): number {
+  let j = i;
+  while (j < text.length && j - i < 4096 && [32, 9, 12, 11].includes(text.charCodeAt(j))) {
+    j++;
+  }
+  return j;
+}
+
 /** One duration separator — a comma and/or a word-bounded 'and'
  *  ('1 hour, and 30 minutes'). Returns the index past it, or the
  *  input position when neither sits there. */
 function separatorEnd(text: string, i: number): number {
   let j = i;
   if (text.charCodeAt(j) === 44) {
-    j = skipBlank(text, j + 1);
+    j = skipBlankInline(text, j + 1);
   }
   if (
     j > 0 &&
@@ -175,7 +186,7 @@ function separatorEnd(text: string, i: number): number {
     text.slice(j, j + 3).toLowerCase() === 'and' &&
     (j + 3 >= text.length || !/[A-Za-z0-9_]/.test(text[j + 3]!))
   ) {
-    j = skipBlank(text, j + 3);
+    j = skipBlankInline(text, j + 3);
   }
   return j;
 }
@@ -245,7 +256,10 @@ function relScanFrom(text: string, start: number): number | undefined {
   let found = false;
   let i = start;
   while (i < text.length) {
-    i = skipBlank(text, i);
+    i = skipBlankInline(text, i);
+    if (text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13) {
+      break; // pairs bind to the phrase line — a newline closes the scan
+    }
     // separators can chain ('…and, 5 minutes' — odd but harmless to
     // keep reading); each pass ends where nothing else consumed
     for (;;) {
@@ -259,7 +273,7 @@ function relScanFrom(text: string, start: number): number | undefined {
     if (num === undefined) {
       break;
     }
-    const unit = unitKeyAt(text, skipBlank(text, num.end));
+    const unit = unitKeyAt(text, skipBlankInline(text, num.end));
     if (unit === undefined) {
       break;
     }
