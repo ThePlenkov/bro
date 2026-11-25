@@ -6134,17 +6134,36 @@ export function gcMatchDir(dir: string, env: AgentConnectorEnv): boolean {
   return city !== null && existsSync(join(city, 'city.toml'));
 }
 
-function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  const proc = /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */ spawnSync(
-    'gc',
-    args,
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
+/** Resolve a PATH binary ourselves and pin the absolute path — first
+ *  PATH dir wins, same order the OS uses; spawnSync then needs no
+ *  PATH lookup of its own. */
+function resolveOnPath(bin: string): string | null {
+  const exts =
+    process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir === '') continue;
+    for (const ext of exts) {
+      const candidate = join(dir, bin + ext);
+      try {
+        if (statSync(candidate).isFile()) {
+          accessSync(candidate, constants.X_OK);
+          return candidate;
+        }
+      } catch {
+        /* keep scanning PATH */
+      }
     }
-  );
+  }
+  return null;
+}
+
+function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
+  const proc = spawnSync(resolveOnPath('gc') ?? 'gc', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
@@ -6871,16 +6890,12 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  const proc = /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */ spawnSync(
-    'docker',
-    args,
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      maxBuffer: 16 * 1024 * 1024,
-    }
-  );
+  const proc = spawnSync(resolveOnPath('docker') ?? 'docker', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  });
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
