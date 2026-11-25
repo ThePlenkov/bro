@@ -35,6 +35,7 @@ export const isJudgeTurn = (text: string | undefined, by: string | undefined): b
   (by !== undefined && /\bjudge\b|\bjev\b/i.test(by));
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 
 /** One shape-table entry: answer object → its one-line rendering. */
 const SHAPES: Record<string, (a: Record<string, unknown>) => string | undefined> = {
@@ -54,17 +55,50 @@ const SHAPES: Record<string, (a: Record<string, unknown>) => string | undefined>
 };
 
 const answerLine = (a: unknown): string | undefined => {
-  if (typeof a !== 'object' || a === null) return undefined;
-  const r = a as Record<string, unknown>;
-  const fn =
-    typeof r.type === 'string' && Object.hasOwn(SHAPES, r.type) ? SHAPES[r.type] : undefined;
-  if (fn !== undefined) return fn(r);
-  // type-less answers still render when a single shape key is present
-  for (const key of Object.keys(SHAPES)) {
-    const line = SHAPES[key]?.(r);
+  if (!isRecord(a)) return undefined;
+  // a named type binds to its shape; a type-less (or mistyped) answer still renders
+  // when a single shape key is present
+  const named =
+    typeof a.type === 'string' ? Object.getOwnPropertyDescriptor(SHAPES, a.type)?.value : undefined;
+  const candidates = named !== undefined ? [named] : Object.values(SHAPES);
+  for (const fn of candidates) {
+    const line = fn(a);
     if (line !== undefined) return line;
   }
   return undefined;
+};
+
+/** Cheap shape gate before JSON.parse: non-empty, bounded, object-looking. */
+const isCandidateJson = (t: string): boolean =>
+  t.length > 0 && t.length <= 4096 && t.startsWith('{');
+
+const parseJsonRecord = (t: string): Record<string, unknown> | undefined => {
+  try {
+    const parsed: unknown = JSON.parse(t);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Keys allowed beside `answers` in the typed-call wrapper. */
+const WRAPPER_KEYS: ReadonlySet<string> = new Set(['answers', 'model', '_meta']);
+
+// the typed call wraps answers: {answers:{…}} — unwrap it
+const unwrapAnswers = (map: Record<string, unknown>): Record<string, unknown> =>
+  isRecord(map.answers) && Object.keys(map).every(k => WRAPPER_KEYS.has(k)) ? map.answers : map;
+
+/** Every entry must render through a shape, and at most 8 of them — more means the body
+ *  is a plain JSON payload, not a verdict (the ▸ JSON row takes it). */
+const fieldsOf = (map: Record<string, unknown>): [string, string][] | undefined => {
+  const fields: [string, string][] = [];
+  for (const [qid, a] of Object.entries(map)) {
+    const line = answerLine(a);
+    if (line === undefined) return undefined;
+    fields.push([qid, line]);
+    if (fields.length > 8) return undefined;
+  }
+  return fields.length === 0 ? undefined : fields;
 };
 
 /** Agent text → a verdict control, or undefined (falls back to the
@@ -72,33 +106,13 @@ const answerLine = (a: unknown): string | undefined => {
  *  — a prose reply on a judge turn stays a message. */
 export function verdictOf(text: string): VerdictView | undefined {
   const t = text.trim();
-  if (t.length === 0 || t.length > 4096 || !t.startsWith('{')) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(t);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== 'object' || parsed === null) return undefined;
-  let map = parsed as Record<string, unknown>;
+  if (!isCandidateJson(t)) return undefined;
+  const parsed = parseJsonRecord(t);
+  if (parsed === undefined) return undefined;
   // the reply may name its model — the generic call label
-  const model = typeof map.model === 'string' && map.model !== '' ? map.model : undefined;
-  // the typed call wraps answers: {answers:{…}} — unwrap it
-  if (
-    typeof map.answers === 'object' &&
-    map.answers !== null &&
-    Object.keys(map).every(k => k === 'answers' || k === 'model' || k === '_meta')
-  ) {
-    map = map.answers as Record<string, unknown>;
-  }
-  const fields: [string, string][] = [];
-  for (const [qid, a] of Object.entries(map)) {
-    const line = answerLine(a);
-    if (line === undefined) return undefined;
-    fields.push([qid, line]);
-    if (fields.length > 8) return undefined; // too big — the ▸ JSON row
-  }
-  if (fields.length === 0) return undefined;
+  const model = typeof parsed.model === 'string' && parsed.model !== '' ? parsed.model : undefined;
+  const fields = fieldsOf(unwrapAnswers(parsed));
+  if (fields === undefined) return undefined;
   return {
     badge: model ?? 'verdict',
     ...(model !== undefined ? { model } : {}),
