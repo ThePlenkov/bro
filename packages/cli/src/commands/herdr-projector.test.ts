@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -639,7 +647,9 @@ describe('projectFleet — a live pass over a fake herdr', () => {
       },
       () => projectFleet(root, now)
     );
-    return { r, calls: callsOf(log) };
+    // a pass that correctly refuses every write never emits a call —
+    // the log then doesn't exist at all (bro-u0yjy)
+    return { r, calls: existsSync(log) ? callsOf(log) : [] };
   };
 
   const stateDirOf = (): string => mkdtempSync(join(tmpdir(), 'proj-state-'));
@@ -890,6 +900,31 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     // and the workspace label keeps the robot marker on the acp lane
     const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
     assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', `🤖 ${basename(root)}`]);
+  });
+
+  test('a corrupt registry skips every write of the pass (bro-u0yjy)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-corrupt-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    mkdirSync(join(root, '.git', 'bro', 'agents'), { recursive: true });
+    // torn write — valid ENOENT-empty is fine, corrupt JSON is degradation
+    writeFileSync(join(root, '.git', 'bro', 'agents.json'), '{ "mol-1": {');
+    const stateDir = stateDirOf();
+    const scope = createHash('sha1').update(join(root, '.git')).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({ workspaces: { [root]: { ws: 'w1', label: 'old', managed: true } } })
+    );
+    const { r, calls } = fleetPass(root, stateDir, {
+      scenario: {
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'old' }],
+      },
+      state: {},
+    });
+    assert.equal(r.degraded, 'registry read');
+    assert.equal(r.writes, 0);
+    // no rename/meta write can land while worker evidence is unreadable
+    assert.ok(!calls.some(c => c[0] === 'workspace'));
   });
 
   test('a user-owned workspace is never touched', () => {

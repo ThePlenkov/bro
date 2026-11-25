@@ -154,14 +154,38 @@ interface Planes {
   providers: Record<string, ProviderEntry>;
 }
 
-/** A corrupt/unreadable agents.json degrades to an empty registry —
- *  one bad file must not skip projection for every managed workspace. */
-function tryRegistry(ctx: Pick<PassCtx, 'root'>): ReturnType<typeof readAgentRegistry> {
-  try {
-    return readAgentRegistry(ctx.root);
-  } catch {
-    return {};
+/** The registry read, split honest: a corrupt/unreadable agents.json
+ *  is degradation, NOT emptiness (bro-u0yjy). An empty {} would strip
+ *  every worker row from the projection and the pass would write
+ *  dead-looking titles/meta over workspaces whose only live evidence
+ *  is the registry — the exact corruption-as-emptiness doctrine
+ *  readAgentRegistryFile itself refuses. */
+/** One registry read per pass — memoized on the ctx object. A second
+ *  read could observe the file mid-corruption AFTER the gate check
+ *  passed, and the projection would treat every registry worker as
+ *  absent: the exact corruption-as-emptiness the gate exists to kill
+ *  (kody + cubic on #1239). */
+const regCache = new WeakMap<
+  object,
+  { reg: ReturnType<typeof readAgentRegistry>; failed: boolean }
+>();
+
+function tryRegistry(ctx: Pick<PassCtx, 'root'>): {
+  reg: ReturnType<typeof readAgentRegistry>;
+  failed: boolean;
+} {
+  const hit = regCache.get(ctx);
+  if (hit !== undefined) {
+    return hit;
   }
+  let out: { reg: ReturnType<typeof readAgentRegistry>; failed: boolean };
+  try {
+    out = { reg: readAgentRegistry(ctx.root), failed: false };
+  } catch {
+    out = { reg: {}, failed: true };
+  }
+  regCache.set(ctx, out);
+  return out;
 }
 
 function readPlanes(ctx: PassCtx): Planes {
@@ -169,7 +193,7 @@ function readPlanes(ctx: PassCtx): Planes {
   return {
     agentsHome: ctx.common === null ? null : join(ctx.common, 'bro', 'agents'),
     eventsHome: ctx.state === null ? null : join(ctx.state, 'bro', 'agents'),
-    registry: tryRegistry(ctx),
+    registry: tryRegistry(ctx).reg,
     branches: gitBranches(ctx),
     runs: collectLoopRuns(ctx.root, ctx.now),
     act: actStates(ctx),
@@ -248,6 +272,20 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
   const common = gitCommonDir(mainRoot);
   const state = stateCommonDir(mainRoot);
   const ctx: PassCtx = { root: mainRoot, common, state, now };
+  // a degraded registry read means no write is safe: the projection
+  // cannot tell a dead workspace from one whose only live evidence is
+  // the file it just failed to read. Skip the pass, name the cause —
+  // the next pass with a healed file resumes writes (bro-u0yjy).
+  if (tryRegistry(ctx).failed) {
+    return {
+      reachable: true,
+      workspaces: 0,
+      writes: 0,
+      files: 0,
+      leds: 0,
+      degraded: 'registry read',
+    };
+  }
   return runFleetPass(ctx, {
     planes: () => readPlanes(ctx),
     input: (t, planes) => treeInput(t, planes, ctx),
