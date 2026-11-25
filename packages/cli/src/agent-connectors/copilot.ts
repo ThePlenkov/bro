@@ -78,20 +78,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     target: { owner: string; repo: string; slug: string }
   ): { task: CopilotTask; taskId: string } => {
     const bodyFile = join(home, `${agentId}.task.json`);
-    writePrivateFileSync({
-      path: bodyFile,
-      data: JSON.stringify({
-        prompt: spec.prompt,
-        create_pull_request: true,
-        ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
-        ...((spec.model ?? knobString('model')) !== undefined
-          ? { model: spec.model ?? knobString('model') }
-          : {}),
-        ...(knobString('customAgent') !== undefined
-          ? { custom_agent: knobString('customAgent') }
-          : {}),
-      }),
-    });
+    writePrivateFileSync({ path: bodyFile, data: JSON.stringify(copilotTaskBody(spec)) });
     const res = ghRun(
       [
         'api',
@@ -125,6 +112,16 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     }
     return { task, taskId };
   };
+
+  const copilotTaskBody = (spec: SpawnSpec): Record<string, unknown> => ({
+    prompt: spec.prompt,
+    create_pull_request: true,
+    ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
+    ...((spec.model ?? knobString('model')) !== undefined
+      ? { model: spec.model ?? knobString('model') }
+      : {}),
+    ...(knobString('customAgent') !== undefined ? { custom_agent: knobString('customAgent') } : {}),
+  });
 
   /** Why a dispatch failed — a transport/body-shape error is quoted
    *  raw; anything else is almost always the coding agent not being
@@ -181,23 +178,78 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     }
   };
 
+  const preflightCopilot = (
+    spec: SpawnSpec
+  ): { home: string; target: { owner: string; repo: string; slug: string } } => {
+    assertMutableConfig(dir);
+    refuseCopilotWorker(spec);
+    if (!existsSync(spec.repoRoot)) {
+      throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input');
+    }
+    const home = agentsHome(dir);
+    if (home === null) {
+      throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config');
+    }
+    return { home, target: targetRepo(spec) };
+  };
+
+  const finishCopilotSpawn = (
+    spec: SpawnSpec,
+    home: string,
+    target: { owner: string; repo: string; slug: string },
+    agentId: string
+  ): AgentInfo => {
+    const { task, taskId } = dispatchTask(home, agentId, spec, target);
+    const state = copilotTaskState(task);
+    const spawned = patchAgentRegistry(dir, spec.molStep, {
+      taskId,
+      taskRepo: target.slug,
+      taskState: state !== '' ? state : undefined,
+      branch: copilotHeadRef(task),
+    });
+    writeWorkMarker(dir, agentId, spec.molStep);
+    copilotRefreshCount(dir, env);
+    return {
+      id: agentId,
+      spawnedAt: typeof spawned.spawnedAt === 'string' ? spawned.spawnedAt : undefined,
+      molStep: spec.molStep,
+      backend: 'copilot',
+      state:
+        state === 'in_progress' || state === 'idle' || state === 'waiting_for_user'
+          ? 'running'
+          : 'spawned',
+      ...infoProvenance(spawned),
+      worktree: resolve(spec.repoRoot),
+      log: copilotSessionUrl(target.slug, spawned.pr, spawned.sessionId),
+    };
+  };
+
+  const releaseCopilotSpawn = (
+    err: unknown,
+    spec: SpawnSpec,
+    reservation: Parameters<typeof releaseSessionSlot>[0] | undefined,
+    crossKindReservations: Parameters<typeof releaseSessionStart>[0],
+    lease: Parameters<typeof releaseSpawnLease>[1]
+  ): never => {
+    copilotRefreshCount(dir, env);
+    if (reservation !== undefined) releaseSessionSlot(reservation);
+    releaseSessionStart(crossKindReservations);
+    releaseSpawnLease(dir, lease);
+    try {
+      patchAgentRegistry(dir, spec.molStep, {
+        spawnError: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // the entry landed already — the SpawnError still reports
+    }
+    throw err;
+  };
+
   return {
     name: 'copilot',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
-      // NOSONAR — connector contract is async; the critical section is sync
-      // policy before preflight — an invalid committed config must
-      // refuse ahead of the remote-count refresh, not just the claim
-      assertMutableConfig(dir);
-      refuseCopilotWorker(spec);
-      if (!existsSync(spec.repoRoot)) {
-        throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input');
-      }
-      const home = agentsHome(dir);
-      if (home === null) {
-        throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config');
-      }
-      const target = targetRepo(spec);
+      const { home, target } = preflightCopilot(spec);
       // refresh the remote count BEFORE admission — a first-ever spawn
       // on a reachable API must not fail closed on an absent cache;
       // unreachable stays fail-closed by the same path. Outside the
@@ -251,50 +303,9 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           external: externalGuardOf(env),
         });
         try {
-          const { task, taskId } = dispatchTask(home, agentId, spec, target);
-          const state = copilotTaskState(task);
-          const spawned = patchAgentRegistry(dir, spec.molStep, {
-            taskId,
-            taskRepo: target.slug,
-            taskState: state !== '' ? state : undefined,
-            branch: copilotHeadRef(task),
-          });
-          writeWorkMarker(dir, agentId, spec.molStep);
-          copilotRefreshCount(dir, env);
-          return {
-            id: agentId,
-            spawnedAt: typeof spawned.spawnedAt === 'string' ? spawned.spawnedAt : undefined,
-            molStep: spec.molStep,
-            backend: 'copilot',
-            // queued is still 'spawned'; the create response is fresh
-            // enough to report 'running' on an in-progress read
-            state:
-              state === 'in_progress' || state === 'idle' || state === 'waiting_for_user'
-                ? 'running'
-                : 'spawned',
-            ...infoProvenance(spawned),
-            worktree: resolve(spec.repoRoot),
-            log: copilotSessionUrl(target.slug, spawned.pr, spawned.sessionId),
-          };
+          return finishCopilotSpawn(spec, home, target, agentId);
         } catch (err) {
-          // the create may still have landed server-side (a timeout or
-          // a lost response can't prove the task doesn't exist) —
-          // refresh the remote count so the NEXT admission sees the
-          // orphan's share instead of only the released reservation
-          copilotRefreshCount(dir, env);
-          if (reservation !== undefined) {
-            releaseSessionSlot(reservation);
-          }
-          releaseSessionStart(crossKindReservations);
-          releaseSpawnLease(dir, lease);
-          try {
-            patchAgentRegistry(dir, spec.molStep, {
-              spawnError: err instanceof Error ? err.message : String(err),
-            });
-          } catch {
-            // the entry landed already — the SpawnError still reports
-          }
-          throw err;
+          return releaseCopilotSpawn(err, spec, reservation, crossKindReservations, lease);
         }
       });
     },

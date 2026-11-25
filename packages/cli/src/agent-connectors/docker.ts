@@ -63,9 +63,102 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 
   const findEntry = (id: string) => findAgentEntry(dir, 'docker', id);
 
+  const launchDockerContainer = (input: {
+    spec: SpawnSpec;
+    home: string;
+    agentId: string;
+    promptFile: string;
+    log: string;
+    stderrLog: string | undefined;
+    exitFile: string;
+    resumeSessionId: string | undefined;
+    name: string;
+    mol: string;
+    image: string;
+  }): string => {
+    const {
+      spec,
+      home,
+      agentId,
+      promptFile,
+      log,
+      stderrLog,
+      exitFile,
+      resumeSessionId,
+      name,
+      mol,
+      image,
+    } = input;
+    const envFile = join(home, `${agentId}.env`);
+    try {
+      dockerRun(['rm', '-f', name]);
+      writeDockerEnvFile(envFile, spec);
+      const worker = workerWithResume(spec.worker, resumeSessionId);
+      warnNoPromptFile(worker, command);
+      const cliBadge = workerCliBadge(worker, command);
+      const runLine = workerRunLine(worker, command);
+      const wrapper =
+        stderrLog !== undefined
+          ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
+          : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`;
+      const res = dockerRun(
+        dockerRunArgv(
+          name,
+          spec,
+          dockerMounts(spec),
+          envFile,
+          agentId,
+          promptFile,
+          cliBadge,
+          mol,
+          runArgs,
+          image,
+          wrapper,
+          getCredentialScope(env, 'docker').strictEnv
+        )
+      );
+      rmSync(envFile, { force: true });
+      if (res.code !== 0) {
+        const why = res.err !== '' ? res.err : `exited ${res.code}`;
+        throw new SpawnError(`docker run failed — ${why}`, 'unavailable');
+      }
+      return res.out.trim().split('\n')[0] ?? '';
+    } catch (err) {
+      dockerRun(['rm', '-f', name]);
+      try {
+        rmSync(envFile, { force: true });
+      } catch {
+        // cleanup must not mask the launch error
+      }
+      throw err;
+    }
+  };
+
+  const releaseDockerSpawn = (input: {
+    err: unknown;
+    reservation: Parameters<typeof releaseSessionSlot>[0] | undefined;
+    crossKindReservations: Parameters<typeof releaseSessionStart>[0];
+    lease: Parameters<typeof rebindSpawnLease>[1];
+    molStep: string;
+  }): never => {
+    const { err, reservation, crossKindReservations, lease, molStep } = input;
+    if (reservation !== undefined) releaseSessionSlot(reservation);
+    releaseSessionStart(crossKindReservations);
+    releaseSpawnLease(dir, lease);
+    try {
+      patchAgentRegistry(dir, molStep, {
+        spawnError: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // the entry landed already — the SpawnError still reports
+    }
+    throw err;
+  };
+
   return {
     name: 'docker',
 
+    // NOSONAR — connector contract is async; the critical section is intentionally centralized
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
       // NOSONAR — connector contract is async; the work is one sync critical section
       // policy BEFORE the daemon probe and image pull/build — a refused
@@ -124,98 +217,40 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           external: externalGuardOf(env),
         });
         const name = `bro-${agentId}`;
-        const envFile = join(home, `${agentId}.env`);
-        let containerId = '';
         try {
-          // a corpse with our name (crash between entry and rm, a
-          // respawn over a stopped container) collides docker run —
-          // clear it
-          dockerRun(['rm', '-f', name]);
-          writeDockerEnvFile(envFile, spec);
-          const worker = workerWithResume(spec.worker, resumeSessionId);
-          warnNoPromptFile(worker, command);
-          const cliBadge = workerCliBadge(worker, command);
-          const runLine = workerRunLine(worker, command);
-          // the native wrapper, verbatim — the mounted paths make .exit/
-          // log land where the host ladder reads them. --init gives the
-          // worker a reaper so grandchildren can't zombie inside; --rm
-          // removes the corpse on exit so `docker ps -a` doesn't fill
-          // with bro litter and the name frees for a respawn.
-          const wrapper =
-            stderrLog !== undefined
-              ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
-              : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`;
-          const res = dockerRun(
-            dockerRunArgv(
-              name,
-              spec,
-              dockerMounts(spec),
-              envFile,
-              agentId,
-              promptFile,
-              cliBadge,
-              mol,
-              runArgs,
-              image,
-              wrapper,
-              getCredentialScope(env, 'docker').strictEnv
-            )
-          );
-          rmSync(envFile, { force: true }); // the env is baked into container config — the file has done its job
-          if (res.code !== 0) {
-            const why = res.err !== '' ? res.err : `exited ${res.code}`;
-            throw new SpawnError(`docker run failed — ${why}`, 'unavailable');
+          const containerId = launchDockerContainer({
+            spec,
+            home,
+            agentId,
+            promptFile,
+            log,
+            stderrLog,
+            exitFile,
+            resumeSessionId,
+            name,
+            mol: mol!,
+            image,
+          });
+          const insp = dockerInspect(name);
+          const spawned = patchAgentRegistry(dir, spec.molStep, {
+            containerId,
+            ...(insp.pid !== undefined ? { pid: insp.pid, pidStart: null } : {}),
+          });
+          rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {});
+          if (dockerPidIsLocal && insp.pid !== undefined) {
+            retagSessionSlots([reservation, ...crossKindReservations], insp.pid);
           }
-          containerId = res.out.trim().split('\n')[0] ?? '';
+          writeWorkMarker(dir, agentId, spec.molStep, insp.pid);
+          return toDockerInfo(dir, home, spec.molStep, spawned);
         } catch (err) {
-          // ANY setup failure after the reservation releases it — a
-          // leaked slot starves the quota until its TTL lapses. The
-          // registry entry already landed; the spawnError fields it,
-          // and the env file (ambient secrets included) goes too.
-          dockerRun(['rm', '-f', name]);
-          try {
-            rmSync(envFile, { force: true });
-          } catch {
-            // a cleanup failure must not mask the launch error or
-            // skip the slot/lease releases below — same guard the
-            // tmux catch carries
-          }
-          if (reservation !== undefined) {
-            releaseSessionSlot(reservation);
-          }
-          releaseSessionStart(crossKindReservations);
-          releaseSpawnLease(dir, lease);
-          try {
-            patchAgentRegistry(dir, spec.molStep, {
-              spawnError: err instanceof Error ? err.message : String(err),
-            });
-          } catch {
-            // the entry landed already — the SpawnError still reports
-          }
-          throw err;
+          return releaseDockerSpawn({
+            err,
+            reservation,
+            crossKindReservations,
+            lease,
+            molStep: spec.molStep,
+          });
         }
-        const insp = dockerInspect(name);
-        const spawned = patchAgentRegistry(dir, spec.molStep, {
-          containerId,
-          ...(insp.pid !== undefined
-            ? // State.Pid is a display handle only — a remote/VM daemon
-              // reports ITS host's pid, meaningless to local /proc and
-              // pidAlive; pidStart stays null so nothing correlates it
-              { pid: insp.pid, pidStart: null }
-            : {}),
-        });
-        // a usable local State.Pid downgrades the born-TTL lease to
-        // local governance — a remote daemon's pid names its own host,
-        // and an empty patch keeps the foreign stamp
-        rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {});
-        // the slot claims follow the lane's holder — a local container
-        // pid is probeable like native's child (spec bro-x601l); a
-        // remote daemon's pid names its own host and retags nothing
-        if (dockerPidIsLocal && insp.pid !== undefined) {
-          retagSessionSlots([reservation, ...crossKindReservations], insp.pid);
-        }
-        writeWorkMarker(dir, agentId, spec.molStep, insp.pid);
-        return toDockerInfo(dir, home, spec.molStep, spawned);
       });
     },
 

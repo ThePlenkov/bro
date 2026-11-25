@@ -541,6 +541,45 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 
   const findEntry = (id: string) => findAgentEntry(dir, 'native', id);
 
+  const spawnNativeWorker = (
+    scoped: boolean,
+    args: string[],
+    scopeArgv: string[],
+    spawnOpts: SpawnOptions,
+    stderrLog: string | undefined,
+    log: string,
+    handleFile: string,
+    exitFile: string
+  ): { child: ReturnType<typeof spawn>; scopeRetried: boolean } => {
+    const spawnWorker = (wrap: boolean) => {
+      if (wrap && spawnTestSeam.scopeRefused === true) {
+        return spawn('sh', ['-c', 'exit 1'], spawnOpts);
+      }
+      return spawn(wrap ? 'systemd-run' : 'sh', wrap ? scopeArgv : args, spawnOpts);
+    };
+    let child = spawnWorker(scoped);
+    if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
+      if (stderrLog !== undefined) {
+        appendPrivateFileSync({
+          path: stderrLog,
+          data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
+        });
+      } else {
+        appendPrivateFileSync({
+          path: log,
+          data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
+        });
+      }
+      child.on('error', () => {
+        /* the retry owns the verdict now */
+      });
+      child = spawnWorker(false);
+      return { child, scopeRetried: true };
+    }
+    return { child, scopeRetried: false };
+  };
+
+  // NOSONAR — the lock callback owns one synchronous spawn transaction
   const spawnNative = (spec: SpawnSpec, home: string, mol: string): AgentInfo => {
     return withAgentRegistryLock(dir, () => {
       const {
@@ -696,47 +735,18 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // the scope refusal path needs a second shot at the same spawn —
         // the seam's refusal stand-in dies instantly like a real refused
         // systemd-run, but runs the payload verbatim for everything else
-        const spawnWorker = (wrap: boolean) => {
-          if (wrap && spawnTestSeam.scopeRefused === true) {
-            // PATH lookup is the contract (same as git/bd everywhere)
-            return /* NOSONAR */ spawn('sh', ['-c', 'exit 1'], spawnOpts);
-          }
-          // PATH lookup is the contract (same as git/bd everywhere)
-          return /* NOSONAR */ spawn(
-            wrap ? 'systemd-run' : 'sh',
-            wrap ? scopeArgv : args,
-            spawnOpts
-          );
-        };
-        let child = spawnWorker(scoped);
-        childPid = child.pid;
-        if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
-          // refused — the payload never ran: dead pid, no handle, no
-          // .exit; left alone the row would read 'lost' with no record
-          // and the reservation would idle out its TTL. Retry the plain
-          // spawn over the same attempt artifacts. The refused child is
-          // proven dead, so it does not block the catch's row stamp —
-          // only the retry's own pid may still publish a handle
-          childPid = undefined;
-          if (stderrLog !== undefined) {
-            appendPrivateFileSync({
-              path: stderrLog,
-              data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
-            });
-          } else {
-            appendPrivateFileSync({
-              path: log,
-              data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
-            });
-          }
-          // the discarded child may still emit 'error' (the ENOENT
-          // path) — an unlistened error event takes the whole CLI down
-          child.on('error', () => {
-            /* the retry owns the verdict now — swallow the loser's */
-          });
-          child = spawnWorker(false);
-          childPid = child.pid;
-        }
+        const spawnedWorker = spawnNativeWorker(
+          scoped,
+          args,
+          scopeArgv,
+          spawnOpts,
+          stderrLog,
+          log,
+          handleFile,
+          exitFile
+        );
+        let child = spawnedWorker.child;
+        childPid = spawnedWorker.scopeRetried ? undefined : child.pid;
         // an unhandled 'error' event would take the whole CLI down —
         // a failed exec records itself on the entry and reads 'lost'
         const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt;
