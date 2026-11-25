@@ -4635,6 +4635,9 @@ export function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
+  // BRO_HOOKS=0 pins the machine-backend turn (spec bro-ddksm) — it must
+  // not inherit into fleet workers, which fire hooks of their own.
+  delete env.BRO_HOOKS;
   const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
     // NOSONAR — PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -5173,8 +5176,13 @@ export function writeDockerEnvFile(
   const policy = env
     ? getCredentialScope(env, 'docker')
     : { strictEnv: false, envAllowlist: undefined };
+  // BRO_HOOKS=0 pins the machine-backend turn only — fleet workers must
+  // not inherit the suppression (spec bro-ddksm).
+  const baseEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k) && k !== 'BRO_HOOKS')
+  );
   const ambient = Object.entries({
-    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
+    ...baseEnv,
     ...spec.env,
   })
     .map(([key, value]) => dockerEnvValue(key, value, spec, env, policy, dropped))
