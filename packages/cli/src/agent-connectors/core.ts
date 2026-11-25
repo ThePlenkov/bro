@@ -6135,16 +6135,13 @@ export function gcMatchDir(dir: string, env: AgentConnectorEnv): boolean {
 }
 
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  const proc = /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */ spawnSync(
-    'gc',
-    args,
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-    }
-  );
+  const proc = spawnSync('gc', args, {
+    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
