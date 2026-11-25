@@ -1804,6 +1804,9 @@ async function drivePr(ctx: DriveCtx, pr: number): Promise<PrVerdict> {
   }
   const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval });
   const humanThreads = humanThreadSweep(ctx, pr, state, link);
+  if (humanThreads !== undefined && gate.alerts.length > 0) {
+    humanThreads.alerts = gate.alerts;
+  }
   return humanThreads ?? serviceGate(ctx, pr, state, link, fixer, gate);
 }
 
