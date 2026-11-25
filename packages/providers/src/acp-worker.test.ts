@@ -502,6 +502,30 @@ describe('runAcpWorker', () => {
     }
   });
 
+  test('a resume without a model option falls back cold when a model is requested (bro-fpdhg)', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'done',
+      loadCapable: true,
+      configOptions: [MODEL_OPTION],
+      loadConfigOptions: [],
+    });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+      model: 'qwen3-coder',
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      // the load was attempted, then the cold path opened a fresh session
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
+      assert.equal(fake.sessions.length, 1);
+      assert.deepEqual(fake.prompts, ['PROMPT-TEXT']);
+      assert.match(lines.join('\n'), /resumed but advertises no model config option/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("sessionCapabilities.resume agents take session/resume — the ladder's second rung", async () => {
     const fake = fakeAcpAgent({ replyText: 'done', resumeCapable: true });
     const { spec, lines, dir } = workerSpec({

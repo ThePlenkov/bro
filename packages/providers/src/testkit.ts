@@ -151,6 +151,9 @@ export function fakeAcpAgent(
     authMethods?: AuthMethod[];
     protocolVersion?: number;
     configOptions?: SessionConfigOption[];
+    /** load/resume report these instead of configOptions — a reopened
+     *  session that cannot be model-pinned while a fresh one can. */
+    loadConfigOptions?: SessionConfigOption[];
     /** set_config_option reports this value instead of the pin — an
      *  agent that "applied" the request but kept running another model. */
     reportedModel?: string;
@@ -288,14 +291,14 @@ export function fakeAcpAgent(
         });
       }
       await opts.holdLoadUntil;
-      return { configOptions: opts.configOptions ?? [] };
+      return { configOptions: opts.loadConfigOptions ?? opts.configOptions ?? [] };
     })
     .onRequest('session/resume', ctx => {
       seen.resumes.push(ctx.params.sessionId);
       if (opts.failLoad === true) {
         throw new Error(`session ${ctx.params.sessionId} not found`);
       }
-      return { configOptions: opts.configOptions ?? [] };
+      return { configOptions: opts.loadConfigOptions ?? opts.configOptions ?? [] };
     })
     .onRequest('session/close', ctx => {
       seen.closes.push(ctx.params.sessionId);
