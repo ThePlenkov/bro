@@ -572,7 +572,11 @@ function installLockedSkills(
  *  the lock on disk — later checks accept changed upstream content instead of
  *  reporting drift (bro-illox). The in-memory drift check compares against the
  *  original either way; a failed restore just leaves the installer's rewrite. */
-function installLockedSkillsPreservingLock(dir: string, locked: Map<string, LockedSkill>): void {
+function installLockedSkillsPreservingLock(
+  dir: string,
+  locked: Map<string, LockedSkill>,
+  skillsDir: string
+): void {
   const lockPath = join(dir, 'skills-lock.json');
   let originalLock: string | null = null;
   try {
@@ -580,7 +584,7 @@ function installLockedSkillsPreservingLock(dir: string, locked: Map<string, Lock
   } catch {
     originalLock = null;
   }
-  installLockedSkills(dir, locked);
+  installLockedSkills(dir, locked, skillsDir);
   if (originalLock === null) {
     return;
   }
