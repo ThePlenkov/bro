@@ -83,7 +83,8 @@ describe('clockPlane', () => {
       '/repo',
       { name: 'github' },
       probe({ code: 0, out: INCLUDE_OK, err: '' }),
-      now
+      now,
+      now + 1_500 // probe flight — the uncertainty seam
     );
     assert.deepEqual(res, {
       local: '2026-10-25T23:22:45.000Z',
@@ -102,7 +103,8 @@ describe('clockPlane', () => {
         '/repo',
         { name: 'github' },
         probe({ code: 0, out: INCLUDE_OK, err: '' }),
-        Date.parse(now)
+        Date.parse(now),
+        Date.parse(now) + 1_500
       );
       assert.equal(res?.skewed, true);
       assert.equal(res?.skewMs, skewMs);
