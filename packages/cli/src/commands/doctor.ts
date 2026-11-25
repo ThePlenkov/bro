@@ -1505,7 +1505,11 @@ function doltStoreCheck(r: DoltRemote, network = false): DoctorCheck {
   // doctor` must never egress (bro-krpu5). File transport never leaves
   // the machine and verifies without the opt-in; everything host-shaped
   // waits for `--network`.
-  if (!network && !/^((git\+)?file:\/\/|\.?\.?\/|~\/)/.test(r.url)) {
+  // the gate tests the RESOLVED src, never the wrapper: a git+file://
+  // bridge mirror can carry an https/ssh upstream, and probeDoltRemote
+  // contacts what the mirror resolves to — the opt-in would otherwise
+  // bypass exactly where it matters (review #1252)
+  if (!network && !/^(\.?\.?\/|~\/)/.test(src)) {
     return check(
       'dolt-store',
       'skip',
