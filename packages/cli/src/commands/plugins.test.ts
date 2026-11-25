@@ -56,6 +56,107 @@ function fixture(): {
   };
 }
 
+function assertBundleMatches(dir: string): void {
+  const files = ['index.ts', 'tui.tsx', 'rpc.ts'];
+  for (const file of files) {
+    assert.equal(
+      readFileSync(join(dir, file), 'utf8'),
+      readFileSync(join(repoRoot, 'plugins/opencode/bro', file), 'utf8')
+    );
+  }
+  assert.match(readFileSync(join(dir, 'tui.tsx'), 'utf8'), /from\s+['"]\.\/rpc\.ts['"]/);
+  for (const skill of ['sdd', 'act']) {
+    assert.equal(
+      readFileSync(join(dir, 'skills', skill, 'SKILL.md'), 'utf8'),
+      readFileSync(join(repoRoot, 'skills', skill, 'SKILL.md'), 'utf8')
+    );
+  }
+}
+
+type ClientFixture = {
+  cwd: string;
+  opts: MutateOpts;
+  globalPath: string;
+  localPath: string;
+};
+
+type ClientMatrix = {
+  client: 'opencode' | 'kilo';
+  fixture: () => ClientFixture;
+  assertInstalled: (path: string) => void;
+};
+
+function registerClientMatrix(config: ClientMatrix): void {
+  const { client, fixture: makeFixture, assertInstalled } = config;
+
+  test(`${client} install materializes the global plugin; a second run reports current`, () => {
+    const f = makeFixture();
+    const out = installClient(client, ['global', 'local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
+    assertInstalled(f.globalPath);
+    assert.ok(!existsSync(f.localPath));
+
+    const again = installClient(client, ['global', 'local'], f.opts);
+    assert.deepEqual(
+      again.map(o => o.action),
+      ['current']
+    );
+  });
+
+  test(`${client} list reports an installed global plugin`, () => {
+    const f = makeFixture();
+    installClient(client, ['global'], f.opts);
+    const row = pluginRows(f.cwd, f.opts.env).find(
+      r => r.client === client && r.scope === 'global'
+    );
+    assert.equal(row!.state, 'installed');
+  });
+
+  test(`${client} uninstall removes the plugin`, () => {
+    const f = makeFixture();
+    installClient(client, ['global'], f.opts);
+    const out = uninstallClient(client, ['global'], f.opts);
+    assert.equal(out[0]!.action, 'removed');
+    assert.ok(!existsSync(f.globalPath));
+  });
+
+  test(`${client} refuses a foreign file without --force`, () => {
+    const f = makeFixture();
+    mkdirSync(dirname(f.globalPath), { recursive: true });
+    writeFileSync(f.globalPath, '// someone else\n');
+    const out = installClient(client, ['global'], f.opts);
+    assert.equal(out[0]!.action, 'refused');
+    assert.equal(readFileSync(f.globalPath, 'utf8'), '// someone else\n');
+  });
+
+  test(`${client} dry-run writes nothing`, () => {
+    const f = makeFixture();
+    const out = installClient(client, ['global', 'local'], { ...f.opts, dryRun: true });
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['would-install']
+    );
+    assert.match(out[0]!.note ?? '', /without dedupe/);
+    assert.ok(!existsSync(f.globalPath));
+    assert.ok(!existsSync(f.localPath));
+  });
+
+  test(`${client} explicit --local installs the project copy`, () => {
+    const f = makeFixture();
+    const out = installClient(client, ['local'], f.opts);
+    assert.deepEqual(
+      out.map(o => o.action),
+      ['installed']
+    );
+    assertInstalled(f.localPath);
+    assert.ok(!existsSync(f.globalPath));
+  });
+}
+
 describe('scopesOf', () => {
   test('no scope flag means both', () => {
     assert.deepEqual(scopesOf(['opencode']), ['global', 'local']);

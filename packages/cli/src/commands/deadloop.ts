@@ -231,7 +231,8 @@ export function deadLoopPostTool(
   // warn once per detection cycle — a marker already fresh for this
   // signature means the agent was already told; repeating the warning
   // every call is noise, the pre-tool gate is the enforcement
-  if (fresh && prior !== null && prior.signature === loop.signature) {
+  const alreadyWarned = prior !== null && fresh && prior.signature === loop.signature;
+  if (alreadyWarned) {
     return [];
   }
   return [loopWarning(loop)];
