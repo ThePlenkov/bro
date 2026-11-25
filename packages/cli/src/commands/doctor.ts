@@ -1498,7 +1498,10 @@ function doltStoreCheck(r: DoltRemote): DoctorCheck {
   if (src === null) {
     return check('dolt-store', 'skip', `${r.name} — non-git remote, nothing to verify`);
   }
-  return doltStoreRow(r.name, probeDoltRemote(src));
+  // a dead or slow remote is a warn row, not a minute of the doctor's
+  // runtime — 10s per network op bounds one remote at ~30s worst case
+  // instead of ~180s (bro-mazfc)
+  return doltStoreRow(r.name, probeDoltRemote(src, { netMs: 10_000 }));
 }
 
 /** Health → row. `missing` fails — that head boots no replica (`bd
