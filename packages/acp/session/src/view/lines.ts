@@ -137,20 +137,7 @@ export function mdPlain(text: string): string[] {
       out.push(`    ${raw}`);
       continue;
     }
-    out.push(
-      stripTags(raw)
-        .replace(/^\s{0,3}#{1,6}\s+/, '')
-        .replace(/!\[([^\]!]*)\]\([^()]*\)/g, '$1')
-        .replace(/\[([^\]]*)\]\(([^()]*)\)/g, '$1 ($2)')
-        .replace(/\[\/\/\]:\s*#\s*\(.*\)/g, '')
-        .replace(/\*\*([^*]+)\*\*/g, '$1')
-        .replace(/__([^_]+)__/g, '$1')
-        .replace(/\*([^*\n]+)\*/g, '$1')
-        .replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, '$1$2')
-        .replace(/~~([^~]+)~~/g, '$1')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/^\s*>\s?/, '  ')
-    );
+    out.push(stripMarkdownLine(raw));
   }
   return out;
 }
@@ -172,6 +159,179 @@ const stripDelims = (s: string, open: string, close: string, keepUnclosed: boole
     rest = rest.slice(j + close.length);
   }
 };
+
+/** The inline markdown subset used by the plain-text view.  Each helper
+ * makes one bounded linear pass.  This is deliberately not a collection of
+ * regular expressions: malformed or hostile markdown must not make matching
+ * revisit the same suffix exponentially. */
+const stripMarkdownLine = (raw: string): string => {
+  let line = stripTags(raw);
+  line = stripHeading(line);
+  line = stripLinkDefinition(line);
+  line = stripLinks(line);
+  line = stripDelimited(line, '**');
+  line = stripDelimited(line, '__');
+  line = stripDelimited(line, '*');
+  line = stripUnderscores(line);
+  line = stripDelimited(line, '~~');
+  line = stripDelimited(line, '`');
+  let indent = 0;
+  while (indent < line.length && (line[indent] === ' ' || line[indent] === '\t')) indent++;
+  if (line[indent] === '>') {
+    const skip = line[indent + 1] === ' ' ? 2 : 1;
+    line = `${line.slice(0, indent)}  ${line.slice(indent + skip)}`;
+  }
+  // A delimiter can be exposed by removing a longer delimiter (***x***).
+  // Three passes match the old replacement order without an unbounded loop.
+  return stripDelimited(line, '*');
+};
+
+const stripHeading = (s: string): string => {
+  let i = 0;
+  while (i < s.length && i < 3 && s[i] === ' ') i++;
+  const start = i;
+  while (i < s.length && i - start < 6 && s[i] === '#') i++;
+  return i > start && s[i] === ' ' ? s.slice(i + 1) : s;
+};
+
+const stripLinks = (s: string): string => {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const image = s.startsWith('![', i);
+    const link = image || s[i] === '[';
+    if (!link) {
+      out += s[i++];
+      continue;
+    }
+    const labelStart = i + (image ? 2 : 1);
+    const labelEnd = s.indexOf(']', labelStart);
+    const targetStart = labelEnd + 1;
+    const targetEnd =
+      labelEnd >= 0 && s[targetStart] === '(' ? s.indexOf(')', targetStart + 1) : -1;
+    if (labelEnd < 0 || targetEnd < 0 || s.slice(labelStart, labelEnd).includes('!')) {
+      out += s[i++];
+      continue;
+    }
+    const label = s.slice(labelStart, labelEnd);
+    if (image) out += label;
+    else out += `${label} (${s.slice(targetStart + 1, targetEnd)})`;
+    i = targetEnd + 1;
+  }
+  return out;
+};
+
+const stripLinkDefinition = (s: string): string => {
+  const start = s.indexOf('[//]:');
+  if (start < 0) return s;
+  let i = start + 5;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+  if (s[i] !== '#') return s;
+  i++;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+  if (s[i] !== '(') return s;
+  const close = s.lastIndexOf(')');
+  return close < i ? s : s.slice(0, start) + s.slice(close + 1);
+};
+
+const stripDelimited = (s: string, marker: string): string => {
+  let out = '';
+  let cursor = 0;
+  let open = -1;
+  for (let i = 0; i <= s.length - marker.length; i++) {
+    if (!s.startsWith(marker, i)) continue;
+    if (open < 0) {
+      open = i;
+      i += marker.length - 1;
+      continue;
+    }
+    if (i === open + marker.length) {
+      out += s.slice(cursor, i + marker.length);
+    } else {
+      out += s.slice(cursor, open) + s.slice(open + marker.length, i);
+    }
+    cursor = i + marker.length;
+    open = -1;
+    i += marker.length - 1;
+  }
+  return out + s.slice(cursor);
+};
+
+const stripUnderscores = (s: string): string => {
+  let out = '';
+  let cursor = 0;
+  let open = -1;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '_') continue;
+    if (open < 0) {
+      const before = i === 0 ? '' : s[i - 1]!;
+      if (!isWord(before)) open = i;
+      continue;
+    }
+    const after = i + 1 >= s.length ? '' : s[i + 1]!;
+    if (i === open + 1 || isWord(after)) {
+      out += s.slice(cursor, i + 1);
+      cursor = i + 1;
+      open = -1;
+      continue;
+    }
+    out += s.slice(cursor, open) + s.slice(open + 1, i);
+    cursor = i + 1;
+    open = -1;
+  }
+  return out + s.slice(cursor);
+};
+
+const isWord = (char: string): boolean => {
+  if (char === '') return false;
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    char === '_'
+  );
+};
+
+/** HTML-looking tags out of a line — a linear scan, no regex: `<`
+ *  opens a tag that runs to `>`; an unclosed `<` keeps its char (it
+ *  was never a tag) so ordinary text like `a < b` survives. */
+const stripTags = (s: string): string => {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const open = s.indexOf('<', i);
+    if (open === -1) return out + s.slice(i);
+    out += s.slice(i, open);
+    const close = s.indexOf('>', open + 1);
+    if (close === -1) return out + s.slice(open);
+    i = close + 1;
+  }
+};
+
+/** `<!-- ... -->` comments out of a line — a linear scan, no regex:
+ *  an unterminated comment eats to end-of-line and no `<!--` can
+ *  survive the pass (the scanner's injection/ReDoS flags). */
+const stripHtmlComments = (s: string): string => {
+  let out = '';
+  let rest = s;
+  for (;;) {
+    const i = rest.indexOf(open);
+    if (i === -1) return out + rest;
+    out += rest.slice(0, i);
+    const j = rest.indexOf(close, i + open.length);
+    if (j === -1) return keepUnclosed ? out + rest.slice(i) : out;
+    rest = rest.slice(j + close.length);
+  }
+};
+
+/** HTML-looking tags out of a line — `<` opens a tag that runs to
+ *  `>`; an unclosed `<` keeps its char so ordinary text survives. */
+const stripTags = (s: string): string => stripDelims(s, '<', '>', true);
+
+/** `<!-- ... -->` comments out of a line — an unterminated comment
+ *  eats to end-of-line so no `<!--` can survive the pass. */
+const stripHtmlComments = (s: string): string => stripDelims(s, '<!--', '-->', false);
 
 /** HTML-looking tags out of a line — `<` opens a tag that runs to
  *  `>`; an unclosed `<` keeps its char so ordinary text survives. */
