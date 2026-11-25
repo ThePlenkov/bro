@@ -204,6 +204,41 @@ export function AcpToolBody(props: { item: ToolItem; syntax: SyntaxStyle; width:
   );
 }
 
+/** selection previews: a still-collapsed run shows its members
+ *  while it holds the selection (j/k), Enter/c pins it open;
+ *  the FoldBtn on the head row is the mouse path. */
+const runPeek = (item: ToolItem, selected: boolean): boolean =>
+  !item.collapsed || (selected && item.foldTouched !== true);
+
+/** the run's head row — `▸`/`▾` marker, the run's `arg` one-liner,
+ *  and the fold button. */
+function AcpRunHead(props: { item: ToolItem; selected: boolean; onToggle?: () => void }) {
+  const live = () => props.item.status === 'live';
+  const closed = () => props.item.collapsed === true;
+  return (
+    <box
+      flexDirection="row"
+      width="100%"
+      height={1}
+      flexShrink={0}
+      backgroundColor={props.selected ? theme.surface : undefined}
+    >
+      <text
+        fg={theme.cyan}
+        attributes={live() ? undefined : TextAttributes.DIM}
+        content={closed() && (!props.selected || props.item.foldTouched === true) ? '▸ ' : '▾ '}
+      />
+      <text
+        fg={live() ? theme.text : theme.muted}
+        attributes={live() ? undefined : TextAttributes.DIM}
+        content={props.item.arg ?? ''}
+      />
+      <box flexGrow={1} />
+      <FoldBtn open={!closed()} onToggle={props.onToggle} compact={true} />
+    </box>
+  );
+}
+
 /** The collapsed activity run — the confirmed `▸ N tool calls · N
  *  thought · Ns` line; expanded (the card toggle still applies) it
  *  shows each member's own one-liner under the `│` gutter. */
@@ -217,34 +252,8 @@ export function AcpRunRow(props: {
 }) {
   return (
     <box flexDirection="column" flexShrink={0}>
-      <box
-        flexDirection="row"
-        width="100%"
-        height={1}
-        flexShrink={0}
-        backgroundColor={props.selected ? theme.surface : undefined}
-      >
-        <text
-          fg={theme.cyan}
-          attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
-          content={
-            props.item.collapsed === true && (!props.selected || props.item.foldTouched === true)
-              ? '▸ '
-              : '▾ '
-          }
-        />
-        <text
-          fg={props.item.status === 'live' ? theme.text : theme.muted}
-          attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
-          content={props.item.arg ?? ''}
-        />
-        <box flexGrow={1} />
-        <FoldBtn open={props.item.collapsed !== true} onToggle={props.onToggle} compact={true} />
-      </box>
-      {/* selection previews: a still-collapsed run shows its members
-       *  while it holds the selection (j/k), Enter/c pins it open;
-       *  the FoldBtn on the head row is the mouse path */}
-      <Show when={!props.item.collapsed || (props.selected && props.item.foldTouched !== true)}>
+      <AcpRunHead item={props.item} selected={props.selected} onToggle={props.onToggle} />
+      <Show when={runPeek(props.item, props.selected)}>
         <AcpRunMembers {...props} />
       </Show>
     </box>
