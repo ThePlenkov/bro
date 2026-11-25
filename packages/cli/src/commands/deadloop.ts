@@ -74,7 +74,7 @@ export function deadSignature(input: { tool_name?: unknown; tool_input?: unknown
   if (typeof ti.command === 'string' && ti.command !== '') {
     detail = ti.command.replace(/\s+/g, ' ').trim();
   } else if (Array.isArray(ti.paths) && ti.paths.length > 0) {
-    detail = [...ti.paths].sort().join(',');
+    detail = [...ti.paths].sort((a, b) => a.localeCompare(b)).join(',');
   } else {
     const fp =
       typeof ti.file_path === 'string' ? ti.file_path : typeof ti.path === 'string' ? ti.path : '';
@@ -85,7 +85,10 @@ export function deadSignature(input: { tool_name?: unknown; tool_input?: unknown
 
 function stableStringify(v: unknown): string {
   try {
-    return JSON.stringify(v, Object.keys(v as object).sort());
+    return JSON.stringify(
+      v,
+      Object.keys(v as object).sort((a, b) => a.localeCompare(b))
+    );
   } catch {
     return String(v);
   }
@@ -161,7 +164,7 @@ function signatureOfEntry(e: TraceEntry): string {
     typeof e.command === 'string' && e.command !== ''
       ? e.command.replace(/\s+/g, ' ').trim()
       : Array.isArray(e.paths) && e.paths.length > 0
-        ? [...e.paths].sort().join(',')
+        ? [...e.paths].sort((a, b) => a.localeCompare(b)).join(',')
         : '';
   return `${tool}|${detail}`.slice(0, 400);
 }
