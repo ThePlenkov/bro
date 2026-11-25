@@ -245,7 +245,6 @@ describe('the pane impl seam', () => {
     assert.doesNotMatch(text, /▸ 3 tool calls/);
     assert.match(text, /▸ 1 internal call/);
   });
-
   test('the dump only classifies structured replies from judge-labelled turns', async () => {
     const reply = JSON.stringify({ answers: { route: { type: 'choice', choice: 'a' } } });
     const normal = await pickImpl('acp', {});
@@ -276,5 +275,25 @@ describe('the pane impl seam', () => {
       } as never,
     });
     assert.match(judge.dump().join('\n'), /⛨ .*route choice: a/);
+  });
+  test('concurrent archived permission asks keep separate records', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({
+      kind: 'permission',
+      title: 'write /first',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      ts: '2026-01-01T00:00:01Z',
+    });
+    impl.feed({
+      kind: 'permission',
+      title: 'write /second',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      ts: '2026-01-01T00:00:02Z',
+    });
+    impl.beginLive();
+
+    const dump = impl.dump().join('\n');
+    assert.match(dump, /write \/first/);
+    assert.match(dump, /write \/second/);
   });
 });

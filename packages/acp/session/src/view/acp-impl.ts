@@ -77,7 +77,7 @@ const at = (row: ArchiveRow): number => {
 /** One archive row → the ModelEvents it means (usually one; `turn
  *  start` maps to `turn_started` — `prompt_sent` would fabricate a
  *  user message the archive does not carry). */
-function eventsOf(row: ArchiveRow): ModelEvent[] {
+function eventsOf(row: ArchiveRow, position: number): ModelEvent[] {
   const t = at(row);
   switch (row.kind) {
     case 'update':
@@ -87,7 +87,7 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
     case 'turn':
       return turnEvents(row, t);
     case 'permission':
-      return permissionEvents(row, t);
+      return permissionEvents(row, t, position);
     default:
       return [];
   }
@@ -127,8 +127,10 @@ const turnEvents = (row: ArchiveRow, t: number): ModelEvent[] => {
  *  ONE row that carries the verdict and no phase — for that shape
  *  the row opens AND closes, which is what keeps the archive's
  *  single-row permission working. */
-const permissionEvents = (row: ArchiveRow, t: number): ModelEvent[] => {
-  const toolCallId = (row.toolCallId ?? 'unknown') as never;
+const permissionEvents = (row: ArchiveRow, t: number, position: number): ModelEvent[] => {
+  // Headless archives omit the tool call id. Use a stable per-row fallback
+  // so concurrent asks do not overwrite one another in the ACP model.
+  const toolCallId = (row.toolCallId ?? `archive-permission-${position}`) as never;
   const events: ModelEvent[] = [];
   if (row.phase !== 'answer') {
     events.push({
@@ -776,6 +778,8 @@ export class AcpImpl implements PaneImpl {
   /** Their sid → the turn origin at item birth (update rows carry no
    *  `by`; the turn's `by` is on the start row). */
   private readonly sidBy = new Map<string, string>();
+  /** Archive row position, used to identify permission asks without ids. */
+  private feedPosition = 0;
   private ops: Op[] = [];
 
   /** The shell's context — agent/worktree for the feed header. */
@@ -784,6 +788,7 @@ export class AcpImpl implements PaneImpl {
   }
 
   feed(row: ArchiveRow): void /* NOSONAR typescript:S3776 */ {
+    const position = this.feedPosition++;
     this.launchTs ??= row.ts;
     if (row.ts !== undefined) this.lastActivityTs = row.ts;
     // the provider label is any `acp provider 'X'`/`provider:X` by —
@@ -851,7 +856,7 @@ export class AcpImpl implements PaneImpl {
     }
     const wasAction = this.session.state === 'requires_action';
     const orderLen = this.session.order.length;
-    for (const ev of eventsOf(row)) {
+    for (const ev of eventsOf(row, position)) {
       this.session = reduce(this.session, ev);
     }
     // the blocked clock starts when the ask lands — a stamp-less
