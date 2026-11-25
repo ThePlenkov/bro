@@ -1664,6 +1664,9 @@ export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}):
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      // the fake host has no review bots — the green-settle window would
+      // only burn the test timeout, so e2e fixtures opt out of it
+      act: { reviewSettleMinutes: 0 },
       ...(opts.loopAgent === true ? { loop: { agent: `node ${host.agent}` } } : {}),
     })
   );
@@ -1901,6 +1904,7 @@ export function driveFixture(prefix: string): DriveFixture {
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      act: { reviewSettleMinutes: 0 },
       loop: { agent: `node ${host.agent}` },
       // the pass's litter sweep is off here: these suites script exact
       // host-read sequences (readQueues.meta), and since bro-imvu3 the
