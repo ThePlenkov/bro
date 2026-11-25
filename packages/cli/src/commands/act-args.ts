@@ -127,6 +127,32 @@ export function resolvePr(
   return { repo, pr, source: 'explicit' };
 }
 
+/** resolvePr semantics without the exits — for best-effort recorders
+ *  that must never interrupt the caller after the real mutation landed
+ *  (bro-6mjla). Same precedence (--pr/positional → branch → recency);
+ *  invalid numbers, a missing implicit PR, or a closed branch PR yield
+ *  null instead of process.exit. */
+export function resolvePrLenient(rev: ReviewFacade, argv: string[]): ResolvedTarget | null {
+  const repo = rev.resolveRepo([]);
+  const prRaw = prArgFrom(argv);
+  if (prRaw !== null) {
+    const pr = Number(prRaw);
+    if (!Number.isInteger(pr) || pr <= 0) {
+      return null;
+    }
+    return { repo, pr, source: 'explicit' };
+  }
+  const cur = rev.currentPr();
+  if (cur?.state === 'OPEN') {
+    return { repo, pr: cur.pr, source: 'branch' };
+  }
+  const auto = rev.openPrs?.(repo)[0];
+  if (auto === undefined) {
+    return null;
+  }
+  return { repo, pr: auto.pr, source: 'auto' };
+}
+
 /** Merge strategy validation — returns null (caller errors out) on
  *  conflicting flags. Runs before the slot so a doomed request never
  *  occupies the critical section. */
