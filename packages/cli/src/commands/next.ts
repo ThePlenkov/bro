@@ -343,7 +343,7 @@ function printResult(result: NextResult, list: boolean, backend: string): void {
   if (result.beads.length === 0) {
     console.log(
       result.state === 'gated'
-        ? 'next: nothing claimable — filters, gates, epics, or molecule steps remain'
+        ? 'next: nothing claimable — filters, gates, epics, molecule steps, or foreign-held claims remain'
         : 'next: backlog empty — nothing ready'
     );
   }
@@ -448,7 +448,12 @@ function gateClaim(
  *  'idle' there would falsely tell the loop the backlog is empty. */
 function nextResult(c: ReturnType<typeof classify>, beads: ReadyBead[]): NextResult {
   const picked = new Set(beads.map(b => b.id));
-  const gatedLeft = c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0;
+  // unpicked queue members are work that lost its claim — raced away or
+  // pinned to a foreign holder (bro-c955a). Counting them as gated
+  // keeps 'idle' honest: the backlog is not empty, it is unwinnable
+  const unpicked = c.queue.filter(b => !picked.has(b.id)).length;
+  const gatedLeft =
+    unpicked + c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0;
   let state: NextResult['state'] = 'idle';
   if (beads.length > 0) {
     state = 'task';
