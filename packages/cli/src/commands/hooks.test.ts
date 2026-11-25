@@ -290,6 +290,11 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('npx -y @broject/bro review act status'), 'act');
     assert.equal(classifyArmCommand('npx @broject/bro work drill down "x"'), 'drill');
     assert.equal(classifyArmCommand('npx bro self wtf "why"'), 'drill');
+    // npm permits repeated flags before the package — 13 of them arm
+    assert.equal(
+      classifyArmCommand('npx ' + '--noproxy=localhost '.repeat(13) + '@broject/bro drill down x'),
+      'drill'
+    );
   });
 
   test('arms work on worktree-mutating commands', () => {

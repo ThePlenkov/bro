@@ -344,12 +344,12 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   }
   // the bro command alternation is inlined: a regex literal keeps the
   // static-analysis contract (a RegExp constructor with a non-literal
-  // value is a codacy finding) — the pattern is fixed text, the
-  // interpolation only ever spelled these same bytes. The npx flag loop
-  // is bounded {0,12}: the unbounded form is a ReDoS finding (codeql,
-  // review #1168) and no real invocation carries a dozen flags.
+  // value is a codacy finding). Flag tokens are single `-\S+` blobs —
+  // deterministic tokenization, so the loop stays unbounded without
+  // the ReDoS the `--?[\w-]+(?:=\S+)?` nesting carried (codeql), and
+  // npm's repeated-flag forms (--noproxy=a --noproxy=b ...) still arm.
   if (
-    /(^|[;&|\n])\s*(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?){0,12}\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+(?:(?:work\s+)?drill|(?:self\s+)?wtf)\b/.test(
+    /(^|[;&|\n])\s*(?:bro|npx(?:\s+-\S+)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+(?:(?:work\s+)?drill|(?:self\s+)?wtf)\b/.test(
       c
     )
   ) {
