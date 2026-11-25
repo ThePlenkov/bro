@@ -18,13 +18,12 @@ mechanics, rendered in each client's own command format.
 - **claude** — plugin commands dir; precedent exists: `commands/models.md`
   (frontmatter `description` + `allowed-tools`, body `!`cmd``). Add
   `commands/bro.md`.
-- **codex** — no custom prompt surface; `.codex-plugin/plugin.json`
-  resolves `skills` to the repo root, so codex discovers the canonical
-  `skills/bro/SKILL.md` directly. No `prompts/bro.md`.
-- **opencode** — `command/*.md` convention; wire only if an opencode
-  manifest/client files already exist in the repo (check `dogfood/` and
-  plugin manifests first — do not invent a client block the spec doesn't
-  carry).
+- **codex** — native prompt surface at `prompts/bro.md`; it points at the
+  canonical skill rather than duplicating it. The plugin's `skills` path
+  still resolves to the repo root, so Codex can read the same skill.
+- **opencode** — native `.opencode/command/bro.md` surface alongside the
+  existing V2 plugin. It points at the canonical skill rather than
+  duplicating the plugin's command implementation.
 
 ## Content shape (shared contract)
 
