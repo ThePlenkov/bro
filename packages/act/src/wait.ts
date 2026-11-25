@@ -127,6 +127,14 @@ export async function waitForGate(
       polls += 1;
       const { state, gate } = result;
       opts.onPoll?.(state, gate);
+      // continuous-green tracking for the settle window: a green reading
+      // starts the clock, any pending or non-green poll resets it. This
+      // must precede every continue below — the BEHIND update-branch
+      // paths skip the settle check, and a pending poll inside an update
+      // sequence (or the new head the update pushes) must reset the
+      // clock, not inherit the previous head's green age
+      const greenNow = !gatePending(state) && gate.ok && state.state === 'OPEN';
+      greenSince = greenNow ? (greenSince ?? Date.now()) : null;
       // BEHIND settles the wait, but it isn't a verdict — when it's the
       // ONLY blocker (gate.blockers is just the behind entry) and the
       // branch still merges cleanly, an update pushes a new head and the
@@ -160,25 +168,22 @@ export async function waitForGate(
           }
         }
       }
-      // continuous-green tracking for the settle window: a green reading
-      // starts the clock, any pending or non-green poll resets it
-      const greenNow = !gatePending(state) && gate.ok && state.state === 'OPEN';
-      greenSince = greenNow ? (greenSince ?? Date.now()) : null;
       if (!gatePending(state) || Date.now() >= deadline) {
         const settleMs = opts.greenSettleMs ?? 0;
-        const freshGreen =
-          greenNow &&
-          settleMs > 0 &&
-          Date.now() - (greenSince ?? Date.now()) < settleMs &&
-          Date.now() < deadline;
-        if (freshGreen) {
+        const greenAge = Date.now() - (greenSince ?? Date.now());
+        const greenUnproven = greenNow && settleMs > 0 && greenAge < settleMs;
+        if (greenUnproven && Date.now() < deadline) {
           // the green is younger than the settle window — reviewers
           // re-armed by a push or a ready-mark may still be writing;
           // hold the verdict and let them break the green
           await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
           continue;
         }
-        return { state, gate, timedOut: gatePending(state), polls };
+        // an unproven green at the deadline is not a settled verdict —
+        // it is the wait running out of time, or settleWait would merge
+        // before the review safety window completes (amazon-q/macroscope
+        // on #1193)
+        return { state, gate, timedOut: gatePending(state) || greenUnproven, polls };
       }
       // cap the sleep at the deadline — a full-interval nap can overshoot
       // the configured timeout by up to intervalMs

@@ -259,3 +259,41 @@ test('a pending poll inside the window resets the green clock', async () => {
   assert.equal(res.gate.ok, true);
   assert.ok(res.polls >= 5, `expected the reset to cost extra polls, got ${res.polls}`);
 });
+
+test('an unproven green at the deadline reads timed out, never a merge verdict', async () => {
+  // the deadline expiring inside the settle window must not hand
+  // settleWait a green light — the review safety window has not
+  // completed, so the wait ran out of time
+  const res = await waitForGate(fetcher([open()]), {
+    intervalMs: 10,
+    timeoutMs: 30,
+    greenSettleMs: 60_000,
+  });
+  assert.equal(res.timedOut, true);
+  assert.equal(res.gate.ok, true);
+});
+
+test('a BEHIND update resets the green clock — the new head re-earns the window', async () => {
+  // green+BEHIND → updateBranch fires → the updated head must not
+  // inherit the old head's green age: the window restarts
+  let updates = 0;
+  const states = [
+    open({ mergeState: 'BEHIND', headSha: 'old' }),
+    open({ mergeState: 'BEHIND', headSha: 'old' }),
+    open({ headSha: 'new' }),
+    open({ headSha: 'new' }),
+  ];
+  const res = await waitForGate(fetcher(states), {
+    intervalMs: 10,
+    greenSettleMs: 25,
+    updateBranch: () => {
+      updates += 1;
+      return true;
+    },
+  });
+  assert.ok(updates >= 1, 'updateBranch fired');
+  // the updated head reads green — but the clock restarted at its first
+  // green read, so settling takes the window past THAT point
+  assert.equal(res.gate.ok, true);
+  assert.ok(res.polls >= 4, `expected re-earned window polls, got ${res.polls}`);
+});
