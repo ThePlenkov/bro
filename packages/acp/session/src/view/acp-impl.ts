@@ -1422,7 +1422,7 @@ export class AcpImpl implements PaneImpl {
   private dumpProjected(d: DumpRun, sid: string, item: TheirItem, id: number): void {
     const p = project(item, this.dumpCtx(sid, id, this.tsMap.get(sid)));
     if (p === undefined) return;
-    if ('text' in p) {
+    if (p.kind === 'message' && p.judge === true) {
       const v = verdictOf(p.text);
       if (v !== undefined) {
         d.out.push(`⛨ ${v.model ?? p.by ?? 'verdict'} · ${v.summary}`);

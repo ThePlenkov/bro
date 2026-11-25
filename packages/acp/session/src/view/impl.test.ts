@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ArchiveRow } from '../archive/index.ts';
+import { JUDGE_PROMPT_MARK } from '../model/verdict.ts';
 import { IMPL_NAMES, implArg, pickImpl } from './impl.ts';
 
 describe('the pane impl seam', () => {
@@ -222,7 +223,6 @@ describe('the pane impl seam', () => {
     const tools = impl.drain().filter(o => o.op === 'tool');
     assert.equal(tools.length, 1);
   });
-
   test('an internal activity sid stops the preceding activity run', async () => {
     const impl = await pickImpl('acp', {});
     const tool = (toolCallId: string, by: string) => ({
@@ -244,5 +244,37 @@ describe('the pane impl seam', () => {
     assert.match(text, /▸ 2 tool calls/);
     assert.doesNotMatch(text, /▸ 3 tool calls/);
     assert.match(text, /▸ 1 internal call/);
+  });
+
+  test('the dump only classifies structured replies from judge-labelled turns', async () => {
+    const reply = JSON.stringify({ answers: { route: { type: 'choice', choice: 'a' } } });
+    const normal = await pickImpl('acp', {});
+    normal.feed({ kind: 'prompt', text: 'plain prompt', ts: '2026-01-01T00:00:00Z' });
+    normal.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:01Z',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: reply },
+      } as never,
+    });
+    assert.match(normal.dump().join('\n'), /\{"answers"/);
+    assert.doesNotMatch(normal.dump().join('\n'), /⛨ .*route choice/);
+
+    const judge = await pickImpl('acp', {});
+    judge.feed({
+      kind: 'prompt',
+      text: `evaluate\n\n${JUDGE_PROMPT_MARK}`,
+      ts: '2026-01-01T00:00:00Z',
+    });
+    judge.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:01Z',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: reply },
+      } as never,
+    });
+    assert.match(judge.dump().join('\n'), /⛨ .*route choice: a/);
   });
 });
