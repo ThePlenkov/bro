@@ -57,24 +57,27 @@ export function releaseArgs(pane: string, seq: number, id: PaneIdentity): string
   return paneArgs('release-agent', pane, seq, id);
 }
 
-/** The display-text argvs — the two-call contract every pane shares:
- *  call 1 clears state-labels (herdr rejects set-and-clear in one
- *  call, and the clear wipes display-agent too), call 2 lands
- *  display-agent + an optional `state=label` pair. */
-export function metaArgs(
-  pane: string,
-  seq: number,
-  id: PaneIdentity,
-  display: string,
-  label?: string
-): string[][] {
-  const calls = [[...paneArgs('report-metadata', pane, seq, id), '--clear-state-labels']];
+/** Everything one report-metadata pair needs — pane, seq, identity,
+ *  and the two display texts. The two-call contract every pane
+ *  shares: call 1 clears state-labels (herdr rejects set-and-clear
+ *  in one call, and the clear wipes display-agent too), call 2
+ *  lands display-agent + an optional `state=label` pair. */
+export interface MetaSpec {
+  pane: string;
+  seq: number;
+  id: PaneIdentity;
+  display: string;
+  label?: string;
+}
+
+export function metaArgs(s: MetaSpec): string[][] {
+  const calls = [[...paneArgs('report-metadata', s.pane, s.seq, s.id), '--clear-state-labels']];
   const set = [
-    ...paneArgs('report-metadata', pane, seq + 1, id),
+    ...paneArgs('report-metadata', s.pane, s.seq + 1, s.id),
     '--display-agent',
-    plain(display),
+    plain(s.display),
   ];
-  if (label !== undefined && label !== '') set.push('--state-label', label);
+  if (s.label !== undefined && s.label !== '') set.push('--state-label', s.label);
   calls.push(set);
   return calls;
 }
@@ -91,7 +94,14 @@ export function report(
 ): number {
   const seq = nextSeq();
   call(reportArgs(pane, led, seq, id));
-  for (const a of metaArgs(pane, seq, id, display, `${led.state}=${plain(mode)}`)) call(a);
+  for (const a of metaArgs({
+    pane,
+    seq,
+    id,
+    display,
+    label: `${led.state}=${plain(mode)}`,
+  }))
+    call(a);
   return seq;
 }
 
@@ -118,14 +128,22 @@ export function sessionReleaseArgs(pane: string, seq: number): string[] {
 /** The display-text argvs — same two-call contract status carries:
  *  call 1 clears, call 2 lands display-agent + state-label (herdr
  *  rejects set-and-clear in one call). */
-export function sessionMetaArgs(
-  pane: string,
-  agent: string,
-  led: PaneLed,
-  mode: string,
-  seq: number
-): string[][] {
-  return metaArgs(pane, seq, SESSION_IDENTITY, agent, `${led.state}=${mode}`);
+export interface SessionMetaSpec {
+  pane: string;
+  agent: string;
+  led: PaneLed;
+  mode: string;
+  seq: number;
+}
+
+export function sessionMetaArgs(s: SessionMetaSpec): string[][] {
+  return metaArgs({
+    pane: s.pane,
+    seq: s.seq,
+    id: SESSION_IDENTITY,
+    display: s.agent,
+    label: `${s.led.state}=${s.mode}`,
+  });
 }
 
 /** Fire the report bundle for one LED move — report-agent plus the

@@ -47,6 +47,27 @@ export function logStem(entry: AgentEntry | undefined): string | undefined {
 const homesOf = (base: string | readonly string[]): readonly string[] =>
   typeof base === 'string' ? [base] : base;
 
+/** Walk the home chain with one pick — the first home whose registry
+ *  answers wins. `id === undefined` never reaches the files. */
+function eachRegistry<T>(
+  base: string | readonly string[],
+  id: string | undefined,
+  pick: (reg: Record<string, AgentEntry>, id: string) => T | undefined
+): T | undefined {
+  if (id === undefined) return undefined;
+  for (const b of homesOf(base)) {
+    const hit = pick(agentsJson(b), id);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
+/** The key whose entry's archive stem equals `k` — pane argv carries
+ *  the journal stem `native-<hash>` while the registry keys on the
+ *  run id. */
+const stemKey = (reg: Record<string, AgentEntry>, k: string): string | undefined =>
+  Object.keys(reg).find(key => logStem(reg[key]) === k);
+
 /** One registry entry — undefined when the id or the file is absent.
  *  The id matches a registry KEY first, then an entry's archive stem
  *  (its log basename minus `.log`) — pane argv carries the journal
@@ -55,13 +76,10 @@ export function agentEntry(
   base: string | readonly string[],
   id: string | undefined
 ): AgentEntry | undefined {
-  if (id === undefined) return undefined;
-  for (const b of homesOf(base)) {
-    const reg = agentsJson(b);
-    const entry = reg[id] ?? Object.values(reg).find(e => logStem(e) === id);
-    if (entry !== undefined) return entry;
-  }
-  return undefined;
+  return eachRegistry(base, id, (reg, k) => {
+    const key = reg[k] !== undefined ? k : stemKey(reg, k);
+    return key === undefined ? undefined : reg[key];
+  });
 }
 
 /** The registry KEY for an id — the readable run id (`bro-2bv6q`)
@@ -72,14 +90,7 @@ export function agentKey(
   base: string | readonly string[],
   id: string | undefined
 ): string | undefined {
-  if (id === undefined) return undefined;
-  for (const b of homesOf(base)) {
-    const reg = agentsJson(b);
-    if (reg[id] !== undefined) return id;
-    const key = Object.keys(reg).find(k => logStem(reg[k]) === id);
-    if (key !== undefined) return key;
-  }
-  return undefined;
+  return eachRegistry(base, id, (reg, k) => (reg[k] !== undefined ? k : stemKey(reg, k)));
 }
 
 /** The pane's display agent — the TRUE agent name, the registry
@@ -145,19 +156,30 @@ export function registryHomeOf(eventsPath: string): string | undefined {
  *  here while `exitStatus` is still unwritten — without it a dead
  *  pid + missing field is indistinguishable from a crash. First
  *  whitespace token is the code; absent/unreadable → undefined. */
+/** The recorded agentId when it is a bare name — anything else falls
+ *  back to the journal's stem. */
+function agentIdOf(entry: AgentEntry, eventsPath: string): string {
+  return typeof entry.agentId === 'string' && basename(entry.agentId) === entry.agentId
+    ? entry.agentId
+    : basename(eventsPath).replace(/\.events\.jsonl$/, '');
+}
+
+/** A run id safe to embed in a filename — anything else is absent. */
+const runIdOf = (v: unknown): string | undefined =>
+  typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(v) ? v : undefined;
+
+/** `<agentId>.<runId>.exit`, or the legacy `<agentId>.exit` when no
+ *  run id recorded. */
+function exitFileName(entry: AgentEntry, eventsPath: string): string {
+  const runId = runIdOf(entry.runId);
+  const agentId = agentIdOf(entry, eventsPath);
+  return runId === undefined ? `${agentId}.exit` : `${agentId}.${runId}.exit`;
+}
+
 function exitCodeOf(entry: AgentEntry, eventsPath: string | undefined): number | undefined {
   if (eventsPath === undefined) return undefined;
-  const agentId =
-    typeof entry.agentId === 'string' && basename(entry.agentId) === entry.agentId
-      ? entry.agentId
-      : basename(eventsPath).replace(/\.events\.jsonl$/, '');
-  const runId =
-    typeof entry.runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.runId)
-      ? entry.runId
-      : undefined;
-  const name = runId === undefined ? `${agentId}.exit` : `${agentId}.${runId}.exit`;
   try {
-    const v = readFileSync(join(dirname(eventsPath), name), 'utf8')
+    const v = readFileSync(join(dirname(eventsPath), exitFileName(entry, eventsPath)), 'utf8')
       .trim()
       .split(/\s+/)[0];
     // an empty file is a truncated record, not exit 0 — `Number('')`

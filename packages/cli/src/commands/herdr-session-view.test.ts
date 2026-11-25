@@ -209,13 +209,13 @@ describe('viewVerdict — the pane reports its own feed', () => {
 describe('sessionMetaArgs — two-call display contract', () => {
   test('call 1 clears, call 2 sets display-agent + state-label', () => {
     const t = resolveTarget(doc({ agent: 'opencode' }), '/repo/trees/t1', {});
-    const calls = sessionMetaArgs(
-      'w1:p2',
-      sessionAgentOf(t),
-      { state: 'working' },
-      'session/load',
-      7
-    );
+    const calls = sessionMetaArgs({
+      pane: 'w1:p2',
+      agent: sessionAgentOf(t),
+      led: { state: 'working' },
+      mode: 'session/load',
+      seq: 7,
+    });
     assert.equal(calls.length, 2);
     assert.ok(calls[0]!.includes('--clear-state-labels'));
     assert.ok(!calls[0]!.includes('--display-agent'));
@@ -231,13 +231,25 @@ describe('sessionMetaArgs — two-call display contract', () => {
     const t = resolveTarget(doc({ provider: 'oc', acpSessionId: 's' }), '/repo/trees/t1', {
       oc: { type: 'acp', command: 'opencode acp' },
     });
-    const calls = sessionMetaArgs('w1:p2', sessionAgentOf(t), { state: 'idle' }, 'x', 7);
+    const calls = sessionMetaArgs({
+      pane: 'w1:p2',
+      agent: sessionAgentOf(t),
+      led: { state: 'idle' },
+      mode: 'x',
+      seq: 7,
+    });
     assert.equal(calls[1]![calls[1]!.indexOf('--display-agent') + 1], 'oc');
   });
 
   test('escapes in display text are stripped', () => {
     const t = resolveTarget(doc({ agent: 'a[2J' }), '/repo/trees/t1', {});
-    const calls = sessionMetaArgs('w1:p2', sessionAgentOf(t), { state: 'idle' }, 'm', 7);
+    const calls = sessionMetaArgs({
+      pane: 'w1:p2',
+      agent: sessionAgentOf(t),
+      led: { state: 'idle' },
+      mode: 'm',
+      seq: 7,
+    });
     assert.equal(calls[1]![calls[1]!.indexOf('--display-agent') + 1], 'a[2J');
   });
 });

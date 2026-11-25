@@ -48,13 +48,13 @@ export function statusMetaArgs(
   s: FleetPaneState | undefined,
   seq: number
 ): string[][] {
-  return kitMetaArgs(
+  return kitMetaArgs({
     pane,
     seq,
-    STATUS_IDENTITY,
-    s?.agent ?? s?.slug ?? 'fleet',
-    s !== undefined && s.status !== '' ? `${s.led.state}=${plain(s.status)}` : undefined
-  );
+    id: STATUS_IDENTITY,
+    display: s?.agent ?? s?.slug ?? 'fleet',
+    label: s !== undefined && s.status !== '' ? `${s.led.state}=${plain(s.status)}` : undefined,
+  });
 }
 
 /** OSC8 hyperlink — `#N` stays `#N` on screen but a ctrl/cmd-click

@@ -38,20 +38,20 @@ export type SessionAction =
 /** The pane the session role may take: an unbound orphan carrying our
  *  label first, then any idle pane not bound to another bro role and
  *  not wearing a bro-role label. */
-export function pickPane(
-  panes: PaneInfo[],
-  bound: Set<string>,
-  sessionLabel: string,
-  broLabels: Set<string>,
-  idle: (paneId: string) => boolean
-): { id?: string; adopted: boolean } {
-  const orphan = panes.find(
-    p => p.label === sessionLabel && !bound.has(p.pane_id) && idle(p.pane_id)
-  );
+export interface PanePick {
+  panes: PaneInfo[];
+  bound: Set<string>;
+  sessionLabel: string;
+  broLabels: Set<string>;
+  idle: (paneId: string) => boolean;
+}
+
+export function pickPane(s: PanePick): { id?: string; adopted: boolean } {
+  const unboundIdle = (p: PaneInfo): boolean => !s.bound.has(p.pane_id) && s.idle(p.pane_id);
+  const orphan = s.panes.find(p => p.label === s.sessionLabel && unboundIdle(p));
   if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
-  const free = panes.find(
-    p =>
-      !bound.has(p.pane_id) && (p.label === undefined || !broLabels.has(p.label)) && idle(p.pane_id)
+  const free = s.panes.find(
+    p => unboundIdle(p) && (p.label === undefined || !s.broLabels.has(p.label))
   );
   return { ...(free !== undefined ? { id: free.pane_id } : {}), adopted: false };
 }
@@ -75,18 +75,31 @@ export function decideSession(input: {
   agent?: { id: string };
 }): SessionAction {
   const { rec } = input;
-  if (rec !== undefined && input.exists(rec.pane_id)) {
-    if (input.agent !== undefined && rec.agent_id !== input.agent.id) {
-      return { kind: 'rebind', paneId: rec.pane_id };
-    }
-    if (!input.idle(rec.pane_id)) return { kind: 'none' };
-    return { kind: 'rearm', paneId: rec.pane_id, adopted: true };
-  }
-  const pick = pickPane(input.panes, input.bound, input.sessionLabel, input.broLabels, input.idle);
+  if (rec !== undefined && input.exists(rec.pane_id)) return recDecision(input, rec);
+  const pick = pickPane({
+    panes: input.panes,
+    bound: input.bound,
+    sessionLabel: input.sessionLabel,
+    broLabels: input.broLabels,
+    idle: input.idle,
+  });
   if (pick.id === undefined) {
     return { kind: 'split', targetId: input.panes[0]?.pane_id };
   }
   return { kind: 'arm', paneId: pick.id, adopted: pick.adopted };
+}
+
+/** The decision when the recorded pane still exists — rebind on an
+ *  agent move, keep while busy, re-arm when it idled out. */
+function recDecision(
+  input: { idle: (paneId: string) => boolean; agent?: { id: string } },
+  rec: SessionRec
+): SessionAction {
+  if (input.agent !== undefined && rec.agent_id !== input.agent.id) {
+    return { kind: 'rebind', paneId: rec.pane_id };
+  }
+  if (!input.idle(rec.pane_id)) return { kind: 'none' };
+  return { kind: 'rearm', paneId: rec.pane_id, adopted: true };
 }
 
 /** Which pane a retire closes — the recorded pane when it still
@@ -98,10 +111,11 @@ export function decideSessionRetire(input: {
   exists: (paneId: string) => boolean;
 }): { closeId?: string } {
   const { rec } = input;
-  const recPane = input.panes.find(p => p.pane_id === rec?.pane_id);
-  if (rec !== undefined && input.exists(rec.pane_id) && recPane?.label === input.sessionLabel) {
-    return { closeId: rec.pane_id };
-  }
+  const ours =
+    rec !== undefined &&
+    input.exists(rec.pane_id) &&
+    input.panes.find(p => p.pane_id === rec.pane_id)?.label === input.sessionLabel;
+  if (ours) return { closeId: rec.pane_id };
   return { closeId: input.panes.find(p => p.label === input.sessionLabel)?.pane_id };
 }
 
@@ -156,29 +170,54 @@ export function convergeViews(input: {
   exists: (paneId: string) => boolean;
   idle: (paneId: string) => boolean;
 }): LiveViewAction[] {
-  const out: LiveViewAction[] = [];
-  /** Ids whose open is suppressed: 'keep' settles, 'rearm' is the
-   *  caller's inline branch — a failed `pane run` falls through to
-   *  the caller's own drop-then-open path, not a fresh action. */
-  const suppressed = new Set<string>();
-  const recAction = (id: string, rec: LiveViewRec): LiveViewAction => {
-    const agent = input.live.find(a => a.id === id);
-    if (agent === undefined) return { kind: 'retire', id, rec, reason: 'dead' };
-    if (agent.worktree !== undefined && input.covered.has(agent.worktree)) {
-      return { kind: 'retire', id, rec, reason: 'covered' };
-    }
-    if (!input.exists(rec.pane_id)) return { kind: 'drop', id, rec };
-    return input.idle(rec.pane_id) ? { kind: 'rearm', id, rec } : { kind: 'keep', id, rec };
-  };
+  const recs = recDecisions(input);
+  const settled = new Set(Object.values(recs.settled));
+  const opens = input.live
+    .filter(a => (a.worktree === undefined || !input.covered.has(a.worktree)) && !settled.has(a.id))
+    .map(a => ({ kind: 'open', agent: a }) as LiveViewAction);
+  return [...recs.actions, ...opens];
+}
+
+/** Every existing record's retire/drop/rearm/keep decision, emitted
+ *  before the opens so the caller frees state first. `settled`
+ *  collects the ids whose open is suppressed: 'keep' settles,
+ *  'rearm' is the caller's inline branch — a failed `pane run`
+ *  falls through to the caller's own drop-then-open path, not a
+ *  fresh action. */
+function recDecisions(input: {
+  live: LiveAgent[];
+  existing: Record<string, LiveViewRec>;
+  covered: Set<string>;
+  exists: (paneId: string) => boolean;
+  idle: (paneId: string) => boolean;
+}): { actions: LiveViewAction[]; settled: string[] } {
+  const actions: LiveViewAction[] = [];
+  const settled: string[] = [];
   for (const [id, rec] of Object.entries(input.existing)) {
-    const action = recAction(id, rec);
-    out.push(action);
-    if (action.kind === 'rearm' || action.kind === 'keep') suppressed.add(id);
+    const action = recAction(input, id, rec);
+    actions.push(action);
+    if (action.kind === 'rearm' || action.kind === 'keep') settled.push(id);
   }
-  for (const a of input.live) {
-    if (a.worktree !== undefined && input.covered.has(a.worktree)) continue;
-    if (suppressed.has(a.id)) continue;
-    out.push({ kind: 'open', agent: a });
+  return { actions, settled };
+}
+
+/** One record's verdict — dead/covered retire, vanished pane drop,
+ *  idle rearm, busy keep. */
+function recAction(
+  input: {
+    live: LiveAgent[];
+    covered: Set<string>;
+    exists: (paneId: string) => boolean;
+    idle: (paneId: string) => boolean;
+  },
+  id: string,
+  rec: LiveViewRec
+): LiveViewAction {
+  const agent = input.live.find(a => a.id === id);
+  if (agent === undefined) return { kind: 'retire', id, rec, reason: 'dead' };
+  if (agent.worktree !== undefined && input.covered.has(agent.worktree)) {
+    return { kind: 'retire', id, rec, reason: 'covered' };
   }
-  return out;
+  if (!input.exists(rec.pane_id)) return { kind: 'drop', id, rec };
+  return input.idle(rec.pane_id) ? { kind: 'rearm', id, rec } : { kind: 'keep', id, rec };
 }

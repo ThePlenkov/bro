@@ -53,28 +53,29 @@ test('the exec seam: only client/exec.ts spawns', () => {
   }
 });
 
+function checkLocalImport(f: string, spec: string): void {
+  const layer = layerOf(f);
+  const targetLayer = layerOf(join(f, '..', spec));
+  if (targetLayer === layer || LAYERS[targetLayer] === undefined) return;
+  assert.ok(
+    (LAYERS[layer] ?? []).includes(targetLayer),
+    `${relative(SRC, f)} (layer ${layer}) must not import layer ${targetLayer}`
+  );
+}
+
+function checkBareImport(f: string, spec: string): void {
+  assert.ok(
+    spec.startsWith('node:') || BARE_OK.has(spec),
+    `${relative(SRC, f)} bare import '${spec}' is not whitelisted`
+  );
+}
+
 test('layer direction + bare-import whitelist', () => {
   for (const f of walk(SRC)) {
-    const layer = layerOf(f);
-    const allowed = LAYERS[layer] ?? [];
-    const body = readFileSync(f, 'utf8');
-    for (const m of body.matchAll(IMPORT_RE)) {
+    for (const m of readFileSync(f, 'utf8').matchAll(IMPORT_RE)) {
       const spec = m[1];
-      if (spec.startsWith('.')) {
-        const target = join(f, '..', spec);
-        const targetLayer = layerOf(target);
-        if (targetLayer !== layer && LAYERS[targetLayer] !== undefined) {
-          assert.ok(
-            allowed.includes(targetLayer),
-            `${relative(SRC, f)} (layer ${layer}) must not import layer ${targetLayer}`
-          );
-        }
-      } else {
-        assert.ok(
-          spec.startsWith('node:') || BARE_OK.has(spec),
-          `${relative(SRC, f)} bare import '${spec}' is not whitelisted`
-        );
-      }
+      if (spec.startsWith('.')) checkLocalImport(f, spec);
+      else checkBareImport(f, spec);
     }
   }
 });

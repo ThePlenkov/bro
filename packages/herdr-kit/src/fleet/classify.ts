@@ -223,28 +223,30 @@ export function labelFor(worktreePath: string, proj: TreeProjection): string {
  *  dashboard — release belongs to its own exit, not the worker's),
  *  armed-but-no-worker → unknown (the LED present but dim, the
  *  `no PR`-layer analogue), vacated → idle. */
+const PANE_LED: { [K in WorkerState]: (p: TreeProjection) => PaneLed } = {
+  working: () => ({ state: 'working' }),
+  silent: silentLed,
+  interrupted: p => ({ state: 'blocked', message: p.state }),
+  lost: p => ({ state: 'blocked', message: p.state }),
+  exited: () => ({ state: 'idle', message: 'exited' }),
+  stopped: () => ({ state: 'idle', message: 'stopped' }),
+};
+
+function silentLed(p: TreeProjection): PaneLed {
+  const m = workerToken(p);
+  // a silent verdict always carries its bucket — an unbucketed
+  // 'silent' message reads like a bug, so fall back to bare working
+  return m === undefined || m === 'silent'
+    ? { state: 'working' }
+    : { state: 'working', message: m };
+}
+
 export function paneLed(p: TreeProjection): PaneLed {
-  switch (p.state) {
-    case 'working':
-      return { state: 'working' };
-    case 'silent': {
-      const m = workerToken(p);
-      // a silent verdict always carries its bucket — an unbucketed
-      // 'silent' message reads like a bug, so fall back to bare working
-      return m === undefined || m === 'silent'
-        ? { state: 'working' }
-        : { state: 'working', message: m };
-    }
-    case 'interrupted':
-    case 'lost':
-      return { state: 'blocked', message: p.state };
-    case 'exited':
-      return { state: 'idle', message: 'exited' };
-    case 'stopped':
-      return { state: 'idle', message: 'stopped' };
-    case undefined:
-      return p.armed === true ? { state: 'unknown' } : { state: 'idle' };
+  if (p.state === undefined) {
+    return p.armed === true ? { state: 'unknown' } : { state: 'idle' };
   }
+  const led = Object.getOwnPropertyDescriptor(PANE_LED, p.state)?.value;
+  return led !== undefined ? led(p) : { state: 'idle' };
 }
 
 /** One `pane list` row — the backstop reads pane_id + bound agent. */
@@ -423,41 +425,87 @@ export function projectTree(i: TreeInput): {
   title: string;
   slug?: string;
 } {
-  const slug =
-    i.claim ??
-    i.runs.find(r => r.beadId !== undefined)?.beadId ??
-    (i.agents.find(a => a.live) ?? i.agents[0])?.key;
-  const worker = workerState(workerCands(i), i.stallMin);
-  // the freshest agent names the pipeline driver — a live one wins,
-  // a dead one still identifies who ran the tree
-  const agent = (
-    i.agents.find(a => a.live && a.agent !== undefined) ?? i.agents.find(a => a.agent !== undefined)
-  )?.agent;
-  // the session owner — the agent whose session the `bro: session` pane
-  // attaches (or whose log it tails). A carrier is a row holding an
-  // acpSessionId or a log; live wins over dead, the newest carrier
-  // wins inside a liveness class — the freshest worker on the tree is
-  // the session worth watching, even when an older acp session exists
-  const session = i.agents.reduce<AgentRow | undefined>((best, a) => {
-    if (a.acpSessionId === undefined && a.log === undefined) return best;
-    if (best === undefined || (a.live && !best.live)) return a;
-    return a.live === best.live && a.at > best.at ? a : best;
-  }, undefined);
+  const slug = treeSlug(i);
   const projection: TreeProjection = {
-    ...worker,
+    ...workerState(workerCands(i), i.stallMin),
     ...prFor(i.branch, slug, i.beads, i.act, i.now),
     armed: i.claim !== undefined || i.markerArmed,
-    ...(agent !== undefined ? { agent } : {}),
-    ...(session?.acpSessionId !== undefined ? { acpSessionId: session.acpSessionId } : {}),
-    ...(session?.provider !== undefined ? { provider: session.provider } : {}),
-    ...(session?.model !== undefined ? { model: session.model } : {}),
-    ...(session?.log !== undefined ? { log: session.log } : {}),
-    ...(session?.acp === true ? { acp: true } : {}),
-    ...(session?.events !== undefined ? { events: session.events } : {}),
+    ...definedFields({ agent: driverAgent(i.agents) }),
+    ...sessionFields(sessionOwner(i.agents)),
   };
-  const title =
-    (slug !== undefined ? i.beads.find(b => b.id === slug)?.title : undefined) || basename(i.path);
+  const title = treeTitle(i, slug);
   return { projection, title, ...(slug !== undefined ? { slug } : {}) };
+}
+
+/** The tree's resolved slug — claim first, then a run's beadId, then
+ *  the freshest agent's registry key. */
+function treeSlug(i: TreeInput): string | undefined {
+  return (
+    i.claim ??
+    i.runs.find(r => r.beadId !== undefined)?.beadId ??
+    (i.agents.find(a => a.live) ?? i.agents[0])?.key
+  );
+}
+
+/** The freshest agent names the pipeline driver — a live one wins, a
+ *  dead one still identifies who ran the tree. */
+function driverAgent(agents: AgentRow[]): string | undefined {
+  const named = agents.filter(a => a.agent !== undefined);
+  return (named.find(a => a.live) ?? named[0])?.agent;
+}
+
+/** The bead title behind the slug, else the worktree's basename. */
+function treeTitle(i: TreeInput, slug: string | undefined): string {
+  const bead = slug === undefined ? undefined : i.beads.find(b => b.id === slug);
+  return bead?.title || basename(i.path);
+}
+
+/** Drop the undefined entries of a partial — the spread-table below
+ *  keeps `projectTree` flat instead of one ternary per field. */
+export function definedFields<T extends object>(
+  fields: {
+    [K in keyof T]: T[K] | undefined;
+  }
+): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, v]) => v !== undefined)
+  ) as Partial<T>;
+}
+
+/** The session owner's ride-along fields — present only when the row
+ *  carries them (acp collapses to `true`, never `false`). */
+function sessionFields(
+  s: AgentRow | undefined
+): Pick<TreeProjection, 'acpSessionId' | 'provider' | 'model' | 'log' | 'acp' | 'events'> {
+  if (s === undefined) return {};
+  return definedFields({
+    acpSessionId: s.acpSessionId,
+    provider: s.provider,
+    model: s.model,
+    log: s.log,
+    acp: s.acp === true ? true : undefined,
+    events: s.events,
+  });
+}
+
+/** A carrier is a row holding an acpSessionId or a log. */
+const carriesSession = (a: AgentRow): boolean =>
+  a.acpSessionId !== undefined || a.log !== undefined;
+
+/** Live wins over dead; inside a liveness class the newest carrier
+ *  wins — the freshest worker on the tree is the session worth
+ *  watching, even when an older acp session exists. */
+const outranks = (a: AgentRow, best: AgentRow): boolean =>
+  (a.live && !best.live) || (a.live === best.live && a.at > best.at);
+
+/** The session owner — the agent whose session the `bro: session` pane
+ *  attaches (or whose log it tails). */
+function sessionOwner(agents: AgentRow[]): AgentRow | undefined {
+  const carriers = agents.filter(carriesSession);
+  return carriers.reduce<AgentRow | undefined>(
+    (best, a) => (best === undefined || outranks(a, best) ? a : best),
+    undefined
+  );
 }
 
 /** The agent name behind a provider command — the first meaningful
@@ -465,14 +513,27 @@ export function projectTree(i: TreeInput): {
  *  `npx opencode acp` → opencode). Shell wrappers and `{placeholder}`
  *  tokens are skipped. */
 const CMD_WRAPPERS = new Set(['npx', 'bunx', 'uvx', 'env', 'cat', 'echo', 'sh', 'bash']);
+
+/** Shell noise tokens — empties, `{placeholder}`s, `VAR=val` prefixes. */
+const NOISE_TOKEN: ((t: string) => boolean)[] = [
+  t => t === '',
+  t => t.startsWith('{'),
+  t => /^[A-Z_]+=/.test(t),
+];
+
+/** The program name a token resolves to, or undefined for noise and
+ *  shell wrappers (`npx`, `cat`, …). */
+const meaningfulToken = (tok: string): string | undefined => {
+  if (NOISE_TOKEN.some(skip => skip(tok))) return undefined;
+  const name = basename(tok);
+  return CMD_WRAPPERS.has(name) ? undefined : name;
+};
 export function agentOfCommand(command: string | undefined): string | undefined {
   if (command === undefined) return undefined;
   const last = (command.split('|').pop() ?? '').trim();
   for (const tok of last.split(/\s+/)) {
-    if (tok === '' || tok.startsWith('{') || /^[A-Z_]+=/.test(tok)) continue;
-    const name = basename(tok);
-    if (CMD_WRAPPERS.has(name)) continue;
-    return name;
+    const name = meaningfulToken(tok);
+    if (name !== undefined) return name;
   }
   return undefined;
 }

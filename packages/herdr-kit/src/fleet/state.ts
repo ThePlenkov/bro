@@ -145,13 +145,19 @@ const OPTIONAL_STR: readonly (keyof FleetPaneState)[] = [
   'events',
 ];
 
-/** Parse + shape-check one document — anything else is a miss, never
- *  a throw: a torn write or a schema bump must not kill the pane. */
+/** The required-shape guards — version, the scalar strings, a valid
+ *  led, a numeric ts. One predicate list, every miss is a parse miss:
+ *  a torn write or a schema bump must not kill the pane. */
+const SHAPE_OK: readonly ((s: Partial<FleetPaneState>) => boolean)[] = [
+  s => s.v === 1,
+  s => REQUIRED_STR.every(k => isStr(s[k])),
+  s => ledOk(s.led),
+  s => typeof s.ts === 'number',
+];
+
 export function parseFleetState(raw: string): FleetPaneState | undefined {
   const s = jsonObj(raw);
-  if (s === undefined || s.v !== 1) return undefined;
-  if (!REQUIRED_STR.every(k => isStr(s[k]))) return undefined;
-  if (!ledOk(s.led) || typeof s.ts !== 'number') return undefined;
+  if (s === undefined || !SHAPE_OK.every(g => g(s))) return undefined;
   for (const k of OPTIONAL_STR) {
     if (s[k] !== undefined && !isStr(s[k])) delete s[k];
   }
