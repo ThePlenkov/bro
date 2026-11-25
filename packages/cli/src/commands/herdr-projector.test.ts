@@ -927,16 +927,35 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.ok(!calls.some(c => c[0] === 'workspace'));
   });
 
-  test('an acp worker whose provider left the config keeps its lane (bro-iik6m)', () => {
-    const root = mkdtempSync(join(tmpdir(), 'proj-acp-gone-'));
+  /** The filesystem fixture every projector-pass test needs: a repo
+   *  root, an agents registry, and the herdr state file. Entries and
+   *  workspaces are built lazily with the root in hand — the registry
+   *  row's worktree is the root itself. */
+  const projectorFixture = (
+    prefix: string,
+    build: (root: string) => {
+      entries: Record<string, unknown>;
+      workspaces: Record<string, unknown>;
+      config?: Record<string, unknown>;
+    }
+  ): { root: string; stateDir: string } => {
+    const root = mkdtempSync(join(tmpdir(), prefix));
     execFileSync('git', ['init', '-q'], { cwd: root });
     mkdirSync(join(root, '.git', 'bro', 'agents'), { recursive: true });
-    // no providers section at all — the entry's acpSessionId is the only
-    // evidence the worker is an acp lane
-    writeFileSync(join(root, 'bro.config.json'), JSON.stringify({}));
-    writeFileSync(
-      join(root, '.git', 'bro', 'agents.json'),
-      JSON.stringify({
+    const { entries, workspaces, config = {} } = build(root);
+    writeFileSync(join(root, 'bro.config.json'), JSON.stringify(config));
+    writeFileSync(join(root, '.git', 'bro', 'agents.json'), JSON.stringify(entries));
+    const stateDir = stateDirOf();
+    const scope = createHash('sha1').update(join(root, '.git')).digest('hex').slice(0, 12);
+    writeFileSync(join(stateDir, `state-${scope}.json`), JSON.stringify({ workspaces }));
+    return { root, stateDir };
+  };
+
+  test('an acp worker whose provider left the config keeps its lane (bro-iik6m)', () => {
+    // no providers section in the config — the entry's acpSessionId is
+    // the only evidence the worker is an acp lane
+    const { root, stateDir } = projectorFixture('proj-acp-gone-', root => ({
+      entries: {
         'mol-1': {
           agentId: 'a1',
           backend: 'acp',
@@ -946,14 +965,9 @@ describe('projectFleet — a live pass over a fake herdr', () => {
           log: '/a1.log',
           spawnedAt: new Date(NOW).toISOString(),
         },
-      })
-    );
-    const stateDir = stateDirOf();
-    const scope = createHash('sha1').update(join(root, '.git')).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({ workspaces: { [root]: { ws: 'w1', label: 'old', managed: true } } })
-    );
+      },
+      workspaces: { [root]: { ws: 'w1', label: 'old', managed: true } },
+    }));
     fleetPass(root, stateDir, {
       scenario: {
         worktrees: [{ path: root, open_workspace_id: 'w1' }],
