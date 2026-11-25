@@ -455,33 +455,27 @@ function makeCore(input: BroCoreInput) {
     if (sessionID !== undefined && !live.has(sessionID)) {
       live.set(sessionID, ++liveSeq);
     }
-    const handler = eventHandlers[type];
-    if (handler) {
-      await handler(sessionID, props);
+    switch (type) {
+      case 'session.execution.started':
+        if (sessionID !== undefined) void hydrate(sessionID, 'session-start');
+        return;
+      case 'session.execution.succeeded':
+        if (sessionID === undefined) return;
+        clean.add(sessionID);
+        await onSessionIdle({ sessionID });
+        return;
+      case 'session.execution.failed':
+      case 'session.execution.interrupted':
+        if (sessionID !== undefined) clean.delete(sessionID);
+        return;
+      case 'session.compaction.succeeded':
+      case 'session.compaction.ended':
+        onSessionCompacted(props);
+        return;
+      case 'session.deleted':
+        onSessionDeleted(props);
+        return;
     }
-  };
-
-  const eventHandlers: Record<
-    string,
-    (sessionID: string | undefined, props: Record<string, unknown>) => void | Promise<void>
-  > = {
-    'session.execution.started': sessionID => {
-      if (sessionID !== undefined) void hydrate(sessionID, 'session-start');
-    },
-    'session.execution.succeeded': async sessionID => {
-      if (sessionID === undefined) return;
-      clean.add(sessionID);
-      await onSessionIdle({ sessionID });
-    },
-    'session.execution.failed': sessionID => {
-      if (sessionID !== undefined) clean.delete(sessionID);
-    },
-    'session.execution.interrupted': sessionID => {
-      if (sessionID !== undefined) clean.delete(sessionID);
-    },
-    'session.compaction.succeeded': (_sessionID, props) => onSessionCompacted(props),
-    'session.compaction.ended': (_sessionID, props) => onSessionCompacted(props),
-    'session.deleted': (_sessionID, props) => onSessionDeleted(props),
   };
 
   return { probe, hydrate, onEvent, exec };

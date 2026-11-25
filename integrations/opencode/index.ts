@@ -1082,27 +1082,27 @@ function makeCore(input) {
 	const onEvent = async (type, props) => {
 		const sessionID = typeof props.sessionID === "string" ? props.sessionID : void 0;
 		if (sessionID !== void 0 && !live.has(sessionID)) live.set(sessionID, ++liveSeq);
-		const handler = eventHandlers[type];
-		if (handler) await handler(sessionID, props);
-	};
-	const eventHandlers = {
-		"session.execution.started": (sessionID) => {
-			if (sessionID !== void 0) hydrate(sessionID, "session-start");
-		},
-		"session.execution.succeeded": async (sessionID) => {
-			if (sessionID === void 0) return;
-			clean.add(sessionID);
-			await onSessionIdle({ sessionID });
-		},
-		"session.execution.failed": (sessionID) => {
-			if (sessionID !== void 0) clean.delete(sessionID);
-		},
-		"session.execution.interrupted": (sessionID) => {
-			if (sessionID !== void 0) clean.delete(sessionID);
-		},
-		"session.compaction.succeeded": (_sessionID, props) => onSessionCompacted(props),
-		"session.compaction.ended": (_sessionID, props) => onSessionCompacted(props),
-		"session.deleted": (_sessionID, props) => onSessionDeleted(props)
+		switch (type) {
+			case "session.execution.started":
+				if (sessionID !== void 0) hydrate(sessionID, "session-start");
+				return;
+			case "session.execution.succeeded":
+				if (sessionID === void 0) return;
+				clean.add(sessionID);
+				await onSessionIdle({ sessionID });
+				return;
+			case "session.execution.failed":
+			case "session.execution.interrupted":
+				if (sessionID !== void 0) clean.delete(sessionID);
+				return;
+			case "session.compaction.succeeded":
+			case "session.compaction.ended":
+				onSessionCompacted(props);
+				return;
+			case "session.deleted":
+				onSessionDeleted(props);
+				return;
+		}
 	};
 	return {
 		probe,
