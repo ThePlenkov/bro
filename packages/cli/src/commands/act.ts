@@ -238,6 +238,34 @@ function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): voi
   }
 }
 
+/** Batch-file rows — `<id><TAB><body>` per line, `\\n`/`\\t` escapes
+ *  expanded. Reply and resolve share one parser: the file shape is the
+ *  same contract on both verbs (bro-71a10). Lines without the tab yield
+ *  a null body — resolve reads them as silent fixes, reply skips them. */
+function parseBatchRows(file: string): { rows: { id: string; body: string }[]; tabless: string[] } {
+  const lines = readFileSync(file, 'utf8')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0);
+  const rows: { id: string; body: string }[] = [];
+  const tabless: string[] = [];
+  for (const line of lines) {
+    const tab = line.indexOf('\t');
+    if (tab === -1) {
+      tabless.push(line);
+      continue;
+    }
+    rows.push({
+      id: line.slice(0, tab).trim(),
+      body: line
+        .slice(tab + 1)
+        .replaceAll(String.raw`\n`, '\n')
+        .replaceAll(String.raw`\t`, '\t'),
+    });
+  }
+  return { rows, tabless };
+}
+
 /** One thread through the resolve/unresolve flow — the batch --file
  *  path and the single --thread path share it exactly (bro-71a10). */
 function resolveOne(
@@ -297,22 +325,14 @@ function cmdResolve(argv: string[]): void {
       console.error('error: --file requires a path');
       process.exit(2);
     }
-    const lines = readFileSync(file, 'utf8')
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0);
+    const { rows, tabless } = parseBatchRows(file);
     let resolved = 0;
-    for (const line of lines) {
-      const tab = line.indexOf('\t');
-      const rowId = (tab === -1 ? line : line.slice(0, tab)).trim();
-      const rowComment =
-        tab === -1
-          ? undefined
-          : line
-              .slice(tab + 1)
-              .replaceAll(String.raw`\n`, '\n')
-              .replaceAll(String.raw`\t`, '\t');
-      resolveOne(rev, argv, rowId, rowComment, unresolve);
+    for (const row of rows) {
+      resolveOne(rev, argv, row.id, row.body, unresolve);
+      resolved += 1;
+    }
+    for (const id of tabless) {
+      resolveOne(rev, argv, id, undefined, unresolve);
       resolved += 1;
     }
     console.error(`act resolve: ${resolved} thread(s)`);
@@ -335,27 +355,8 @@ function cmdReply(argv: string[]): void {
       console.error('error: --file requires a path');
       process.exit(2);
     }
-    const lines = readFileSync(file, 'utf8')
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0);
-    let skipped = 0;
-    const rows = lines
-      .map(l => {
-        const tab = l.indexOf('\t');
-        if (tab === -1) {
-          skipped += 1;
-          return null;
-        }
-        return {
-          id: l.slice(0, tab).trim(),
-          body: l
-            .slice(tab + 1)
-            .replaceAll(String.raw`\n`, '\n')
-            .replaceAll(String.raw`\t`, '\t'),
-        };
-      })
-      .filter((r): r is { id: string; body: string } => r !== null);
+    const { rows, tabless } = parseBatchRows(file);
+    const skipped = tabless.length;
     for (const row of rows) {
       rev.replyThread(row.id, row.body);
       console.error(`act: replied on ${row.id}`);
