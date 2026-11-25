@@ -45,6 +45,7 @@
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  chmodSync,
   renameSync,
   rmSync,
   mkdirSync,
@@ -713,6 +714,12 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
     const tmp = `${path}.tmp.${process.pid}`;
     try {
       writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
+      // carry the existing file's mode across the rename — a 0600 config
+      // must not come back 0644 under the umask (same bro-kztfl rule the
+      // otel writer follows)
+      if (existsSync(path)) {
+        chmodSync(tmp, statSync(path).mode & 0o777);
+      }
       renameSync(tmp, path);
     } catch (err) {
       rmSync(tmp, { force: true });
