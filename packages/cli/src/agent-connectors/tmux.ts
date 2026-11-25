@@ -56,6 +56,198 @@ import type {
 import { rmSync } from 'node:fs';
 import { assertMutableConfig } from '../config-policy.ts';
 import type { Lease } from '@broject/core';
+
+interface TmuxSpawnInput {
+  dir: string;
+  env: AgentConnectorEnv;
+  command: string;
+  socket: string;
+  spec: SpawnSpec;
+}
+
+interface TmuxPreparedSpawn {
+  agentId: string;
+  promptFile: string;
+  log: string;
+  stderrLog?: string;
+  exitFile: string;
+  lease: Lease;
+  reservation: Parameters<typeof releaseSessionSlot>[0] | undefined;
+  resumeSessionId?: string;
+  crossKindReservations: Parameters<typeof releaseSessionStart>[0];
+  mol: string;
+  home: string;
+  panePid?: number;
+}
+
+async function spawnTmuxAgent(input: TmuxSpawnInput): Promise<AgentInfo> {
+  const { dir, env, command, socket, spec } = input;
+  assertMutableConfig(dir);
+  const home = spawnHome(dir, 'tmux', command, spec);
+  const ver = tmuxRun(socket, ['-V']);
+  if (ver.missing || ver.code !== 0) {
+    throw new SpawnError(
+      `tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`,
+      'unavailable'
+    );
+  }
+  const mol = stepParent(spec.beadsDir, spec.molStep);
+  let spawnLease: Lease | undefined;
+  try {
+    return withAgentRegistryLock(dir, () => {
+      const prepared = prepareTmuxSpawn({
+        dir,
+        env,
+        command,
+        socket,
+        spec,
+        home: home!,
+        mol: mol!,
+      });
+      spawnLease = prepared.lease;
+      launchTmuxSession({ ...input, home: home!, mol: mol! }, prepared);
+      const spawned = patchAgentRegistry(
+        dir,
+        spec.molStep,
+        prepared.panePid === undefined
+          ? {}
+          : {
+              pid: prepared.panePid,
+              pidStart: procStat(prepared.panePid)?.start ?? null,
+            }
+      );
+      const hasPanePid = prepared.panePid !== undefined;
+      rebindSpawnLease(
+        dir,
+        prepared.lease,
+        hasPanePid ? { host: hostname(), pid: prepared.panePid } : {}
+      );
+      if (hasPanePid) {
+        const panePid = prepared.panePid!;
+        retagSessionSlots([prepared.reservation, ...prepared.crossKindReservations], panePid);
+      }
+      writeWorkMarker(dir, prepared.agentId, spec.molStep, prepared.panePid);
+      return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
+    });
+  } catch (err) {
+    if (spawnLease !== undefined) releaseSpawnLease(dir, spawnLease);
+    throw err;
+  }
+}
+
+function prepareTmuxSpawn(
+  input: TmuxSpawnInput & { home: string; mol: string }
+): TmuxPreparedSpawn {
+  const { dir, env, command, socket, spec, home, mol } = input;
+  const prepared = prepareSpawn(dir, home, 'tmux', spec, {
+    isLive: e => {
+      const name = tmuxSessionName(e);
+      if (name === undefined) return false;
+      const probe = tmuxProbe(socket, name);
+      if (probe.live === 'unknown') {
+        throw new SpawnError(
+          `cannot verify ${spec.molStep}'s tmux session — ${probe.err}`,
+          'unavailable'
+        );
+      }
+      if (probe.live === 'running') touchWorkMarker(dir, e.agentId);
+      return probe.live === 'running';
+    },
+    liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
+    entry: id => ({ session: `bro-${id}` }),
+    cap: { max: fleetCapOf(env), env },
+    env,
+    sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
+    spawnCommand: command,
+    external: externalGuardOf(env),
+  });
+  return { ...prepared, mol, home, reservation: prepared.reservation };
+}
+
+function launchTmuxSession(
+  input: TmuxSpawnInput & { home: string; mol: string },
+  prepared: TmuxPreparedSpawn
+): void {
+  const { dir, env, command, socket, spec, home } = input;
+  const {
+    agentId,
+    promptFile,
+    log,
+    stderrLog,
+    exitFile,
+    reservation,
+    crossKindReservations,
+    resumeSessionId,
+  } = prepared;
+  const session = `bro-${agentId}`;
+  const workerTmp = workerTmpDir(spec.repoRoot, agentId);
+  tmuxRun(socket, ['kill-session', '-t', session]);
+  const envFile = join(home, `${agentId}.env`);
+  try {
+    const policy = getCredentialScope(env, 'tmux');
+    const ambient = Object.entries({ ...process.env, ...spec.env })
+      .filter(
+        (e): e is [string, string] =>
+          e[1] !== undefined &&
+          /^[A-Za-z_]\w*$/.test(e[0]) &&
+          !envKeyDropped(e[0], workerTmp !== undefined) &&
+          !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+          isAllowedByEnvPolicy(
+            e[0],
+            e[1],
+            'tmux',
+            spec,
+            env,
+            policy,
+            Object.hasOwn(spec.env ?? {}, e[0])
+          )
+      )
+      .map(([k, v]) => `export ${k}=${shQuote(v)}`)
+      .join('\n');
+    writePrivateFileSync({ path: envFile, data: `${ambient}\n` });
+    const worker = workerWithResume(spec.worker, resumeSessionId);
+    const envArgs = [
+      ...agentEnvPins(spec, agentId, promptFile, workerCliBadge(worker, command), prepared.mol),
+      ...workerTmpEnvPins(workerTmp),
+    ].flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+    ensureWorkerTmpDir(workerTmp);
+    warnNoPromptFile(worker, command);
+    const runLine = workerRunLine(worker, command);
+    const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
+    const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
+    const res = tmuxRun(socket, [
+      'new-session',
+      '-d',
+      '-s',
+      session,
+      '-c',
+      spec.repoRoot,
+      ...envArgs,
+      `sh -c ${shQuote(paneScript)}`,
+    ]);
+    if (res.code !== 0) throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+  } catch (err) {
+    try {
+      rmSync(envFile, { force: true });
+    } catch {
+      /* preserve launch error */
+    }
+    if (reservation !== undefined) releaseSessionSlot(reservation);
+    releaseSessionStart(crossKindReservations);
+    try {
+      patchAgentRegistry(dir, spec.molStep, {
+        spawnError: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      /* entry remains for diagnostics */
+    }
+    throw err;
+  }
+  const pane = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}']);
+  const panePid = pane.code === 0 ? Number(pane.out.trim().split('\n')[0]) : Number.NaN;
+  prepared.panePid = Number.isInteger(panePid) && panePid > 0 ? panePid : undefined;
+}
+
 export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir;
   const knobs = env.agents['tmux'] ?? {};
@@ -73,212 +265,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
     name: 'tmux',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
-      // NOSONAR — connector contract is async; the critical section is sync
-      assertMutableConfig(dir);
-      const home = spawnHome(dir, 'tmux', command, spec);
-      const ver = tmuxRun(socket, ['-V']);
-      if (ver.missing || ver.code !== 0) {
-        throw new SpawnError(
-          `tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`,
-          'unavailable'
-        );
-      }
-      // same critical section as native: dedup → claim → session →
-      // pid-patch under the registry lock, all synchronous shell-outs;
-      // the molecule pin's bd show resolves before the lock is taken
-      const mol = stepParent(spec.beadsDir, spec.molStep);
-      // the lease prepareSpawn mints must outlive the lock scope — a
-      // launch failure after commit still has to free the cross-repo
-      // key, so it is hoisted for the catch below
-      let spawnLease: Lease | undefined;
-      try {
-        return withAgentRegistryLock(dir, () => {
-          // the session name derives from the agentId prepareSpawn
-          // resolves — entry callback, not a precomputed name, because a
-          // tampered entry's unsafe id is reminted inside
-          const {
-            agentId,
-            promptFile,
-            log,
-            stderrLog,
-            exitFile,
-            lease,
-            reservation,
-            resumeSessionId,
-            crossKindReservations,
-          } = prepareSpawn(dir, home, 'tmux', spec, {
-            isLive: e => {
-              const n = tmuxSessionName(e);
-              if (n === undefined) {
-                return false;
-              }
-              const p = tmuxProbe(socket, n);
-              if (p.live === 'unknown') {
-                // an unverifiable liveness probe must not let a duplicate
-                // spawn kill-session a worker that may still be alive
-                throw new SpawnError(
-                  `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
-                  'unavailable'
-                );
-              }
-              if (p.live === 'running') {
-                touchWorkMarker(dir, e.agentId);
-              }
-              return p.live === 'running';
-            },
-            liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
-            entry: id => ({ session: `bro-${id}` }),
-            cap: { max: fleetCapOf(env), env },
-            env,
-            sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
-            spawnCommand: command,
-            external: externalGuardOf(env),
-          });
-          spawnLease = lease;
-          const session = `bro-${agentId}`;
-          // resolved once for both consumers — the envFile filter drops
-          // TMP* only when the pin rides -e below, and the mkdir runs
-          // inside the failure guard (spec bro-v96mp)
-          const workerTmp = workerTmpDir(spec.repoRoot, agentId);
-          // a leftover session with our name (crash between entry and
-          // kill, a respawn over a zombie) would make new-session fail
-          // 'duplicate' — clear it; kill-session on a missing target is
-          // a no-op error we ignore
-          tmuxRun(socket, ['kill-session', '-t', session]);
-          // ambient env (process.env + spec.env) rides a 0600 file the
-          // pane sources, not argv — -e KEY=VALUE would expose secrets on
-          // the tmux client's world-readable cmdline, a regression vs
-          // native's spawn env. Identity pins are non-secret and stay on
-          // -e; they're also filtered OUT of the file so sourcing can
-          // never redirect the claim store or re-badge the worker
-          const envFile = join(home, `${agentId}.env`);
-          try {
-            // the same credential-scope policy native/docker enforce (spec
-            // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
-            // ambient env the allowlist excludes, and the ambient BRO_BATCH
-            // marker is stripped the same way (only spec.env supplies it)
-            const policy = getCredentialScope(env, 'tmux');
-            const ambient = Object.entries({ ...process.env, ...spec.env })
-              .filter(
-                (e): e is [string, string] =>
-                  e[1] !== undefined &&
-                  /^[A-Za-z_]\w*$/.test(e[0]) &&
-                  !envKeyDropped(e[0], workerTmp !== undefined) &&
-                  !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-                  isAllowedByEnvPolicy(
-                    e[0],
-                    e[1],
-                    'tmux',
-                    spec,
-                    env,
-                    policy,
-                    Object.hasOwn(spec.env ?? {}, e[0])
-                  )
-              )
-              .map(([k, v]) => `export ${k}=${shQuote(v)}`)
-              .join('\n');
-            writePrivateFileSync({ path: envFile, data: `${ambient}\n` });
-            const worker = workerWithResume(spec.worker, resumeSessionId);
-            const cliBadge = workerCliBadge(worker, command);
-            const envArgs = [
-              ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol),
-              // the tmpdir pin (spec bro-v96mp) — non-secret path, -e is
-              // where tmux pins ride
-              ...workerTmpEnvPins(workerTmp),
-            ].flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-            ensureWorkerTmpDir(workerTmp);
-            // the pane sources the ambient env and drops the file, then runs
-            // the agent; $? lands in the .exit file before the pipeline
-            // drains, tee keeps a log the way native's fd redirect does.
-            // Session dies with the pane → has-session IS liveness. tmux
-            // runs the command through the user's default-shell — a
-            // non-POSIX one (fish) would eat the braces, so sh -c pins the
-            // dialect the same way native's spawn does.
-            // Worker payloads (spec bro-5hx1.1): a 'template' command
-            // substitutes wholesale; an 'argv' worker becomes an exec line
-            // with every element single-quoted — the provider argv never
-            // re-parses into a different program.
-            warnNoPromptFile(worker, command);
-            const runLine = workerRunLine(worker, command);
-            // stderr splits into its own capture when the backend records
-            // one; without a capture it folds into the stdout tee so the
-            // worker's noise still lands in the .log (docker does the same)
-            const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
-            const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
-            const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
-            const res = tmuxRun(socket, [
-              'new-session',
-              '-d',
-              '-s',
-              session,
-              '-c',
-              spec.repoRoot,
-              ...envArgs,
-              paneCmd,
-            ]);
-            if (res.code !== 0) {
-              throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
-            }
-          } catch (err) {
-            // ANY setup failure after the reservation hands its slots
-            // and env file back — a stranded slot starves the quota
-            // until its TTL lapses, and the ambient-secret env file
-            // must not outlive the failed launch (an unwritable
-            // bro-tmp is how this fires, spec bro-v96mp). The rethrow
-            // still reaches the outer catch, whose lease release is
-            // the existing fourth leg of this cleanup.
-            try {
-              rmSync(envFile, { force: true });
-            } catch {
-              // a cleanup failure (an envFile that is a directory
-              // needs recursive; EACCES) must not mask the setup
-              // error or skip the releases below
-            }
-            if (reservation !== undefined) {
-              releaseSessionSlot(reservation);
-            }
-            releaseSessionStart(crossKindReservations);
-            try {
-              patchAgentRegistry(dir, spec.molStep, {
-                spawnError: err instanceof Error ? err.message : String(err),
-              });
-            } catch {
-              // the entry landed already — the SpawnError still reports
-            }
-            throw err;
-          }
-          // pane pid — a display handle like native's child pid, not the
-          // liveness signal (has-session is); pidStart pins its identity
-          // anyway so registry-side pidAlive probes (drive's cheap
-          // occupancy plane runs no backend list()) can tell a recycled
-          // pid from the live pane (bro-i5oq)
-          const pp = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}']);
-          const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : Number.NaN;
-          const hasPanePid = Number.isInteger(panePid) && panePid > 0;
-          const spawned = patchAgentRegistry(
-            dir,
-            spec.molStep,
-            hasPanePid ? { pid: panePid, pidStart: procStat(panePid)?.start ?? null } : {}
-          );
-          // a readable pane pid is a local liveness probe — downgrade the
-          // born-TTL lease to pid governance. No pane pid: the lease keeps
-          // its foreign host and the TTL backs it while the pane may still
-          // be live
-          rebindSpawnLease(dir, lease, hasPanePid ? { host: hostname(), pid: panePid } : {});
-          // the slot claims follow the lane's holder — the pane lives
-          // exactly as long as the session it hosts (spec bro-x601l)
-          if (hasPanePid) {
-            retagSessionSlots([reservation, ...crossKindReservations], panePid);
-          }
-          writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined);
-          return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
-        });
-      } catch (err) {
-        if (spawnLease !== undefined) {
-          releaseSpawnLease(dir, spawnLease);
-        }
-        throw err;
-      }
+      return spawnTmuxAgent({ dir, env, command, socket, spec });
     },
 
     async list() {
