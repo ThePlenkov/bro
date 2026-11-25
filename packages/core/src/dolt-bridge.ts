@@ -21,7 +21,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitTry } from './git.ts';
+import { spawnSync } from 'node:child_process';
+import { assertGitArgs, gitBin, GIT_REPO_ENV, gitTry } from './git.ts';
 
 /** The bd run signature the TaskStore threads through — tests inject
  *  scripted answers; git calls are real (mirrors live under tmp dirs). */
@@ -596,6 +597,61 @@ const DOLT_DEEPEN = 64;
  *  objects only, the manifest blob lazy-fetches on read — so the check
  *  costs ~1 RTT regardless of store size. On a corrupt head, deepens
  *  and walks ancestors for `lastGood`. */
+/** A probe fetch with a ceiling on any single written file — the
+ *  scratch repo trusts the remote's objects, and a hostile or corrupt
+ *  pack must not fill the disk (bro-23nns). ulimit -f counts in 512B
+ *  blocks on Linux: 262144 blocks = 128 MiB. */
+function boundedFetch(args: string[], netMs: number): { code: number; out: string; err: string } {
+  // same command-runner-flag protection as gitTry — a bounded fetch is
+  // still a git invocation and --upload-pack must never pass (kody).
+  // The probe contract is fail-open: a rejected flag is a failed probe
+  // row, never an uncaught throw through the doctor (kilo on #1201)
+  try {
+    assertGitArgs(args);
+  } catch (err) {
+    return { code: 128, out: '', err: err instanceof Error ? err.message : String(err) };
+  }
+  // the probe always runs with -C scratch — an inherited GIT_DIR /
+  // GIT_WORK_TREE would redirect the fetch into the caller's repo
+  // (macroscope on #1201); strip repo env exactly like gitTry does
+  const env = { ...process.env };
+  for (const k of GIT_REPO_ENV) {
+    delete env[k];
+  }
+  // /bin/sh carries the ulimit file-cap — on Windows there is no such
+  // shell, so the probe spawns git bare: the 128MiB cap degrades away
+  // but the fetch itself stays functional (kilo on #1201)
+  const unix = process.platform !== 'win32';
+  const proc = unix
+    ? spawnSync(
+        // absolute path — a PATH-resolved shell is a SonarCloud security
+        // hotspot (S4036) and the wrapper adds nothing user-controlled anyway
+        '/bin/sh',
+        ['-c', 'ulimit -f 262144 2>/dev/null; exec git "$@"', 'sh', ...args],
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+          encoding: 'utf8',
+          env,
+          timeout: netMs,
+        }
+      )
+    : spawnSync(gitBin(), args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        encoding: 'utf8',
+        env,
+        timeout: netMs,
+      });
+  return {
+    code: proc.status ?? 128,
+    out: proc.stdout ?? '',
+    // a timeout leaves stderr EMPTY, so ?? never reaches error.message —
+    // the kill reason must survive or the caller reads a bare 128
+    err: (proc.stderr ?? '').trim() || (proc.error?.message ?? '').trim(),
+  };
+}
+
 export function probeDoltRemote(
   src: string,
   opts?: { deepen?: number; netMs?: number }
@@ -651,7 +707,7 @@ export function probeDoltRemote(
     }
     gitTry(['-C', scratch, 'config', 'remote.origin.promisor', 'true'], PROBE_MS);
     gitTry(['-C', scratch, 'config', 'remote.origin.partialclonefilter', 'blob:none'], PROBE_MS);
-    const f = gitTry(
+    const f = boundedFetch(
       [
         '-C',
         scratch,
@@ -677,7 +733,7 @@ export function probeDoltRemote(
       return health;
     }
     const deepen = opts?.deepen ?? DOLT_DEEPEN;
-    const d = gitTry(
+    const d = boundedFetch(
       [
         '-C',
         scratch,
