@@ -14,7 +14,7 @@
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { CommandError, EXIT, hasHelpFlag, type ExitCode } from '@broject/core';
+import { CommandError, EXIT, gitBin, hasHelpFlag, type ExitCode } from '@broject/core';
 import { otelEndpoint } from '@broject/providers';
 import {
   hookEventName,
@@ -76,7 +76,7 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
   // (bro-mrc4n). .gitignore normally keeps it untracked; a force-added
   // file is operator error, not a state to write into.
   try {
-    execFileSync('git', ['ls-files', '--error-unmatch', 'bro.config.local.json'], {
+    execFileSync(gitBin(), ['ls-files', '--error-unmatch', 'bro.config.local.json'], {
       cwd: dir,
       stdio: 'pipe',
     });
