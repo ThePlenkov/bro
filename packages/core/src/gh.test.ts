@@ -3,7 +3,7 @@ import { describe, test } from 'node:test';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gh, ghTry, issueLink, prLink, prRefs } from './gh.ts';
+import { gh, ghTry, issueLink, osc8Link, prLink, prLinkTerm, prRefs, supportsOsc8 } from './gh.ts';
 
 describe('prLink', () => {
   test('renders a clickable markdown link', () => {
@@ -129,5 +129,34 @@ describe('gh failure reporting', () => {
     withFakeGh(`node -e 'process.stdout.write("x".repeat(2 * 1024 * 1024))'`, () => {
       assert.equal(gh(['api', 'repos/acme/widgets/pulls']).length, 2 * 1024 * 1024);
     });
+  });
+});
+
+describe('osc8 terminal links (bro-8gh0t)', () => {
+  test('supportsOsc8 is false off a TTY even for a known terminal', () => {
+    assert.equal(supportsOsc8({ TERM_PROGRAM: 'ghostty' }, false), false);
+  });
+  test('supportsOsc8 is true on a TTY for ghostty/wezterm/iterm/kitty', () => {
+    for (const termProgram of ['ghostty', 'WezTerm', 'iTerm.app', 'vscode']) {
+      assert.equal(supportsOsc8({ TERM_PROGRAM: termProgram }, true), true);
+    }
+    assert.equal(supportsOsc8({ TERM: 'xterm-kitty' }, true), true);
+  });
+  test('supportsOsc8 is false for unknown terminals — never escape junk', () => {
+    assert.equal(
+      supportsOsc8({ TERM_PROGRAM: 'Apple_Terminal', TERM: 'xterm-256color' }, true),
+      false
+    );
+    assert.equal(supportsOsc8({}, true), false);
+  });
+  test('osc8Link wraps text in the hyperlink sequence when supported', () => {
+    const out = osc8Link('https://github.com/o/r/pull/7', '#7', { TERM_PROGRAM: 'ghostty' }, true);
+    assert.equal(out, '\x1b]8;;https://github.com/o/r/pull/7\x07#7\x1b]8;;\x07');
+  });
+  test('osc8Link falls back to plain text when unsupported', () => {
+    assert.equal(osc8Link('https://x', '#7', {}, false), '#7');
+  });
+  test('prLinkTerm stays the markdown form off a supporting terminal', () => {
+    assert.equal(prLinkTerm('o/r', 42, 'github.com'), '[#42](https://github.com/o/r/pull/42)');
   });
 });
