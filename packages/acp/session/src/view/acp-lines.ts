@@ -116,11 +116,14 @@ const toolGlyph = (status: string, frame: number): Segment => {
   return { text: `${g.text} `, token: g.token };
 };
 
-/** An overflow row — the head clips to what the tail leaves. */
-const clippedHead = (head: string, tail: string, width: number): Segment[] => [
-  { text: clipTo(head, Math.max(0, width - tail.length)), token: 'title' },
-  { text: tail, token: 'tail' },
-];
+/** An overflow row — preserve the status cell, then clip the rest of the
+ * head to what the right-aligned tail leaves. */
+const clippedHead = (head: readonly Segment[], tail: string, width: number): Segment[] => {
+  const glyph = head[0] ?? { text: '', token: 'marker' };
+  const rest = lineText(head.slice(1));
+  const budget = Math.max(0, width - tail.length - glyph.text.length);
+  return [glyph, { text: clipTo(rest, budget), token: 'arg' }, { text: tail, token: 'tail' }];
+};
 
 /** `✓ Bash arg …           #1` — the mass row: the status glyph
  *  inline, title + clipped arg dim, right-aligned tail. One compact
@@ -129,7 +132,10 @@ const clippedHead = (head: string, tail: string, width: number): Segment[] => [
 const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string): Segment[] => {
   const segs: Segment[] = [
     toolGlyph(item.toolStatus, frame),
-    { text: item.title === '' ? (item.toolName ?? 'tool') : item.title, token: 'arg' },
+    {
+      text: firstLine(item.title === '' ? (item.toolName ?? 'tool') : item.title),
+      token: 'arg',
+    },
   ];
   if (item.toolKind !== undefined && item.toolKind !== null) {
     segs.push({ text: ` [${item.toolKind}]`, token: 'arg' });
@@ -138,7 +144,7 @@ const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string
   if (head1 !== '') segs.push({ text: `  ${head1}`, token: 'arg' });
   const tail = ` #${item.index}`;
   const head = lineText(segs);
-  if (head.length + tail.length > width) return clippedHead(head, tail, width);
+  if (head.length + tail.length > width) return clippedHead(segs, tail, width);
   segs.push({ text: ' '.repeat(width - head.length - tail.length), token: 'marker' });
   segs.push({ text: tail, token: 'tail' });
   return segs;

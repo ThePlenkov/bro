@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mdPlain } from './lines.ts';
+import { mdPlain, mdSource } from './lines.ts';
 
 test('mdPlain removes markers exposed by other markers', () => {
   assert.deepEqual(mdPlain('***x***'), ['x']);
@@ -17,4 +17,12 @@ test('mdPlain handles hostile delimiter input in linear time', () => {
 
   assert.equal(result.length, 1);
   assert.ok(elapsed < 1000, `markdown scan took ${elapsed.toFixed(1)}ms`);
+});
+
+test('mdSource removes comments spanning multiple lines', () => {
+  assert.equal(mdSource('before<!-- hidden\nstill hidden -->after'), 'before\nafter');
+});
+
+test('mdSource drops an unterminated comment through the end of input', () => {
+  assert.equal(mdSource('before<!-- hidden\nstill hidden'), 'before\n');
 });
