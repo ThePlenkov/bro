@@ -48,16 +48,18 @@ const CONTINUATION = /\\\r?\n\s*/g;
  *  `-c k=v`, `--git-dir=…`) may sit between `git` and `push`. An
  *  option's separate value never consumes the `push` word itself.
  *
- *  The `git` word may follow a grouping paren: `(git push --force …)`
- *  is the same command to the shell, and a bracket must not defeat
- *  the guard. */
-const PUSH_CALL = /(?:^|[\s(])git(?:\s+-{1,2}[^\s]+(?:\s+(?!push\b)[^\s]+)?)*\s+push\b(.*)/;
+ *  The `git` word may follow a grouping paren, a quote, or a command
+ *  substitution: `(git push …)`, `sh -c 'git push …'`, `$(git push …)`
+ *  are the same command to the shell, and wrapping must not defeat
+ *  the guard (bro-u93xd). */
+const PUSH_CALL = /(?:^|[\s('"`$])git(?:\s+-{1,2}[^\s]+(?:\s+(?!push\b)[^\s]+)?)*\s+push\b(.*)/;
 
 /** Force spellings in the push arguments: `--force` as a whole word
  *  (never `--force-with-lease` / `--force-if-includes` — a following
- *  hyphen disqualifies), bare `-f`, or a leading-`+` refspec
- *  (`git push origin +main`). */
-const FORCE_FLAG = /(?:^|\s)--force(?!-)|(?:^|\s)-f(?![\w-])|(?:^|\s)\+\S+/;
+ *  hyphen disqualifies), `-f` bare or bundled (`-vf` forces just the
+ *  same — a bundle is still the flag, bro-u93xd), or a leading-`+`
+ *  refspec (`git push origin +main`). */
+const FORCE_FLAG = /(?:^|\s)--force(?!-)|(?:^|\s)-[a-zA-Z]*f[a-zA-Z]*(?![\w-])|(?:^|\s)\+\S+/;
 
 /** Does any shell segment of this command force-push? */
 export function isForcePush(command: string): boolean {

@@ -24,6 +24,20 @@ describe('the omp force-push guard', () => {
     // the shell runs `(git push --force origin main)` exactly as it runs
     // the bare command — a bracket must not defeat the guard
     assert.equal(isForcePush('(git push --force origin main)'), true);
+  });
+
+  test('bundled short options still read as force (bro-u93xd)', () => {
+    assert.equal(isForcePush('git push -vf origin main'), true);
+    assert.equal(isForcePush('git push -fv origin main'), true);
+    // -u/-n/-q bundles without f stay clean
+    assert.equal(isForcePush('git push -vn origin main'), false);
+    assert.equal(isForcePush('git push -u origin main'), false);
+  });
+
+  test('shell wrapping does not hide the push (bro-u93xd)', () => {
+    assert.equal(isForcePush("sh -c 'git push --force origin main'"), true);
+    assert.equal(isForcePush('sh -c "git push -f origin main"'), true);
+    assert.equal(isForcePush('x=$(git push -f origin main)'), true);
     assert.equal(isForcePush('{ git push --force origin main; }'), true);
   });
 
