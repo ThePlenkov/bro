@@ -164,6 +164,36 @@ describe('bro work e2e — enter', () => {
   });
 });
 
+describe('bro work e2e — enter base-ahead warning (bro-9cxhp)', () => {
+  test('enter warns when the base branch is ahead of its upstream', () => {
+    const { root, main } = workFixture();
+    inside(main, root, () => {
+      // a bare origin carrying main, then one unpushed local commit
+      git(['init', '--bare', '-q', join(root, 'origin.git')], main);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      git(['push', '-q', '-u', 'origin', 'main'], main);
+      writeFileSync(join(main, 'unpushed.txt'), 'x');
+      git(['add', 'unpushed.txt'], main);
+      git(['commit', '-q', '-m', 'unpushed'], main);
+      const r = runCli(['work', 'enter', 'fix-upstream'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /base main is 1 commit\(s\) ahead of/);
+    });
+  });
+
+  test('enter stays silent when the base is even with its upstream', () => {
+    const { root, main } = workFixture();
+    inside(main, root, () => {
+      git(['init', '--bare', '-q', join(root, 'origin.git')], main);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      git(['push', '-q', '-u', 'origin', 'main'], main);
+      const r = runCli(['work', 'enter', 'fix-even'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.doesNotMatch(r.stderr, /ahead of/);
+    });
+  });
+});
+
 describe('bro work e2e — leave', () => {
   /** Fixture with a linked worktree already entered. */
   const entered = (root: string, main: string, slug = 'fix-x'): string => {
