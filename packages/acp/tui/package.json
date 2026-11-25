@@ -17,6 +17,10 @@
     "solid-js": "^1.9.12",
     "web-tree-sitter": "^0.25.10"
   },
+  "overrides": {
+    "seroval": "1.7.9",
+    "seroval-plugins": "1.7.8"
+  },
   "devDependencies": {
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
