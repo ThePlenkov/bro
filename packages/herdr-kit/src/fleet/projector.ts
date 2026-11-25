@@ -274,8 +274,21 @@ function managedTargets(
  *  the fleet-status files live there, same base the status/session
  *  panes resolve (stateCommonDir), so a BRO_STATE_DIR pin moves both
  *  ends together. */
+/** The write pass's wall-clock budget — one herdr write call times out
+ *  at 5s, so this admits a handful of stalled workspaces per pass while
+ *  keeping the drive tick's worst case finite. */
+export const WRITE_PASS_BUDGET_MS = 25_000;
+
 export function runFleetPass<P extends { beads: { id: string }[] }>(
-  ctx: { root: string; common: string | null; state: string | null; now: number },
+  ctx: {
+    root: string;
+    common: string | null;
+    state: string | null;
+    now: number;
+    /** write-pass wall-clock budget — defaults to WRITE_PASS_BUDGET_MS;
+     *  injectable so a test doesn't pay real stall time. */
+    writeBudgetMs?: number;
+  },
   deps: {
     /** lazily assembled — an unreachable herdr or an empty target set
      *  must never pay the bro-plane reads. */
@@ -321,7 +334,17 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   let writes = 0;
   let files = 0;
   let leds = 0;
+  // the write pass is bounded: every write is a herdr call with its own
+  // timeout, and N stalled workspaces otherwise multiply into a pass
+  // that outlasts the drive tick it serves (bro-1fv9e). Whatever the
+  // budget doesn't reach is not lost — the next tick retries it.
+  const passStart = Date.now();
+  let truncated = 0;
   for (const t of targets) {
+    if (Date.now() - passStart > (ctx.writeBudgetMs ?? WRITE_PASS_BUDGET_MS)) {
+      truncated = targets.length - targets.indexOf(t);
+      break;
+    }
     const { projection, title, slug } = projectTree(deps.input(t.tree, planes));
     // an empty bead plane means the backend read failed or is empty —
     // a live titled label beats a path-basename downgrade in that gap
@@ -340,7 +363,16 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
     if (r.path !== undefined) keep.add(r.path);
   }
   pruneFleetStatus(statusBase, keep);
-  return { reachable: true, workspaces: targets.length, writes, files, leds };
+  return {
+    reachable: true,
+    workspaces: targets.length,
+    writes,
+    files,
+    leds,
+    ...(truncated > 0
+      ? { degraded: `write budget — ${truncated} workspace(s) deferred to the next pass` }
+      : {}),
+  };
 }
 
 /** Everything one workspace's write pass needs — the projection, the
