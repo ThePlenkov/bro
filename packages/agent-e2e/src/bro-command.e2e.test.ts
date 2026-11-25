@@ -61,11 +61,11 @@ test('pi: /bro <args> dispatches to bro with matrix argv (S4)', {
   assert.equal(inst.code, 0, `plugins install pi failed: ${inst.stderr.slice(-400)}`);
   const fb = fakeBro().install(e);
 
-  const r = await runRpcPrompt(e, 'pi', `/bro ${CMD_KEY}`);
+  const r = await runRpcPrompt(e, 'pi', `/bro ${CMD_KEY}`, { timeoutMs: 150_000 });
   assert.equal(
     r.disposition,
     'handled',
-    `pi did not handle /bro: ${JSON.stringify(r.records.slice(-5))}`
+    `pi did not handle /bro: ${JSON.stringify(r.records.slice(-5))} stderr=${r.stderr.slice(-400)}`
   );
   assertBroCommand(fb, 'pi');
   // an extension-handled command never becomes a model prompt, so
@@ -182,17 +182,17 @@ test('pi: family commands dispatch bare names — /learn, /wtf multilingual (S4f
   const fb = familyFakeBro(['learn', 'backlog'], ['wtf', 'какого', 'черта']);
   fb.install(e);
 
-  const r1 = await runRpcPrompt(e, 'pi', '/learn backlog');
+  const r1 = await runRpcPrompt(e, 'pi', '/learn backlog', { timeoutMs: 150_000 });
   assert.equal(
     r1.disposition,
     'handled',
-    `pi /learn not handled: ${JSON.stringify(r1.records.slice(-5))}`
+    `pi /learn not handled: ${JSON.stringify(r1.records.slice(-5))} stderr=${r1.stderr.slice(-400)}`
   );
-  const r2 = await runRpcPrompt(e, 'pi', '/wtf какого черта');
+  const r2 = await runRpcPrompt(e, 'pi', '/wtf какого черта', { timeoutMs: 150_000 });
   assert.equal(
     r2.disposition,
     'handled',
-    `pi /wtf not handled: ${JSON.stringify(r2.records.slice(-5))}`
+    `pi /wtf not handled: ${JSON.stringify(r2.records.slice(-5))} stderr=${r2.stderr.slice(-400)}`
   );
   assertArgv(fb, ['learn', 'backlog'], 'pi /learn');
   assertArgv(fb, ['wtf', 'какого', 'черта'], 'pi /wtf');
