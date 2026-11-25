@@ -168,10 +168,10 @@ function firstExisting(candidates: Array<string | null>): string | null {
  *  plugin serves it as the directory's `index.ts`. */
 function opencodeArtifact(cwd: string, src: string, shipped: string): string | null {
   const ap = agentPluginPackageRoot('opencode');
-  const root = gitRoot(cwd);
   const cli = packageRoot();
+  const repo = cli === null ? null : dirname(dirname(cli));
   return firstExisting([
-    root === null ? null : join(root, 'plugins', 'opencode', 'bro', shipped),
+    repo === null ? null : join(repo, 'plugins', 'opencode', 'bro', shipped),
     cli === null ? null : join(cli, 'dist', 'plugins', 'opencode', 'bro', shipped),
     ap === null ? null : join(ap, 'dist', shipped.replace(/\.(ts|tsx)$/, '.js')),
     ap === null ? null : join(ap, 'src', src),
@@ -254,12 +254,12 @@ function opencodeLegacy(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope
   };
 }
 
-function kiloArtifact(cwd: string): string | null {
+function kiloArtifact(_cwd: string): string | null {
   const ap = agentPluginPackageRoot('kilo');
   const pkg = packageRoot();
-  const root = gitRoot(cwd);
+  const repo = pkg === null ? null : dirname(dirname(pkg));
   return firstExisting([
-    root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
+    repo === null ? null : join(repo, 'plugins', 'kilo', 'bro', 'bro.ts'),
     pkg === null ? null : join(pkg, 'dist', 'plugins', 'kilo', 'bro', 'bro.ts'),
     ap === null ? null : join(ap, 'dist', 'kilo.js'),
     ap === null ? null : join(ap, 'src', 'kilo.ts'),
@@ -270,12 +270,12 @@ function kiloConfigDir(env: NodeJS.ProcessEnv): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo');
 }
 
-function piArtifact(cwd: string): string | null {
+function piArtifact(_cwd: string): string | null {
   const ap = agentPluginPackageRoot('pi');
   const pkg = packageRoot();
-  const root = gitRoot(cwd);
+  const repo = pkg === null ? null : dirname(dirname(pkg));
   return firstExisting([
-    root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
+    repo === null ? null : join(repo, 'plugins', 'pi', 'bro', 'bro.ts'),
     ap === null ? null : join(ap, 'dist', 'pi.js'),
     ap === null ? null : join(ap, 'src', 'pi.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
@@ -283,12 +283,12 @@ function piArtifact(cwd: string): string | null {
   ]);
 }
 
-function ompArtifact(cwd: string): string | null {
+function ompArtifact(_cwd: string): string | null {
   const ap = agentPluginPackageRoot('omp');
   const pkg = packageRoot();
-  const root = gitRoot(cwd);
+  const repo = pkg === null ? null : dirname(dirname(pkg));
   return firstExisting([
-    root === null ? null : join(root, 'plugins', 'omp', 'bro', 'bro.ts'),
+    repo === null ? null : join(repo, 'plugins', 'omp', 'bro', 'bro.ts'),
     ap === null ? null : join(ap, 'dist', 'omp.js'),
     ap === null ? null : join(ap, 'src', 'omp.ts'),
     pkg === null ? null : join(pkg, 'dist', 'omp.js'),
