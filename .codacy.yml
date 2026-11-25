@@ -156,3 +156,18 @@ exclude_paths:
   # attacker-controlled; the flag only appeared because the PR's style
   # reformat made the pre-existing line read as added.
   - 'packages/cli/src/commands/next-plan.ts'
+
+  # The e2e host drivers are test infrastructure — they spawn the host
+  # binaries against a loopback aimock and write configs into the env
+  # dir they build. Every fs path is computed from that env root and
+  # every URL is the spawned server's own 127.0.0.1 address, so the
+  # non-literal-path and SSRF rules flag the files' whole job — same
+  # class as '**/*.test.ts' above.
+  - 'packages/agent-e2e/src/hosts/*.ts'
+
+  # The dead-loop marker/trace plane IS path construction: markers are
+  # <cwd>/.bro/dead-loop-*.json and the trace is the session's own
+  # .jsonl — paths bro builds from the session dir, never request data.
+  # The JSON.parse of bro's own trace lines reads as object-injection
+  # for the same reason the contract fixture paths did.
+  - 'packages/cli/src/commands/deadloop.ts'
