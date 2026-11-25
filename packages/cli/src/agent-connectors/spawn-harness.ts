@@ -794,6 +794,28 @@ export async function resolveSpawnRoute(
  *  non-pick outcome (dimmed, off-table, judge-down) already returns
  *  that lane — bro-v0pvd.1.1 names it "spawn-static, the class
  *  router's enforce-unanswered posture". */
+function hasTaskText(info: { title?: string; description?: string } | undefined): boolean {
+  if (info === undefined) {
+    return false;
+  }
+  return (info.title ?? '').trim() !== '' || (info.description ?? '').trim() !== '';
+}
+
+function routerCanRun(
+  router: FleetRouter | undefined,
+  routed: ResolvedClass | undefined,
+  info: { label?: string; title?: string; description?: string } | undefined
+): boolean {
+  return (
+    router !== undefined &&
+    router.mode !== 'off' &&
+    routed !== undefined &&
+    info !== undefined &&
+    info.label === undefined &&
+    hasTaskText(info)
+  );
+}
+
 export async function applyFleetRouter(
   dir: string,
   env: AgentConnectorEnv,
@@ -803,14 +825,15 @@ export async function applyFleetRouter(
   opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<ResolvedClass | undefined> {
   const router = env.fleet?.router;
-  if (
-    router === undefined ||
-    router.mode === 'off' ||
-    routed === undefined ||
-    info === undefined ||
-    info.label !== undefined ||
-    ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
-  ) {
+  if (!routerCanRun(router, routed, info)) {
+    return routed;
+  }
+  // routerCanRun proves these values; keep the narrowing local and explicit.
+  if (router === undefined || routed === undefined || info === undefined) {
+    return routed;
+  }
+  const mode = router.mode;
+  if (mode === 'off') {
     return routed;
   }
   const routing = env.fleet!.routing!;
@@ -824,7 +847,7 @@ export async function applyFleetRouter(
     }
     throw err;
   }
-  if (router.mode === 'enforce') {
+  if (mode === 'enforce') {
     requireTypedRouterGrade(router.provider, entry, 'fleet.router.provider');
   }
   // the judge + providers stack is heavy (the acp binding pulls the
@@ -850,7 +873,7 @@ export async function applyFleetRouter(
       state: { molStep, title: info.title ?? '', description: info.description ?? '' },
       routing,
       resolved: routed.class,
-      mode: router.mode,
+      mode,
     });
   } catch (err) {
     if (err instanceof JudgeUnavailable) {
@@ -906,6 +929,15 @@ export function requireTypedRouterGrade(provider: string, entry: ProviderEntry, 
  *  mode. JudgeUnavailable is "no verdict" — warn and stand,
  *  fail-open like every judge call: an outage is infra, never a
  *  hold. */
+function matrixCanRun(matrix: FleetMatrix | undefined): boolean {
+  return (
+    matrix !== undefined &&
+    matrix.provider !== undefined &&
+    matrix.mode !== 'off' &&
+    Object.keys(matrix.models).length > 0
+  );
+}
+
 export async function applyFleetMatrix(
   dir: string,
   env: AgentConnectorEnv,
@@ -914,23 +946,14 @@ export async function applyFleetMatrix(
   opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<MatrixVerdict | undefined> {
   const matrix = env.fleet?.matrix;
-  if (matrix === undefined) {
+  if (!matrixCanRun(matrix)) {
     return undefined;
   }
-  if (matrix.provider === undefined) {
-    return undefined;
-  }
-  if (matrix.mode === 'off') {
-    return undefined;
-  }
-  if (Object.keys(matrix.models).length === 0) {
+  if (matrix === undefined || matrix.provider === undefined) {
     return undefined;
   }
   const armed = matrix.mode;
-  if (
-    info === undefined ||
-    ((info.title ?? '').trim() === '' && (info.description ?? '').trim() === '')
-  ) {
+  if (info === undefined || !hasTaskText(info)) {
     // nothing to judge — shadow stands (the spawn has no text to
     // route on); enforce holds: an unscoreable task cannot pick a
     // lane, and route-or-queue is enforce's whole contract
@@ -4491,6 +4514,33 @@ export function handleIdentity(
   return true;
 }
 
+function adoptNativeEntry(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  pid: number,
+  start: string | null
+): void {
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[molStep];
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
+        return;
+      }
+      reg[molStep] = { ...cur, pid, pidStart: start };
+      writeAgentRegistry(dir, reg);
+    });
+  } catch {
+    // the registry stamp is advisory — the handle still proves liveness
+  }
+}
+
 /** Adopt a survivor: the entry's pid patch never landed, but the
  *  worker published its own handle before the launcher died. A live
  *  handle whose pid still carries the published starttime stamps
@@ -4537,26 +4587,9 @@ export function adoptNativeHandle(
   // (the AgentInfo built from it carries the pid to status/down)
   entry.pid = pid;
   entry.pidStart = start;
-  try {
-    withAgentRegistryLock(dir, () => {
-      const reg = readAgentRegistry(dir);
-      const cur = reg[molStep];
-      // a respawn owns the entry now — the handle belongs to a dead
-      // generation and must not stamp the new run's fields
-      if (
-        cur === undefined ||
-        cur.agentId !== entry.agentId ||
-        cur.spawnedAt !== entry.spawnedAt ||
-        cur.runId !== entry.runId
-      ) {
-        return;
-      }
-      reg[molStep] = { ...cur, pid, pidStart: start };
-      writeAgentRegistry(dir, reg);
-    });
-  } catch {
-    // the registry stamp is advisory — the handle still proves liveness
-  }
+  // A respawn owns the entry now; adoptNativeEntry repeats the generation
+  // check under the registry lock before publishing the handle.
+  adoptNativeEntry(dir, molStep, entry, pid, start);
   return { pid, start };
 }
 
@@ -5092,6 +5125,38 @@ export function filterStrictRunArgs(runArgs: string[], strictEnv: boolean): stri
   return kept;
 }
 
+function dockerEnvValue(
+  key: string,
+  value: string | undefined,
+  spec: SpawnSpec,
+  env: AgentConnectorEnv | undefined,
+  policy: { strictEnv: boolean; envAllowlist: string[] | undefined },
+  dropped: string[]
+): string | undefined {
+  if (
+    value === undefined ||
+    !/^[A-Za-z_]\w*$/.test(key) ||
+    envKeyDropped(key, false) ||
+    GIT_REPOSITORY_ENV_KEYS.has(key)
+  ) {
+    return undefined;
+  }
+  if (value.includes('\n') || value.includes('\r')) {
+    dropped.push(key);
+    return undefined;
+  }
+  const allowed = isAllowedByEnvPolicy(
+    key,
+    value,
+    'docker',
+    spec,
+    env ?? { agents: {}, connectors: {} },
+    policy,
+    Object.hasOwn(spec.env ?? {}, key)
+  );
+  return allowed ? `${key}=${value}` : undefined;
+}
+
 /** The ambient env file — a 0600 file like tmux's, deleted by the
  *  caller after `docker run` (and on any failure). argv is visible to
  *  every local user (`ps`, `docker inspect`), so the ambient bag
@@ -5112,42 +5177,8 @@ export function writeDockerEnvFile(
     ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
     ...spec.env,
   })
-    .filter((e): e is [string, string] => {
-      if (
-        e[1] === undefined ||
-        !/^[A-Za-z_]\w*$/.test(e[0]) ||
-        // no tmpdir pin rides into a container (its /tmp is not the
-        // host's), so an explicit spec.env TMPDIR passes — ambient TMP*
-        // still drop via DOCKER_HOST_ENV above, they would shadow the
-        // image's own tmpdir
-        envKeyDropped(e[0], false) ||
-        GIT_REPOSITORY_ENV_KEYS.has(e[0])
-      ) {
-        return false;
-      }
-      if (e[1].includes('\n') || e[1].includes('\r')) {
-        dropped.push(e[0]);
-        return false;
-      }
-      // spec.env spread over ambient — a key the caller supplied decides
-      // its own row (the ambient BRO_BATCH marker is stripped; the
-      // caller's own travels, spec bro-l8c4f.6)
-      if (
-        !isAllowedByEnvPolicy(
-          e[0],
-          e[1],
-          'docker',
-          spec,
-          env ?? { agents: {}, connectors: {} },
-          policy,
-          Object.hasOwn(spec.env ?? {}, e[0])
-        )
-      ) {
-        return false;
-      }
-      return true;
-    })
-    .map(([k, v]) => `${k}=${v}`)
+    .map(([key, value]) => dockerEnvValue(key, value, spec, env, policy, dropped))
+    .filter((line): line is string => line !== undefined)
     .join('\n');
   if (dropped.length > 0) {
     console.error(
@@ -5498,12 +5529,10 @@ export function copilotTerminalPatch(
   };
 }
 
-export function copilotAbsorb(
-  dir: string,
-  molStep: string,
+function copilotSessionPatch(
   entry: AgentRegistryEntry,
   task: CopilotTask
-): void {
+): Record<string, unknown> {
   const patch: Record<string, unknown> = {};
   const state = copilotTaskState(task);
   if (state !== '' && entry.taskState !== state) {
@@ -5514,14 +5543,25 @@ export function copilotAbsorb(
     patch.sessionId = session.id;
     patch.attach = `gh agent-task view ${session.id} --log --follow`;
   }
-  const runId = session?.workflow_run_id;
-  if (typeof runId === 'number' && runId !== entry.workflowRun) {
-    patch.workflowRun = runId;
+  if (
+    typeof session?.workflow_run_id === 'number' &&
+    session.workflow_run_id !== entry.workflowRun
+  ) {
+    patch.workflowRun = session.workflow_run_id;
   }
   const headRef = copilotHeadRef(task);
   if (headRef !== undefined && headRef !== entry.branch) {
     patch.branch = headRef;
   }
+  return patch;
+}
+
+function copilotPullPatch(
+  entry: AgentRegistryEntry,
+  task: CopilotTask,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const headRef = copilotHeadRef(task);
   const repo = copilotEntryRepo(entry);
   if (
     entry.pr === undefined &&
@@ -5543,6 +5583,18 @@ export function copilotAbsorb(
   if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
     patch.sessionUrl = sessionUrl;
   }
+  return patch;
+}
+
+export function copilotAbsorb(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  task: CopilotTask
+): void {
+  const state = copilotTaskState(task);
+  const patch = copilotSessionPatch(entry, task);
+  copilotPullPatch(entry, task, patch);
   Object.assign(patch, copilotTerminalPatch(state, task, entry));
   if (Object.keys(patch).length > 0) {
     copilotPatch(dir, molStep, entry, patch);
