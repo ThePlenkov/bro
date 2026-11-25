@@ -53,6 +53,7 @@ import {
   cmdMerge,
   harvestClosedPr,
   reportActOutcome,
+  sweepMergedPrLabels,
 } from './act-land.ts';
 import { landedLine, landedPhrase, printStatus, settledLabel, waitVerdict } from './act-report.ts';
 import { flag } from './args.ts';
@@ -314,6 +315,7 @@ async function settleMergedWait(ctx: WaitSettleCtx): Promise<void> {
   // reconciliation the spec wants (bro-0ykhg.4); own merges already
   // reported inside cmdMerge and dedupe on the same event id
   if (res.state.state === 'MERGED') {
+    sweepMergedPrLabels(rev, t);
     await reportActOutcome(argv, t, res.state, 'merged');
   }
   process.exitCode = 0;

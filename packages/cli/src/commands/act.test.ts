@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ReviewFacade } from '@broject/core';
 import { cleanupAfterMerge, resolvePr } from './act.ts';
+import { sweepMergedPrLabels } from './act-land.ts';
 import { git, initRepo, inside } from './testrepo.ts';
 
 const repo = () =>
@@ -142,6 +143,19 @@ function fakeRev(o: {
     ...(o.open !== undefined ? { openPrs: () => o.open! } : {}),
   } as unknown as ReviewFacade;
 }
+
+test('sweepMergedPrLabels removes transient bro labels but keeps debt markers', () => {
+  const removed: string[] = [];
+  const rev = {
+    labels: () => ['bro-review', 'bro-managed', 'bro:bead', 'debt:clean', 'team:cli'],
+    removeLabel: (_t: { repo: string; pr: number }, label: string) => removed.push(label),
+    prLink: (_repo: string, pr: number) => `[#${pr}](https://example.test/pull/${pr})`,
+  } as unknown as ReviewFacade;
+
+  sweepMergedPrLabels(rev, { repo: 'o/r', pr: 7 });
+
+  assert.deepEqual(removed.sort(), ['bro-managed', 'bro-review', 'bro:bead'].sort());
+});
 
 /** Run fn with process.exit captured — returns the code it would exit
  *  with, or fails when fn returns normally. */

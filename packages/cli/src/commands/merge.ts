@@ -45,6 +45,7 @@ import {
   waitOpts,
   warnHumanOwned,
 } from './act.ts';
+import { sweepMergedPrLabels } from './act-land.ts';
 import { flag } from './args.ts';
 import { reconcileOutcomes } from './outcome-report.ts';
 
@@ -535,6 +536,7 @@ async function alreadyLanded(
   first: Awaited<ReturnType<MergeCtx['fetcher']>>
 ): Promise<boolean> {
   if (first.state.state !== 'MERGED') return false;
+  sweepMergedPrLabels(ctx.rev, ctx.t);
   note(ctx, `merge: ${termPr(ctx, ctx.t.repo, ctx.t.pr)} already MERGED`);
   emitVerdict(
     gateVerdict(ctx, { ...first, polls: 0, timedOut: false }),
@@ -549,6 +551,7 @@ async function alreadyLanded(
 /** --bead close + outcome record — one shape for the early and the
  *  full-cycle success paths. */
 async function discharge(ctx: MergeCtx, state: PrActState): Promise<void> {
+  sweepMergedPrLabels(ctx.rev, ctx.t);
   const bead = flag(ctx.argv, '--bead');
   if (bead !== undefined) {
     closeLandedBead(ctx.rev, ctx.t, bead);
