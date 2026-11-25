@@ -443,6 +443,22 @@ describe('SessionModel — internal storms + turn seals', () => {
     );
   });
 
+  test('chunks after the detail cap do not inflate the open call tally', () => {
+    const m = new SessionModel();
+    for (let i = 0; i < 30; i++) {
+      m.feed(start('conductor'));
+      m.feed(stop());
+    }
+    m.feed(start('conductor'));
+    for (let i = 0; i < 31; i++) m.feed(chunk(`part-${i}`));
+    m.feed(stop());
+
+    const note = m.items.find(i => i.kind === 'note');
+    assert.ok(note !== undefined);
+    assert.match(txt(note), /^▸ 31 internal calls · conductor$/m);
+    assert.ok(txt(note).includes('- +1 more'));
+  });
+
   test('failed internal calls keep visible ✗ rows — deduped by (origin,error), tally counts all', () => {
     const m = new SessionModel();
     for (let i = 0; i < 3; i++) {
