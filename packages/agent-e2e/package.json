@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@copilotkit/aimock": "^1.48.0"
+    "@copilotkit/aimock": "^1.48.0",
+    "@broject/bro": "^0.3.0"
   }
 }
