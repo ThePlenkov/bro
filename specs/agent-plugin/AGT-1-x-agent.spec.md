@@ -76,8 +76,8 @@ delivered per host capability:
   prompt-submission by design, so its `/bro [args]` runs the verb and
   submits the output *as the next prompt* (bare defaults to `status`)
   — the model sees the result immediately. On manifest hosts there
-  is no command surface — bro reaches the model through hook context
-  + skills instead.
+  is no command surface — bro reaches the model through hook
+  context + skills instead.
 - **Command family** — the curated verbs as first-class slash
   commands, registered by the same shared table on every command
   surface (`BRO_COMMANDS` in `adapter-core/core.ts`):
@@ -223,7 +223,7 @@ responder or the real CLI; **deps** = ScriptedCli PATH shims
 where its native surface can express the trigger.
 
 | ID | Scenario | Trigger | Acceptance criterion |
-|----|----------|---------|----------------------|
+| --- | --- | --- | --- |
 | S1 | session-start context | session/turn start | hook's `additionalContext` appears verbatim in the first model request body (aimock journal) |
 | S2 | pre-tool guard | model calls a tool | veto (`decision:block`/deny/empty per host) reaches the model as the tool result; the tool never executes; journal shows exactly one guard probe |
 | S3 | stop gate | clean turn end | first stop probe blocks once → host reprompts → second probe (with `stop_hook_active`) passes → turn ends; failed/interrupted turns never gate |

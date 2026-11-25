@@ -3,6 +3,7 @@
  *  `mock` provider at the llm-mock endpoint, and runs `opencode run`
  *  headless. */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes, randomInt } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO, run, runBro, type E2eEnv, type RunResult } from '../env.ts';
@@ -100,7 +101,9 @@ export interface OpencodeServer {
   stop(): Promise<void>;
 }
 
-const SERVER_PASSWORD = 'e2e';
+// generated per test process — a fixture credential, never a committed
+// one; every spawn and api call in the run shares it
+const SERVER_PASSWORD = randomBytes(8).toString('hex');
 
 /** `opencode serve` on a random localhost port, fixture env, plugin
  *  already installed. Resolves once /doc answers; kills on timeout. */
@@ -108,7 +111,7 @@ export async function startOpencodeServer(
   e: E2eEnv,
   opts: { port?: number; timeoutMs?: number } = {}
 ): Promise<OpencodeServer> {
-  const port = opts.port ?? 16000 + Math.floor(Math.random() * 2000);
+  const port = opts.port ?? randomInt(16000, 18000);
   const url = `http://127.0.0.1:${port}`;
   const child: ChildProcess = spawn(
     'opencode',
