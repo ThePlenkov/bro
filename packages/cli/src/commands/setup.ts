@@ -567,6 +567,30 @@ function installLockedSkills(
   }
 }
 
+/** Install, then put the committed lockfile back: `npx skills add` rewrites
+ *  skills-lock.json with freshly fetched hashes, which would silently advance
+ *  the lock on disk — later checks accept changed upstream content instead of
+ *  reporting drift (bro-illox). The in-memory drift check compares against the
+ *  original either way; a failed restore just leaves the installer's rewrite. */
+function installLockedSkillsPreservingLock(dir: string, locked: Map<string, LockedSkill>): void {
+  const lockPath = join(dir, 'skills-lock.json');
+  let originalLock: string | null = null;
+  try {
+    originalLock = readFileSync(lockPath, 'utf8');
+  } catch {
+    originalLock = null;
+  }
+  installLockedSkills(dir, locked);
+  if (originalLock === null) {
+    return;
+  }
+  try {
+    writeFileSync(lockPath, originalLock);
+  } catch {
+    // best-effort — see the doc comment
+  }
+}
+
 function reportSkillDrift(locked: Map<string, LockedSkill>, drift: SkillDrift[]): void {
   if (drift.length === 0) {
     console.error(`  ${locked.size} locked skill(s) match the lock`);
@@ -588,27 +612,7 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   const skillsDir = join(dir, '.agents', 'skills');
 
   if (!checkOnly && !dryRun) {
-    // the lockfile is the committed contract — `npx skills add` rewrites it
-    // with freshly fetched hashes, which would silently advance the lock on
-    // disk: later checks accept changed upstream content instead of reporting
-    // drift (bro-illox). Snapshot before, restore after; the in-memory drift
-    // check below already compares against the original.
-    const lockPath = join(dir, 'skills-lock.json');
-    let originalLock: string | null = null;
-    try {
-      originalLock = readFileSync(lockPath, 'utf8');
-    } catch {
-      originalLock = null;
-    }
-    installLockedSkills(dir, locked, skillsDir);
-    if (originalLock !== null) {
-      try {
-        writeFileSync(lockPath, originalLock);
-      } catch {
-        // a failed restore leaves the installer-advanced lock — the drift
-        // report below still compares against the original in-memory snapshot
-      }
-    }
+    installLockedSkillsPreservingLock(dir, locked, skillsDir);
   }
 
   // Compare against the original committed lock snapshot, not a re-read:
