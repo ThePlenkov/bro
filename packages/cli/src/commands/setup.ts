@@ -537,12 +537,32 @@ function spawnErrorDetail(e: unknown): string {
   return (line ?? err.message ?? 'unknown error').trim().slice(0, 200);
 }
 
-function installLockedSkills(dir: string, locked: Map<string, LockedSkill>): void {
+function installLockedSkills(
+  dir: string,
+  locked: Map<string, LockedSkill>,
+  skillsDir: string
+): void {
   if (!hasBin('npx')) {
     console.error('  npx not on PATH — skipping the locked skills');
     return;
   }
+  // drift check BEFORE any install: `skills add -y` cleans and recreates
+  // the canonical directory, so a copy whose content drifted from the lock
+  // (local edits, pinned older content) would be clobbered before the drift
+  // report even prints. Drifted copies are skipped — the report below names
+  // them, and the operator decides whether to reset.
+  const drifted = new Set(
+    checkSkillLock(locked, { skillsDir })
+      .filter(d => d.kind !== 'missing')
+      .map(d => d.name)
+  );
   for (const skill of locked.values()) {
+    if (drifted.has(skill.name)) {
+      console.error(
+        `  ${skill.name}: installed copy drifted from the lock — kept as-is, not replaced`
+      );
+      continue;
+    }
     installOneLockedSkill(dir, skill);
   }
 }
@@ -568,7 +588,7 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   const skillsDir = join(dir, '.agents', 'skills');
 
   if (!checkOnly && !dryRun) {
-    installLockedSkills(dir, locked);
+    installLockedSkills(dir, locked, skillsDir);
   }
 
   // Compare against the original committed lock snapshot, not a re-read:
@@ -583,11 +603,19 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
     const drifted = new Map(drift.map(d => [d.name, d.kind]));
     for (const skill of locked.values()) {
       const state = drifted.get(skill.name) ?? 'matches';
-      // `--lock` installs every entry unconditionally — installLockedSkills
-      // has no up-to-date skip — so the verb is uniform; only entries whose
-      // name/source fail the install-time SKILL_ARG guard deviate.
+      // entries whose name/source fail the install-time SKILL_ARG guard are
+      // skipped; a drifted copy is KEPT, not replaced — the install path
+      // refuses to clobber drift (bro-emlsg), so the dry-run verb must say so
+      // precedence mirrors the real install path: the drift-keep happens
+      // BEFORE the SKILL_ARG guard ever runs — a drifted copy is kept even
+      // when its lock entry would also fail validation
       const valid = SKILL_ARG.test(skill.source) && SKILL_ARG.test(skill.name);
-      const verb = valid ? 'would install' : 'would skip (invalid name/source)';
+      const verb =
+        state === 'drifted'
+          ? 'would keep (drifted — not replaced)'
+          : !valid
+            ? 'would skip (invalid name/source)'
+            : 'would install';
       console.error(`  ${verb} ${skill.name} (${skill.source}) — installed copy: ${state}`);
     }
     return;
