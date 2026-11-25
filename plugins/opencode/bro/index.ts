@@ -219,13 +219,16 @@ function hookEmitEnv(kind, opts = {}) {
 	if (opts.npxPin !== void 0 && at > 0) env.BRO_HOOK_ADAPTER = opts.npxPin.slice(at + 1);
 	return env;
 }
-/**
-* Run one `bro hooks <event>` with the payload on stdin; resolve null on
-* every failure mode — spawn error, timeout, nonzero exit, garbage out.
-* `extraEnv` rides on the spawn env (the adapter's `hookEmitEnv` block).
-*/
-async function callHook(command, event, payload, cwd, timeoutMs, extraEnv) {
-	return (await callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv)).control;
+/** The one-line cause a diagnostic surfaces for a failed hook call. */
+function hookFailureText(failure) {
+	switch (failure.kind) {
+		case "no-cli": return "no bro CLI resolved";
+		case "input": return "the hook payload could not be serialized";
+		case "spawn": return "the hook process failed to spawn";
+		case "timeout": return `the hook timed out after ${failure.timeoutMs}ms`;
+		case "exit": return `the hook exited ${failure.code ?? "with no exit code"}`;
+		case "output": return "the hook answered with no control object";
+	}
 }
 /**
 * callHook with the failure class attached. The stop gate needs to tell
@@ -830,15 +833,22 @@ function makeCore(input) {
 	const notify = (level, message) => {
 		log(level, message).catch(() => {});
 	};
+	let lastStopWarning = 0;
 	const probe = async (event, payload, timeoutMs = HOOK_TIMEOUT_MS) => {
 		const resolved = await getCommand();
 		if (!resolved) {
 			notify("debug", `bro probe skipped (no cli) for event=${event}`);
 			return null;
 		}
-		const result = await callHook(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
-		if (result === null) notify("debug", `bro probe returned null for event=${event}`);
-		return result;
+		const result = await callHookDetailed(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
+		if (result.failure !== null) {
+			const message = hookFailureText(result.failure);
+			if (event === "stop" && Date.now() - lastStopWarning >= 15 * 6e4) {
+				lastStopWarning = Date.now();
+				notify("warn", `stop gate did not run (${message})`);
+			} else notify("debug", `probe failed (${message})`);
+		} else if (result.control === null) notify("debug", `bro probe returned null for event=${event}`);
+		return result.control;
 	};
 	/** Spawn `<bro> args` and capture stdout — the read-verb path tool
 	* executions and commands share. Never rejects: no resolved CLI,

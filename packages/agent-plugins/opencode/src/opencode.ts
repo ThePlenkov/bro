@@ -35,11 +35,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   BRO_COMMANDS,
-  callHook,
+  callHookDetailed,
   contextOf,
   createCommandResolver,
   HOOK_TIMEOUT_MS,
   type HookControl,
+  hookFailureText,
   hookEmitEnv,
   REHYDRATION_TIMEOUT_MS,
   RUN_TIMEOUT_MS,
@@ -132,6 +133,7 @@ function makeCore(input: BroCoreInput) {
   const notify = (level: Level, message: string): void => {
     log(level, message).catch(() => {});
   };
+  let lastStopWarning = 0;
 
   const probe = async (
     event: string,
@@ -143,11 +145,19 @@ function makeCore(input: BroCoreInput) {
       notify('debug', `bro probe skipped (no cli) for event=${event}`);
       return null;
     }
-    const result = await callHook(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
-    if (result === null) {
+    const result = await callHookDetailed(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
+    if (result.failure !== null) {
+      const message = hookFailureText(result.failure);
+      if (event === 'stop' && Date.now() - lastStopWarning >= 15 * 60_000) {
+        lastStopWarning = Date.now();
+        notify('warn', `stop gate did not run (${message})`);
+      } else {
+        notify('debug', `probe failed (${message})`);
+      }
+    } else if (result.control === null) {
       notify('debug', `bro probe returned null for event=${event}`);
     }
-    return result;
+    return result.control;
   };
 
   /** Spawn `<bro> args` and capture stdout — the read-verb path tool

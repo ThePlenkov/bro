@@ -960,6 +960,7 @@ function binding(pi) {
 				"quit"
 			],
 			stop: "agent_before_settle",
+			userInput: "input",
 			on(event, handler) {
 				pi.on(event, handler);
 			},
