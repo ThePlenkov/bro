@@ -125,8 +125,10 @@ function handleTextChunk(
   const { itemId, isNew } = textChunkTarget(session, kind, messageId);
 
   // A different item beginning finalises whatever text item was previously live (spec: "Items
-  // become final at defined points").
-  const base = isNew ? finaliseItem(session, session.liveTextItemId) : session;
+  // become final at defined points"). A messageId can reopen an existing item, so compare the
+  // target with the live item rather than using `isNew`: reopening an earlier item must still
+  // seal the item that was live immediately before it.
+  const base = session.liveTextItemId === itemId ? session : finaliseItem(session, session.liveTextItemId);
   const next = isNew
     ? appendTextItem(base, { itemId, kind, text, messageId })
     : extendTextItem(base, itemId, kind, text);
