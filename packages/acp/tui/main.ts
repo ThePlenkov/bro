@@ -22,7 +22,13 @@
 import { AcpClient, type ClientRow, type PermissionAsk, splitArgv } from '../client/src/index.ts';
 import { sanitise } from '../model/src/index.ts';
 import { pickImpl } from '../session/src/index.ts';
-import { type ComposerSubmitEvent, liveAction, type LiveMode, type LiveView } from './live.ts';
+import {
+  type LiveAction,
+  type ComposerSubmitEvent,
+  liveAction,
+  type LiveMode,
+  type LiveView,
+} from './live.ts';
 import { copyRow, serve } from './serve.ts';
 
 /**
@@ -63,23 +69,32 @@ interface Args {
 /** The argv — a tiny parser; the pane's options are few and flat. */
 function parseArgs(argv: readonly string[]): Args {
   const out: Args = { cmd: 'devin acp', cwd: process.cwd(), resume: false, help: false };
+  // a table, not a chain — the pane's grammar is a lookup: flag → the
+  // field its value lands in. Boolean flags carry no field of their own
+  const VALUE_FLAGS: Record<string, 'cmd' | 'cwd' | 'session' | 'prompt'> = {
+    '--cmd': 'cmd',
+    '--cwd': 'cwd',
+    '--session': 'session',
+    '--prompt': 'prompt',
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    const next = (): string => {
+    // own-property only — '--constructor' must hit the unknown-arg branch,
+    // not resolve Object's constructor through the prototype chain
+    const flag = Object.hasOwn(VALUE_FLAGS, arg) ? VALUE_FLAGS[arg] : undefined;
+    if (flag !== undefined) {
       const value = argv[i + 1];
       if (value === undefined) throw new Error(`${arg} needs a value`);
       i += 1;
-      return value;
-    };
-    if (arg === '--cmd') out.cmd = next();
-    else if (arg.startsWith('--cmd=')) out.cmd = arg.slice('--cmd='.length);
-    else if (arg === '--cwd') out.cwd = next();
-    else if (arg.startsWith('--cwd=')) out.cwd = arg.slice('--cwd='.length);
-    else if (arg === '--session') out.session = next();
-    else if (arg.startsWith('--session=')) out.session = arg.slice('--session='.length);
-    else if (arg === '--resume') out.resume = true;
-    else if (arg === '--prompt') out.prompt = next();
-    else if (arg.startsWith('--prompt=')) out.prompt = arg.slice('--prompt='.length);
+      out[flag] = value;
+      continue;
+    }
+    const inline = Object.entries(VALUE_FLAGS).find(([f]) => arg.startsWith(`${f}=`));
+    if (inline !== undefined) {
+      out[inline[1]] = arg.slice(inline[0].length + 1);
+      continue;
+    }
+    if (arg === '--resume') out.resume = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -204,70 +219,54 @@ async function main(): Promise<void> {
     },
     keys: (_pane, key) => {
       const action = liveAction(key, view());
-      switch (action.kind) {
-        case 'compose':
-          // the key that opens the composer must NOT land in it —
-          // the global handler runs before the focused input, so the
-          // 'i' would otherwise be typed as the first letter
-          key.preventDefault();
-          setMode('compose');
-          break;
-        case 'browse':
-          key.preventDefault();
-          setMode('browse');
-          // the input keeps the focus unless it is told otherwise —
-          // a focused input would swallow j/k/Enter from the pane
-          served.pane.blurComposer?.();
-          break;
-        case 'cancel':
-          key.preventDefault();
-          if (!client.cancel()) served.pane.toast?.('nothing to cancel');
-          break;
-        case 'answer': {
-          const pendingAsk = ask();
-          const option = pendingAsk?.options[action.index];
-          if (pendingAsk === undefined || option === undefined) break;
-          if (!client.answerPermission(pendingAsk.requestId, option.optionId)) {
-            served.pane.toast?.('the agent refused that answer');
-          }
-          break;
+      // a table, not a switch — the effect of each action kind is one
+      // small handler; the grammar already lives in live.ts's tables
+      const answerAsk = (index: number): void => {
+        const pendingAsk = ask();
+        const option = pendingAsk?.options[index];
+        if (pendingAsk === undefined || option === undefined) return;
+        if (!client.answerPermission(pendingAsk.requestId, option.optionId)) {
+          served.pane.toast?.('the agent refused that answer');
         }
-        case 'deny': {
-          const pendingAsk = ask();
-          if (pendingAsk === undefined) break;
-          client.denyPermission(pendingAsk.requestId);
-          break;
-        }
-        case 'select':
-          served.pane.writer.select(action.delta);
-          break;
-        case 'fold':
-          served.pane.writer.toggle();
-          break;
-        case 'expand-all':
-          served.pane.writer.toggleAll(true);
-          break;
-        case 'collapse-all':
-          served.pane.writer.toggleAll(false);
-          break;
-        case 'copy':
-          copyRow(served.pane);
-          break;
-        case 'scroll':
-          served.pane.scroll?.(action.lines);
-          break;
-        case 'page':
-          served.pane.scrollPage?.(action.dir);
-          break;
-        case 'edge':
-          served.pane.scrollEdge?.(action.edge);
-          break;
-        case 'quit':
-          void shutdown();
-          break;
-        case 'none':
-          break;
-      }
+      };
+      const EFFECTS: { [K in LiveAction['kind']]?: (a: Extract<LiveAction, { kind: K }>) => void } =
+        {
+          // the key that opens the composer must NOT land in it — the
+          // global handler runs before the focused input, so the 'i'
+          // would otherwise be typed as the first letter
+          compose: () => {
+            key.preventDefault();
+            setMode('compose');
+          },
+          browse: () => {
+            key.preventDefault();
+            setMode('browse');
+            // the input keeps the focus unless it is told otherwise — a
+            // focused input would swallow j/k/Enter from the pane
+            served.pane.blurComposer?.();
+          },
+          cancel: () => {
+            key.preventDefault();
+            if (!client.cancel()) served.pane.toast?.('nothing to cancel');
+          },
+          answer: a => answerAsk(a.index),
+          deny: () => {
+            const pendingAsk = ask();
+            if (pendingAsk === undefined) return;
+            client.denyPermission(pendingAsk.requestId);
+          },
+          select: a => served.pane.writer.select(a.delta),
+          fold: () => served.pane.writer.toggle(),
+          'expand-all': () => served.pane.writer.toggleAll(true),
+          'collapse-all': () => served.pane.writer.toggleAll(false),
+          copy: () => copyRow(served.pane),
+          scroll: a => served.pane.scroll?.(a.lines),
+          page: a => served.pane.scrollPage?.(a.dir),
+          edge: a => served.pane.scrollEdge?.(a.edge),
+          quit: () => void shutdown(),
+        };
+      // the kind union is exhaustive — a typed table lookup, never user input
+      (EFFECTS[action.kind] as ((a: LiveAction) => void) | undefined)?.(action); // nosemgrep
     },
   });
   pane = served.pane;
