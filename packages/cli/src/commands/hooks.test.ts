@@ -268,12 +268,33 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('gh pr view 42'), 'act');
     assert.equal(classifyArmCommand('git push -u origin feat/x'), 'act');
     assert.equal(classifyArmCommand('cd x && gh pr checks'), 'act');
+    // the registered spellings carry the group word (specs/bro-npx)
+    assert.equal(classifyArmCommand('bro review act status'), 'act');
+    assert.equal(classifyArmCommand('bro review act threads 33'), 'act');
+    assert.equal(classifyArmCommand('bro review act wait 33 --merge'), 'act');
   });
 
   test('arms drill on drill/wtf commands', () => {
     assert.equal(classifyArmCommand('bro drill down "x"'), 'drill');
     assert.equal(classifyArmCommand('bro wtf "why"'), 'drill');
     assert.equal(classifyArmCommand('bro drill up --result "done"'), 'drill');
+    // the registered spellings carry the group word (specs/bro-npx)
+    assert.equal(classifyArmCommand('bro work drill down "x"'), 'drill');
+    assert.equal(classifyArmCommand('bro work drill up --result "done"'), 'drill');
+    // wtf registers under self, not work (review round on PR #1168);
+    // `bro work wtf` falls to the work group host — arming 'work' is the
+    // conservative read of a typo'd drill/wtf intent
+    assert.equal(classifyArmCommand('bro self wtf "why"'), 'drill');
+    assert.equal(classifyArmCommand('bro work wtf "why"'), 'work');
+    // npx-prefixed group-word forms (amazon-q review round)
+    assert.equal(classifyArmCommand('npx -y @broject/bro review act status'), 'act');
+    assert.equal(classifyArmCommand('npx @broject/bro work drill down "x"'), 'drill');
+    assert.equal(classifyArmCommand('npx bro self wtf "why"'), 'drill');
+    // npm permits repeated flags before the package — 13 of them arm
+    assert.equal(
+      classifyArmCommand('npx ' + '--noproxy=localhost '.repeat(13) + '@broject/bro drill down x'),
+      'drill'
+    );
   });
 
   test('arms work on worktree-mutating commands', () => {
@@ -304,6 +325,12 @@ describe('classifyArmCommand', () => {
 
   test('work enter arms both work and task — it also claims the bead', () => {
     assert.deepEqual(classifyArmCommands('bro work enter bro-x1').sort(), ['task', 'work']);
+    // a compound enter && drill keeps every aspect (review round #1168):
+    // enter arms work+task, the drill segment adds drill
+    assert.deepEqual(
+      classifyArmCommands('bro work enter bro-x1 && bro work drill down "x"').sort(),
+      ['drill', 'task', 'work']
+    );
     assert.deepEqual(classifyArmCommands('git worktree add ../x'), ['work']);
     assert.deepEqual(classifyArmCommands('git status'), []);
   });

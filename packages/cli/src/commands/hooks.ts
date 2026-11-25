@@ -336,10 +336,23 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd);
   const at = '(^|[;&|\\n])\\s*';
   const bro = BRO_CMD;
-  if (new RegExp(`${at}${bro}\\s+act\\b`).test(c)) {
+  // the registered spellings carry their group word — `bro review act`,
+  // `bro work drill` (specs/bro-npx); the bare forms stay matched, the
+  // group hosts swallow unmatched argv so `bro act` still dispatches
+  if (new RegExp(`${at}${bro}\\s+(?:review\\s+)?act\\b`).test(c)) {
     return 'act';
   }
-  if (new RegExp(`${at}${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
+  // the bro command alternation is inlined: a regex literal keeps the
+  // static-analysis contract (a RegExp constructor with a non-literal
+  // value is a codacy finding). Flag tokens are single `-\S+` blobs —
+  // deterministic tokenization, so the loop stays unbounded without
+  // the ReDoS the `--?[\w-]+(?:=\S+)?` nesting carried (codeql), and
+  // npm's repeated-flag forms (--noproxy=a --noproxy=b ...) still arm.
+  if (
+    /(^|[;&|\n])\s*(?:bro|npx(?:\s+-\S+)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+(?:(?:work\s+)?drill|(?:self\s+)?wtf)\b/.test(
+      c
+    )
+  ) {
     return 'drill';
   }
   if (new RegExp(String.raw`${at}${bro}\s+work\b`).test(c)) {
@@ -380,6 +393,11 @@ export function classifyArmCommands(cmd: string): GateAspect[] {
   const c = unquoted(cmd);
   const bro = BRO_CMD;
   if (new RegExp(`(^|[;&|\\n])\\s*${bro}\\s+work\\s+enter\\b`).test(c)) {
+    // enter claims the bead — work+task ride along even when a later
+    // segment in the same compound command classifies as the primary
+    // (bro work enter X && bro work drill down: the session armed
+    // work-enter AND drill, never just the drill tail — review #1168)
+    out.add('work');
     out.add('task');
   }
   return [...out];
