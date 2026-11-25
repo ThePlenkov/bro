@@ -76,7 +76,10 @@ const cli = defineCommand({
       const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 });
       setAmbient(cmdSpan.ctx);
       process.on('exit', code => {
-        journalCommand(cmd as string, Date.now() - t0, code ?? 0);
+        // only an alphabetic second token is a subcommand — a positional
+        // (a PR number, a bead id, free text) is noise, not latency shape
+        const sub = typeof argv[1] === 'string' && /^[a-z-]+$/.test(argv[1]) ? argv[1] : undefined;
+        journalCommand(cmd as string, Date.now() - t0, code ?? 0, sub);
         cmdSpan.endDetached(
           { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
           (code ?? 0) === 0 ? 'ok' : 'error'
