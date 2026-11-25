@@ -1992,100 +1992,107 @@ async function pass(ctx: DriveCtx): Promise<void> {
       ctx.deps.say(`warning: litter sweep failed — ${errText(err)}`);
     }
   }
-  const { byStep, degraded } = await ctx.deps.collectAgents();
-  for (const d of degraded) {
-    ctx.deps.say(`warning: backend degraded — ${d}`);
-  }
-  const hooks = hooksDirOf(ctx.mainRoot);
-  ctx.work = {
-    ...freshDrivePass(),
-    worktreeByBranch: worktreeMap(ctx),
-    agents: [...byStep.values()],
-    workDetails: hooks === null ? [] : liveWorkEntries(hooks),
-    // the claims rung's pre-lock snapshot — one list per pass; a failed
-    // read degrades to marker-only occupancy, never a failed pass
-    claims: ctx.deps.claims === undefined ? [] : await ctx.deps.claims().catch(() => []),
-    watches: listWatches(ctx.mainRoot),
-    judgeBudget: ctx.deps.judgeBudget(),
-    heads: new Map<number, string>(),
-  };
-  const { prs, complete } = openFleetPrs(ctx);
-  ctx.work.prs = prs;
-  ctx.work.pending = [...prs];
-  if (ctx.everySec !== undefined) {
-    const supervised = new Set(
-      [...prs].filter(pr => supervisedBy(ctx.work.watches, pr) !== undefined)
-    );
-    emitWatchHeartbeats(ctx, prs, supervised, complete);
-  }
-  for (;;) {
-    const pr = selectPr(ctx);
-    if (pr === undefined) {
-      break;
-    }
-    // a throwing probe on one PR must not kill the pass — in --every
-    // mode an unhandled throw would end the driver entirely
-    const v: PrVerdict = await drivePr(ctx, pr).catch(err => ({
-      // NOSONAR — a pass settles one PR before judging the next
-      pr,
-      link: ctx.deps.rev.prLink(ctx.repo, pr),
-      verdict: 'error',
-      detail: errText(err),
-    }));
-    await ctx.deps.signalForeignPush(pr, ctx.deps.rev.prLink(ctx.repo, pr), ctx.work.heads.get(pr)); // NOSONAR — the pass settles one PR before judging the next
-    // the human edge: unmovable verdicts and silent-reviewer alerts —
-    // dedup keys make a repeated pass quiet, not absent
-    if (ALERT_VERDICTS.has(v.verdict)) {
-      await parkAlert(ctx, pr, v.verdict, v.detail); // NOSONAR — sinks deliver serially, dedup order matters
-    }
-    if ((v.alerts?.length ?? 0) > 0) {
-      await parkAlert(ctx, pr, 'reviewer-alert', v.alerts!.join('; ')); // NOSONAR — serial by contract
-    }
-    if (ctx.json) {
-      ctx.deps.emitJson(v);
-    } else {
-      ctx.deps.say(`drive ${v.link} ${v.verdict}${v.detail === undefined ? '' : ` — ${v.detail}`}`);
-    }
-  }
-  if (prs.size === 0) {
-    ctx.deps.say('drive: no open PRs on fleet branches');
-  }
-  // the projector rides even a failed sweep — a skipped projection is
-  // a stale label, exactly the failure this tick exists to kill
+  // every leg past the preamble rides the finally — an early failure
+  // must still project: a skipped tick is exactly the stale-label
+  // failure the projector exists to kill (bro-wgfpw)
   try {
-    await sweepFixers(ctx);
-  } finally {
-    ctx.deps.projectorTick();
-  }
-  // the pipeline run-waker (bro-v0pvd.3) — journaled runs resume when
-  // their awaited input may have settled (customer records, provider
-  // walls, fleet capacity, the PR-settle seam, crash residue). Script-
-  // first, rides this cadence on the production engine map (.10) and
-  // the <runId>.formula.toml sidecar convention. A throwing pass must
-  // not kill the driver — same rule as the PR loop above.
-  try {
-    const wake = await ctx.deps.pipelineWake();
-    if (wake.locked) {
-      ctx.deps.say('pipeline wake: another pass holds the lock — skipped');
-    } else {
-      const woken = wake.runs.filter(r => r.action === 'woken').length;
-      const failed = wake.runs.filter(r => r.action === 'failed');
-      const unreadable = wake.unreadable ?? [];
-      if (woken > 0 || failed.length > 0 || unreadable.length > 0) {
-        // name the runs/files an operator must look at — a bare count
-        // leaves an unreadable journal or a failed resume invisible
-        const details = [
-          ...failed.map(r => `${r.runId}/${r.item}: ${r.detail ?? 'failed'}`),
-          ...unreadable.map(f => `unreadable ${f}`),
-        ];
+    const { byStep, degraded } = await ctx.deps.collectAgents();
+    for (const d of degraded) {
+      ctx.deps.say(`warning: backend degraded — ${d}`);
+    }
+    const hooks = hooksDirOf(ctx.mainRoot);
+    ctx.work = {
+      ...freshDrivePass(),
+      worktreeByBranch: worktreeMap(ctx),
+      agents: [...byStep.values()],
+      workDetails: hooks === null ? [] : liveWorkEntries(hooks),
+      // the claims rung's pre-lock snapshot — one list per pass; a failed
+      // read degrades to marker-only occupancy, never a failed pass
+      claims: ctx.deps.claims === undefined ? [] : await ctx.deps.claims().catch(() => []),
+      watches: listWatches(ctx.mainRoot),
+      judgeBudget: ctx.deps.judgeBudget(),
+      heads: new Map<number, string>(),
+    };
+    const { prs, complete } = openFleetPrs(ctx);
+    ctx.work.prs = prs;
+    ctx.work.pending = [...prs];
+    if (ctx.everySec !== undefined) {
+      const supervised = new Set(
+        [...prs].filter(pr => supervisedBy(ctx.work.watches, pr) !== undefined)
+      );
+      emitWatchHeartbeats(ctx, prs, supervised, complete);
+    }
+    for (;;) {
+      const pr = selectPr(ctx);
+      if (pr === undefined) {
+        break;
+      }
+      // a throwing probe on one PR must not kill the pass — in --every
+      // mode an unhandled throw would end the driver entirely
+      const v: PrVerdict = await drivePr(ctx, pr).catch(err => ({
+        // NOSONAR — a pass settles one PR before judging the next
+        pr,
+        link: ctx.deps.rev.prLink(ctx.repo, pr),
+        verdict: 'error',
+        detail: errText(err),
+      }));
+      await ctx.deps.signalForeignPush(
+        pr,
+        ctx.deps.rev.prLink(ctx.repo, pr),
+        ctx.work.heads.get(pr)
+      ); // NOSONAR — the pass settles one PR before judging the next
+      // the human edge: unmovable verdicts and silent-reviewer alerts —
+      // dedup keys make a repeated pass quiet, not absent
+      if (ALERT_VERDICTS.has(v.verdict)) {
+        await parkAlert(ctx, pr, v.verdict, v.detail); // NOSONAR — sinks deliver serially, dedup order matters
+      }
+      if ((v.alerts?.length ?? 0) > 0) {
+        await parkAlert(ctx, pr, 'reviewer-alert', v.alerts!.join('; ')); // NOSONAR — serial by contract
+      }
+      if (ctx.json) {
+        ctx.deps.emitJson(v);
+      } else {
         ctx.deps.say(
-          `pipeline wake: ${woken} woken, ${failed.length} failed of ${wake.runs.length} anchor(s)` +
-            (details.length > 0 ? ` — ${details.join('; ')}` : '')
+          `drive ${v.link} ${v.verdict}${v.detail === undefined ? '' : ` — ${v.detail}`}`
         );
       }
     }
-  } catch (err) {
-    ctx.deps.say(`warning: pipeline wake failed — ${errText(err)}`);
+    if (prs.size === 0) {
+      ctx.deps.say('drive: no open PRs on fleet branches');
+    }
+    await sweepFixers(ctx);
+    // the pipeline run-waker (bro-v0pvd.3) — journaled runs resume when
+    // their awaited input may have settled (customer records, provider
+    // walls, fleet capacity, the PR-settle seam, crash residue). Script-
+    // first, rides this cadence on the production engine map (.10) and
+    // the <runId>.formula.toml sidecar convention. A throwing pass must
+    // not kill the driver — same rule as the PR loop above.
+    try {
+      const wake = await ctx.deps.pipelineWake();
+      if (wake.locked) {
+        ctx.deps.say('pipeline wake: another pass holds the lock — skipped');
+      } else {
+        const woken = wake.runs.filter(r => r.action === 'woken').length;
+        const failed = wake.runs.filter(r => r.action === 'failed');
+        const unreadable = wake.unreadable ?? [];
+        if (woken > 0 || failed.length > 0 || unreadable.length > 0) {
+          // name the runs/files an operator must look at — a bare count
+          // leaves an unreadable journal or a failed resume invisible
+          const details = [
+            ...failed.map(r => `${r.runId}/${r.item}: ${r.detail ?? 'failed'}`),
+            ...unreadable.map(f => `unreadable ${f}`),
+          ];
+          ctx.deps.say(
+            `pipeline wake: ${woken} woken, ${failed.length} failed of ${wake.runs.length} anchor(s)` +
+              (details.length > 0 ? ` — ${details.join('; ')}` : '')
+          );
+        }
+      }
+    } catch (err) {
+      ctx.deps.say(`warning: pipeline wake failed — ${errText(err)}`);
+    }
+  } finally {
+    ctx.deps.projectorTick();
   }
 }
 
