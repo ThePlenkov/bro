@@ -24,7 +24,7 @@
  * Those keep calling bd() until they get doc types.
  */
 import { type Dirent, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   bd,
   BdCompatError,
@@ -76,6 +76,9 @@ const STORE_SIZE_TTL_MS = 60_000;
 const storeSizeCache = new Map<string, { bytes: number; at: number }>();
 
 function storeSizeBytes(storeDir: string): number {
+  // canonicalize once — the walk must stay inside the resolved store
+  // path even if the input carried segments or symlinks (kody on #1236)
+  storeDir = resolve(storeDir);
   const hit = storeSizeCache.get(storeDir);
   if (hit !== undefined && Date.now() - hit.at < STORE_SIZE_TTL_MS) {
     return hit.bytes;
