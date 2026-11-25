@@ -61,7 +61,21 @@ function resetGcSession(input: { id: string; city: string }): string {
 }
 
 function createGcSession(input: { molStep: string; city: string }): string {
-  const created = gcRun({
+  const created = gcRun(createGcSessionRun(input));
+  if (created.code !== 0) throw new Error(`gc session new ${input.molStep} — ${gcErr(created)}`);
+  try {
+    return createdGcSessionId(parseGcSession(created.out));
+  } catch (err) {
+    closeGcSession(input);
+    throw err;
+  }
+}
+
+function createGcSessionRun(input: { molStep: string; city: string }): {
+  args: string[];
+  timeoutMs: number;
+} {
+  return {
     args: [
       'session',
       'new',
@@ -74,23 +88,16 @@ function createGcSession(input: { molStep: string; city: string }): string {
       input.city,
     ],
     timeoutMs: 120_000,
-  });
-  if (created.code !== 0) throw new Error(`gc session new ${input.molStep} — ${gcErr(created)}`);
-  let value: { session_id?: string; ok?: boolean };
-  try {
-    value = parseGcSession(created.out);
-  } catch (err) {
-    gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
-    throw err;
-  }
-  if (value.ok === false || value.session_id === undefined) {
-    gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
-    throw new Error(
-      value.ok === false
-        ? 'gc session new returned ok: false'
-        : 'gc session new returned no session_id'
-    );
-  }
+  };
+}
+
+function closeGcSession(input: { molStep: string; city: string }): void {
+  gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
+}
+
+function createdGcSessionId(value: { session_id?: string; ok?: boolean }): string {
+  if (value.ok === false) throw new Error('gc session new returned ok: false');
+  if (value.session_id === undefined) throw new Error('gc session new returned no session_id');
   return value.session_id;
 }
 
