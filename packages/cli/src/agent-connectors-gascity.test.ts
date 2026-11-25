@@ -333,6 +333,22 @@ describe('gascity connector', () => {
     }
   });
 
+  test('writeStepAgent pins the complete worker identity', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8');
+      assert.match(agentToml, new RegExp(`BEADS_DIR = "${fx.beadsDir}"`));
+      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/);
+      assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`));
+      assert.match(agentToml, new RegExp(`BRO_PROMPT_FILE = ".*${info.id}\\.prompt\\.md"`));
+      assert.match(agentToml, new RegExp(`BRO_SESSION_ID = "${info.id}"`));
+    } finally {
+      cleanup(fx);
+    }
+  });
+
   test('TOML escapes every control char in env values', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
