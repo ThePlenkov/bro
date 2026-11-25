@@ -60,6 +60,7 @@ import {
   type ReviewFacade,
   readAgentRegistry,
   reviewHost,
+  sessionIdFromEnv,
   sessionProject,
   stackSection,
   type TaskRow,
@@ -69,6 +70,7 @@ import {
 import { type LoopConfig, loopSection, loopSlug } from '@broject/loop';
 import {
   agentOwner,
+  checkoutOccupants,
   claimLockPath,
   hooksDirOf,
   isLinkedGitDir,
@@ -289,6 +291,34 @@ export function dirtyCount(path: string): number {
     return -1;
   }
   return res.out.split('\n').filter(Boolean).length;
+}
+
+/** The hands-off warning for mutating a dirty shared checkout (bro-bswx5):
+ *  live foreign session markers resolving to `root` mean its uncommitted
+ *  state may be another session's WIP — a stale or crashed marker does
+ *  not warn, and file mtime is never read as ownership. Warns, never
+ *  blocks. */
+function warnOccupiedDirtyCheckout(root: string): void {
+  if (dirtyCount(root) <= 0) {
+    return;
+  }
+  const hooks = hooksDirOf(root);
+  if (hooks === null) {
+    return;
+  }
+  const self = sessionIdFromEnv()?.replace(/[^\w.-]/g, '_');
+  const who = [
+    ...new Set(
+      checkoutOccupants(hooks, root)
+        .map(e => e.session ?? '')
+        .filter(s => s !== '' && s !== self)
+    ),
+  ];
+  if (who.length > 0) {
+    console.error(
+      `warning: ${root} is dirty and live session(s) ${who.join(', ')} own it — hands off their WIP`
+    );
+  }
 }
 
 function diskUsage(path: string): string {
@@ -806,6 +836,9 @@ function cmdEnter(argv: string[]): void {
   }
   const branch = flag(argv, '--branch') ?? `work/${slug}`;
   const main = mainWorktree();
+  // the checkout enter runs in may hold another session's uncommitted
+  // WIP — name its owner before git-mutating shared state (bro-bswx5)
+  warnOccupiedDirtyCheckout(currentRoot());
   const defaultRef = defaultBranchName();
   const { base } = enterBase(argv, main);
   const branchExists =
@@ -901,6 +934,9 @@ function cmdLeave(argv: string[]): void {
   }
   const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0]);
   assertRemovable(target, force);
+  // --force already overrode the dirty refusal — a live foreign marker
+  // means the dirt is a session's WIP, so name the owner (bro-bswx5)
+  warnOccupiedDirtyCheckout(target.path);
   const args = ['-C', main.path, 'worktree', 'remove', target.path];
   if (force) {
     args.push('--force');

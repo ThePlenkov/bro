@@ -11,7 +11,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, stackSection, type ConnectorCtx } from '@broject/core';
+import {
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  procStat,
+  stackSection,
+  type ConnectorCtx,
+} from '@broject/core';
 import { git, initRepo, inside } from './testrepo.ts';
 import {
   claimWorktree,
@@ -340,6 +345,68 @@ describe('work enter --stack', () => {
       const tree = join(root, 'main--b');
       assert.ok(readFileSync(join(tree, '.git'), 'utf8').startsWith('gitdir:'));
       assert.equal(headOf(tree, 'HEAD'), headOf(main, 'work/b'));
+    });
+  });
+});
+
+/** Dirty checkout + a live foreign marker → hands-off warning naming the
+ *  session, never a block (bro-bswx5). The marker's owner tag pins THIS
+ *  test process so markerLive's pid verdict is "live". */
+describe('work enter/leave occupancy warning (bro-bswx5)', () => {
+  function foreignMarker(main: string, checkout: string, session: string): void {
+    const hooks = join(main, '.git', 'bro', 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    const st = procStat(process.pid);
+    assert.ok(st);
+    writeFileSync(
+      join(hooks, `${session}.work`),
+      `${Date.now()} ${process.pid} ${st.start}\ncheckout:${checkout}\n`
+    );
+  }
+
+  function captureErr(fn: () => unknown): string[] {
+    const errs: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => errs.push(args.join(' '));
+    try {
+      fn();
+    } finally {
+      console.error = orig;
+    }
+    return errs;
+  }
+
+  test('enter warns when the current checkout is dirty and a foreign session owns it', () => {
+    const { root, main } = initRepo('bro-occ-');
+    inside(main, root, () => {
+      writeFileSync(join(main, 'wip.ts'), 'uncommitted\n');
+      foreignMarker(main, main, 'foreign-1');
+      const errs = captureErr(() => runWorkCommand(['enter', 'c']));
+      assert.ok(errs.some(e => e.includes('foreign-1') && e.includes('hands off')));
+      // warning, not a block — the worktree stands
+      assert.ok(existsSync(join(root, 'main--c')));
+    });
+  });
+
+  test('enter stays quiet when the dirty checkout has no live foreign owner', () => {
+    const { root, main } = initRepo('bro-occ-quiet-');
+    inside(main, root, () => {
+      writeFileSync(join(main, 'wip.ts'), 'uncommitted\n');
+      const errs = captureErr(() => runWorkCommand(['enter', 'c']));
+      assert.ok(!errs.some(e => e.includes('hands off')));
+    });
+  });
+
+  test('leave --force warns when the target is dirty and a foreign session owns it', () => {
+    const { root, main } = initRepo('bro-occ-leave-');
+    const linked = join(root, 'main--d');
+    git(['worktree', 'add', '-q', linked, '-b', 'work/d'], main);
+    inside(main, root, () => {
+      writeFileSync(join(linked, 'wip.ts'), 'uncommitted\n');
+      foreignMarker(main, linked, 'foreign-2');
+      const errs = captureErr(() => runWorkCommand(['leave', '--force', 'main--d']));
+      assert.ok(errs.some(e => e.includes('foreign-2') && e.includes('hands off')));
+      assert.equal(existsSync(linked), false);
     });
   });
 });

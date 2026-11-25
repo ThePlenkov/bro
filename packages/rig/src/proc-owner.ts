@@ -12,7 +12,7 @@
  * /proc, a human shell — fall back to the mtime window.
  */
 import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   agentEntryBlocked,
@@ -874,6 +874,33 @@ export function liveWorkDetails(
   now: number = Date.now()
 ): string[] {
   return liveWorkEntries(dir, suffixes, now).map(e => e.detail);
+}
+
+/** The detail-line prefix naming the checkout a `.work` marker's owning
+ *  session works in (bro-bswx5). `checkout:` keeps the record out of the
+ *  bare-absolute-path shape the janitor reads as a claimed worktree —
+ *  the session's own checkout existing must never keep a dead session's
+ *  files alive the way a surviving claimed worktree does. */
+export const CHECKOUT_DETAIL_PREFIX = 'checkout:';
+
+/** The live session markers that resolve to THIS checkout — a `checkout:`
+ *  detail line, or a bare absolute-path detail equal to it, answers "who
+ *  owns this dirty state?" (bro-bswx5). Liveness is markerLive's own
+ *  verdict — owner pid first, mtime window for ownerless markers; file
+ *  mtime alone is never ownership evidence. `.task` rides along: a claim
+ *  arm means the session works here too. */
+export function checkoutOccupants(
+  dir: string,
+  checkout: string,
+  now: number = Date.now()
+): WorkEntry[] {
+  const root = resolve(checkout);
+  return liveWorkEntries(dir, ['.work', '.task'], now).filter(e => {
+    const d = e.detail.startsWith(CHECKOUT_DETAIL_PREFIX)
+      ? e.detail.slice(CHECKOUT_DETAIL_PREFIX.length)
+      : e.detail;
+    return isAbsolute(d) && resolve(d) === root;
+  });
 }
 
 /** An .exit file not yet harvested into the registry is death proof too

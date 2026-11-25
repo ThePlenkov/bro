@@ -26,6 +26,8 @@ import {
 } from '@broject/core';
 import {
   acquireOccupancyLocks,
+  CHECKOUT_DETAIL_PREFIX,
+  checkoutOccupants,
   claimLockPath,
   ensureFixerBead,
   ensureFixerWorktree,
@@ -592,6 +594,98 @@ describe('fixer bead plane', () => {
       assert.equal(fixerAttemptSpent(stopped, 'head2', 'ci'), false);
     } finally {
       rmSync(join(main, '..'), { recursive: true, force: true });
+    }
+  });
+});
+
+// --- checkout occupancy — who owns this dirty state (bro-bswx5) ----------------
+
+describe('checkoutOccupants — live session markers resolving to a checkout', () => {
+  /** Hand-written hooks dir: ownerless markers judge by mtime, owned
+   *  ones by pid liveness — file mtime alone is never consulted twice. */
+  function hooksFixture(): { dir: string; checkout: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'rig-occ-hooks-'));
+    const checkout = mkdtempSync(join(tmpdir(), 'rig-occ-co-'));
+    return { dir, checkout };
+  }
+
+  function stamp(
+    dir: string,
+    name: string,
+    first: string,
+    details: string[],
+    ageHrs?: number
+  ): void {
+    const p = join(dir, name);
+    writeFileSync(p, `${first}\n${details.join('\n')}\n`);
+    if (ageHrs !== undefined) {
+      const past = new Date(Date.now() - ageHrs * 3_600_000);
+      utimesSync(p, past, past);
+    }
+  }
+
+  test('a live marker naming the checkout lists its session', () => {
+    const { dir, checkout } = hooksFixture();
+    try {
+      stamp(dir, 'sess-a.work', `${Date.now()}`, [`${CHECKOUT_DETAIL_PREFIX}${checkout}`, 'bro-x']);
+      const found = checkoutOccupants(dir, checkout);
+      assert.equal(found.length, 1);
+      assert.equal(found[0]!.session, 'sess-a');
+      assert.equal(found[0]!.detail, `${CHECKOUT_DETAIL_PREFIX}${checkout}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test('stale ownerless markers and dead owners never own a checkout', () => {
+    const { dir, checkout } = hooksFixture();
+    try {
+      stamp(
+        dir,
+        'old.work',
+        `${Date.now() - 25 * 3_600_000}`,
+        [`${CHECKOUT_DETAIL_PREFIX}${checkout}`],
+        25
+      );
+      // a fresh stamp whose recorded owner is dead — residue, not a session
+      stamp(dir, 'dead.work', `${Date.now()} ${DEAD_PID} 1`, [
+        `${CHECKOUT_DETAIL_PREFIX}${checkout}`,
+      ]);
+      assert.equal(checkoutOccupants(dir, checkout).length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test('markers naming a different checkout do not leak in; claim arms count too', () => {
+    const { dir, checkout } = hooksFixture();
+    try {
+      stamp(dir, 'elsewhere.work', `${Date.now()}`, [`${CHECKOUT_DETAIL_PREFIX}/elsewhere/repo`]);
+      stamp(dir, 'claimer.task', `${Date.now()}`, [
+        `${CHECKOUT_DETAIL_PREFIX}${checkout}`,
+        'bro-y',
+      ]);
+      const found = checkoutOccupants(dir, checkout);
+      assert.deepEqual(
+        found.map(e => e.session),
+        ['claimer']
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test('a bare absolute-path detail still resolves — pre-checkout: markers keep working', () => {
+    const { dir, checkout } = hooksFixture();
+    try {
+      stamp(dir, 'legacy.work', `${Date.now()}`, [checkout]);
+      assert.equal(checkoutOccupants(dir, checkout).length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
     }
   });
 });

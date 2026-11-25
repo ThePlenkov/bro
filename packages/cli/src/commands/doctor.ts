@@ -81,6 +81,7 @@ import {
 import type { JudgeConfig } from '@broject/judge';
 import { judgeConfig, synthesizedProviders } from '@broject/judge';
 import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh';
+import { checkoutOccupants, hooksDirOf } from '@broject/rig';
 import {
   type AgentConnectorEnv,
   type BudgetSnapshot,
@@ -3279,6 +3280,33 @@ export async function sessionLedgerChecks(
   return [silent, ledgerKilledCheck(env, now), drain, ledgerAdaptersCheck(dir, env)];
 }
 
+/** The checkout-occupancy row (bro-bswx5) — the live session markers
+ *  resolving to THIS checkout, so `bro doctor` alone answers "who owns
+ *  this dirty state?". Liveness is markerLive's verdict (owner pid,
+ *  mtime window fallback), never bare file mtime. A dirty checkout with
+ *  live owners warns: the dirt may be their WIP. */
+function occupancyCheck(root: string | null): DoctorCheck {
+  if (root === null) {
+    return check('occupancy', 'skip', 'not inside a git worktree');
+  }
+  const hooks = hooksDirOf(root);
+  if (hooks === null) {
+    return check('occupancy', 'skip', 'no session marker dir');
+  }
+  const occupants = [...new Set(checkoutOccupants(hooks, root).map(e => e.session ?? '?'))];
+  if (occupants.length === 0) {
+    return check('occupancy', 'ok', 'no live session markers claim this checkout');
+  }
+  const dirty = gitTry(['-C', root, 'status', '--porcelain']).out.trim() !== '';
+  const names = occupants.join(', ');
+  return check(
+    'occupancy',
+    dirty ? 'warn' : 'ok',
+    `${occupants.length} live session(s) claim this checkout: ${names}`,
+    dirty ? 'checkout is dirty — the uncommitted state may be their WIP; hands off' : undefined
+  );
+}
+
 export function runDoctorChecks(
   dir: string = process.cwd(),
   opts: { strict?: boolean; network?: boolean } = {}
@@ -3335,6 +3363,7 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
+    occupancyCheck(root),
     ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found, opts.network ?? false),
     ...credentialScopeChecks(dir, cfg)
   );
