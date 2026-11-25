@@ -1487,9 +1487,9 @@
     },
     {
       "quality_gates": {
-        "new_code_health": false
+        "new_code_health": true
       },
-      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "quality_gates_doc": "Relocated code from PR #873 is now baselined; keep this explicit per-path rung-1 gate so future edits remain subject to new_code_health.",
       "matching_content_path": "packages/acp/session/src/archive/tail.ts"
     },
     {
