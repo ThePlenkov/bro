@@ -291,7 +291,38 @@ export function writeConfig(opts: {
 }
 
 /** Install files under root; returns installed count. Warns on drift. */
-function installFiles(root: string, files: Record<string, string>, what: string): number {
+export function installFiles(root: string, files: Record<string, string>, what: string): number {
+  // `.agents/skills/` is also the generated link plane used by
+  // `bro skills sync`. Writing through one of its entries would follow the
+  // link into the repo-owned source tree (and can overwrite SKILL.md).
+  // Refuse the whole materialisation rather than trying to unlink or
+  // repoint a link that another command owns.
+  if (root === join('.agents', 'skills')) {
+    const skillsRoot = join(process.cwd(), root);
+    let linked: string[] = [];
+    try {
+      if (lstatSync(skillsRoot).isSymbolicLink()) {
+        linked = ['.agents/skills'];
+      } else if (statSync(skillsRoot).isDirectory()) {
+        linked = readdirSync(skillsRoot).filter(name => {
+          try {
+            return lstatSync(join(skillsRoot, name)).isSymbolicLink();
+          } catch {
+            return false;
+          }
+        });
+      }
+    } catch {
+      // An absent skills root is safe: mkdirSync below will create it.
+    }
+    if (linked.length > 0) {
+      console.error(
+        `  refusing to materialise ${what}s through symlinked .agents/skills ` +
+          `(${linked.join(', ')}); run \`bro skills sync\` instead`
+      );
+      return 0;
+    }
+  }
   let n = 0;
   for (const [rel, content] of Object.entries(files)) {
     const path = join(process.cwd(), root, rel);

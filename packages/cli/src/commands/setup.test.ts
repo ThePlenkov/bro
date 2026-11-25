@@ -1,9 +1,9 @@
-import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { describe, test } from 'node:test';
 import { CONFIG_SCHEMA_URL } from '@broject/core';
-import { readPackTree, resolvePackDir, writeConfig } from './setup.ts';
+import { installFiles, readPackTree, resolvePackDir, writeConfig } from './setup.ts';
 import { git, initRepo, inside, tmpDir } from './testrepo.ts';
 
 const tmp = (p: string) => tmpDir(p);
@@ -68,6 +68,30 @@ describe('readPackTree', () => {
     writeFileSync(join(root, 'a/b/x.md'), 'x');
     writeFileSync(join(root, 'y.md'), 'y');
     assert.deepEqual(readPackTree(root), { 'a/b/x.md': 'x', 'y.md': 'y' });
+  });
+});
+
+describe('installFiles', () => {
+  test('does not write through an existing generated skill symlink', () => {
+    const { root, main } = initRepo('bro-setup-skills-link-', dir => {
+      mkdirSync(join(dir, 'skills/demo'), { recursive: true });
+      writeFileSync(join(dir, 'skills/demo/SKILL.md'), '# source stays intact\n');
+      mkdirSync(join(dir, '.agents/skills'), { recursive: true });
+      symlinkSync('../../skills/demo', join(dir, '.agents/skills/demo'));
+    });
+
+    inside(main, root, () => {
+      const installed = installFiles(
+        join('.agents', 'skills'),
+        { 'demo/SKILL.md': '# setup must not overwrite\n' },
+        'skill'
+      );
+      assert.equal(installed, 0);
+      assert.equal(
+        readFileSync(join(main, 'skills/demo/SKILL.md'), 'utf8'),
+        '# source stays intact\n'
+      );
+    });
   });
 });
 
