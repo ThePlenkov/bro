@@ -50,6 +50,10 @@ import { Plugin } from '@opencode/plugin';
 import { Bro, type BroBoard, emptyBoard, parseBoard } from './rpc.ts';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
+const DEFAULT_STOP_REASON = 'unfinished bro work';
+const BLOCKED_TOOL_REASON = 'blocked by bro';
+const DEFAULT_COMMAND_OUTPUT = '(no output)';
+const BRO_AGENT = 'opencode';
 
 /** `["@broject/bro", { command: … }]` — opencode's tuple plugin form. */
 interface PluginOptions {
@@ -58,6 +62,19 @@ interface PluginOptions {
   mcpPort?: number;
   /** Extra directory to scan for bro skills (defaults to the sibling `skills/`). */
   skillsDir?: string;
+}
+
+interface StorageLike {
+  get?(key: string): Promise<unknown>;
+  set?(key: string, value: unknown): Promise<void>;
+}
+
+function makePersistence(storage: StorageLike | undefined): BroCoreInput['persist'] {
+  if (!storage?.get || !storage.set) return undefined;
+  return {
+    load: () => storage.get?.('stop-gated') ?? Promise.resolve(undefined),
+    save: ids => Promise.resolve(storage.set?.('stop-gated', [...ids])).then(() => undefined),
+  };
 }
 
 /** Last-resort npx fallback specs, pinned first then latest — gen-plugins
@@ -80,6 +97,85 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isCleanSession(sessionID: unknown, clean: Set<string>): sessionID is string {
+  return typeof sessionID === 'string' && clean.delete(sessionID);
+}
+
+async function logControlHint(
+  control: HookControl | null,
+  log: (level: Level, message: string) => Promise<unknown>
+): Promise<void> {
+  const hint = contextOf(control);
+  if (hint) await log('info', hint);
+}
+
+async function logAlreadyGated(
+  reason: string,
+  log: (level: Level, message: string) => Promise<unknown>
+): Promise<void> {
+  await log(
+    'info',
+    `stop gate: already gated — not re-prompting (${reason || DEFAULT_STOP_REASON})`
+  );
+}
+
+function stopReason(control: HookControl | null): string {
+  return typeof control?.reason === 'string' ? control.reason.trim() : '';
+}
+
+interface SystemMessage {
+  push(value: { type: 'text'; text: string }): void;
+}
+
+function pushSystem(system: SystemMessage | undefined, text: string): void {
+  if (system) system.push({ type: 'text', text });
+}
+
+function mergedToolInput(control: HookControl, input: unknown): Record<string, unknown> | null {
+  const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
+  return override ? { ...asRecord(input), ...override } : null;
+}
+
+function assertToolAllowed(control: HookControl): void {
+  if (control.decision !== 'block' && control.decision !== 'deny') return;
+  throw new Error(stopReason(control) || BLOCKED_TOOL_REASON);
+}
+
+function permissionEffect(control: HookControl | null): 'allow' | 'deny' | undefined {
+  if (control?.decision === 'approve') return 'allow';
+  if (control?.decision === 'deny' || control?.decision === 'block') return 'deny';
+  return undefined;
+}
+
+interface StopGateOptions {
+  control: HookControl | null;
+  sessionID: string;
+  stillAlive(): boolean;
+  gated: Set<string>;
+  persistGated(): void;
+  log: (level: Level, message: string) => Promise<unknown>;
+  reprompt(sessionID: string, text: string): Promise<unknown>;
+}
+
+async function finishStopGate(options: StopGateOptions): Promise<void> {
+  const { control, sessionID, stillAlive, gated, persistGated, log, reprompt } = options;
+  const reason = stopReason(control);
+  if (gated.has(sessionID)) {
+    await logAlreadyGated(reason, log);
+    return;
+  }
+  gated.add(sessionID);
+  persistGated();
+  const message = reason || DEFAULT_STOP_REASON;
+  await log('warn', `stop gate: ${message}`);
+  if (!stillAlive()) return;
+  try {
+    await reprompt(sessionID, message);
+  } catch (err) {
+    await log('error', `stop gate could not re-prompt: ${errorText(err)}`);
+  }
 }
 
 /** Did the tool succeed? bro arms its gates and cites skills only on success,
@@ -306,7 +402,7 @@ function makeCore(input: BroCoreInput) {
    *  one-shot guard is bro's, not duplicated here. */
   const onSessionIdle = async (props: Record<string, unknown>): Promise<void> => {
     const sessionID = props.sessionID;
-    if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
+    if (!isCleanSession(sessionID, clean)) {
       return;
     }
     // the instance token is captured before any suspending await: a
@@ -319,12 +415,8 @@ function makeCore(input: BroCoreInput) {
       session_id: sessionID,
       stop_hook_active: gated.has(sessionID),
     });
-    const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
     if (control?.decision !== 'block') {
-      const hint = contextOf(control);
-      if (hint) {
-        await log('info', hint);
-      }
+      await logControlHint(control, log);
       return;
     }
     // the probe awaited real I/O — a session.deleted that interleaved retired
@@ -334,30 +426,15 @@ function makeCore(input: BroCoreInput) {
     if (!stillAlive()) {
       return;
     }
-    if (gated.has(sessionID)) {
-      // the repeat block still earns a trace — it's the answer to
-      // "why didn't the agent get re-prompted?"
-      await log(
-        'info',
-        `stop gate: already gated — not re-prompting (${reason || 'unfinished bro work'})`
-      );
-      return;
-    }
-    gated.add(sessionID);
-    persistGated();
-    const message = reason || 'unfinished bro work';
-    await log('warn', `stop gate: ${message}`);
-    // the log await is real I/O — a session.deleted landing inside it
-    // retires the instance, and prompting now could hit a session that
-    // reused the id
-    if (!stillAlive()) {
-      return;
-    }
-    try {
-      await input.reprompt(sessionID, message);
-    } catch (err) {
-      await log('error', `stop gate could not re-prompt: ${errorText(err)}`);
-    }
+    await finishStopGate({
+      control,
+      sessionID,
+      stillAlive,
+      gated,
+      persistGated,
+      log,
+      reprompt: input.reprompt,
+    });
   };
 
   /** Dispatches the v2 event stream into core handlers.
@@ -378,35 +455,33 @@ function makeCore(input: BroCoreInput) {
     if (sessionID !== undefined && !live.has(sessionID)) {
       live.set(sessionID, ++liveSeq);
     }
-    switch (type) {
-      case 'session.execution.started':
-        // earliest per-turn signal — prime rehydration while the host is
-        // still waiting on the prompt, the only window where the probe's
-        // seconds don't sit on the turn's critical path
-        if (sessionID !== undefined) {
-          void hydrate(sessionID, 'session-start');
-        }
-        break;
-      case 'session.execution.succeeded':
-        if (sessionID !== undefined) {
-          clean.add(sessionID);
-          await onSessionIdle({ sessionID });
-        }
-        break;
-      case 'session.execution.failed':
-      case 'session.execution.interrupted':
-        if (sessionID !== undefined) {
-          clean.delete(sessionID);
-        }
-        break;
-      case 'session.compaction.succeeded':
-      case 'session.compaction.ended':
-        onSessionCompacted(props);
-        break;
-      case 'session.deleted':
-        onSessionDeleted(props);
-        break;
+    const handler = eventHandlers[type];
+    if (handler) {
+      await handler(sessionID, props);
     }
+  };
+
+  const eventHandlers: Record<
+    string,
+    (sessionID: string | undefined, props: Record<string, unknown>) => void | Promise<void>
+  > = {
+    'session.execution.started': sessionID => {
+      if (sessionID !== undefined) void hydrate(sessionID, 'session-start');
+    },
+    'session.execution.succeeded': async sessionID => {
+      if (sessionID === undefined) return;
+      clean.add(sessionID);
+      await onSessionIdle({ sessionID });
+    },
+    'session.execution.failed': sessionID => {
+      if (sessionID !== undefined) clean.delete(sessionID);
+    },
+    'session.execution.interrupted': sessionID => {
+      if (sessionID !== undefined) clean.delete(sessionID);
+    },
+    'session.compaction.succeeded': (_sessionID, props) => onSessionCompacted(props),
+    'session.compaction.ended': (_sessionID, props) => onSessionCompacted(props),
+    'session.deleted': (_sessionID, props) => onSessionDeleted(props),
   };
 
   return { probe, hydrate, onEvent, exec };
@@ -659,6 +734,82 @@ function splitArgs(input: string): string[] {
   return args;
 }
 
+function cleanCommandOutput(body: string): string {
+  return body
+    .split('\n')
+    .filter(line => {
+      if (!line.trim()) return true;
+      const words = line.trim().toLowerCase().split(/\s+/);
+      return !(words[0] === 'bro' && words[1] === 'learn');
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function tryPrompt(
+  prompt: ((input: { sessionID: string; text: string }) => Promise<unknown>) | undefined,
+  sessionID: string,
+  text: string
+): Promise<boolean> {
+  if (!prompt) return false;
+  try {
+    await prompt({ sessionID, text });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface Notification {
+  sessionID?: string;
+  title: string;
+  message: string;
+  severity: 'error' | 'warning' | 'info';
+}
+
+function readNotification(input: unknown): Notification | null {
+  const { sessionID, text, title, variant } = asRecord(input) ?? {};
+  if (typeof text !== 'string' || text.trim() === '') return null;
+  return {
+    sessionID: validSessionID(sessionID),
+    title: validTitle(title),
+    message: warningMessage(text, variant),
+    severity: notificationSeverity(variant),
+  };
+}
+
+function validSessionID(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+function validTitle(value: unknown): string {
+  return typeof value === 'string' && value.trim() !== '' ? value : 'bro';
+}
+
+function warningMessage(text: string, variant: unknown): string {
+  return variant === 'error' || variant === 'warning' ? `⚠ ${text}` : text;
+}
+
+function notificationSeverity(variant: unknown): Notification['severity'] {
+  if (variant === 'error') return 'error';
+  if (variant === 'warning') return 'warning';
+  return 'info';
+}
+
+async function submitPrompt(options: {
+  switchAgent?: (input: { sessionID: string; agent: string }) => Promise<unknown>;
+  prompt?: (input: { sessionID: string; text: string }) => Promise<unknown>;
+  sessionID: string;
+  text: string;
+  agent?: string;
+}): Promise<boolean> {
+  const { switchAgent, prompt, sessionID, text, agent } = options;
+  if (agent) await switchAgent?.({ sessionID, agent });
+  await prompt?.({ sessionID, text });
+  return true;
+}
+
 /** Where the nudge lands on a tool result — `output`/`content` take text
  * directly; anything else rides metadata as `broContext`. */
 function appendToolResult(result: Record<string, unknown> | null, text: string): unknown {
@@ -686,27 +837,54 @@ interface BroSkill {
   content: string;
 }
 
+interface SkillFileReader {
+  stat(path: string): { isFile(): boolean };
+  read(path: string, encoding: 'utf8'): string;
+}
+
+function readSkillFile(reader: SkillFileReader, root: string, entry: string): BroSkill | null {
+  const path = join(root, entry, 'SKILL.md');
+  try {
+    if (!reader.stat(path).isFile()) return null;
+    const content = reader.read(path, 'utf8');
+    const parsed = parseSkill(content);
+    if (!parsed) return null;
+    return {
+      id: entry,
+      name: parsed.name ?? entry,
+      description: parsed.description ?? '',
+      path,
+      content,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Parse a `SKILL.md` frontmatter block — `name`, `description`, and the
  * optional `autoinvoke` flag. A file without frontmatter is not a skill;
  * it is skipped rather than half-registered. */
 function parseSkill(markdown: string): { name?: string; description?: string } | null {
-  if (!markdown.startsWith('---')) {
-    return null;
-  }
-  const end = markdown.indexOf('\n---', 3);
-  if (end < 0) {
-    return null;
-  }
-  const front = markdown.slice(3, end);
-  const name = /^\s*name:\s*(.+)$/m.exec(front)?.[1]?.trim();
-  const description = /^\s*description:\s*(.+)$/m.exec(front)?.[1]?.trim();
-  if (!name || !description) {
-    return null;
-  }
+  const front = frontmatter(markdown);
+  if (front === null) return null;
+  const name = readFrontmatterValue(front, 'name');
+  const description = readFrontmatterValue(front, 'description');
+  if (!name || !description) return null;
   return {
     name: name.replace(/^["']|["']$/g, ''),
     description: description.replace(/^["']|["']$/g, ''),
   };
+}
+
+function frontmatter(markdown: string): string | null {
+  if (!markdown.startsWith('---')) return null;
+  const end = markdown.indexOf('\n---', 3);
+  return end < 0 ? null : markdown.slice(3, end);
+}
+
+function readFrontmatterValue(front: string, key: string): string | undefined {
+  const pattern = key === 'name' ? /^\s*name:\s*(.+)$/m : /^\s*description:\s*(.+)$/m;
+  return pattern.exec(front)?.[1]?.trim();
 }
 
 /** Auto-discovered skills roots must look like BRO's tree before they
@@ -776,14 +954,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
       const fn = session?.prompt?.bind(session) ?? session?.synthetic?.bind(session);
       return fn ? fn({ sessionID, text }) : Promise.resolve(undefined);
     },
-    persist:
-      ctx.storage?.get !== undefined && ctx.storage?.set !== undefined
-        ? {
-            load: () => ctx.storage?.get?.('stop-gated') ?? Promise.resolve(undefined),
-            save: ids =>
-              Promise.resolve(ctx.storage?.set?.('stop-gated', [...ids])).then(() => undefined),
-          }
-        : undefined,
+    persist: makePersistence(ctx.storage),
   });
 
   const pendingPromptContext = new Map<string, string>();
@@ -805,15 +976,11 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
         return;
       }
       const text = await core.hydrate(sessionID, 'session-start');
-      if (text) {
-        event.system.push({ type: 'text', text });
-      }
-      if (sessionID) {
-        const pending = pendingPromptContext.get(sessionID);
-        if (pending && event.system !== undefined) {
-          event.system.push({ type: 'text', text: pending });
-          pendingPromptContext.delete(sessionID);
-        }
+      if (text) pushSystem(event.system, text);
+      const pending = pendingPromptContext.get(sessionID);
+      if (pending) {
+        pushSystem(event.system, pending);
+        pendingPromptContext.delete(sessionID);
       }
     })
   );
@@ -866,14 +1033,9 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
       // bro's guard contract, translated: block becomes the throw that
       // vetoes the call; a tool_input override merges over the original
       // args — a connector rewriting `command` must not wipe `workdir`
-      const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
-      if (override) {
-        event.input = { ...asRecord(event.input), ...override };
-      }
-      if (control.decision === 'block' || control.decision === 'deny') {
-        const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
-        throw new Error(reason || 'blocked by bro');
-      }
+      const merged = mergedToolInput(control, event.input);
+      if (merged) event.input = merged;
+      assertToolAllowed(control);
     })
   );
 
@@ -906,14 +1068,12 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
         tool_input: { command },
         session_id: event.sessionID,
       });
-      if (control?.decision === 'approve') {
-        event.effect = 'allow';
-      } else if (control?.decision === 'deny' || control?.decision === 'block') {
-        event.effect = 'deny';
-        const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
-        if (reason) {
-          event.message = reason;
-        }
+      const effect = permissionEffect(control);
+      if (!effect) return;
+      event.effect = effect;
+      const reason = stopReason(control);
+      if (reason) {
+        event.message = reason;
       }
     })
   );
@@ -942,7 +1102,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           options: BRO_TOOL_OPTIONS,
           execute: async () => {
             const { code, out, err } = await core.exec(tool.args);
-            const body = out || err || '(no output)';
+            const body = out || err || DEFAULT_COMMAND_OUTPUT;
             return { content: code === 0 ? body : `exit ${code}: ${body}` };
           },
         });
@@ -962,21 +1122,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
           return;
         }
         const { code, out, err } = await core.exec(argv);
-        let body = out || err || '(no output)';
-        body = body
-          .split('\n')
-          .filter(l => {
-            const t = l.trim().toLowerCase();
-            if (!t) return true;
-            // drop only the `bro learn ...` hint line itself — a
-            // substring match would eat real output that mentions it
-            const words = t.split(/\s+/);
-            if (words[0] === 'bro' && words[1] === 'learn') return false;
-            return true;
-          })
-          .join('\n')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
+        const body = cleanCommandOutput(out || err || DEFAULT_COMMAND_OUTPUT);
         const suffix = code === 0 ? '' : ` (exit ${code})`;
         await ctx.session.prompt({
           sessionID,
@@ -1041,26 +1187,18 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
     board: async () => boardSnapshot(),
 
     notify: async (input: unknown, _context?: RpcCallContext) => {
-      const { sessionID, text, title, variant } = asRecord(input) ?? {};
-      if (typeof text !== 'string' || text.trim() === '') {
-        return { delivered: false };
-      }
-      const body = typeof title === 'string' && title.trim() !== '' ? title : 'bro';
-      const message = variant === 'error' || variant === 'warning' ? `⚠ ${text}` : text;
-      if (typeof sessionID === 'string' && sessionID !== '') {
-        try {
-          await ctx.session?.prompt?.({ sessionID, text: `${body}: ${message}` });
-          return { delivered: true };
-        } catch {
-          // fall through to the broadcast below
-        }
+      const notification = readNotification(input);
+      if (!notification) return { delivered: false };
+      const { sessionID, title, message, severity } = notification;
+      if (sessionID && (await tryPrompt(ctx.session?.prompt, sessionID, `${title}: ${message}`))) {
+        return { delivered: true };
       }
       // no session — the event still reaches every TUI listening on the
       // contract, which is the point of an RPC event
       await emitRpc('attention', {
-        title: body,
+        title,
         message,
-        severity: variant === 'error' ? 'error' : variant === 'warning' ? 'warning' : 'info',
+        severity,
       });
       return { delivered: true };
     },
@@ -1074,10 +1212,13 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
         return { accepted: false };
       }
       try {
-        if (typeof agent === 'string' && agent !== '') {
-          await ctx.session?.switchAgent?.({ sessionID, agent });
-        }
-        await ctx.session?.prompt?.({ sessionID, text });
+        await submitPrompt({
+          switchAgent: ctx.session?.switchAgent,
+          prompt: ctx.session?.prompt,
+          sessionID,
+          text,
+          agent: typeof agent === 'string' && agent !== '' ? agent : undefined,
+        });
         return { accepted: true };
       } catch {
         return declaredError(context, 'no_session', 'session not available', { sessionID });
@@ -1183,32 +1324,14 @@ export async function collectBroSkills(options: PluginOptions | undefined): Prom
       continue;
     }
     for (const entry of entries) {
-      const path = join(root, entry, 'SKILL.md');
-      let content: string;
-      try {
-        if (!statSync(path).isFile()) {
-          continue;
-        }
-        content = readFileSync(path, 'utf8');
-      } catch {
-        continue;
-      }
-      const parsed = parseSkill(content);
-      if (parsed === null) {
-        continue;
-      }
+      const skill = readSkillFile({ stat: statSync, read: readFileSync }, root, entry);
+      if (!skill) continue;
       const id = entry;
       if (seen.has(id)) {
         continue;
       }
       seen.add(id);
-      out.push({
-        id,
-        name: parsed.name ?? entry,
-        description: parsed.description ?? '',
-        path,
-        content,
-      });
+      out.push(skill);
     }
     if (out.length > 0) {
       // the first root that yields skills wins — a materialized sibling

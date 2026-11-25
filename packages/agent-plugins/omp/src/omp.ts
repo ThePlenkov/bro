@@ -60,6 +60,12 @@ import { type BoardSnapshot, installModeBridges } from './omp-modes.ts';
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.3.0';
+const JSON_FLAG = '--json';
+const PREWALK_KIND = 'prewalk';
+const FLEET_COMMAND = 'fleet';
+const STATUS_COMMAND = 'status';
+const DEBT_COMMAND = 'debt';
+const NEXT_COMMAND = 'next';
 
 /**
  * The omp binding: the host's own shape, nothing else. Every
@@ -192,12 +198,15 @@ export default function broExtension(pi: OmpApi): void {
   installModeBridges(pi, {
     board: () => driver.board as BoardSnapshot | null,
     async modeContext(kind, cwd) {
-      const args = kind === 'prewalk' ? ['fleet', 'status', '--json'] : ['debt', 'next', '--json'];
+      const args =
+        kind === PREWALK_KIND
+          ? [FLEET_COMMAND, STATUS_COMMAND, JSON_FLAG]
+          : [DEBT_COMMAND, NEXT_COMMAND, JSON_FLAG];
       const result = await driver.run(args, cwd);
       if (result.code !== 0 || result.stdout.trim() === '') {
         return null;
       }
-      const label = kind === 'prewalk' ? 'provider routing' : 'review debt';
+      const label = kind === PREWALK_KIND ? 'provider routing' : 'review debt';
       return `bro ${label} (read-only):\n${result.stdout.trim()}`;
     },
   });

@@ -23,6 +23,10 @@ const RUN_TIMEOUT_MS = 6e4;
 *  re-probing the npx rung on every keystroke would be worse than
 *  the outage. */
 const RESOLVE_RETRY_MS = 6e4;
+const HOOKS_COMMAND = "hooks";
+const NPX_COMMAND = "npx";
+const NPX_YES_FLAG = "-y";
+const NPX_OFFLINE_FLAG = "--prefer-offline";
 /** The curated command family — first-class slash aliases for bro's
 *  workflow verbs. `verb` is the CLI argv head; `name` is the slash
 *  name, renamed to `bro:<name>` when the host owns it natively
@@ -193,17 +197,17 @@ async function pathResolved() {
 }
 async function npxResolved(opts) {
 	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
-	if (specs.length === 0 || !await exitsZero("npx", ["--version"])) return null;
-	for (const spec of specs) if (await exitsZero("npx", [
-		"-y",
-		"--prefer-offline",
+	if (specs.length === 0 || !await exitsZero(NPX_COMMAND, ["--version"])) return null;
+	for (const spec of specs) if (await exitsZero(NPX_COMMAND, [
+		NPX_YES_FLAG,
+		NPX_OFFLINE_FLAG,
 		spec,
-		"hooks"
+		HOOKS_COMMAND
 	])) return {
-		cmd: "npx",
+		cmd: NPX_COMMAND,
 		args: [
-			"-y",
-			"--prefer-offline",
+			NPX_YES_FLAG,
+			NPX_OFFLINE_FLAG,
 			spec
 		]
 	};
@@ -265,7 +269,7 @@ async function callHookDetailed(command, call) {
 	try {
 		child = spawn(command.cmd, [
 			...command.args,
-			"hooks",
+			HOOKS_COMMAND,
 			event
 		], {
 			cwd,
@@ -402,14 +406,7 @@ function runCommand(command, args, options) {
 	});
 }
 function runCollect(child, options, resolve) {
-	let settled = false;
-	const settle = (result) => {
-		if (!settled) {
-			settled = true;
-			resolve(result);
-		}
-	};
-	const cap = (buf, chunk) => buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+	const settle = once(resolve);
 	let stdout = "";
 	let stderr = "";
 	const timer = killAfter(child, options.timeoutMs, () => settle({
@@ -418,17 +415,13 @@ function runCollect(child, options, resolve) {
 		stderr,
 		error: `timed out after ${options.timeoutMs}ms`
 	}));
-	wireCollect(child, options, (finish) => {
-		clearTimeout(timer);
-		settle(finish);
-	});
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
-		stdout = cap(stdout, chunk);
+		stdout = appendOutput(stdout, chunk);
 	});
 	child.stderr?.setEncoding("utf8");
 	child.stderr?.on("data", (chunk) => {
-		stderr = cap(stderr, chunk);
+		stderr = appendOutput(stderr, chunk);
 	});
 	child.on("error", (error) => {
 		clearTimeout(timer);
@@ -450,6 +443,18 @@ function runCollect(child, options, resolve) {
 	});
 	child.stdin?.on("error", () => {});
 	child.stdin?.end(options.input ?? "");
+}
+function once(resolve) {
+	let settled = false;
+	return (result) => {
+		if (settled) return;
+		settled = true;
+		resolve(result);
+	};
+}
+function appendOutput(buffer, chunk) {
+	const remaining = MAX_OUTPUT - buffer.length;
+	return remaining > 0 ? buffer + chunk.slice(0, remaining) : buffer;
 }
 /**
 * The lazy, retrying CLI resolver every adapter shares: resolution
@@ -820,6 +825,16 @@ function parseBoard(out) {
 
 //#endregion
 //#region packages/agent-plugins/opencode/src/opencode.ts
+const DEFAULT_STOP_REASON = "unfinished bro work";
+const BLOCKED_TOOL_REASON = "blocked by bro";
+const DEFAULT_COMMAND_OUTPUT = "(no output)";
+function makePersistence(storage) {
+	if (!storage?.get || !storage.set) return void 0;
+	return {
+		load: () => storage.get?.("stop-gated") ?? Promise.resolve(void 0),
+		save: (ids) => Promise.resolve(storage.set?.("stop-gated", [...ids])).then(() => void 0)
+	};
+}
 /** Last-resort npx fallback specs, pinned first then latest — gen-plugins
 *  lists this file in VERSIONED_SOURCES, so the pin is rewritten to
 *  plugin.json's version on every gen/release run. */
@@ -835,6 +850,58 @@ function asRecord(value) {
 }
 function errorText(err) {
 	return err instanceof Error ? err.message : String(err);
+}
+function isCleanSession(sessionID, clean) {
+	return typeof sessionID === "string" && clean.delete(sessionID);
+}
+async function logControlHint(control, log) {
+	const hint = contextOf(control);
+	if (hint) await log("info", hint);
+}
+async function logAlreadyGated(reason, log) {
+	await log("info", `stop gate: already gated — not re-prompting (${reason || DEFAULT_STOP_REASON})`);
+}
+function stopReason(control) {
+	return typeof control?.reason === "string" ? control.reason.trim() : "";
+}
+function pushSystem(system, text) {
+	if (system) system.push({
+		type: "text",
+		text
+	});
+}
+function mergedToolInput(control, input) {
+	const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
+	return override ? {
+		...asRecord(input),
+		...override
+	} : null;
+}
+function assertToolAllowed(control) {
+	if (control.decision !== "block" && control.decision !== "deny") return;
+	throw new Error(stopReason(control) || BLOCKED_TOOL_REASON);
+}
+function permissionEffect(control) {
+	if (control?.decision === "approve") return "allow";
+	if (control?.decision === "deny" || control?.decision === "block") return "deny";
+}
+async function finishStopGate(options) {
+	const { control, sessionID, stillAlive, gated, persistGated, log, reprompt } = options;
+	const reason = stopReason(control);
+	if (gated.has(sessionID)) {
+		await logAlreadyGated(reason, log);
+		return;
+	}
+	gated.add(sessionID);
+	persistGated();
+	const message = reason || DEFAULT_STOP_REASON;
+	await log("warn", `stop gate: ${message}`);
+	if (!stillAlive()) return;
+	try {
+		await reprompt(sessionID, message);
+	} catch (err) {
+		await log("error", `stop gate could not re-prompt: ${errorText(err)}`);
+	}
 }
 /** Did the tool succeed? bro arms its gates and cites skills only on success,
 * so a false positive here is worse than a false negative.
@@ -979,34 +1046,27 @@ function makeCore(input) {
 	*  one-shot guard is bro's, not duplicated here. */
 	const onSessionIdle = async (props) => {
 		const sessionID = props.sessionID;
-		if (typeof sessionID !== "string" || !clean.delete(sessionID)) return;
+		if (!isCleanSession(sessionID, clean)) return;
 		const instance = live.get(sessionID);
 		const stillAlive = () => instance !== void 0 && live.get(sessionID) === instance;
 		const control = await probe("stop", {
 			session_id: sessionID,
 			stop_hook_active: gated.has(sessionID)
 		});
-		const reason = typeof control?.reason === "string" ? control.reason.trim() : "";
 		if (control?.decision !== "block") {
-			const hint = contextOf(control);
-			if (hint) await log("info", hint);
+			await logControlHint(control, log);
 			return;
 		}
 		if (!stillAlive()) return;
-		if (gated.has(sessionID)) {
-			await log("info", `stop gate: already gated — not re-prompting (${reason || "unfinished bro work"})`);
-			return;
-		}
-		gated.add(sessionID);
-		persistGated();
-		const message = reason || "unfinished bro work";
-		await log("warn", `stop gate: ${message}`);
-		if (!stillAlive()) return;
-		try {
-			await input.reprompt(sessionID, message);
-		} catch (err) {
-			await log("error", `stop gate could not re-prompt: ${errorText(err)}`);
-		}
+		await finishStopGate({
+			control,
+			sessionID,
+			stillAlive,
+			gated,
+			persistGated,
+			log,
+			reprompt: input.reprompt
+		});
 	};
 	/** Dispatches the v2 event stream into core handlers.
 	*
@@ -1022,28 +1082,27 @@ function makeCore(input) {
 	const onEvent = async (type, props) => {
 		const sessionID = typeof props.sessionID === "string" ? props.sessionID : void 0;
 		if (sessionID !== void 0 && !live.has(sessionID)) live.set(sessionID, ++liveSeq);
-		switch (type) {
-			case "session.execution.started":
-				if (sessionID !== void 0) hydrate(sessionID, "session-start");
-				break;
-			case "session.execution.succeeded":
-				if (sessionID !== void 0) {
-					clean.add(sessionID);
-					await onSessionIdle({ sessionID });
-				}
-				break;
-			case "session.execution.failed":
-			case "session.execution.interrupted":
-				if (sessionID !== void 0) clean.delete(sessionID);
-				break;
-			case "session.compaction.succeeded":
-			case "session.compaction.ended":
-				onSessionCompacted(props);
-				break;
-			case "session.deleted":
-				onSessionDeleted(props);
-				break;
-		}
+		const handler = eventHandlers[type];
+		if (handler) await handler(sessionID, props);
+	};
+	const eventHandlers = {
+		"session.execution.started": (sessionID) => {
+			if (sessionID !== void 0) hydrate(sessionID, "session-start");
+		},
+		"session.execution.succeeded": async (sessionID) => {
+			if (sessionID === void 0) return;
+			clean.add(sessionID);
+			await onSessionIdle({ sessionID });
+		},
+		"session.execution.failed": (sessionID) => {
+			if (sessionID !== void 0) clean.delete(sessionID);
+		},
+		"session.execution.interrupted": (sessionID) => {
+			if (sessionID !== void 0) clean.delete(sessionID);
+		},
+		"session.compaction.succeeded": (_sessionID, props) => onSessionCompacted(props),
+		"session.compaction.ended": (_sessionID, props) => onSessionCompacted(props),
+		"session.deleted": (_sessionID, props) => onSessionDeleted(props)
 	};
 	return {
 		probe,
@@ -1157,6 +1216,61 @@ function splitArgs(input) {
 	for (const m of input.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) args.push(m[1] ?? m[2] ?? m[3] ?? m[0]);
 	return args;
 }
+function cleanCommandOutput(body) {
+	return body.split("\n").filter((line) => {
+		if (!line.trim()) return true;
+		const words = line.trim().toLowerCase().split(/\s+/);
+		return !(words[0] === "bro" && words[1] === "learn");
+	}).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+async function tryPrompt(prompt, sessionID, text) {
+	if (!prompt) return false;
+	try {
+		await prompt({
+			sessionID,
+			text
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+function readNotification(input) {
+	const { sessionID, text, title, variant } = asRecord(input) ?? {};
+	if (typeof text !== "string" || text.trim() === "") return null;
+	return {
+		sessionID: validSessionID(sessionID),
+		title: validTitle(title),
+		message: warningMessage(text, variant),
+		severity: notificationSeverity(variant)
+	};
+}
+function validSessionID(value) {
+	return typeof value === "string" && value !== "" ? value : void 0;
+}
+function validTitle(value) {
+	return typeof value === "string" && value.trim() !== "" ? value : "bro";
+}
+function warningMessage(text, variant) {
+	return variant === "error" || variant === "warning" ? `⚠ ${text}` : text;
+}
+function notificationSeverity(variant) {
+	if (variant === "error") return "error";
+	if (variant === "warning") return "warning";
+	return "info";
+}
+async function submitPrompt(options) {
+	const { switchAgent, prompt, sessionID, text, agent } = options;
+	if (agent) await switchAgent?.({
+		sessionID,
+		agent
+	});
+	await prompt?.({
+		sessionID,
+		text
+	});
+	return true;
+}
 /** Where the nudge lands on a tool result — `output`/`content` take text
 * directly; anything else rides metadata as `broContext`. */
 function appendToolResult(result, text) {
@@ -1177,21 +1291,45 @@ function appendToolResult(result, text) {
 		}
 	};
 }
+function readSkillFile(reader, root, entry) {
+	const path = join(root, entry, "SKILL.md");
+	try {
+		if (!reader.stat(path).isFile()) return null;
+		const content = reader.read(path, "utf8");
+		const parsed = parseSkill(content);
+		if (!parsed) return null;
+		return {
+			id: entry,
+			name: parsed.name ?? entry,
+			description: parsed.description ?? "",
+			path,
+			content
+		};
+	} catch {
+		return null;
+	}
+}
 /** Parse a `SKILL.md` frontmatter block — `name`, `description`, and the
 * optional `autoinvoke` flag. A file without frontmatter is not a skill;
 * it is skipped rather than half-registered. */
 function parseSkill(markdown) {
-	if (!markdown.startsWith("---")) return null;
-	const end = markdown.indexOf("\n---", 3);
-	if (end < 0) return null;
-	const front = markdown.slice(3, end);
-	const name = /^\s*name:\s*(.+)$/m.exec(front)?.[1]?.trim();
-	const description = /^\s*description:\s*(.+)$/m.exec(front)?.[1]?.trim();
+	const front = frontmatter(markdown);
+	if (front === null) return null;
+	const name = readFrontmatterValue(front, "name");
+	const description = readFrontmatterValue(front, "description");
 	if (!name || !description) return null;
 	return {
 		name: name.replace(/^["']|["']$/g, ""),
 		description: description.replace(/^["']|["']$/g, "")
 	};
+}
+function frontmatter(markdown) {
+	if (!markdown.startsWith("---")) return null;
+	const end = markdown.indexOf("\n---", 3);
+	return end < 0 ? null : markdown.slice(3, end);
+}
+function readFrontmatterValue(front, key) {
+	return (key === "name" ? /^\s*name:\s*(.+)$/m : /^\s*description:\s*(.+)$/m).exec(front)?.[1]?.trim();
 }
 /** Auto-discovered skills roots must look like BRO's tree before they
 *  are registered — the ancestor walk-up can land on a foreign `skills/`
@@ -1248,10 +1386,7 @@ async function BroSetup(ctx) {
 				text
 			}) : Promise.resolve(void 0);
 		},
-		persist: ctx.storage?.get !== void 0 && ctx.storage?.set !== void 0 ? {
-			load: () => ctx.storage?.get?.("stop-gated") ?? Promise.resolve(void 0),
-			save: (ids) => Promise.resolve(ctx.storage?.set?.("stop-gated", [...ids])).then(() => void 0)
-		} : void 0
+		persist: makePersistence(ctx.storage)
 	});
 	const pendingPromptContext = /* @__PURE__ */ new Map();
 	const registrations = [];
@@ -1262,19 +1397,11 @@ async function BroSetup(ctx) {
 		const sessionID = event.sessionID;
 		if (!sessionID || event.system === void 0) return;
 		const text = await core.hydrate(sessionID, "session-start");
-		if (text) event.system.push({
-			type: "text",
-			text
-		});
-		if (sessionID) {
-			const pending = pendingPromptContext.get(sessionID);
-			if (pending && event.system !== void 0) {
-				event.system.push({
-					type: "text",
-					text: pending
-				});
-				pendingPromptContext.delete(sessionID);
-			}
+		if (text) pushSystem(event.system, text);
+		const pending = pendingPromptContext.get(sessionID);
+		if (pending) {
+			pushSystem(event.system, pending);
+			pendingPromptContext.delete(sessionID);
 		}
 	}));
 	register(ctx.session?.hook?.("compaction", async (event) => {
@@ -1302,15 +1429,9 @@ async function BroSetup(ctx) {
 			tool_input: asRecord(event.input) ?? {}
 		});
 		if (control === null) return;
-		const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
-		if (override) event.input = {
-			...asRecord(event.input),
-			...override
-		};
-		if (control.decision === "block" || control.decision === "deny") {
-			const reason = typeof control.reason === "string" ? control.reason.trim() : "";
-			throw new Error(reason || "blocked by bro");
-		}
+		const merged = mergedToolInput(control, event.input);
+		if (merged) event.input = merged;
+		assertToolAllowed(control);
 	}));
 	register(ctx.tool?.hook?.("execute.after", async (event) => {
 		const result = asRecord(event.result);
@@ -1329,12 +1450,11 @@ async function BroSetup(ctx) {
 			tool_input: { command },
 			session_id: event.sessionID
 		});
-		if (control?.decision === "approve") event.effect = "allow";
-		else if (control?.decision === "deny" || control?.decision === "block") {
-			event.effect = "deny";
-			const reason = typeof control?.reason === "string" ? control.reason.trim() : "";
-			if (reason) event.message = reason;
-		}
+		const effect = permissionEffect(control);
+		if (!effect) return;
+		event.effect = effect;
+		const reason = stopReason(control);
+		if (reason) event.message = reason;
 	}));
 	register(ctx.shell?.hook?.("create.before", (event) => {
 		if (event.env === void 0) return;
@@ -1356,7 +1476,7 @@ async function BroSetup(ctx) {
 			options: BRO_TOOL_OPTIONS,
 			execute: async () => {
 				const { code, out, err } = await core.exec(tool.args);
-				const body = out || err || "(no output)";
+				const body = out || err || DEFAULT_COMMAND_OUTPUT;
 				return { content: code === 0 ? body : `exit ${code}: ${body}` };
 			}
 		});
@@ -1365,14 +1485,7 @@ async function BroSetup(ctx) {
 		const run = async (sessionID, argv, label) => {
 			if (!sessionID || !ctx.session?.prompt) return;
 			const { code, out, err } = await core.exec(argv);
-			let body = out || err || "(no output)";
-			body = body.split("\n").filter((l) => {
-				const t = l.trim().toLowerCase();
-				if (!t) return true;
-				const words = t.split(/\s+/);
-				if (words[0] === "bro" && words[1] === "learn") return false;
-				return true;
-			}).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+			const body = cleanCommandOutput(out || err || DEFAULT_COMMAND_OUTPUT);
 			const suffix = code === 0 ? "" : ` (exit ${code})`;
 			await ctx.session.prompt({
 				sessionID,
@@ -1419,21 +1532,14 @@ async function BroSetup(ctx) {
 	const rpcRegistration = ctx.rpc?.register?.(Bro, {
 		board: async () => boardSnapshot(),
 		notify: async (input, _context) => {
-			const { sessionID, text, title, variant } = asRecord(input) ?? {};
-			if (typeof text !== "string" || text.trim() === "") return { delivered: false };
-			const body = typeof title === "string" && title.trim() !== "" ? title : "bro";
-			const message = variant === "error" || variant === "warning" ? `⚠ ${text}` : text;
-			if (typeof sessionID === "string" && sessionID !== "") try {
-				await ctx.session?.prompt?.({
-					sessionID,
-					text: `${body}: ${message}`
-				});
-				return { delivered: true };
-			} catch {}
+			const notification = readNotification(input);
+			if (!notification) return { delivered: false };
+			const { sessionID, title, message, severity } = notification;
+			if (sessionID && await tryPrompt(ctx.session?.prompt, sessionID, `${title}: ${message}`)) return { delivered: true };
 			await emitRpc("attention", {
-				title: body,
+				title,
 				message,
-				severity: variant === "error" ? "error" : variant === "warning" ? "warning" : "info"
+				severity
 			});
 			return { delivered: true };
 		},
@@ -1442,13 +1548,12 @@ async function BroSetup(ctx) {
 			if (typeof sessionID !== "string" || sessionID === "") return declaredError(context, "no_session", "sessionID is required", { sessionID: "" });
 			if (typeof text !== "string" || text.trim() === "") return { accepted: false };
 			try {
-				if (typeof agent === "string" && agent !== "") await ctx.session?.switchAgent?.({
+				await submitPrompt({
+					switchAgent: ctx.session?.switchAgent,
+					prompt: ctx.session?.prompt,
 					sessionID,
-					agent
-				});
-				await ctx.session?.prompt?.({
-					sessionID,
-					text
+					text,
+					agent: typeof agent === "string" && agent !== "" ? agent : void 0
 				});
 				return { accepted: true };
 			} catch {
@@ -1510,26 +1615,15 @@ async function collectBroSkills(options) {
 			continue;
 		}
 		for (const entry of entries) {
-			const path = join(root, entry, "SKILL.md");
-			let content;
-			try {
-				if (!statSync$1(path).isFile()) continue;
-				content = readFileSync(path, "utf8");
-			} catch {
-				continue;
-			}
-			const parsed = parseSkill(content);
-			if (parsed === null) continue;
+			const skill = readSkillFile({
+				stat: statSync$1,
+				read: readFileSync
+			}, root, entry);
+			if (!skill) continue;
 			const id = entry;
 			if (seen.has(id)) continue;
 			seen.add(id);
-			out.push({
-				id,
-				name: parsed.name ?? entry,
-				description: parsed.description ?? "",
-				path,
-				content
-			});
+			out.push(skill);
 		}
 		if (out.length > 0) break;
 	}

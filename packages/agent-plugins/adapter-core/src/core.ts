@@ -81,6 +81,19 @@ export const RUN_TIMEOUT_MS = 60_000;
  *  re-probing the npx rung on every keystroke would be worse than
  *  the outage. */
 export const RESOLVE_RETRY_MS = 60_000;
+const HOOKS_COMMAND = 'hooks';
+const STATUS_COMMAND = 'status';
+const JSON_FLAG = '--json';
+const NPX_COMMAND = 'npx';
+const NPX_YES_FLAG = '-y';
+const NPX_OFFLINE_FLAG = '--prefer-offline';
+const BRO_MARKERS = [
+  'bro.config.ts',
+  'bro.config.json',
+  'bro.config.local.ts',
+  'bro.config.local.json',
+  '.beads',
+] as const;
 
 /** The curated command family — first-class slash aliases for bro's
  *  workflow verbs. `verb` is the CLI argv head; `name` is the slash
@@ -286,12 +299,12 @@ async function pathResolved(): Promise<Command | null> {
 
 async function npxResolved(opts: ResolveOptions): Promise<Command | null> {
   const specs = opts.npxSpecs ?? (opts.npxPin !== undefined ? [opts.npxPin] : []);
-  if (specs.length === 0 || !(await exitsZero('npx', ['--version']))) {
+  if (specs.length === 0 || !(await exitsZero(NPX_COMMAND, ['--version']))) {
     return null;
   }
   for (const spec of specs) {
-    if (await exitsZero('npx', ['-y', '--prefer-offline', spec, 'hooks'])) {
-      return { cmd: 'npx', args: ['-y', '--prefer-offline', spec] };
+    if (await exitsZero(NPX_COMMAND, [NPX_YES_FLAG, NPX_OFFLINE_FLAG, spec, HOOKS_COMMAND])) {
+      return { cmd: NPX_COMMAND, args: [NPX_YES_FLAG, NPX_OFFLINE_FLAG, spec] };
     }
   }
   return null;
@@ -409,7 +422,7 @@ export async function callHookDetailed(command: Command, call: HookCall): Promis
   const { promise, resolve } = Promise.withResolvers<HookResult>();
   let child: ChildProcess;
   try {
-    child = spawn(command.cmd, [...command.args, 'hooks', event], {
+    child = spawn(command.cmd, [...command.args, HOOKS_COMMAND, event], {
       cwd,
       env: extraEnv === undefined ? undefined : { ...process.env, ...extraEnv },
       stdio: ['pipe', 'pipe', 'ignore'],
@@ -502,16 +515,9 @@ export function contextOf(control: HookControl | null): string {
  * keep the list in sync with CONFIG_LAYER_FILES.
  */
 export function broEnabled(startDir: string): boolean {
-  const markers = [
-    'bro.config.ts',
-    'bro.config.json',
-    'bro.config.local.ts',
-    'bro.config.local.json',
-    '.beads',
-  ];
   let dir = startDir;
   for (;;) {
-    if (markers.some(m => existsSync(join(dir, m)))) {
+    if (BRO_MARKERS.some(marker => existsSync(join(dir, marker)))) {
       return true;
     }
     const parent = dirname(dir);
@@ -528,7 +534,7 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
   const { promise, resolve } = Promise.withResolvers<BoardStatus | null>();
   let child: ChildProcess;
   try {
-    child = spawn(command.cmd, [...command.args, 'status', '--json'], {
+    child = spawn(command.cmd, [...command.args, STATUS_COMMAND, JSON_FLAG], {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
@@ -680,15 +686,7 @@ function runCollect(
   options: RunOptions,
   resolve: (r: RunResult) => void
 ): void {
-  let settled = false;
-  const settle = (result: RunResult): void => {
-    if (!settled) {
-      settled = true;
-      resolve(result);
-    }
-  };
-  const cap = (buf: string, chunk: string): string =>
-    buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+  const settle = once(resolve);
   let stdout = '';
   let stderr = '';
   const timer = killAfter(child, options.timeoutMs, () =>
@@ -701,11 +699,11 @@ function runCollect(
   );
   child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {
-    stdout = cap(stdout, chunk);
+    stdout = appendOutput(stdout, chunk);
   });
   child.stderr?.setEncoding('utf8');
   child.stderr?.on('data', (chunk: string) => {
-    stderr = cap(stderr, chunk);
+    stderr = appendOutput(stderr, chunk);
   });
   child.on('error', error => {
     clearTimeout(timer);
@@ -717,6 +715,22 @@ function runCollect(
   });
   child.stdin?.on('error', () => {});
   child.stdin?.end(options.input ?? '');
+}
+
+function once(resolve: (result: RunResult) => void): (result: RunResult) => void {
+  let settled = false;
+  return result => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    resolve(result);
+  };
+}
+
+function appendOutput(buffer: string, chunk: string): string {
+  const remaining = MAX_OUTPUT - buffer.length;
+  return remaining > 0 ? buffer + chunk.slice(0, remaining) : buffer;
 }
 
 /**
