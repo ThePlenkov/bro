@@ -54,15 +54,25 @@ import {
   entryRunId,
 } from './spawn-harness.ts';
 
-function resetGcSession(id: string, city: string): string {
-  const reset = gcRun({ args: ['session', 'reset', id, '--city', city] });
-  if (reset.code !== 0) throw new Error(`gc session reset ${id} — ${gcErr(reset)}`);
-  return id;
+function resetGcSession(input: { id: string; city: string }): string {
+  const reset = gcRun({ args: ['session', 'reset', input.id, '--city', input.city] });
+  if (reset.code !== 0) throw new Error(`gc session reset ${input.id} — ${gcErr(reset)}`);
+  return input.id;
 }
 
-function createGcSession(molStep: string, city: string): string {
+function createGcSession(input: { molStep: string; city: string }): string {
   const created = gcRun({
-    args: ['session', 'new', molStep, '--alias', molStep, '--no-attach', '--json', '--city', city],
+    args: [
+      'session',
+      'new',
+      input.molStep,
+      '--alias',
+      input.molStep,
+      '--no-attach',
+      '--json',
+      '--city',
+      input.city,
+    ],
     timeoutMs: 120_000,
   });
   if (created.code !== 0) throw new Error(`gc session new ${molStep} — ${gcErr(created)}`);
@@ -70,11 +80,11 @@ function createGcSession(molStep: string, city: string): string {
   try {
     value = JSON.parse(created.out) as { session_id?: string; ok?: boolean };
   } catch {
-    gcRun({ args: ['session', 'close', molStep, '--city', city] });
+    gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
     throw new Error('gc session new returned unparseable JSON');
   }
   if (value.ok === false || value.session_id === undefined) {
-    gcRun({ args: ['session', 'close', molStep, '--city', city] });
+    gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
     throw new Error(
       value.ok === false
         ? 'gc session new returned ok: false'
@@ -418,8 +428,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       s => s.id === priorId || s.alias === spec.molStep
     );
     return alive === undefined
-      ? createGcSession(spec.molStep, city)
-      : resetGcSession(alive.id, city);
+      ? createGcSession({ molStep: spec.molStep, city })
+      : resetGcSession({ id: alive.id, city });
   };
 
   /** Route + deliver: sling the bead (the routed work order), then
