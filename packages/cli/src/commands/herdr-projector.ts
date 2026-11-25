@@ -216,9 +216,11 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
       // spawned through an acp provider that was since REMOVED from the
       // config still carries its acpSessionId — it is an acp lane
       // whatever the current config says (bro-iik6m)
+      // empty string is no evidence — drive.ts/acp-settle.ts/learn-evidence.ts
+      // all exclude it; the lane pin must not disagree with them
+      const hasAcpSession = typeof e.acpSessionId === 'string' && e.acpSessionId !== '';
       const acp =
-        (e.provider !== undefined && p.providers[e.provider]?.type === 'acp') ||
-        typeof e.acpSessionId === 'string';
+        (e.provider !== undefined && p.providers[e.provider]?.type === 'acp') || hasAcpSession;
       return {
         key,
         live,
@@ -231,7 +233,7 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
             }
           : {}),
         ...(typeof e.model === 'string' ? { model: e.model } : {}),
-        ...(typeof e.acpSessionId === 'string' ? { acpSessionId: e.acpSessionId } : {}),
+        ...(hasAcpSession ? { acpSessionId: e.acpSessionId } : {}),
         ...(typeof e.log === 'string' ? { log: e.log } : {}),
         ...(acp ? { acp: true } : {}),
         ...(acp && p.eventsHome !== null && typeof e.agentId === 'string' && e.agentId !== ''
