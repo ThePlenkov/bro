@@ -582,7 +582,7 @@ async function finishCycle(ctx: MergeCtx, res: GateWaitResult, landed: PrActStat
 
 function gateVerdict(ctx: MergeCtx, res: GateWaitResult): Record<string, unknown> {
   return {
-    pr: termPr(ctx, ctx.t.repo, ctx.t.pr),
+    pr: ctx.rev.prLink(ctx.t.repo, ctx.t.pr),
     open_threads: res.gate.open_threads,
     fix_rounds: res.gate.fix_rounds,
     polls: res.polls,
@@ -612,7 +612,8 @@ function emitVerdict(
 function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult, landed: PrActState): void {
   const { state } = res;
   const { threadsAtStart, started } = ctx;
-  const link = termPr(ctx, ctx.t.repo, ctx.t.pr);
+  // structured record — markdown form, never terminal escapes (review #1254)
+  const link = ctx.rev.prLink(ctx.t.repo, ctx.t.pr);
   const minutes = Math.round((Date.now() - started) / 60_000);
   try {
     const retro = recordRetro({
