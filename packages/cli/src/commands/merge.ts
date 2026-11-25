@@ -427,7 +427,17 @@ async function landPhase(ctx: MergeCtx, res: GateWaitResult): Promise<PrActState
  *  state) passes through; a settled blocker reports and ends the run
  *  — re-entry resumes, finished phases no-op. */
 async function gatePhase(ctx: MergeCtx): Promise<GateWaitResult | undefined> {
-  const res = await waitForGate(ctx.fetcher, ctx.opts);
+  let res = await waitForGate(ctx.fetcher, ctx.opts);
+  if (!res.gate.ok && !res.timedOut && res.state.state === 'OPEN') {
+    // a settled-blocked verdict is a decision point, and the feed is a
+    // pollers' cache (bro-amnmo): a thread resolved since the last fetch
+    // must not end the run on a stale read — invalidate and run the wait
+    // again so its first read is fresh. A genuinely blocked PR costs one
+    // extra fetch (the re-run settles immediately); a stale one re-enters
+    // the full transition logic — BEHIND branch-updates included
+    ctx.cache?.invalidate(ctx.t);
+    res = await waitForGate(ctx.fetcher, ctx.opts);
+  }
   const verdict = gateVerdict(ctx, res);
   if (!res.gate.ok && res.state.state === 'OPEN') {
     for (const b of res.gate.blockers) {
