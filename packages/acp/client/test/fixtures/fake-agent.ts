@@ -100,66 +100,69 @@ async function pumpTurn(): Promise<void> {
   if (id !== undefined) send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
 }
 
+interface Incoming {
+  id?: number;
+  method?: string;
+  params?: { sessionId?: string };
+  result?: { outcome?: { outcome?: string; optionId?: string } };
+}
+
+/** A response to OUR request — the permission answer. */
+function permissionAnswer(msg: Incoming): void {
+  if (msg.id !== PERMISSION_ID) return;
+  notify({ sessionUpdate: 'fake/permission_outcome', outcome: msg.result?.outcome });
+  releasePermission?.();
+}
+
+const REPLIES: { [method: string]: (msg: Incoming) => void } = {
+  initialize: msg => {
+    send({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: {
+        protocolVersion: CFG.protocolVersion ?? 1,
+        agentCapabilities: CFG.caps ?? { promptCapabilities: {} },
+        agentInfo: { name: 'fake', version: '0' },
+      },
+    });
+    if (CFG.die === true) process.exit(0);
+  },
+  'session/new': msg => send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: SESSION } }),
+  'session/load': msg =>
+    send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: msg.params?.sessionId ?? SESSION } }),
+  'session/resume': msg =>
+    send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: msg.params?.sessionId ?? SESSION } }),
+  'session/prompt': msg => {
+    promptId = msg.id;
+    void pumpTurn();
+  },
+  'session/cancel': () => {
+    const id = promptId;
+    promptId = undefined;
+    if (id !== undefined) send({ jsonrpc: '2.0', id, result: { stopReason: 'cancelled' } });
+  },
+};
+
 const rl = createInterface({ input: process.stdin });
 
 rl.on('line', line => {
-  let msg: {
-    id?: number;
-    method?: string;
-    params?: { sessionId?: string };
-    result?: { outcome?: { outcome?: string; optionId?: string } };
-  };
+  let msg: Incoming;
   try {
-    msg = JSON.parse(line);
+    msg = JSON.parse(line) as Incoming;
   } catch {
     return;
   }
-
-  // a response to OUR request — the permission answer
   if (msg.method === undefined) {
-    if (msg.id === PERMISSION_ID) {
-      notify({ sessionUpdate: 'fake/permission_outcome', outcome: msg.result?.outcome });
-      releasePermission?.();
-    }
+    permissionAnswer(msg);
     return;
   }
-
-  switch (msg.method) {
-    case 'initialize':
-      send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: {
-          protocolVersion: CFG.protocolVersion ?? 1,
-          agentCapabilities: CFG.caps ?? { promptCapabilities: {} },
-          agentInfo: { name: 'fake', version: '0' },
-        },
-      });
-      if (CFG.die === true) process.exit(0);
-      return;
-    case 'session/new':
-      send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: SESSION } });
-      return;
-    case 'session/load':
-      send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: msg.params?.sessionId ?? SESSION } });
-      return;
-    case 'session/resume':
-      send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: msg.params?.sessionId ?? SESSION } });
-      return;
-    case 'session/prompt':
-      promptId = msg.id;
-      void pumpTurn();
-      return;
-    case 'session/cancel': {
-      const id = promptId;
-      promptId = undefined;
-      if (id !== undefined) send({ jsonrpc: '2.0', id, result: { stopReason: 'cancelled' } });
-      return;
-    }
-    default:
-      if (msg.id !== undefined) {
-        send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
-      }
+  const reply = Object.getOwnPropertyDescriptor(REPLIES, msg.method)?.value;
+  if (reply !== undefined) {
+    reply(msg);
+    return;
+  }
+  if (msg.id !== undefined) {
+    send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
   }
 });
 

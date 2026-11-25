@@ -20,76 +20,52 @@ test('pickPane — orphan with our label adopts; idle unbound takes; bound never
     { pane_id: 'p2', label: 'shell' },
     { pane_id: 'p3' },
   ];
-  assert.deepEqual(
-    pickPane(panes, live(), LABEL, BRO_LABELS, () => true),
-    { id: 'p1', adopted: true }
-  );
+  const pick = (ps: typeof panes, bound: Set<string>) =>
+    pickPane({ panes: ps, bound, sessionLabel: LABEL, broLabels: BRO_LABELS, idle: () => true });
+  assert.deepEqual(pick(panes, live()), { id: 'p1', adopted: true });
   // 'shell' isn't a bro-role label — p2 is a legal take when idle
-  assert.deepEqual(
-    pickPane(panes, new Set(['p1']), LABEL, BRO_LABELS, () => true),
-    { id: 'p2', adopted: false }
-  );
+  assert.deepEqual(pick(panes, new Set(['p1'])), { id: 'p2', adopted: false });
   // bro-role labels never taken even when idle
-  const role = [{ pane_id: 'p9', label: 'bro: status' }];
-  assert.deepEqual(
-    pickPane(role, live(), LABEL, BRO_LABELS, () => true),
-    { adopted: false }
-  );
+  assert.deepEqual(pick([{ pane_id: 'p9', label: 'bro: status' }], live()), { adopted: false });
 });
 
 test('decideSession — recorded live pane keeps; idle re-arms; none splits; free arms', () => {
   const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
   const panes = [{ pane_id: 'p1' }, { pane_id: 'pS', label: LABEL }];
+  const decide = (input: {
+    rec?: typeof rec;
+    panes?: typeof panes;
+    exists?: () => boolean;
+    idle?: () => boolean;
+  }) =>
+    decideSession({
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+      panes,
+      ...input,
+    });
   // live recorded pane → none
-  assert.deepEqual(
-    decideSession({
-      rec,
-      panes,
-      bound: live(),
-      sessionLabel: LABEL,
-      broLabels: BRO_LABELS,
-      exists: () => true,
-      idle: () => false,
-    }),
-    { kind: 'none' }
-  );
+  assert.deepEqual(decide({ rec }), { kind: 'none' });
   // recorded pane idle → rearm
-  assert.deepEqual(
-    decideSession({
-      rec,
-      panes,
-      bound: live(),
-      sessionLabel: LABEL,
-      broLabels: BRO_LABELS,
-      exists: () => true,
-      idle: () => true,
-    }),
-    { kind: 'rearm', paneId: 'pS', adopted: true }
-  );
+  assert.deepEqual(decide({ rec, idle: () => true }), {
+    kind: 'rearm',
+    paneId: 'pS',
+    adopted: true,
+  });
   // no rec, free idle pane → arm
-  assert.deepEqual(
-    decideSession({
-      panes: [{ pane_id: 'pX' }],
-      bound: live(),
-      sessionLabel: LABEL,
-      broLabels: BRO_LABELS,
-      exists: () => false,
-      idle: () => true,
-    }),
-    { kind: 'arm', paneId: 'pX', adopted: false }
-  );
+  assert.deepEqual(decide({ panes: [{ pane_id: 'pX' }], exists: () => false, idle: () => true }), {
+    kind: 'arm',
+    paneId: 'pX',
+    adopted: false,
+  });
   // nothing free → split off the first pane
-  assert.deepEqual(
-    decideSession({
-      panes: [{ pane_id: 'p1', label: 'shell' }],
-      bound: live(),
-      sessionLabel: LABEL,
-      broLabels: BRO_LABELS,
-      exists: () => false,
-      idle: () => false,
-    }),
-    { kind: 'split', targetId: 'p1' }
-  );
+  assert.deepEqual(decide({ panes: [{ pane_id: 'p1', label: 'shell' }], exists: () => false }), {
+    kind: 'split',
+    targetId: 'p1',
+  });
 });
 
 test('decideSession — a different live agent rebinds the recorded pane', () => {

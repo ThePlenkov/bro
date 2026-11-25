@@ -112,24 +112,35 @@ export interface AttachState {
   rowMode?: string;
 }
 
-export function viewVerdict(t: SessionTarget | undefined, a: AttachState): ViewVerdict {
-  if (t === undefined) return { led: { state: 'unknown' }, mode: 'waiting for projector' };
-  if (a.mode === 'events') {
-    return eventsVerdict(
+const acpPosture: { [K in AttachState['acp']]: ViewVerdict } = {
+  ended: { led: { state: 'idle' }, mode: 'session ended' },
+  live: { led: { state: 'working' }, mode: 'session/load' },
+  none: { led: { state: 'working' }, mode: 'attaching' },
+  connecting: { led: { state: 'working' }, mode: 'attaching' },
+};
+
+const MODE_VERDICT: {
+  [K in AttachState['mode']]: (t: SessionTarget, a: AttachState) => ViewVerdict;
+} = {
+  events: (t, a) =>
+    eventsVerdict(
       t.workerLed,
       a.rowLed !== undefined ? { led: a.rowLed, mode: a.rowMode ?? 'session events' } : undefined
-    );
-  }
-  if (a.mode === 'acp') {
-    if (a.acp === 'ended') return { led: { state: 'idle' }, mode: 'session ended' };
-    if (a.acp === 'live') return { led: { state: 'working' }, mode: 'session/load' };
-    return { led: { state: 'working' }, mode: 'attaching' };
-  }
-  if (a.mode === 'log') {
-    return {
-      led: { state: t.workerLed.state === 'working' ? 'working' : 'idle' },
-      mode: 'log tail',
-    };
-  }
-  return { led: { state: 'unknown' }, mode: 'no session' };
+    ),
+  acp: (_t, a) =>
+    Object.getOwnPropertyDescriptor(acpPosture, a.acp)?.value ?? {
+      led: { state: 'working' },
+      mode: 'attaching',
+    },
+  log: t => ({
+    led: { state: t.workerLed.state === 'working' ? 'working' : 'idle' },
+    mode: 'log tail',
+  }),
+  none: () => ({ led: { state: 'unknown' }, mode: 'no session' }),
+};
+
+export function viewVerdict(t: SessionTarget | undefined, a: AttachState): ViewVerdict {
+  if (t === undefined) return { led: { state: 'unknown' }, mode: 'waiting for projector' };
+  const v = Object.getOwnPropertyDescriptor(MODE_VERDICT, a.mode)?.value;
+  return v !== undefined ? v(t, a) : { led: { state: 'unknown' }, mode: 'no session' };
 }

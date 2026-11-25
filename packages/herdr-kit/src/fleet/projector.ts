@@ -11,6 +11,7 @@ import { basename, join } from 'node:path';
 import type { PaneLed } from '@broject/acp-session';
 import { callJson, callOk, nextSeq, STATUS_IDENTITY } from '../client/index.ts';
 import {
+  definedFields,
   type HerdrPaneRow,
   labelFor,
   paneLed,
@@ -124,10 +125,13 @@ export function pluginLedgerDirs(): string[] {
   ];
 }
 
-function pluginLedger(
-  ctx: { root: string; common: string | null },
-  liveWs: { has(id: string): boolean }
-): PluginLedger {
+type WsRec = { ws?: string; managed?: boolean };
+type StRec = { pane_id?: string; workspace?: string };
+
+/** Every dir×scope×file candidate path — raw and realpath scopes
+ *  both hash in (a symlinked checkout must not partition the
+ *  fleet). */
+function ledgerPaths(ctx: { root: string; common: string | null }): string[] {
   const base = ctx.common ?? ctx.root;
   const real = realpathOrNull(base);
   const scopes = new Set(
@@ -135,20 +139,73 @@ function pluginLedger(
       createHash('sha1').update(p).digest('hex').slice(0, 12)
     )
   );
-  const dirs = pluginLedgerDirs();
-  // Gather every candidate record per key, then pick one: a
-  // herdr-hosted plugin pane and a daemon-side run write different
-  // state dirs, and after a herdr restart the stale file's dead ws
-  // bindings must not clobber the live writer's fresh ones — a
-  // record wins only when its bound workspace id is alive, so even a
-  // NEWER file re-saved with a dead ws loses. openSync+fstatSync+
-  // readFileSync(fd) couples each candidate's content to the mtime of
-  // that same file generation — a stat-then-read race can never pair
-  // fresh bytes with a stale rank.
-  type WsRec = { ws?: string; managed?: boolean };
-  type StRec = { pane_id?: string; workspace?: string };
-  const wsCands = new Map<string, Scored<WsRec>[]>();
-  const stCands = new Map<string, Scored<StRec>[]>();
+  const paths: string[] = [];
+  for (const dir of pluginLedgerDirs()) {
+    for (const scope of scopes) {
+      paths.push(join(dir, 'state.json'), join(dir, `state-${scope}.json`));
+    }
+  }
+  return paths;
+}
+
+/** The scored candidates a ledger gathers per key. */
+interface LedgerCands {
+  ws: Map<string, Scored<WsRec>[]>;
+  st: Map<string, Scored<StRec>[]>;
+}
+
+/** Read one candidate file and bank its records — openSync+fstatSync+
+ *  readFileSync(fd) couples each candidate's content to the mtime of
+ *  that same file generation: a stat-then-read race can never pair
+ *  fresh bytes with a stale rank. Missing/unreadable files simply
+ *  contribute nothing. */
+function scanLedgerFile(
+  p: string,
+  liveWs: { has(id: string): boolean },
+  add: <T>(map: Map<string, Scored<T>[]>, key: string, c: Omit<Scored<T>, 'order'>) => void,
+  out: LedgerCands
+): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, 'r');
+    const mtime = fstatSync(fd).mtimeMs;
+    const parsed = JSON.parse(readFileSync(fd, 'utf8')) as PluginLedgerFile;
+    for (const [path, rec] of Object.entries(parsed.workspaces ?? {})) {
+      add(out.ws, path, { rec, mtime, live: rec.ws !== undefined && liveWs.has(rec.ws) });
+    }
+    for (const r of Object.values(parsed.statuses ?? {})) {
+      // an incomplete status row (no pane_id) is never a candidate —
+      // a newer half-written sibling must not hide an older valid
+      // binding
+      if (r.workspace !== undefined && r.pane_id !== undefined) {
+        add(out.st, r.workspace, { rec: r, mtime, live: liveWs.has(r.workspace) });
+      }
+    }
+  } catch {
+    // missing file or unreadable JSON at this candidate — the others
+    // still apply
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // a close failure leaves nothing actionable behind
+      }
+    }
+  }
+}
+
+/** Gather every candidate record per key, then pick one: a
+ *  herdr-hosted plugin pane and a daemon-side run write different
+ *  state dirs, and after a herdr restart the stale file's dead ws
+ *  bindings must not clobber the live writer's fresh ones — a
+ *  record wins only when its bound workspace id is alive, so even a
+ *  NEWER file re-saved with a dead ws loses. */
+function gatherLedger(
+  ctx: { root: string; common: string | null },
+  liveWs: { has(id: string): boolean }
+): LedgerCands {
+  const out: LedgerCands = { ws: new Map(), st: new Map() };
   let seq = 0;
   const add = <T>(
     map: Map<string, Scored<T>[]>,
@@ -159,61 +216,35 @@ function pluginLedger(
     arr.push({ ...c, order: seq++ });
     map.set(key, arr);
   };
-  for (const dir of dirs) {
-    for (const scope of scopes) {
-      for (const file of ['state.json', `state-${scope}.json`]) {
-        const p = join(dir, file);
-        let fd: number | undefined;
-        try {
-          fd = openSync(p, 'r');
-          const mtime = fstatSync(fd).mtimeMs;
-          const parsed = JSON.parse(readFileSync(fd, 'utf8')) as PluginLedgerFile;
-          for (const [path, rec] of Object.entries(parsed.workspaces ?? {})) {
-            add(wsCands, path, {
-              rec,
-              mtime,
-              live: rec.ws !== undefined && liveWs.has(rec.ws),
-            });
-          }
-          for (const r of Object.values(parsed.statuses ?? {})) {
-            // an incomplete status row (no pane_id) is never a
-            // candidate — a newer half-written sibling must not hide
-            // an older valid binding
-            if (r.workspace !== undefined && r.pane_id !== undefined) {
-              add(stCands, r.workspace, { rec: r, mtime, live: liveWs.has(r.workspace) });
-            }
-          }
-        } catch {
-          // missing file or unreadable JSON at this candidate — the
-          // others still apply
-        } finally {
-          if (fd !== undefined) {
-            try {
-              closeSync(fd);
-            } catch {
-              // a close failure leaves nothing actionable behind
-            }
-          }
-        }
-      }
-    }
-  }
-  const out: PluginLedger = { workspaces: new Map(), statusPanes: new Map() };
-  for (const [path, c] of wsCands) {
-    const w = pickLive(c);
-    if (w !== undefined) out.workspaces.set(path, w);
-  }
-  for (const [ws, c] of stCands) {
-    // every candidate shares the key's ws, so `live` is one class —
-    // order is live-first then newest; the push walks the list until
-    // a pane row actually answers
+  for (const p of ledgerPaths(ctx)) scanLedgerFile(p, liveWs, add, out);
+  return out;
+}
+
+/** ws → every status-pane candidate, live-first then newest — the
+ *  push walks the list until a pane row actually answers. */
+function orderStatusPanes(cands: Map<string, Scored<StRec>[]>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const [ws, c] of cands) {
     const ordered = [...c]
       .sort((a, b) => Number(b.live) - Number(a.live) || b.mtime - a.mtime || b.order - a.order)
       .map(x => x.rec.pane_id)
       .filter((p): p is string => p !== undefined);
-    if (ordered.length > 0) out.statusPanes.set(ws, ordered);
+    if (ordered.length > 0) out.set(ws, ordered);
   }
   return out;
+}
+
+function pluginLedger(
+  ctx: { root: string; common: string | null },
+  liveWs: { has(id: string): boolean }
+): PluginLedger {
+  const cands = gatherLedger(ctx, liveWs);
+  const workspaces = new Map<string, WsRec>();
+  for (const [path, c] of cands.ws) {
+    const w = pickLive(c);
+    if (w !== undefined) workspaces.set(path, w);
+  }
+  return { workspaces, statusPanes: orderStatusPanes(cands.st) };
 }
 
 export interface ProjectResult {
@@ -317,28 +348,59 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   // state files live under the state root the pane resolves identically
   // (stateCommonDir(worktree) ?? worktree) — prune has the same base
   const statusBase = ctx.state ?? ctx.root;
-  // prune keeps every file a live workspace could still be rendering:
-  // a tree herdr lists with an open workspace keeps its file even when
-  // the ledger read was blind — wiping on a transient miss would blank
-  // every status pane until the next good pass
-  const keep = new Set(
-    trees.worktrees
-      .filter(t => t.open_workspace_id !== undefined)
-      .map(t => fleetStatusPath(statusBase, t.path))
-  );
+  const keep = keepPaths(statusBase, trees.worktrees);
   if (targets.length === 0) {
     pruneFleetStatus(statusBase, keep);
     return { reachable: true, workspaces: 0, writes: 0, files: 0, leds: 0 };
   }
 
-  const planes = deps.planes();
+  const r = writePass({ ctx, deps, targets, planes: deps.planes(), keep, statusBase });
+  pruneFleetStatus(statusBase, keep);
+  return {
+    reachable: true,
+    workspaces: targets.length,
+    writes: r.writes,
+    files: r.files,
+    leds: r.leds,
+    ...(r.truncated > 0
+      ? { degraded: `write budget — ${r.truncated} workspace(s) deferred to the next pass` }
+      : {}),
+  };
+}
+
+/** The fleet-status paths a live open workspace could still be
+ *  rendering — prune keeps these: a tree herdr lists with an open
+ *  workspace keeps its file even when the ledger read was blind —
+ *  wiping on a transient miss would blank every status pane until
+ *  the next good pass. */
+function keepPaths(statusBase: string, trees: HerdrWorktree[]): Set<string> {
+  return new Set(
+    trees
+      .filter(t => t.open_workspace_id !== undefined)
+      .map(t => fleetStatusPath(statusBase, t.path))
+  );
+}
+
+/** The bounded write loop over the target set. Bounded because every
+ *  write is a herdr call with its own timeout, and N stalled
+ *  workspaces otherwise multiply into a pass that outlasts the drive
+ *  tick it serves (bro-1fv9e) — whatever the budget doesn't reach is
+ *  not lost, the next tick retries it. */
+interface WritePassJob<P extends { beads: { id: string }[] }> {
+  ctx: { now: number; writeBudgetMs?: number };
+  deps: { input: (t: HerdrWorktree, planes: P) => TreeInput };
+  targets: WsTarget[];
+  planes: P;
+  keep: Set<string>;
+  statusBase: string;
+}
+
+function writePass<P extends { beads: { id: string }[] }>(
+  j: WritePassJob<P>
+): { writes: number; files: number; leds: number; truncated: number } {
   let writes = 0;
   let files = 0;
   let leds = 0;
-  // the write pass is bounded: every write is a herdr call with its own
-  // timeout, and N stalled workspaces otherwise multiply into a pass
-  // that outlasts the drive tick it serves (bro-1fv9e). Whatever the
-  // budget doesn't reach is not lost — the next tick retries it.
   const passStart = Date.now();
   let truncated = 0;
   // rotate the starting target per pass: a prefix that repeatedly eats
@@ -346,43 +408,33 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   // offset makes every workspace the head of some pass (cubic on #1240)
   // crypto, not Math.random — the scanner's weak-randomness finding is
   // noise for a rotation offset, but the strong primitive costs nothing
-  const offset = targets.length > 1 ? randomInt(targets.length) : 0;
-  const ordered = [...targets.slice(offset), ...targets.slice(0, offset)];
+  const offset = j.targets.length > 1 ? randomInt(j.targets.length) : 0;
+  const ordered = [...j.targets.slice(offset), ...j.targets.slice(0, offset)];
   let done = 0;
   for (const t of ordered) {
-    if (Date.now() - passStart > (ctx.writeBudgetMs ?? WRITE_PASS_BUDGET_MS)) {
+    if (Date.now() - passStart > (j.ctx.writeBudgetMs ?? WRITE_PASS_BUDGET_MS)) {
       truncated = ordered.length - done;
       break;
     }
-    const { projection, title, slug } = projectTree(deps.input(t.tree, planes));
+    const { projection, title, slug } = projectTree(j.deps.input(t.tree, j.planes));
     // an empty bead plane means the backend read failed or is empty —
     // a live titled label beats a path-basename downgrade in that gap
-    const safe = planes.beads.length === 0 ? (liveTitle(t.live.label) ?? title) : title;
-    writes += writeDiffs({ ws: t, proj: projection, title: safe, now: ctx.now });
+    const safe = j.planes.beads.length === 0 ? (liveTitle(t.live.label) ?? title) : title;
+    writes += writeDiffs({ ws: t, proj: projection, title: safe, now: j.ctx.now });
     const r = paneWrites({
       ws: t,
       proj: projection,
       title: safe,
       slug,
-      base: statusBase,
-      now: ctx.now,
+      base: j.statusBase,
+      now: j.ctx.now,
     });
     files += r.files;
     leds += r.leds;
-    if (r.path !== undefined) keep.add(r.path);
+    if (r.path !== undefined) j.keep.add(r.path);
     done++;
   }
-  pruneFleetStatus(statusBase, keep);
-  return {
-    reachable: true,
-    workspaces: targets.length,
-    writes,
-    files,
-    leds,
-    ...(truncated > 0
-      ? { degraded: `write budget — ${truncated} workspace(s) deferred to the next pass` }
-      : {}),
-  };
+  return { writes, files, leds, truncated };
 }
 
 /** Everything one workspace's write pass needs — the projection, the
@@ -513,25 +565,25 @@ function backstopArgs(paneId: string, led: PaneLed, seq: number): string[] {
  *  real title away). */
 function stateOf(j: PaneJob, path: string, led: PaneLed): FleetPaneState {
   const prev = readFleetState(path);
-  const title =
-    j.title === basename(j.ws.tree.path) && prev?.title !== undefined && prev.title !== ''
-      ? prev.title
-      : j.title;
+  const degraded = j.title === basename(j.ws.tree.path);
+  const title = degraded && prev?.title !== undefined && prev.title !== '' ? prev.title : j.title;
   return {
     v: 1,
     worktree: j.ws.tree.path,
     workspace: j.ws.wsId,
     title,
-    ...(j.slug !== undefined ? { slug: j.slug } : {}),
+    ...definedFields({ slug: j.slug }),
     status: statusString(j.proj),
-    ...(j.proj.prUrl !== undefined ? { prUrl: j.proj.prUrl } : {}),
-    ...(j.proj.agent !== undefined ? { agent: j.proj.agent } : {}),
-    ...(j.proj.acpSessionId !== undefined ? { acpSessionId: j.proj.acpSessionId } : {}),
-    ...(j.proj.provider !== undefined ? { provider: j.proj.provider } : {}),
-    ...(j.proj.model !== undefined ? { model: j.proj.model } : {}),
-    ...(j.proj.log !== undefined ? { log: j.proj.log } : {}),
-    ...(j.proj.acp === true ? { lane: 'acp' as const } : {}),
-    ...(j.proj.events !== undefined ? { events: j.proj.events } : {}),
+    ...definedFields({
+      prUrl: j.proj.prUrl,
+      agent: j.proj.agent,
+      acpSessionId: j.proj.acpSessionId,
+      provider: j.proj.provider,
+      model: j.proj.model,
+      log: j.proj.log,
+      lane: j.proj.acp === true ? ('acp' as const) : undefined,
+      events: j.proj.events,
+    }),
     led,
     ts: j.now,
   };

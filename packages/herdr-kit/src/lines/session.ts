@@ -385,6 +385,31 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     acpDone(a, t, err instanceof Error ? err.message : String(err), false);
   };
 
+  /** The events lane's attach leg — the renderer import is lazy,
+   *  rows stay on disk so the async gap loses nothing. */
+  const armEvents = async (a: Attach, t: SessionTarget, events: string): Promise<void> => {
+    const { AcpRenderer } = await import('@broject/providers');
+    if (cur !== a) return;
+    renderer ??= new AcpRenderer(out);
+    tailEvents(a, t, events);
+    a.markHandshake('events');
+  };
+
+  /** A failed events leg — tail the native log when the doc has one,
+   *  a bare note otherwise; the same fallback as a wire refusal. */
+  const armEventsFailed = (a: Attach, t: SessionTarget, err: unknown): void => {
+    a.markHandshake(err);
+    if (cur !== a) return;
+    dim(
+      `── events feed failed (${err instanceof Error ? err.message : String(err)}) — ${
+        t.log !== undefined ? 'tailing the native log' : 'no fallback stream'
+      } ──`
+    );
+    if (t.log !== undefined) tailLog(a, t.log);
+    lastReport = '';
+    report(t, viewVerdict(t, a));
+  };
+
   /** No acp target resolved — the log carries the conversation when
    *  the doc records one, a bare note otherwise. */
   const armFallback = (a: Attach, t: SessionTarget): void => {
@@ -418,25 +443,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       // the acp lane's leg — the renderer import is lazy like the
       // attach leg's; rows stay on disk so the async gap loses nothing
       a.mode = 'events';
-      const events = t.events;
-      void (async (): Promise<void> => {
-        const { AcpRenderer } = await import('@broject/providers');
-        if (cur !== a) return;
-        renderer ??= new AcpRenderer(out);
-        tailEvents(a, t, events);
-        a.markHandshake('events');
-      })().catch((err: unknown) => {
-        a.markHandshake(err);
-        if (cur !== a) return;
-        dim(
-          `── events feed failed (${err instanceof Error ? err.message : String(err)}) — ${
-            t.log !== undefined ? 'tailing the native log' : 'no fallback stream'
-          } ──`
-        );
-        if (t.log !== undefined) tailLog(a, t.log);
-        lastReport = '';
-        report(t, viewVerdict(t, a));
-      });
+      void armEvents(a, t, t.events).catch((err: unknown) => armEventsFailed(a, t, err));
       return;
     }
     if (t.session === undefined) {
@@ -516,18 +523,17 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (ctx.agent === undefined) return undefined;
     return eventsFile(eventsBase, logStem(entryOf()) ?? ctx.agent);
   };
-  /** The worker floor with its reason stamped — a blocked worker
-   *  reports WHEN it exited (the journal's last write), an idle one
-   *  when it went quiet. */
+  /** The worker floor's timestamped reason per state — a blocked
+   *  worker reports WHEN it exited (the journal's last write), an
+   *  idle one when it went quiet; working/unknown carry none. */
+  const FLOOR_WHEN: Record<string, string> = { blocked: 'exited', idle: 'quiet since' };
   const workerLedOf = (): PaneLed => {
     const eventsPath = eventsPathOf();
     const state = workerLedState(entryOf(), eventsPath);
-    if (state === 'working' || state === 'unknown' || eventsPath === undefined) {
-      return { state };
-    }
+    const verb = FLOOR_WHEN[state];
+    if (verb === undefined || eventsPath === undefined) return { state };
     try {
-      const when = fmtWhen(statSync(eventsPath).mtimeMs);
-      return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
+      return { state, message: `${verb} ${fmtWhen(statSync(eventsPath).mtimeMs)}` };
     } catch {
       return { state };
     }
