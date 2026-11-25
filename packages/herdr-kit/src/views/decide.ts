@@ -44,11 +44,18 @@ export interface PanePick {
   sessionLabel: string;
   broLabels: Set<string>;
   idle: (paneId: string) => boolean;
+  /** Status panes may adopt an orphan before checking whether it is idle. */
+  orphanRequiresIdle?: boolean;
 }
 
 export function pickPane(s: PanePick): { id?: string; adopted: boolean } {
   const unboundIdle = (p: PaneInfo): boolean => !s.bound.has(p.pane_id) && s.idle(p.pane_id);
-  const orphan = s.panes.find(p => p.label === s.sessionLabel && unboundIdle(p));
+  const orphan = s.panes.find(
+    p =>
+      p.label === s.sessionLabel &&
+      !s.bound.has(p.pane_id) &&
+      (s.orphanRequiresIdle === false || s.idle(p.pane_id))
+  );
   if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
   const free = s.panes.find(
     p => unboundIdle(p) && (p.label === undefined || !s.broLabels.has(p.label))

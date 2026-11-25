@@ -29,6 +29,20 @@ test('pickPane — orphan with our label adopts; idle unbound takes; bound never
   assert.deepEqual(pick([{ pane_id: 'p9', label: 'bro: status' }], live()), { adopted: false });
 });
 
+test('pickPane — callers may adopt a busy orphan when their role permits it', () => {
+  assert.deepEqual(
+    pickPane({
+      panes: [{ pane_id: 'p1', label: LABEL }],
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      idle: () => false,
+      orphanRequiresIdle: false,
+    }),
+    { id: 'p1', adopted: true }
+  );
+});
+
 test('decideSession — recorded live pane keeps; idle re-arms; none splits; free arms', () => {
   const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
   const panes = [{ pane_id: 'p1' }, { pane_id: 'pS', label: LABEL }];
