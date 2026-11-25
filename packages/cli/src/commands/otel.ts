@@ -28,6 +28,7 @@ import {
   GIT_REPO_ENV,
   gitBin,
   hasHelpFlag,
+  withFileLock,
   type ExitCode,
 } from '@broject/core';
 import { otelEndpoint } from '@broject/providers';
@@ -126,25 +127,29 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
       );
     }
   }
-  const section = isObj(cfg.otel) ? cfg.otel : {};
-  cfg.otel = { ...section, enabled };
-  // temp + rename — a direct overwrite can leave a truncated file on a
-  // mid-write crash; operator config loses every sibling section.
-  const tmp = `${path}.tmp-${process.pid}`;
-  try {
-    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
-    // preserve the existing file's mode across the rename — exporter
-    // headers can carry tokens, and a fresh tempfile wears the umask
-    // default (0644 under 022), silently widening a 0600 config
-    // (bro-kztfl)
-    if (existsSync(path)) {
-      chmodSync(tmp, statSync(path).mode & 0o777);
+  // under the writers' lock — the mutation gate validates under the
+  // same lock now (bro-gyvfp), so a write can never land mid-claim
+  withFileLock(`${path}.lock`, () => {
+    const section = isObj(cfg.otel) ? cfg.otel : {};
+    cfg.otel = { ...section, enabled };
+    // temp + rename — a direct overwrite can leave a truncated file on a
+    // mid-write crash; operator config loses every sibling section.
+    const tmp = `${path}.tmp-${process.pid}`;
+    try {
+      writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
+      // preserve the existing file's mode across the rename — exporter
+      // headers can carry tokens, and a fresh tempfile wears the umask
+      // default (0644 under 022), silently widening a 0600 config
+      // (bro-kztfl)
+      if (existsSync(path)) {
+        chmodSync(tmp, statSync(path).mode & 0o777);
+      }
+      renameSync(tmp, path);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
     }
-    renameSync(tmp, path);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  });
   console.log(`otel.enabled=${enabled} → ${path}`);
 }
 

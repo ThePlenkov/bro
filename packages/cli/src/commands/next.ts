@@ -39,7 +39,7 @@ import { NEVER_CLAIM_LABELS, readyBeads, storeFor, type ReadyBead } from '@broje
 import { flag } from './args.ts';
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts';
 import { requireGlobalStore } from '../doctypes/store.ts';
-import { assertMutableConfig } from '../config-policy.ts';
+import { assertMutableConfig, withConfigGateLock } from '../config-policy.ts';
 import { loadBroConfig } from '../plugins.ts';
 
 /** The serving tasks backend for `dir` — `connectors.tasks` in
@@ -313,17 +313,24 @@ export function claimUpTo(
   // claimUpTo without next.ts's gate above, and a claim landing before
   // a refused spawn is exactly the half-state the gate exists to stop
   // (spec: bro-d9dmx)
-  gateClaimQueue(queue, dir, skipPolicy);
-  const picked: ReadyBead[] = [];
-  for (const b of queue) {
-    if (picked.length >= limit) {
-      break;
+  const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd());
+  // validate + claim inside the writers' lock — a config write landing
+  // mid-claim would otherwise commit a claim the validation never saw
+  // (bro-gyvfp). The lock is per-config-file, uncontended in practice,
+  // and re-entrant so a claim inside an outer section cannot deadlock.
+  return withConfigGateLock(root, () => {
+    gateClaimQueue(queue, dir, skipPolicy);
+    const picked: ReadyBead[] = [];
+    for (const b of queue) {
+      if (picked.length >= limit) {
+        break;
+      }
+      if (claimOne(b, dir, opts)) {
+        picked.push(b);
+      }
     }
-    if (claimOne(b, dir, opts)) {
-      picked.push(b);
-    }
-  }
-  return picked;
+    return picked;
+  });
 }
 
 function printPick(b: ReadyBead, list: boolean, backend: string): void {

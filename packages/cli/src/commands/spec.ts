@@ -43,7 +43,15 @@
  * never on every prompt (spec bro-6a3dq).
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  renameSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import {
   facade,
@@ -66,6 +74,7 @@ import {
   type TaskRow,
   type TaskStore,
   type TaskStoreAsync,
+  withFileLock,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
 import { hasSpecDoc, repoRoot, specDirAbs, validBeadId } from '@broject/spec';
@@ -697,7 +706,13 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
   } else {
     cfg.connectors = connectors;
   }
-  writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`);
+  // under the writers' lock, tmp+rename — the gate validates under the
+  // same lock (bro-gyvfp), and a torn write would read as invalid policy
+  withFileLock(`${path}.lock`, () => {
+    const tmp = `${path}.tmp.${process.pid}`;
+    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
+    renameSync(tmp, path);
+  });
   return path;
 }
 
