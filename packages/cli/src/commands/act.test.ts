@@ -77,6 +77,31 @@ describe('cleanupAfterMerge', () => {
     });
   });
 
+  test('a registry agent occupant keeps the merged worktree (bro-giznr)', () => {
+    const { root, main, linked, sha } = fixture();
+    mkdirSync(join(main, '.git', 'bro'), { recursive: true });
+    writeFileSync(
+      join(main, '.git', 'bro', 'agents.json'),
+      JSON.stringify({
+        'fx-1': {
+          agentId: 'tmux-pane-agent',
+          backend: 'tmux',
+          spawnedAt: new Date().toISOString(),
+          runId: 'r1',
+          worktree: linked,
+        },
+      })
+    );
+    // a herdr pane's process lives outside the tree — /proc shows
+    // nothing, yet the agent works inside; the registry is the only
+    // witness and the cleanup must defer to it
+    inside(linked, root, () => {
+      cleanupAfterMerge('work/x', sha);
+      assert.equal(existsSync(linked), true);
+      assert.notEqual(git(['branch', '--list', 'work/x'], main).trim(), '');
+    });
+  });
+
   test('a main checkout on the merged branch switches back to the default branch', () => {
     const { root, main } = repo();
     git(['switch', '-qc', 'work/x'], main);
