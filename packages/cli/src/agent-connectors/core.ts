@@ -162,6 +162,7 @@ import {
 import { assertMutableConfig } from '../config-policy.ts';
 import { enterWorktree } from '../commands/work.ts';
 import { checkRunLearnEvidence } from './learn-evidence.ts';
+import { resolveOnPath } from './resolve-on-path.ts';
 import {
   COPILOT_COUNT_TTL_MS,
   copilotCountFile,
@@ -6132,29 +6133,6 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 export function gcMatchDir(dir: string, env: AgentConnectorEnv): boolean {
   const city = gcConfigDir(dir, env);
   return city !== null && existsSync(join(city, 'city.toml'));
-}
-
-/** Resolve a PATH binary ourselves and pin the absolute path — first
- *  PATH dir wins, same order the OS uses; spawnSync then needs no
- *  PATH lookup of its own. */
-function resolveOnPath(bin: string): string | null {
-  const exts =
-    process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
-  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
-    if (dir === '') continue;
-    for (const ext of exts) {
-      const candidate = join(dir, bin + ext);
-      try {
-        if (statSync(candidate).isFile()) {
-          accessSync(candidate, constants.X_OK);
-          return candidate;
-        }
-      } catch {
-        /* keep scanning PATH */
-      }
-    }
-  }
-  return null;
 }
 
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
