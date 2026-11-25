@@ -121,6 +121,20 @@ function goalScopeContext(board: ReturnType<ModeBridgeSource['board']>): string 
   return `${scope}${bead}${advice} \`bro work goal\` carries the condition across sessions.`;
 }
 
+/** Void bridge events cannot hand context back through a result —
+ *  omp 18.12.6 types plan_review_requested/goal_updated/
+ *  before_subagent_spawn as void listeners, so a returned
+ *  additionalContext is silently discarded (bro-t1e5e). The supported
+ *  injection channel is sendMessage; deliverAs nextTurn queues the
+ *  context for the model's next turn without stealing the current one. */
+function inject(pi: OmpApi, content: string): undefined {
+  pi.sendMessage(
+    { customType: 'bro-mode-context', content, display: false },
+    { deliverAs: 'nextTurn' }
+  );
+  return undefined;
+}
+
 export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
   /**
    * **Plan mode.** omp's Plan Review is the user's decision point; bro
@@ -141,9 +155,10 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
       return undefined;
     }
     const named = claims.map(beadName).join(', ');
-    return {
-      additionalContext: `${UNTRUSTED_NOTE}bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.`,
-    };
+    return inject(
+      pi,
+      `${UNTRUSTED_NOTE}bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.`
+    );
   });
 
   /**
@@ -161,7 +176,11 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
     if (objective === '') {
       return undefined;
     }
-    return { additionalContext: `${UNTRUSTED_NOTE}${goalScopeContext(source.board())}` };
+    const board = source.board();
+    if (board === null) {
+      return undefined;
+    }
+    return inject(pi, `${UNTRUSTED_NOTE}${goalScopeContext(board)}`);
   });
 
   /**
@@ -179,9 +198,10 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
       return undefined;
     }
     const ids = running.map(a => a.id ?? '?');
-    return {
-      additionalContext: `bro: ${running.length} worker(s) already running (${ids.join(', ')}) — claim a bead before editing, so two workers never touch one unit of work.`,
-    };
+    return inject(
+      pi,
+      `bro: ${running.length} worker(s) already running (${ids.join(', ')}) — claim a bead before editing, so two workers never touch one unit of work.`
+    );
   });
 
   /**
