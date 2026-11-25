@@ -184,37 +184,7 @@ function launchTmuxSession(
   tmuxRun(socket, ['kill-session', '-t', session]);
   const envFile = join(home, `${agentId}.env`);
   try {
-    const policy = getCredentialScope(env, 'tmux');
-    const ambient = Object.entries({ ...process.env, ...spec.env })
-      .filter(
-        (e): e is [string, string] =>
-          e[1] !== undefined &&
-          /^[A-Za-z_]\w*$/.test(e[0]) &&
-          !envKeyDropped(e[0], workerTmp !== undefined) &&
-          !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-          isAllowedByEnvPolicy(
-            e[0],
-            e[1],
-            'tmux',
-            spec,
-            env,
-            policy,
-            Object.hasOwn(spec.env ?? {}, e[0])
-          )
-      )
-      .map(([k, v]) => `export ${k}=${shQuote(v)}`)
-      .join('\n');
-    writePrivateFileSync({ path: envFile, data: `${ambient}\n` });
-    const worker = workerWithResume(spec.worker, resumeSessionId);
-    const envArgs = [
-      ...agentEnvPins(spec, agentId, promptFile, workerCliBadge(worker, command), prepared.mol),
-      ...workerTmpEnvPins(workerTmp),
-    ].flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-    ensureWorkerTmpDir(workerTmp);
-    warnNoPromptFile(worker, command);
-    const runLine = workerRunLine(worker, command);
-    const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
-    const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
+    const launch = buildTmuxLaunch({ env, command, spec, prepared, envFile, workerTmp });
     const res = tmuxRun(socket, [
       'new-session',
       '-d',
@@ -222,8 +192,8 @@ function launchTmuxSession(
       session,
       '-c',
       spec.repoRoot,
-      ...envArgs,
-      `sh -c ${shQuote(paneScript)}`,
+      ...launch.envArgs,
+      launch.paneCommand,
     ]);
     if (res.code !== 0) throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
   } catch (err) {
@@ -246,6 +216,64 @@ function launchTmuxSession(
   const pane = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}']);
   const panePid = pane.code === 0 ? Number(pane.out.trim().split('\n')[0]) : Number.NaN;
   prepared.panePid = Number.isInteger(panePid) && panePid > 0 ? panePid : undefined;
+}
+
+function buildTmuxLaunch(input: {
+  env: AgentConnectorEnv;
+  command: string;
+  spec: SpawnSpec;
+  prepared: TmuxPreparedSpawn;
+  envFile: string;
+  workerTmp: string | undefined;
+}): { envArgs: string[]; paneCommand: string } {
+  const { env, command, spec, prepared, envFile, workerTmp } = input;
+  const policy = getCredentialScope(env, 'tmux') ?? { strictEnv: false };
+  const ambient = Object.entries({ ...process.env, ...spec.env })
+    .filter((e): e is [string, string] => isTmuxEnvEntry(e, workerTmp, spec, env, policy))
+    .map(([key, value]) => `export ${key}=${shQuote(value)}`)
+    .join('\n');
+  writePrivateFileSync({ path: envFile, data: `${ambient}\n` });
+  const worker = workerWithResume(spec.worker, prepared.resumeSessionId);
+  const envArgs = [
+    ...agentEnvPins(
+      spec,
+      prepared.agentId,
+      prepared.promptFile,
+      workerCliBadge(worker, command),
+      prepared.mol
+    ),
+    ...workerTmpEnvPins(workerTmp),
+  ].flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+  ensureWorkerTmpDir(workerTmp);
+  warnNoPromptFile(worker, command);
+  const runLine = workerRunLine(worker, command);
+  const stderr = prepared.stderrLog === undefined ? '2>&1' : `2>> ${shQuote(prepared.stderrLog)}`;
+  const script = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(prepared.exitFile)} ); } ${stderr} | tee -a ${shQuote(prepared.log)}`;
+  return { envArgs, paneCommand: `sh -c ${shQuote(script)}` };
+}
+
+function isTmuxEnvEntry(
+  entry: [string, unknown],
+  workerTmp: string | undefined,
+  spec: SpawnSpec,
+  env: AgentConnectorEnv,
+  policy: ReturnType<typeof getCredentialScope>
+): entry is [string, string] {
+  return (
+    typeof entry[1] === 'string' &&
+    /^[A-Za-z_]\w*$/.test(entry[0]) &&
+    !envKeyDropped(entry[0], workerTmp !== undefined) &&
+    !GIT_REPOSITORY_ENV_KEYS.has(entry[0]) &&
+    isAllowedByEnvPolicy(
+      entry[0],
+      entry[1],
+      'tmux',
+      spec,
+      env,
+      policy,
+      Object.hasOwn(spec.env ?? {}, entry[0])
+    )
+  );
 }
 
 export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
