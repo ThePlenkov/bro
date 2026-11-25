@@ -78,8 +78,15 @@ describe('the pane state fold', () => {
 
   test('an evicted selection is dropped', () => {
     const first = applyOps(emptyState(), [{ op: 'append', item: tool(1, 'Bash') }]);
-    const selected = applyOps(first, [{ op: 'append', item: message(2, 'two') }]);
-    assert.equal(selected.selected, -1);
+    const selected = { ...first, selected: 1 };
+    const next = applyOps(selected, [
+      { op: 'append', item: message(2, 'two') },
+      { op: 'evict', ids: [1] },
+    ]);
+    assert.equal(next.selected, -1);
+    assert.deepEqual(next.order, [2]);
+    assert.equal(next.byId[1], undefined);
+    assert.equal(next.byId[2]?.id, 2);
   });
 
   test('the tool walk lists the tool cards in order', () => {
