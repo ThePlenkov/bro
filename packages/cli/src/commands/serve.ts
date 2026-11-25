@@ -627,6 +627,7 @@ function agentDeleteConflict(ref: string, outcome: StopOutcome): ServeResponse {
       agent: outcome.agent,
       stopped: false,
       verdict: outcome.verdict,
+      ...(outcome.stopError !== undefined ? { stopError: outcome.stopError } : {}),
       ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
     },
   };
