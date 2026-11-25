@@ -164,9 +164,8 @@ into `pulse.json` when `--every` isn't passed.
 
 ### The checkpoint probes (slice 2)
 
-Every lifecycle event is one checkpoint — `pulseCheckpoint` behind both
-`watchConnector.sessionStart` (the first event, cold start) and
-`watchConnector.postTool` (the warm path, every tool call):
+Session start is the watch rearm checkpoint — `pulseCheckpoint` sits behind
+`watchConnector.sessionStart` (the cold start):
 
 1. `pulseRearm(dir)` decides, pure: armed marker + dead `pulse.lock`
    holder + orchestrator + no live recorded spawn → `rearm`.
@@ -174,25 +173,29 @@ Every lifecycle event is one checkpoint — `pulseCheckpoint` behind both
    shell, no LLM; the hook exits on its own timeout) and records the
    child in `pulse.spawn.json`.
 3. A live recorded spawn suppresses the next rearm — it is either the
-   pulse itself or a standby waiting behind another contender; without
-   the record every tool call would pile another standby on a dead
-   incumbent. A dead recorded pid does not suppress — the next event
-   retries.
+   pulse itself or a standby waiting behind another contender. A dead
+   recorded pid does not suppress the next session-start retry.
 
-Matcher note: the shipped Devin hook map keeps PostToolUse at `^exec$` —
-every tool call would pay a `bro hooks` process for coverage the pulse
-does not need; exec dominates agent activity, and the next exec call
-checkpoints anything that happened between (bounded staleness, probes
-are idempotent).
+The watch connector intentionally has no `postTool` hook. A watch window
+already performs repeated fleet/GitHub sweeps; rearming it from every tool
+call caused a short-lived or expired child to start another full sweep on
+each subsequent tool call, multiplying `gh` API traffic across sessions.
+After a window expires, the next session start (or an explicit
+`bro watch --every ... --for ... --notify`) starts the next window. This
+bounded staleness is preferable to exhausting GitHub quota.
+
+Matcher note: the shipped Devin hook map keeps PostToolUse at `^exec$` for
+other connectors, but the watch connector is not attached to that warm path.
+This avoids paying a `bro hooks` process to start another fleet sweep after
+the bounded watch window has already expired.
 
 Delivery to the session is unchanged: mailbox drops drain on the same
 postTool probe (the notify connector) and on Stop/UserPromptSubmit. A
-fully idle session has no events — the bounded window simply dies and
-the next event rearms it; orchestration never depends on the session
-being awake.
+fully idle session has no events — the bounded window simply dies; the
+next session start or an explicit watch command starts another one.
 
 - `BRO_AGENT_ID` guards the rearm on the write side too — a worker's
-  postTool probe returns quiet always.
+  session-start probe returns quiet always.
 - Spawn uses `process.argv[1]` as the CLI entry so dist/npx/source
   installs all re-spawn themselves; the child takes `pulse.lock` under
   the same `--every` guard (workers exit 2 even if spawned by hand).
@@ -202,7 +205,7 @@ being awake.
 - `bro watch install` on a repo with a legacy timer: timer gone,
   `pulse.json` written, nothing under `~/.config/systemd` or crontab.
 - An armed repo with a dead pulse gets the bounded window spawned on
-  the first checkpoint (session start or the next tool call) — the hook
+  the session-start checkpoint — the hook
   reports the pid; a live pulse or a live recorded spawn stays quiet;
   under `BRO_AGENT_ID` every checkpoint is quiet.
 - `BRO_AGENT_ID=x bro watch --every` and `... drive --every` exit 2.

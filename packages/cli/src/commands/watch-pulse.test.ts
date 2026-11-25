@@ -18,6 +18,7 @@ import {
   readPulseMarker,
   readPulseSpawn,
   writePulseSpawn,
+  watchConnector,
 } from './watch-pulse.ts'
 
 const DEAD = 1 << 30
@@ -384,5 +385,13 @@ describe('pulseRearm', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('watch connector cadence', () => {
+  test('does not rearm a new gh sweep from every postTool event', () => {
+    const hooks = watchConnector.hooks!({ dir: process.cwd() })
+    assert.equal(hooks.postTool, undefined)
+    assert.equal(typeof hooks.sessionStart, 'function')
   })
 })

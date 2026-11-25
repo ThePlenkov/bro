@@ -117,7 +117,7 @@ Assignments (the spec's mode table):
 | sdd | sessionStart, promptSubmit, stopGate | plan,code |
 | session-cap | — | all (safety veto) |
 | herdr | — | all |
-| pulses (watch/drive/loop/rig) | sessionStart, postTool | code,orchestrate (supervisor rearm stays with the code+ planes so `modes.default: code` restores today's behavior) |
+| pulses (watch/drive/loop/rig) | sessionStart (watch); sessionStart, postTool (drive/loop/rig) | code,orchestrate (supervisor rearm stays with the code+ planes so `modes.default: code` restores today's behavior) |
 
 `observe` sessions therefore run only notify drains, session-cap vetoes,
 learn post-tool, and herdr task-finish — everything else is filtered before
