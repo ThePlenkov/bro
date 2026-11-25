@@ -2507,7 +2507,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // journal before the probes run — a lesson triggered on this exact
   // tool landing must see its own trace line in the same event
   journalTrace(input, sessionId);
-  lines.push(...deadLoopPostTool(process.cwd(), sessionId, input));
+  lines.push(...deadLoopPostTool({ dir: process.cwd(), sessionId }, input));
   // OTLP auto-flush — opt-in only, throttled, detached; a dead
   // collector can lose spans, never stall the hook (spec:
   // specs/telemetry/bro-huy5o.11.md)
@@ -2784,7 +2784,7 @@ function preToolEarlyBlock(
   tool: string,
   toolInput: Record<string, unknown>
 ): string | null {
-  const deadLoopBlock = deadLoopPreTool(process.cwd(), sessionId, input);
+  const deadLoopBlock = deadLoopPreTool({ dir: process.cwd(), sessionId }, input);
   if (deadLoopBlock !== null) return deadLoopBlock;
   // The waste guard runs before connector verdicts: a deterministic
   // duplicate veto costs no model call and fails open on state errors.

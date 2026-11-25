@@ -2,7 +2,7 @@
  *  project opted into bro, a `bro` PATH shim pinned to THIS checkout's
  *  built CLI, and a scrubbed env — so a spawned host CLI exercises the
  *  real plugin → `bro hooks` chain with zero user state. */
-import { execFileSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, devNull } from 'node:os';
 import { join } from 'node:path';
@@ -38,7 +38,8 @@ export function tmpDir(prefix: string): string {
   return dir;
 }
 
-export function git(args: string[], cwd: string): string {
+export function git(spec: { args: string[]; cwd: string }): string {
+  const { args, cwd } = spec;
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !AMBIENT_GIT.test(k))
   ) as NodeJS.ProcessEnv;
@@ -83,15 +84,15 @@ export function makeEnv(opts: MakeEnvOpts = {}): E2eEnv {
     mkdirSync(d, { recursive: true });
   }
 
-  git(['init', '-q', '-b', 'main', proj], root);
-  git(['config', 'user.email', 'e2e@t'], proj);
-  git(['config', 'user.name', 'e2e'], proj);
+  git({ args: ['init', '-q', '-b', 'main', proj], cwd: root });
+  git({ args: ['config', 'user.email', 'e2e@t'], cwd: proj });
+  git({ args: ['config', 'user.name', 'e2e'], cwd: proj });
   opts.seed?.(proj);
   if (!opts.noBro) {
     writeFileSync(join(proj, 'bro.config.json'), '{}\n');
   }
-  git(['add', '-A'], proj);
-  git(['commit', '-qm', 'init', '--allow-empty'], proj);
+  git({ args: ['add', '-A'], cwd: proj });
+  git({ args: ['commit', '-qm', 'init', '--allow-empty'], cwd: proj });
 
   const shim = join(binDir, 'bro');
   writeFileSync(shim, `#!/bin/sh\nexec node "${BRO_DIST}" "$@"\n`);
@@ -146,51 +147,70 @@ export function run(
   const cwd = opts.cwd ?? process.cwd();
   const env = { ...(opts.env ?? process.env), PWD: cwd };
   return new Promise(resolve => {
-    const child = spawnChild(cmd, args, cwd, env);
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const finish = (code: number | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, ms: Date.now() - started });
-    };
-    const timer = setTimeout(() => {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        try {
-          child.kill('SIGKILL');
-        } catch {}
-      }
-      finish(null);
-    }, opts.timeoutMs ?? 120_000);
-    timer.unref?.();
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', c => {
-      stdout += c;
+    const child = spawn(cmd, args, {
+      cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: process.platform !== 'win32',
     });
-    child.stderr.on('data', c => {
-      stderr += c;
-    });
-    child.on('error', () => finish(null));
-    child.on('close', code => finish(code));
-    child.stdin.on('error', () => {});
-    child.stdin.end(opts.input ?? '');
+    collectRun(child, opts, started, resolve);
   });
 }
 
-function spawnChild(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) {
-  return spawn(cmd, args, {
-    cwd,
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-    detached: process.platform !== 'win32',
+/** Pump the child's streams, cap it at timeoutMs, and settle exactly
+ *  once with the accumulated output. */
+function collectRun(
+  child: ChildProcess,
+  opts: { timeoutMs?: number; input?: string },
+  started: number,
+  resolve: (r: RunResult) => void
+): void {
+  const bufs = { stdout: '', stderr: '' };
+  let settled = false;
+  const finish = (code: number | null) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve({ code, stdout: bufs.stdout, stderr: bufs.stderr, ms: Date.now() - started });
+  };
+  const timer = armRunTimer(child, opts.timeoutMs ?? 120_000, () => finish(null));
+  pumpRun(child, bufs);
+  child.on('error', () => finish(null));
+  child.on('close', code => finish(code));
+  child.stdin?.on('error', () => {});
+  child.stdin?.end(opts.input ?? '');
+}
+
+/** Kill the group at the deadline and report it via onTimeout. */
+function armRunTimer(child: ChildProcess, timeoutMs: number, onTimeout: () => void) {
+  const timer = setTimeout(() => {
+    killChild(child);
+    onTimeout();
+  }, timeoutMs);
+  timer.unref?.();
+  return timer;
+}
+
+function pumpRun(child: ChildProcess, bufs: { stdout: string; stderr: string }): void {
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', (c: string) => {
+    bufs.stdout += c;
   });
+  child.stderr?.on('data', (c: string) => {
+    bufs.stderr += c;
+  });
+}
+
+function killChild(child: ChildProcess): void {
+  try {
+    if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {}
+  }
 }
 
 /** `bro` on the fixture PATH — runs the worktree's built CLI. */

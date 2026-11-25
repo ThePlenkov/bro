@@ -129,41 +129,50 @@ export async function startOpencodeServer(
     stderrTail = (stderrTail + c).slice(-4000);
   });
   child.stdout?.on('data', () => {});
-  const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+  await waitForDoc(url, child, () => stderrTail, opts.timeoutMs ?? 30_000);
+  return { url, stop: () => stopServer(child) };
+}
+
+function killChild(child: ChildProcess): void {
+  try {
+    if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {}
+  }
+}
+
+async function waitForDoc(
+  url: string,
+  child: ChildProcess,
+  stderrTail: () => string,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       const r = await fetch(`${url}/doc`);
       if (r.ok) {
-        break;
+        return;
       }
     } catch {
       // not up yet
     }
     if (Date.now() > deadline) {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        child.kill('SIGKILL');
-      }
-      throw new Error(`opencode serve did not start:\n${stderrTail}`);
+      killChild(child);
+      throw new Error(`opencode serve did not start:\n${stderrTail()}`);
     }
     await new Promise(r => setTimeout(r, 400));
   }
-  return {
-    url,
-    stop: () =>
-      new Promise(resolve => {
-        try {
-          if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          try {
-            child.kill('SIGKILL');
-          } catch {}
-        }
-        child.once('close', () => resolve());
-        setTimeout(resolve, 3000).unref?.();
-      }),
-  };
+}
+
+function stopServer(child: ChildProcess): Promise<void> {
+  return new Promise(resolve => {
+    killChild(child);
+    child.once('close', () => resolve());
+    setTimeout(resolve, 3000).unref?.();
+  });
 }
 
 /** One `opencode api --server <url> <operation>` call — the supported

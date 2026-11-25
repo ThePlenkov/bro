@@ -36,13 +36,15 @@ export async function runRpcPrompt(
     ['--mode', 'rpc', '--no-session', '--model', model, '--api-key', opts.apiKey ?? 'e2e'],
     { cwd: e.proj, env: e.env, stdio: ['pipe', 'pipe', 'pipe'] }
   );
-  const records: Record<string, unknown>[] = [];
+  const st: RpcState = {
+    records: [],
+    disposition: null,
+    success: null,
+    settled: false,
+    answered: false,
+  };
   let stderr = '';
   let buf = '';
-  let disposition: string | null = null;
-  let success: boolean | null = null;
-  let settled = false;
-  let answered = false;
   const state = { changed: Promise.withResolvers<void>() };
   const poke = () => state.changed.resolve();
   child.stdout?.on('data', (chunk: Buffer) => {
@@ -53,19 +55,7 @@ export async function runRpcPrompt(
       const line = buf.slice(0, idx).trim();
       buf = buf.slice(idx + 1);
       if (line === '') continue;
-      const rec = parseRecord(line);
-      if (rec === null) continue;
-      records.push(rec);
-      if (rec.type === 'response' && rec.command === 'prompt') {
-        disposition = (rec.data as { disposition?: string } | undefined)?.disposition ?? null;
-        success = typeof rec.success === 'boolean' ? rec.success : null;
-        answered = true;
-        poke();
-      }
-      if (rec.type === 'agent_settled') {
-        settled = true;
-        poke();
-      }
+      feedRecord(st, line, poke);
     }
   });
   child.stderr?.on('data', (c: Buffer) => {
@@ -84,13 +74,37 @@ export async function runRpcPrompt(
   const deadline = Date.now() + (opts.timeoutMs ?? 60_000);
   // wait for the prompt answer (or a model turn to settle), then a
   // grace window so async hook spawns can land in the journal
-  while (Date.now() < deadline && !(answered || settled)) {
+  while (Date.now() < deadline && !(st.answered || st.settled)) {
     await Promise.race([state.changed.promise, sleep(250)]);
   }
   await sleep(opts.graceMs ?? 2_500);
   clearTimeout(guard);
   kill();
-  return { disposition, success, records, stderr };
+  return { disposition: st.disposition, success: st.success, records: st.records, stderr };
+}
+
+interface RpcState {
+  records: Record<string, unknown>[];
+  disposition: string | null;
+  success: boolean | null;
+  settled: boolean;
+  answered: boolean;
+}
+
+function feedRecord(st: RpcState, line: string, poke: () => void): void {
+  const rec = parseRecord(line);
+  if (rec === null) return;
+  st.records.push(rec);
+  if (rec.type === 'response' && rec.command === 'prompt') {
+    st.disposition = (rec.data as { disposition?: string } | undefined)?.disposition ?? null;
+    st.success = typeof rec.success === 'boolean' ? rec.success : null;
+    st.answered = true;
+    poke();
+  }
+  if (rec.type === 'agent_settled') {
+    st.settled = true;
+    poke();
+  }
 }
 
 function parseRecord(line: string): Record<string, unknown> | null {

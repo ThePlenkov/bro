@@ -254,16 +254,33 @@ function opencodeLegacy(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope
   };
 }
 
-function kiloArtifact(_cwd: string): string | null {
-  const ap = agentPluginPackageRoot('kilo');
+/** Single-module adapter artifact resolution — every client searches the
+ *  same four sources, differing only in preference order: the catalog
+ *  bundle (self-contained, adapter-core inlined — preferred in repo
+ *  checkouts), the tarball copy inside cli dist, then the adapter
+ *  package's built js and its TS source (whose workspace imports only
+ *  resolve inside this checkout). */
+type ArtSrc = 'repo' | 'pkgPlugins' | 'apDist' | 'apSrc' | 'pkgDist';
+
+function adapterArtifact(client: string, order: readonly ArtSrc[]): string | null {
+  const ap = agentPluginPackageRoot(client);
   const pkg = packageRoot();
   const repo = pkg === null ? null : dirname(dirname(pkg));
-  return firstExisting([
-    repo === null ? null : join(repo, 'plugins', 'kilo', 'bro', 'bro.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'plugins', 'kilo', 'bro', 'bro.ts'),
-    ap === null ? null : join(ap, 'dist', 'kilo.js'),
-    ap === null ? null : join(ap, 'src', 'kilo.ts'),
-  ]);
+  const js = `${client}.js`;
+  const src = `${client}.ts`;
+  const shipped = join('plugins', client, 'bro', 'bro.ts');
+  const cand: Record<ArtSrc, string | null> = {
+    repo: repo === null ? null : join(repo, shipped),
+    pkgPlugins: pkg === null ? null : join(pkg, 'dist', shipped),
+    apDist: ap === null ? null : join(ap, 'dist', js),
+    apSrc: ap === null ? null : join(ap, 'src', src),
+    pkgDist: pkg === null ? null : join(pkg, 'dist', js),
+  };
+  return firstExisting(order.map(k => cand[k]));
+}
+
+function kiloArtifact(_cwd: string): string | null {
+  return adapterArtifact('kilo', ['repo', 'pkgPlugins', 'apDist', 'apSrc']);
 }
 
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
@@ -271,29 +288,11 @@ function kiloConfigDir(env: NodeJS.ProcessEnv): string {
 }
 
 function piArtifact(_cwd: string): string | null {
-  const ap = agentPluginPackageRoot('pi');
-  const pkg = packageRoot();
-  const repo = pkg === null ? null : dirname(dirname(pkg));
-  return firstExisting([
-    repo === null ? null : join(repo, 'plugins', 'pi', 'bro', 'bro.ts'),
-    ap === null ? null : join(ap, 'dist', 'pi.js'),
-    ap === null ? null : join(ap, 'src', 'pi.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'pi.js'),
-    pkg === null ? null : join(pkg, 'dist', 'plugins', 'pi', 'bro', 'bro.ts'),
-  ]);
+  return adapterArtifact('pi', ['repo', 'apDist', 'apSrc', 'pkgDist', 'pkgPlugins']);
 }
 
 function ompArtifact(_cwd: string): string | null {
-  const ap = agentPluginPackageRoot('omp');
-  const pkg = packageRoot();
-  const repo = pkg === null ? null : dirname(dirname(pkg));
-  return firstExisting([
-    repo === null ? null : join(repo, 'plugins', 'omp', 'bro', 'bro.ts'),
-    ap === null ? null : join(ap, 'dist', 'omp.js'),
-    ap === null ? null : join(ap, 'src', 'omp.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'omp.js'),
-    pkg === null ? null : join(pkg, 'dist', 'plugins', 'omp', 'bro', 'bro.ts'),
-  ]);
+  return adapterArtifact('omp', ['repo', 'apDist', 'apSrc', 'pkgDist', 'pkgPlugins']);
 }
 
 /** omp's active agent directory — the user profile's config root.
@@ -550,65 +549,84 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
       ? ([preferredSingleScope(surfaces)] as PluginScope[])
       : scopes;
   const collapsed = effective !== scopes;
-  const outcomes = installScopes(name, effective, client, surfaces, opts);
+  const ctx: InstallCtx = { name, client, surfaces, opts };
+  const outcomes = installScopes(ctx, effective);
   if (client.singleScope !== undefined) {
-    const notes: string[] = [];
-    if (collapsed) {
-      const scope = effective[0];
-      notes.push(
-        `${client.singleScope}; only the ${scope}-scope copy was installed ` +
-          '— pass an explicit scope flag to choose the other one instead'
-      );
-    }
-    // converge — the host must never hold bro copies in both scopes.
-    // Remove ours outside the installed set (sentinel-checked; a
-    // foreign file at the path is never touched), including stale
-    // legacy-layout modules the host would still load.
-    for (const scope of ['global', 'local'] as PluginScope[]) {
-      if (effective.includes(scope)) {
-        continue;
-      }
-      for (const surface of surfaces) {
-        const outcome = convergeScopeCopy(name, scope, surface, opts);
-        if (outcome !== null) {
-          outcomes.push(outcome);
-        }
-      }
-      for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
-        const outcome = legacyOutcome(name, scope, legacy, opts);
-        if (outcome !== null) {
-          outcomes.push(outcome);
-        }
-      }
-    }
-    const conflict = crossScopeBroCopy(surfaces, effective);
-    if (conflict !== null) {
-      notes.push(conflict);
-    }
-    const first = outcomes[0];
-    if (notes.length > 0 && first !== undefined) {
-      first.note =
-        first.note === undefined ? notes.join('; ') : `${first.note}; ${notes.join('; ')}`;
-    }
+    convergeSingleScope(ctx, effective, collapsed, outcomes);
   }
   return outcomes;
 }
 
-function installScopes(
-  name: string,
-  scopes: PluginScope[],
-  client: ClientSpec,
-  surfaces: Surface[],
-  opts: MutateOpts
-): Outcome[] {
+interface InstallCtx {
+  name: string;
+  client: ClientSpec;
+  surfaces: Surface[];
+  opts: MutateOpts;
+}
+
+/** The singleScope tail of installClient — converge the host to one
+ *  bro copy (remove ours in unchosen scopes, sentinel-checked), then
+ *  report the collapse + any cross-scope conflict on the first outcome. */
+function convergeSingleScope(
+  ctx: InstallCtx,
+  effective: PluginScope[],
+  collapsed: boolean,
+  outcomes: Outcome[]
+): void {
+  const notes: string[] = [];
+  if (collapsed) {
+    const scope = effective[0];
+    notes.push(
+      `${ctx.client.singleScope}; only the ${scope}-scope copy was installed ` +
+        '— pass an explicit scope flag to choose the other one instead'
+    );
+  }
+  // converge — the host must never hold bro copies in both scopes.
+  // Remove ours outside the installed set (sentinel-checked; a
+  // foreign file at the path is never touched), including stale
+  // legacy-layout modules the host would still load.
+  for (const scope of ['global', 'local'] as PluginScope[]) {
+    if (effective.includes(scope)) {
+      continue;
+    }
+    pruneScopeCopies(ctx, scope, outcomes);
+  }
+  const conflict = crossScopeBroCopy(ctx.surfaces, effective);
+  if (conflict !== null) {
+    notes.push(conflict);
+  }
+  const first = outcomes[0];
+  if (notes.length > 0 && first !== undefined) {
+    first.note = first.note === undefined ? notes.join('; ') : `${first.note}; ${notes.join('; ')}`;
+  }
+}
+
+/** Drop every bro copy one scope holds — live surfaces plus the
+ *  stale legacy-layout modules the host would still load. */
+function pruneScopeCopies(ctx: InstallCtx, scope: PluginScope, outcomes: Outcome[]): void {
+  for (const surface of ctx.surfaces) {
+    const outcome = convergeScopeCopy(ctx.name, scope, surface, ctx.opts);
+    if (outcome !== null) {
+      outcomes.push(outcome);
+    }
+  }
+  for (const legacy of ctx.client.legacy?.(ctx.opts.cwd, ctx.opts.env)[scope] ?? []) {
+    const outcome = legacyOutcome(ctx.name, scope, legacy, ctx.opts);
+    if (outcome !== null) {
+      outcomes.push(outcome);
+    }
+  }
+}
+
+function installScopes(ctx: InstallCtx, scopes: PluginScope[]): Outcome[] {
   const outcomes: Outcome[] = [];
   for (const scope of scopes) {
-    for (const [idx, surface] of surfaces.entries()) {
-      const owner = idx === 0 ? client : { ...client, registration: undefined };
-      outcomes.push(installSurface(name, scope, surface, owner, opts));
+    for (const [idx, surface] of ctx.surfaces.entries()) {
+      const owner = idx === 0 ? ctx.client : { ...ctx.client, registration: undefined };
+      outcomes.push(installSurface(ctx, scope, surface, owner));
     }
-    for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
-      const outcome = legacyOutcome(name, scope, legacy, opts);
+    for (const legacy of ctx.client.legacy?.(ctx.opts.cwd, ctx.opts.env)[scope] ?? []) {
+      const outcome = legacyOutcome(ctx.name, scope, legacy, ctx.opts);
       if (outcome !== null) outcomes.push(outcome);
     }
   }
@@ -616,15 +634,27 @@ function installScopes(
 }
 
 function installSurface(
-  name: string,
+  ctx: InstallCtx,
   scope: PluginScope,
   surface: Surface,
-  owner: ClientSpec,
-  opts: MutateOpts
+  owner: ClientSpec
 ): Outcome {
   return surface.kind === 'file'
-    ? installOne(name, scope, surface, owner, opts)
-    : installBundle(name, scope, surface.files, surface.dirs[scope], opts);
+    ? installOne(ctx.name, scope, surface, owner, ctx.opts)
+    : installBundle(ctx.name, scope, surface.files, surface.dirs[scope], ctx.opts);
+}
+
+/** Sentinel gate: the path exists AND verifies as a bro adapter —
+ *  anything else (missing, foreign file) leaves it untouched. */
+function broCopyAt(path: string): boolean {
+  if (!existsSync(path)) {
+    return false;
+  }
+  try {
+    return isBroAdapter(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
 }
 
 /** Remove a bro copy sitting in a scope the install did not choose —
@@ -637,34 +667,38 @@ function convergeScopeCopy(
   surface: Surface,
   opts: MutateOpts
 ): Outcome | null {
+  return surface.kind === 'file'
+    ? convergeFileCopy(name, scope, surface, opts)
+    : convergeBundleCopy(name, scope, surface, opts);
+}
+
+function convergeFileCopy(
+  name: string,
+  scope: PluginScope,
+  surface: Extract<Surface, { kind: 'file' }>,
+  opts: MutateOpts
+): Outcome | null {
   const note = 'single-scope convergence (bro-b7mae)';
-  if (surface.kind === 'file') {
-    const target = surface.targets[scope];
-    if (!existsSync(target)) {
-      return null;
-    }
-    try {
-      if (!isBroAdapter(readFileSync(target, 'utf8'))) {
-        return null;
-      }
-    } catch {
-      return null;
-    }
-    if (opts.dryRun) {
-      return { client: name, scope, action: 'would-remove', path: target, note };
-    }
-    rmSync(target);
-    return { client: name, scope, action: 'removed', path: target, note };
-  }
-  const dir = surface.dirs[scope];
-  if (!existsSync(join(dir, 'index.ts'))) {
+  const target = surface.targets[scope];
+  if (!broCopyAt(target)) {
     return null;
   }
-  try {
-    if (!isBroAdapter(readFileSync(join(dir, 'index.ts'), 'utf8'))) {
-      return null;
-    }
-  } catch {
+  if (opts.dryRun) {
+    return { client: name, scope, action: 'would-remove', path: target, note };
+  }
+  rmSync(target);
+  return { client: name, scope, action: 'removed', path: target, note };
+}
+
+function convergeBundleCopy(
+  name: string,
+  scope: PluginScope,
+  surface: Extract<Surface, { kind: 'bundle' }>,
+  opts: MutateOpts
+): Outcome | null {
+  const note = 'single-scope convergence (bro-b7mae)';
+  const dir = surface.dirs[scope];
+  if (!broCopyAt(join(dir, 'index.ts'))) {
     return null;
   }
   if (opts.dryRun) {
@@ -676,8 +710,18 @@ function convergeScopeCopy(
       rmSync(path);
     }
   }
-  // nested bundle members (skills/<name>/…) leave empty dirs behind —
-  // rmdir deepest-first so a foreign file keeps its directory alive
+  pruneEmptyDirs(dir, surface);
+  try {
+    rmdirSync(dir);
+  } catch {
+    // not empty — something of the user's lives here, leave the directory
+  }
+  return { client: name, scope, action: 'removed', path: dir, note };
+}
+
+/** nested bundle members (skills/<name>/…) leave empty dirs behind —
+ *  rmdir deepest-first so a foreign file keeps its directory alive. */
+function pruneEmptyDirs(dir: string, surface: Extract<Surface, { kind: 'bundle' }>): void {
   const dirs = new Set<string>();
   for (const f of surface.files) {
     let rel = dirname(f.name);
@@ -693,12 +737,6 @@ function convergeScopeCopy(
       // not empty — something of the user's lives here, leave it
     }
   }
-  try {
-    rmdirSync(dir);
-  } catch {
-    // not empty — something of the user's lives here, leave the directory
-  }
-  return { client: name, scope, action: 'removed', path: dir, note };
 }
 
 /** Which scope a collapsed singleScope install lands in: the scope

@@ -70,17 +70,19 @@ interface DeadLoopMarker {
 export function deadSignature(input: { tool_name?: unknown; tool_input?: unknown }): string {
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   const ti = (input.tool_input ?? {}) as Record<string, unknown>;
-  let detail = '';
+  return `${tool}|${detailOf(ti)}`.slice(0, 400);
+}
+
+function detailOf(ti: Record<string, unknown>): string {
   if (typeof ti.command === 'string' && ti.command !== '') {
-    detail = ti.command.replace(/\s+/g, ' ').trim();
-  } else if (Array.isArray(ti.paths) && ti.paths.length > 0) {
-    detail = [...ti.paths].sort((a, b) => a.localeCompare(b)).join(',');
-  } else {
-    const fp =
-      typeof ti.file_path === 'string' ? ti.file_path : typeof ti.path === 'string' ? ti.path : '';
-    detail = fp !== '' ? fp : stableStringify(ti);
+    return ti.command.replace(/\s+/g, ' ').trim();
   }
-  return `${tool}|${detail}`.slice(0, 400);
+  if (Array.isArray(ti.paths) && ti.paths.length > 0) {
+    return [...ti.paths].sort((a, b) => a.localeCompare(b)).join(',');
+  }
+  const fp =
+    typeof ti.file_path === 'string' ? ti.file_path : typeof ti.path === 'string' ? ti.path : '';
+  return fp !== '' ? fp : stableStringify(ti);
 }
 
 function stableStringify(v: unknown): string {
@@ -94,14 +96,19 @@ function stableStringify(v: unknown): string {
   }
 }
 
-function tracePath(dir: string, sessionId: string): string | null {
-  const stateDir = hooksStateDir(dir);
-  const safe = sessionId.replace(/[^\w.-]/g, '_');
+interface DeadTarget {
+  dir: string;
+  sessionId: string;
+}
+
+function tracePath(t: DeadTarget): string | null {
+  const stateDir = hooksStateDir(t.dir);
+  const safe = t.sessionId.replace(/[^\w.-]/g, '_');
   return stateDir && safe ? join(stateDir, 'trace', `${safe}.jsonl`) : null;
 }
 
-function markerPath(dir: string, sessionId: string): string | null {
-  const tp = tracePath(dir, sessionId);
+function markerPath(t: DeadTarget): string | null {
+  const tp = tracePath(t);
   return tp === null ? null : tp.replace(/\.jsonl$/, '.deadloop.json');
 }
 
@@ -110,11 +117,10 @@ function markerPath(dir: string, sessionId: string): string | null {
  *  length, or null under the threshold / on any read failure —
  *  detection is advisory, a torn journal means no opinion. */
 export function trailingLoop(
-  dir: string,
-  sessionId: string,
+  t: DeadTarget,
   threshold = DEAD_LOOP_REPEAT
 ): { signature: string; count: number; failing: boolean } | null {
-  const path = tracePath(dir, sessionId);
+  const path = tracePath(t);
   if (path === null || !existsSync(path)) {
     return null;
   }
@@ -126,7 +132,13 @@ export function trailingLoop(
   } catch {
     return null;
   }
-  const tail = lines.slice(-SCAN_TAIL);
+  return countTailRun(lines.slice(-SCAN_TAIL), threshold);
+}
+
+function countTailRun(
+  tail: string[],
+  threshold: number
+): { signature: string; count: number; failing: boolean } | null {
   let sig: string | null = null;
   let count = 0;
   let failing = false;
@@ -169,8 +181,8 @@ function signatureOfEntry(e: TraceEntry): string {
   return `${tool}|${detail}`.slice(0, 400);
 }
 
-function readMarker(dir: string, sessionId: string): DeadLoopMarker | null {
-  const path = markerPath(dir, sessionId);
+function readMarker(t: DeadTarget): DeadLoopMarker | null {
+  const path = markerPath(t);
   if (path === null || !existsSync(path)) {
     return null;
   }
@@ -185,8 +197,8 @@ function readMarker(dir: string, sessionId: string): DeadLoopMarker | null {
   }
 }
 
-function writeMarker(dir: string, sessionId: string, m: DeadLoopMarker): void {
-  const path = markerPath(dir, sessionId);
+function writeMarker(t: DeadTarget, m: DeadLoopMarker): void {
+  const path = markerPath(t);
   if (path === null) {
     return;
   }
@@ -202,17 +214,16 @@ function writeMarker(dir: string, sessionId: string, m: DeadLoopMarker): void {
  *  On a fresh threshold crossing writes/refresh the marker and returns
  *  the advisory lines for the hook context; otherwise nothing. */
 export function deadLoopPostTool(
-  dir: string,
-  sessionId: string,
+  t: DeadTarget,
   input: { tool_name?: unknown; tool_input?: unknown }
 ): string[] {
-  const loop = matchingLoop(dir, sessionId, input);
+  const loop = matchingLoop(t, input);
   if (loop === null) {
     return [];
   }
-  const prior = readMarker(dir, sessionId);
+  const prior = readMarker(t);
   const fresh = prior !== null && Date.now() - prior.ts < DEAD_LOOP_TTL_MS;
-  writeMarker(dir, sessionId, {
+  writeMarker(t, {
     signature: loop.signature,
     count: loop.count,
     ts: Date.now(),
@@ -227,14 +238,13 @@ export function deadLoopPostTool(
 }
 
 function matchingLoop(
-  dir: string,
-  sessionId: string,
+  t: DeadTarget,
   input: { tool_name?: unknown; tool_input?: unknown }
 ): { signature: string; count: number; failing: boolean } | null {
-  if (sessionId === '') {
+  if (t.sessionId === '') {
     return null;
   }
-  const loop = trailingLoop(dir, sessionId);
+  const loop = trailingLoop(t);
   // The journal and live payload must agree: foreign writes cannot arm
   // this session's gate.
   return loop !== null && deadSignature(input) === loop.signature ? loop : null;
@@ -253,14 +263,13 @@ function loopWarning(loop: { signature: string; count: number; failing: boolean 
 /** pre-tool stage: the gate. Returns the veto reason when this call's
  *  signature matches a fresh dead-loop marker, else null (call runs). */
 export function deadLoopPreTool(
-  dir: string,
-  sessionId: string,
+  t: DeadTarget,
   input: { tool_name?: unknown; tool_input?: unknown }
 ): string | null {
-  if (sessionId === '') {
+  if (t.sessionId === '') {
     return null;
   }
-  const marker = readMarker(dir, sessionId);
+  const marker = readMarker(t);
   if (marker === null || Date.now() - marker.ts >= DEAD_LOOP_TTL_MS) {
     return null;
   }
@@ -278,8 +287,8 @@ export function deadLoopPreTool(
 /** Marker file size is irrelevant but existence is probed per
  *  pre-tool — keep the check cheap: statSync only, no JSON parse on
  *  the hot path beyond what readMarker already does. */
-export function deadLoopMarkerExists(dir: string, sessionId: string): boolean {
-  const path = markerPath(dir, sessionId);
+export function deadLoopMarkerExists(t: DeadTarget): boolean {
+  const path = markerPath(t);
   try {
     return path !== null && existsSync(path) && statSync(path).size > 0;
   } catch {
