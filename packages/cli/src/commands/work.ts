@@ -597,6 +597,24 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   if (branchExists && !allowExisting) {
     fail(`${branch} already exists`);
   }
+  // a local base ahead of its upstream means the new tree inherits
+  // commits no remote knows — another session's unpushed work rides
+  // into this PR silently (bro-9cxhp). Warn, never block: stacking on
+  // a local branch is sometimes exactly the intent.
+  if (!branchExists && base !== undefined) {
+    const up = gitTry(['rev-parse', '--abbrev-ref', `${base}@{upstream}`]);
+    const upstream = up.out.trim();
+    if (up.code === 0 && upstream !== '') {
+      const ahead = gitTry(['rev-list', '--count', `${upstream}..${base}`]);
+      const n = Number(ahead.out.trim());
+      if (ahead.code === 0 && Number.isInteger(n) && n > 0) {
+        console.error(
+          `work: note — base ${base} is ${n} commit(s) ahead of ${upstream}; ` +
+            'unpushed work rides into this worktree — push the base or pick another --base'
+        );
+      }
+    }
+  }
   const res = gitTry(worktreeAddArgs(path, branch, base, branchExists));
   if (res.code !== 0) {
     fail(`git worktree add failed — ${res.err}`);
