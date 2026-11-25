@@ -156,6 +156,10 @@ describe('osc8 terminal links (bro-8gh0t)', () => {
   test('osc8Link falls back to plain text when unsupported', () => {
     assert.equal(osc8Link('https://x', '#7', {}, false), '#7');
   });
+  test('osc8Link strips control characters from url and text (review #1254)', () => {
+    const out = osc8Link('https://x/\u0007evil', 'a\u001bb', { TERM_PROGRAM: 'ghostty' }, true);
+    assert.equal(out, '\x1b]8;;https://x/evil\x07ab\x1b]8;;\x07');
+  });
   test('prLinkTerm stays the markdown form off a supporting terminal', () => {
     assert.equal(prLinkTerm('o/r', 42, 'github.com'), '[#42](https://github.com/o/r/pull/42)');
   });

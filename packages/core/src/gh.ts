@@ -249,7 +249,12 @@ export function osc8Link(
   isTTY?: boolean
 ): string {
   if (!supportsOsc8(env, isTTY)) return text;
-  return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
+  // control bytes out of both halves before they ever reach the sequence —
+  // a BEL/ESC inside url or text would terminate/rewrite the hyperlink or
+  // inject terminal control of its own (review #1254)
+  const safeUrl = url.replace(/[\x00-\x1f\x7f]/g, '');
+  const safeText = text.replace(/[\x00-\x1f\x7f]/g, '');
+  return `\x1b]8;;${safeUrl}\x07${safeText}\x1b]8;;\x07`;
 }
 
 /** Terminal-facing variant of prLink: `#N` as a clickable OSC8 hyperlink in
