@@ -3,7 +3,15 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { killGroup, spawnCollect } from './live-procs.ts';
 
@@ -12,7 +20,7 @@ import { killGroup, spawnCollect } from './live-procs.ts';
  *  whatever repository the parent process was spawned inside (agent
  *  envs carry them). GIT_INDEX_FILE stays: data-ref writes use it as a
  *  private index. undefined for non-`-C` calls — inherit as usual. */
-const GIT_REPO_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const;
+export const GIT_REPO_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const;
 export const GIT_SYNC_PROBE_TIMEOUT_MS = 1_500;
 
 function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
@@ -38,7 +46,7 @@ function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
 const GIT_COMMAND_ARG = /^(--(upload-pack|receive-pack|exec|template)(=|$)|ext::)/;
 const GIT_COMMAND_FLAGS = new Set(['--upload-pack', '--receive-pack', '--exec', '--template']);
 
-function assertGitArgs(args: string[]): void {
+export function assertGitArgs(args: string[]): void {
   for (const a of args) {
     // Git accepts both --upload-pack=<command> and
     // --upload-pack <command>. Reject the standalone spellings too:
@@ -48,6 +56,31 @@ function assertGitArgs(args: string[]): void {
       throw new Error(`git arg rejected — command-runner flag: ${a}`);
     }
   }
+}
+
+/** Absolute path to the git binary, resolved against PATH once —
+ *  security scanners (S4036) reject PATH-resolved spawns in probed
+ *  subprocesses, and on Windows there is no shell to do the lookup. */
+export function gitBin(): string {
+  const pathEnv = process.env.PATH ?? '';
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  for (const dir of pathEnv.split(process.platform === 'win32' ? ';' : ':')) {
+    if (dir === '') {
+      continue;
+    }
+    for (const ext of exts) {
+      const candidate = `${dir}/git${ext}`;
+      try {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      } catch {
+        // not here — keep walking PATH
+      }
+    }
+  }
+  // unresolved: fall back to the bare name and let the spawn fail loud —
+  // a gitless machine has bigger problems than the probe
+  return 'git';
 }
 
 export function git(args: string[]): string {
