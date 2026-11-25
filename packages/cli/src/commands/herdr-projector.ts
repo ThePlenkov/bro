@@ -212,7 +212,13 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
     .map(([key, e]) => {
       const st = registryEntryState(p.agentsHome, e);
       const live = st === 'running' || st === 'spawned';
-      const acp = e.provider !== undefined && p.providers[e.provider]?.type === 'acp';
+      // the entry's own evidence outranks the config lookup: a worker
+      // spawned through an acp provider that was since REMOVED from the
+      // config still carries its acpSessionId — it is an acp lane
+      // whatever the current config says (bro-iik6m)
+      const acp =
+        (e.provider !== undefined && p.providers[e.provider]?.type === 'acp') ||
+        typeof e.acpSessionId === 'string';
       return {
         key,
         live,
