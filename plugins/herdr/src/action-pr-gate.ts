@@ -29,7 +29,7 @@ const clickedRepo =
   clicked !== undefined ? /github\.com[/:]([^/]+\/[^/]+?)\/pull\//.exec(clicked)?.[1] : undefined;
 if (clickedRepo !== undefined) {
   const remote = run('git', ['-C', dir, 'remote', 'get-url', 'origin']);
-  const own = /github\.com[/:]([^/]+\/[^/.]+?)(\.git)?$/.exec(remote.out.trim())?.[1];
+  const own = /github\.com[/:]([^/]+\/[^/]+?)(\.git)?$/.exec(remote.out.trim())?.[1];
   if (own !== undefined && own.toLowerCase() !== clickedRepo.toLowerCase()) {
     const msg = `${clickedRepo}#${pr} — not this repository (${own})`;
     notify('bro pr-gate', msg);

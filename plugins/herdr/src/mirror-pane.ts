@@ -42,7 +42,7 @@ function aliveProbe(pid: number, pidStart?: string): string {
   if (pidStart === undefined || pidStart === '') return `kill -0 ${pid} 2>/dev/null`;
   return (
     `kill -0 ${pid} 2>/dev/null && { [ ! -e /proc/${pid}/stat ] || ` +
-    `[ "$(awk '{print $22}' /proc/${pid}/stat 2>/dev/null)" = ${shq(pidStart)} ]; }`
+    `[ "$(sed 's/^.*) //' /proc/${pid}/stat 2>/dev/null | awk '{print $20}')" = ${shq(pidStart)} ]; }`
   );
 }
 
@@ -199,10 +199,18 @@ function mirrorPaneFor(
   return paneId === undefined ? undefined : { paneId, orphanLabel: orphan?.label };
 }
 
-/** A pane whose attempt moved on: different pane, agent, or pid than
- *  the record holds. */
+/** A pane whose attempt moved on: different pane, agent, pid, or start
+ *  token than the record holds. pidStart must compare — a respawn can
+ *  keep agentId/pane/PID (a recycled pid) while the process is new:
+ *  the armed watcher's /proc probe still matches the OLD start token,
+ *  so without re-arming the tail dies under a live worker. */
 function attemptMoved(rec: MirrorRec | undefined, paneId: string, a: MirrorSource): boolean {
-  return rec?.pane_id !== paneId || rec?.agentId !== a.agentId || rec?.pid !== a.pid;
+  return (
+    rec?.pane_id !== paneId ||
+    rec?.agentId !== a.agentId ||
+    rec?.pid !== a.pid ||
+    rec?.pidStart !== a.pidStart
+  );
 }
 
 /** One mirror's convergence for a pass: find-or-split the pane, then
