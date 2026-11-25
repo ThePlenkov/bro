@@ -54,33 +54,53 @@ import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, gitTryAsync } from './git.ts';
  *  default wall — ~30s per 500MB over the first gigabyte. */
 export function bdSyncTimeoutMs(storeDir?: string): number {
   const env = Number(process.env.BRO_BD_SYNC_TIMEOUT_MS);
-  if (Number.isFinite(env) && env > 0) {
+  if (Number.isInteger(env) && env > 0) {
     return env;
   }
   let floor = 120_000;
   if (storeDir !== undefined) {
-    try {
-      let bytes = 0;
-      const walk = (dir: string): void => {
-        for (const e of readdirSync(dir, { withFileTypes: true })) {
-          const p = join(dir, e.name);
-          if (e.isDirectory()) {
-            walk(p);
-          } else if (e.isFile()) {
-            bytes += statSync(p).size;
-          }
-        }
-      };
-      walk(storeDir);
-      const gib = bytes / (1024 * 1024 * 1024);
-      if (gib > 1) {
-        floor = Math.max(floor, 120_000 + Math.ceil((gib - 1) * 2) * 30_000);
-      }
-    } catch {
-      // unreadable store — the default wall applies
+    const bytes = storeSizeBytes(storeDir);
+    const gib = bytes / (1024 * 1024 * 1024);
+    if (gib > 1) {
+      floor = Math.max(floor, 120_000 + Math.ceil((gib - 1) * 2) * 30_000);
     }
   }
   return floor;
+}
+
+/** Store size memoized per dir — the walk is synchronous and a big
+ *  store must not re-pay it on every sync probe in the process. */
+const storeSizeCache = new Map<string, number>();
+
+function storeSizeBytes(storeDir: string): number {
+  const hit = storeSizeCache.get(storeDir);
+  if (hit !== undefined) {
+    return hit;
+  }
+  let bytes = 0;
+  const walk = (dir: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // an unreadable dir contributes nothing, the walk survives
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      try {
+        if (e.isDirectory()) {
+          walk(p);
+        } else if (e.isFile()) {
+          bytes += statSync(p).size;
+        }
+      } catch {
+        // a vanishing/unreadable entry loses its own bytes, never the walk
+      }
+    }
+  };
+  walk(storeDir);
+  storeSizeCache.set(storeDir, bytes);
+  return bytes;
 }
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
