@@ -603,8 +603,14 @@ const DOLT_DEEPEN = 64;
  *  blocks on Linux: 262144 blocks = 128 MiB. */
 function boundedFetch(args: string[], netMs: number): { code: number; out: string; err: string } {
   // same command-runner-flag protection as gitTry — a bounded fetch is
-  // still a git invocation and --upload-pack must never pass (kody)
-  assertGitArgs(args);
+  // still a git invocation and --upload-pack must never pass (kody).
+  // The probe contract is fail-open: a rejected flag is a failed probe
+  // row, never an uncaught throw through the doctor (kilo on #1201)
+  try {
+    assertGitArgs(args);
+  } catch (err) {
+    return { code: 128, out: '', err: err instanceof Error ? err.message : String(err) };
+  }
   // the probe always runs with -C scratch — an inherited GIT_DIR /
   // GIT_WORK_TREE would redirect the fetch into the caller's repo
   // (macroscope on #1201); strip repo env exactly like gitTry does
