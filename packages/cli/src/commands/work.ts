@@ -52,6 +52,7 @@ import {
   facade,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   git,
+  gitCommonDir,
   gitTry,
   hasHelpFlag,
   LockTimeout,
@@ -1375,6 +1376,14 @@ export interface LitterReapOpts {
   sessionClaims?: ClaimRow[];
   dryRun?: boolean;
   now?: number;
+  /** Optional two-observation grace for the fleet worktree reaper. When
+   * supplied, the first eligible observation is stamped and kept. */
+  graceMs?: number;
+  /** Fleet reaping keeps branch refs; callers may opt into that policy
+   * without changing the historical loop-litter cleanup contract. */
+  keepBranches?: boolean;
+  /** Push a non-empty committed tree to origin before removing its checkout. */
+  backupNonEmptyDiff?: boolean;
 }
 
 /** Branch prefixes whose tail is a human/agent label, not a
@@ -1514,10 +1523,33 @@ function litterCandidates(
   }
   const sink: CandSink = { opts, rep, main, onTree, cands, tipIndex: lazyTipIndex(opts, rep) };
   for (const w of all.slice(1)) {
-    treeCand(w, sink);
+    opts.graceMs === undefined ? treeCand(w, sink) : fleetTreeCand(w, sink);
   }
   litterBranches(opts, rep, onTree, cands);
   return { main, cands };
+}
+
+/** Fleet cleanup is deliberately broader than loop litter: a completed bead
+ * can leave a checkout on any branch name. The branch itself is retained by
+ * the fleet policy, so this pass only needs to attribute the worktree. */
+function fleetTreeCand(w: WorktreeInfo, sink: CandSink): void {
+  if (w.prunable !== undefined || !existsSync(w.path)) {
+    return;
+  }
+  const branch = w.branch;
+  if (branch !== undefined) {
+    sink.onTree.add(branch);
+    sink.cands.push({
+      w,
+      branch,
+      slug: branch.split('/').at(-1) ?? branch,
+      label: true,
+    });
+    return;
+  }
+  if (w.detached === true) {
+    detachedTreeCand(w, sink);
+  }
 }
 
 /** `worktree list --porcelain`, parsed — undefined (and reported)
@@ -1995,7 +2027,9 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
   // would be): a kept tree keeps its branch — it is still checked out
   // there, and a dry-run 'would delete' line on a kept tree is a lie
   if (reapTreeUnderLock(c.w, c, ctx, label)) {
-    retireLitterBranch(c, ctx, pr);
+    if (opts.keepBranches !== true) {
+      retireLitterBranch(c, ctx, pr);
+    }
   }
 }
 
@@ -2047,6 +2081,24 @@ function reapTreeUnderLock(
       rep.kept.push(`${label} (${why})`);
       return false;
     }
+    if (!fleetGraceSatisfied(c.w!.path, ctx.opts)) {
+      rep.kept.push(`${label} (grace window)`);
+      return false;
+    }
+    if (ctx.opts.backupNonEmptyDiff === true && c.branch !== '') {
+      const diff = gitTry(['-C', c.w!.path, 'diff', '--quiet', 'origin/main...HEAD']);
+      if (diff.code > 1) {
+        rep.kept.push(`${label} (base diff unverifiable)`);
+        return false;
+      }
+      if (diff.code === 1) {
+        const push = gitTry(['-C', c.w!.path, 'push', 'origin', `HEAD:${c.branch}`]);
+        if (push.code !== 0) {
+          rep.errors.push(`worktree ${c.w!.path} backup push failed — ${push.err || 'git error'}`);
+          return false;
+        }
+      }
+    }
     if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
       rep.errors.push(`worktree ${w.path} not removed`);
       return false;
@@ -2056,6 +2108,49 @@ function reapTreeUnderLock(
   } finally {
     release();
   }
+}
+
+/** Persist the first eligible observation in the shared git dir. A file in
+ * the worktree would disappear with the checkout and could not provide the
+ * second-sighting guarantee. Corrupt state is discarded conservatively. */
+function fleetGraceSatisfied(path: string, opts: LitterReapOpts): boolean {
+  if (opts.graceMs === undefined || opts.dryRun === true) {
+    return true;
+  }
+  const common = gitCommonDir(opts.root);
+  if (common === null) {
+    return false;
+  }
+  const file = join(common, 'bro', 'worktree-reaper.json');
+  let stamps: Record<string, number> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) {
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          stamps[key] = value;
+        }
+      }
+    }
+  } catch {
+    // Missing/corrupt state is equivalent to a first sighting.
+  }
+  const key = resolve(path);
+  const now = opts.now ?? Date.now();
+  const since = stamps[key];
+  if (since === undefined) {
+    stamps[key] = now;
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(stamps)}\n`, 'utf8');
+    return false;
+  }
+  if (now - since < opts.graceMs) {
+    return false;
+  }
+  delete stamps[key];
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(stamps)}\n`, 'utf8');
+  return true;
 }
 
 interface ParkedCand {
@@ -2134,7 +2229,9 @@ function reapParkedCand(
   } finally {
     release();
   }
-  retireLitterBranch(c, ctx, pr);
+  if (opts.keepBranches !== true) {
+    retireLitterBranch(c, ctx, pr);
+  }
   return 0;
 }
 
