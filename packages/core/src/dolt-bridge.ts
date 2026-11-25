@@ -470,8 +470,8 @@ function missingTables(tables: string[], files: Set<string>): string[] {
 /** A dolt data ref already local in gitDir — rev-parse + one ls-tree +
  *  the manifest blob. Zero network: sync checks the mirror post-push,
  *  doctor checks FETCH_HEAD after its own fetch. */
-export function doltHeadHealth(gitDir: string, ref: string): DoltHeadHealth {
-  const head = gitTry(['-C', gitDir, 'rev-parse', '--verify', `${ref}^{commit}`], PROBE_MS);
+export function doltHeadHealth(gitDir: string, ref: string, ms: number = PROBE_MS): DoltHeadHealth {
+  const head = gitTry(['-C', gitDir, 'rev-parse', '--verify', `${ref}^{commit}`], ms);
   if (head.code !== 0) {
     return { head: '', tables: 0, missing: [], error: `no ${ref}` };
   }
@@ -479,11 +479,11 @@ export function doltHeadHealth(gitDir: string, ref: string): DoltHeadHealth {
   // default ls-tree form `mode type sha\tname`, NUL-framed — a table
   // name must resolve to a regular file (blob), never a tree/gitlink:
   // a directory carrying the manifest's name is NOT the table file
-  const tree = gitTry(['-C', gitDir, 'ls-tree', '-z', sha], PROBE_MS);
+  const tree = gitTry(['-C', gitDir, 'ls-tree', '-z', sha], ms);
   if (tree.code !== 0) {
     return { head: sha, tables: 0, missing: [], error: firstLine(tree.err) || 'ls-tree failed' };
   }
-  const man = gitTry(['-C', gitDir, 'show', `${sha}:manifest`], PROBE_MS);
+  const man = gitTry(['-C', gitDir, 'show', `${sha}:manifest`], ms);
   if (man.code !== 0) {
     return { head: sha, tables: 0, missing: [], error: 'head carries no manifest' };
   }
@@ -545,8 +545,13 @@ export function doltDirHealth(dir: string): DoltHeadHealth {
  *  the report's last-good head. History must already be local (deepen
  *  first); an unverifiable ancestor is skipped, never trusted. `cap`
  *  bounds the walk. */
-export function lastGoodDoltHead(gitDir: string, from: string, cap = 64): string | null {
-  const list = gitTry(['-C', gitDir, 'rev-list', from, `--max-count=${cap + 1}`], PROBE_MS);
+export function lastGoodDoltHead(
+  gitDir: string,
+  from: string,
+  cap = 64,
+  ms: number = PROBE_MS
+): string | null {
+  const list = gitTry(['-C', gitDir, 'rev-list', from, `--max-count=${cap + 1}`], ms);
   if (list.code !== 0) {
     return null;
   }
@@ -555,7 +560,7 @@ export function lastGoodDoltHead(gitDir: string, from: string, cap = 64): string
     .map(l => l.trim())
     .filter(l => l !== '')
     .slice(1)) {
-    const h = doltHeadHealth(gitDir, sha);
+    const h = doltHeadHealth(gitDir, sha, ms);
     if (h.error === undefined && h.missing.length === 0) {
       return sha;
     }
@@ -665,7 +670,7 @@ export function probeDoltRemote(
         error: displayUrl(firstLine(f.err)) || `git fetch exited ${f.code}`,
       };
     }
-    const health = doltHeadHealth(scratch, 'FETCH_HEAD');
+    const health = doltHeadHealth(scratch, 'FETCH_HEAD', netMs);
     if (health.missing.length === 0) {
       return health;
     }
@@ -684,7 +689,7 @@ export function probeDoltRemote(
       netMs
     );
     if (d.code === 0) {
-      const lastGood = lastGoodDoltHead(scratch, health.head, deepen);
+      const lastGood = lastGoodDoltHead(scratch, health.head, deepen, netMs);
       return lastGood === null ? health : { ...health, lastGood };
     }
     return health;
