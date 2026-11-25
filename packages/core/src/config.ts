@@ -2717,6 +2717,35 @@ export function loadConfig(
       isPlainObject(globalFleet) ? globalFleet.providerCaps : undefined
     ),
   };
+  // cross-section validation — the sections parse independently, but a
+  // routing chain entry is only sound WITH its model pin: inline, or
+  // inherited from providers.<name>.model. An unpinned entry falls back
+  // to the lane default at use-time and leaks the wrong model into the
+  // lane (drill 2026-10-30 minimax-model-mismatch, bro-1lvvx). The drop
+  // lands here where both sections are resolved; an entry naming an
+  // unknown provider stays a use-time error, not a parse-time drop.
+  for (const [cls, row] of Object.entries(config.fleet.routing)) {
+    const chain = row.chain.filter(e => {
+      if (e.model !== undefined) {
+        return true;
+      }
+      if (config.providers[e.provider]?.model !== undefined) {
+        return true;
+      }
+      console.error(
+        `bro.config: fleet.routing.${cls}.chain entry '${e.provider}' pins no model and providers.${e.provider} carries none — entry dropped`
+      );
+      return false;
+    });
+    if (chain.length !== row.chain.length) {
+      if (chain.length === 0) {
+        console.error(`bro.config: fleet.routing.${cls} has no usable entries — class dropped`);
+        delete config.fleet.routing[cls];
+      } else {
+        row.chain = chain;
+      }
+    }
+  }
   return config;
 }
 
