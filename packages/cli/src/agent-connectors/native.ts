@@ -222,7 +222,14 @@ export {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-export { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+export {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  resolve,
+} from 'node:path';
 export * from '@broject/core';
 export { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
 export type { AcpSeam, FetchFn } from '@broject/providers';
@@ -534,6 +541,489 @@ type DockerInspect = harness.DockerInspect;
 type DockerMount = harness.DockerMount;
 type Devcontainer = harness.Devcontainer;
 type GhResult = harness.GhResult;
+
+type NativeSpawnWorkerArgs = {
+  scoped: boolean;
+  args: string[];
+  scopeArgv: string[];
+  spawnOpts: SpawnOptions;
+  stderrLog: string | undefined;
+  log: string;
+  handleFile: string;
+  exitFile: string;
+};
+
+function spawnNativeWorker({
+  scoped,
+  args,
+  scopeArgv,
+  spawnOpts,
+  stderrLog,
+  log,
+  handleFile,
+  exitFile,
+}: NativeSpawnWorkerArgs): {
+  child: ReturnType<typeof spawn>;
+  scopeRetried: boolean;
+} {
+  const spawnWorker = (wrap: boolean) => {
+    if (wrap && spawnTestSeam.scopeRefused === true) {
+      return spawn('sh', ['-c', 'exit 1'], spawnOpts);
+    }
+    return spawn(wrap ? 'systemd-run' : 'sh', wrap ? scopeArgv : args, spawnOpts);
+  };
+  let child = spawnWorker(scoped);
+  if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
+    appendPrivateFileSync({
+      path: stderrLog ?? log,
+      data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
+    });
+    child.on('error', () => {
+      /* the retry owns the verdict now */
+    });
+    child = spawnWorker(false);
+    return { child, scopeRetried: true };
+  }
+  return { child, scopeRetried: false };
+}
+
+type PublishNativeChildArgs = {
+  dir: string;
+  molStep: string;
+  spec: SpawnSpec;
+  agentId: string;
+  goFile: string;
+  child: ReturnType<typeof spawn>;
+  reservation: Parameters<typeof releaseSessionSlot>[0] | undefined;
+  crossKindReservations: Parameters<typeof releaseSessionStart>[0];
+  lease: Lease | undefined;
+};
+
+function publishNativeChild({
+  dir,
+  molStep,
+  spec,
+  agentId,
+  goFile,
+  child,
+  reservation,
+  crossKindReservations,
+  lease,
+}: PublishNativeChildArgs): AgentRegistryEntry {
+  // an unhandled 'error' event would take the whole CLI down —
+  // a failed exec records itself on the entry and reads 'lost'
+  const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt;
+  watchNativeChild({
+    child,
+    dir,
+    molStep: spec.molStep,
+    agentId,
+    spawnStamp,
+    reservation,
+    crossKindReservations,
+    lease,
+  });
+  child.unref();
+  // the launcher died between OS spawn and pid publication —
+  // a live detached child the registry cannot yet name (spec
+  // bro-l8c4f.5 failpoint)
+  maybeAbandonSpawn('os-spawn');
+  const spawned = patchAgentRegistry(dir, spec.molStep, {
+    pid: child.pid ?? -1,
+    // the starttime pins identity against pid reuse — without it
+    // a recycled pid keeps a dead agent 'running' in every
+    // dedup/stop decision the registry drives
+    pidStart: typeof child.pid === 'number' ? (procStat(child.pid)?.start ?? null) : null,
+  });
+  // the spawned pid IS probeable — downgrade the born-TTL
+  // lease to local governance so a dead worker frees the key
+  // without waiting out the TTL
+  rebindSpawnLease(dir, lease!, { host: hostname(), pid: child.pid });
+  // the slot claims follow the lane's real holder — a spawning
+  // CLI exits but the session's lane lives with the child
+  // (spec bro-x601l); a swept claim retags to nothing
+  if (child.pid !== undefined) {
+    retagSessionSlots([reservation, ...crossKindReservations], child.pid);
+  }
+  writeWorkMarker(dir, agentId, spec.molStep, child.pid);
+  // died after publishing the handle — pid+marker are durable,
+  // the worker's admission stamp never lands
+  maybeAbandonSpawn('publication');
+  // the admission stamp — durable only after pid+marker, so a
+  // crash earlier can never admit a worker the registry cannot
+  // reach. Existence is the signal; the pid inside is forensic.
+  writePrivateFileSync({ path: goFile, data: `${child.pid ?? -1}\n` });
+  return spawned;
+}
+
+function watchNativeChild({
+  child,
+  dir,
+  molStep,
+  agentId,
+  spawnStamp,
+  reservation,
+  crossKindReservations,
+  lease,
+}: {
+  child: ReturnType<typeof spawn>;
+  dir: string;
+  molStep: string;
+  agentId: string;
+  spawnStamp: string | undefined;
+  reservation: Parameters<typeof releaseSessionSlot>[0] | undefined;
+  crossKindReservations: Parameters<typeof releaseSessionStart>[0];
+  lease: Lease | undefined;
+}) {
+  child.on('error', err => {
+    try {
+      const cur = readAgentRegistry(dir)[molStep];
+      if (cur?.agentId !== agentId || cur?.spawnedAt !== spawnStamp) return;
+      patchAgentRegistry(dir, molStep, { spawnError: err.message });
+      if (reservation !== undefined) releaseSessionSlot(reservation);
+      releaseSessionStart(crossKindReservations);
+      releaseSpawnLease(dir, lease!);
+    } catch {
+      // The entry may not have landed yet.
+    }
+  });
+}
+
+type NativeLaunchArgs = {
+  dir: string;
+  home: string;
+  mol: string;
+  spec: SpawnSpec;
+  env: AgentConnectorEnv;
+  command: string;
+  knobs: Record<string, unknown>;
+  agentId: string;
+  promptFile: string;
+  log: string;
+  stderrLog: string | undefined;
+  exitFile: string;
+  resumeSessionId: string | undefined;
+  handleFile: string;
+  goFile: string;
+  workerTmp: string | undefined;
+};
+
+type NativeProcessArgs = {
+  scoped: boolean;
+  args: string[];
+  scopeArgv: string[];
+  spawnOpts: SpawnOptions;
+  stderrLog: string | undefined;
+  log: string;
+  handleFile: string;
+  exitFile: string;
+};
+
+function spawnNativeProcess(args: NativeProcessArgs) {
+  return spawnNativeWorker(args);
+}
+
+type NativeLaunchProcessArgs = {
+  args: string[];
+  agentId: string;
+  spec: SpawnSpec;
+  knobs: Record<string, unknown>;
+  env: AgentConnectorEnv;
+  workerTmp: string | undefined;
+  promptFile: string;
+  cliBadge: string | undefined;
+  mol: string;
+  fd: number;
+  errFd: number | undefined;
+  stderrLog: string | undefined;
+  log: string;
+  handleFile: string;
+  exitFile: string;
+};
+
+// NOSONAR — keeps native launch setup together as one transaction.
+function launchNativeProcess({
+  args,
+  agentId,
+  spec,
+  knobs,
+  env,
+  workerTmp,
+  promptFile,
+  cliBadge,
+  mol,
+  fd,
+  errFd,
+  stderrLog,
+  log,
+  handleFile,
+  exitFile,
+}: NativeLaunchProcessArgs) {
+  const scoped = systemdScopeFor(knobs);
+  const scopeArgv = [
+    ...SCOPE_RUN_PREFIX.slice(1),
+    `--description=bro agent ${agentId} ${spec.molStep}`,
+    '--',
+    'sh',
+    ...args,
+  ];
+  const spawnOpts: SpawnOptions = {
+    cwd: spec.repoRoot,
+    env: nativeSpawnEnvironment({
+      spec,
+      env,
+      workerTmp,
+      agentId,
+      promptFile,
+      cliBadge,
+      mol,
+    }),
+    stdio: ['ignore', fd, errFd],
+    detached: true,
+  };
+  return spawnNativeProcess({
+    scoped,
+    args,
+    scopeArgv,
+    spawnOpts,
+    stderrLog,
+    log,
+    handleFile,
+    exitFile,
+  });
+}
+
+// NOSONAR — keeps native launch setup together as one transaction.
+function launchNativeChild(args: NativeLaunchArgs): {
+  fd: number;
+  errFd: number | undefined;
+  child: ReturnType<typeof spawn>;
+  scopeRetried: boolean;
+} {
+  const {
+    dir,
+    home,
+    mol,
+    spec,
+    env,
+    command,
+    knobs,
+    agentId,
+    promptFile,
+    log,
+    stderrLog,
+    exitFile,
+    resumeSessionId,
+    handleFile,
+    goFile,
+    workerTmp,
+  } = args;
+  let fd: number | undefined;
+  let errFd: number | undefined;
+  try {
+    fd = openPrivateAppendSync({ path: log });
+    if (stderrLog !== undefined) {
+      errFd = openPrivateAppendSync({ path: stderrLog });
+    }
+    ensureWorkerTmpDir(workerTmp);
+    const worker = workerWithResume(spec.worker, resumeSessionId);
+    warnNoPromptFile(worker, command);
+    const { args } = nativePayloadArgs({
+      worker,
+      command,
+      exitFile,
+      handleFile,
+      goFile,
+      promptFile,
+    });
+    const cliBadge = workerCliBadge(worker, command);
+    const spawnedWorker = launchNativeProcess({
+      args,
+      agentId,
+      spec,
+      knobs,
+      env,
+      workerTmp,
+      promptFile,
+      cliBadge,
+      mol,
+      fd: fd!,
+      errFd,
+      stderrLog,
+      log,
+      handleFile,
+      exitFile,
+    });
+    const child = spawnedWorker.child;
+    return { fd: fd!, errFd, child, scopeRetried: spawnedWorker.scopeRetried };
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    if (errFd !== undefined) closeSync(errFd);
+    throw error;
+  }
+}
+type NativeSpawnFailureArgs = {
+  dir: string;
+  molStep: string;
+  agentId: string;
+  runId: string;
+  reservation: Parameters<typeof releaseSessionSlot>[0] | undefined;
+  crossKindReservations: Parameters<typeof releaseSessionStart>[0];
+  lease: Lease | undefined;
+  childPid: number | undefined;
+};
+function handleNativeSpawnFailure(error: unknown, args: NativeSpawnFailureArgs): never {
+  const { dir, molStep, agentId, runId, reservation, crossKindReservations, lease, childPid } =
+    args;
+  if (reservation !== undefined) {
+    releaseSessionSlot(reservation);
+  }
+  releaseSessionStart(crossKindReservations);
+  releaseSpawnLease(dir, lease!);
+  stampNativeSpawnFailure({ dir, molStep, agentId, runId, error, childPid });
+  throw error;
+}
+function stampNativeSpawnFailure({
+  dir,
+  molStep,
+  agentId,
+  runId,
+  error,
+  childPid,
+}: {
+  dir: string;
+  molStep: string;
+  agentId: string;
+  runId: string;
+  error: unknown;
+  childPid: number | undefined;
+}) {
+  try {
+    patchAgentRegistryIf(
+      dir,
+      molStep,
+      {
+        stopped: true,
+        spawnError: error instanceof Error ? error.message : String(error),
+      },
+      cur =>
+        cur?.agentId === agentId &&
+        cur?.runId === runId &&
+        cur?.pid === undefined &&
+        childPid === undefined
+    );
+  } catch {}
+}
+type NativeEnvironmentArgs = {
+  spec: SpawnSpec;
+  env: AgentConnectorEnv;
+  workerTmp: string | undefined;
+  agentId: string;
+  promptFile: string;
+  cliBadge: string | undefined;
+  mol: string;
+};
+function nativeSpawnEnvironment({
+  spec,
+  env,
+  workerTmp,
+  agentId,
+  promptFile,
+  cliBadge,
+  mol,
+}: NativeEnvironmentArgs): Record<string, string> {
+  const policy = getCredentialScope(env, 'native');
+  const ambient = Object.fromEntries(
+    Object.entries(process.env).filter((e): e is [string, string] => {
+      if (e[1] === undefined) return false;
+      if (envKeyDropped(e[0], workerTmp !== undefined)) return false;
+      if (GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
+    })
+  );
+  const fromSpec = Object.fromEntries(
+    Object.entries(spec.env ?? {}).filter((e): e is [string, string] => {
+      if (e[1] === undefined) return false;
+      if (envKeyDropped(e[0], workerTmp !== undefined)) return false;
+      if (GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
+    })
+  );
+  return {
+    ...ambient,
+    ...fromSpec,
+    ...Object.fromEntries(workerTmpEnvPins(workerTmp)),
+    ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
+  };
+}
+function nativePayloadArgs({
+  worker,
+  command,
+  exitFile,
+  handleFile,
+  goFile,
+  promptFile,
+}: {
+  worker: ReturnType<typeof workerWithResume>;
+  command: string;
+  exitFile: string;
+  handleFile: string;
+  goFile: string;
+  promptFile: string;
+}) {
+  const goTicks = String(spawnTestSeam.goWaitTicks ?? GO_WAIT_TICKS);
+  const args =
+    worker?.kind === 'argv'
+      ? [
+          '-c',
+          `${HANDSHAKE_SCRIPT} shift 4; "$@"; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
+          'bro-agent',
+          exitFile,
+          handleFile,
+          goFile,
+          goTicks,
+          ...worker.argv,
+          promptFile,
+        ]
+      : [
+          '-c',
+          `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
+          'bro-agent',
+          exitFile,
+          handleFile,
+          goFile,
+          goTicks,
+        ];
+  return { args, goTicks };
+}
+
+function prepareNativeSpawn({
+  dir,
+  home,
+  spec,
+  env,
+  command,
+}: {
+  dir: string;
+  home: string;
+  spec: SpawnSpec;
+  env: AgentConnectorEnv;
+  command: string;
+}) {
+  return prepareSpawn(dir, home, 'native', spec, {
+    isLive: e => {
+      const s = nativeState(dir, home, spec.molStep, e);
+      return s === 'running' || s === 'spawned';
+    },
+    liveDetail: e => (typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight'),
+    cap: { max: fleetCapOf(env), env },
+    env,
+    sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
+    spawnCommand: command,
+    external: externalGuardOf(env),
+  });
+}
+
 export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir;
   const knobs = env.agents['native'] ?? {};
@@ -541,47 +1031,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 
   const findEntry = (id: string) => findAgentEntry(dir, 'native', id);
 
-  const spawnNativeWorker = (
-    scoped: boolean,
-    args: string[],
-    scopeArgv: string[],
-    spawnOpts: SpawnOptions,
-    stderrLog: string | undefined,
-    log: string,
-    handleFile: string,
-    exitFile: string
-  ): { child: ReturnType<typeof spawn>; scopeRetried: boolean } => {
-    const spawnWorker = (wrap: boolean) => {
-      if (wrap && spawnTestSeam.scopeRefused === true) {
-        return spawn('sh', ['-c', 'exit 1'], spawnOpts);
-      }
-      return spawn(wrap ? 'systemd-run' : 'sh', wrap ? scopeArgv : args, spawnOpts);
-    };
-    let child = spawnWorker(scoped);
-    if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
-      if (stderrLog !== undefined) {
-        appendPrivateFileSync({
-          path: stderrLog,
-          data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
-        });
-      } else {
-        appendPrivateFileSync({
-          path: log,
-          data: 'bro: systemd-run refused the scope — respawned without the wrap\n',
-        });
-      }
-      child.on('error', () => {
-        /* the retry owns the verdict now */
-      });
-      child = spawnWorker(false);
-      return { child, scopeRetried: true };
-    }
-    return { child, scopeRetried: false };
-  };
-
   // NOSONAR — the lock callback owns one synchronous spawn transaction
+  // NOSONAR — the lock callback owns one synchronous spawn transaction.
   const spawnNative = (spec: SpawnSpec, home: string, mol: string): AgentInfo => {
     return withAgentRegistryLock(dir, () => {
+      const prepared = prepareNativeSpawn({ dir, home, spec, env, command });
+      // prettier-ignore
       const {
         agentId,
         promptFile,
@@ -593,247 +1048,59 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         reservation,
         resumeSessionId,
         crossKindReservations,
-      } = prepareSpawn(dir, home, 'native', spec, {
-        // 'spawned' counts as live for dedup: inside the handoff
-        // window a pid-less entry may still be a worker about to
-        // publish its handle — a respawn beside it is the
-        // crash-window bug (spec bro-l8c4f.5)
-        isLive: e => {
-          const s = nativeState(dir, home, spec.molStep, e);
-          return s === 'running' || s === 'spawned';
-        },
-        liveDetail: e => (typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight'),
-        cap: { max: fleetCapOf(env), env },
-        env,
-        sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
-        spawnCommand: command,
-        external: externalGuardOf(env),
-      });
-      // the launcher crashed after the reservation — registry+claim
-      // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
+      } = prepared;
       maybeAbandonSpawn('reservation');
       const { handleFile, goFile } = attemptHandles(home, agentId, runId);
-      // resolved once inside the lock — the git probe is the only IO
-      // the pin needs and every consumer (mkdir, env) shares it
       const workerTmp = workerTmpDir(spec.repoRoot, agentId);
-      // the worker's stderr gets its own append fd — the .log stays
-      // the agent-updates stream; the child/agent noise (and every
-      // template worker's diagnostics) lands in .stderr (bro-e2ec0).
-      // Both open INSIDE the guard — a throw must hand the session
-      // reservation back like any other spawn failure, not strand it.
       let fd: number | undefined;
       let errFd: number | undefined;
-      // whether any spawnWorker produced a child — read by the catch
-      // to tell a pre-launch throw (no child, the row is dead weight)
-      // from a post-spawn one (a live child can still publish its
-      // handle, and the handoff grace window owns the row)
       let childPid: number | undefined;
       let spawned: AgentRegistryEntry;
       try {
-        fd = openPrivateAppendSync({ path: log });
-        if (stderrLog !== undefined) {
-          errFd = openPrivateAppendSync({ path: stderrLog });
-        }
-        // the worker's tmpdir exists before the payload execs — the
-        // nx daemon's mkdtemp needs the parent (spec bro-v96mp)
-        ensureWorkerTmpDir(workerTmp);
-        // the wrapper captures $? into the .exit file — the only exit
-        // record a detached process can leave once the parent is gone.
-        // The write targets the literal quoted path, never $out: a
-        // 'template' payload runs in this shell's scope and assigning
-        // `out` would retarget the exit write (the shape tmux/docker
-        // already use).
-        // Worker payloads (spec bro-5hx1.1): a 'template' worker's
-        // command substitutes for the backend's own template; an
-        // 'argv' worker execs verbatim through the wrapper's "$@"
-        // positional passthrough — the provider argv (a `model` value
-        // could carry shell metachars) is never string-concatenated.
-        const worker = workerWithResume(spec.worker, resumeSessionId);
-        warnNoPromptFile(worker, command);
-        // the handshake runs before the payload: the worker publishes
-        // its own handle, then holds on the launcher's go stamp — a
-        // launcher that died mid-publish never admits it (75), so a
-        // survivor can never silently double a respawn (spec
-        // bro-l8c4f.5)
-        const goTicks = String(spawnTestSeam.goWaitTicks ?? GO_WAIT_TICKS);
-        const args =
-          worker?.kind === 'argv'
-            ? [
-                '-c',
-                `${HANDSHAKE_SCRIPT} shift 4; "$@"; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
-                'bro-agent',
-                exitFile,
-                handleFile,
-                goFile,
-                goTicks,
-                ...worker.argv,
-                promptFile,
-              ]
-            : [
-                '-c',
-                `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
-                'bro-agent',
-                exitFile,
-                handleFile,
-                goFile,
-                goTicks,
-              ];
-        const cliBadge = workerCliBadge(worker, command);
-        // the scope wrap (bro-ybo8z): the payload runs under
-        // systemd-run so a supervisor's cgroup kill cannot reach it.
-        // --description carries the run's identity (never --unit — a
-        // respawned agentId must not collide on a lingering scope)
-        const scoped = systemdScopeFor(knobs);
-        const scopeArgv = [
-          ...SCOPE_RUN_PREFIX.slice(1),
-          `--description=bro agent ${agentId} ${spec.molStep}`,
-          '--',
-          'sh',
-          ...args,
-        ];
-        const spawnOpts: SpawnOptions = {
-          // NOSONAR — operator-configured agent command (same contract as loop)
-          cwd: spec.repoRoot,
-          env: (() => {
-            const policy = getCredentialScope(env, 'native');
-            const ambient = Object.fromEntries(
-              Object.entries(process.env).filter((e): e is [string, string] => {
-                if (e[1] === undefined) return false;
-                // the tmpdir triple drops only when a pin replaces
-                // it — a repo-less spawn keeps the ambient tmpdir
-                if (envKeyDropped(e[0], workerTmp !== undefined)) return false;
-                if (GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
-                // ambient BRO_BATCH is stripped, not passed — the
-                // marker reaches the worker only via spec.env below
-                return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
-              })
-            );
-            const fromSpec = Object.fromEntries(
-              Object.entries(spec.env ?? {}).filter((e): e is [string, string] => {
-                if (e[1] === undefined) return false;
-                if (envKeyDropped(e[0], workerTmp !== undefined)) return false;
-                if (GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
-                return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
-              })
-            );
-            return {
-              // ambient env minus the connector-owned pins
-              ...ambient,
-              ...fromSpec,
-              // the tmpdir pin rides the pin layer too — a spec.env
-              // TMPDIR must not re-aim worker scratch at the tmpfs
-              // (spec bro-v96mp)
-              ...Object.fromEntries(workerTmpEnvPins(workerTmp)),
-              // identity pins last — spec.env must never redirect the
-              // claim store or re-badge the worker as another bead/agent
-              ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
-            };
-          })(),
-          stdio: ['ignore', fd, errFd],
-          detached: true,
-        };
-        // the scope refusal path needs a second shot at the same spawn —
-        // the seam's refusal stand-in dies instantly like a real refused
-        // systemd-run, but runs the payload verbatim for everything else
-        const spawnedWorker = spawnNativeWorker(
-          scoped,
-          args,
-          scopeArgv,
-          spawnOpts,
-          stderrLog,
+        const launched = launchNativeChild({
+          dir,
+          home,
+          mol,
+          spec,
+          env,
+          command,
+          knobs,
+          agentId,
+          promptFile,
           log,
+          stderrLog,
+          exitFile,
+          resumeSessionId,
           handleFile,
-          exitFile
-        );
-        let child = spawnedWorker.child;
-        childPid = spawnedWorker.scopeRetried ? undefined : child.pid;
-        // an unhandled 'error' event would take the whole CLI down —
-        // a failed exec records itself on the entry and reads 'lost'
-        const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt;
-        child.on('error', err => {
-          try {
-            // stamp only our own run — a respawn that reused this
-            // molStep/agentId owns the entry now; an old child's error
-            // must not mislabel a live respawn (bro-ooud)
-            const cur = readAgentRegistry(dir)[spec.molStep];
-            if (cur?.agentId !== agentId || cur?.spawnedAt !== spawnStamp) {
-              return;
-            }
-            patchAgentRegistry(dir, spec.molStep, { spawnError: err.message });
-            // the devin session never started — hand the slot back now
-            // rather than block peers for the reservation's whole TTL
-            if (reservation !== undefined) {
-              releaseSessionSlot(reservation);
-            }
-            releaseSessionStart(crossKindReservations);
-            releaseSpawnLease(dir, lease);
-          } catch {
-            // the entry may not have landed yet — nothing else to do
-          }
+          goFile,
+          workerTmp,
         });
-        child.unref();
-        // the launcher died between OS spawn and pid publication —
-        // a live detached child the registry cannot yet name (spec
-        // bro-l8c4f.5 failpoint)
-        maybeAbandonSpawn('os-spawn');
-        spawned = patchAgentRegistry(dir, spec.molStep, {
-          pid: child.pid ?? -1,
-          // the starttime pins identity against pid reuse — without it
-          // a recycled pid keeps a dead agent 'running' in every
-          // dedup/stop decision the registry drives
-          pidStart: typeof child.pid === 'number' ? (procStat(child.pid)?.start ?? null) : null,
+        fd = launched.fd;
+        errFd = launched.errFd;
+        const child = launched.child;
+        childPid = launched.scopeRetried ? undefined : child.pid;
+        spawned = publishNativeChild({
+          dir,
+          molStep: spec.molStep,
+          spec,
+          agentId,
+          goFile,
+          child,
+          reservation,
+          crossKindReservations,
+          lease,
         });
-        // the spawned pid IS probeable — downgrade the born-TTL
-        // lease to local governance so a dead worker frees the key
-        // without waiting out the TTL
-        rebindSpawnLease(dir, lease, { host: hostname(), pid: child.pid });
-        // the slot claims follow the lane's real holder — a spawning
-        // CLI exits but the session's lane lives with the child
-        // (spec bro-x601l); a swept claim retags to nothing
-        if (child.pid !== undefined) {
-          retagSessionSlots([reservation, ...crossKindReservations], child.pid);
-        }
-        writeWorkMarker(dir, agentId, spec.molStep, child.pid);
-        // died after publishing the handle — pid+marker are durable,
-        // the worker's admission stamp never lands
-        maybeAbandonSpawn('publication');
-        // the admission stamp — durable only after pid+marker, so a
-        // crash earlier can never admit a worker the registry cannot
-        // reach. Existence is the signal; the pid inside is forensic.
-        writePrivateFileSync({ path: goFile, data: `${child.pid ?? -1}\n` });
       } catch (err) {
-        // sync failure after the reservation — hand the slot back
-        if (reservation !== undefined) {
-          releaseSessionSlot(reservation);
-        }
-        releaseSessionStart(crossKindReservations);
-        releaseSpawnLease(dir, lease);
-        // a pre-launch throw leaves the row prepareSpawn committed
-        // pid-less: inside the handoff TTL it reads 'spawned' and the
-        // retry is refused 'spawn handoff in flight' over a child that
-        // never ran. Stamp this attempt terminal — matched by
-        // agentId+runId under the lock — so the retry re-picks. A
-        // produced child pid skips the stamp: that attempt can still
-        // publish its handle and the grace window owns its row (spec
-        // bro-l8c4f.5).
-        try {
-          patchAgentRegistryIf(
-            dir,
-            spec.molStep,
-            {
-              stopped: true,
-              spawnError: err instanceof Error ? err.message : String(err),
-            },
-            cur =>
-              cur?.agentId === agentId &&
-              cur?.runId === runId &&
-              cur?.pid === undefined &&
-              childPid === undefined
-          );
-        } catch {
-          // a registry write failure must not mask the launch error
-        }
-        throw err;
+        handleNativeSpawnFailure(err, {
+          dir,
+          molStep: spec.molStep,
+          agentId,
+          runId,
+          reservation,
+          crossKindReservations,
+          lease,
+          childPid,
+        });
       } finally {
         if (fd !== undefined) {
           closeSync(fd);
@@ -845,7 +1112,6 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       return toInfo(dir, home, spec.molStep, spawned);
     });
   };
-
   return {
     name: 'native',
 
