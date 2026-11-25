@@ -130,6 +130,62 @@ interface ToolRec {
   edge?: string;
 }
 
+/** The tool_call/tool_call_update wire shape the card reads. */
+interface ToolUpdateShape {
+  toolCallId?: string;
+  title?: string | null;
+  name?: string | null;
+  kind?: string | null;
+  status?: string | null;
+  content?: unknown;
+  rawInput?: unknown;
+  locations?: { path?: unknown }[] | null;
+}
+
+/** The dim one-liner per update kind — the `structured` table as
+ *  data, with `noteLine` falling back to a `[kind]` bracket. */
+const NOTE_LINE: ReadonlyMap<string, (u: SessionUpdateLike) => string> = new Map([
+  [
+    'usage_update',
+    (u): string => {
+      const t = u as { used?: unknown; size?: unknown };
+      const used = Number(t.used);
+      const size = Number(t.size);
+      return `◌ usage ${Number.isFinite(used) && Number.isFinite(size) ? fmtUsage(used, size) : `${scalar(t.used)}/${scalar(t.size)}`}`;
+    },
+  ],
+  [
+    'config_option_update',
+    (u): string => {
+      const opts = (u.configOptions as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
+      return `config ${opts.map(o => `${safe(o.id ?? '?')}=${safe(scalar(o.currentValue))}`).join(' ')}`;
+    },
+  ],
+  [
+    'current_mode_update',
+    u => `mode → ${safe(scalar((u as { currentModeId?: unknown }).currentModeId))}`,
+  ],
+  [
+    'available_commands_update',
+    u => `${((u.availableCommands as unknown[] | undefined) ?? []).length} commands`,
+  ],
+  [
+    'session_info_update',
+    (u): string => {
+      const title = (u as { title?: unknown }).title;
+      return `session ${typeof title === 'string' && title !== '' ? safe(title) : '(info)'}`;
+    },
+  ],
+  [
+    'subagent_update',
+    (u): string => {
+      const s = u as { sessionId?: string; title?: string | null; description?: string | null };
+      const desc = s.description != null && s.description !== '' ? ` — ${safe(s.description)}` : '';
+      return `⎇ subagent ${safe(s.title ?? s.sessionId ?? '?')}${desc}`;
+    },
+  ],
+]);
+
 const scalar = (v: unknown): string => {
   const t = typeof v;
   return t === 'string' || t === 'number' || t === 'boolean' ? String(v) : '?';
@@ -198,80 +254,118 @@ export class SessionModel {
       row.by !== undefined && row.by !== '' ? isInternalBy(row.by) : this.curInternal;
     switch (row.kind) {
       case 'update':
-        if (internal) {
-          this.microUpdate(row);
-          break;
-        }
-        this.microClose();
-        if (row.update !== undefined) this.update(row.update);
+        this.feedUpdate(row, internal);
         break;
       case 'turn':
-        if (row.phase === 'start') {
-          this.judgeNow = isJudgeTurn(undefined, row.by);
-          this.gutter.start(row.by);
-          this.sealed = true;
-          this.curInternal = isInternalBy(row.by);
-          if (this.curInternal) this.microStart(row.by);
-          else this.microClose();
-        } else if (row.phase === 'stop') {
-          this.judgeNow = false;
-          this.sealed = true;
-          if (this.curInternal || internal) {
-            this.microStop(row);
-            this.curInternal = false;
-            break;
-          }
-          // a normal end_turn prints nothing — every turn ends;
-          // only failures and abnormal stops earn a marker row
-          const failed = row.error !== undefined && row.error !== '';
-          const reason = row.stopReason ?? '';
-          if (!failed && (reason === '' || reason === 'end_turn')) break;
-          this.side(
-            'turn',
-            failed
-              ? `── turn failed — ${safe(row.error ?? '')} ──`
-              : `── turn ended (${safe(reason)}) ──`,
-            failed ? 'error' : undefined
-          );
-        }
+        this.feedTurn(row, internal);
         break;
       case 'prompt':
-        if (internal) {
-          // a probe call's question — first line rides the batch
-          // detail (`by « question → reply`) instead of the card
-          const q = firstLine(safe(row.text ?? ''));
-          if (q !== '' && this.micro.pendDetail >= 0) {
-            this.micro.pendQ = q;
-            this.micro.details[this.micro.pendDetail] = this.microDetail();
-            this.microPatch();
-          }
-          break;
-        }
-        this.microClose();
-        // the prompt row marks its turn — judge prompts carry the
-        // typed preamble; the reply then classifies as a verdict
-        this.judgeNow = isJudgeTurn(row.text, row.by);
-        this.gutter.start(row.by);
-        this.push<TextItem>({ kind: 'prompt', text: row.text ?? '' });
+        this.feedPrompt(row, internal);
         break;
-      case 'permission': {
-        // visible even inside a storm — a headless internal call
-        // still wanted something — and the batch survives across it
-        const what = row.title ?? PERMISSION_FALLBACK;
-        const verdict = row.verdict ?? 'denied';
-        this.side(
-          'permission',
-          `── ⚠ permission ‹${safe(what)}› — ${safe(verdict)} (headless driver; open a terminal in this workspace to handle interactively) ──`,
-          'warn'
-        );
+      case 'permission':
+        this.feedPermission(row);
         break;
-      }
       default:
         break;
     }
     const v = rowVerdict(row);
     if (v !== undefined) this.verdict = v;
     this.evict();
+  }
+
+  /** An update row — absorbed by the storm batch under internal
+   *  provenance, dispatched into the item tree otherwise. */
+  private feedUpdate(row: ArchiveRow, internal: boolean): void {
+    if (internal) {
+      this.microUpdate(row);
+      return;
+    }
+    this.microClose();
+    if (row.update !== undefined) this.update(row.update);
+  }
+
+  private feedTurn(row: ArchiveRow, internal: boolean): void {
+    if (row.phase === 'start') {
+      this.turnStart(row.by);
+      return;
+    }
+    if (row.phase === 'stop') this.turnStop(row, internal);
+  }
+
+  /** A turn opened — the seal cuts the chunk tail, and the storm
+   *  batch opens (internal) or closes (real agent). */
+  private turnStart(by: string | undefined): void {
+    this.judgeNow = isJudgeTurn(undefined, by);
+    this.gutter.start(by);
+    this.sealed = true;
+    this.curInternal = isInternalBy(by);
+    if (this.curInternal) this.microStart(by);
+    else this.microClose();
+  }
+
+  private turnStop(row: ArchiveRow, internal: boolean): void {
+    this.judgeNow = false;
+    this.sealed = true;
+    if (this.curInternal || internal) {
+      this.microStop(row);
+      this.curInternal = false;
+      return;
+    }
+    // a normal end_turn prints nothing — every turn ends; only
+    // failures and abnormal stops earn a marker row
+    if (this.quietStop(row)) return;
+    const failed = row.error !== undefined && row.error !== '';
+    this.side(
+      'turn',
+      failed
+        ? `── turn failed — ${safe(row.error ?? '')} ──`
+        : `── turn ended (${safe(row.stopReason ?? '')}) ──`,
+      failed ? 'error' : undefined
+    );
+  }
+
+  /** A stop that owes no row — a clean `end_turn` (or stamp-less
+   *  equivalent) is the common case, never a marker. */
+  private quietStop(row: ArchiveRow): boolean {
+    if (row.error !== undefined && row.error !== '') return false;
+    const reason = row.stopReason ?? '';
+    return reason === '' || reason === 'end_turn';
+  }
+
+  private feedPrompt(row: ArchiveRow, internal: boolean): void {
+    if (internal) {
+      this.microPrompt(row);
+      return;
+    }
+    this.microClose();
+    // the prompt row marks its turn — judge prompts carry the
+    // typed preamble; the reply then classifies as a verdict
+    this.judgeNow = isJudgeTurn(row.text, row.by);
+    this.gutter.start(row.by);
+    this.push<TextItem>({ kind: 'prompt', text: row.text ?? '' });
+  }
+
+  /** A probe call's question — the first line rides the batch
+   *  detail (`by « question → reply`) instead of the card. */
+  private microPrompt(row: ArchiveRow): void {
+    const q = firstLine(safe(row.text ?? ''));
+    if (q === '' || this.micro.pendDetail < 0) return;
+    this.micro.pendQ = q;
+    this.micro.details[this.micro.pendDetail] = this.microDetail();
+    this.microPatch();
+  }
+
+  /** A permission row — visible even inside a storm: a headless
+   *  internal call still wanted something, and the batch survives
+   *  across it. */
+  private feedPermission(row: ArchiveRow): void {
+    const what = row.title ?? PERMISSION_FALLBACK;
+    const verdict = row.verdict ?? 'denied';
+    this.side(
+      'permission',
+      `── ⚠ permission ‹${safe(what)}› — ${safe(verdict)} (headless driver; open a terminal in this workspace to handle interactively) ──`,
+      'warn'
+    );
   }
 
   /** One session/update value — the same dispatch the line renderer
@@ -390,41 +484,53 @@ export class SessionModel {
   /** An internal turn closed — the pending detail seals with its
    *  outcome (`✓` silent-ok, `✗` error, `◌` abnormal stop). Unique
    *  errors also emit their own red row — visible without a fold. */
-  private microStop(row: ArchiveRow): void /* NOSONAR typescript:S3776 */ {
+  private microStop(row: ArchiveRow): void {
     const b = this.micro;
     const by = b.pendBy !== '' ? b.pendBy : (shortBy(row.by) ?? '?');
-    if (b.pendBy === '' && b.pendDetail < 0) {
-      // a stop whose start fell outside the slice — still a call
-      b.calls++;
-      b.origins.set(by, (b.origins.get(by) ?? 0) + 1);
-      if (b.details.length < SessionModel.MICRO_DETAILS) {
-        b.details.push(`- ${by}`);
-        b.pendDetail = b.details.length - 1;
-      } else {
-        b.extra++;
-      }
-    }
+    if (b.pendBy === '' && b.pendDetail < 0) this.microOrphanCall(by);
     const failed = row.error !== undefined && row.error !== '';
-    const reason = row.stopReason ?? '';
-    const base = b.pendBy !== '' ? this.microDetail() : `- ${by}`;
-    let fin = base;
-    if (failed) fin = `${base} ✗ ${safe(row.error ?? '')}`;
-    else if (reason !== '' && reason !== 'end_turn') fin = `${base} ◌ ${safe(reason)}`;
-    else if (base === `- ${by}`) fin = `${base} ✓`;
-    if (b.pendDetail >= 0) b.details[b.pendDetail] = fin;
-    if (failed) {
-      b.fails++;
-      const key = `${by}|${row.error ?? ''}`;
-      if (!b.errors.has(key)) {
-        b.errors.add(key);
-        this.side('turn', `✗ ${by} · ${safe(row.error ?? '')}`, 'error');
-      }
-    }
+    if (b.pendDetail >= 0) b.details[b.pendDetail] = this.microStopDetail(row, by, failed);
+    if (failed) this.microFail(by, row.error ?? '');
     b.pendBy = '';
     b.pendQ = '';
     b.pendText = '';
     b.pendDetail = -1;
     this.microPatch();
+  }
+
+  /** A stop whose start fell outside the slice — still a call in
+   *  the tally, with its own pending detail line to seal. */
+  private microOrphanCall(by: string): void {
+    const b = this.micro;
+    b.calls++;
+    b.origins.set(by, (b.origins.get(by) ?? 0) + 1);
+    if (b.details.length < SessionModel.MICRO_DETAILS) {
+      b.details.push(`- ${by}`);
+      b.pendDetail = b.details.length - 1;
+    } else {
+      b.extra++;
+    }
+  }
+
+  /** The pending detail's sealed line — the outcome glyph appended
+   *  to the open `by « q → reply` (or the bare `- by` of an orphan). */
+  private microStopDetail(row: ArchiveRow, by: string, failed: boolean): string {
+    const reason = row.stopReason ?? '';
+    const base = this.micro.pendBy !== '' ? this.microDetail() : `- ${by}`;
+    if (failed) return `${base} ✗ ${safe(row.error ?? '')}`;
+    if (reason !== '' && reason !== 'end_turn') return `${base} ◌ ${safe(reason)}`;
+    return base === `- ${by}` ? `${base} ✓` : base;
+  }
+
+  /** A unique failure — the tally counts it AND its own red `✗`
+   *  row shows it (repeats stay members only). */
+  private microFail(by: string, error: string): void {
+    const b = this.micro;
+    b.fails++;
+    const key = `${by}|${error}`;
+    if (b.errors.has(key)) return;
+    b.errors.add(key);
+    this.side('turn', `✗ ${by} · ${safe(error)}`, 'error');
   }
 
   /** An internal update row — reply chunks grow the open turn's
@@ -433,48 +539,58 @@ export class SessionModel {
   private microUpdate(row: ArchiveRow): void {
     const u = row.update;
     if (u === undefined) return;
-    const b = this.micro;
     switch (u.sessionUpdate) {
       case 'agent_message_chunk':
       case 'agent_thought_chunk':
-      case 'user_message_chunk': {
-        const t = chunkText(u);
-        if (t === '') return;
-        if (b.pendDetail >= 0) {
-          b.pendText += t;
-          b.details[b.pendDetail] = this.microDetail();
-        } else if (b.details.length < SessionModel.MICRO_DETAILS) {
-          // an orphan chunk (no open turn) — its own call line
-          b.calls++;
-          const o = shortBy(row.by) ?? '?';
-          b.origins.set(o, (b.origins.get(o) ?? 0) + 1);
-          b.details.push(`- ${o} → \`${clip(firstLine(safe(t)), 48)}\``);
-        } else {
-          b.calls++;
-          b.extra++;
-        }
-        this.microPatch();
+      case 'user_message_chunk':
+        this.microChunk(row, chunkText(u));
         return;
-      }
       case 'tool_call':
-      case 'tool_call_update': {
-        const id = String((u as { toolCallId?: unknown }).toolCallId ?? '');
-        if (id === '' || b.tools.has(id)) return;
-        b.tools.add(id);
-        const title = firstLine(
-          safe(String((u as { title?: unknown }).title ?? (u as { name?: unknown }).name ?? 'tool'))
-        );
-        if (b.details.length < SessionModel.MICRO_DETAILS) {
-          b.details.push(`- ${shortBy(row.by) ?? b.pendBy} ⚙ ${clip(title, 48)}`);
-        } else {
-          b.extra++;
-        }
-        this.microPatch();
+      case 'tool_call_update':
+        this.microTool(row, u);
         return;
-      }
       default:
         return;
     }
+  }
+
+  /** An internal reply chunk — grows the open turn's detail, or
+   *  its own call line when no turn is open (an orphan chunk). */
+  private microChunk(row: ArchiveRow, t: string): void {
+    if (t === '') return;
+    const b = this.micro;
+    if (b.pendDetail >= 0) {
+      b.pendText += t;
+      b.details[b.pendDetail] = this.microDetail();
+    } else {
+      b.calls++;
+      if (b.details.length < SessionModel.MICRO_DETAILS) {
+        const o = shortBy(row.by) ?? '?';
+        b.origins.set(o, (b.origins.get(o) ?? 0) + 1);
+        b.details.push(`- ${o} → \`${clip(firstLine(safe(t)), 48)}\``);
+      } else {
+        b.extra++;
+      }
+    }
+    this.microPatch();
+  }
+
+  /** An internal tool call — one `⚙` detail line per toolCallId,
+   *  deduped across the open/update chatter. */
+  private microTool(row: ArchiveRow, u: SessionUpdateLike): void {
+    const b = this.micro;
+    const id = String((u as { toolCallId?: unknown }).toolCallId ?? '');
+    if (id === '' || b.tools.has(id)) return;
+    b.tools.add(id);
+    const title = firstLine(
+      safe(String((u as { title?: unknown }).title ?? (u as { name?: unknown }).name ?? 'tool'))
+    );
+    if (b.details.length < SessionModel.MICRO_DETAILS) {
+      b.details.push(`- ${shortBy(row.by) ?? b.pendBy} ⚙ ${clip(title, 48)}`);
+    } else {
+      b.extra++;
+    }
+    this.microPatch();
   }
 
   /** A non-internal row arrived — the storm run is over; the next
@@ -513,38 +629,69 @@ export class SessionModel {
   }
 
   private onTool(u: SessionUpdateLike): void {
-    const t = u as {
-      toolCallId?: string;
-      title?: string | null;
-      name?: string | null;
-      kind?: string | null;
-      status?: string | null;
-      content?: unknown;
-      rawInput?: unknown;
-      locations?: { path?: unknown }[] | null;
-    };
+    const t = u as ToolUpdateShape;
     const id = t.toolCallId ?? '?';
-    let rec = this.tools.get(id);
-    let born = false;
-    if (rec === undefined) {
-      const item = this.push<ToolItem>({
-        kind: 'tool',
-        toolCallId: id,
-        title: 'tool',
-        status: 'live',
-        bodyLanded: false,
-        collapsed: false,
-        content: [],
-      });
-      rec = { item };
-      this.tools.set(id, rec);
-      born = true;
-    }
-    const item = rec.item;
+    const born = !this.tools.has(id);
+    const rec = this.tools.get(id) ?? this.toolBorn(id);
+    this.toolHead(t, rec.item);
+    this.toolEdge(t, rec, born);
+  }
+
+  /** The status edge — a repeat is churn (unless it newly carries
+   *  the terminal card); a fresh edge updates status + body and, on
+   *  an existing card, emits the routine tool op. */
+  private toolEdge(t: ToolUpdateShape, rec: ToolRec, born: boolean): void {
+    const status = typeof t.status === 'string' && t.status !== '' ? safe(t.status) : 'pending';
+    const done = DONE_STATUS.has(status);
+    const content = Array.isArray(t.content) ? t.content : [];
+    if (this.toolChurn(rec, status, done, content)) return;
+    this.toolApply(rec, status, done, content);
+    // a just-born item's append op already carries the populated card —
+    // a second tool op would paint it twice
+    if (!born) this.pushTool(rec.item);
+  }
+
+  /** A fresh edge — status + edge markers update, and a terminal
+   *  status with content lands the card body. */
+  private toolApply(rec: ToolRec, status: string, done: boolean, content: unknown[]): void {
+    rec.status = status;
+    rec.edge = done ? status : 'live';
+    rec.item.status = done ? (status as ToolStatus) : 'live';
+    if (done) this.toolBody(rec.item, content);
+  }
+
+  /** The dedupe, lifted from the line renderer: a repeat status is
+   *  churn — EXCEPT a terminal repeat that newly carries content,
+   *  which is still owed its card (once, flagged by bodyLanded). */
+  private toolChurn(rec: ToolRec, status: string, done: boolean, content: unknown[]): boolean {
+    if (rec.status !== status && rec.edge !== (done ? status : 'live')) return false;
+    rec.status = status;
+    if (done && this.toolBody(rec.item, content)) this.pushTool(rec.item);
+    return true;
+  }
+
+  /** A new tool card — pushed, recorded, returned for the update's
+   *  header/status pass. */
+  private toolBorn(id: string): ToolRec {
+    const item = this.push<ToolItem>({
+      kind: 'tool',
+      toolCallId: id,
+      title: 'tool',
+      status: 'live',
+      bodyLanded: false,
+      collapsed: false,
+      content: [],
+    });
+    const rec: ToolRec = { item };
+    this.tools.set(id, rec);
+    return rec;
+  }
+
+  /** The card's head — title (one line; a heredoc wire title keeps
+   *  its first non-empty line, never a ⏎ mash), kind, arg. */
+  private toolHead(t: ToolUpdateShape, item: ToolItem): void {
     for (const k of ['title', 'name'] as const) {
       const v = t[k];
-      // the header is ONE line — a multiline wire title (a heredoc
-      // command) keeps its first non-empty line, never a ⏎ mash
       if (typeof v === 'string' && v !== '') {
         item.title = clip(firstLine(safeBlock(v)), 80);
       }
@@ -552,31 +699,16 @@ export class SessionModel {
     if (typeof t.kind === 'string' && t.kind !== '') item.toolKind = safe(t.kind);
     const arg = toolArg(t, item.toolKind);
     if (arg !== undefined) item.arg = arg;
-    const status = typeof t.status === 'string' && t.status !== '' ? safe(t.status) : 'pending';
-    const content = Array.isArray(t.content) ? t.content : [];
-    const done = DONE_STATUS.has(status);
-    // the line renderer's dedupe, lifted: a repeat status is churn —
-    // EXCEPT a terminal repeat that newly carries content, which is
-    // still owed its card (once, flagged by bodyLanded)
-    if (rec.status === status || rec.edge === (done ? status : 'live')) {
-      rec.status = status;
-      if (done && !item.bodyLanded && content.length > 0) {
-        item.bodyLanded = true;
-        item.content = content.map(toolContent);
-        this.pushTool(item);
-      }
-      return;
-    }
-    rec.status = status;
-    rec.edge = done ? status : 'live';
-    item.status = done ? (status as ToolStatus) : 'live';
-    if (done && content.length > 0) {
-      item.bodyLanded = true;
-      item.content = content.map(toolContent);
-    }
-    // a just-born item's append op already carries the populated card —
-    // a second tool op would paint it twice
-    if (!born) this.pushTool(item);
+  }
+
+  /** The completion card's body — lands once, only with content.
+   *  Returns true when the card was newly populated (the caller
+   *  decides whether a tool op must carry it). */
+  private toolBody(item: ToolItem, content: unknown[]): boolean {
+    if (item.bodyLanded || content.length === 0) return false;
+    item.bodyLanded = true;
+    item.content = content.map(toolContent);
+    return true;
   }
 
   /** A routine tool update op — pane-owned fold fields stay out so a
@@ -600,35 +732,8 @@ export class SessionModel {
   /** The dim one-liner for every other update kind — same mapping as
    *  the line renderer's `structured` table + unknown-kind fallback. */
   private noteLine(u: SessionUpdateLike): string {
-    switch (u.sessionUpdate) {
-      case 'usage_update': {
-        const t = u as { used?: unknown; size?: unknown };
-        const used = Number(t.used);
-        const size = Number(t.size);
-        return `◌ usage ${Number.isFinite(used) && Number.isFinite(size) ? fmtUsage(used, size) : `${scalar(t.used)}/${scalar(t.size)}`}`;
-      }
-      case 'config_option_update': {
-        const opts =
-          (u.configOptions as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
-        return `config ${opts.map(o => `${safe(o.id ?? '?')}=${safe(scalar(o.currentValue))}`).join(' ')}`;
-      }
-      case 'current_mode_update':
-        return `mode → ${safe(scalar((u as { currentModeId?: unknown }).currentModeId))}`;
-      case 'available_commands_update':
-        return `${((u.availableCommands as unknown[] | undefined) ?? []).length} commands`;
-      case 'session_info_update': {
-        const title = (u as { title?: unknown }).title;
-        return `session ${typeof title === 'string' && title !== '' ? safe(title) : '(info)'}`;
-      }
-      case 'subagent_update': {
-        const s = u as { sessionId?: string; title?: string | null; description?: string | null };
-        const desc =
-          s.description != null && s.description !== '' ? ` — ${safe(s.description)}` : '';
-        return `⎇ subagent ${safe(s.title ?? s.sessionId ?? '?')}${desc}`;
-      }
-      default:
-        return `[${safe(u.sessionUpdate)}]`;
-    }
+    const f = NOTE_LINE.get(u.sessionUpdate);
+    return f !== undefined ? f(u) : `[${safe(u.sessionUpdate)}]`;
   }
 
   /** The oldest items evict past MAX_ITEMS — the emitted ids let the
@@ -659,38 +764,54 @@ export class SessionModel {
 /** The item list → plain dump lines, shared by every impl's dump()
  *  — a dump is a snapshot, not the live pane, so there are no caps. */
 export function dumpItems(items: readonly Item[]): string[] {
-  const lines: string[] = [];
-  for (const it of items) {
-    switch (it.kind) {
-      case 'message':
-      case 'thought':
-        for (const l of it.text.split('\n')) lines.push(clip(l));
-        break;
-      case 'prompt':
-        if (it.text === '') {
-          lines.push('▸ prompt unavailable');
-          break;
-        }
-        for (const l of it.text.split('\n')) lines.push(`▸ ${clip(l)}`);
-        break;
-      case 'tool': {
-        const glyph = it.status === 'completed' ? '✓' : it.status === 'failed' ? '✗' : '⣿';
-        const head = `${glyph} ${clip(it.title)}`;
-        const kind = it.toolKind !== undefined && it.toolKind !== '' ? ` [${it.toolKind}]` : '';
-        const argText = it.arg !== undefined ? firstLine(it.arg) : '';
-        const arg = argText !== '' ? ` ${clip(argText, 120 - head.length - kind.length)}` : '';
-        lines.push(`${head}${kind}${arg}`);
-        if (it.bodyLanded && !it.collapsed) {
-          for (const l of dumpContent(it.content)) lines.push(`│  ${l}`);
-        }
-        break;
-      }
-      default:
-        for (const l of it.text.split('\n')) lines.push(clip(l));
-    }
+  return items.flatMap(dumpItem);
+}
+
+/** Every text line clipped, optionally prefixed (`▸ ` on prompts). */
+const dumpLines = (text: string, prefix = ''): string[] =>
+  text.split('\n').map(l => `${prefix}${clip(l)}`);
+
+/** One item → its dump lines: text items flatten, a tool card gets
+ *  its status head plus the open body, a prompt its `▸` marker. */
+const dumpItem = (it: Item): string[] => {
+  switch (it.kind) {
+    case 'prompt':
+      return it.text === '' ? ['▸ prompt unavailable'] : dumpLines(it.text, '▸ ');
+    case 'tool':
+      return dumpTool(it);
+    default:
+      return dumpLines(it.text);
+  }
+};
+
+/** The tool card's dump — `✓ title [kind] arg` head, then the
+ *  landed body's `│`-gutter lines while the card is open. */
+const dumpTool = (it: ToolItem): string[] => {
+  const lines = [dumpToolHead(it)];
+  if (it.bodyLanded && !it.collapsed) {
+    for (const l of dumpContent(it.content)) lines.push(`│  ${l}`);
   }
   return lines;
-}
+};
+
+/** The card's head row — `✓ title [kind] arg`, the arg's first
+ *  line clipped to what the row leaves. */
+const dumpToolHead = (it: ToolItem): string => {
+  const glyph = it.status === 'completed' ? '✓' : it.status === 'failed' ? '✗' : '⣿';
+  const head = `${glyph} ${clip(it.title)}`;
+  const kind = it.toolKind !== undefined && it.toolKind !== '' ? ` [${it.toolKind}]` : '';
+  const argText = it.arg !== undefined ? firstLine(it.arg) : '';
+  const arg = argText !== '' ? ` ${clip(argText, 120 - head.length - kind.length)}` : '';
+  return `${head}${kind}${arg}`;
+};
+
+/** A diff entry's dump — `─ path` then the `-`/`+` hunks. */
+const dumpDiff = (c: Extract<ToolContent, { kind: 'diff' }>): string[] => {
+  const out = [`─ ${clip(c.path)}`];
+  if (c.old !== undefined) for (const l of c.old.split('\n')) out.push(`- ${clip(l)}`);
+  if (c.cur !== undefined) for (const l of c.cur.split('\n')) out.push(`+ ${clip(l)}`);
+  return out;
+};
 
 /** One content item → plain card lines for dump()/tests — text block,
  *  diff `─ path` + `-`/`+`, terminal note, unknown bracket. No caps
@@ -702,12 +823,9 @@ export function dumpContent(content: ToolContent[]): string[] {
       case 'text':
         for (const l of c.text.split('\n')) lines.push(clip(l));
         break;
-      case 'diff': {
-        lines.push(`─ ${clip(c.path)}`);
-        if (c.old !== undefined) for (const l of c.old.split('\n')) lines.push(`- ${clip(l)}`);
-        if (c.cur !== undefined) for (const l of c.cur.split('\n')) lines.push(`+ ${clip(l)}`);
+      case 'diff':
+        lines.push(...dumpDiff(c));
         break;
-      }
       case 'terminal':
         lines.push(`terminal output is not archived (terminal ${c.id})`);
         break;
