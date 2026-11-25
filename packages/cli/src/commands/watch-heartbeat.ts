@@ -55,6 +55,10 @@ export interface HeartbeatSummary {
    *  writer stamps old times that no reader-side check can catch, so
    *  the persisted verdict is the only signal. */
   writerSkewed?: boolean;
+  /** the writer's tick recorded `clock.error` — its probe failed, so
+   *  the stamps are unverified WITHOUT being evidence of skew. Distinct
+   *  from writerSkewed: a failed probe establishes nothing (bro-f40o6). */
+  writerUnverified?: boolean;
   /** size of the snapshot's attention list — the rig's open decisions */
   attention: number;
 }
@@ -68,6 +72,7 @@ interface RawHeartbeat {
   ms: number;
   attention: number;
   writerSkewed: boolean;
+  writerUnverified: boolean;
 }
 
 /** Raw-read half: parse the file, guard the shape, hand back the
@@ -83,7 +88,11 @@ function parseHeartbeat(file: string): RawHeartbeat | null {
   if (typeof raw !== 'object' || raw === null) {
     return null;
   }
-  const obj = raw as { ts?: unknown; attention?: unknown; clock?: { skewed?: unknown } };
+  const obj = raw as {
+    ts?: unknown;
+    attention?: unknown;
+    clock?: { skewed?: unknown; error?: unknown };
+  };
   const ms = typeof obj.ts === 'string' ? Date.parse(obj.ts) : Number.NaN;
   if (!Number.isFinite(ms) || !Array.isArray(obj.attention)) {
     return null;
@@ -93,6 +102,7 @@ function parseHeartbeat(file: string): RawHeartbeat | null {
     ms,
     attention: obj.attention.length,
     writerSkewed: obj.clock?.skewed === true,
+    writerUnverified: typeof obj.clock?.error === 'string',
   };
 }
 
@@ -111,6 +121,7 @@ export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary |
     ageMs: Math.max(0, now - raw.ms),
     ...(ahead > CLOCK_SKEW_MS ? { futureMs: ahead } : {}),
     ...(raw.writerSkewed ? { writerSkewed: true } : {}),
+    ...(raw.writerUnverified ? { writerUnverified: true } : {}),
     attention: raw.attention,
   };
 }
@@ -148,6 +159,9 @@ export function heartbeatLine(dir: string): string | null {
   }
   if (h.writerSkewed === true) {
     return `last tick ${heartbeatAge(h.ageMs)} ago — writer clock skew — ${tail}`;
+  }
+  if (h.writerUnverified === true) {
+    return `last tick ${heartbeatAge(h.ageMs)} ago — writer clock unverified — ${tail}`;
   }
   return `last tick ${heartbeatAge(h.ageMs)} ago — ${tail}`;
 }
