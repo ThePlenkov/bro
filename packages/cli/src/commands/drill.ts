@@ -36,12 +36,7 @@ import {
   type DrillPlan,
   type DrillRow,
 } from '@broject/drill';
-import { flag, flagAll, positionals } from './args.ts';
-
-const flagZone = (argv: string[]): string[] => {
-  const end = argv.indexOf('--');
-  return end === -1 ? argv : argv.slice(0, end);
-};
+import { flag, flagAll, flagZone, positionals } from './args.ts';
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(

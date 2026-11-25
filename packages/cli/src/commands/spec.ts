@@ -81,7 +81,7 @@ import {
 import type { ExitCode } from '@broject/core';
 import { hasSpecDoc, repoRoot, specDirAbs, validBeadId } from '@broject/spec';
 import { driftEnv, driftRow, specLinkPath, SPEC_LINK } from '../spec-drift.ts';
-import { flag, positionals } from './args.ts';
+import { flag, flagZone, positionals } from './args.ts';
 
 export type SpecState = 'spec' | 'link' | 'exempt' | 'missing';
 
@@ -808,7 +808,7 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
  *  allowlist yet miss the exact `includes('--all')` check — a silently
  *  ignored option, the same class the allowlist exists for). */
 function assertSpecFlags(key: string, known: Set<string>, rest: string[]): void {
-  for (const a of rest) {
+  for (const a of flagZone(rest)) {
     if (!a.startsWith('--')) {
       continue;
     }

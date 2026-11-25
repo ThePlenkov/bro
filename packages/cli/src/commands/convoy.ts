@@ -62,7 +62,7 @@ import type {
   Molecule,
   StepState,
 } from '@broject/convoy';
-import { flag, flagAll, positionals } from './args.ts';
+import { flag, flagAll, flagZone, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { publishGate, runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
@@ -293,7 +293,7 @@ export async function runConvoyCommand(
         ? [...VALUE_FLAGS, '--every', '--timeout', '--json']
         : [...VALUE_FLAGS]
   );
-  for (const a of rest) {
+  for (const a of flagZone(rest)) {
     // `--x=v` — match the flag name, not the whole arg; flag()/flagAll()
     // accept both spellings, so the unknown-option check must too
     if (a.startsWith('--') && !KNOWN_FLAGS.has(a.split('=', 1)[0]!)) {

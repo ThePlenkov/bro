@@ -28,7 +28,7 @@ import {
   type EventInput,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
-import { flag, flagAll, positionals } from './args.ts';
+import { flag, flagAll, flagZone, positionals } from './args.ts';
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--topic',
@@ -99,7 +99,7 @@ function die(msg: string): never {
 /** A misspelled option is a typo, not input — writes fail closed. */
 function rejectUnknownFlags(sub: string, rest: string[]): void {
   const known = KNOWN_FLAGS[sub] ?? new Set<string>();
-  for (const arg of rest) {
+  for (const arg of flagZone(rest)) {
     if (!arg.startsWith('--')) {
       continue;
     }

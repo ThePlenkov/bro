@@ -197,7 +197,7 @@ import {
   type StepSpawnRequest,
   type StopOutcome,
 } from './agents.ts';
-import { flag, positionals } from './args.ts';
+import { flag, flagZone, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
 import '../planes/index.ts';
 import { routePlanes } from '../planes/rest.ts';
@@ -2133,7 +2133,7 @@ async function cmdEnsure(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) usage(0);
   const pos = positionals(argv, new Set(['--port']));
   if (pos.length > 0) usage();
-  for (const a of argv) {
+  for (const a of flagZone(argv)) {
     if (a.startsWith('--') && a.split('=')[0] !== '--port') {
       console.error(`error: unknown option ${a}`);
       usage();
@@ -2287,7 +2287,7 @@ function parseServePort(argv: string[]): number {
   }
   // reject unknown options — `--prot 3000` must fail, not silently serve
   // on an ephemeral port nobody can see
-  for (const a of argv) {
+  for (const a of flagZone(argv)) {
     if (a.startsWith('--') && a.split('=')[0] !== '--port') {
       console.error(`error: unknown option ${a}`);
       usage();

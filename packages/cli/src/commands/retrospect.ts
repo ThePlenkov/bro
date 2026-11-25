@@ -23,7 +23,7 @@ import {
   recordRetro,
 } from '@broject/retro'
 import type { RetroPlan } from '@broject/retro'
-import { flag, positionals } from './args.ts'
+import { flag, flagZone, positionals } from './args.ts'
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(['--wtf'])
 
@@ -177,7 +177,7 @@ function rejectUnknownFlags(sub: string, known: Set<string>, rest: string[]): vo
   if (sub === 'capture') {
     return
   }
-  for (const arg of rest) {
+  for (const arg of flagZone(rest)) {
     if (arg.startsWith('--') && !known.has(arg)) {
       console.error(`error: unknown option "${arg}" for retrospect ${sub}`)
       process.exit(2)
