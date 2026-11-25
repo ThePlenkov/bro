@@ -143,13 +143,13 @@ function gcSessionIsActive(session: GcSession): boolean {
 function recoverGascitySpawn(input: {
   dir: string;
   spec: SpawnSpec;
+  city: string;
   sessionId: string | undefined;
   prepared: ReturnType<typeof prepareSpawn>;
   err: unknown;
 }): never {
-  const { dir, spec, sessionId, prepared, err } = input;
-  if (sessionId !== undefined)
-    gcRun({ args: ['session', 'close', sessionId, '--city', input.spec.molStep] });
+  const { dir, spec, city, sessionId, prepared, err } = input;
+  if (sessionId !== undefined) gcRun({ args: ['session', 'close', sessionId, '--city', city] });
   if (prepared.reservation !== undefined) releaseSessionSlot(prepared.reservation);
   releaseSessionStart(prepared.crossKindReservations);
   releaseSpawnLease(dir, prepared.lease);
@@ -571,7 +571,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         });
         dispatchStep(spec, city);
       } catch (err) {
-        recoverGascitySpawn({ dir, spec, sessionId, prepared, err });
+        recoverGascitySpawn({ dir, spec, city, sessionId, prepared, err });
       }
       return patchAgentRegistry(dir, spec.molStep, { sessionId });
     });

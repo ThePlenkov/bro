@@ -289,6 +289,25 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     throw err;
   };
 
+  const shouldCancelCopilot = (entry: AgentRegistryEntry, taskId: string | undefined): boolean =>
+    entry.stopped !== true && taskId !== undefined;
+
+  const sameCopilotRun = (
+    current: AgentRegistryEntry | undefined,
+    original: AgentRegistryEntry
+  ): boolean =>
+    current !== undefined &&
+    current.agentId === original.agentId &&
+    current.spawnedAt === original.spawnedAt;
+
+  const cancelCopilotIfNeeded = (
+    molStep: string,
+    entry: AgentRegistryEntry,
+    taskId: string | undefined
+  ): void => {
+    if (shouldCancelCopilot(entry, taskId)) copilotCancelRemote(molStep, entry, taskId!);
+  };
+
   return {
     name: 'copilot',
 
@@ -430,25 +449,6 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     },
 
     capabilities: () => ({ attach: true, respawn: true, workers: false, supervisor: 'none' }),
-  };
-
-  const shouldCancelCopilot = (entry: AgentRegistryEntry, taskId: string | undefined): boolean =>
-    entry.stopped !== true && taskId !== undefined;
-
-  const sameCopilotRun = (
-    current: AgentRegistryEntry | undefined,
-    original: AgentRegistryEntry
-  ): boolean =>
-    current !== undefined &&
-    current.agentId === original.agentId &&
-    current.spawnedAt === original.spawnedAt;
-
-  const cancelCopilotIfNeeded = (
-    molStep: string,
-    entry: AgentRegistryEntry,
-    taskId: string | undefined
-  ): void => {
-    if (shouldCancelCopilot(entry, taskId)) copilotCancelRemote(molStep, entry, taskId!);
   };
 }
 
