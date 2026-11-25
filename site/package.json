@@ -31,6 +31,7 @@
   "overrides": {
     "mdast-util-to-markdown": "2.1.2",
     "zod": "^4.6.6",
-    "seroval": "^1.8.2"
+    "seroval": "^1.8.2",
+    "seroval-plugins@<1.7.5": "1.7.5"
   }
 }
