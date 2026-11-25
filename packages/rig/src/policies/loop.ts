@@ -1450,7 +1450,7 @@ async function runFixRound(
     m.rounds -= 1;
     return;
   }
-  const prompt = buildFixPrompt(m.beads, pr, threads);
+  const prompt = buildFixPrompt(m.beads, pr, threads, undefined, m.lane.provider);
   writePrompt(m.item, prompt);
   ctx.deps.say(`loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`);
   if (ctx.deps.agents !== undefined) {
@@ -1518,7 +1518,7 @@ async function runRebaseRound(
     );
     return;
   }
-  const prompt = buildRebasePrompt(m.beads, pr, base);
+  const prompt = buildRebasePrompt(m.beads, pr, base, undefined, m.lane.provider);
   writePrompt(m.item, prompt);
   ctx.deps.say(`loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`);
   if (ctx.deps.agents !== undefined) {
