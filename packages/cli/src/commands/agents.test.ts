@@ -753,6 +753,121 @@ describe('bro agents run — --for claim dedup', () => {
     }
   });
 
+  test('composed work order gains ## Context — deps + dupes + lessons + memories (bro-nfl0e)', async () => {
+    const fx = fixture([
+      { id: 'fx-1', status: 'open', title: 'fix the parser crash', description: 'repair it' },
+      // near-identical bead — the promptSimilar dup-scan leg
+      {
+        id: 'fx-2',
+        status: 'open',
+        title: 'fix the parser crash slowly',
+        description: 'repair it',
+      },
+      { id: 'fx-3', status: 'open', title: 'unrelated thing', description: 'zzz' },
+    ]);
+    try {
+      // dep edge fx-1→fx-3, a learn lesson in kv, bd memories — the fake
+      // bd reads them straight from the json db
+      const dbv = JSON.parse(readFileSync(fx.db, 'utf8'));
+      dbv.deps = [{ from: 'fx-1', to: 'fx-3', type: 'blocks' }];
+      dbv.memories = { 'parser-note': 'always free the buffer' };
+      dbv.kv = {
+        'learn/learn-parser-crash': JSON.stringify({
+          id: 'learn-parser-crash',
+          trigger: { on: ['prompt-submit'] },
+          lesson: 'parser crash fix — null check first',
+          evidence: [{ kind: 'session', ref: 's1' }],
+          confidence: 'established',
+          source: 'manual',
+          createdAt: '2026-01-01T00:00:00Z',
+        }),
+      };
+      writeFileSync(fx.db, JSON.stringify(dbv));
+      const r = await agents([
+        'run',
+        '--for',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+      ]);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      const entry = readAgentRegistry(fx.main)['fx-1']!;
+      const text = readFileSync(agentPromptPath(fx.main, String(entry.agentId))!, 'utf8');
+      assert.ok(text.includes('## Context'), 'context section present');
+      assert.ok(text.includes('### Dependencies'), 'dep tree leg');
+      assert.ok(text.includes('fx-1 -[blocked]-> fx-3'), 'dep edge rendered');
+      assert.ok(text.includes('### Similar beads'), 'dup-scan leg');
+      assert.ok(text.includes('fx-2'), 'similar bead named');
+      assert.ok(text.includes('### Lessons'), 'lesson leg');
+      assert.ok(text.includes('learn-parser-crash'), 'matching lesson named');
+      assert.ok(text.includes('### Notes'), 'bd memory leg');
+      assert.ok(text.includes('parser-note: always free the buffer'), 'memory content');
+      // no live .work markers in the fixture — the overlap leg stays absent
+      assert.ok(!text.includes('### Live work'), 'overlap leg absent when no markers');
+      assert.ok(text.includes('learn + retro'), 'closeout still appended');
+      await agents(['down', 'fx-1']);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('empty store → composed prompt has NO ## Context but still spawns (fail-open)', async () => {
+    const fx = fixture([
+      { id: 'fx-1', status: 'open', title: 'fix the parser crash', description: 'repair it' },
+    ]);
+    try {
+      const r = await agents([
+        'run',
+        '--for',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+      ]);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      const entry = readAgentRegistry(fx.main)['fx-1']!;
+      const text = readFileSync(agentPromptPath(fx.main, String(entry.agentId))!, 'utf8');
+      assert.ok(!text.includes('## Context'), 'no context section when every leg is empty');
+      assert.ok(text.includes('learn + retro'), 'closeout contract appended');
+      await agents(['down', 'fx-1']);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('--prompt-file prompt stays verbatim — never gains ## Context', async () => {
+    const fx = fixture([
+      { id: 'fx-1', status: 'open', title: 'fix the parser crash', description: 'repair it' },
+    ]);
+    try {
+      // even with context ingredients in the store, operator prompts pass through
+      const dbv = JSON.parse(readFileSync(fx.db, 'utf8'));
+      dbv.memories = { 'parser-note': 'always free the buffer' };
+      writeFileSync(fx.db, JSON.stringify(dbv));
+      const r = await agents([
+        'up',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+        '--prompt-file',
+        fx.promptFile(LONG_RUN),
+      ]);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      const entry = readAgentRegistry(fx.main)['fx-1']!;
+      const text = readFileSync(agentPromptPath(fx.main, String(entry.agentId))!, 'utf8');
+      assert.equal(text, LONG_RUN, 'operator prompt untouched');
+      assert.ok(!text.includes('## Context'), 'no context on verbatim path');
+      await agents(['down', 'fx-1']);
+    } finally {
+      fx.restore();
+    }
+  });
+
   test('run --for on a missing bead fails — no phantom fallback', async () => {
     const fx = fixture([]);
     try {

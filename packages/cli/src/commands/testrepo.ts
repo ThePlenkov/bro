@@ -487,6 +487,12 @@ switch (cmdName) {
     else fail('kv ' + sub)
     break
   }
+  case 'memories': {
+    // real bd memories --json answers {key: content, schema_version}
+    // — db.memories seeds via the fixture db file, not a remember cmd
+    jsonOut({ ...(db.memories || {}), schema_version: 1 })
+    break
+  }
   case 'dep': {
     // dep add <id> <to> — records the edge verbatim (external:<…>:<…>
     // refs included) so tests can assert dep wiring happened
