@@ -22,7 +22,7 @@ export function bareUrl(link: string): string {
   // is a scanner finding (CodeQL js/polynomial-redos); index arithmetic
   // is linear by construction
   const open = link.indexOf('](');
-  const close = link.lastIndexOf(')');
+  const close = link.indexOf(')', open + 2);
   if (open >= 0 && close > open + 2) {
     return link.slice(open + 2, close);
   }
