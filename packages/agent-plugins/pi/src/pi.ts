@@ -194,7 +194,6 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
         'quit',
       ],
       stop: 'agent_before_settle',
-      userInput: 'input',
       on(event, handler) {
         pi.on(event as never, handler as never);
       },
