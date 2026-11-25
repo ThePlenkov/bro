@@ -31,6 +31,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
+
+/** Worktree-creation grace — the record predates the mkdir (bro-4q6n9). */
+const WORKTREE_GRACE_MS = 5 * 60_000;
 import { pidAlive, stateCommonDir } from '@broject/core';
 
 /** What the loop records for an in-flight spawn — pid + pidStart are
@@ -202,7 +205,13 @@ function fileView(home: string, f: string, now: number): LoopRunView {
   // kept rendering 'running' for hours off the supervisor's live pid
   // (bro-4q6n9). No worktree = nowhere to run in = dead, whatever the
   // pid says.
-  const worktreeGone = rec !== null && rec.worktree !== '' && !existsSync(rec.worktree);
+  // grace before the worktree check bites: beginRun records the path
+  // BEFORE the supervisor creates it, so a fresh claim with a live pid
+  // must not read dead inside the setup window (cubic on #1244)
+  const ageMs =
+    rec?.startedAt !== undefined && rec.startedAt !== '' ? now - Date.parse(rec.startedAt) : 0;
+  const worktreeGone =
+    rec !== null && rec.worktree !== '' && ageMs > WORKTREE_GRACE_MS && !existsSync(rec.worktree);
   const live = pid !== null && pidAlive(pid, rec?.pidStart) && !worktreeGone;
   return {
     beadId: rec?.beadId ?? slug,
@@ -265,7 +274,9 @@ export function reapLoopRuns(dir: string): void {
     // unparseable, dead-owned, or its worktree reaped from under it —
     // all residue, not a live record. The worktree check is the
     // shared-supervisor case: the pid outlives the run (bro-4q6n9).
-    const worktreeGone = rec !== null && rec.worktree !== '' && !existsSync(rec.worktree);
+    const ageMs = rec !== null && rec.startedAt !== '' ? Date.now() - Date.parse(rec.startedAt) : 0;
+    const worktreeGone =
+      rec !== null && rec.worktree !== '' && ageMs > WORKTREE_GRACE_MS && !existsSync(rec.worktree);
     if (rec === null || !pidAlive(rec.pid, rec.pidStart) || worktreeGone) {
       try {
         rmSync(path, { force: true });

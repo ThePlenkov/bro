@@ -168,7 +168,7 @@ describe('loop run records', () => {
   test('a deleted worktree reads dead even while the shared supervisor pid lives (bro-4q6n9)', () => {
     const { root, main } = initRepo('bro-loopstate-');
     inside(main, root, () => {
-      const r = rec(main);
+      const r = rec(main, { startedAt: new Date(Date.now() - 10 * 60_000).toISOString() });
       beginLoopRun(main, r);
       assert.equal(collectLoopRuns(main)[0]?.state, 'running');
       rmSync(r.worktree, { recursive: true, force: true });
