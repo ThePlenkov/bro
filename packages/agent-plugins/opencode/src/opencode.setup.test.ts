@@ -626,20 +626,15 @@ describe('event stream', () => {
     respond({});
     process.env.BRO_STUB_STATUS_MAP = '{"stop":2}';
     const { emit } = await makeSetup();
-    const cleanTurn = (): void => {
-      emit('message.updated', {
-        info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-      });
-    };
+    // v2: session.execution.succeeded is the clean turn AND the idle
+    // moment — opencode ≥2.x never emits message.updated/session.idle
     const lines = await captureBroErr(async l => {
-      cleanTurn();
-      emit('session.idle', { sessionID: 'ses_1' });
+      emit('session.execution.succeeded', { sessionID: 'ses_1' });
       await waitFor(() => l.some(line => /stop gate did not run/.test(line)));
       // a second idle inside the interval must not repeat the warning —
       // loud once, never a spammer. The debug line is the settle signal:
       // probeFailed writes it before checking the warn window.
-      cleanTurn();
-      emit('session.idle', { sessionID: 'ses_1' });
+      emit('session.execution.succeeded', { sessionID: 'ses_1' });
       await waitFor(() => l.filter(line => /probe failed/.test(line)).length >= 2);
     });
     const warns = lines.filter(l => l.includes('[bro] warn:'));
@@ -651,10 +646,7 @@ describe('event stream', () => {
     respond({ stop: 'loading beads...\ngarbage\n' });
     const { emit } = await makeSetup();
     const lines = await captureBroErr(async l => {
-      emit('message.updated', {
-        info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-      });
-      emit('session.idle', { sessionID: 'ses_1' });
+      emit('session.execution.succeeded', { sessionID: 'ses_1' });
       await waitFor(() => l.some(line => /no control object/.test(line)));
     });
     assert.equal(lines.filter(l => l.includes('[bro] warn:')).length, 1);
@@ -664,10 +656,7 @@ describe('event stream', () => {
     respond({});
     const second = await makeSetup();
     const silent = await captureBroErr(async l => {
-      second.emit('message.updated', {
-        info: { role: 'assistant', sessionID: 'ses_2', time: { completed: 2 } },
-      });
-      second.emit('session.idle', { sessionID: 'ses_2' });
+      second.emit('session.execution.succeeded', { sessionID: 'ses_2' });
       await waitFor(() => l.some(line => /probe returned null for event=stop/.test(line)));
     });
     assert.equal(silent.filter(l => l.includes('[bro] warn:')).length, 0);
