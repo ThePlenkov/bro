@@ -759,6 +759,44 @@ function launchNativeProcess({
   handleFile,
   exitFile,
 }: NativeLaunchProcessArgs) {
+  const options = nativeLaunchOptions({
+    args,
+    agentId,
+    spec,
+    knobs,
+    env,
+    workerTmp,
+    promptFile,
+    cliBadge,
+    mol,
+    fd,
+    errFd,
+  });
+  return spawnNativeProcess({
+    ...options,
+    stderrLog,
+    log,
+    handleFile,
+    exitFile,
+  });
+}
+
+function nativeLaunchOptions({
+  args,
+  agentId,
+  spec,
+  knobs,
+  env,
+  workerTmp,
+  promptFile,
+  cliBadge,
+  mol,
+  fd,
+  errFd,
+}: Omit<NativeLaunchProcessArgs, 'stderrLog' | 'log' | 'handleFile' | 'exitFile'>): Omit<
+  NativeProcessArgs,
+  'stderrLog' | 'log' | 'handleFile' | 'exitFile'
+> {
   const scoped = systemdScopeFor(knobs);
   const scopeArgv = [
     ...SCOPE_RUN_PREFIX.slice(1),
@@ -781,16 +819,12 @@ function launchNativeProcess({
     stdio: ['ignore', fd, errFd],
     detached: true,
   };
-  return spawnNativeProcess({
+  return {
     scoped,
     args,
     scopeArgv,
     spawnOpts,
-    stderrLog,
-    log,
-    handleFile,
-    exitFile,
-  });
+  };
 }
 
 // NOSONAR — keeps native launch setup together as one transaction.
@@ -800,67 +834,67 @@ function launchNativeChild(args: NativeLaunchArgs): {
   child: ReturnType<typeof spawn>;
   scopeRetried: boolean;
 } {
-  const {
-    dir,
-    home,
-    mol,
-    spec,
-    env,
-    command,
-    knobs,
-    agentId,
-    promptFile,
-    log,
-    stderrLog,
-    exitFile,
-    resumeSessionId,
-    handleFile,
-    goFile,
-    workerTmp,
-  } = args;
-  let fd: number | undefined;
-  let errFd: number | undefined;
+  const files = openNativeLogs(args.log, args.stderrLog);
   try {
-    fd = openPrivateAppendSync({ path: log });
-    if (stderrLog !== undefined) {
-      errFd = openPrivateAppendSync({ path: stderrLog });
-    }
-    ensureWorkerTmpDir(workerTmp);
-    const worker = workerWithResume(spec.worker, resumeSessionId);
-    warnNoPromptFile(worker, command);
-    const { args } = nativePayloadArgs({
-      worker,
-      command,
-      exitFile,
-      handleFile,
-      goFile,
-      promptFile,
-    });
-    const cliBadge = workerCliBadge(worker, command);
-    const spawnedWorker = launchNativeProcess({
-      args,
-      agentId,
-      spec,
-      knobs,
-      env,
-      workerTmp,
-      promptFile,
-      cliBadge,
-      mol,
-      fd: fd!,
-      errFd,
-      stderrLog,
-      log,
-      handleFile,
-      exitFile,
-    });
-    const child = spawnedWorker.child;
-    return { fd: fd!, errFd, child, scopeRetried: spawnedWorker.scopeRetried };
+    const worker = launchNativeChildWorker(args, files);
+    return { ...worker, fd: files.fd, errFd: files.errFd };
   } catch (error) {
-    if (fd !== undefined) closeSync(fd);
-    if (errFd !== undefined) closeSync(errFd);
+    closeNativeLogs(files);
     throw error;
   }
+}
+
+function launchNativeChildWorker(
+  args: NativeLaunchArgs,
+  files: { fd: number; errFd: number | undefined }
+): { child: ReturnType<typeof spawn>; scopeRetried: boolean } {
+  ensureWorkerTmpDir(args.workerTmp);
+  const worker = workerWithResume(args.spec.worker, args.resumeSessionId);
+  warnNoPromptFile(worker, args.command);
+  const payload = nativePayloadArgs({
+    worker,
+    command: args.command,
+    exitFile: args.exitFile,
+    handleFile: args.handleFile,
+    goFile: args.goFile,
+    promptFile: args.promptFile,
+  });
+  const spawned = launchNativeProcess({
+    args: payload.args,
+    agentId: args.agentId,
+    spec: args.spec,
+    knobs: args.knobs,
+    env: args.env,
+    workerTmp: args.workerTmp,
+    promptFile: args.promptFile,
+    cliBadge: workerCliBadge(worker, args.command),
+    mol: args.mol,
+    fd: files.fd,
+    errFd: files.errFd,
+    stderrLog: args.stderrLog,
+    log: args.log,
+    handleFile: args.handleFile,
+    exitFile: args.exitFile,
+  });
+  return { child: spawned.child, scopeRetried: spawned.scopeRetried };
+}
+
+function openNativeLogs(
+  log: string,
+  stderrLog: string | undefined
+): {
+  fd: number;
+  errFd: number | undefined;
+} {
+  return {
+    fd: openPrivateAppendSync({ path: log }),
+    errFd: stderrLog === undefined ? undefined : openPrivateAppendSync({ path: stderrLog }),
+  };
+}
+
+function closeNativeLogs(files: { fd: number; errFd: number | undefined }): void {
+  closeSync(files.fd);
+  if (files.errFd !== undefined) closeSync(files.errFd);
 }
 type NativeSpawnFailureArgs = {
   dir: string;
@@ -1024,6 +1058,96 @@ function prepareNativeSpawn({
   });
 }
 
+type NativeSpawnArgs = {
+  dir: string;
+  home: string;
+  mol: string;
+  spec: SpawnSpec;
+  env: AgentConnectorEnv;
+  command: string;
+  knobs: Record<string, unknown>;
+};
+
+function runNativeSpawn({ dir, home, mol, spec, env, command, knobs }: NativeSpawnArgs): AgentInfo {
+  return withAgentRegistryLock(dir, () => {
+    const prepared = prepareNativeSpawn({ dir, home, spec, env, command });
+    // prettier-ignore
+    const {
+      agentId,
+      promptFile,
+      log,
+      stderrLog,
+      exitFile,
+      runId,
+      lease,
+      reservation,
+      resumeSessionId,
+      crossKindReservations,
+    } = prepared;
+    maybeAbandonSpawn('reservation');
+    const { handleFile, goFile } = attemptHandles(home, agentId, runId);
+    const workerTmp = workerTmpDir(spec.repoRoot, agentId);
+    let fd: number | undefined;
+    let errFd: number | undefined;
+    let childPid: number | undefined;
+    let spawned: AgentRegistryEntry;
+    try {
+      const launched = launchNativeChild({
+        dir,
+        home,
+        mol,
+        spec,
+        env,
+        command,
+        knobs,
+        agentId,
+        promptFile,
+        log,
+        stderrLog,
+        exitFile,
+        resumeSessionId,
+        handleFile,
+        goFile,
+        workerTmp,
+      });
+      fd = launched.fd;
+      errFd = launched.errFd;
+      const child = launched.child;
+      childPid = launched.scopeRetried ? undefined : child.pid;
+      spawned = publishNativeChild({
+        dir,
+        molStep: spec.molStep,
+        spec,
+        agentId,
+        goFile,
+        child,
+        reservation,
+        crossKindReservations,
+        lease,
+      });
+    } catch (err) {
+      handleNativeSpawnFailure(err, {
+        dir,
+        molStep: spec.molStep,
+        agentId,
+        runId,
+        reservation,
+        crossKindReservations,
+        lease,
+        childPid,
+      });
+    } finally {
+      if (fd !== undefined) {
+        closeSync(fd);
+      }
+      if (errFd !== undefined) {
+        closeSync(errFd);
+      }
+    }
+    return toInfo(dir, home, spec.molStep, spawned);
+  });
+}
+
 export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir;
   const knobs = env.agents['native'] ?? {};
@@ -1033,85 +1157,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 
   // NOSONAR — the lock callback owns one synchronous spawn transaction
   // NOSONAR — the lock callback owns one synchronous spawn transaction.
-  const spawnNative = (spec: SpawnSpec, home: string, mol: string): AgentInfo => {
-    return withAgentRegistryLock(dir, () => {
-      const prepared = prepareNativeSpawn({ dir, home, spec, env, command });
-      // prettier-ignore
-      const {
-        agentId,
-        promptFile,
-        log,
-        stderrLog,
-        exitFile,
-        runId,
-        lease,
-        reservation,
-        resumeSessionId,
-        crossKindReservations,
-      } = prepared;
-      maybeAbandonSpawn('reservation');
-      const { handleFile, goFile } = attemptHandles(home, agentId, runId);
-      const workerTmp = workerTmpDir(spec.repoRoot, agentId);
-      let fd: number | undefined;
-      let errFd: number | undefined;
-      let childPid: number | undefined;
-      let spawned: AgentRegistryEntry;
-      try {
-        const launched = launchNativeChild({
-          dir,
-          home,
-          mol,
-          spec,
-          env,
-          command,
-          knobs,
-          agentId,
-          promptFile,
-          log,
-          stderrLog,
-          exitFile,
-          resumeSessionId,
-          handleFile,
-          goFile,
-          workerTmp,
-        });
-        fd = launched.fd;
-        errFd = launched.errFd;
-        const child = launched.child;
-        childPid = launched.scopeRetried ? undefined : child.pid;
-        spawned = publishNativeChild({
-          dir,
-          molStep: spec.molStep,
-          spec,
-          agentId,
-          goFile,
-          child,
-          reservation,
-          crossKindReservations,
-          lease,
-        });
-      } catch (err) {
-        handleNativeSpawnFailure(err, {
-          dir,
-          molStep: spec.molStep,
-          agentId,
-          runId,
-          reservation,
-          crossKindReservations,
-          lease,
-          childPid,
-        });
-      } finally {
-        if (fd !== undefined) {
-          closeSync(fd);
-        }
-        if (errFd !== undefined) {
-          closeSync(errFd);
-        }
-      }
-      return toInfo(dir, home, spec.molStep, spawned);
-    });
-  };
+  const spawnNative = (spec: SpawnSpec, home: string, mol: string): AgentInfo =>
+    withAgentRegistryLock(dir, () => runNativeSpawn({ dir, home, mol, spec, env, command, knobs }));
   return {
     name: 'native',
 
