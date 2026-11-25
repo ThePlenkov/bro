@@ -26,17 +26,17 @@
  * no resolve recorded reads as "not reopened" — never a crash, never a
  * false block on a healthy PR.
  */
-import type { ReviewComment, ReviewThread } from '@broject/core'
-import type { ResolveLedger } from './resolve-log.ts'
+import type { ReviewComment, ReviewThread } from '@broject/core';
+import type { ResolveLedger } from './resolve-log.ts';
 
 export interface ReopenedThread {
-  id: string
+  id: string;
   /** The author of the comment that reopened the thread. */
-  author: string
+  author: string;
   /** When the reopening comment landed. */
-  reopenedAt: string
+  reopenedAt: string;
   /** 'the thread was resolved before and is open again' */
-  reason: string
+  reason: string;
 }
 
 /**
@@ -50,43 +50,51 @@ export function detectReopenedThreads(
   ledger: ResolveLedger | null | undefined,
   repo: string,
   pr: number,
-  current: ReviewThread[]
+  current: ReviewThread[],
+  actor?: string
 ): ReopenedThread[] {
   if (!ledger) {
-    return []
+    return [];
   }
-  const reopened: ReopenedThread[] = []
+  const reopened: ReopenedThread[] = [];
 
   for (const thread of current) {
     if (thread.resolved) {
       // still resolved — not a reopen
-      continue
+      continue;
     }
     if (!ledger.wasResolved(repo, pr, thread.id)) {
       // never resolved by bro — an ordinary open thread
-      continue
+      continue;
     }
-    const newest = newestComment(thread)
+    const newest = newestComment(thread);
     if (newest === null) {
-      continue
+      continue;
+    }
+    // bro's own reply unresolves the thread on the host (any new comment
+    // does) — the token owner's comment is the resolution's evidence,
+    // never a human objection (bro-c593y: watch reported rounds of
+    // 'reopened by <self>' with the thread quiet the whole time)
+    if (actor !== undefined && newest.author === actor) {
+      continue;
     }
     reopened.push({
       id: thread.id,
       author: newest.author,
       reopenedAt: newest.createdAt,
       reason: 'thread was resolved before and is open again',
-    })
+    });
   }
 
-  return reopened
+  return reopened;
 }
 
 /** The newest comment in the thread — the one that reopened it. Null when
  *  the thread carries no comment at all. */
 function newestComment(thread: ReviewThread): ReviewComment | null {
-  const comments = thread.comments ?? (thread.comment ? [thread.comment] : [])
+  const comments = thread.comments ?? (thread.comment ? [thread.comment] : []);
   if (comments.length === 0) {
-    return null
+    return null;
   }
-  return comments.reduce((a, b) => (Date.parse(b.createdAt) > Date.parse(a.createdAt) ? b : a))
+  return comments.reduce((a, b) => (Date.parse(b.createdAt) > Date.parse(a.createdAt) ? b : a));
 }
