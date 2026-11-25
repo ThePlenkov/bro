@@ -69,7 +69,8 @@ function hook(
   f: Fixture,
   event: string,
   payload: Record<string, unknown>,
-  cwd = f.main
+  cwd = f.main,
+  env: Record<string, string> = {}
 ): { code: number | null; stdout: string; stderr: string } {
   // XDG pinned to the fixture — the notify drain reads the user-level
   // mailbox ($HOME/.local/state/bro/notify) too, and a test run must
@@ -77,7 +78,7 @@ function hook(
   return runCli(['hooks', event], {
     cwd,
     input: JSON.stringify(payload),
-    env: { XDG_STATE_HOME: join(f.root, 'xdg-state') },
+    env: { XDG_STATE_HOME: join(f.root, 'xdg-state'), ...env },
   });
 }
 
@@ -2928,28 +2929,44 @@ describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
 });
 
 describe('hooks e2e — dead-loop gate', () => {
+  // BRO_WASTE_GUARD=0: a verify-shaped post ('npm test') arms the
+  // waste-guard's unchanged-tree veto, and that veto lands before any
+  // assertion here reaches the dead-loop gate — the guards are
+  // independent, and this suite tests only dead-loop
   const post = (
     f: Fixture,
     session: string,
     cmd: string,
     ok = true
   ): { code: number | null; stdout: string; stderr: string } =>
-    hook(f, 'post-tool', {
-      tool_name: 'Bash',
-      tool_input: { command: cmd },
-      tool_response: { success: ok },
-      session_id: session,
-    });
+    hook(
+      f,
+      'post-tool',
+      {
+        tool_name: 'Bash',
+        tool_input: { command: cmd },
+        tool_response: { success: ok },
+        session_id: session,
+      },
+      f.main,
+      { BRO_WASTE_GUARD: '0' }
+    );
   const pre = (
     f: Fixture,
     session: string,
     cmd: string
   ): { code: number | null; stdout: string; stderr: string } =>
-    hook(f, 'pre-tool', {
-      tool_name: 'Bash',
-      tool_input: { command: cmd },
-      session_id: session,
-    });
+    hook(
+      f,
+      'pre-tool',
+      {
+        tool_name: 'Bash',
+        tool_input: { command: cmd },
+        session_id: session,
+      },
+      f.main,
+      { BRO_WASTE_GUARD: '0' }
+    );
 
   test('4 identical post-tools warn + arm; the next identical pre-tool is vetoed, others pass', () => {
     const f = hookFixture();
