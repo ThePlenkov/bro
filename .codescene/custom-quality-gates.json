@@ -409,6 +409,46 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/act.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from act.ts: the argv layer — usage text, PR-number resolution, and the thread/comment readers — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/act-args.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from act.ts: the dismiss verb — stale-veto probe, re-read, and per-candidate dismissal — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/act-dismiss.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from act.ts: the merge verb and its landing pipeline — queue-aware land, bead discharge, closed-PR harvest, post-merge retire — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/act-land.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from act.ts: the status/verdict rendering — printStatus, landed phrasing, veto display — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/act-report.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved extraction from act.ts: the wait cluster — poll loop, detached spawn, rearm pass, settle verdicts — preserves existing behavior and is not newly authored code.",
+      "matching_content_path": "packages/cli/src/commands/act-wait.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/agents.ts"
     },
     {
