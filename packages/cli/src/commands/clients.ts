@@ -371,7 +371,7 @@ const CLIENTS: Record<string, ClientSpec> = {
     // omp discovers <cwd>/.omp/extensions/ locally and
     // <agentDir>/extensions/ globally — the same loose-extension shape
     // pi uses. The full plugin (skills, hooks, commands, WATCHDOG) is
-    // omp's own package surface: `omp plugin install ./plugins/omp/bro`.
+    // omp's own package surface: `omp plugin install ./integrations/omp`.
     surfaces: (cwd, env) => [
       {
         kind: 'file',
@@ -559,7 +559,7 @@ function cursorProbes(cwd: string, env: NodeJS.ProcessEnv): Array<Omit<PluginRow
   // use it as their seam
   const home = env.CURSOR_CONFIG_DIR || join(homedir(), '.cursor');
   // the documented local install — the symlink Cursor's plugin README
-  // prescribes (plugins/cursor/bro → plugins/local/bro)
+  // prescribes (integrations/cursor → plugins/local/bro)
   const local = cursorPluginStateAt(join(home, 'plugins', 'local', 'bro'));
   if (local.state !== 'absent') {
     return [{ scope: 'global', ...local }];
@@ -601,7 +601,7 @@ const MANIFEST_CLIENTS: Record<string, ManifestClientSpec> = {
   },
   cursor: {
     installHint:
-      '/add-plugin https://github.com/ThePlenkov/bro in Cursor (Customize → bro), or symlink plugins/cursor/bro to ~/.cursor/plugins/local/bro',
+      '/add-plugin https://github.com/ThePlenkov/bro in Cursor (Customize → bro), or symlink integrations/cursor to ~/.cursor/plugins/local/bro',
     probes: cursorProbes,
   },
 };

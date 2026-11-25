@@ -270,7 +270,7 @@ run.sh automatically.
   cleaned `dist/` and emitted a single-entry build with no
   `dist/hooks.js`. Drop the positional arg so the fallback honors the
   config's full entry list (found by CI: the nested `nx run` inside an
-  nx task fails project-graph processing on `plugins/omp/bro`, so the
+  nx task fails project-graph processing on `integrations/omp`, so the
   fallback is the path CI actually exercises).
 - [ ] `packages/cli/src/log-timestamps.ts` + `index.ts`/`hooks.ts` —
   the BRO_LOG_TIMESTAMP console wrap moves to a shared module both

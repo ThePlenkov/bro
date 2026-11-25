@@ -9,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ThePlenkov/bro.git",
-    "directory": "plugins/omp/bro"
+    "directory": "integrations/omp"
   },
   "license": "MIT",
   "keywords": [

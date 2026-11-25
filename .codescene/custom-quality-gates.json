@@ -1287,12 +1287,12 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
-      "matching_content_path": "plugins/opencode/bro/bro.ts"
+      "matching_content_path": "integrations/opencode/bro.ts"
     },
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
-      "matching_content_path": "plugins/opencode/bro/cli.ts"
+      "matching_content_path": "integrations/opencode/cli.ts"
     },
     {
       "quality_gates": "bare_minimum",

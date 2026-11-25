@@ -49,7 +49,7 @@ host exposes and hands the client back a `run()` and the last board.
 The standalone-file constraint is then solved at **build time** rather
 than by hand-copying: `scripts/bundle-adapter.ts` folds the core into
 the binding with rolldown (tsdown's own bundler), and `gen-plugins.ts`
-emits the result as `plugins/<client>/bro/bro.ts`. The copies still
+emits the result as `integrations/<client>/bro.ts`. The copies still
 exist; what is gone is the chance for them to disagree.
 
 The build is also where the ownership sentinel is re-asserted: rolldown
@@ -168,7 +168,7 @@ finding.
 Two paths, because omp's plugin manager is package-shaped and bro's
 adapters are module-shaped:
 
-- `omp plugin install ./plugins/omp/bro` — the full plugin: extension,
+- `omp plugin install ./integrations/omp` — the full plugin: extension,
   skills, hooks, commands, WATCHDOG.
 - `bro plugins install omp` — the adapter module alone, into
   `~/.omp/agent/extensions/bro.ts` (global) or `<repo>/.omp/extensions/`

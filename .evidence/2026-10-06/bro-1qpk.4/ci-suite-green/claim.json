@@ -9,7 +9,7 @@
   "verification_method": "test-suite",
   "preconditions": [
     "worktree /home/pepl/projects/bro--bro-1qpk.4 on branch work/bro-1qpk.4, rebased onto origin/main",
-    "all bro-1qpk.4 changes present: opencode.ts V2 setup, opencode-tui.ts, plugins.ts extras, connectors.ts preTool, hooks.ts pre-tool dispatch, generated plugins/opencode/bro/{bro.ts,cli.ts,README.md}",
+    "all bro-1qpk.4 changes present: opencode.ts V2 setup, opencode-tui.ts, plugins.ts extras, connectors.ts preTool, hooks.ts pre-tool dispatch, generated integrations/opencode/{bro.ts,cli.ts,README.md}",
     "node_modules refreshed via npm install (workspace links + @kilocode/plugin present)"
   ],
   "commands": [
@@ -84,9 +84,9 @@
     "/home/pepl/projects/bro--bro-1qpk.4/packages/core/src/connectors.test.ts",
     "/home/pepl/projects/bro--bro-1qpk.4/packages/core/src/index.ts",
     "/home/pepl/projects/bro--bro-1qpk.4/scripts/gen-plugins.ts",
-    "/home/pepl/projects/bro--bro-1qpk.4/plugins/opencode/bro/bro.ts",
-    "/home/pepl/projects/bro--bro-1qpk.4/plugins/opencode/bro/cli.ts",
-    "/home/pepl/projects/bro--bro-1qpk.4/plugins/opencode/bro/README.md",
+    "/home/pepl/projects/bro--bro-1qpk.4/integrations/opencode/bro.ts",
+    "/home/pepl/projects/bro--bro-1qpk.4/integrations/opencode/cli.ts",
+    "/home/pepl/projects/bro--bro-1qpk.4/integrations/opencode/README.md",
     "/home/pepl/projects/bro--bro-1qpk.4/specs/bro-1qpk.4.md",
     "/home/pepl/projects/bro--bro-1qpk.4/specs/bro-1qpk.4.1.md",
     "/home/pepl/projects/bro--bro-1qpk.4/specs/bro-1qpk.4.2.md",

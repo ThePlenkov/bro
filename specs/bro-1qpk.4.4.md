@@ -12,7 +12,7 @@ the live board are invisible inside the opencode TUI.
 ## Design
 
 A second artifact `packages/cli/src/opencode-tui.ts` → materialized to
-`plugins/opencode/bro/cli.ts`, a `@opencode/plugin/tui` entrypoint
+`integrations/opencode/cli.ts`, a `@opencode/plugin/tui` entrypoint
 (`Plugin.define({id:'bro.cli', setup})`) — the V2 terminal plugin
 contract, structurally declared (no runtime import).
 
@@ -34,5 +34,5 @@ contract, structurally declared (no runtime import).
 - `cli.ts` exports `{id:'bro.cli', setup}`; setup registers the keymap
   layer and event taps, returns a disposer
 - `plugins.ts` ships the second target for `opencode` installs
-- `npm run gen:plugins` emits `plugins/opencode/bro/cli.ts` + README
+- `npm run gen:plugins` emits `integrations/opencode/cli.ts` + README
   section; `check:plugins` drift-clean

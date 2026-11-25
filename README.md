@@ -104,19 +104,19 @@ per client:
 
 | Client      | Install                                                                                |
 | ----------- | -------------------------------------------------------------------------------------- |
-| Devin       | `devin plugins install ThePlenkov/bro` (or `ThePlenkov/bro#plugins/devin/bro`)         |
+| Devin       | `devin plugins install ThePlenkov/bro` (or `ThePlenkov/bro#integrations/devin`)        |
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro`                   |
 | Codex       | `codex plugin marketplace add ThePlenkov/bro` → install `bro`                          |
 | Cursor      | `/add-plugin https://github.com/ThePlenkov/bro`, then install `bro`                    |
 | OpenCode    | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro plugins install opencode` |
 | Kilo        | `bro plugins install kilo`                                                             |
 | pi          | `bro plugins install pi`                                                               |
-| omp         | `omp plugin install ./plugins/omp/bro`, or `bro plugins install omp`                   |
+| omp         | `omp plugin install ./integrations/omp`, or `bro plugins install omp`                  |
 
 Every adapter ships the same skills and lifecycle hooks (session
 rehydration, review-gate stop, self-approve for `bro`/`bd`) wired through
 `hooks/run.sh` — local dist → `bro` on PATH → major-pinned `npx`, always
-fail-open. Cursor's adapter is `plugins/cursor/bro`; its hooks speak
+fail-open. Cursor's adapter is `integrations/cursor`; its hooks speak
 Cursor's schema (`additional_context`, one `followup_message` on stop).
 Cloud agents do not run `sessionStart`, so the first prompt rehydrates
 once.

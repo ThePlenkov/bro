@@ -18,7 +18,7 @@ load — belongs there.
 ## Design
 
 A third artifact `packages/cli/src/opencode-tui-v2.tsx` → materialized
-to `plugins/opencode/bro/tui.tsx`, installed as a **plugin directory**
+to `integrations/opencode/tui.tsx`, installed as a **plugin directory**
 `plugins/bro/tui.tsx` (global: `~/.config/opencode/plugins/bro/`,
 local: `<repo>/.opencode/plugins/bro/`). The host supplies
 `@opencode/plugin`, `solid-js`, and `@opentui/*` at runtime — real
@@ -52,6 +52,6 @@ TUI face, superset of the V1 `cli.ts`:
 - `plugins/bro/tui.tsx` appears in `opencode plugin list` as a local
   TUI target after `bro plugins install opencode --global`.
 - The sidebar shows the board in a bro rig and stays silent outside.
-- `npm run gen:plugins` emits `plugins/opencode/bro/tui.tsx`;
+- `npm run gen:plugins` emits `integrations/opencode/tui.tsx`;
   `check:plugins` drift-clean; `npm test` green incl. a stub-context
   test exercising slot registration and the poll→render data path.

@@ -40,5 +40,5 @@ one-shot re-prompt.
   `typeof plugin.setup === 'function'`
 - V2 setup wires every row in the table; each degrades to no-op when
   the bro command resolves null (fail-open)
-- `npm test` green; `plugins/opencode/bro/bro.ts` regenerated
+- `npm test` green; `integrations/opencode/bro.ts` regenerated
 - README states V1+V2 support (drops the bro-ot80 caveat)

@@ -22,7 +22,7 @@ One module keeps serving both majors: the default export gains a V2
 `setup(ctx)` beside the existing V1 `server()` — the documented dual
 entrypoint (`V1 calls server()`, `V2 reads id + setup()`, ignoring the
 other side). `Plugin.define` is not imported: the materialized module is
-standalone (node builtins only, verbatim copy to `plugins/opencode/bro/`),
+standalone (node builtins only, verbatim copy to `integrations/opencode/`),
 so the `{id, setup}` shape is declared structurally, same discipline the
 V1 hooks already use. The bro-side contract is unchanged — every surface
 still funnels through `bro hooks <event>` / read-verb spawns; no policy
@@ -50,7 +50,7 @@ moves into the plugin.
 
 Terminal UI is a second entrypoint on `@opencode/plugin/tui`, not the
 server ctx: `packages/cli/src/opencode-tui.ts` →
-`plugins/opencode/bro/cli.ts`. `keymap.layer` carries `/bro` palette +
+`integrations/opencode/cli.ts`. `keymap.layer` carries `/bro` palette +
 slash commands, `data.on`/`data.listen` surfaces gate events as
 `ui.toast.show`, and `bro status --json` feeds a status read. It shares
 the CLI-resolution ladder (extracted per module — standalone artifact

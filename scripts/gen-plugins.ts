@@ -6,14 +6,14 @@
  * directories carry only that client's extras (manifest, hooks). Codex
  * installs the repo root, so it does not get a skills tree of its own.
  *
- *   plugins/devin/bro/   plugin.json + hooks.json copied from root
+ *   integrations/devin/   plugin.json + hooks.json copied from root
  *   .claude-plugin/plugin.json  Claude manifest at the repo root; skills
  *                        are ./skills/. The hook map is Claude-only:
- *                        plugins/claude/bro/hooks/hooks.json
+ *                        integrations/claude/hooks/hooks.json
  *   .codex-plugin/plugin.json  Codex manifest at the repo root; skills
  *                        resolve to ./skills/, hooks to the hand-written
- *                        plugins/codex/bro/hooks/hooks.json
- *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
+ *                        integrations/codex/hooks/hooks.json
+ *   integrations/cursor/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
  * Claude and Codex install the repo root, so neither gets a skills tree
@@ -195,8 +195,8 @@ if (claudeEntry?.source !== './') {
   );
   process.exit(1);
 }
-if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'plugins/cursor/bro') {
-  console.error('.cursor-plugin/marketplace.json: name "bro" must source "plugins/cursor/bro"');
+if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'integrations/cursor') {
+  console.error('.cursor-plugin/marketplace.json: name "bro" must source "integrations/cursor"');
   process.exit(1);
 }
 if (cursorEntry.version !== undefined && cursorEntry.version !== cliVersion) {
@@ -209,9 +209,9 @@ if (cursorEntry.version !== undefined && cursorEntry.version !== cliVersion) {
 // the omp plugin carries its own manifest and skills tree.
 const ompMarketplace = readJson('.omp-plugin/marketplace.json');
 const ompEntry = (ompMarketplace.plugins ?? []).find(p => p?.name === 'bro');
-if (ompEntry?.source !== './plugins/omp/bro') {
+if (ompEntry?.source !== './integrations/omp') {
   console.error(
-    '.omp-plugin/marketplace.json: bro source must be "./plugins/omp/bro" — the omp plugin is its own package'
+    '.omp-plugin/marketplace.json: bro source must be "./integrations/omp" — the omp plugin is its own package'
   );
   process.exit(1);
 }
@@ -492,7 +492,7 @@ function ompManifest() {
       repository: {
         type: 'git',
         url: 'git+https://github.com/ThePlenkov/bro.git',
-        directory: 'plugins/omp/bro',
+        directory: 'integrations/omp',
       },
       license: 'MIT',
       keywords: [
@@ -559,11 +559,11 @@ reimplement them — it supplies the state they cannot have. See
 ## Install
 
 \`\`\`sh
-omp plugin install ./plugins/omp/bro     # from a checkout
+omp plugin install ./integrations/omp     # from a checkout
 omp plugin install bro@bro               # from the marketplace
 \`\`\`
 
-Or load it ad hoc: \`omp --extension ./plugins/omp/bro/bro.ts\`.
+Or load it ad hoc: \`omp --extension ./integrations/omp/bro.ts\`.
 
 The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
@@ -593,7 +593,7 @@ Then install **bro** from Customize. The marketplace manifest is
 \`.cursor-plugin/marketplace.json\` at the repo root; this directory is
 the plugin it points at.
 
-For a local checkout, symlink \`plugins/cursor/bro\` to
+For a local checkout, symlink \`integrations/cursor\` to
 \`~/.cursor/plugins/local/bro\`. \`skills\` in that directory is a link to
 the repository \`skills/\` tree — one copy for every client — so the
 adapter has to stay inside the checkout.
@@ -626,24 +626,24 @@ PATH, then \`npx -y @broject/bro@${manifest.version}\`.
 /** Per-adapter opt-outs — opencode plugins are bare modules: no skills
  *  tree, no shell hook launcher. Anything not listed gets both. */
 const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
-  'plugins/opencode/bro': { skills: false, runSh: false },
-  'plugins/kilo/bro': { skills: false, runSh: false },
-  'plugins/pi/bro': { skills: false, runSh: false },
+  'integrations/opencode': { skills: false, runSh: false },
+  'integrations/kilo': { skills: false, runSh: false },
+  'integrations/pi': { skills: false, runSh: false },
   // omp loads hook modules, not the shell launcher: the omp plugin's
   // hook is hooks/pre/permission.ts, and omp discovers .ts/.js children
   // of hooks/pre and hooks/post. A run.sh there is dead weight.
-  'plugins/omp/bro': { runSh: false },
+  'integrations/omp': { runSh: false },
   // Claude and Codex install the repo root. A skills entry in the
   // adapter would be a second package. Claude's hook map stays in the
   // adapter; the shared hooks/ dir is only run.sh.
-  'plugins/codex/bro': { skills: false },
-  'plugins/claude/bro': { skills: false, runSh: false },
+  'integrations/codex': { skills: false },
+  'integrations/claude': { skills: false, runSh: false },
 };
 
 // files written per adapter — value is source path, [text] literal
 // content, or null for a hand-written file that must already exist
 const ADAPTERS = {
-  'plugins/opencode/bro': {
+  'integrations/opencode': {
     // the v2 catalog plugin — one directory, three modules. opencode
     // loads a plugin as a directory and raises the TUI half only for a
     // package that also has a server, so they belong together.
@@ -652,18 +652,18 @@ const ADAPTERS = {
     'rpc.ts': 'packages/agent-plugins/opencode/src/rpc.ts',
     'README.md': [opencodeReadme()],
   },
-  'plugins/kilo/bro': {
+  'integrations/kilo': {
     'bro.ts': 'packages/agent-plugins/kilo/src/kilo.ts',
     'README.md': [kiloReadme()],
   },
-  'plugins/pi/bro': {
+  'integrations/pi': {
     // BUNDLED, not copied: the adapter imports the shared core
     // (packages/agent-plugins/*/src/), and the shipped file has to stand
     // alone — jiti loads it with no node_modules to resolve against.
     'bro.ts': [await bundleAdapter('packages/agent-plugins/pi/src/pi.ts')],
     'README.md': [piReadme()],
   },
-  'plugins/omp/bro': {
+  'integrations/omp': {
     // BUNDLED, not copied: the adapter imports the shared core
     // (packages/agent-plugins/*/src/), and the shipped file has to stand
     // alone — the host loads it with no node_modules to resolve
@@ -675,22 +675,22 @@ const ADAPTERS = {
     'hooks/pre/permission.ts': 'packages/agent-plugins/omp/src/omp-hook.ts',
     'README.md': [ompReadme()],
   },
-  'plugins/devin/bro': {
+  'integrations/devin': {
     'plugin.json': 'plugin.json',
     'hooks.json': [devinHooksJson()],
   },
-  'plugins/claude/bro': {
+  'integrations/claude': {
     // hand-written (Claude event names). Not hooks/hooks.json: that path
     // is the shared launcher directory, and Claude's root var stays here.
     'hooks/hooks.json': null,
   },
-  'plugins/codex/bro': {
+  'integrations/codex': {
     // hand-written (Codex event names) — listed so --check doesn't flag it.
     // The manifest lives at the repo root: this directory is hooks only.
     'hooks/hooks.json': null,
     'INSTRUCTIONS.md': null,
   },
-  'plugins/cursor/bro': {
+  'integrations/cursor': {
     '.cursor-plugin/plugin.json': [cursorManifest()],
     'hooks/hooks.json': [cursorHooksJson()],
     'README.md': [cursorReadme()],
@@ -703,7 +703,7 @@ const ADAPTERS = {
 const VERSIONED_SOURCES = [
   'hooks.json',
   'hooks/run.sh',
-  'plugins/codex/bro/hooks/hooks.json',
+  'integrations/codex/hooks/hooks.json',
   // the materialized opencode modules carry the npx fallback pin
   'packages/agent-plugins/opencode/src/opencode.ts',
   // the pi and omp extensions carry the same pin
@@ -819,7 +819,7 @@ for (const name of readdirSync(skillsRoot).sort()) {
   }
 }
 
-/** plugins/<client>/bro/skills → the one repo skills/ tree. Forward
+/** integrations/<client>/skills → the one repo skills/ tree. Forward
  * slashes so the git symlink is the same on every OS. */
 function skillsLinkTarget(adapterRel) {
   return relative(join(ROOT, adapterRel), join(ROOT, 'skills')).split(sep).join('/');
@@ -867,7 +867,7 @@ function ensureSkillsLink(adapterRel) {
 
 emit(
   '.claude-plugin/plugin.json',
-  clientManifest({ hooks: './plugins/claude/bro/hooks/hooks.json' })
+  clientManifest({ hooks: './integrations/claude/hooks/hooks.json' })
 );
 
 emit(
@@ -875,7 +875,7 @@ emit(
   clientManifest({
     interface: { displayName: 'bro' },
     skills: './skills/',
-    hooks: './plugins/codex/bro/hooks/hooks.json',
+    hooks: './integrations/codex/hooks/hooks.json',
   })
 );
 

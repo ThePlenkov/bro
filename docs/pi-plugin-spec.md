@@ -1,6 +1,6 @@
 # Pi plugin spec — bro as a pi extension
 
-bro ships as a single self-contained pi extension: `plugins/pi/bro/bro.ts`,
+bro ships as a single self-contained pi extension: `integrations/pi/bro.ts`,
 generated from `packages/cli/src/adapter/pi.ts` via `npm run gen:plugins`.
 `check:plugins` fails when the bundle drifts from source.
 

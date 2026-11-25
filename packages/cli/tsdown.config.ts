@@ -68,13 +68,13 @@ export default defineConfig({
       name: 'bro-opencode-plugin',
       generateBundle() {
         for (const name of OPENCODE_PLUGIN_FILES) {
-          const source = `${root}/plugins/opencode/bro/${name}`;
+          const source = `${root}/integrations/opencode/${name}`;
           if (!existsSync(source)) {
             continue;
           }
           this.emitFile({
             type: 'asset',
-            fileName: `plugins/opencode/bro/${name}`,
+            fileName: `integrations/opencode/${name}`,
             source: readFileSync(source),
           });
         }

@@ -164,10 +164,12 @@ for (const hostName of ['claude', 'codex', 'devin', 'cursor'] as const) {
 
 describe('generated hook launch paths', () => {
   test('launchers and inline commands never probe or install bro', () => {
-    const pluginDirs = readdirSync(join(repoRoot, 'plugins'));
+    const integrationDirs = readdirSync(join(repoRoot, 'integrations'));
     const launchers = [
       join(repoRoot, 'hooks', 'run.sh'),
-      ...pluginDirs.map(plugin => join(repoRoot, 'plugins', plugin, 'bro', 'hooks', 'run.sh')),
+      ...integrationDirs.map(integration =>
+        join(repoRoot, 'integrations', integration, 'hooks', 'run.sh')
+      ),
     ].filter(existsSync);
     for (const path of launchers) {
       const launcher = readFileSync(path, 'utf8');
@@ -179,7 +181,7 @@ describe('generated hook launch paths', () => {
       assert.doesNotMatch(launcher, /bro hooks <\/dev\/null/, `${path} probes bro hooks`);
     }
 
-    const manifests = [join(repoRoot, 'hooks.json'), ...jsonFiles(join(repoRoot, 'plugins'))];
+    const manifests = [join(repoRoot, 'hooks.json'), ...jsonFiles(join(repoRoot, 'integrations'))];
     for (const path of manifests) {
       const commands = hookCommands(JSON.parse(readFileSync(path, 'utf8')) as unknown);
       for (const command of commands) {
@@ -234,7 +236,7 @@ async function loadModule(rel: string): Promise<{ default: (api: unknown) => voi
 for (const hostName of ['pi', 'omp'] as const) {
   describe(`matrix conformance — ${hostName} extension`, () => {
     const host = HOOK_MATRIX.hosts[hostName]!;
-    const mod = `plugins/${hostName}/bro/bro.ts`;
+    const mod = `integrations/${hostName}/bro.ts`;
 
     test('the adapter registers exactly the declared event set', async () => {
       const { api, events } = hostStub();
@@ -258,7 +260,7 @@ test('matrix conformance — omp pre-tool cell ships via its own module', async 
 
 test('matrix conformance — opencode plugin exposes setup (modern API)', async () => {
   // the v2 catalog plugin — the server entrypoint of the plugin dir
-  const plugin = (await import(join(repoRoot, 'plugins/opencode/bro/index.ts'))) as {
+  const plugin = (await import(join(repoRoot, 'integrations/opencode/index.ts'))) as {
     default: { id?: string; setup?: unknown; server?: unknown };
   };
   assert.equal(plugin.default.id, 'bro');
@@ -268,7 +270,7 @@ test('matrix conformance — opencode plugin exposes setup (modern API)', async 
 });
 
 test('matrix conformance — kilo plugin exposes its declared hooks', async () => {
-  const plugin = (await import(join(repoRoot, 'plugins/kilo/bro/bro.ts'))) as {
+  const plugin = (await import(join(repoRoot, 'integrations/kilo/bro.ts'))) as {
     default: { server: (input: unknown) => Promise<Record<string, unknown>> };
   };
   const host = HOOK_MATRIX.hosts.kilo!;

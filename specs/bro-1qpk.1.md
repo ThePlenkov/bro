@@ -11,14 +11,14 @@ complete native adapter (hook bus → `bro hooks` control objects,
 fail-open, async spawns). What does not exist is the install mechanics:
 nothing places that module into opencode's plugin dirs. Every client
 bro supports today (devin/claude/codex/cursor adapters under
-`plugins/<client>/bro/`) relies on a marketplace or manual symlink —
+`integrations/<client>/`) relies on a marketplace or manual symlink —
 there is no `bro`-owned verb that answers "put bro into this agent,
 here or everywhere."
 
 Milestone 1 of bro-1qpk: the `bro plugins` command grows a client-
 adapter surface (`install` / `uninstall` / `list` over `--global` /
 `--local` scopes) and the opencode adapter becomes materializable —
-the same module gen-plugins can emit into `plugins/opencode/bro/` for
+the same module gen-plugins can emit into `integrations/opencode/` for
 repo-distributed installs and `bro plugins install` can write into a
 client's plugin dir.
 
@@ -74,11 +74,11 @@ this client.
 Artifact source resolution (first hit wins):
 
 1. `<pkg>/src/opencode.ts` — dev checkout / tsx run; also the file
-   gen-plugins copies into `plugins/opencode/bro/bro.ts`
+   gen-plugins copies into `integrations/opencode/bro.ts`
 2. `<pkg>/dist/opencode.js` — the npm tarball entry (`exports["./server"]`);
    self-contained: opencode.ts imports node builtins only, so the
    bundle has no internal chunks — written out as `bro.ts` (JS ⊂ TS)
-3. `<git-root(cwd)>/plugins/opencode/bro/bro.ts` — repo-distributed
+3. `<git-root(cwd)>/integrations/opencode/bro.ts` — repo-distributed
    adapter, e.g. a marketplace clone where the CLI runs via npx
 
 All three carry identical hook behavior; the byte-content compared for
@@ -94,7 +94,7 @@ All three carry identical hook behavior; the byte-content compared for
    covers the npm `plugin: ["@broject/bro/server"]` config-entry form)
 3. **walk-up** from the module dir for `packages/cli/dist/index.js` —
    a materialized `bro.ts` inside a bro checkout
-   (`.opencode/plugins/`, `plugins/opencode/bro/`) resolves the
+   (`.opencode/plugins/`, `integrations/opencode/`) resolves the
    checkout's build; same walk `.kilo/plugin/bro.ts` and
    `hooks/run.sh` already do
 4. PATH `bro` passing the `bro hooks` probe (unchanged)
@@ -109,7 +109,7 @@ falls through — fail-open is the contract.
 
 ### gen-plugins — the repo-distributed adapter
 
-New `ADAPTERS` entry `plugins/opencode/bro/` emitting `bro.ts` (copy of
+New `ADAPTERS` entry `integrations/opencode/` emitting `bro.ts` (copy of
 `packages/cli/src/opencode.ts`) and a generated `README.md`. opencode
 plugins do not consume `skills/` links or `hooks/run.sh`, so the emit
 loop gains a per-adapter opt-out (`shell`/`skills` flags defaulting
@@ -142,7 +142,7 @@ install ("I installed but the hooks never fire") has a visible verdict.
       by the registry to avoid the import cycle)
 - [ ] `packages/cli/src/plugins.ts`: `plugins` plugin `run` delegates
       to the command module
-- [ ] `scripts/gen-plugins.ts`: `plugins/opencode/bro` adapter
+- [ ] `scripts/gen-plugins.ts`: `integrations/opencode` adapter
       (bro.ts copy + README, skills/run.sh opt-out) +
       `src/opencode.ts` in VERSIONED_SOURCES
 - [ ] `packages/cli/src/commands/doctor.ts`: `plugins` row

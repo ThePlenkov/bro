@@ -18,7 +18,7 @@ alternative, which is N spawns per tick.
 
 One self-contained module `packages/cli/src/pi.ts` (node builtins
 only — pi loads the raw .ts, no build step) materialized verbatim to
-`plugins/pi/bro/bro.ts` by gen-plugins, exactly like the opencode
+`integrations/pi/bro.ts` by gen-plugins, exactly like the opencode
 adapter. No bro policy lives in the extension: every lifecycle event
 is one `bro hooks <event>` call with the payload on stdin, and the
 control object on stdout is translated into pi's own result slots.

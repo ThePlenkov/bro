@@ -170,7 +170,7 @@ reader behind the lane telemetry. `packages/cli` keeps the wiring only
 This is not a rename: `packages/devin` is the devin **facade** — the
 thing that knows how devin marks a session, how its CLI spells a session
 start, and how its store counts requests. The bro **devin plugin**
-(`plugins/devin/bro`) is a different animal: the client adapter that
+(`integrations/devin`) is a different animal: the client adapter that
 carries bro's skills and hooks into the devin CLI. It inherits the
 facade; it does not contain it.
 

@@ -110,7 +110,7 @@ function siblingCli(): string | null {
 }
 
 /** Walk up from this module for a checkout build — a bro.ts materialized
- * into `.opencode/plugins/` or `plugins/opencode/bro/` inside a bro
+ * into `.opencode/plugins/` or `integrations/opencode/` inside a bro
  * clone resolves the clone's own `packages/cli/dist/index.js`, so hook
  * behavior tracks the checkout. Same walk `.kilo/plugin/bro.ts` and
  * `hooks/run.sh` already do. */

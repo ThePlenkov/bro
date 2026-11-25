@@ -5,10 +5,10 @@
 The generated hook manifests carry a fallback that bypasses the shared
 launcher. Two shapes exist today:
 
-- `hooks.json` + `plugins/devin/bro/hooks.json` (both emitted by
+- `hooks.json` + `integrations/devin/hooks.json` (both emitted by
   `devinHooksJson()`): `P="${DEVIN_PLUGIN_ROOT}"`, run.sh when executable,
   else a `bro hooks <event>` wrapped in an inline sleep/kill watcher.
-- `plugins/cursor/bro/hooks/hooks.json` (emitted by `cursorHooksJson()`):
+- `integrations/cursor/hooks/hooks.json` (emitted by `cursorHooksJson()`):
   `if [ -f "${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ] … elif command -v bro …
   bro hooks <event> || true` — **no watchdog at all**.
 
@@ -63,9 +63,9 @@ Per-event deviations that are part of the contract, not the bug:
   only. The `P=…`/`[ -x … ]` preamble and the entire `elif command -v bro`
   watchdog-fallback block are deleted.
 - Regenerate: `node scripts/gen-plugins.ts` rewrites `hooks.json`,
-  `plugins/devin/bro/hooks.json`, `plugins/cursor/bro/hooks/hooks.json`.
-  `plugins/claude/bro/hooks/hooks.json` and
-  `plugins/codex/bro/hooks/hooks.json` are hand-written and already thin —
+  `integrations/devin/hooks.json`, `integrations/cursor/hooks/hooks.json`.
+  `integrations/claude/hooks/hooks.json` and
+  `integrations/codex/hooks/hooks.json` are hand-written and already thin —
   untouched.
 
 ## Non-goals
