@@ -41,6 +41,8 @@ Developing bro itself: see CONTRIBUTING.md.
 
 ## Conventions
 
+- **PR size** — keep each PR to roughly 100 files or fewer. Larger units
+  ship as a `gh-stack` PR stack of independently green layers.
 - **Static-analysis-shaped seams** — every SAST finding class gets a
   structural home before a config waiver: fs calls funnel through a
   guarded `io` module (paths resolve inside a root or are
