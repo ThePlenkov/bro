@@ -320,6 +320,12 @@ describe('classifyArmCommand', () => {
 
   test('work enter arms both work and task — it also claims the bead', () => {
     assert.deepEqual(classifyArmCommands('bro work enter bro-x1').sort(), ['task', 'work']);
+    // a compound enter && drill keeps every aspect (review round #1168):
+    // enter arms work+task, the drill segment adds drill
+    assert.deepEqual(
+      classifyArmCommands('bro work enter bro-x1 && bro work drill down "x"').sort(),
+      ['drill', 'task', 'work']
+    );
     assert.deepEqual(classifyArmCommands('git worktree add ../x'), ['work']);
     assert.deepEqual(classifyArmCommands('git status'), []);
   });

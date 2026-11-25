@@ -17,10 +17,13 @@ Found by codeant-ai review on PR #1111 (thread deferred to this bead).
 
 ## Design
 
-The classifier accepts the optional group word: `bro [review ]act`,
-`bro [work ](drill|wtf)`. The bare forms stay matched — `bro act` still
-dispatches (the review group host swallows unmatched argv), and old
-scripts keep arming. `bro work …` already matched and keeps matching.
+The classifier accepts the optional group word per registered spelling:
+`bro [review ]act`, `bro [work ]drill`, `bro [self ]wtf` — wtf
+registers under self, not work (review round on this PR). The bare
+forms stay matched — `bro act` still dispatches (the review group host
+swallows unmatched argv), and old scripts keep arming. `bro work …`
+already matched and keeps matching; `bro work wtf` falls to the work
+host and arms `work`.
 
 ## Verify
 

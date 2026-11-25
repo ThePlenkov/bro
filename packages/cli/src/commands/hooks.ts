@@ -345,9 +345,11 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   // the bro command alternation is inlined: a regex literal keeps the
   // static-analysis contract (a RegExp constructor with a non-literal
   // value is a codacy finding) — the pattern is fixed text, the
-  // interpolation only ever spelled these same bytes
+  // interpolation only ever spelled these same bytes. The npx flag loop
+  // is bounded {0,12}: the unbounded form is a ReDoS finding (codeql,
+  // review #1168) and no real invocation carries a dozen flags.
   if (
-    /(^|[;&|\n])\s*(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+(?:(?:work\s+)?drill|(?:self\s+)?wtf)\b/.test(
+    /(^|[;&|\n])\s*(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?){0,12}\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))\s+(?:(?:work\s+)?drill|(?:self\s+)?wtf)\b/.test(
       c
     )
   ) {
@@ -391,6 +393,11 @@ export function classifyArmCommands(cmd: string): GateAspect[] {
   const c = unquoted(cmd);
   const bro = BRO_CMD;
   if (new RegExp(`(^|[;&|\\n])\\s*${bro}\\s+work\\s+enter\\b`).test(c)) {
+    // enter claims the bead — work+task ride along even when a later
+    // segment in the same compound command classifies as the primary
+    // (bro work enter X && bro work drill down: the session armed
+    // work-enter AND drill, never just the drill tail — review #1168)
+    out.add('work');
     out.add('task');
   }
   return [...out];
