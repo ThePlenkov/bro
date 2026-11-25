@@ -39,7 +39,7 @@ import {
   TAIL_BYTES,
   tailArchive,
 } from '../../../packages/acp/session/src/index.ts';
-import { serve } from '../../../packages/acp/tui/serve.ts';
+import { serve, type ServedPane } from '../../../packages/acp/tui/serve.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import { flag } from '../../../packages/cli/src/commands/args.ts';
 import {
@@ -67,6 +67,8 @@ const FLUSH_MS = 32;
 /** The resolution poll — a fs.watch on the state dir catches most
  *  moves; the poll is the floor for missed events on overlay fs. */
 const POLL_MS = 500;
+
+const opt = (argv: string[], name: string): string | undefined => flag(argv, name);
 
 const readRaw = (path: string): string | undefined => {
   try {
@@ -126,6 +128,43 @@ function feedArchive(impl: PaneImpl, eventsPath: string, rows: ArchiveRow[]): vo
   for (const row of rows) impl.feed(row);
 }
 
+// --- argv / env gates --------------------------------------------------------
+
+/** The CLI's target selectors: a worktree positional and the direct
+ *  bind flags. A flag's VALUE is not a positional — `--events <path>`
+ *  alone must not turn the archive path into the worktree arg. */
+interface TuiCli {
+  worktree?: string;
+  eventsArg?: string;
+  agentArg?: string;
+  dump: boolean;
+}
+
+function parseCli(argv: string[]): TuiCli {
+  const VALUE_FLAGS = new Set(['--events', '--agent', '--impl']);
+  const cli: TuiCli = {
+    worktree: argv.find((a, i) => !a.startsWith('-') && !VALUE_FLAGS.has(argv[i - 1] ?? '')),
+    eventsArg: opt(argv, '--events'),
+    agentArg: opt(argv, '--agent'),
+    dump: argv.includes('--dump'),
+  };
+  if ([cli.worktree, cli.eventsArg, cli.agentArg].every(a => a === undefined)) {
+    console.error(
+      'usage: main.ts <worktree> [--dump] [--impl legacy|acp] [--events <path>] [--agent <id>]'
+    );
+    process.exit(2);
+  }
+  return cli;
+}
+
+/** The pane env gate — the viewer only lives under herdr supervision:
+ *  HERDR_ENV=1 plus the pane's report id; a bare exec is a no-op. */
+const supervisedPaneId = (): string | undefined => {
+  if (process.env.HERDR_ENV !== '1') return undefined;
+  const id = process.env.HERDR_PANE_ID;
+  return id === undefined || id === '' ? undefined : id;
+};
+
 // --- dump mode -------------------------------------------------------------
 
 /** `main.ts <worktree> --dump` — the headless readout. Prints the
@@ -157,123 +196,150 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
   for (const line of impl.dump()) process.stdout.write(`${line}\n`);
 }
 
-// --- the TUI ---------------------------------------------------------------
+// --- the direct bind ---------------------------------------------------------
 
-const opt = (argv: string[], name: string): string | undefined => flag(argv, name);
-
-/** Liveness floor for a direct `--agent` target — the archive's own
- *  verdict rides on top (eventsVerdict); pid probing replaces the
- *  fleet doc's workerLed so the viewer never needs a daemon file. */
-
-export async function runTui(argv: string[]): Promise<void> {
-  // a flag's VALUE is not a positional — `--events <path>` alone must
-  // not turn the archive path into the worktree arg
-  const VALUE_FLAGS = new Set(['--events', '--agent', '--impl']);
-  const worktree = argv.find((a, i) => !a.startsWith('-') && !VALUE_FLAGS.has(argv[i - 1] ?? ''));
-  const eventsArg = opt(argv, '--events');
-  const agentArg = opt(argv, '--agent');
-  if (worktree === undefined && eventsArg === undefined && agentArg === undefined) {
-    console.error(
-      'usage: main.ts <worktree> [--dump] [--impl legacy|acp] [--events <path>] [--agent <id>]'
-    );
-    process.exit(2);
+/** The LED worker floor with its reason stamped — a blocked worker
+ *  reports WHEN it exited (the journal's last write), an idle one
+ *  when it went quiet; the verdict reads the message as its mode.
+ *  working/unknown carry no timestamp — the archive's own verdict
+ *  rides on top via eventsVerdict. */
+const UNSTAMPED: ReadonlySet<string> = new Set(['working', 'unknown']);
+function workerFloorLed(entry: ReturnType<typeof agentEntry>, events: string | undefined): PaneLed {
+  const state = workerLedState(entry, events);
+  if (events === undefined || UNSTAMPED.has(state)) return { state };
+  try {
+    const when = fmtWhen(statSync(events).mtimeMs);
+    return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
+  } catch {
+    return { state };
   }
-  if (argv.includes('--dump')) {
-    await dump(worktree ?? process.cwd(), argv);
-    return;
-  }
-  if (process.env.HERDR_ENV !== '1') return;
-  const paneId = process.env.HERDR_PANE_ID;
-  if (paneId === undefined || paneId === '') return;
+}
 
-  // Direct resolution (addendum 17): `--events`/`--agent` point the
-  // viewer at the archive itself — no fleet-status doc involved
-  // (janitor-reaped files were the "waiting for projector" bug).
-  const ctxDir = worktree ?? process.cwd();
-  // The registry home: the worktree's git common dir first. A
-  // worktree-less direct bind (the live view's argv) leaves ctxDir at
-  // the pane's scratch cwd — the journal's own
-  // <git-common>/bro/agents/ location is the next source, or the
-  // floor reads 'unknown' and a stale journal glows working
-  const base0 =
-    gitCommonDir(ctxDir) ??
-    (eventsArg !== undefined ? registryHomeOf(eventsArg) : undefined) ??
-    ctxDir;
-  /** The id the registry resolves — `--agent` first; a journal-only
-   *  bind (`--events` alone) still names its worker by the file's own
-   *  stem, or a provable crash reads 'unknown' forever. */
-  const entryId =
-    agentArg ??
-    (eventsArg !== undefined ? basename(eventsArg).replace(/\.events\.jsonl$/, '') : undefined);
-  const entry = agentEntry(base0, entryId);
-  /** The worker floor with its reason stamped — a blocked worker
-   *  reports WHEN it exited (the journal's last write), an idle one
-   *  when it went quiet; the verdict reads the message as its mode. */
-  const workerLedOf = (e: typeof entry, events: string | undefined): PaneLed => {
-    const state = workerLedState(e, events);
-    if (state === 'working' || state === 'unknown' || events === undefined) {
-      return { state };
-    }
-    try {
-      const when = fmtWhen(statSync(events).mtimeMs);
-      return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
-    } catch {
-      return { state };
-    }
+/** The archive stem a `--events` journal names its worker by. */
+const eventsStem = (eventsPath: string): string =>
+  basename(eventsPath).replace(/\.events\.jsonl$/, '');
+
+/** The id the registry resolves — `--agent` first; a journal-only
+ *  bind (`--events` alone) still names its worker by the file's own
+ *  stem, or a provable crash reads 'unknown' forever. */
+const entryIdOf = (cli: TuiCli): string | undefined =>
+  cli.agentArg ?? (cli.eventsArg === undefined ? undefined : eventsStem(cli.eventsArg));
+
+/** The registry home: the worktree's git common dir first. A
+ *  worktree-less direct bind leaves ctxDir at the pane's scratch cwd —
+ *  the journal's own <git-common>/bro/agents/ location is the next
+ *  source, or the floor reads 'unknown' and a stale journal glows
+ *  working. */
+const registryBase = (ctxDir: string, eventsArg: string | undefined): string =>
+  gitCommonDir(ctxDir) ??
+  (eventsArg === undefined ? undefined : registryHomeOf(eventsArg)) ??
+  ctxDir;
+
+/** The journal's path resolved through the matched entry's log stem
+ *  (a registry run key like `bro-2bv6q` never becomes the filename;
+ *  the archive lives on the native stem) — a FUNCTION, not a const:
+ *  a bind made before the registry harvest lands must heal on the
+ *  next refresh, not keep stating a key-named file that never exists
+ *  (the floor reads 'idle' and the watch never fires). A bare live
+ *  pid still never stands in for a journal the floor cannot read. */
+const eventsPathOf = (cli: TuiCli, base: string, entryId: string | undefined) =>
+  cli.eventsArg ??
+  (cli.agentArg === undefined
+    ? undefined
+    : eventsFile(base, logStem(agentEntry(base, entryId)) ?? cli.agentArg));
+
+/** The direct SessionTarget a resolved bind carries — undefined when
+ *  neither --events nor --agent named anything and the fleet doc must
+ *  drive instead. */
+function directTarget(cli: TuiCli, bind: DirectBind): SessionTarget | undefined {
+  const resolved = eventsPathOf(cli, bind.base, bind.entryId);
+  if (resolved === undefined && cli.agentArg === undefined) return undefined;
+  return {
+    worktree: bind.worktree,
+    status: 'live',
+    ...(resolved === undefined ? {} : { events: resolved }),
+    agent: bind.agent,
+    slug: cli.agentArg,
+    workerLed: workerFloorLed(agentEntry(bind.base, bind.entryId), resolved),
   };
+}
+
+/** Direct resolution (addendum 17): `--events`/`--agent` point the
+ *  viewer at the archive itself — no fleet-status doc involved
+ *  (janitor-reaped files were the "waiting for projector" bug). The
+ *  bind carries the probes refresh() re-runs every poll: a respawn
+ *  swaps the registry record, and probing a stale entry's pid reads
+ *  'blocked' on a live worker — the display name and the journal path
+ *  heal on the same pass once the record lands. */
+interface DirectBind {
+  /** The worktree context — the positional arg or the pane's scratch cwd. */
+  ctxDir: string;
+  /** The registry home: the worktree's git common dir first. A
+   *  worktree-less direct bind leaves ctxDir at the pane's scratch cwd —
+   *  the journal's own <git-common>/bro/agents/ location is the next
+   *  source, or the floor reads 'unknown' and a stale journal glows
+   *  working. */
+  base: string;
+  /** The entry's worktree or the ctx fallback. */
+  worktree: string;
   /** The display agent — the true agent name (provider), resolved in
-   *  the kit next to agentKey/agentEntry. Re-probed in refresh(): a
+   *  the kit next to agentKey/agentEntry. Re-probed in reprobe(): a
    *  late-landing registry record heals the cryptic archive stem the
    *  first pass had to print. */
-  const displayAgentOf0 = (): string | undefined => displayAgentOf(base0, agentArg ?? entryId);
-  const displayAgent = displayAgentOf0();
-  // the journal's path resolved through the matched entry's log stem
-  // (a registry run key like `bro-2bv6q` never becomes the filename;
-  // the archive lives on the native stem) — a FUNCTION, not a const:
-  // a bind made before the registry harvest lands must heal on the
-  // next refresh, not keep stating a key-named file that never exists
-  // (the floor reads 'idle' and the watch never fires). A bare live
-  // pid still never stands in for a journal the floor cannot read
-  const eventsPathOf = (): string | undefined =>
-    eventsArg ??
-    (agentArg !== undefined
-      ? eventsFile(base0, logStem(agentEntry(base0, entryId)) ?? agentArg)
-      : undefined);
-  const resolvedEvents = eventsPathOf();
-  const direct: SessionTarget | undefined =
-    resolvedEvents === undefined && agentArg === undefined
-      ? undefined
-      : {
-          worktree: entry?.worktree ?? ctxDir,
-          status: 'live',
-          ...(resolvedEvents !== undefined ? { events: resolvedEvents } : {}),
-          agent: displayAgent,
-          slug: agentArg,
-          workerLed: workerLedOf(entry, resolvedEvents),
-        };
+  agent?: string;
+  /** The entry id the registry resolves (agent arg or journal stem). */
+  entryId?: string;
+  /** The direct target — undefined when neither --events nor --agent
+   *  resolved anything and the fleet doc must drive. */
+  target?: SessionTarget;
+  /** Re-read the registry and re-probe the worker floor / journal path
+   *  / display name. A crash mid-turn leaves the model 'running'
+   *  forever; only the fresh pid check reads 'blocked' instead of
+   *  lying working (dogfood finding — a crashed agent's pane glowed
+   *  working while its pid was gone). */
+  reprobe(): void;
+}
 
-  const base = base0;
-  const statePath = fleetStatusPath(base, ctxDir);
-  mkdirSync(dirname(statePath), { recursive: true });
+function bindDirect(cli: TuiCli): DirectBind {
+  const ctxDir = cli.worktree ?? process.cwd();
+  const base = registryBase(ctxDir, cli.eventsArg);
+  const entryId = entryIdOf(cli);
+  const bind: DirectBind = {
+    ctxDir,
+    base,
+    entryId,
+    worktree: agentEntry(base, entryId)?.worktree ?? ctxDir,
+    agent: displayAgentOf(base, cli.agentArg ?? entryId),
+    reprobe() {
+      if (bind.target === undefined) return;
+      const events = eventsPathOf(cli, base, entryId);
+      bind.target.workerLed = workerFloorLed(agentEntry(base, entryId), events);
+      if (events !== bind.target.events) bind.target.events = events;
+      bind.target.agent = displayAgentOf(base, cli.agentArg ?? entryId);
+    },
+  };
+  bind.target = directTarget(cli, bind);
+  return bind;
+}
 
-  const impl = await pickImpl(implArg(argv));
-  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: displayAgent });
+// --- the feed: archive tail → model → tree -----------------------------------
 
-  // the shell — renderer + JSX preload + mount + keymap — is
-  // @broject/acp-tui's serve(); this process stays glue: target
-  // resolution, feed, report
-  const { pane } = await serve({
-    meta: { worktree: entry?.worktree ?? ctxDir },
-    foldAll: impl.fold === 'folded',
-    copyItem: it => impl.copyText?.(it) ?? ('text' in it ? it.text : ''),
-    // no onRetire — the feed lives ENTIRELY in the scrollbox as
-    // renderables: every row keeps markdown/color/expand chrome, and
-    // scrolling is the scrollbox's scrollTop, not captured stdout.
-    copy: sysCopy,
-  });
+/** One armed archive tail — replay the window, then ride appends via
+ *  fs.watch (+ the poll covers misses). */
+interface Feed {
+  /** The armed attach identity, or undefined with nothing armed. */
+  readonly key?: string;
+  /** One pump of the archive tail — feed the model only; the tree
+   *  commit rides the FLUSH_MS drain so token-wise chunks don't
+   *  re-render per event. */
+  pump(): void;
+  /** Arm the tail on a resolved target. */
+  arm(t: SessionTarget): void;
+  /** Close the watcher and drop the binding. */
+  detach(): void;
+}
 
-  // --- the feed: fleet doc → target → archive tail → model → tree
-
+function createFeed(impl: PaneImpl): Feed {
   let cur:
     | {
         key: string;
@@ -283,15 +349,8 @@ export async function runTui(argv: string[]): Promise<void> {
         seeded?: boolean;
       }
     | undefined;
-  const detachFeed = (): void => {
-    cur?.watcher?.close();
-    cur = undefined;
-  };
 
-  /** One pump of the archive tail — feed the model only; the tree
-   *  commit rides the FLUSH_MS drain so token-wise chunks don't
-   *  re-render per event. */
-  const pumpEvents = (): void => {
+  const pump = (): void => {
     if (cur?.eventsPath === undefined) return;
     const more = readTailSlice(cur.eventsPath, cur.offset);
     if (more === undefined) return;
@@ -309,9 +368,7 @@ export async function runTui(argv: string[]): Promise<void> {
     for (const row of rows) impl.feed(row);
   };
 
-  /** Arm the archive tail on a resolved target — replay the window,
-   *  then ride appends via fs.watch (+ the poll covers misses). */
-  const armFeed = (t: SessionTarget): void => {
+  const arm = (t: SessionTarget): void => {
     if (t.events === undefined) return;
     const path = t.events;
     cur = { key: targetKey(t), eventsPath: path, offset: 0 };
@@ -336,35 +393,63 @@ export async function runTui(argv: string[]): Promise<void> {
     // live tail — the impl's replay/live boundary
     impl.beginLive();
     try {
-      cur.watcher = watch(path, () => pumpEvents());
+      cur.watcher = watch(path, () => pump());
     } catch {
       // a vanished archive just stays put — the poll still rides
     }
   };
 
-  /** The LED — model verdict over the worker floor, deduped by
-   *  state|mode|agent like session-view; every real move also lands
-   *  on the header bar's chip. */
+  return {
+    get key() {
+      return cur?.key;
+    },
+    pump,
+    arm,
+    detach() {
+      cur?.watcher?.close();
+      cur = undefined;
+    },
+  };
+}
+
+/** A target with nothing the feed can ride — no archive, no session
+ *  log, no acp leg. */
+const noFeedSource = (t: SessionTarget): boolean =>
+  t.events === undefined && t.session === undefined && t.log === undefined;
+
+/** The LED verdict — the model's verdict over the worker floor. */
+function paneVerdict(
+  target: SessionTarget | undefined,
+  armed: boolean,
+  rowV: PaneImpl['verdict']
+): { led: PaneLed; mode: string } {
+  if (target === undefined) {
+    return { led: { state: 'unknown' }, mode: 'waiting for projector' };
+  }
+  if (!armed) {
+    return noFeedSource(target)
+      ? // nothing armed and nothing to arm — the impl never leaves
+        // 'replaying' on its own and the LED would lie 'working'
+        // forever on an empty tree
+        { led: target.workerLed, mode: 'no session recorded' }
+      : // a feed exists this shell cannot ride (log/acp legs) — report
+        // the worker posture, not a phantom 'replaying'
+        eventsVerdict(target.workerLed, undefined);
+  }
+  return eventsVerdict(target.workerLed, rowV);
+}
+
+/** The LED — model verdict over the worker floor, deduped by
+ *  state|mode|agent like session-view; every real move also lands
+ *  on the header bar's chip. */
+function createReporter(
+  impl: PaneImpl,
+  pane: ServedPane['pane'],
+  paneId: string
+): (target: SessionTarget | undefined, armed: boolean) => void {
   let lastReport = '';
-  let target: SessionTarget | undefined;
-  const report = (): void => {
-    const rowV = impl.verdict;
-    const v =
-      target === undefined
-        ? { led: { state: 'unknown' } as PaneLed, mode: 'waiting for projector' }
-        : cur === undefined
-          ? target.events === undefined && target.session === undefined && target.log === undefined
-            ? {
-                // nothing armed and nothing to arm — the impl never
-                // leaves 'replaying' on its own and the LED would lie
-                // 'working' forever on an empty tree
-                led: target.workerLed,
-                mode: 'no session recorded',
-              }
-            : // a feed exists this shell cannot ride (log/acp legs) —
-              // report the worker posture, not a phantom 'replaying'
-              eventsVerdict(target.workerLed, undefined)
-          : eventsVerdict(target.workerLed, rowV);
+  return (target, armed) => {
+    const v = paneVerdict(target, armed, impl.verdict);
     const agent = sessionAgentOf(target);
     const mark = `${v.led.state}|${v.mode}|${agent}`;
     if (mark === lastReport) return;
@@ -373,31 +458,64 @@ export async function runTui(argv: string[]): Promise<void> {
     impl.setContext?.({ agent });
     pane.writer.setMeta({ agent, led: v.led.state, mode: v.mode });
   };
+}
 
-  /** The resolution poll — read the doc, re-arm the feed when the
-   *  attach identity moves, report the verdict. The direct binding's
-   *  worker floor is re-probed every pass: a crash mid-turn leaves
-   *  the model 'running' forever, and only the fresh pid check makes
-   *  that read 'blocked' instead of lying working (dogfood finding —
-   *  a crashed agent's pane glowed working while its pid was gone). */
+// --- the TUI ---------------------------------------------------------------
+
+/** Re-arm the feed when the resolved attach identity moves. */
+const rearmFeed = (feed: Feed, target: SessionTarget | undefined): void => {
+  if (targetKey(target) === feed.key) return;
+  feed.detach();
+  if (target !== undefined) feed.arm(target);
+};
+
+/** The copy gesture's text — the impl's own copyText when it has one,
+ *  the item's text slot otherwise. */
+const copyTextOf = (impl: PaneImpl) => {
+  return (it: Parameters<NonNullable<PaneImpl['copyText']>>[0]): string =>
+    impl.copyText?.(it) ?? ('text' in it ? it.text : '');
+};
+
+export async function runTui(argv: string[]): Promise<void> {
+  const cli = parseCli(argv);
+  if (cli.dump) {
+    await dump(cli.worktree ?? process.cwd(), argv);
+    return;
+  }
+  const paneId = supervisedPaneId();
+  if (paneId === undefined) return;
+
+  const bind = bindDirect(cli);
+  const statePath = fleetStatusPath(bind.base, bind.ctxDir);
+  mkdirSync(dirname(statePath), { recursive: true });
+
+  const impl = await pickImpl(implArg(argv));
+  impl.setContext?.({ worktree: bind.worktree, agent: bind.agent });
+
+  // the shell — renderer + JSX preload + mount + keymap — is
+  // @broject/acp-tui's serve(); this process stays glue: target
+  // resolution, feed, report
+  const { pane } = await serve({
+    meta: { worktree: bind.worktree },
+    foldAll: impl.fold === 'folded',
+    copyItem: copyTextOf(impl),
+    // no onRetire — the feed lives ENTIRELY in the scrollbox as
+    // renderables: every row keeps markdown/color/expand chrome, and
+    // scrolling is the scrollbox's scrollTop, not captured stdout.
+    copy: sysCopy,
+  });
+
+  const feed = createFeed(impl);
+  const report = createReporter(impl, pane, paneId);
+
+  /** The resolution poll pass — read the doc, re-arm the feed when
+   *  the attach identity moves, report the verdict. */
   const refresh = (): void => {
-    if (direct !== undefined) {
-      // re-read the registry too — a respawn swaps the record, and
-      // probing a stale entry's pid reads 'blocked' on a live worker;
-      // the display name and the journal path heal the same pass once
-      // the record lands (a late stem swap re-keys the feed below)
-      const events = eventsPathOf();
-      direct.workerLed = workerLedOf(agentEntry(base0, entryId), events);
-      if (events !== direct.events) direct.events = events;
-      direct.agent = displayAgentOf0();
-    }
-    target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
-    const key = targetKey(target);
-    if (key !== cur?.key) {
-      detachFeed();
-      if (target !== undefined) armFeed(target);
-    }
-    report();
+    bind.reprobe();
+    const target =
+      bind.target ?? resolveTarget(readState(statePath), bind.ctxDir, providers(bind.ctxDir));
+    rearmFeed(feed, target);
+    report(target, feed.key !== undefined);
   };
 
   process.on('exit', () => paneRelease(paneId, SESSION_IDENTITY));
@@ -413,7 +531,7 @@ export async function runTui(argv: string[]): Promise<void> {
 
   refresh();
   setInterval(() => {
-    pumpEvents();
+    feed.pump();
     refresh();
   }, POLL_MS);
   // the tree commit — opencode's delta-buffer cadence
