@@ -23,31 +23,44 @@ function repoRoot(): string {
  *  directory-shallow (node_modules and dist skipped) and finishes in
  *  milliseconds on this repo's scale. e2e files are included only with
  *  --e2e: they spawn real processes and cost minutes each. */
+const SKIP_DIRS = new Set(['node_modules', 'dist']);
+
+function skippableDir(name: string): boolean {
+  return SKIP_DIRS.has(name) || name.startsWith('.');
+}
+
+function testFile(name: string, includeE2e: boolean): boolean {
+  if (!name.endsWith('.test.ts')) {
+    return false;
+  }
+  return includeE2e || !name.endsWith('.e2e.test.ts');
+}
+
+function walkTests(dir: string, includeE2e: boolean, out: string[]): void {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) {
+      if (!skippableDir(e.name)) {
+        walkTests(p, includeE2e, out);
+      }
+    } else if (testFile(e.name, includeE2e)) {
+      out.push(p);
+    }
+  }
+}
+
 export function inventory(root: string, includeE2e: boolean): string[] {
   const out: string[] = [];
-  const walk = (dir: string): void => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) {
-        if (e.name === 'node_modules' || e.name === 'dist' || e.name.startsWith('.')) {
-          continue;
-        }
-        walk(p);
-      } else if (e.name.endsWith('.test.ts') && (includeE2e || !e.name.endsWith('.e2e.test.ts'))) {
-        out.push(p);
-      }
-    }
-  };
   for (const base of ['packages', 'plugins']) {
     const b = join(root, base);
     if (existsSync(b) && statSync(b).isDirectory()) {
-      walk(b);
+      walkTests(b, includeE2e, out);
     }
   }
   return out.sort();
