@@ -82,110 +82,129 @@ interface Stats {
   messageChars: number;
   verdict: string;
 }
-const run = async (name: string): Promise<Stats> => /* NOSONAR typescript:S3776 */ {
+type ToolItem = Extract<Item, { kind: 'tool' }>;
+
+interface RunMember {
+  kind: string;
+  toolCallId?: string;
+  content?: readonly { type: string; path?: string }[];
+}
+
+const freshStats = (impl: string, verdict: string): Stats => ({
+  impl,
+  appended: 0,
+  tools: 0,
+  toolIds: new Set(),
+  toolsWithContent: new Set(),
+  diffs: 0,
+  messages: 0,
+  thoughts: 0,
+  turns: 0,
+  permissions: 0,
+  notes: 0,
+  prompts: 0,
+  updates: 0,
+  diffKeys: new Set(),
+  messageChars: 0,
+  verdict,
+});
+
+/** One activity-run member — the tally line IS the tools, counted
+ *  individually. */
+const countRunMember = (s: Stats, item: ToolItem, m: RunMember): void => {
+  if (m.kind !== 'tool_call') return;
+  s.tools++;
+  s.toolIds.add(m.toolCallId ?? `run:${item.id}`);
+  if ((m.content?.length ?? 0) > 0) {
+    s.toolsWithContent.add(m.toolCallId ?? `${item.id}`);
+  }
+  for (const c of m.content ?? []) {
+    if (c.type === 'diff' && c.path !== undefined) {
+      s.diffs++;
+      s.diffKeys.add(`${m.toolCallId ?? `id:${item.id}`}|${c.path}`);
+    }
+  }
+};
+
+/** An activity-run group covers its members. */
+const countRun = (s: Stats, item: ToolItem): void => {
+  for (const m of (item.runs ?? []) as RunMember[]) countRunMember(s, item, m);
+};
+
+const countToolItem = (s: Stats, item: ToolItem): void => {
+  if (item.runs !== undefined) {
+    countRun(s, item);
+    return;
+  }
+  s.tools++;
+  s.toolIds.add(item.toolCallId);
+  if (item.content.length > 0) s.toolsWithContent.add(item.toolCallId);
+  s.diffs += item.content.filter(c => c.kind === 'diff').length;
+  for (const c of item.content) {
+    if (c.kind === 'diff') s.diffKeys.add(`${item.toolCallId}|${c.path}`);
+  }
+};
+
+/** A tool-op update — a group morph re-projects (recount member
+ *  coverage); a content update adds cards and diff keys. */
+const countToolUpdate = (s: Stats, t: ToolItem): void => {
+  if (t.runs !== undefined) {
+    countRun(s, t);
+    s.updates++;
+    return;
+  }
+  if (t.content !== undefined && t.content.length > 0) {
+    s.toolsWithContent.add(t.toolCallId ?? `${t.id}`);
+    s.diffs += t.content.filter(c => c.kind === 'diff').length;
+    for (const c of t.content) {
+      if (c.kind === 'diff') {
+        s.diffKeys.add(`${t.toolCallId ?? `id:${t.id}`}|${c.path}`);
+      }
+    }
+  }
+  s.updates++;
+};
+
+const countItem = (s: Stats, item: Item): void => {
+  switch (item.kind) {
+    case 'tool':
+      countToolItem(s, item);
+      break;
+    case 'message':
+      s.messages++;
+      s.messageChars += item.text.length;
+      break;
+    case 'thought':
+      s.thoughts++;
+      break;
+    case 'turn':
+      s.turns++;
+      break;
+    case 'prompt':
+      s.prompts++;
+      break;
+    case 'permission':
+      s.permissions++;
+      break;
+    default:
+      s.notes++;
+  }
+};
+
+const run = async (name: string): Promise<Stats> => {
   const impl = await pickImpl(name, {});
   // the .prompt.md fallback — same posture as the live feed: only
   // when the archive itself journals no prompt rows
   if (!rows.some(r => r.kind === 'prompt')) impl.feed({ kind: 'prompt', text: prompt });
   for (const row of rows) impl.feed(row);
   impl.beginLive();
-  const s: Stats = {
-    impl: name,
-    appended: 0,
-    tools: 0,
-    toolIds: new Set(),
-    toolsWithContent: new Set(),
-    diffs: 0,
-    messages: 0,
-    thoughts: 0,
-    turns: 0,
-    permissions: 0,
-    notes: 0,
-    prompts: 0,
-    updates: 0,
-    diffKeys: new Set(),
-    messageChars: 0,
-    verdict: impl.verdict?.led.state ?? '?',
-  };
-  // an activity-run group covers its members — the tally line IS
-  // the tools, counted individually
-  const countRun = (item: ToolItem): void => {
-    for (const m of (item.runs ?? []) as {
-      kind: string;
-      toolCallId?: string;
-      content?: readonly { type: string; path?: string }[];
-    }[]) {
-      if (m.kind !== 'tool_call') continue;
-      s.tools++;
-      s.toolIds.add(m.toolCallId ?? `run:${item.id}`);
-      if ((m.content?.length ?? 0) > 0) {
-        s.toolsWithContent.add(m.toolCallId ?? `${item.id}`);
-      }
-      for (const c of m.content ?? []) {
-        if (c.type === 'diff' && c.path !== undefined) {
-          s.diffs++;
-          s.diffKeys.add(`${m.toolCallId ?? `id:${item.id}`}|${c.path}`);
-        }
-      }
-    }
-  };
-  const countItem = (item: Item): void => {
-    switch (item.kind) {
-      case 'tool':
-        if (item.runs !== undefined) {
-          countRun(item);
-          break;
-        }
-        s.tools++;
-        s.toolIds.add(item.toolCallId);
-        if (item.content.length > 0) s.toolsWithContent.add(item.toolCallId);
-        s.diffs += item.content.filter(c => c.kind === 'diff').length;
-        for (const c of item.content) {
-          if (c.kind === 'diff') s.diffKeys.add(`${item.toolCallId}|${c.path}`);
-        }
-        break;
-      case 'message':
-        s.messages++;
-        s.messageChars += item.text.length;
-        break;
-      case 'thought':
-        s.thoughts++;
-        break;
-      case 'turn':
-        s.turns++;
-        break;
-      case 'prompt':
-        s.prompts++;
-        break;
-      case 'permission':
-        s.permissions++;
-        break;
-      default:
-        s.notes++;
-    }
-  };
+  const s = freshStats(name, impl.verdict?.led.state ?? '?');
   for (const op of impl.drain()) {
     if (op.op === 'append') {
       s.appended++;
-      countItem(op.item);
+      countItem(s, op.item);
     } else if (op.op === 'tool') {
-      const t = op.item;
-      if (t.runs !== undefined) {
-        // a group morph re-projects — recount member coverage
-        countRun(t as ToolItem);
-        s.updates++;
-        continue;
-      }
-      if (t.content !== undefined && t.content.length > 0) {
-        s.toolsWithContent.add(t.toolCallId ?? `${t.id}`);
-        s.diffs += t.content.filter(c => c.kind === 'diff').length;
-        for (const c of t.content) {
-          if (c.kind === 'diff') {
-            s.diffKeys.add(`${t.toolCallId ?? `id:${t.id}`}|${c.path}`);
-          }
-        }
-      }
-      s.updates++;
+      countToolUpdate(s, op.item as ToolItem);
     } else if (op.op === 'text') {
       s.updates++;
     }

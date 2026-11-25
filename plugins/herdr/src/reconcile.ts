@@ -62,7 +62,7 @@ import {
   withStateLock,
   worktreeGone,
 } from './lib.ts';
-import { convergeLiveViews, liveAgents } from './live-views.ts';
+import { convergeLiveViews, type LiveAgent, liveAgents } from './live-views.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
@@ -215,27 +215,39 @@ function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | u
   const { path } = tree;
   const openId = ctx.openByPath.get(path);
   if (openId === undefined) return openWorkspace(tree, label, ctx);
+  reconcileWsRecord(ctx, path, openId);
+  return openId;
+}
 
+/** The recorded record vs the live binding — one of four outcomes:
+ *  adopt a reopened id, drop a vanished workspace's record, observe
+ *  a user-opened one, or resync the projector's relabel. */
+function reconcileWsRecord(ctx: WsCtx, path: string, openId: string): void {
   const rec = ctx.state.workspaces[path];
   const live = ctx.wsById.get(openId);
-  if (rec !== undefined && live !== undefined && rec.ws !== openId) {
+  if (rec === undefined) {
+    // a workspace the user opened — observe, never touch its label
+    ctx.state.workspaces[path] = { ws: openId, label: live?.label ?? '', managed: false };
+    return;
+  }
+  if (live === undefined) {
+    delete ctx.state.workspaces[path];
+    return;
+  }
+  if (rec.ws !== openId) {
     // the workspace was closed externally and reopened under a NEW id —
     // openByPath already follows the live binding, so the record must
     // adopt it: a stale rec.ws fails every rec.ws===live-wsId guard
     // downstream and the workspace silently loses panes + projection
     // until the binding disappears entirely (bro-0knei)
     ctx.state.workspaces[path] = { ...rec, ws: openId, label: live.label ?? '' };
-  } else if (rec !== undefined && live === undefined) {
-    delete ctx.state.workspaces[path];
-  } else if (rec === undefined) {
-    // a workspace the user opened — observe, never touch its label
-    ctx.state.workspaces[path] = { ws: openId, label: live?.label ?? '', managed: false };
-  } else if (projectorRelabeled(rec, live)) {
+    return;
+  }
+  if (projectorRelabeled(rec, live)) {
     // the projector relabels managed workspaces — keep the record's
     // view of the live label honest so a restart doesn't misread it
-    ctx.state.workspaces[path] = { ...rec, label: live?.label ?? '' };
+    ctx.state.workspaces[path] = { ...rec, label: live.label ?? '' };
   }
-  return openId;
 }
 
 export interface ConvergeResult {
@@ -360,14 +372,11 @@ function archiveBinds(
 ): Map<string, { id: string; events: string; at: string }> {
   const bindByTree = new Map<string, { id: string; events: string; at: string }>();
   for (const e of Object.values(agentsJson(base))) {
-    if (e.worktree === undefined || typeof e.log !== 'string') continue;
-    const events = e.log.replace(/\.log$/, '.events.jsonl');
-    if (!existsSync(events)) continue;
-    const key = isAbsolute(e.worktree) ? e.worktree : resolve(main, e.worktree);
-    const at = typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
-    const cur = bindByTree.get(key);
-    if (cur === undefined || at >= cur.at) {
-      bindByTree.set(key, { id: basename(e.log).replace(/\.log$/, ''), events, at });
+    const cand = archiveBindOf(e, main);
+    if (cand === undefined) continue;
+    const cur = bindByTree.get(cand.key);
+    if (cur === undefined || cand.at >= cur.at) {
+      bindByTree.set(cand.key, { id: cand.id, events: cand.events, at: cand.at });
     }
   }
   for (const [key, a] of liveByTree) {
@@ -375,10 +384,31 @@ function archiveBinds(
     // bury the tree's usable archive — overlay a dead bind only over
     // nothing (codeant: the missing file would disarm AND retire the
     // recorded session pane)
-    if (bindByTree.has(key) && !existsSync(a.events)) continue;
-    bindByTree.set(key, { ...a, at: '\uffff' });
+    if (!bindByTree.has(key) || existsSync(a.events)) {
+      bindByTree.set(key, { ...a, at: '\uffff' });
+    }
   }
   return bindByTree;
+}
+
+/** One registry entry → its archive binding candidate, or undefined
+ *  when it carries no tailable journal. The status plane keys on
+ *  absolute paths — a relative registry worktree resolves against
+ *  main so every downstream compare shares the vocabulary. */
+function archiveBindOf(
+  e: AgentEntry,
+  main: string
+): { key: string; id: string; events: string; at: string } | undefined {
+  if (e.worktree === undefined || typeof e.log !== 'string') return undefined;
+  const events = e.log.replace(/\.log$/, '.events.jsonl');
+  if (!existsSync(events)) return undefined;
+  const key = isAbsolute(e.worktree) ? e.worktree : resolve(main, e.worktree);
+  return {
+    key,
+    id: basename(e.log).replace(/\.log$/, ''),
+    events,
+    at: typeof e.spawnedAt === 'string' ? e.spawnedAt : '',
+  };
 }
 
 /** The session view is THE human pane (user ruling 10.11) — every
@@ -398,14 +428,28 @@ function retireUnviewable(viewable: Set<string>, ctx: WsCtx): void {
     }
     // every pane record on the dead workspace dies with it — mirrors
     // key on the step, not the path, so sweep by workspace id
-    delete ctx.state.workspaces[path];
-    delete ctx.state.sessions[path];
-    delete ctx.state.renderers[path];
-    delete ctx.state.statuses[path];
+    dropPaneRecords(ctx, path);
     for (const [step, m] of Object.entries(ctx.state.mirrors)) {
       if (m.workspace === rec.ws) delete ctx.state.mirrors[step];
     }
   }
+}
+
+/** The four pane-keyed records on one tree — workspaces, sessions,
+ *  renderers, statuses. `gone` stays the caller's: the reapers own
+ *  its lifecycle, the retire path never touches it. */
+function dropPaneRecords(ctx: WsCtx, path: string): void {
+  delete ctx.state.workspaces[path];
+  delete ctx.state.sessions[path];
+  delete ctx.state.renderers[path];
+  delete ctx.state.statuses[path];
+}
+
+/** Every record keyed on the tree — the pane four plus the reaper's
+ *  `gone` sighting. */
+function forgetTree(ctx: WsCtx, path: string): void {
+  dropPaneRecords(ctx, path);
+  delete ctx.state.gone[path];
 }
 
 /** Orphan sweep — a session record outliving its workspace (a foreign
@@ -421,21 +465,16 @@ function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
 const GONE_GRACE_MS = 60_000;
 
 function resolveAgentWorktreePath(a: StatusAgent, p: Planes): string | undefined {
-  // Try agentTreePath first (handles registry + name resolution)
-  const fromAgentTreePath = agentTreePath(a, p);
-  if (fromAgentTreePath) return fromAgentTreePath;
-  // Fallback: if worktree is absolute path
-  if (a.worktree && isAbsolute(a.worktree)) {
-    const w = p.status.worktrees.find(t => t.path === a.worktree);
-    if (w) return w.path;
-    return a.worktree;
+  // agentTreePath first (handles registry + name resolution)
+  const direct = agentTreePath(a, p);
+  if (direct !== undefined && direct !== '') return direct;
+  if (a.worktree === undefined || a.worktree === '') return undefined;
+  // an absolute worktree names itself when no status row claims it
+  if (isAbsolute(a.worktree)) {
+    return p.status.worktrees.find(t => t.path === a.worktree)?.path ?? a.worktree;
   }
-  // Fallback: resolve by name
-  if (a.worktree) {
-    const w = p.status.worktrees.find(t => t.name === a.worktree);
-    if (w) return w.path;
-  }
-  return undefined;
+  // a bare name resolves through the status plane's worktrees
+  return p.status.worktrees.find(t => t.name === a.worktree)?.path;
 }
 
 /** Prefix-containment counts — a process parked in a subdirectory of
@@ -483,13 +522,12 @@ function registryEntryLive(p: Planes, entry: AgentEntry): boolean {
 }
 
 function registryLive(p: Planes, treePath: string): boolean {
-  for (const entry of Object.values(agentsJson(p.repo))) {
-    const ew = entry.worktree;
-    if (ew !== undefined && pathRelated(ew, treePath) && registryEntryLive(p, entry)) {
-      return true;
-    }
-  }
-  return false;
+  return Object.values(agentsJson(p.repo)).some(
+    entry =>
+      entry.worktree !== undefined &&
+      pathRelated(entry.worktree, treePath) &&
+      registryEntryLive(p, entry)
+  );
 }
 
 function paneWorkspaceRelated(p: Planes, ws: HerdrWorkspace, treePath: string): boolean {
@@ -507,20 +545,18 @@ function paneAgentLive(p: Planes, treePath: string): boolean {
   for (const ws of p.workspaces) {
     if (!paneWorkspaceRelated(p, ws, treePath)) continue;
     try {
-      const panes = paneList(ws.workspace_id);
-      if (
-        panes.some(
-          pane => pane.agent !== undefined && pane.agent !== '' && pane.agent !== 'bro-status'
-        )
-      ) {
-        return true;
-      }
+      if (paneList(ws.workspace_id).some(liveAgentPane)) return true;
     } catch {
       log(`pane list failed for ${ws.workspace_id} — keeping ${basename(treePath)} (fail closed)`);
       return true;
     }
   }
   return false;
+}
+
+/** Any non-`bro-status` agent value on a pane means live. */
+function liveAgentPane(pane: HerdrPane): boolean {
+  return pane.agent !== undefined && pane.agent !== '' && pane.agent !== 'bro-status';
 }
 
 function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
@@ -772,11 +808,7 @@ function occupiedNow(path: string): boolean {
  *  same ledger sweep reapDead does, sessions included. */
 function closeAndForget(ctx: WsCtx, path: string, ws: string): boolean {
   if (herdrTry(['workspace', 'close', ws]) === undefined) return false;
-  delete ctx.state.workspaces[path];
-  delete ctx.state.renderers[path];
-  delete ctx.state.statuses[path];
-  delete ctx.state.sessions[path];
-  delete ctx.state.gone[path];
+  forgetTree(ctx, path);
   return true;
 }
 
@@ -788,38 +820,42 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
   for (const w of p.worktrees.worktrees) {
     const ws = w.open_workspace_id;
     if (ws === undefined || !reapableWorkspace(p, ctx, w)) continue;
-    const name = basename(w.path);
-    if (
-      isArmedOrClaimed(p, w.path) ||
-      armedSet(p).has(w.path) ||
-      hasLiveRunOrBoundAgent(p, w.path) ||
-      occupiedNow(w.path)
-    ) {
-      log(`keep ${name} — occupied`);
-      continue;
-    }
-    if (!isTreeClean(w.path)) {
-      log(`keep ${name} — dirty tree`);
-      continue;
-    }
-    if (hasUnpushedCommits(w.path) || !isBranchPushedToRemote(w.path)) {
-      log(`keep ${name} — work not remote-preserved`);
-      continue;
-    }
-    // last word before the irreversible call — the planes are re-read
-    // so a use that started during the git checks still wins the race
-    if (occupiedNow(w.path)) {
-      log(`keep ${name} — occupied at close time`);
+    const keep = keepReason(p, w);
+    if (keep !== undefined) {
+      log(`keep ${basename(w.path)} — ${keep}`);
       continue;
     }
     if (closeAndForget(ctx, w.path, ws)) {
       reaped += 1;
-      log(`reaped preserved-dead ${ws} — ${name}`);
+      log(`reaped preserved-dead ${ws} — ${basename(w.path)}`);
     } else {
       log(`reap preserved-dead ${ws} failed — retry next pass`);
     }
   }
   return reaped;
+}
+
+/** Why a reapable workspace survives this pass — occupancy first,
+ *  then the git proofs, then one last occupancy re-read before the
+ *  irreversible close so a use that started mid-check still wins. */
+function keepReason(p: Planes, w: HerdrWorktree): string | undefined {
+  if (occupied(p, w.path)) return 'occupied';
+  if (!isTreeClean(w.path)) return 'dirty tree';
+  if (hasUnpushedCommits(w.path) || !isBranchPushedToRemote(w.path)) {
+    return 'work not remote-preserved';
+  }
+  return occupiedNow(w.path) ? 'occupied at close time' : undefined;
+}
+
+/** Anything still using the tree — armed, claimed, a live run or
+ *  bound agent, or a fresh planes sighting. */
+function occupied(p: Planes, path: string): boolean {
+  return (
+    isArmedOrClaimed(p, path) ||
+    armedSet(p).has(path) ||
+    hasLiveRunOrBoundAgent(p, path) ||
+    occupiedNow(path)
+  );
 }
 
 function reapDead(p: Planes, ctx: WsCtx): number {
@@ -835,32 +871,37 @@ function reapDead(p: Planes, ctx: WsCtx): number {
     if (ctx.wsById.get(ws) === undefined) {
       // the workspace plane no longer carries this id — somebody closed
       // it already; whatever we recorded is residue.
-      delete ctx.state.gone[w.path];
-      delete ctx.state.workspaces[w.path];
-      delete ctx.state.renderers[w.path];
-      delete ctx.state.statuses[w.path];
-      delete ctx.state.sessions[w.path];
+      forgetTree(ctx, w.path);
       continue;
     }
-    let since = ctx.state.gone[w.path];
-    if (since === undefined) {
-      since = now;
-      ctx.state.gone[w.path] = now;
-    }
-    if (now - since < GONE_GRACE_MS) continue;
-    if (herdrTry(['workspace', 'close', ws]) !== undefined) {
-      delete ctx.state.workspaces[w.path];
-      delete ctx.state.renderers[w.path];
-      delete ctx.state.statuses[w.path];
-      delete ctx.state.sessions[w.path];
-      delete ctx.state.gone[w.path];
-      reaped += 1;
-      log(`reaped ${ws} — worktree gone: ${basename(w.path)}`);
-    } else {
-      log(`reap ${ws} failed — retry next pass`);
-    }
+    if (reapGoneTree(ctx, w, ws, now)) reaped += 1;
   }
   return reaped;
+}
+
+/** One gone worktree — residue when the workspace id already
+ *  vanished, a `goneSince` stamp on the first sighting, the close
+ *  only once the grace window passed. */
+function reapGoneTree(ctx: WsCtx, w: HerdrWorktree, ws: string, now: number): boolean {
+  if (ctx.wsById.get(ws) === undefined) {
+    // the workspace plane no longer carries this id — somebody closed
+    // it already; whatever we recorded is residue.
+    forgetTree(ctx, w.path);
+    return false;
+  }
+  const since = ctx.state.gone[w.path];
+  if (since === undefined) {
+    ctx.state.gone[w.path] = now;
+    return false;
+  }
+  if (now - since < GONE_GRACE_MS) return false;
+  if (herdrTry(['workspace', 'close', ws]) === undefined) {
+    log(`reap ${ws} failed — retry next pass`);
+    return false;
+  }
+  forgetTree(ctx, w.path);
+  log(`reaped ${ws} — worktree gone: ${basename(w.path)}`);
+  return true;
 }
 
 /** One converge pass over a planes snapshot — the function every
@@ -887,46 +928,15 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
 
   const armed = armedSet(p);
   const base = gitCommonDir(p.main) ?? p.main;
-  // live agents by worktree — the viewable set's live half AND the
-  // session pane's direct archive binding; one registry scan feeds both
   const live = liveAgents(base);
-  // the status plane keys on absolute paths; a registry worktree may
-  // be relative — normalize the sightings ONCE so liveByTree AND the
-  // live-view coverage check compare the same vocabulary (field bug:
-  // a relative registry path never matched an absolute armed key, so
-  // the same agent got a session pane AND a second 🤖 view: workspace)
-  for (const a of live) {
-    if (a.worktree !== undefined && !isAbsolute(a.worktree)) {
-      a.worktree = resolve(p.main, a.worktree);
-    }
-  }
-  const liveByTree = new Map<string, { id: string; events: string }>();
-  for (const a of live) {
-    if (a.worktree === undefined) continue;
-    const cur = liveByTree.get(a.worktree);
-    // several live agents can share one worktree — keep the one whose
-    // journal exists: a warming-up agent that wins the slot leaves
-    // eligibility blind and can retire a live session pane
-    if (cur !== undefined && existsSync(cur.events) && !existsSync(a.events)) continue;
-    liveByTree.set(a.worktree, { id: a.id, events: a.events });
-  }
-  const bindByTree = archiveBinds(base, p.main, liveByTree);
-  // the viewable gate (user ruling 10.11): a workspace opens only
-  // where the session pane has something to show — a session record
-  // (live or archived), a live agent journal, or the acp lane. An
-  // armed tree with nothing recorded is an empty window; it never
-  // opens, and a managed one that lost its content closes
-  const viewable = new Set<string>(bindByTree.keys());
-  for (const [path, lane] of Object.entries(p.lanes)) {
-    if (lane === 'acp') viewable.add(path);
-  }
+  const { bindByTree, viewable } = bindPlanes(p, base, live);
   const wsForPath = convergeWorkspaces(p, armed, ctx, viewable);
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes. The
   // retire set is pane-LIVE, not eligibility: an arm that never
   // landed leaves the fallback panes in place
   const sessionLive = convergeSessionPanes(wsForPath, ctx, bindByTree);
-  convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state, sessionLive);
+  convergeMirrors({ p, wsForPath, openByPath: ctx.openByPath, state: ctx.state, sessionLive });
   markExitedMirrors(p, ctx.state, sessionLive);
   convergeRenderers(wsForPath, ctx, sessionLive);
   convergeStatuses(wsForPath, ctx, sessionLive);
@@ -949,6 +959,44 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
     sessions: Object.keys(ctx.state.sessions).length,
     reaped,
   };
+}
+
+/** The bind planes one registry scan feeds — the archive binding
+ *  per worktree AND the viewable gate (user ruling 10.11): a
+ *  workspace opens only where the session pane has something to
+ *  show — a session record (live or archived), a live agent journal,
+ *  or the acp lane. An armed tree with nothing recorded is an empty
+ *  window; it never opens, and a managed one that lost its content
+ *  closes. */
+function bindPlanes(
+  p: Planes,
+  base: string,
+  live: LiveAgent[]
+): { bindByTree: Map<string, { id: string; events: string }>; viewable: Set<string> } {
+  // the status plane keys on absolute paths; a registry worktree may
+  // be relative — normalize the sightings ONCE so liveByTree AND the
+  // live-view coverage check compare the same vocabulary (field bug:
+  // a relative registry path never matched an absolute armed key, so
+  // the same agent got a session pane AND a second 🤖 view: workspace)
+  const liveByTree = new Map<string, { id: string; events: string }>();
+  for (const a of live) {
+    if (a.worktree !== undefined && !isAbsolute(a.worktree)) {
+      a.worktree = resolve(p.main, a.worktree);
+    }
+    if (a.worktree === undefined) continue;
+    const cur = liveByTree.get(a.worktree);
+    // several live agents can share one worktree — keep the one whose
+    // journal exists: a warming-up agent that wins the slot leaves
+    // eligibility blind and can retire a live session pane
+    if (cur !== undefined && existsSync(cur.events) && !existsSync(a.events)) continue;
+    liveByTree.set(a.worktree, { id: a.id, events: a.events });
+  }
+  const bindByTree = archiveBinds(base, p.main, liveByTree);
+  const viewable = new Set<string>(bindByTree.keys());
+  for (const [path, lane] of Object.entries(p.lanes)) {
+    if (lane === 'acp') viewable.add(path);
+  }
+  return { bindByTree, viewable };
 }
 
 /** One-shot entry — the `sync` action and the startup hook both land
@@ -1016,15 +1064,20 @@ function claimSyncSlot(pidFile: string, live: () => boolean): boolean {
  *  different checkout) out of the sweep. */
 function sweepSyncHusks(): void {
   for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
-    if (
-      p.label === SYNC_LABEL &&
-      p.pane_id !== undefined &&
-      p.cwd === PLUGIN_ROOT &&
-      paneIdle(p.pane_id)
-    ) {
-      herdrTry(['pane', 'close', p.pane_id]);
-    }
+    if (syncHusk(p)) herdrTry(['pane', 'close', p.pane_id!]);
   }
+}
+
+/** One husk — our label, our checkout's cwd, an idle pane. cwd
+ *  scoping keeps another repository's sync pane (same label,
+ *  different checkout) out of the sweep. */
+function syncHusk(p: HerdrPane): boolean {
+  return (
+    p.label === SYNC_LABEL &&
+    p.pane_id !== undefined &&
+    p.cwd === PLUGIN_ROOT &&
+    paneIdle(p.pane_id)
+  );
 }
 
 /** A failed open must not leave a fresh 'pending' suppressing the next

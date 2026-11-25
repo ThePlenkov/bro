@@ -39,7 +39,7 @@ const TUI_MAIN = join(PLUGIN_ROOT, 'tui', 'main.ts');
 const VIEW_PREFIX = '🤖 view:';
 
 /** One discovered live agent — a registry entry with a live pid. */
-interface LiveAgent {
+export interface LiveAgent {
   id: string;
   events: string;
   worktree?: string;
@@ -54,22 +54,36 @@ interface LiveAgent {
  *  starts rendering when it lands. */
 export function liveAgents(base: string): LiveAgent[] {
   const dir = join(base, 'bro', 'agents');
+  const out = registryAgents(base, dir);
+  handleAgents(dir, out);
+  return [...out.values()];
+}
+
+/** The `agents.json` pass — a live pid is the truth. The archive
+ *  stem is the agent id (native-<hash>), not the run key — the
+ *  entry's log path carries it: native-x.events.jsonl sits beside
+ *  native-x.log. Keying on it also dedupes a run key and its
+ *  handle-file sighting of the same agent. */
+function registryAgents(base: string, dir: string): Map<string, LiveAgent> {
   const out = new Map<string, LiveAgent>();
   for (const [key, e] of Object.entries(agentsJson(base))) {
     if (e.pid === undefined || !pidAlive(e.pid)) continue;
-    // the archive stem is the agent id (native-<hash>), not the run
-    // key — the entry's log path carries it: native-x.events.jsonl
-    // sits beside native-x.log. Keying on it also dedupes a run key
-    // and its handle-file sighting of the same agent.
     const stem = e.log?.replace(/\.log$/, '') ?? join(dir, `${key}.events`);
     const id = stem.split('/').pop() ?? key;
     out.set(id, { id, events: `${stem}.events.jsonl`, worktree: e.worktree, pid: e.pid });
   }
+  return out;
+}
+
+/** The handle-file pass — `<id>.<run>.go` pins without a sibling
+ *  `.exit` are live even when the janitor already reaped their
+ *  registry entry (the attempt pins outlive it — field bug B). */
+function handleAgents(dir: string, out: Map<string, LiveAgent>): void {
   let names: string[] = [];
   try {
     names = readdirSync(dir);
   } catch {
-    return [...out.values()];
+    return;
   }
   for (const f of names) {
     if (!f.endsWith('.go')) continue;
@@ -77,19 +91,23 @@ export function liveAgents(base: string): LiveAgent[] {
     if (names.includes(`${stem}.exit`)) continue;
     const id = stem.split('.')[0] ?? '';
     if (id === '' || out.has(id)) continue;
-    let pid: number | undefined;
-    let start: string | undefined;
-    try {
-      const [p, s] = readFileSync(join(dir, `${stem}.handle`), 'utf8').split(' ');
-      pid = Number(p);
-      start = s;
-    } catch {
-      continue;
+    const attempt = handleAttempt(dir, stem);
+    if (attempt !== undefined) {
+      out.set(id, { id, events: join(dir, `${id}.events.jsonl`), pid: attempt });
     }
-    if (!pidAlive(pid, start)) continue;
-    out.set(id, { id, events: join(dir, `${id}.events.jsonl`), pid });
   }
-  return [...out.values()];
+}
+
+/** One handle's live pid — the `<stem>.handle` sidecar's `pid start`
+ *  pair, alive-checked against its start marker. */
+function handleAttempt(dir: string, stem: string): number | undefined {
+  try {
+    const [p, s] = readFileSync(join(dir, `${stem}.handle`), 'utf8').split(' ');
+    const pid = Number(p);
+    return pidAlive(pid, s) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The pane command — the OpenTUI viewer bound to the archive

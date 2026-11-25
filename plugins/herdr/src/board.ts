@@ -8,7 +8,7 @@
  * workspace(id,label) · mirror pane · PR.
  */
 import { existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import {
   type AgentEntry,
   broFleet,
@@ -107,17 +107,25 @@ function isArmed(
   armedDetails: Set<string>,
   main: string
 ): boolean {
-  if (
-    w.claim !== undefined ||
-    (reg?.pid !== undefined &&
-      pidAlive(reg.pid, typeof reg.pidStart === 'string' ? reg.pidStart : undefined))
-  )
-    return true;
-  return [...armedDetails].some(d =>
-    d.includes('/')
-      ? resolve(main, d) === w.path
-      : w.name === `bro--${d}` || w.name === d || w.claim === d
+  if (w.claim !== undefined || pidLive(reg)) return true;
+  return [...armedDetails].some(d => markerMatches(d, w, main));
+}
+
+/** The registry's pid/pidStart pair is the honest liveness check —
+ *  the status doc's `running` lies for loop-recorded dead workers. */
+function pidLive(reg: AgentEntry | undefined): boolean {
+  return (
+    reg?.pid !== undefined &&
+    pidAlive(reg.pid, typeof reg.pidStart === 'string' ? reg.pidStart : undefined)
   );
+}
+
+/** One session marker vs one worktree — a path marker resolves
+ *  against main, a bare name matches the bro-- prefixed or raw
+ *  worktree name or the claim. */
+function markerMatches(d: string, w: StatusWorktree, main: string): boolean {
+  if (dirname(d) !== '.') return resolve(main, d) === w.path;
+  return w.name === `bro--${d}` || w.name === d || w.claim === d;
 }
 
 /** Per-cell projections — each reads one join and returns display text. */
@@ -172,28 +180,29 @@ function deadCell(reg: AgentEntry): string {
  *  exit, never the spawn placeholder. */
 function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number): string {
   if (reg === undefined) return w.state ?? '';
-  if (reg.pid === undefined) {
-    // spawn handoff — the connector patches pid after the attempt
-    // lands; inside the slot window a pid-less row is 'spawn', the
-    // same reading the fleet's own liveness ladder gives it
-    const spawned = typeof reg.spawnedAt === 'string' ? Date.parse(reg.spawnedAt) : Number.NaN;
-    if (
-      Number.isFinite(spawned) &&
-      now - spawned < SESSION_SLOT_TTL_MS &&
-      reg.exitStatus === undefined &&
-      reg.stopped !== true &&
-      // a recorded spawnError is already the failed end of the window —
-      // the placeholder must not outlive the connector's own verdict
-      typeof reg.spawnError !== 'string'
-    )
-      return 'spawn';
-  }
+  if (reg.pid === undefined && inSpawnWindow(reg, now)) return 'spawn';
   const events =
     typeof reg.log === 'string' ? reg.log.replace(/\.log$/, '.events.jsonl') : undefined;
   const led = workerLedState(reg, events, now);
   if (led === 'blocked') return deadCell(reg);
   if (led === 'unknown') return w.state ?? '';
   return led;
+}
+
+/** The spawn-handoff window — the connector patches pid after the
+ *  attempt lands; inside the slot window a pid-less row is 'spawn',
+ *  the same reading the fleet's own liveness ladder gives it. A
+ *  recorded spawnError is already the failed end of the window —
+ *  the placeholder must not outlive the connector's own verdict. */
+function inSpawnWindow(reg: AgentEntry, now: number): boolean {
+  const spawned = typeof reg.spawnedAt === 'string' ? Date.parse(reg.spawnedAt) : Number.NaN;
+  return (
+    Number.isFinite(spawned) &&
+    now - spawned < SESSION_SLOT_TTL_MS &&
+    reg.exitStatus === undefined &&
+    reg.stopped !== true &&
+    typeof reg.spawnError !== 'string'
+  );
 }
 
 function lastCell(reg: AgentEntry | undefined): string {
