@@ -496,6 +496,12 @@ function checkPrereqs(needBeads: boolean, allowFallback = false): void {
  *  cannot sit mid-argv here because real flags follow the positional. */
 const SKILL_ARG = /^(?!-)[^\s]+$/;
 
+/** The skills installer is pinned, never floating: `npx skills` without a
+ *  version executes whatever the latest registry release is — a compromised
+ *  publish would run arbitrary code on every `bro setup --lock`. Bump this
+ *  deliberately when upstream releases (bro-zha74). */
+const SKILLS_CLI_SPEC = 'skills@1.9.0';
+
 function installOneLockedSkill(dir: string, skill: LockedSkill): void {
   // `npx skills add` owns the fetch, the symlink and the lockfile
   // update; bro only decides what to ask for.
@@ -506,7 +512,7 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
   try {
     execFileSync(
       'npx', // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
-      ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
+      ['--yes', SKILLS_CLI_SPEC, 'add', skill.source, '--skill', skill.name, '-y'],
       { cwd: dir, stdio: 'pipe' }
     );
   } catch (e) {
