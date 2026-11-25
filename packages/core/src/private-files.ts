@@ -27,6 +27,7 @@ import {
   ftruncateSync,
   mkdirSync,
   openSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -176,9 +177,16 @@ export function mkdirPrivateSync({ path }: PrivatePath): void {
   for (let d = path; !existsSync(d); d = dirname(d)) {
     missing.push(d);
   }
-  for (const d of missing.reverse()) {
+  // pin the LEAF only — intermediate missing levels (a fresh
+  // `<git-common>/bro` above `bro/agents/<id>`) are shared ancestors of a
+  // checkout other local users may ride; pinning them 0700 would lock those
+  // users out of bro/loop, bro/hooks, the mailbox and the registry
+  // (bro-frida). They get the default mode; the leaf keeps owner-only.
+  const chain = missing.reverse();
+  const leaf = chain[chain.length - 1];
+  for (const d of chain) {
     try {
-      mkdirSync(d, PRIVATE_DIR_MODE);
+      mkdirSync(d, d === leaf ? PRIVATE_DIR_MODE : undefined);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         continue; // creation race — the winner's mode stands
@@ -186,7 +194,14 @@ export function mkdirPrivateSync({ path }: PrivatePath): void {
       throw err;
     }
     try {
-      chmodSync(d, PRIVATE_DIR_MODE);
+      if (d === leaf) {
+        chmodSync(d, PRIVATE_DIR_MODE);
+      } else {
+        // intermediates keep the umask's group/other bits, but owner rwx is
+        // unconditional — a bit-masking umask (0777) must never strand the
+        // chain owner-unusable before the leaf even lands
+        chmodSync(d, statSync(d).mode | 0o700);
+      }
     } catch (err) {
       warn({ path: d, err });
     }

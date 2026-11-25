@@ -70,6 +70,52 @@ type DockerLaunchInput = {
   image: string;
 };
 
+/** The effective `--user` uid of operator runArgs — accepts every docker
+ *  spelling (`--user X`, `--user=X`, `-u X`, glued `-uX`). Returns the raw
+ *  value or undefined when no user flag rides the args. */
+function dockerUserOf(runArgs: string[]): string | undefined {
+  // docker applies the LAST repeated flag — validating the first would
+  // judge a principal the run never uses
+  let user: string | undefined;
+  for (let i = 0; i < runArgs.length; i++) {
+    const a = runArgs[i];
+    if (a === '--user' || a === '-u') {
+      user = runArgs[i + 1];
+    } else if (a.startsWith('--user=')) {
+      user = a.slice('--user='.length);
+    } else if (a.startsWith('-u') && a.length > 2) {
+      user = a.slice(2);
+    }
+  }
+  return user;
+}
+
+/** Refuse a numeric uid that can never traverse the mount permissions:
+ *  the agents dir is 0700 host-owned and prompt/log files 0600 — any uid
+ *  that is neither root nor the host uid dies with EACCES inside the
+ *  container and only stderr hints why. Named users can't be resolved
+ *  without inspecting the image — they pass through (bro-frida). */
+function assertDockerUserCompatible(runArgs: string[]): void {
+  const user = dockerUserOf(runArgs);
+  if (user === undefined || !/^\d+(?::\d+)?$/.test(user)) {
+    return;
+  }
+  const uid = Number(user.split(':')[0]);
+  // no getuid → no POSIX modes either (win32) — the whole EACCES premise
+  // is absent there, so validating would only false-positive
+  if (typeof process.getuid !== 'function') {
+    return;
+  }
+  const hostUid = process.getuid();
+  if (uid !== 0 && uid !== hostUid) {
+    throw new SpawnError(
+      `agents.docker.runArgs pins --user uid ${uid} — the mounted agents dir is 0700 uid ${hostUid}, ` +
+        `so the worker would die with EACCES. Use the host uid, root (0), or a named user the image resolves.`,
+      'config'
+    );
+  }
+}
+
 export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir;
   const knobs = env.agents['docker'] ?? {};
@@ -80,6 +126,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     env.loop?.agent ??
     '';
   const runArgs = dockerRunArgs(knobs.runArgs);
+  assertDockerUserCompatible(runArgs);
 
   const findEntry = (id: string) => findAgentEntry(dir, 'docker', id);
 
