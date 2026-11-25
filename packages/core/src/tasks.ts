@@ -23,7 +23,8 @@
  * mol/wisp (molecules), provenance (evidence), kv/docs, config.
  * Those keep calling bd() until they get doc types.
  */
-import { join } from 'node:path';
+import { type Dirent, readdirSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   bd,
   BdCompatError,
@@ -44,6 +45,76 @@ import {
   type DoltBridge,
 } from './dolt-bridge.ts';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, gitTryAsync } from './git.ts';
+
+/** The `bd sync` probe budget — a hardcoded 120s wall turned the fsck
+ *  incident into a crash loop: the operator's 2G store needs longer,
+ *  and the caller-side env pin (BEADS_FSCK_TIMEOUT) only helps when the
+ *  probe outlives it (bro-lvj0j). BRO_BD_SYNC_TIMEOUT_MS overrides; the
+ *  floor scales with the on-disk store so a big replica never hits the
+ *  default wall — ~30s per 500MB over the first gigabyte. */
+export function bdSyncTimeoutMs(storeDir?: string): number {
+  const env = Number(process.env.BRO_BD_SYNC_TIMEOUT_MS);
+  if (Number.isInteger(env) && env > 0) {
+    return env;
+  }
+  let floor = 120_000;
+  if (storeDir !== undefined) {
+    const bytes = storeSizeBytes(storeDir);
+    const gib = bytes / (1024 * 1024 * 1024);
+    if (gib > 1) {
+      floor = Math.max(floor, 120_000 + Math.ceil((gib - 1) * 2) * 30_000);
+    }
+  }
+  return floor;
+}
+
+/** Store size memoized per dir — the walk is synchronous and a big
+ *  store must not re-pay it on every sync probe in the process. The
+ *  cache is TTL-bound: a store only grows, and a transient unreadable
+ *  entry must not pin a too-small budget forever (kody on bro-lvj0j). */
+const STORE_SIZE_TTL_MS = 60_000;
+const storeSizeCache = new Map<string, { bytes: number; at: number }>();
+
+function storeSizeBytes(storeDir: string): number {
+  // canonicalize once — the walk must stay inside the resolved store
+  // path even if the input carried segments or symlinks (kody on #1236)
+  storeDir = resolve(storeDir);
+  const hit = storeSizeCache.get(storeDir);
+  if (hit !== undefined && Date.now() - hit.at < STORE_SIZE_TTL_MS) {
+    return hit.bytes;
+  }
+  let bytes = 0;
+  let clean = true;
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      clean = false;
+      return; // an unreadable dir contributes nothing, the walk survives
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      try {
+        if (e.isDirectory()) {
+          walk(p);
+        } else if (e.isFile()) {
+          bytes += statSync(p).size;
+        }
+      } catch {
+        // a vanishing/unreadable entry loses its own bytes, never the walk
+        clean = false;
+      }
+    }
+  };
+  walk(storeDir);
+  // a partial measurement is never cached — next probe re-walks rather
+  // than pinning a low budget on a transient error
+  if (clean) {
+    storeSizeCache.set(storeDir, { bytes, at: Date.now() });
+  }
+  return bytes;
+}
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
  *  several times per event in one process, and each probe is a sync
@@ -839,7 +910,7 @@ function makeStore(x: StoreExec): TaskStore {
           notes.push(`warning: bridge fetch ${b.mirror} failed — ${err}; the next sync retries`);
         }
       }
-      const r = x.probe(['sync', ...plan.args], 120_000);
+      const r = x.probe(['sync', ...plan.args], bdSyncTimeoutMs(x.storeDir));
       if (r.code !== 0) {
         if (/ENOENT/.test(r.err) || BD_NO_STORE.test(r.err)) {
           return ''; // no bd, or no routed store — state simply doesn't move

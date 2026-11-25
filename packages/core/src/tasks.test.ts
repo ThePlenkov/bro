@@ -1,10 +1,21 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  ftruncateSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   bdActor,
+  bdSyncTimeoutMs,
   claimRemote,
   getTasks,
   getTasksAsync,
@@ -597,5 +608,34 @@ describe('claimRemote', { skip: WIN32 }, () => {
         'an unpublished claim must be undone locally'
       );
     });
+  });
+});
+
+describe('bdSyncTimeoutMs (bro-lvj0j)', () => {
+  test('a small store keeps the 120s default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-ms-'));
+    writeFileSync(join(dir, 'f'), 'x');
+    assert.equal(bdSyncTimeoutMs(dir), 120_000);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('the budget scales past the first GiB', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-ms-'));
+    // sparse file — 1.5GiB of store without paying the write
+    const fd = openSync(join(dir, 'big'), 'w');
+    ftruncateSync(fd, Math.floor(1.5 * 1024 * 1024 * 1024));
+    closeSync(fd);
+    const ms = bdSyncTimeoutMs(dir);
+    assert.ok(ms > 120_000, `expected scaling, got ${ms}`);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('BRO_BD_SYNC_TIMEOUT_MS wins over everything', () => {
+    process.env.BRO_BD_SYNC_TIMEOUT_MS = '47000';
+    try {
+      assert.equal(bdSyncTimeoutMs(undefined), 47_000);
+    } finally {
+      delete process.env.BRO_BD_SYNC_TIMEOUT_MS;
+    }
   });
 });
