@@ -78,10 +78,10 @@ function createGcSession(input: { molStep: string; city: string }): string {
   if (created.code !== 0) throw new Error(`gc session new ${input.molStep} — ${gcErr(created)}`);
   let value: { session_id?: string; ok?: boolean };
   try {
-    value = JSON.parse(created.out) as { session_id?: string; ok?: boolean };
-  } catch {
+    value = parseGcSession(created.out);
+  } catch (err) {
     gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
-    throw new Error('gc session new returned unparseable JSON');
+    throw err;
   }
   if (value.ok === false || value.session_id === undefined) {
     gcRun({ args: ['session', 'close', input.molStep, '--city', input.city] });
@@ -94,14 +94,23 @@ function createGcSession(input: { molStep: string; city: string }): string {
   return value.session_id;
 }
 
-function gcEntryIsLive(
-  entry: AgentRegistryEntry,
-  molStep: string,
-  city: string,
-  snapshot: GcSession[] | undefined
-): boolean {
+function parseGcSession(output: string): { session_id?: string; ok?: boolean } {
+  try {
+    return JSON.parse(output) as { session_id?: string; ok?: boolean };
+  } catch {
+    throw new Error('gc session new returned unparseable JSON');
+  }
+}
+
+function gcEntryIsLive(input: {
+  entry: AgentRegistryEntry;
+  molStep: string;
+  city: string;
+  snapshot: GcSession[] | undefined;
+}): boolean {
+  const { entry, molStep, city, snapshot } = input;
   const snap = gcSessionFor(entry, molStep, snapshot ?? []);
-  if (snap !== undefined && ['running', 'spawned'].includes(gcState(snap))) return true;
+  if (snap !== undefined) return gcSessionIsActive(snap);
   const fresh = listGcSessions(city);
   if (fresh.sessions === undefined) {
     throw new SpawnError(
@@ -116,6 +125,10 @@ function gcEntryIsLive(
     }
     return false;
   }
+  return gcSessionIsActive(session);
+}
+
+function gcSessionIsActive(session: GcSession): boolean {
   return ['running', 'spawned'].includes(gcState(session));
 }
 
@@ -140,17 +153,18 @@ function recoverGascitySpawn(input: {
   throw err instanceof SpawnError ? err : new SpawnError(why, 'unavailable');
 }
 
-function requireGcSessions(city: string): GcSession[] {
-  const result = listGcSessions(city);
+function requireGcSessions(input: { city: string }): GcSession[] {
+  const result = listGcSessions(input.city);
   if (result.sessions === undefined) throw new Error(`gascity unreachable — ${result.err}`);
   return result.sessions;
 }
 
-function requireKnownGcAgent(
-  entry: AgentRegistryEntry,
-  molStep: string,
-  sessions: GcSession[]
-): void {
+function requireKnownGcAgent(input: {
+  entry: AgentRegistryEntry;
+  molStep: string;
+  sessions: GcSession[];
+}): void {
+  const { entry, molStep, sessions } = input;
   if (gcSessionFor(entry, molStep, sessions) === undefined && gcSupervisorRunning() !== true) {
     throw new Error('gc supervisor not running — agent liveness unknown');
   }
@@ -158,35 +172,40 @@ function requireKnownGcAgent(
 
 async function listGascityAgents(dir: string, configDir: () => string | null): Promise<ListResult> {
   try {
-    const city = configDir();
-    const entries = Object.entries(readAgentRegistry(dir)).filter(
-      ([, e]) => e.backend === 'gascity'
-    );
-    if (entries.length === 0) {
-      return { agents: [] };
-    }
-    if (city === null || !existsSync(join(city, 'city.toml'))) {
-      // never initialized — every gascity entry is unverifiable
-      return { agents: [], degraded: 'gascity city not initialized' };
-    }
-    const { sessions, err } = listGcSessions(city);
-    if (sessions === undefined) {
-      return { agents: [], degraded: err };
-    }
-    // absent sessions are 'lost' only when the supervisor can verify;
-    // not verifiably running → degrade and omit them: an unlisted
-    // agent renders 'unknown' in fleet, a 'lost' one would look like
-    // a dead fleet.
-    if (hasUnverifiableAgents(entries, sessions)) {
-      return {
-        agents: knownGascityAgents(entries, sessions),
-        degraded: 'gc supervisor not running — agent liveness unknown',
-      };
-    }
-    return { agents: entries.map(([molStep, e]) => gascityInfo(molStep, e, sessions, 'lost')) };
+    return listGascityAgentsOnce({ dir, city: configDir() });
   } catch (err) {
     return { agents: [], degraded: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function listGascityAgentsOnce(input: { dir: string; city: string | null }): ListResult {
+  const { dir, city } = input;
+  const entries = Object.entries(readAgentRegistry(dir)).filter(([, e]) => e.backend === 'gascity');
+  if (entries.length === 0) return { agents: [] };
+  if (city === null || !existsSync(join(city, 'city.toml'))) {
+    return { agents: [], degraded: 'gascity city not initialized' };
+  }
+  return listGascitySessions({ entries, city });
+}
+
+function listGascitySessions(input: {
+  entries: [string, AgentRegistryEntry][];
+  city: string;
+}): ListResult {
+  const { entries, city } = input;
+  const { sessions, err } = listGcSessions(city);
+  if (sessions === undefined) return { agents: [], degraded: err };
+  if (hasUnverifiableAgents(entries, sessions)) {
+    return {
+      agents: knownGascityAgents(entries, sessions),
+      degraded: 'gc supervisor not running — agent liveness unknown',
+    };
+  }
+  return {
+    agents: entries.map(([molStep, entry]) =>
+      gascityInfo({ molStep, entry, sessions, missing: 'lost' })
+    ),
+  };
 }
 
 function hasUnverifiableAgents(
@@ -205,15 +224,16 @@ function knownGascityAgents(
 ): AgentInfo[] {
   return entries
     .filter(([molStep, entry]) => gcSessionFor(entry, molStep, sessions) !== undefined)
-    .map(([molStep, entry]) => gascityInfo(molStep, entry, sessions, 'lost'));
+    .map(([molStep, entry]) => gascityInfo({ molStep, entry, sessions, missing: 'lost' }));
 }
 
-function gascityInfo(
-  molStep: string,
-  entry: AgentRegistryEntry,
-  sessions: GcSession[] | undefined,
-  missing: AgentState
-): AgentInfo {
+function gascityInfo(input: {
+  molStep: string;
+  entry: AgentRegistryEntry;
+  sessions: GcSession[] | undefined;
+  missing: AgentState;
+}): AgentInfo {
+  const { molStep, entry, sessions, missing } = input;
   const s = sessions === undefined ? undefined : gcSessionFor(entry, molStep, sessions);
   return {
     id: entry.agentId,
@@ -228,6 +248,69 @@ function gascityInfo(
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   };
+}
+
+function assertSafeGcAgentName(molStep: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(molStep)) {
+    throw new SpawnError(`molStep ${molStep} is not a safe gascity agent name`, 'input');
+  }
+}
+
+function validateGascitySpawn(spec: SpawnSpec): void {
+  if (spec.worker !== undefined) {
+    throw new SpawnError(
+      `providers.${spec.provider ?? '?'} resolved a spawn worker, but the gascity backend runs its own provider sessions (city.toml owns the command) — run it on native/tmux or drop the provider`,
+      'config'
+    );
+  }
+  const promptBytes = Buffer.byteLength(spec.prompt);
+  if (promptBytes > GC_SUBMIT_PROMPT_MAX) {
+    throw new SpawnError(
+      `prompt is ${promptBytes} bytes — gc session submit passes it as one argv element (cap ${GC_SUBMIT_PROMPT_MAX}); shorten the prompt or file it`,
+      'input'
+    );
+  }
+}
+
+function gcAgentToml(input: {
+  spec: SpawnSpec;
+  templateDir: string;
+  agentId: string;
+  promptFile: string;
+  command: string;
+  mol: string | undefined;
+}): string {
+  const { spec, templateDir, agentId, promptFile, command, mol } = input;
+  const envEntries = gcEnvEntries(spec);
+  const allEnv = [
+    ...envEntries,
+    ...agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol),
+  ];
+  const envToml = `env = { ${allEnv.map(([key, value]) => `${key} = "${tomlStr(value)}"`).join(', ')} }\n`;
+  return (
+    `work_dir = "${tomlStr(spec.repoRoot)}"\n${envToml}` +
+    gcTemplateFile({ templateDir, file: 'agent.toml', fallback: GC_AGENT_TOML })
+      .replace(/^work_dir\s*=.*$/gm, '')
+      .replace(/^env\s*=.*$/gm, '')
+  );
+}
+
+function gcEnvEntries(spec: SpawnSpec): [string, string][] {
+  return Object.entries(spec.env ?? {}).filter(([key]) => gcEnvKeyIsAllowed(key));
+}
+
+function gcEnvKeyIsAllowed(key: string): boolean {
+  return (
+    /^[A-Za-z_]\w*$/.test(key) && !envKeyDropped(key, false) && !GIT_REPOSITORY_ENV_KEYS.has(key)
+  );
+}
+
+function gcTemplateFile(input: { templateDir: string; file: string; fallback: string }): string {
+  try {
+    return readFileSync(join(input.templateDir, input.file), 'utf8');
+  } catch {
+    return input.fallback;
+  }
 }
 
 export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
@@ -250,7 +333,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 
   /** Author city.toml + the worker template once, then `gc init --file
    *  … --no-start` — files-only bootstrap, no supervisor side effects. */
-  const initCity = (city: string): void => {
+  const initCity = (input: { city: string }): void => {
+    const { city } = input;
     mkdirSync(city, { recursive: true });
     const toml = join(city, 'city.toml');
     if (existsSync(toml)) {
@@ -297,53 +381,27 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     const { spec, city, agentId, promptFile, mol } = input;
     // leading-alnum guard: '.'/'..' would escape the per-step dir and a
     // template-named step would overwrite the shared template
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.molStep)) {
-      throw new SpawnError(`molStep ${spec.molStep} is not a safe gascity agent name`, 'input');
-    }
-    // inherit a customized agents.gascity.template — its prompt and
-    // agent.toml carry over; only the work_dir pin is asserted
+    assertSafeGcAgentName(spec.molStep);
     const tplDir = join(city, 'agents', template);
-    const read = (f: string, fallback: string): string => {
-      try {
-        return readFileSync(join(tplDir, f), 'utf8');
-      } catch {
-        return fallback;
-      }
-    };
-    const wd = `work_dir = "${tomlStr(spec.repoRoot)}"`;
-    // spec.env rides the agent's env table — the only channel a gc
-    // session has for caller env (gc re-injects it after its `env -u`
-    // strip, so the spawned provider process actually sees the vars)
-    const envEntries = Object.entries(spec.env ?? {}).filter(
-      // identity pins are connector-owned — a caller value for
-      // BEADS_DIR/BRO_BEAD_ID/... would redirect bead ops or re-badge
-      // the worker, so the env table filters them out and re-injects
-      // the connector's own below. gc injects no tmpdir pin — a caller
-      // TMPDIR is the caller's to keep (envKeyDropped's unpinned leg)
-      ([k]) =>
-        /^[A-Za-z_]\w*$/.test(k) && !envKeyDropped(k, false) && !GIT_REPOSITORY_ENV_KEYS.has(k)
-    );
-    // caller env plus the connector-owned identity pins — pins always
-    // render so the table exists even when spec.env is empty
-    const allEnv = [
-      ...envEntries,
-      ...agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol),
-    ];
-    const envToml = `env = { ${allEnv.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`;
-    // work_dir (+ env) are top-level — they must precede any [table] in
-    // the file; the template's own copies are dropped so ours win
-    const agentToml =
-      `${wd}\n${envToml}` +
-      read('agent.toml', GC_AGENT_TOML)
-        .replace(/^work_dir\s*=.*$/gm, '')
-        .replace(/^env\s*=.*$/gm, '');
+    const agentToml = gcAgentToml({
+      spec,
+      templateDir: tplDir,
+      agentId,
+      promptFile,
+      command,
+      mol,
+    });
     const agentDir = join(city, 'agents', spec.molStep);
     // owner-only (spec bro-l8c4f.4) — agent.toml inlines the caller's
     // env table; a permissive file leaks secrets into every local login
     mkdirPrivateSync({ path: agentDir });
     writePrivateFileSync({
       path: join(agentDir, 'prompt.template.md'),
-      data: read('prompt.template.md', GC_PROMPT_TEMPLATE),
+      data: gcTemplateFile({
+        templateDir: tplDir,
+        file: 'prompt.template.md',
+        fallback: GC_PROMPT_TEMPLATE,
+      }),
     });
     writePrivateFileSync({ path: join(agentDir, 'agent.toml'), data: agentToml });
   };
@@ -375,7 +433,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 
   /** City-scoped supervisor ensure — `gc start` registers the city and
    *  brings up the shared supervisor. */
-  const ensureStarted = (city: string): void => {
+  const ensureStarted = (input: { city: string }): void => {
+    const { city } = input;
     if (gcSupervisorRunning() !== true) {
       const start = gcRun({ args: ['start', city], timeoutMs: 120_000 });
       if (start.code !== 0) {
@@ -384,12 +443,13 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     }
   };
 
-  const toInfo = (
-    molStep: string,
-    entry: AgentRegistryEntry,
-    sessions: GcSession[] | undefined,
-    missing: AgentState
-  ): AgentInfo => {
+  const toInfo = (input: {
+    molStep: string;
+    entry: AgentRegistryEntry;
+    sessions: GcSession[] | undefined;
+    missing: AgentState;
+  }): AgentInfo => {
+    const { molStep, entry, sessions, missing } = input;
     const s = sessions === undefined ? undefined : gcSessionFor(entry, molStep, sessions);
     return {
       id: entry.agentId,
@@ -419,10 +479,10 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     mol?: string;
   }): string => {
     const { spec, city, prior, agentId, promptFile, mol } = input;
-    initCity(city);
+    initCity({ city });
     writeStepAgent({ spec, city, agentId, promptFile, mol });
     ensureRig(spec, city);
-    ensureStarted(city);
+    ensureStarted({ city });
     const priorId = typeof prior === 'string' ? prior : undefined;
     const alive = listGcSessions(city).sessions?.find(
       s => s.id === priorId || s.alias === spec.molStep
@@ -475,7 +535,13 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     return withAgentRegistryLock(dir, () => {
       const existing = readAgentRegistry(dir)[spec.molStep];
       const prepared = prepareSpawn(dir, home, 'gascity', spec, {
-        isLive: e => gcEntryIsLive(e, spec.molStep, city, preSessions?.sessions),
+        isLive: entry =>
+          gcEntryIsLive({
+            entry,
+            molStep: spec.molStep,
+            city,
+            snapshot: preSessions?.sessions,
+          }),
         liveDetail: e => `session ${typeof e.sessionId === 'string' ? e.sessionId : spec.molStep}`,
         entry: () => ({ sessionId: undefined }),
         claimAs: spec.molStep,
@@ -513,27 +579,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // policy before preflight — refuse invalid committed config ahead
       // of the worker/prompt checks, let alone the gc side effects
       assertMutableConfig(dir);
-      // a provider-resolved worker can't ride gc — the city's provider
-      // command is written once in city.toml at init, so recording
-      // provenance while gc runs its own configured provider would be
-      // laundering. Model labels alone still pin (env table).
-      if (spec.worker !== undefined) {
-        throw new SpawnError(
-          `providers.${spec.provider ?? '?'} resolved a spawn worker, but the gascity backend runs its own provider sessions (city.toml owns the command) — run it on native/tmux or drop the provider`,
-          'config'
-        );
-      }
-      // gc session submit has no --file/stdin mode (v1.4.2), so the
-      // prompt rides argv — Linux caps a single element at 128KiB
-      // (MAX_ARG_STRLEN) and E2BIG there reads as an opaque spawn
-      // failure. Bound it as bad input before claiming or touching gc.
-      const promptBytes = Buffer.byteLength(spec.prompt);
-      if (promptBytes > GC_SUBMIT_PROMPT_MAX) {
-        throw new SpawnError(
-          `prompt is ${promptBytes} bytes — gc session submit passes it as one argv element (cap ${GC_SUBMIT_PROMPT_MAX}); shorten the prompt or file it`,
-          'input'
-        );
-      }
+      validateGascitySpawn(spec);
       const home = spawnHome(dir, 'gascity', command, spec);
       const city = configDir();
       if (city === null) {
@@ -562,7 +608,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // A failed list passes undefined → 'spawned' (the contract's
       // registered-unverified state), not a faked live read.
       const { sessions } = listGcSessions(city);
-      return toInfo(spec.molStep, spawned, sessions, 'spawned');
+      return toInfo({ molStep: spec.molStep, entry: spawned, sessions, missing: 'spawned' });
     },
 
     async list(): Promise<ListResult> {
@@ -579,9 +625,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       if (city === null) {
         throw new Error('no git common dir — cannot reach gascity');
       }
-      const sessions = requireGcSessions(city);
-      requireKnownGcAgent(entry, molStep, sessions);
-      return toInfo(molStep, entry, sessions, 'lost');
+      const sessions = requireGcSessions({ city });
+      requireKnownGcAgent({ entry, molStep, sessions });
+      return toInfo({ molStep, entry, sessions, missing: 'lost' });
     },
 
     async stop(id: string): Promise<void> {
@@ -619,8 +665,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           'config'
         );
       }
-      initCity(city);
-      ensureStarted(city);
+      initCity({ city });
+      ensureStarted({ city });
     },
 
     async down(): Promise<void> {
