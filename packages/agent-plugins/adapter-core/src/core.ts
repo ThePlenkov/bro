@@ -490,9 +490,66 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
 
 const ELLIPSIS = '…';
 
-/** Clip to a width, marking the cut. */
+/** Terminal column width of one code point — wcwidth-lite: zero for
+ *  combining marks and joiners, two for wide/fullwidth and emoji ranges,
+ *  one otherwise. */
+function charWidth(cp: number): number {
+  if (
+    (cp >= 0x300 && cp <= 0x36f) ||
+    cp === 0x200d ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    cp === 0x200b
+  ) {
+    return 0;
+  }
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0x303e) ||
+    (cp >= 0x3041 && cp <= 0x33ff) ||
+    (cp >= 0x3400 && cp <= 0x4dbf) ||
+    (cp >= 0x4e00 && cp <= 0x9fff) ||
+    (cp >= 0xa000 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1f64f) ||
+    (cp >= 0x20000 && cp <= 0x2fffd) ||
+    (cp >= 0x30000 && cp <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** Display width in terminal columns — not string length. */
+export function displayWidth(text: string): number {
+  let w = 0;
+  for (const ch of text) {
+    w += charWidth(ch.codePointAt(0) ?? 0);
+  }
+  return w;
+}
+
+/** Clip to a display width in terminal columns, marking the cut. The
+ *  iteration is by code point — a surrogate pair never splits. */
 export function clip(text: string, width: number): string {
-  return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
+  if (displayWidth(text) <= width) {
+    return text;
+  }
+  const budget = Math.max(0, width - 1);
+  let w = 0;
+  let out = '';
+  for (const ch of text) {
+    const cw = charWidth(ch.codePointAt(0) ?? 0);
+    if (w + cw > budget) {
+      break;
+    }
+    w += cw;
+    out += ch;
+  }
+  return `${out}${ELLIPSIS}`;
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   broEnabled,
   callHookDetailed,
   clip,
+  displayWidth,
   contextOf,
   type HookCallOptions,
   hookFailureText,
@@ -58,6 +59,32 @@ test('clip: marks the cut and never exceeds the width', () => {
   const clipped = clip('x'.repeat(50), 10);
   assert.equal(clipped.length, 10);
   assert.ok(clipped.endsWith('…'));
+});
+
+test('clip: wide glyphs count as two columns, never overflow the width', () => {
+  // CJK: each glyph is 2 columns — the fixture is 8 columns
+  const clipped = clip('\u4e2d\u6587\u6d4b\u8bd5', 5);
+  assert.equal(displayWidth(clipped), 5);
+  assert.ok(clipped.endsWith('…'));
+  // narrow text is unchanged
+  assert.equal(clip('abc', 5), 'abc');
+});
+
+test('clip: a surrogate pair never splits', () => {
+  const emoji = '\u{1F680}'; // 🚀 — astral, width 2
+  const text = `ab${emoji}cd`;
+  // width 3: fits 'ab' (2 cols) but not the rocket (2 more) — cut before it
+  const clipped = clip(text, 3);
+  assert.ok(!/[\uD800-\uDFFF]/.test(clipped.replace('…', '')), 'no lone surrogates');
+  assert.ok(clipped.endsWith('…'));
+  // full-width fits: nothing clipped
+  assert.equal(clip(text, displayWidth(text)), text);
+});
+
+test('clip: combining marks are zero-width', () => {
+  const accented = 'e\u0301'; // e + combining acute — one column
+  assert.equal(displayWidth(accented), 1);
+  assert.equal(clip(accented.repeat(10), 5), `${'e\u0301'.repeat(4)}…`);
 });
 
 test('broEnabled: a repo with a bro config opts in', () => {
