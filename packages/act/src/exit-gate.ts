@@ -116,6 +116,9 @@ export function evaluateExitGate(
   if (state.ciFailing > 0) {
     blockers.push(`${state.ciFailing} failing check(s)`);
   }
+  for (const context of state.requiredChecksMissing ?? []) {
+    blockers.push(`required status check "${context}" is missing from the head`);
+  }
   if (state.reviewersPending > 0) {
     blockers.push(`${state.reviewersPending} AI reviewer(s) still running — recheck`);
   }

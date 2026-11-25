@@ -43,6 +43,13 @@ function fakeRev(checks: CheckInfo[], threads: ReviewThread[]): ReviewFacade {
   } as unknown as ReviewFacade;
 }
 
+function fakeRevWithRuleset(checks: CheckInfo[], requiredStatusChecks: string[]): ReviewFacade {
+  return {
+    ...fakeRev(checks, []),
+    requiredStatusChecks: () => requiredStatusChecks,
+  };
+}
+
 /** In-memory history with a preset streak — state.ts reads only the
  *  interface, so tests pin the streak directly. */
 function memHistory(streak: number): CheckHistory & { recorded: string[] } {
@@ -238,6 +245,24 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
       ]);
     const s = await fetchPrActState(rev, target, {});
     assert.equal(s.sastPending, 3);
+  });
+});
+
+describe('fetchPrActState — ruleset-required contexts', () => {
+  test('finds a required context missing from the check rollup', async () => {
+    const state = await fetchPrActState(
+      fakeRevWithRuleset([check('build', 'pass')], ['SonarCloud Code Analysis']),
+      target
+    );
+    assert.deepEqual(state.requiredChecksMissing, ['SonarCloud Code Analysis']);
+  });
+
+  test('does not report a required context that is present', async () => {
+    const state = await fetchPrActState(
+      fakeRevWithRuleset([check('SonarCloud Code Analysis', 'pass')], ['SonarCloud Code Analysis']),
+      target
+    );
+    assert.deepEqual(state.requiredChecksMissing, []);
   });
 });
 

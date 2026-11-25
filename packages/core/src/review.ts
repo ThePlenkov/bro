@@ -357,6 +357,10 @@ export interface ReviewFacade {
 
   checks(t: PrTarget, requiredOnly?: boolean): CheckInfo[];
   checksAsync?(t: PrTarget, requiredOnly?: boolean): Promise<CheckInfo[]>;
+  /** Status-check contexts required by repository rulesets, including
+   * contexts whose check-run never appeared on the head. */
+  requiredStatusChecks?(t: PrTarget): string[];
+  requiredStatusChecksAsync?(t: PrTarget): Promise<string[]>;
   /** Check name → failure-annotation count at a head sha. `null` means
    *  the run exists but its annotations could not be fetched — a caller
    *  that gates on findings must count it as unknown, not zero. An

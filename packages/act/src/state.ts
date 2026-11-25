@@ -432,7 +432,11 @@ async function fetchState(
       target,
       requiredOnly
     );
-  const [meta, threads, checksAll, required, shas] = await Promise.all([
+  const requiredStatusChecks =
+    rev.requiredStatusChecksAsync === undefined
+      ? Promise.resolve().then(() => rev.requiredStatusChecks?.(target) ?? [])
+      : Promise.resolve().then(() => rev.requiredStatusChecksAsync!(target));
+  const [meta, threads, checksAll, required, shas, rulesetRequired] = await Promise.all([
     orSync(rev.prMetaAsync?.bind(rev), (t: PrTarget) => rev.prMeta(t), target),
     rev.reviewThreads(target),
     checksP(false),
@@ -441,6 +445,7 @@ async function fetchState(
     orSync(rev.reviewedShasAsync?.bind(rev), (t: PrTarget) => rev.reviewedShas(t), target).catch(
       (): string[] => []
     ),
+    requiredStatusChecks.catch((): string[] => []),
   ]);
   const rules = ignoreRules(opts?.ignoreChecks ?? []);
   const alerts: string[] = [];
@@ -472,6 +477,17 @@ async function fetchState(
   const checks = checksAll.filter(
     c => !isSelf(c) && advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
   );
+  const reportedNames = new Set(checksAll.map(c => normalizeCheckName(c.name)));
+  const requiredChecksMissing = rulesetRequired
+    .filter(name => {
+      if (selfName === undefined || normalizeCheckName(selfName) === '') {
+        return true;
+      }
+      const normalized = normalizeCheckName(name);
+      const self = normalizeCheckName(selfName);
+      return normalized !== self && !normalized.endsWith(` ${self}`);
+    })
+    .filter(name => !reportedNames.has(normalizeCheckName(name)));
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
@@ -626,6 +642,7 @@ async function fetchState(
     maxRounds,
     docsOnly: isDocsOnly,
     alerts,
+    requiredChecksMissing,
     reviewDecision,
     vetoReviews,
     mergedBy: meta.mergedBy,
