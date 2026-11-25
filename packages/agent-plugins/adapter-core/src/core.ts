@@ -490,37 +490,38 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
 
 const ELLIPSIS = '…';
 
-/** Terminal column width of one code point — wcwidth-lite: zero for
- *  combining marks and joiners, two for wide/fullwidth and emoji ranges,
- *  one otherwise. */
+/** Terminal column width of one code point — wcwidth-lite. Ranges are
+ *  table-driven: ZERO for combining marks/joiners, WIDE for wide,
+ *  fullwidth and emoji blocks (two columns), one otherwise. */
+const ZERO_WIDTH: [number, number][] = [
+  [0x300, 0x36f],
+  [0x200b, 0x200d],
+  [0xfe00, 0xfe0f],
+];
+const WIDE: [number, number][] = [
+  [0x1100, 0x115f],
+  [0x2e80, 0x303e],
+  [0x3041, 0x33ff],
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xa000, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe6f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x1f000, 0x1faff],
+  [0x20000, 0x2fffd],
+  [0x30000, 0x3fffd],
+];
+const inRanges = (cp: number, ranges: [number, number][]): boolean =>
+  ranges.some(([lo, hi]) => cp >= lo && cp <= hi);
+
 function charWidth(cp: number): number {
-  if (
-    (cp >= 0x300 && cp <= 0x36f) ||
-    cp === 0x200d ||
-    (cp >= 0xfe00 && cp <= 0xfe0f) ||
-    cp === 0x200b
-  ) {
+  if (inRanges(cp, ZERO_WIDTH)) {
     return 0;
   }
-  if (
-    (cp >= 0x1100 && cp <= 0x115f) ||
-    (cp >= 0x2e80 && cp <= 0x303e) ||
-    (cp >= 0x3041 && cp <= 0x33ff) ||
-    (cp >= 0x3400 && cp <= 0x4dbf) ||
-    (cp >= 0x4e00 && cp <= 0x9fff) ||
-    (cp >= 0xa000 && cp <= 0xa4cf) ||
-    (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xfe30 && cp <= 0xfe6f) ||
-    (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x1f000 && cp <= 0x1faff) ||
-    (cp >= 0x20000 && cp <= 0x2fffd) ||
-    (cp >= 0x30000 && cp <= 0x3fffd)
-  ) {
-    return 2;
-  }
-  return 1;
+  return inRanges(cp, WIDE) ? 2 : 1;
 }
 
 /** Display width in terminal columns — not string length. */
@@ -561,27 +562,31 @@ export function boardLines(s: BoardStatus): string[] {
   const beads = s.beads?.inProgress ?? [];
   const running = (s.fleet?.agents ?? []).filter(a => a.state === 'running');
   const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : '';
+  // optional summary segments — [present, text] pairs keep the shape flat
+  const optional: [unknown, string][] = [
+    [s.drill?.frame, `drill ${s.drill?.frame?.id ?? ''}`],
+    [(s.dirty ?? 0) > 0, `dirty ${s.dirty ?? 0}`],
+  ];
   const parts = [
     `◐ ${beads.length} bead${beads.length === 1 ? '' : 's'}`,
     `fleet ${running.length}${cap}`,
     `ready ${s.beads?.readyTotal ?? 0}`,
+    ...optional.filter(([present]) => present).map(([, text]) => text),
   ];
-  if (s.drill?.frame) {
-    parts.push(`drill ${s.drill.frame.id}`);
-  }
-  if ((s.dirty ?? 0) > 0) {
-    parts.push(`dirty ${s.dirty}`);
-  }
-  const lines = [`bro · ${parts.join(' · ')}`];
-  for (const b of beads.slice(0, 3)) {
-    const link = b.link ? `  ${b.link}` : '';
-    lines.push(`  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${link}`);
-  }
-  for (const a of running.slice(0, 2)) {
-    const step = a.step ? `  ${a.step}` : '';
-    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`);
-  }
-  return lines;
+  const beadLine = (
+    b: BoardStatus['beads'] extends infer T
+      ? T extends { inProgress?: (infer U)[] }
+        ? U
+        : never
+      : never
+  ): string => `  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${b.link ? `  ${b.link}` : ''}`;
+  const agentLine = (a: { id?: string; backend?: string; step?: string }): string =>
+    `  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${a.step ? `  ${a.step}` : ''}`;
+  return [
+    `bro · ${parts.join(' · ')}`,
+    ...beads.slice(0, 3).map(beadLine),
+    ...running.slice(0, 2).map(agentLine),
+  ];
 }
 
 /** The footer crumb — the one-glance form of the same board. */
