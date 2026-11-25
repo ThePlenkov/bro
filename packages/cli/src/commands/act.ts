@@ -32,7 +32,7 @@ import {
 } from '@broject/core';
 import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@broject/judge';
 import { loadBroConfig } from '../plugins.ts';
-import { commentArg, resolvePr, threadArg, usage } from './act-args.ts';
+import { commentArg, resolvePr, resolvePrLenient, threadArg, usage } from './act-args.ts';
 import { cmdDismiss } from './act-dismiss.ts';
 import { claimStore, cmdMerge, dropActState } from './act-land.ts';
 import { printStatus } from './act-report.ts';
@@ -222,7 +222,14 @@ function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): voi
     if (ledger === null) {
       return;
     }
-    const target = resolvePr(rev, argv, 'record');
+    // resolvePrLenient, not resolvePr — resolvePr exits on an invalid
+    // number or a missing implicit PR, and cmdResolve calls this AFTER
+    // the thread is already resolved: an exit here would strand the
+    // disposition journal and dropActState (bro-6mjla)
+    const target = resolvePrLenient(rev, argv);
+    if (target === null) {
+      return;
+    }
     if (target.source === 'auto') {
       // the auto row is a recency guess — recording a thread under the
       // wrong PR poisons the reopen guard just as much as losing the
