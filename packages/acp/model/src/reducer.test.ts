@@ -33,6 +33,25 @@ test('a prompt-opened turn still marks its items "self"', () => {
   assert.equal(item?.origin, 'self');
 });
 
+test('a permission opened from the live archive does not make following activity self-owned', () => {
+  let s = createSession();
+  s = reduce(s, {
+    type: 'permission_opened',
+    toolCallId: 't1',
+    request: {
+      sessionId: 'archive',
+      toolCall: { toolCallId: 't1', title: 'run it', status: 'in_progress' },
+      options: [],
+    },
+    at: 1000,
+  } as ModelEvent);
+  s = reduce(s, chunk('observed after the permission', 1100));
+
+  const message = [...s.items.values()].find(i => i.kind === 'agent_message');
+  assert.equal(message?.origin, 'other');
+  assert.equal(s.turn?.archive, true);
+});
+
 test('a second turn_started re-anchors an idle-pending turn', () => {
   let s = createSession();
   s = reduce(s, started());

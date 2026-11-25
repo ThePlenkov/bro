@@ -538,7 +538,7 @@ function handlePermissionOpened(
   // a permission that opens a turn with no `turn_started` sits in the
   // archive window mid-turn — the fabricated turn is archive-sourced,
   // or the rest of it mislabels `self`
-  const turn = next.turn ?? emptyTurn(at, true);
+  const turn = next.turn ?? archiveTurn(at);
   const ids = turn.openPermissionToolCallIds.includes(toolCallId)
     ? turn.openPermissionToolCallIds
     : [...turn.openPermissionToolCallIds, toolCallId];
@@ -596,6 +596,13 @@ function emptyTurn(startedAt: number, archive = false): NonNullable<Session["tur
     planReportedThisTurn: false,
     archive,
   };
+}
+
+/** A request observed in the archive may arrive without its turn-start row.
+ *  Keep the fallback turn explicitly observed so later id-less updates cannot
+ *  inherit the client-owned (`self`) attribution. */
+function archiveTurn(startedAt: number): NonNullable<Session["turn"]> {
+  return emptyTurn(startedAt, true);
 }
 
 // -- Turn lifecycle (task 3.4) ------------------------------------------------------------------
