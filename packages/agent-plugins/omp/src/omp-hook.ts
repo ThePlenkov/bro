@@ -60,6 +60,27 @@ function bareWord(token: string): string {
  *  (`-vf` forces just the same — a bundle is still the flag), or a
  *  leading-`+` refspec (`git push origin +main`). Tokenizing instead
  *  of regex-matching: no backtracking, nothing super-linear (S8786). */
+/** git push short flags that take NO value — a bundle parses left to
+ *  right until a value-taking flag eats the rest of the token. `-o` is
+ *  the only value-taking short flag of push: `-ofoo` is a push-option
+ *  with value `foo`, never a force (macroscope, bro-u93xd). */
+const VALUELESS_PUSH_FLAGS = new Set(['f', 'u', 'v', 'q', 'd', 'n']);
+
+function isBundledForce(token: string): boolean {
+  if (!/^-[a-zA-Z][a-zA-Z]*$/.test(token)) {
+    return false;
+  }
+  for (const ch of token.slice(1)) {
+    if (ch === 'f') {
+      return true;
+    }
+    if (!VALUELESS_PUSH_FLAGS.has(ch)) {
+      return false; // a value-taking flag — the rest is its value
+    }
+  }
+  return false;
+}
+
 function isForceToken(token: string): boolean {
   if (token === '--force') {
     return true;
@@ -67,7 +88,7 @@ function isForceToken(token: string): boolean {
   if (token.startsWith('+') && token.length > 1) {
     return true;
   }
-  return /^-[a-zA-Z]*f[a-zA-Z]*$/.test(token);
+  return isBundledForce(token);
 }
 
 /** The push arguments of one shell segment, or null when the segment

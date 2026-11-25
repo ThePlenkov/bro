@@ -58,4 +58,13 @@ describe('the omp force-push guard', () => {
     assert.equal(isForcePush('git -C /repo push --force origin main'), true);
     assert.equal(isForcePush('git -c core.hooksPath=/x push --force'), true);
   });
+
+  void test('push-options are not force flags (macroscope)', () => {
+    assert.equal(isForcePush('git push -ofoo origin main'), false);
+    assert.equal(isForcePush('git push -o ci.skip origin main'), false);
+    // a bundle reaching -o never reads the value as flags — but an f
+    // BEFORE it is still force
+    assert.equal(isForcePush('git push -fv origin main'), true);
+    assert.equal(isForcePush('git push -fo ci.skip origin main'), true);
+  });
 });
