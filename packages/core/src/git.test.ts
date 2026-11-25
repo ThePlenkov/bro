@@ -36,10 +36,16 @@ import { scrubEnv, testGit } from './testkit.ts';
 after(scrubEnv());
 
 describe('git command-runner arguments', () => {
-  test('rejects standalone command-runner flags before spawning git', () => {
-    for (const flag of ['--upload-pack', '--receive-pack', '--exec', '--template']) {
-      const result = gitTry([flag, 'echo injected']);
-      assert.equal(result.code, 128, flag);
+  test('rejects command-runner arguments before spawning git', () => {
+    for (const args of [
+      ['--upload-pack', 'echo injected'],
+      ['--receive-pack=echo injected'],
+      ['--exec', 'echo injected'],
+      ['--template=/tmp/untrusted-template'],
+      ['ext::sh -c echo injected'],
+    ]) {
+      const result = gitTry(args);
+      assert.equal(result.code, 128, args[0]);
       assert.match(result.err, /command-runner flag/);
     }
   });
