@@ -77,6 +77,7 @@ import {
   claimsFacade,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
+  gitTry,
   hookHostOf,
   isMode,
   ledgerFacade,
@@ -111,7 +112,13 @@ import {
   type ProbeResult,
   type ProbeTiming,
 } from '@broject/core';
-import { agentOwner, markerLive, markerOwner, ownerTag } from '@broject/rig';
+import {
+  agentOwner,
+  CHECKOUT_DETAIL_PREFIX,
+  markerLive,
+  markerOwner,
+  ownerTag,
+} from '@broject/rig';
 import {
   acquireOrchestratorRole,
   orchestratorRoleHeldBy,
@@ -1150,6 +1157,23 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
   return '';
 }
 
+/** The `checkout:<root>` detail a `.work` arm records — the session's own
+ *  checkout toplevel, so a foreign reader can answer "who owns this dirty
+ *  state?" (bro-bswx5). '' for other aspects and outside a repo — the
+ *  prefix keeps the path out of the bare-absolute shape the janitor reads
+ *  as a claimed worktree. */
+function checkoutDetail(aspect: GateAspect, dir: string): string {
+  if (aspect !== 'work') {
+    return '';
+  }
+  const top = gitTry(
+    ['-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel'],
+    GIT_SYNC_PROBE_TIMEOUT_MS
+  );
+  const root = top.code === 0 ? top.out.trim() : '';
+  return root === '' ? '' : `${CHECKOUT_DETAIL_PREFIX}${root}`;
+}
+
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. `dir` is
  * the repo the marker resolves in — hook events leave it at
@@ -1180,8 +1204,10 @@ export function armSession(
     // trusting mtime, and a resumed session must not keep its previous
     // dead owner (the marker would read as residue while it still works)
     let body = `${Date.now()}${ownerTag()}\n${rest}`;
-    if (detail && !body.split('\n').includes(detail)) {
-      body = `${body.replace(/\n?$/, '\n')}${detail}\n`;
+    for (const line of [detail, checkoutDetail(aspect, dir)]) {
+      if (line !== '' && !body.split('\n').includes(line)) {
+        body = `${body.replace(/\n?$/, '\n')}${line}\n`;
+      }
     }
     // A .work arm shares the drive occupancy lock so the marker normally
     // lands before its probe or after the action (bro-qry9). The 500ms

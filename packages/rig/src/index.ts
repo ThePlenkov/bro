@@ -69,9 +69,11 @@ export {
 
 // --- fleet lifecycle: the ownership plane (bro-jamp7 slice 2) -------------
 export {
+  CHECKOUT_DETAIL_PREFIX,
   LIVE_MARKER_MS,
   agentOwner,
   agentProcessesIn,
+  checkoutOccupants,
   detailMatches,
   hooksDirOf,
   liveWorkDetails,

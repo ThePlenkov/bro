@@ -87,6 +87,23 @@ describe('hook journal and occupancy lock bounds', () => {
     });
   });
 
+  test('a .work arm records the checkout it owns — `checkout:<root>` detail (bro-bswx5)', () => {
+    const { root, main } = initRepo('bro-hooks-co-');
+    inside(main, root, () => {
+      armSession('own-checkout', 'work', 'bro-x', main);
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const body = readFileSync(join(common, 'bro', 'hooks', 'own-checkout.work'), 'utf8');
+      const lines = body.split('\n');
+      const top = git(['rev-parse', '--show-toplevel'], main).trim();
+      assert.ok(lines.includes(`checkout:${top}`));
+      assert.ok(lines.includes('bro-x'));
+      // non-work aspects never carry the checkout record
+      armSession('act-only', 'act', '#1', main);
+      const actBody = readFileSync(join(common, 'bro', 'hooks', 'act-only.act'), 'utf8');
+      assert.ok(!actBody.includes('checkout:'));
+    });
+  });
+
   test('trace append falls back immediately over a live foreign journal lock', {
     skip: process.platform === 'win32',
   }, async () => {
