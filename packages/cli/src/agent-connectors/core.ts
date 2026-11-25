@@ -97,3 +97,5 @@ export function resolveAgentConnector(
 export { makeNativeConnector };
 export { makeTmuxConnector };
 export { makeGascityConnector } from './gascity.ts';
+export { makeDockerConnector } from './docker.ts';
+export { makeCopilotConnector } from './copilot.ts';
