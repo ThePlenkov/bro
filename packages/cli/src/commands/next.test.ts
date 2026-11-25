@@ -39,6 +39,9 @@ case "$1" in
     if [ -n "$FAKE_BD_EPIC_PARENTS" ]; then
       case "$2" in *$FAKE_BD_EPIC_PARENTS*) type=epic ;; esac
     fi
+    if [ -n "$FAKE_BD_FOREIGN" ]; then
+      case "$2" in *$FAKE_BD_FOREIGN*) status=open; assignee=other-agent ;; esac
+    fi
     echo '[{"id":"'$2'","status":"'$status'","assignee":"'$assignee'","issue_type":"'$type'"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
