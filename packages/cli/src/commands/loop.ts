@@ -294,7 +294,7 @@ export interface Ctx {
   scope?: unknown;
 }
 
-const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
+export const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
   if (v === undefined) return dflt;
   const n = Number(v);
   if (!Number.isFinite(n) || n < min || (max !== undefined && n > max)) {
@@ -308,7 +308,7 @@ const num = (v: string | undefined, dflt: number, min = 1, max?: number): number
 /** Node clamps a timer delay over 2^31-1 ms to 1 ms — a flag that becomes
  *  a raw delay needs a ceiling or an absurd value hot-loops the
  *  heartbeat/gate poll (or fires the agent timeout instantly). */
-const TIMER_MAX_MS = 2 ** 31 - 1;
+export const TIMER_MAX_MS = 2 ** 31 - 1;
 
 /** Progress lines — stderr under --json so stdout stays a clean
  *  event stream. */
@@ -992,7 +992,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
-  const ctx = buildCtx(root, argv, broCfg, cfg, run, backend);
+  const ctx = buildCtx({ root, argv, broCfg, cfg, run, backend });
   const leaseStore = localLeaseStore(projectId(root));
   ctx.leaseStore = leaseStore;
   // the explain slices ride the run — the spawn path prints them when the
@@ -1090,231 +1090,7 @@ async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => vo
   }
 }
 
-/** The lane picks resolve once, up front — a bad provider name (or a
- *  broken fleet.routing table) is a config error that must fail BEFORE
- *  a bead is claimed, not mid-run with claims held. Returns the flag
- *  sel, the fixed lane (the whole lane when routing is off or a flag
- *  pins it; `resolveBeadLane` re-resolves per bead otherwise), the
- *  effective template (a cli provider's `command` substitutes for
- *  `loop.agent`; a template --agent stays the literal value — provider
- *  names are never templates, resolveLoopLane consumed them), and
- *  whether per-bead fleet.routing is armed. */
-async function resolveRunLane(
-  root: string,
-  argv: string[],
-  cfg: LoopConfig
-): Promise<{
-  env: AgentConnectorEnv;
-  sel: LoopLaneSel;
-  lane: LoopLane;
-  agent: string;
-  routing: boolean;
-  flagPin: boolean;
-}> {
-  const env = loadAgentEnv(root);
-  const sel = loopLaneSel(argv);
-  return { env, sel, ...(await resolveRunLaneInner(env, sel, cfg)) };
-}
-
-async function resolveRunLaneInner(
-  env: AgentConnectorEnv,
-  sel: LoopLaneSel,
-  cfg: LoopConfig
-): Promise<{ lane: LoopLane; agent: string; routing: boolean; flagPin: boolean }> {
-  // a template --agent bypasses the registry entirely — routing can
-  // only arm when the provider lane is in play (templateEscape already
-  // warned about the bypass)
-  const templateAgent = sel.agent !== undefined && !Object.hasOwn(env.providers ?? {}, sel.agent);
-  const routing =
-    !templateAgent && env.fleet?.routing !== undefined && Object.keys(env.fleet.routing).length > 0;
-  let lane: LoopLane;
-  try {
-    // preflight the class every bead falls back to — a table whose
-    // `default` (or the --class pin) doesn't resolve is a global
-    // config error, detected before the first claim. The route feeds
-    // the lane preflight too: under routing its chain head is the
-    // effective provider floor, so a dead lower-tier pick
-    // (loop.provider/loop.profile) can't abort a run every bead routes
-    // around. Per-bead `class:` labels still resolve per spawn inside
-    // pushItem.
-    const preflight = routing
-      ? routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
-      : undefined;
-    lane = await resolveLoopLane(env, sel, cfg, preflight);
-  } catch (err) {
-    if (err instanceof SpawnError) {
-      console.error(`bro loop: ${err.message}`);
-      process.exit(2);
-    }
-    throw err;
-  }
-  const flagPin = flagTierPin(env, sel);
-  const agent = effectiveAgent(lane, sel, env, cfg);
-  if (lane.worker === undefined && agent === '' && !routing) {
-    // an armed enforce matrix judges every bead per spawn, but its
-    // judge-outage contract fails open to the static lane — with no
-    // lane source at all the first judge-down would spawn on an empty
-    // template, so preflight refuses the config instead of letting a
-    // matrix-only run discover it mid-queue (spec bro-v0pvd.1.1)
-    const matrix = env.fleet?.matrix;
-    const enforceNeedsFallback =
-      matrix !== undefined &&
-      matrix.provider !== undefined &&
-      matrix.mode === 'enforce' &&
-      Object.keys(matrix.models).length > 0;
-    console.error(
-      enforceNeedsFallback
-        ? 'bro loop: fleet.matrix enforce has no fallback lane — a judge outage ' +
-            'fails open to the static lane, so configure one alongside the ' +
-            'matrix (loop.provider/loop.profile/loop.agent, ' +
-            'agents.<backend>.provider, or fleet.routing)'
-        : 'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
-            '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
-    );
-    process.exit(2);
-  }
-  // {promptFile} isn't strictly required — an agent may read
-  // BRO_PROMPT_FILE from env instead — but a TUI-capable CLI spawned
-  // without it opens an interactive session per bead (the file path
-  // lands positionally = the prompt). Warn loudly, don't refuse. An
-  // argv worker takes the file as a positional arg by contract — the
-  // check would only misfire on it. With fleet.routing armed and no
-  // flag-tier pin the base template is inert — each bead's routed lane
-  // carries its own command (lane.worker already holds the fallback
-  // class's floor, so the pin test is the picks, not the lane).
-  if (!(routing && !flagPin) && lane.worker?.kind !== 'argv' && !agent.includes('{promptFile}')) {
-    // binary name only — the template may carry inline credentials
-    const agentBin = agent.split(/\s+/, 1)[0];
-    console.error(
-      `bro loop: agent template has no {promptFile} — "${agentBin}". ` +
-        'The prompt file appends as a positional arg; interactive CLIs ' +
-        '(devin, claude) treat that as a TUI session, not a worker prompt. ' +
-        'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
-    );
-  }
-  return { lane, agent, routing, flagPin };
-}
-
-function buildCtx(
-  root: string,
-  argv: string[],
-  broCfg: ReturnType<typeof loadBroConfig>,
-  cfg: LoopConfig,
-  run: {
-    env: AgentConnectorEnv;
-    sel: LoopLaneSel;
-    lane: LoopLane;
-    agent: string;
-    routing: boolean;
-    flagPin: boolean;
-  },
-  backend: string
-): Ctx {
-  const { env, sel, lane, agent, routing, flagPin } = run;
-  const rev = reviewHost(root, broCfg.connectors);
-  // the shared poll floor, not 1: a fractional interval is the e2e's
-  // clock — the run polls fast without anyone faking the wall clock
-  const intervalS = num(
-    flag(argv, '--interval'),
-    60,
-    MIN_INTERVAL_SEC,
-    Math.floor(TIMER_MAX_MS / 1000)
-  );
-  // hoisted so the ctx fields and the policy's deps surface share the
-  // one instance — the FSM reads deps.tasks, the adapter reads
-  // ctx.tasks, and they must be the same facade (spec bro-u6fp5.1)
-  const tasks = facade('tasks', { dir: root }, { prefer: broCfg.connectors });
-  const stateCache = prStateCache(root, {
-    ttlMs: Math.min(ACT_STATE_TTL_MS, intervalS * 1000),
-  });
-  // BEADS_DIR pinning is a beads tail — a non-beads store has no bd
-  // to pin and no db that could fork inside the worktree
-  const beadsDir = backend === 'beads' ? resolveBeadsDir(root, m => console.error(m)) : undefined;
-  const mirror = mirrorStore(root, broCfg, backend);
-  const specHas = specProbe(root, broCfg);
-  const ctx: Ctx = {
-    rev,
-    tasks,
-    backend,
-    repo: rev.resolveRepo([]),
-    root,
-    cfg: {
-      ...cfg,
-      mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
-      parkedWakeMin: num(flag(argv, '--parked-wake'), cfg.parkedWakeMin, 0),
-      maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
-      maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
-      maxOpenTotal: num(flag(argv, '--max-open-total'), cfg.maxOpenTotal, 0),
-      worktreeWarn: num(flag(argv, '--worktree-warn'), cfg.worktreeWarn, 0),
-      diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
-      batch: num(flag(argv, '--batch'), cfg.batch, 1),
-      batchMinPriority: flag(argv, '--batch-min-priority')
-        ? Number(flag(argv, '--batch-min-priority'))
-        : cfg.batchMinPriority,
-    },
-    act: broCfg.act,
-    // the feed dedup's freshness contract is "at most one poll window
-    // stale" — under a fast tick a full ACT_STATE_TTL_MS window serves
-    // a gate's pending snapshot for 30s of polls. Cap it at the run's
-    // own cadence; the default interval keeps the production 30s.
-    stateCache,
-    agent,
-    lane,
-    env,
-    sel,
-    routing,
-    intervalS,
-    json: argv.includes('--json'),
-    selection: {
-      filters: labelSelection(argv),
-      gates: 'forbid' as const,
-      order: 'priority' as const,
-    },
-    beadsDir,
-    stack: stackNameFlag(argv),
-    tails: [],
-    stage: 'startup',
-    // the projection target rides the REVIEW host's tasks — a named
-    // pick, so github's optInFacades doesn't apply (the operator asked
-    // for this connector's reviews already). A rig whose tasks backend
-    // IS the review host has nothing to project.
-    mirror,
-    mirrorPolicy: broCfg.mirror,
-    specHas,
-    q: freshLoopQueue(),
-    // the policy's IO surface attaches next — its closures read the
-    // finished ctx (say's json route, the stack name, the queue)
-    deps: {} as LoopDeps,
-  };
-  ctx.deps = loopDeps(ctx);
-  // the registry spawn engages when there's a shared store to pin the
-  // claim/exit record against — without one the legacy awaited spawn
-  // keeps the serial semantics (spec bro-zpa93). A connector that
-  // can't even resolve degrades to that same fallback, not a dead loop.
-  if (ctx.beadsDir !== undefined) {
-    try {
-      ctx.agents = resolveAgentConnector({ dir: root }, {}, loadAgentEnv(root));
-      ctx.deps.agents = ctx.agents;
-    } catch (err) {
-      console.error(
-        `loop: agent connector failed to resolve — ${err instanceof Error ? err.message : String(err)} — falling back to the awaited spawn`
-      );
-    }
-  }
-  sayLaneNotes(ctx, flagPin);
-  // the claim-authority advisory: outside the registry path the loop
-  // claims through the tasks facade, whose claim() may be best-effort
-  // assignment rather than a lease. The registry path claims on the
-  // pinned beads store (exclusive) and needs no note; an
-  // exclusive-claiming facade needs none either.
-  if (ctx.agents === undefined) {
-    const note = claimAuthorityNote(ctx.backend, declaredClaimCapability(ctx.tasks));
-    if (note !== undefined) {
-      say(ctx, note);
-    }
-  }
-  return ctx;
-}
+import { buildCtx, resolveRunLane } from './loop-plan.ts';
 
 /** The policy's IO surface (spec bro-u6fp5.1) — every reach the loop
  *  FSM has into this command's machinery, bound once at ctx build.
@@ -1322,7 +1098,7 @@ function buildCtx(
  *  command's spawn/lane/audit helpers so `packages/rig` never imports
  *  back here. Closures read `ctx` lazily — by call time the literal
  *  (queue, stack name, json route) is complete. */
-function loopDeps(ctx: Ctx): LoopDeps {
+export function loopDeps(ctx: Ctx): LoopDeps {
   const { root } = ctx;
   return {
     tasks: ctx.tasks,
@@ -1440,7 +1216,7 @@ export function claimAuthorityNote(
 // With routing armed the pin test is the flag TIER, not ctx.lane —
 // the preflight route fills lane.provider with the fallback class's
 // head, which advertises the floor, not a pin.
-function sayLaneNotes(ctx: Ctx, flagPin: boolean): void {
+export function sayLaneNotes(ctx: Ctx, flagPin: boolean): void {
   if (ctx.routing && !flagPin) {
     const pin = ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`;
     say(ctx, `loop: fleet.routing — provider resolves per bead class${pin}`);
@@ -1457,7 +1233,7 @@ function sayLaneNotes(ctx: Ctx, flagPin: boolean): void {
 // pick, so github's optInFacades doesn't apply (the operator asked
 // for this connector's reviews already). A rig whose tasks backend
 // IS the review host has nothing to project.
-function mirrorStore(
+export function mirrorStore(
   root: string,
   broCfg: ReturnType<typeof loadBroConfig>,
   backend: string
@@ -1474,7 +1250,7 @@ function mirrorStore(
   }
 }
 
-function specProbe(root: string, broCfg: ReturnType<typeof loadBroConfig>): Ctx['specHas'] {
+export function specProbe(root: string, broCfg: ReturnType<typeof loadBroConfig>): Ctx['specHas'] {
   try {
     const specs = specStore(root, broCfg.connectors);
     return (id: string) => specs.hasSpec(id);
