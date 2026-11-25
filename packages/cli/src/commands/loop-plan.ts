@@ -101,10 +101,10 @@ async function resolveLane(
   cfg: LoopConfig,
   routing: boolean
 ): Promise<LoopLane> {
-  const preflight = routing
-    ? routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
-    : undefined;
   try {
+    const preflight = routing
+      ? routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
+      : undefined;
     return await resolveLoopLane(env, sel, cfg, preflight);
   } catch (err) {
     if (err instanceof SpawnError) {
