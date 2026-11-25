@@ -341,6 +341,12 @@ export const actSection: ConfigSection<{
   maxRounds: number;
   docsPaths: string[];
   docsMaxRounds: number;
+  /** Minutes a green gate must hold continuously before the wait
+   *  settles it — review bots re-armed by a push or a ready-mark
+   *  register late or not at all (Devin Review posts findings as
+   *  comments, never a check-run), so instant green proves nothing
+   *  about reviewers still writing. 0 settles immediately. */
+  reviewSettleMinutes: number;
   requireApproval: boolean;
   approvers: string[];
   mergeQueue: { label?: string; comment?: string };
@@ -351,6 +357,7 @@ export const actSection: ConfigSection<{
     maxRounds?: unknown;
     docsPaths?: unknown;
     docsMaxRounds?: unknown;
+    reviewSettleMinutes?: unknown;
     requireApproval?: unknown;
     approvers?: unknown;
     mergeQueue?: unknown;
@@ -371,6 +378,7 @@ export const actSection: ConfigSection<{
         )
       : [...DEFAULT_CONFIG.act.docsPaths],
     docsMaxRounds: countOr(obj.docsMaxRounds, DEFAULT_CONFIG.act.docsMaxRounds),
+    reviewSettleMinutes: countOr(obj.reviewSettleMinutes, DEFAULT_CONFIG.act.reviewSettleMinutes),
     // opt-in human-signoff gate — off by default, auto-merge stays
     // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
     requireApproval: obj.requireApproval === true,
@@ -400,6 +408,7 @@ actSection.jsonSchema = js.obj({
   maxRounds: js.int(),
   docsPaths: js.strList,
   docsMaxRounds: js.int(),
+  reviewSettleMinutes: js.int(),
   requireApproval: js.bool,
   approvers: js.strList,
   mergeQueue: js.obj({ label: js.str, comment: js.str }),
@@ -1836,6 +1845,12 @@ export interface BroConfig {
      *  on a docs-only PR — doc threads churn per push, so inline fixing
      *  converges slower for less value. 0 disables the docs-specific cap. */
     docsMaxRounds: number;
+    /** Minutes a green gate must hold continuously before the wait
+     *  settles it — review bots re-armed by a push or a ready-mark
+     *  register late or not at all (Devin Review posts findings as
+     *  comments, never a check-run), so instant green proves nothing
+     *  about reviewers still writing. 0 settles immediately. */
+    reviewSettleMinutes: number;
     /** Human-signoff gate (bro-3vy93): when true the act exit gate —
      *  and every auto-merge driven off it — also requires a trusted
      *  human's approving review on the current head (latest review per
@@ -1996,6 +2011,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     // no '*.txt' — requirements.txt and test fixtures are not docs
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
     docsMaxRounds: 2,
+    reviewSettleMinutes: 5,
     requireApproval: false,
     approvers: [],
     mergeQueue: {},

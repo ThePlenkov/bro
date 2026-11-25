@@ -1,93 +1,91 @@
-import assert from 'node:assert/strict'
-import { test } from 'node:test'
-import { evaluateExitGate } from './exit-gate.ts'
-import type { PrActState } from './types.ts'
-import { openActState as open } from './act-fixtures.ts'
-import { gatePending, waitForGate } from './wait.ts'
-
-
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { evaluateExitGate } from './exit-gate.ts';
+import type { PrActState } from './types.ts';
+import { openActState as open } from './act-fixtures.ts';
+import { gatePending, waitForGate } from './wait.ts';
 
 const fetcher = (states: PrActState[]) => {
-  let i = 0
+  let i = 0;
   return async () => {
-    const state = states[Math.min(i, states.length - 1)]!
-    i += 1
-    return { state, gate: evaluateExitGate(state) }
-  }
-}
+    const state = states[Math.min(i, states.length - 1)]!;
+    i += 1;
+    return { state, gate: evaluateExitGate(state) };
+  };
+};
 
 test('gatePending: only pending signals keep waiting', () => {
-  assert.equal(gatePending(open({ ciPending: 1 })), true)
-  assert.equal(gatePending(open({ reviewersPending: 1 })), true)
-  assert.equal(gatePending(open({ mergeable: 'UNKNOWN' })), true)
-  assert.equal(gatePending(open()), false)
-  assert.equal(gatePending(open({ openThreads: 3 })), false)
-  assert.equal(gatePending(open({ state: 'MERGED', ciPending: 1 })), false)
-})
+  assert.equal(gatePending(open({ ciPending: 1 })), true);
+  assert.equal(gatePending(open({ reviewersPending: 1 })), true);
+  assert.equal(gatePending(open({ mergeable: 'UNKNOWN' })), true);
+  assert.equal(gatePending(open()), false);
+  assert.equal(gatePending(open({ openThreads: 3 })), false);
+  assert.equal(gatePending(open({ state: 'MERGED', ciPending: 1 })), false);
+});
 
 test('waitForGate settles when the gate is green', async () => {
   const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
     intervalMs: 0,
-  })
-  assert.equal(res.gate.ok, true)
-  assert.equal(res.timedOut, false)
-  assert.equal(res.polls, 2)
-})
+  });
+  assert.equal(res.gate.ok, true);
+  assert.equal(res.timedOut, false);
+  assert.equal(res.polls, 2);
+});
 
 test('waitForGate settles on blockers without waiting them out', async () => {
   const res = await waitForGate(
     fetcher([open({ openThreads: 2, ciPending: 1 }), open({ openThreads: 2 })]),
-    { intervalMs: 0 },
-  )
-  assert.equal(res.gate.ok, false)
-  assert.equal(res.state.openThreads, 2)
-  assert.equal(res.polls, 2)
-})
+    { intervalMs: 0 }
+  );
+  assert.equal(res.gate.ok, false);
+  assert.equal(res.state.openThreads, 2);
+  assert.equal(res.polls, 2);
+});
 
 test('a failing check settles immediately — not waited out', async () => {
   const res = await waitForGate(fetcher([open({ ciFailing: 1 })]), {
     intervalMs: 0,
-  })
-  assert.equal(res.gate.ok, false)
-  assert.equal(res.timedOut, false)
-  assert.equal(res.polls, 1)
-})
+  });
+  assert.equal(res.gate.ok, false);
+  assert.equal(res.timedOut, false);
+  assert.equal(res.polls, 1);
+});
 
 test('transient fetch errors retry; persistent ones throw', async () => {
-  let calls = 0
+  let calls = 0;
   const flaky = async () => {
-    calls += 1
+    calls += 1;
     if (calls < 3) {
-      throw new Error('gh blip')
+      throw new Error('gh blip');
     }
-    const state = open()
-    return { state, gate: evaluateExitGate(state) }
-  }
-  const res = await waitForGate(flaky, { intervalMs: 0 })
-  assert.equal(res.gate.ok, true)
-  assert.equal(calls, 3)
+    const state = open();
+    return { state, gate: evaluateExitGate(state) };
+  };
+  const res = await waitForGate(flaky, { intervalMs: 0 });
+  assert.equal(res.gate.ok, true);
+  assert.equal(calls, 3);
 
   await assert.rejects(
     waitForGate(
       async () => {
-        throw new Error('gh down')
+        throw new Error('gh down');
       },
-      { intervalMs: 0, maxFetchErrors: 2 },
-    ),
-  )
-})
+      { intervalMs: 0, maxFetchErrors: 2 }
+    )
+  );
+});
 
 test('waitForGate times out on never-settling pending', async () => {
   const res = await waitForGate(fetcher([open({ reviewersPending: 1 })]), {
     intervalMs: 0,
     timeoutMs: 0,
-  })
-  assert.equal(res.timedOut, true)
-  assert.equal(res.polls, 1)
-})
+  });
+  assert.equal(res.timedOut, true);
+  assert.equal(res.polls, 1);
+});
 
 test('BEHIND triggers updateBranch and keeps waiting on success', async () => {
-  let updates = 0
+  let updates = 0;
   const res = await waitForGate(
     fetcher([
       open({ mergeState: 'BEHIND', headSha: 'a1' }),
@@ -96,30 +94,30 @@ test('BEHIND triggers updateBranch and keeps waiting on success', async () => {
     ]),
     {
       intervalMs: 0,
-      updateBranch: (s) => {
-        updates += 1
-        assert.equal(s.headSha, 'a1')
-        return true
+      updateBranch: s => {
+        updates += 1;
+        assert.equal(s.headSha, 'a1');
+        return true;
       },
     }
-  )
-  assert.equal(updates, 1)
-  assert.equal(res.gate.ok, true)
-  assert.equal(res.polls, 3)
-})
+  );
+  assert.equal(updates, 1);
+  assert.equal(res.gate.ok, true);
+  assert.equal(res.polls, 3);
+});
 
 test('an accepted-but-unlanded update keeps polling, not settling', async () => {
   const res = await waitForGate(
     fetcher([
       open({ mergeState: 'BEHIND', headSha: 'a1' }),
       open({ mergeState: 'BEHIND', headSha: 'a1' }), // update accepted (202) but head unchanged
-      open({ headSha: 'b2' }),                      // landed — clean state settles green
+      open({ headSha: 'b2' }), // landed — clean state settles green
     ]),
     { intervalMs: 0, updateBranch: () => true }
-  )
-  assert.equal(res.gate.ok, true)
-  assert.equal(res.polls, 3)
-})
+  );
+  assert.equal(res.gate.ok, true);
+  assert.equal(res.polls, 3);
+});
 
 test('a new blocker while the update is pending settles immediately', async () => {
   const res = await waitForGate(
@@ -130,93 +128,134 @@ test('a new blocker while the update is pending settles immediately', async () =
       open({ mergeState: 'BEHIND', headSha: 'a1', openThreads: 1 }),
     ]),
     { intervalMs: 0, timeoutMs: 60_000, updateBranch: () => true }
-  )
-  assert.equal(res.gate.ok, false)
-  assert.equal(res.state.openThreads, 1)
-  assert.equal(res.polls, 2)
-})
+  );
+  assert.equal(res.gate.ok, false);
+  assert.equal(res.state.openThreads, 1);
+  assert.equal(res.polls, 2);
+});
 
 test('BEHIND alongside other blockers does not update', async () => {
-  let called = false
-  const res = await waitForGate(
-    fetcher([open({ mergeState: 'BEHIND', openThreads: 2 })]),
-    { intervalMs: 0, updateBranch: () => ((called = true), true) }
-  )
-  assert.equal(called, false)
-  assert.equal(res.gate.ok, false)
-})
+  let called = false;
+  const res = await waitForGate(fetcher([open({ mergeState: 'BEHIND', openThreads: 2 })]), {
+    intervalMs: 0,
+    updateBranch: () => ((called = true), true),
+  });
+  assert.equal(called, false);
+  assert.equal(res.gate.ok, false);
+});
 
 test('BEHIND settles when updateBranch refuses or conflicts exist', async () => {
   const refused = await waitForGate(fetcher([open({ mergeState: 'BEHIND' })]), {
     intervalMs: 0,
     updateBranch: () => false,
-  })
-  assert.equal(refused.gate.ok, false)
-  assert.equal(refused.polls, 1)
+  });
+  assert.equal(refused.gate.ok, false);
+  assert.equal(refused.polls, 1);
 
   // CONFLICTING is a human job — no update attempt even when offered
-  let called = false
+  let called = false;
   const conflicted = await waitForGate(
     fetcher([open({ mergeState: 'BEHIND', mergeable: 'CONFLICTING' })]),
     { intervalMs: 0, updateBranch: () => ((called = true), true) }
-  )
-  assert.equal(called, false)
-  assert.equal(conflicted.gate.ok, false)
-})
+  );
+  assert.equal(called, false);
+  assert.equal(conflicted.gate.ok, false);
+});
 
 test('a wake event polls early instead of sleeping the interval out', async () => {
-  let pokes = 0
+  let pokes = 0;
   const waker = {
     closed: false,
     next() {
-      return new Promise<void>((r) => {
-        setTimeout(r, 20) // an event lands 20ms into a 10s sleep
-      })
+      return new Promise<void>(r => {
+        setTimeout(r, 20); // an event lands 20ms into a 10s sleep
+      });
     },
     close() {
-      this.closed = true
+      this.closed = true;
     },
-  }
-  const started = Date.now()
+  };
+  const started = Date.now();
   const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
     intervalMs: 10_000,
     wake: async () => (pokes++, waker),
-  })
-  const elapsed = Date.now() - started
-  assert.equal(res.gate.ok, true)
-  assert.equal(res.polls, 2)
-  assert.equal(pokes, 1) // armed once, not per-poll
-  assert.equal(waker.closed, true)
-  assert.ok(elapsed < 5_000, `woke early — took ${String(elapsed)}ms`)
-})
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(res.gate.ok, true);
+  assert.equal(res.polls, 2);
+  assert.equal(pokes, 1); // armed once, not per-poll
+  assert.equal(waker.closed, true);
+  assert.ok(elapsed < 5_000, `woke early — took ${String(elapsed)}ms`);
+});
 
 test('a wake win clears the losing sleep timer — no lingering ref', async () => {
   const waker = {
     next: () => Promise.resolve(), // always wins instantly
     close: () => {},
-  }
-  const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+  };
+  const before = process.getActiveResourcesInfo().filter(r => r === 'Timeout').length;
   const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
     intervalMs: 60_000,
     wake: async () => waker,
-  })
-  const after = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
-  assert.equal(res.polls, 2)
-  assert.equal(after, before)
-})
+  });
+  const after = process.getActiveResourcesInfo().filter(r => r === 'Timeout').length;
+  assert.equal(res.polls, 2);
+  assert.equal(after, before);
+});
 
 test('a waker that cannot arm leaves pure timer polling — fail-open', async () => {
   const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
     intervalMs: 0,
     wake: async () => null,
-  })
-  assert.equal(res.polls, 2)
+  });
+  assert.equal(res.polls, 2);
 
   const thrown = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
     intervalMs: 0,
     wake: async () => {
-      throw new Error('broker wedged')
+      throw new Error('broker wedged');
     },
-  })
-  assert.equal(thrown.polls, 2)
-})
+  });
+  assert.equal(thrown.polls, 2);
+});
+
+test('greenSettleMs holds a fresh green — a late thread breaks it (wtf-merge-race)', async () => {
+  // reviews register no pending signal: the gate reads green while the
+  // bot is still writing. The window keeps polling; the thread arriving
+  // inside it settles blocked instead of landing blind
+  const res = await waitForGate(fetcher([open(), open(), open({ openThreads: 2 })]), {
+    intervalMs: 5,
+    greenSettleMs: 60_000,
+  });
+  assert.equal(res.gate.ok, false);
+  assert.equal(res.state.openThreads, 2);
+  assert.equal(res.polls, 3);
+});
+
+test('greenSettleMs settles once the green has held the window', async () => {
+  const res = await waitForGate(fetcher([open()]), {
+    intervalMs: 15,
+    greenSettleMs: 20,
+  });
+  assert.equal(res.gate.ok, true);
+  assert.equal(res.timedOut, false);
+  assert.ok(res.polls >= 3, `expected the hold to cost extra polls, got ${res.polls}`);
+});
+
+test('without greenSettleMs a green gate settles on the first read', async () => {
+  const res = await waitForGate(fetcher([open()]), { intervalMs: 0 });
+  assert.equal(res.gate.ok, true);
+  assert.equal(res.polls, 1);
+});
+
+test('a pending poll inside the window resets the green clock', async () => {
+  // green → ci spins up again (late-registering check) → green: the
+  // clock restarts, so the settle waits the full window past the
+  // SECOND green, not the first
+  const res = await waitForGate(fetcher([open(), open({ ciPending: 1 }), open()]), {
+    intervalMs: 10,
+    greenSettleMs: 25,
+  });
+  assert.equal(res.gate.ok, true);
+  assert.ok(res.polls >= 5, `expected the reset to cost extra polls, got ${res.polls}`);
+});

@@ -205,6 +205,11 @@ export function waitOpts(
   return {
     intervalMs: timing.interval * 1000,
     timeoutMs: timing.timeout * 60_000,
+    // instant green proves nothing about reviewers still writing —
+    // Devin Review posts findings as comments, never a check-run, so a
+    // bot re-armed by mark-ready is invisible until it posts. The
+    // green must hold before it settles (wtf-merge-race)
+    greenSettleMs: loadBroConfig().act.reviewSettleMinutes * 60_000,
     // a github:* bus subscription pokes the poll loop early (spec
     // bro-huy5o.7) — broker down arms nothing and the timer rules
     wake: () => githubPrWake(process.cwd(), t.pr),
