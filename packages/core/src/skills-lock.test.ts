@@ -205,6 +205,28 @@ describe('checkSkillLock', () => {
     }
   });
 
+  it('drops lock entries whose name is not a plain path segment (bro-oeb5e)', () => {
+    const dir = scratch();
+    try {
+      writeFileSync(
+        join(dir, 'skills-lock.json'),
+        JSON.stringify({
+          skills: {
+            '../etc': { source: 'a/b', computedHash: 'x' },
+            'nested/path': { source: 'a/b', computedHash: 'x' },
+            '..': { source: 'a/b', computedHash: 'x' },
+            '': { source: 'a/b', computedHash: 'x' },
+            legit: { source: 'a/b', computedHash: 'x' },
+          },
+        })
+      );
+      const locked = readSkillLock(dir);
+      assert.deepEqual([...locked.keys()], ['legit']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports nothing for an empty lock', () => {
     const dir = scratch();
     try {

@@ -44,7 +44,9 @@ export interface SkillDrift {
   source: string;
   /** The hash the lock expects. */
   expected: string;
-  /** The hash of what is installed — empty when the skill is missing. */
+  /** The hash of what is installed — empty when the skill is missing
+   *  or its folder could not be fully read (an unhashable folder is
+   *  reported as drift, never vouched for). */
   actual: string;
   /** 'missing' | 'drifted' */
   kind: 'missing' | 'drifted';
@@ -173,9 +175,19 @@ function skillsOf(parsed: unknown): Record<string, unknown> {
   return skills as Record<string, unknown>;
 }
 
+/** A skill name becomes a filesystem path under `.agents/skills/` —
+ *  the lockfile is external input, so a name must be exactly ONE
+ *  plain path segment: no separators, no dot-entries, no empty
+ *  string. Anything else (a traversal like `../x` or a nested path)
+ *  would read or install outside the skills dir (bro-oeb5e). */
+const SKILL_NAME = /^(?!\.)[^/\\\0]+$/;
+
 /** One lock entry — null when it carries no source or no hash. */
 function lockedSkill(entry: { name: string; value: unknown }): LockedSkill | null {
   const { name, value } = entry;
+  if (!SKILL_NAME.test(name) || name === '..') {
+    return null;
+  }
   if (typeof value !== 'object' || value === null) {
     return null;
   }
