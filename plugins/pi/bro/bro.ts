@@ -361,9 +361,34 @@ async function statusJson(command, cwd) {
 	return promise;
 }
 const ELLIPSIS = "…";
-/** Clip to a width, marking the cut. */
+/** Terminal column width of one code point — wcwidth-lite: zero for
+*  combining marks and joiners, two for wide/fullwidth and emoji ranges,
+*  one otherwise. */
+function charWidth(cp) {
+	if (cp >= 768 && cp <= 879 || cp === 8205 || cp >= 65024 && cp <= 65039 || cp === 8203) return 0;
+	if (cp >= 4352 && cp <= 4447 || cp >= 11904 && cp <= 12350 || cp >= 12353 && cp <= 13311 || cp >= 13312 && cp <= 19903 || cp >= 19968 && cp <= 40959 || cp >= 40960 && cp <= 42191 || cp >= 44032 && cp <= 55203 || cp >= 63744 && cp <= 64255 || cp >= 65072 && cp <= 65135 || cp >= 65280 && cp <= 65376 || cp >= 65504 && cp <= 65510 || cp >= 126976 && cp <= 129791 || cp >= 131072 && cp <= 196605 || cp >= 196608 && cp <= 262141) return 2;
+	return 1;
+}
+/** Display width in terminal columns — not string length. */
+function displayWidth(text) {
+	let w = 0;
+	for (const ch of text) w += charWidth(ch.codePointAt(0) ?? 0);
+	return w;
+}
+/** Clip to a display width in terminal columns, marking the cut. The
+*  iteration is by code point — a surrogate pair never splits. */
 function clip(text, width) {
-	return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
+	if (displayWidth(text) <= width) return text;
+	const budget = Math.max(0, width - 1);
+	let w = 0;
+	let out = "";
+	for (const ch of text) {
+		const cw = charWidth(ch.codePointAt(0) ?? 0);
+		if (w + cw > budget) break;
+		w += cw;
+		out += ch;
+	}
+	return `${out}${ELLIPSIS}`;
 }
 /**
 * The widget board — one compact summary line, then the top in-progress
