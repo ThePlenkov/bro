@@ -212,10 +212,6 @@ function disposition(threadId: string, outcome: string, pr?: number): void {
   }
 }
 
-/** Record a resolve in the ledger — the source of "this thread was
- *  resolved before" for the reopened-thread cycle-guard. Best-effort: a
- *  missing git dir or an unwritable ledger means the reopen is not
- *  detected, never a crash. */
 /** Write one row into the resolve ledger. Best-effort by contract —
  *  the reopen guard degrades, never crashes. */
 function ledgerRecord(repo: string, pr: number, threadId: string): void {
@@ -226,6 +222,10 @@ function ledgerRecord(repo: string, pr: number, threadId: string): void {
   }
 }
 
+/** Record a resolve in the ledger — the source of "this thread was
+ *  resolved before" for the reopened-thread cycle-guard. Best-effort: a
+ *  missing git dir or an unwritable ledger means the reopen is not
+ *  detected, never a crash. */
 function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): void {
   try {
     const ledger = resolveLedger(process.cwd());
