@@ -1429,7 +1429,8 @@ function remoteChecks(
   root: string | null,
   syncRemote: string,
   beadsDir: boolean,
-  bdFound: boolean
+  bdFound: boolean,
+  network = false
 ): DoctorCheck[] {
   if (root === null) {
     return [];
@@ -1473,7 +1474,7 @@ function remoteChecks(
     check('dolt-remote', 'ok', remotes.map(r => `${r.name} → ${displayUrl(r.url)}`).join(', '))
   );
   for (const r of remotes) {
-    out.push(doltStoreCheck(r));
+    out.push(doltStoreCheck(r, network));
   }
   return out;
 }
@@ -1483,7 +1484,7 @@ function remoteChecks(
  *  specs/bro-orcdv.md). A file remote pointing at a plain noms dir
  *  verifies in place; everything git-shaped probes over `doltRemoteSrc`
  *  (the bridge mirror's upstream, not its cache). */
-function doltStoreCheck(r: DoltRemote): DoctorCheck {
+function doltStoreCheck(r: DoltRemote, network = false): DoctorCheck {
   const target = fileTargetPath(r.url);
   if (
     target !== null &&
@@ -1497,6 +1498,19 @@ function doltStoreCheck(r: DoltRemote): DoctorCheck {
   const src = doltRemoteSrc(r);
   if (src === null) {
     return check('dolt-store', 'skip', `${r.name} — non-git remote, nothing to verify`);
+  }
+  // git-shaped probes ls-remote/fetch the configured host — a network
+  // operation a diagnostic has no business running unprompted: the URL
+  // is attacker-selectable through the repo config, and a bare `bro
+  // doctor` must never egress (bro-krpu5). File transport never leaves
+  // the machine and verifies without the opt-in; everything host-shaped
+  // waits for `--network`.
+  if (!network && !/^((git\+)?file:\/\/|\.?\.?\/|~\/)/.test(r.url)) {
+    return check(
+      'dolt-store',
+      'skip',
+      `${r.name} — network probe skipped (rerun with --network to verify the remote head)`
+    );
   }
   // a dead or slow remote is a warn row, not a minute of the doctor's
   // runtime — 10s per network op bounds one remote at ~30s worst case
@@ -3263,7 +3277,7 @@ export async function sessionLedgerChecks(
 
 export function runDoctorChecks(
   dir: string = process.cwd(),
-  opts: { strict?: boolean } = {}
+  opts: { strict?: boolean; network?: boolean } = {}
 ): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()];
 
@@ -3317,7 +3331,7 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
-    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found),
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found, opts.network ?? false),
     ...credentialScopeChecks(dir, cfg)
   );
 
@@ -3370,13 +3384,16 @@ function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget
 
 export async function runDoctorCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
-    printUsage('usage: bro doctor [--json] [--strict]', 0);
+    printUsage('usage: bro doctor [--json] [--strict] [--network]', 0);
   }
   const json = argv.includes('--json');
   // --strict: schema violations are failures, not warnings — the CI gate
   const strict = argv.includes('--strict');
+  // --network: dolt-store probes egress to the configured remotes — opt-in
+  // only, a bare doctor never touches the network (bro-krpu5)
+  const network = argv.includes('--network');
   const dir = process.cwd();
-  const checks = runDoctorChecks(dir, { strict });
+  const checks = runDoctorChecks(dir, { strict, network });
   // the session-ledger rows are async (facade reads) and fail open
   // internally — a broken ledger adds skip rows, never a crash
   try {
