@@ -91,7 +91,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     } = input;
     const envFile = join(home, `${agentId}.env`);
     try {
-      dockerRun(['rm', '-f', name]);
+      dockerRun({ args: ['rm', '-f', name] });
       writeDockerEnvFile(envFile, spec);
       const res = runDockerCommand({
         name,
@@ -114,7 +114,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
       return res.out.trim().split('\n')[0] ?? '';
     } catch (err) {
-      dockerRun(['rm', '-f', name]);
+      dockerRun({ args: ['rm', '-f', name] });
       try {
         rmSync(envFile, { force: true });
       } catch {
@@ -157,8 +157,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     const cliBadge = workerCliBadge(worker, command);
     const runLine = workerRunLine(worker, command);
     const wrapper = dockerOutputWrapper(runLine, log, stderrLog, exitFile);
-    return dockerRun(
-      dockerLaunchArgs({
+    return dockerRun({
+      args: dockerLaunchArgs({
         name,
         spec,
         envFile,
@@ -169,8 +169,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         runArgs,
         image,
         wrapper,
-      })
-    );
+      }),
+    });
   };
 
   const dockerOutputWrapper = (
@@ -270,7 +270,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         mol: mol!,
         image,
       });
-      const insp = dockerInspect(name);
+      const insp = dockerInspect({ name });
       const spawned = patchAgentRegistry(dir, spec.molStep, {
         containerId,
         ...(insp.pid !== undefined ? { pid: insp.pid, pidStart: null } : {}),
@@ -325,7 +325,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             if (n === undefined) {
               return false;
             }
-            const p = dockerInspect(n);
+            const p = dockerInspect({ name: n });
             if (p.live === 'unknown') {
               throw new SpawnError(
                 `cannot verify ${spec.molStep}'s container — ${p.err}`,
@@ -420,10 +420,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           typeof entry.containerId === 'string' && entry.containerId !== ''
             ? entry.containerId
             : name;
-        dockerRun(['rm', '-f', target]);
+        dockerRun({ args: ['rm', '-f', target] });
         // let the rm land before recording the stop — 'stopped' on a
         // still-live container would let a respawn run beside it
-        await pollUntilGone(() => dockerInspect(name).live === 'running');
+        await pollUntilGone(() => dockerInspect({ name }).live === 'running');
       }
       // a respawn during the rm re-probes and re-pins the entry under
       // the registry lock — re-verify under the SAME lock or 'stopped'
@@ -434,7 +434,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         entry,
         id,
         what: 'container',
-        probe: name === undefined ? undefined : () => dockerInspect(name),
+        probe: name === undefined ? undefined : () => dockerInspect({ name }),
       });
     },
 

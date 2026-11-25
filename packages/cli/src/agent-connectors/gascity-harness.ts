@@ -14,10 +14,16 @@ export function gcMatchDir(dir: string, env: harness.AgentConnectorEnv): boolean
   return city !== null && existsSync(join(city, 'city.toml'));
 }
 
-export function gcRun(
-  args: string[],
-  timeoutMs = 30_000
-): { code: number; out: string; err: string } {
+export interface GcRunOptions {
+  args: string[];
+  timeoutMs?: number;
+}
+
+export function gcRun({ args, timeoutMs = 30_000 }: GcRunOptions): {
+  code: number;
+  out: string;
+  err: string;
+} {
   const proc = spawnSync('gc', args, {
     // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -50,7 +56,7 @@ export interface GcSession {
 
 /** session list → (sessions, err). A parse failure IS a failed read. */
 export function listGcSessions(city: string): { sessions?: GcSession[]; err?: string } {
-  const r = gcRun(['session', 'list', '--json', '--state', 'all', '--city', city]);
+  const r = gcRun({ args: ['session', 'list', '--json', '--state', 'all', '--city', city] });
   if (r.code !== 0) {
     return { err: r.err !== '' ? r.err : `gc session list exited ${r.code}` };
   }
@@ -97,7 +103,7 @@ export function gcState(s: GcSession): AgentState {
  *  or a verified-stopped supervisor all mean a missing session cannot be
  *  called `lost` — callers degrade on anything but `true`. */
 export function gcSupervisorRunning(): boolean | undefined {
-  const r = gcRun(['supervisor', 'status', '--json']);
+  const r = gcRun({ args: ['supervisor', 'status', '--json'] });
   if (r.code !== 0) {
     return undefined;
   }
@@ -140,7 +146,12 @@ export const tomlStr = (s: string): string =>
  *  rest of argv. */
 export const GC_SUBMIT_PROMPT_MAX = 120_000;
 
-export const GC_CITY_TOML = (provider: string, command: string): string =>
+export interface GcCityTomlOptions {
+  provider: string;
+  command: string;
+}
+
+export const GC_CITY_TOML = ({ provider, command }: GcCityTomlOptions): string =>
   `# authored by bro's gascity connector (bro-cduq) — regenerate by deleting
 [workspace]
 provider = "${provider}"

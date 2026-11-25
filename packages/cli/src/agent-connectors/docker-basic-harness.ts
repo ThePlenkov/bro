@@ -4,10 +4,17 @@ import type { AgentRegistryEntry } from './spawn-harness.ts';
 
 /** One docker call — PATH lookup is the same contract as git/gh/bd. */
 
-export function dockerRun(
-  args: string[],
-  timeoutMs = 30_000
-): { code: number; out: string; err: string; missing: boolean } {
+export interface DockerRunOptions {
+  args: string[];
+  timeoutMs?: number;
+}
+
+export function dockerRun({ args, timeoutMs = 30_000 }: DockerRunOptions): {
+  code: number;
+  out: string;
+  err: string;
+  missing: boolean;
+} {
   const proc = spawnSync('docker', args, {
     // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -27,7 +34,7 @@ export function dockerRun(
  *  `docker --version` is client-only and would pass beside a dead
  *  daemon). */
 export function dockerDaemonUp(): { up: boolean; err: string } {
-  const v = dockerRun(['version', '--format', '{{.Server.Version}}']);
+  const v = dockerRun({ args: ['version', '--format', '{{.Server.Version}}'] });
   if (v.missing) {
     return { up: false, err: 'docker not on PATH' };
   }
@@ -42,7 +49,9 @@ export function dockerDaemonUp(): { up: boolean; err: string } {
  *  callers treat it as "may occupy" the same way tmux treats a failed
  *  list-sessions. bro's own label narrows the listing. */
 export function dockerLiveContainers(): Set<string> | undefined {
-  const ps = dockerRun(['ps', '--filter', 'label=bro.managed=1', '--format', '{{.Names}}']);
+  const ps = dockerRun({
+    args: ['ps', '--filter', 'label=bro.managed=1', '--format', '{{.Names}}'],
+  });
   return ps.code === 0 ? new Set(ps.out.split('\n').filter(s => s !== '')) : undefined;
 }
 
@@ -77,8 +86,14 @@ export interface DockerInspect {
   err?: string;
 }
 
-export function dockerInspect(name: string): DockerInspect {
-  const r = dockerRun(['inspect', '--type', 'container', '--format', '{{json .State}}', name]);
+export interface DockerInspectOptions {
+  name: string;
+}
+
+export function dockerInspect({ name }: DockerInspectOptions): DockerInspect {
+  const r = dockerRun({
+    args: ['inspect', '--type', 'container', '--format', '{{json .State}}', name],
+  });
   if (r.code !== 0) {
     return {
       live: DOCKER_NO_SUCH.test(r.err) ? 'dead' : 'unknown',

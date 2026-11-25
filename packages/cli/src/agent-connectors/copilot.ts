@@ -42,6 +42,26 @@ type AgentConnectorEnv = harness.AgentConnectorEnv;
 type AgentRegistryEntry = harness.AgentRegistryEntry;
 type ListResult = harness.ListResult;
 
+export interface CopilotTarget {
+  owner: string;
+  repo: string;
+  slug: string;
+}
+
+interface CopilotDispatchOptions {
+  home: string;
+  agentId: string;
+  spec: SpawnSpec;
+  target: CopilotTarget;
+}
+
+interface CopilotFinishOptions {
+  spec: SpawnSpec;
+  home: string;
+  target: CopilotTarget;
+  agentId: string;
+}
+
 export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir;
   const knobs = env.agents['copilot'] ?? {};
@@ -53,7 +73,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   /** 'owner/repo' the dispatch targets — agents.copilot.repo wins over
    *  the checkout's origin remote; neither resolvable is a config gap
    *  the error names. */
-  const targetRepo = (spec: SpawnSpec): { owner: string; repo: string; slug: string } => {
+  const targetRepo = (spec: SpawnSpec): CopilotTarget => {
     const slug = knobString('repo') ?? copilotRemoteRepo(spec.repoRoot);
     const m = slug === undefined ? null : /^([\w.-]+)\/([\w.-]+)$/.exec(slug);
     if (!isRepoMatch(m, slug)) {
@@ -77,12 +97,15 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  couldn't pin the remote handle. base_ref absent = the API's repo
    *  default (documented). The body rides a file in the agents home
    *  like the prompt — never argv. */
-  const dispatchTask = (
-    home: string,
-    agentId: string,
-    spec: SpawnSpec,
-    target: { owner: string; repo: string; slug: string }
-  ): { task: CopilotTask; taskId: string } => {
+  const dispatchTask = ({
+    home,
+    agentId,
+    spec,
+    target,
+  }: CopilotDispatchOptions): {
+    task: CopilotTask;
+    taskId: string;
+  } => {
     const bodyFile = join(home, `${agentId}.task.json`);
     writePrivateFileSync({ path: bodyFile, data: JSON.stringify(copilotTaskBody(spec)) });
     const res = ghRun(
@@ -217,13 +240,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     return { home, target: targetRepo(spec) };
   };
 
-  const finishCopilotSpawn = (
-    spec: SpawnSpec,
-    home: string,
-    target: { owner: string; repo: string; slug: string },
-    agentId: string
-  ): AgentInfo => {
-    const { task, taskId } = dispatchTask(home, agentId, spec, target);
+  const finishCopilotSpawn = ({ spec, home, target, agentId }: CopilotFinishOptions): AgentInfo => {
+    const { task, taskId } = dispatchTask({ home, agentId, spec, target });
     const state = copilotTaskState(task);
     const spawned = patchAgentRegistry(dir, spec.molStep, {
       taskId,
@@ -328,7 +346,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           external: externalGuardOf(env),
         });
         try {
-          return finishCopilotSpawn(spec, home, target, agentId);
+          return finishCopilotSpawn({ spec, home, target, agentId });
         } catch (err) {
           return releaseCopilotSpawn({ err, spec, reservation, crossKindReservations, lease });
         }

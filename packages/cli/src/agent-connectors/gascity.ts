@@ -55,26 +55,26 @@ import {
 } from './spawn-harness.ts';
 
 function resetGcSession(id: string, city: string): string {
-  const reset = gcRun(['session', 'reset', id, '--city', city]);
+  const reset = gcRun({ args: ['session', 'reset', id, '--city', city] });
   if (reset.code !== 0) throw new Error(`gc session reset ${id} — ${gcErr(reset)}`);
   return id;
 }
 
 function createGcSession(molStep: string, city: string): string {
-  const created = gcRun(
-    ['session', 'new', molStep, '--alias', molStep, '--no-attach', '--json', '--city', city],
-    120_000
-  );
+  const created = gcRun({
+    args: ['session', 'new', molStep, '--alias', molStep, '--no-attach', '--json', '--city', city],
+    timeoutMs: 120_000,
+  });
   if (created.code !== 0) throw new Error(`gc session new ${molStep} — ${gcErr(created)}`);
   let value: { session_id?: string; ok?: boolean };
   try {
     value = JSON.parse(created.out) as { session_id?: string; ok?: boolean };
   } catch {
-    gcRun(['session', 'close', molStep, '--city', city]);
+    gcRun({ args: ['session', 'close', molStep, '--city', city] });
     throw new Error('gc session new returned unparseable JSON');
   }
   if (value.ok === false || value.session_id === undefined) {
-    gcRun(['session', 'close', molStep, '--city', city]);
+    gcRun({ args: ['session', 'close', molStep, '--city', city] });
     throw new Error(
       value.ok === false
         ? 'gc session new returned ok: false'
@@ -117,7 +117,8 @@ function recoverGascitySpawn(input: {
   err: unknown;
 }): never {
   const { dir, spec, sessionId, prepared, err } = input;
-  if (sessionId !== undefined) gcRun(['session', 'close', sessionId, '--city', input.spec.molStep]);
+  if (sessionId !== undefined)
+    gcRun({ args: ['session', 'close', sessionId, '--city', input.spec.molStep] });
   if (prepared.reservation !== undefined) releaseSessionSlot(prepared.reservation);
   releaseSessionStart(prepared.crossKindReservations);
   releaseSpawnLease(dir, prepared.lease);
@@ -245,13 +246,13 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (existsSync(toml)) {
       return;
     }
-    writeFileSync(toml, GC_CITY_TOML(commandCliName(command), command));
+    writeFileSync(toml, GC_CITY_TOML({ provider: commandCliName(command), command }));
     const agentDir = join(city, 'agents', template);
     mkdirSync(agentDir, { recursive: true });
     writeFileSync(join(agentDir, 'prompt.template.md'), GC_PROMPT_TEMPLATE);
     writeFileSync(join(agentDir, 'agent.toml'), GC_AGENT_TOML);
-    const init = gcRun(
-      [
+    const init = gcRun({
+      args: [
         'init',
         '--file',
         toml,
@@ -261,8 +262,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         '--yes',
         city,
       ],
-      120_000
-    );
+      timeoutMs: 120_000,
+    });
     if (init.code !== 0) {
       // a failed init must not leave the marker standing — otherwise the
       // next spawn sees city.toml and skips init on a half-built city
@@ -341,7 +342,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  so claims land where `bro fleet` reads. Idempotent. */
   const ensureRig = (spec: SpawnSpec, city: string): void => {
     const rigDir = gcRigDirOf(spec);
-    const rigs = gcRun(['rig', 'list', '--json', '--city', city]);
+    const rigs = gcRun({ args: ['rig', 'list', '--json', '--city', city] });
     let registered = false;
     if (rigs.code === 0) {
       try {
@@ -352,7 +353,10 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
     }
     if (!registered) {
-      const add = gcRun(['rig', 'add', rigDir, '--adopt', '--city', city], 60_000);
+      const add = gcRun({
+        args: ['rig', 'add', rigDir, '--adopt', '--city', city],
+        timeoutMs: 60_000,
+      });
       if (add.code !== 0) {
         throw new SpawnError(`gc rig add ${rigDir} failed — ${gcErr(add)}`, 'unavailable');
       }
@@ -363,7 +367,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  brings up the shared supervisor. */
   const ensureStarted = (city: string): void => {
     if (gcSupervisorRunning() !== true) {
-      const start = gcRun(['start', city], 120_000);
+      const start = gcRun({ args: ['start', city], timeoutMs: 120_000 });
       if (start.code !== 0) {
         throw new SpawnError(`gc start failed — ${gcErr(start)}`, 'unavailable');
       }
@@ -422,11 +426,13 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  submit the rendered prompt. Never --force — a bead that doesn't
    *  resolve in the rig store is a claimless dispatch. */
   const dispatchStep = (spec: SpawnSpec, city: string): void => {
-    const sling = gcRun(['sling', spec.molStep, spec.molStep, '--city', city]);
+    const sling = gcRun({ args: ['sling', spec.molStep, spec.molStep, '--city', city] });
     if (sling.code !== 0) {
       throw new Error(`gc sling ${spec.molStep} — ${gcErr(sling)}`);
     }
-    const submit = gcRun(['session', 'submit', spec.molStep, spec.prompt, '--city', city]);
+    const submit = gcRun({
+      args: ['session', 'submit', spec.molStep, spec.prompt, '--city', city],
+    });
     if (submit.code !== 0) {
       throw new Error(`gc session submit ${spec.molStep} — ${gcErr(submit)}`);
     }
@@ -437,7 +443,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  gone — marking stopped while it still runs would leave a live
    *  worker that respawns refuse as a duplicate. */
   const closeGcSession = (city: string, target: string, molStep: string): void => {
-    const close = gcRun(['session', 'close', target, '--city', city]);
+    const close = gcRun({ args: ['session', 'close', target, '--city', city] });
     if (close.code === 0) {
       return;
     }
@@ -613,7 +619,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       if (city === null || !existsSync(join(city, 'city.toml'))) {
         return;
       }
-      const r = gcRun(['stop', city], 120_000);
+      const r = gcRun({ args: ['stop', city], timeoutMs: 120_000 });
       if (r.code !== 0) {
         throw new SpawnError(`gc stop failed — ${gcErr(r)}`, 'unavailable');
       }

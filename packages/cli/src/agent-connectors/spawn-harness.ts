@@ -4959,7 +4959,10 @@ export function buildDevcontainerImage(
     .update(readFileSync(dockerfile, 'utf8'))
     .digest('hex')
     .slice(0, 12)}`;
-  const b = dockerRun(['build', '-t', tag, '-f', dockerfile, ...buildArgs, context], 600_000);
+  const b = dockerRun({
+    args: ['build', '-t', tag, '-f', dockerfile, ...buildArgs, context],
+    timeoutMs: 600_000,
+  });
   if (b.code !== 0) {
     const why = b.err !== '' ? b.err : `exited ${b.code}`;
     throw new SpawnError(`docker build ${dockerfile} failed — ${why}`, 'unavailable');
@@ -4991,10 +4994,10 @@ export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>):
  *  hundreds of MB behind the 30s run timeout and stall every other
  *  spawn. Inspect is cheap; pull gets the build's 10-minute budget. */
 export function ensureDockerImage(image: string): string {
-  if (dockerRun(['image', 'inspect', image]).code === 0) {
+  if (dockerRun({ args: ['image', 'inspect', image] }).code === 0) {
     return image;
   }
-  const p = dockerRun(['pull', image], 600_000);
+  const p = dockerRun({ args: ['pull', image], timeoutMs: 600_000 });
   if (p.code !== 0) {
     const why = p.err !== '' ? p.err : `exited ${p.code}`;
     throw new SpawnError(`docker pull ${image} failed — ${why}`, 'unavailable');
@@ -5007,7 +5010,7 @@ export function dockerProbeVerdict(entry: AgentRegistryEntry, live?: Set<string>
   if (live !== undefined) {
     return name !== undefined && live.has(name) ? 'running' : 'dead';
   }
-  return name === undefined ? 'dead' : dockerInspect(name).live;
+  return name === undefined ? 'dead' : dockerInspect({ name }).live;
 }
 
 export function toDockerInfo(
