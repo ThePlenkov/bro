@@ -38,7 +38,15 @@ current turn ends. Two send modes, deliberately:
   (carriage return). The CR commits the queued text now.
 
 Never assume a sent prompt was read. If the pane was busy and you
-needed it handled, the delivery is the CR, not the text.
+needed it handled, the delivery is the CR, not the text. The same
+split applies to `herdr agent prompt`: on a busy or interactive agent
+it **deposits into the composer** — queue-at-turn-end, never immediate.
+Immediate delivery is text plus `send-keys <pane> C-m`.
+
+A workspace whose last pane exits is **removed** by herdr — not kept
+as an empty shell. Connectors must re-open idempotently:
+`herdr worktree open` on an existing tree answers `already_open`,
+which is a success shape, not an error.
 
 ## 3. report-agent binds to a live pane, or it reports nothing
 
