@@ -5523,12 +5523,26 @@ export function copilotTerminalPatch(
     };
   }
   const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
-  const exitAt = Number.isNaN(stamp) ? Date.now() : stamp;
   const c =
     state === 'timed_out'
       ? { cause: 'crash' as AgentCause, resetAt: undefined }
-      : classifyExitCause(copilotSessionError(task), 1, exitAt);
-  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt);
+      : // a valid stamp is the death clock relative resets count from;
+        // without one the poll clock is the only approximation left
+        classifyExitCause(copilotSessionError(task), 1, Number.isNaN(stamp) ? undefined : stamp);
+  if (Number.isNaN(stamp)) {
+    // no honest death stamp — never fabricate one out of the poll clock:
+    // a Date.now() exitAt inflates the session lifetime (instant deaths
+    // read as slow, the streak clears when it should escalate) or shrinks
+    // it to zero. Where the lifetime cannot be determined the streak is
+    // simply carried — neither escalation nor amnesty (bro-j0v8e)
+    return {
+      exitStatus: 1,
+      cause: c.cause,
+      resetAt: c.resetAt,
+      rateStreak: typeof entry.rateStreak === 'number' ? entry.rateStreak : undefined,
+    };
+  }
+  const back = rateDeathBackoff(entry, c.cause, c.resetAt, stamp);
   return {
     exitStatus: 1,
     cause: c.cause,
