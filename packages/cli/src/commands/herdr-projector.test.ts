@@ -556,6 +556,10 @@ if (process.env.FAKE_HERDR_LOG) {
 }
 const s = JSON.parse(fs.readFileSync(process.env.FAKE_HERDR_SCENARIO, 'utf8'));
 const verb = args.slice(0, 2).join(' ');
+if (verb === 'workspace rename' && process.env.FAKE_HERDR_FAIL_RENAME) {
+  console.error(JSON.stringify({ error: 'rename refused' }));
+  process.exit(1);
+}
 if (verb === 'worktree list') {
   console.log(JSON.stringify({ result: { worktrees: s.worktrees ?? [] } }));
 } else if (verb === 'workspace list') {
@@ -702,6 +706,30 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     const st = readFleetState(fleetStatusPath(root, root));
     assert.equal(st?.workspace, 'w1');
     assert.equal(st?.title, 'Old Title');
+  });
+
+  test('a failed rename vetoes the metadata write (bro-7tdbs)', () => {
+    const root = plainRoot();
+    process.env.FAKE_HERDR_FAIL_RENAME = '1';
+    try {
+      const { calls } = fleetPass(root, stateDirOf(), {
+        scenario: {
+          worktrees: [{ path: root, open_workspace_id: 'w1' }],
+          workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
+        },
+        state: {
+          workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
+        },
+      });
+      const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
+      assert.ok(rename, 'the pass attempted the needed rename');
+      assert.ok(
+        !calls.some(c => c.slice(0, 2).join(' ') === 'workspace report-metadata'),
+        'a failed rename vetoes the metadata write — no split-brain tokens'
+      );
+    } finally {
+      delete process.env.FAKE_HERDR_FAIL_RENAME;
+    }
   });
 
   test('a stale sibling-state ledger cannot clobber the live ws binding — herdr restart regression', () => {
