@@ -236,6 +236,8 @@ export interface LoopDeps {
   bootstrap: (worktreeDir: string) => { status: number | null; signal: NodeJS.Signals | null };
   /** `act merge` on the member's PR. */
   mergePr: (pr: number) => Promise<unknown>;
+  /** Remove GitHub auto-merge when an approval-gated member is reattached. */
+  disableAutoMerge: (pr: number) => void;
   /** Settle a merged member's ACP sessions in its worktree. */
   settleSessions: (worktreeDir: string) => void;
   /** Flow a terminal non-merge verdict back to the router. */
@@ -415,6 +417,8 @@ export interface LoopMember {
    *  still running (spec bro-zpa93): the member is pushed the moment
    *  the spawn registers and joins the gate when the .exit lands. */
   pr?: number;
+  /** The auto-merge decision made when this PR was discovered/armed. */
+  autoMergeArmed?: boolean;
   /** The in-flight registry worker — set at push and again on every
    *  fix/rebase respawn; cleared when its exit record lands. */
   worker?: WorkerRef;
@@ -1113,11 +1117,43 @@ function settleUnavailableSpawn(ctx: LoopCtx, m: LoopMember, msg: string): PushO
  *  'lookup-error' when gh itself failed (not the same thing: a failed
  *  lookup must not reopen a bead whose PR may still exist). */
 
-function findPr(ctx: LoopCtx, branch: string): number | null | 'lookup-error' {
+export function findPrForReattach(
+  rev: ReviewFacade,
+  branch: string
+): number | null | 'lookup-error' {
   try {
-    return ctx.deps.rev.prsForBranch(branch)[0] ?? null;
+    const open = rev.prsForBranch(branch);
+    if (open.length > 0) {
+      return open[0]!;
+    }
+    // A parked member may have landed after its open-PR-only lookup. Keep
+    // the member record attached to the settled PR so the next pass closes
+    // the bead instead of re-running the work order.
+    return rev.prsForBranch(branch, 'all')[0] ?? null;
   } catch {
     return 'lookup-error';
+  }
+}
+
+function findPr(ctx: LoopCtx, branch: string): number | null | 'lookup-error' {
+  return findPrForReattach(ctx.deps.rev, branch);
+}
+
+export function autoMergeArmedForMember(
+  recorded: boolean | undefined,
+  autoMerge: boolean,
+  requireApproval: boolean
+): boolean {
+  return recorded ?? (autoMerge && !requireApproval);
+}
+
+function persistedAutoMergeArmed(ctx: LoopCtx, pr: number): boolean | undefined {
+  try {
+    const body = ctx.deps.rev.prBody?.({ repo: ctx.repo, pr });
+    const value = body === undefined ? undefined : bodyMeta(body).autoMergeArmed;
+    return typeof value === 'boolean' ? value : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1155,7 +1191,13 @@ function stampProjection(ctx: LoopCtx, beads: ReadyBead[], pr: number): void {
  *  skips the label half, a failed write warns, and the gate stack arms
  *  either way. */
 
-function stampLoopPr(ctx: LoopCtx, beads: ReadyBead[], item: LoopItem, pr: number): void {
+function stampLoopPr(
+  ctx: LoopCtx,
+  beads: ReadyBead[],
+  item: LoopItem,
+  pr: number,
+  autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval
+): void {
   let draft = false;
   try {
     draft = ctx.deps.rev.prMeta({ repo: ctx.repo, pr }).isDraft;
@@ -1173,6 +1215,7 @@ function stampLoopPr(ctx: LoopCtx, beads: ReadyBead[], item: LoopItem, pr: numbe
         bead: beads.map(b => b.id).join(','),
         mode: 'loop',
         run: item.branch,
+        autoMergeArmed,
       },
     },
     msg => ctx.deps.error(`loop: ${msg}`)
@@ -1864,7 +1907,8 @@ function serviceLost(ctx: LoopCtx, m: LoopMember): ServiceVerdict {
   // ownership marking (spec bro-c650l) — the registry-spawn path's
   // discovery is HERE, not pushItem: a detached worker's PR only
   // exists once this settle pass finds it
-  stampLoopPr(ctx, m.beads, m.item, pr);
+  m.autoMergeArmed ??= ctx.cfg.autoMerge && !ctx.act.requireApproval;
+  stampLoopPr(ctx, m.beads, m.item, pr, m.autoMergeArmed);
   m.since = ctx.deps.now();
   ctx.deps.say(`loop: ${m.beads.map(b => b.id).join(', ')} → PR ${prRef(ctx, pr)}`);
   return 'active';
@@ -2039,7 +2083,7 @@ async function serviceGate(ctx: LoopCtx, m: LoopMember): Promise<ServiceVerdict>
   // act.requireApproval is set — mirror that predicate here so the
   // gate keeps supervisor semantics (merge stays approval-gated)
   // instead of waiting on an auto-merge that was never armed.
-  const autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval;
+  const autoMergeArmed = m.autoMergeArmed ?? (ctx.cfg.autoMerge && !ctx.act.requireApproval);
   const autoMergeTimedOut = ctx.deps.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
   const kind =
     autoMergeArmed && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
@@ -2352,6 +2396,14 @@ function armMember(
   pr: number,
   lane: LoopLane
 ): LoopMember {
+  const autoMergeArmed = autoMergeArmedForMember(
+    persistedAutoMergeArmed(ctx, pr),
+    ctx.cfg.autoMerge,
+    ctx.act.requireApproval === true
+  );
+  if (ctx.act.requireApproval && autoMergeArmed) {
+    ctx.deps.disableAutoMerge(pr);
+  }
   emitLifecycle(ctx.root, {
     kind: 'pr-open',
     bead: beads[0]?.id,
@@ -2364,11 +2416,12 @@ function armMember(
     bead: beads.map(b => b.id).join(','),
   });
   stampProjection(ctx, beads, pr);
-  stampLoopPr(ctx, beads, item, pr);
+  stampLoopPr(ctx, beads, item, pr, autoMergeArmed);
   return {
     beads,
     item,
     pr,
+    autoMergeArmed,
     lane,
     marker,
     since: ctx.deps.now(),

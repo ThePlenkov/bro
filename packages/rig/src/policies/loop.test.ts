@@ -13,6 +13,8 @@ import { DEFAULT_LOOP_CONFIG, type LoopConfig, type LoopItem } from '@broject/lo
 import type { ReadyBead } from '../ready.ts';
 import {
   freshLoopQueue,
+  autoMergeArmedForMember,
+  findPrForReattach,
   loopPolicy,
   loopWatch,
   topFillers,
@@ -22,6 +24,25 @@ import {
   type LoopLane,
   type LoopMember,
 } from './loop.ts';
+
+describe('auto-merge lifecycle decisions', () => {
+  test('keeps the decision recorded when requireApproval changes', () => {
+    assert.equal(autoMergeArmedForMember(true, true, true), true);
+    assert.equal(autoMergeArmedForMember(false, true, false), false);
+  });
+
+  test('legacy members use the current config only when no decision was recorded', () => {
+    assert.equal(autoMergeArmedForMember(undefined, true, false), true);
+    assert.equal(autoMergeArmedForMember(undefined, true, true), false);
+  });
+
+  test('reattach lookup falls back to landed PRs after open-only lookup is empty', () => {
+    const rev = {
+      prsForBranch: (_branch: string, state?: 'open' | 'all') => (state === 'all' ? [42] : []),
+    } as unknown as ReviewFacade;
+    assert.equal(findPrForReattach(rev, 'loop/bro-x'), 42);
+  });
+});
 
 // --- wallWaitUntil — the wall settle's wait clock (spec bro-36bhc) -------------
 
@@ -162,6 +183,7 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
     providerWall: () => undefined,
     bootstrap: () => ({ status: 0, signal: null }),
     mergePr: async () => {},
+    disableAutoMerge: () => {},
     settleSessions: () => {},
     reportOutcome: async () => {},
     syncStackLines: () => [],

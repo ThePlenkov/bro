@@ -64,6 +64,7 @@ import {
   facade,
   facadeName,
   gitTry,
+  ghTry,
   hasHelpFlag,
   holdRoleLease,
   laneBudgetKey,
@@ -1140,6 +1141,12 @@ export function loopDeps(ctx: Ctx): LoopDeps {
       });
     },
     mergePr: pr => runActCommand(['merge', String(pr)]),
+    disableAutoMerge: pr => {
+      const result = ghTry(['pr', 'merge', String(pr), '--disable-auto', '-R', ctx.repo], root);
+      if (result.code !== 0) {
+        console.error(`loop: --disable-auto refused for PR ${pr} (${result.err || result.out})`);
+      }
+    },
     settleSessions: dir => settleAcpSessions(root, ctx.env, { worktree: dir }),
     reportOutcome: async (beadId, result) => {
       await reportRoutedOutcome({
