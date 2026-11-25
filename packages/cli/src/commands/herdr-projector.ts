@@ -160,15 +160,32 @@ interface Planes {
  *  dead-looking titles/meta over workspaces whose only live evidence
  *  is the registry — the exact corruption-as-emptiness doctrine
  *  readAgentRegistryFile itself refuses. */
+/** One registry read per pass — memoized on the ctx object. A second
+ *  read could observe the file mid-corruption AFTER the gate check
+ *  passed, and the projection would treat every registry worker as
+ *  absent: the exact corruption-as-emptiness the gate exists to kill
+ *  (kody + cubic on #1239). */
+const regCache = new WeakMap<
+  object,
+  { reg: ReturnType<typeof readAgentRegistry>; failed: boolean }
+>();
+
 function tryRegistry(ctx: Pick<PassCtx, 'root'>): {
   reg: ReturnType<typeof readAgentRegistry>;
   failed: boolean;
 } {
-  try {
-    return { reg: readAgentRegistry(ctx.root), failed: false };
-  } catch {
-    return { reg: {}, failed: true };
+  const hit = regCache.get(ctx);
+  if (hit !== undefined) {
+    return hit;
   }
+  let out: { reg: ReturnType<typeof readAgentRegistry>; failed: boolean };
+  try {
+    out = { reg: readAgentRegistry(ctx.root), failed: false };
+  } catch {
+    out = { reg: {}, failed: true };
+  }
+  regCache.set(ctx, out);
+  return out;
 }
 
 function readPlanes(ctx: PassCtx): Planes {
