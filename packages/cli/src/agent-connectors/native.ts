@@ -447,7 +447,6 @@ const {
   tmuxProbe,
   probeState,
   toTmuxInfo,
-  makeTmuxConnector,
   gcMatchDir,
   gcRun,
   gcErr,

@@ -95,3 +95,4 @@ export function resolveAgentConnector(
 }
 
 export { makeNativeConnector };
+export { makeTmuxConnector };
