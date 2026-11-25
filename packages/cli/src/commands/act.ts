@@ -243,7 +243,17 @@ function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): voi
  *  same contract on both verbs (bro-71a10). Lines without the tab yield
  *  a null body — resolve reads them as silent fixes, reply skips them. */
 function parseBatchRows(file: string): { rows: { id: string; body: string }[]; tabless: string[] } {
-  const lines = readFileSync(file, 'utf8')
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (err) {
+    // a missing batch file is a usage error, not a raw ENOENT stack
+    console.error(
+      `error: cannot read --file ${file} — ${err instanceof Error ? err.message : String(err)}`
+    );
+    process.exit(2);
+  }
+  const lines = text!
     .split('\n')
     .map(l => l.trim())
     .filter(l => l.length > 0);
@@ -255,8 +265,14 @@ function parseBatchRows(file: string): { rows: { id: string; body: string }[]; t
       tabless.push(line);
       continue;
     }
+    const id = line.slice(0, tab).trim();
+    // a tab-only line has no thread to act on — an empty id would hit
+    // the host API as a malformed mutation (amazon-q on #1203)
+    if (id === '') {
+      continue;
+    }
     rows.push({
-      id: line.slice(0, tab).trim(),
+      id,
       body: line
         .slice(tab + 1)
         .replaceAll(String.raw`\n`, '\n')
@@ -271,10 +287,9 @@ function parseBatchRows(file: string): { rows: { id: string; body: string }[]; t
 function resolveOne(
   rev: ReviewFacade,
   argv: string[],
-  id: string,
-  comment: string | undefined,
-  unresolve: boolean
+  opts: { id: string; comment?: string; unresolve: boolean }
 ): void {
+  const { id, comment, unresolve } = opts;
   if (comment) {
     if (!unresolve) {
       // the verdict on a fix is the push — comments on resolved-as-fixed
@@ -328,11 +343,11 @@ function cmdResolve(argv: string[]): void {
     const { rows, tabless } = parseBatchRows(file);
     let resolved = 0;
     for (const row of rows) {
-      resolveOne(rev, argv, row.id, row.body, unresolve);
+      resolveOne(rev, argv, { id: row.id, comment: row.body, unresolve });
       resolved += 1;
     }
     for (const id of tabless) {
-      resolveOne(rev, argv, id, undefined, unresolve);
+      resolveOne(rev, argv, { id, unresolve });
       resolved += 1;
     }
     console.error(`act resolve: ${resolved} thread(s)`);
@@ -341,7 +356,7 @@ function cmdResolve(argv: string[]): void {
   }
   const id = threadArg(argv);
   const comment = commentArg(argv);
-  resolveOne(rev, argv, id, comment ?? undefined, unresolve);
+  resolveOne(rev, argv, { id, comment: comment ?? undefined, unresolve });
   dropActState();
 }
 
