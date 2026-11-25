@@ -1179,6 +1179,18 @@ export function removeMergedWorktree(
     console.error(`cleanup: ${root} hosts live process(es): ${who} — worktree kept`);
     return false;
   }
+  // a registry-pinned agent occupant whose process runs OUTSIDE the
+  // tree (a herdr/tmux pane keeps its own cwd) is invisible to /proc —
+  // the merge verdict says nothing about who still works inside
+  // (bro-giznr: the cleanup removed a tree under a live pane agent)
+  const occupants = Object.entries(readAgentRegistry(main.path)).filter(
+    ([, e]) => typeof e.worktree === 'string' && resolve(e.worktree) === resolve(root)
+  );
+  if (occupants.length > 0) {
+    const who = occupants.map(([mol, e]) => e.agentId ?? mol).join(', ');
+    console.error(`cleanup: ${root} hosts registry agent(s): ${who} — worktree kept`);
+    return false;
+  }
   const status = gitTry([
     '-c',
     'status.showUntrackedFiles=all',
