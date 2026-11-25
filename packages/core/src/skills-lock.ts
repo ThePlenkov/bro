@@ -177,10 +177,13 @@ function skillsOf(parsed: unknown): Record<string, unknown> {
 
 /** A skill name becomes a filesystem path under `.agents/skills/` —
  *  the lockfile is external input, so a name must be exactly ONE
- *  plain path segment: no separators, no dot-entries, no empty
- *  string. Anything else (a traversal like `../x` or a nested path)
- *  would read or install outside the skills dir (bro-oeb5e). */
-const SKILL_NAME = /^(?!\.)[^/\\\0]+$/;
+ *  plain path segment: no separators, no empty string, and never
+ *  exactly `.` or `..` — the only segments that escape the skills
+ *  dir. Other dot-leading names (`.hidden`) are valid single
+ *  segments the upstream CLI accepts; rejecting them silently
+ *  drops their lock entries so sync can never restore or check
+ *  them (bro-oeb5e, PR #1208 review). */
+const SKILL_NAME = /^(?!\.{1,2}$)[^/\\\0]+$/;
 
 /** One lock entry — null when it carries no source or no hash. */
 function lockedSkill(entry: { name: string; value: unknown }): LockedSkill | null {

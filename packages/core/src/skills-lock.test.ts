@@ -223,7 +223,9 @@ describe('checkSkillLock', () => {
         })
       );
       const locked = readSkillLock(dir);
-      assert.deepEqual([...locked.keys()], ['legit']);
+      // `.hidden` is a valid single segment the upstream CLI accepts —
+      // only `.`/`..`/separators/empty are rejected.
+      assert.deepEqual([...locked.keys()], ['.hidden', 'legit']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
