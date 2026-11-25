@@ -254,12 +254,15 @@ function unitKeyAt(
 function relScanFrom(text: string, start: number): number | undefined {
   let ms = 0;
   let found = false;
+  // pairs bind to the phrase line — the scan can't cross a newline,
+  // so the line end is the loop bound instead of a bail-out branch
+  let lineEnd = text.indexOf('\n', start);
+  if (lineEnd === -1) {
+    lineEnd = text.length;
+  }
   let i = start;
-  while (i < text.length) {
+  while (i < lineEnd) {
     i = skipBlankInline(text, i);
-    if (text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13) {
-      break; // pairs bind to the phrase line — a newline closes the scan
-    }
     // separators can chain ('…and, 5 minutes' — odd but harmless to
     // keep reading); each pass ends where nothing else consumed
     for (;;) {
