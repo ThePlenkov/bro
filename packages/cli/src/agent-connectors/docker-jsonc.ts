@@ -26,9 +26,9 @@ export function jsoncSkipTrivia(text: string, i: number): number {
     while (k < text.length && /\s/.test(text[k]!)) {
       k++;
     }
-    if (text[k] === '/' && text[k + 1] === '/') {
+    if (text.slice(k, k + 2) === '//') {
       k = jsoncSkipLineComment(text, k);
-    } else if (text[k] === '/' && text[k + 1] === '*') {
+    } else if (text.slice(k, k + 2) === '/*') {
       k = jsoncSkipBlockComment(text, k);
     } else {
       return k;
@@ -64,19 +64,23 @@ export function jsoncToJson(text: string): string {
   const out: string[] = [];
   let i = 0;
   while (i < text.length) {
-    const c = text[i]!;
-    if (c === '"') {
-      i = jsoncCopyString(text, i, out);
-    } else if (c === '/' && text[i + 1] === '/') {
-      i = jsoncSkipLineComment(text, i);
-    } else if (c === '/' && text[i + 1] === '*') {
-      i = jsoncSkipBlockComment(text, i);
-    } else if (c === ',' && ['}', ']'].includes(text[jsoncSkipTrivia(text, i + 1)] ?? '')) {
-      i++;
-    } else {
-      out.push(c);
-      i++;
-    }
+    i = jsoncCopyNext(text, i, out);
   }
   return out.join('');
+}
+
+function jsoncCopyNext(text: string, i: number, out: string[]): number {
+  const c = text[i]!;
+  const pair = text.slice(i, i + 2);
+  if (c === '"') return jsoncCopyString(text, i, out);
+  if (pair === '//') return jsoncSkipLineComment(text, i);
+  if (pair === '/*') return jsoncSkipBlockComment(text, i);
+  if (c === ',' && jsoncHasTrailingComma(text, i)) return i + 1;
+  out.push(c);
+  return i + 1;
+}
+
+function jsoncHasTrailingComma(text: string, i: number): boolean {
+  const next = text[jsoncSkipTrivia(text, i + 1)];
+  return next === '}' || next === ']';
 }
