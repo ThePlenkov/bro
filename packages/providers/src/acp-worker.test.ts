@@ -182,11 +182,23 @@ describe('runAcpWorker', () => {
       assert.equal(code, 0);
       assert.match(lines.join('\n'), /turn stopped — end_turn/);
 
-      // the live tail — turn/tool lifecycle on the 'agent' topic
-      const probed = await busProbe(busSocketPath(dir)!, {
+      // the live tail — turn/tool lifecycle on the 'agent' topic.
+      // publishes are fire-and-forget inside the worker, so on a slow
+      // runner they can still be in flight when the turn resolves —
+      // re-probe until the broker's replay carries them (or time out).
+      const want = ['turn:start', 'prompt:undefined', 'tool_call:open', 'turn:stop'];
+      let probed = await busProbe(busSocketPath(dir)!, {
         filter: { topics: ['agent'] },
         windowMs: 50,
       });
+      const deadline = Date.now() + 5_000;
+      while (probed.events.length < want.length && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100));
+        probed = await busProbe(busSocketPath(dir)!, {
+          filter: { topics: ['agent'] },
+          windowMs: 50,
+        });
+      }
       assert.deepEqual(
         probed.events.map(e => `${e.kind}:${(e.payload as { phase?: string }).phase}`),
         // the journaled prompt rides the bus too (bro-l8wqu addendum 3)
