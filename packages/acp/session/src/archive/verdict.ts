@@ -32,6 +32,12 @@ export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | un
       }
       return undefined;
     case 'permission':
+      if (row.verdict === 'approved') {
+        return {
+          led: { state: 'idle' },
+          mode: since('permission — approved', row.ts),
+        };
+      }
       return {
         led: { state: 'blocked' },
         mode: since(`permission — ${row.verdict ?? 'denied'}`, row.ts),

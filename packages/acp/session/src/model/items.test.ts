@@ -241,6 +241,13 @@ describe('SessionModel — side rows + verdict', () => {
     assert.ok(last.kind === 'turn' && last.text.includes('turn ended (cancelled)'));
   });
 
+  test('an auto-approved permission row paints the session idle', () => {
+    const m = new SessionModel();
+    m.feed({ kind: 'permission', title: 'Read /x', verdict: 'approved' });
+    assert.equal(m.verdict?.led.state, 'idle');
+    assert.equal(m.verdict?.mode, 'permission — approved');
+  });
+
   test('turn stop clean → idle; error → blocked', () => {
     const m = new SessionModel();
     m.feed({ kind: 'turn', phase: 'stop', stopReason: 'end_turn' });
