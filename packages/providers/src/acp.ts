@@ -61,7 +61,7 @@ type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
  *  option advertised, a refused model, a non-v1 peer) — thrown as-is,
  *  never wrapped into JudgeUnavailable: a misconfigured provider is a
  *  startup error, not a backend outage. */
-class AcpConfigError extends Error {
+export class AcpConfigError extends Error {
   override name = 'AcpConfigError';
 }
 

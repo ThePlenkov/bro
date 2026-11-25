@@ -2,8 +2,9 @@
  *  turn on a providers.<name> acp entry, bounded by --timeout, refused
  *  by provider walls before any spend. Reply text + provenance back;
  *  no registry entry. (spec bro-z8tng) */
-import { acpOpen, acpPooledTurn, type ProviderWireOpts } from '@broject/providers';
+import { AcpConfigError, acpOpen, acpPooledTurn, type ProviderWireOpts } from '@broject/providers';
 import { type AgentConnectorEnv } from '../agent-connectors.ts';
+import { SpawnError } from '@broject/core';
 import { SpawnInputError } from './agents.ts';
 import { delegatePrompt } from './delegate-prompt.ts';
 import {
@@ -55,7 +56,17 @@ export async function delegateWait(
   const prompt = delegatePrompt(sel.req);
   const deadline = waitDeadline(sel.req.timeoutSec);
   const wire = waitWire(sel, dir, opts);
-  const peer = await acpOpen(`delegate:${name}`, entry, wire, deadline);
+  // AcpConfigError is a providers-plane type — across the agents-plane
+  // boundary it must arrive as a classified SpawnError('config'), or a
+  // provider misconfiguration escapes as an unclassified 500 (bro-s2p27)
+  const asSpawnError = (err: unknown): unknown =>
+    err instanceof AcpConfigError ? new SpawnError(err.message, 'config') : err;
+  let peer: Awaited<ReturnType<typeof acpOpen>>;
+  try {
+    peer = await acpOpen(`delegate:${name}`, entry, wire, deadline);
+  } catch (err) {
+    throw asSpawnError(err);
+  }
   const onExit = (): void => peer.close();
   process.once('exit', onExit);
   try {
@@ -70,6 +81,8 @@ export async function delegateWait(
       guard: { scope: `delegate:${name}`, cooldown: delegateWallCheck(dir, name) },
     });
     return waitResult(name, sel, r);
+  } catch (err) {
+    throw asSpawnError(err);
   } finally {
     process.removeListener('exit', onExit);
     peer.close();
