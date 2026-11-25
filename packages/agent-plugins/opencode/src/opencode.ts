@@ -145,7 +145,13 @@ function makeCore(input: BroCoreInput) {
       notify('debug', `bro probe skipped (no cli) for event=${event}`);
       return null;
     }
-    const result = await callHookDetailed(resolved, event, payload, directory, timeoutMs, HOOK_ENV);
+    const result = await callHookDetailed(resolved, {
+      event,
+      payload,
+      cwd: directory,
+      timeoutMs,
+      extraEnv: HOOK_ENV,
+    });
     if (result.failure !== null) {
       const message = hookFailureText(result.failure);
       if (event === 'stop' && Date.now() - lastStopWarning >= 15 * 60_000) {

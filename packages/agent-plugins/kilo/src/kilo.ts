@@ -59,6 +59,12 @@ export interface HookOutcome {
   failure: string | null;
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
+}
+
 export function hookOutcome(result: SpawnResult): HookOutcome {
   if (result.error !== null) {
     return { control: null, failure: result.error };
@@ -66,22 +72,32 @@ export function hookOutcome(result: SpawnResult): HookOutcome {
   if (result.code !== 0) {
     return { control: null, failure: `the hook exited ${result.code ?? 'with no exit code'}` };
   }
-  if (result.stdout === '') {
-    return { control: null, failure: null };
+  const control = firstControl(result.stdout);
+  if (control === null) {
+    return {
+      control: null,
+      failure: result.stdout === '' ? null : 'the hook answered with no control object',
+    };
   }
-  for (const line of result.stdout.split('\n')) {
+  return { control, failure: null };
+}
+
+/** First JSON object on the hook's stdout; non-JSON lines are
+ *  diagnostic chatter. null when nothing parses. */
+function firstControl(stdout: string): unknown {
+  for (const line of stdout.split('\n')) {
     const text = line.trim();
     if (text === '') continue;
     try {
-      const parsed = JSON.parse(text) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return { control: parsed, failure: null };
+      const parsed = asRecord(JSON.parse(text));
+      if (parsed !== null) {
+        return parsed;
       }
     } catch {
       // Non-JSON output is diagnostic chatter.
     }
   }
-  return { control: null, failure: 'the hook answered with no control object' };
+  return null;
 }
 
 const BroPlugin: Plugin = async input => {
@@ -98,12 +114,24 @@ const BroPlugin: Plugin = async input => {
   const runBroHook = async (event: string, input: unknown) => {
     if (broArgv !== undefined) {
       const command = { cmd: broArgv[0] ?? '', args: broArgv.slice(1) };
-      return callHookDetailed(command, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+      return callHookDetailed(command, {
+        event,
+        payload: input,
+        cwd: directory,
+        timeoutMs: HOOK_TIMEOUT_MS,
+        extraEnv: HOOK_ENV,
+      });
     }
     const resolved = await getCommand();
     return resolved === null
       ? { control: null, failure: { kind: 'no-cli' as const } }
-      : callHookDetailed(resolved, event, input, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+      : callHookDetailed(resolved, {
+          event,
+          payload: input,
+          cwd: directory,
+          timeoutMs: HOOK_TIMEOUT_MS,
+          extraEnv: HOOK_ENV,
+        });
   };
 
   // --- tools: bro subcommands the model can call directly -------------------
@@ -157,6 +185,80 @@ const BroPlugin: Plugin = async input => {
     return context;
   };
 
+  const sessionIdOf = (event: { properties?: unknown }): string | null => {
+    const props = asRecord(event.properties) ?? {};
+    const info = asRecord(props.info);
+    return typeof props.sessionID === 'string'
+      ? props.sessionID
+      : typeof info?.id === 'string'
+        ? info.id
+        : null;
+  };
+
+  const onSessionCreated = async (sid: string | null): Promise<void> => {
+    if (sid === null) {
+      return;
+    }
+    liveSessions.add(sid);
+    if (!hydratedContexts.has(sid)) {
+      await hydrate(sid);
+    }
+  };
+
+  const contextVisibleFor = (sessionKey: string): boolean =>
+    sessionKey === '' || liveSessions.has(sessionKey);
+
+  const onSessionDeleted = (sid: string | null): void => {
+    liveSessions.delete(sid ?? '');
+    if (sid === null) {
+      hydratedContexts.clear();
+    } else {
+      hydratedContexts.delete(sid);
+    }
+  };
+
+  const reportStopGateDiag = async (
+    failure: Parameters<typeof hookFailureText>[0]
+  ): Promise<void> => {
+    const now = Date.now();
+    if (now - stopGateDiagAt < GATE_DIAG_INTERVAL_MS) {
+      return;
+    }
+    stopGateDiagAt = now;
+    try {
+      await client.app
+        .log({
+          body: {
+            service: 'bro',
+            level: 'warn',
+            message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`,
+          },
+        })
+        .catch(() => {});
+    } catch {
+      // Diagnostics are fail-open and must never break the lifecycle hook.
+    }
+  };
+
+  const runStopGate = async (event: { properties?: unknown }): Promise<void> => {
+    const { control, failure } = await runBroHook('stop', {
+      session_id: asRecord(event.properties)?.sessionID,
+    });
+    if (failure !== null) {
+      await reportStopGateDiag(failure);
+      return;
+    }
+    if (control?.decision === 'block') {
+      await client.app.log({
+        body: {
+          service: 'bro',
+          level: 'warn',
+          message: `bro stop gate blocked: ${control.reason ?? 'unfinished work'}`,
+        },
+      });
+    }
+  };
+
   return {
     tool: {
       bro: tool({
@@ -193,7 +295,9 @@ const BroPlugin: Plugin = async input => {
         await hydrate(sessionKey);
       }
       const context = contextForSession(sessionKey);
-      if (context && (!sessionKey || liveSessions.has(sessionKey))) {
+      // an id-less transform only pushes a live session's own context —
+      // a foreign session's cached frame must never leak across
+      if (context !== null && contextVisibleFor(sessionKey)) {
         output.system.push(`bro state — resume from here:\n${context}`);
       }
     },
@@ -210,61 +314,16 @@ const BroPlugin: Plugin = async input => {
       // primes its own probe, a deleted one retires it. Without this a
       // new session's first (id-less) transform pushes the prior
       // session's cached context.
-      const props = (event.properties ?? {}) as Record<string, unknown>;
-      const sid =
-        typeof props.sessionID === 'string'
-          ? props.sessionID
-          : typeof (props.info as { id?: unknown } | undefined)?.id === 'string'
-            ? (props.info as { id: string }).id
-            : null;
-      if (event.type === 'session.created' && sid !== null) {
-        liveSessions.add(sid);
-        if (!hydratedContexts.has(sid)) {
-          await hydrate(sid);
-        }
+      const sid = sessionIdOf(event);
+      if (event.type === 'session.created') {
+        await onSessionCreated(sid);
       } else if (event.type === 'session.deleted') {
-        liveSessions.delete(sid ?? '');
-        if (sid === null) {
-          hydratedContexts.clear();
-        } else {
-          hydratedContexts.delete(sid);
-        }
+        onSessionDeleted(sid);
       }
       if (event.type !== 'session.idle') {
         return;
       }
-      const { control, failure } = await runBroHook('stop', {
-        session_id: event.properties.sessionID,
-      });
-      if (failure !== null) {
-        const now = Date.now();
-        if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
-          stopGateDiagAt = now;
-          try {
-            await client.app
-              .log({
-                body: {
-                  service: 'bro',
-                  level: 'warn',
-                  message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`,
-                },
-              })
-              .catch(() => {});
-          } catch {
-            // Diagnostics are fail-open and must never break the lifecycle hook.
-          }
-        }
-        return;
-      }
-      if (control?.decision === 'block') {
-        await client.app.log({
-          body: {
-            service: 'bro',
-            level: 'warn',
-            message: `bro stop gate blocked: ${control.reason ?? 'unfinished work'}`,
-          },
-        });
-      }
+      await runStopGate(event);
     },
 
     // --- auto-approve bro/bd shell calls ------------------------------------

@@ -107,45 +107,54 @@ async function exitsZero(cmd, args) {
 * bro is skipped rather than failing every hook.
 */
 async function resolveCommand(opts = {}) {
-	const pinned = opts.command;
-	if (typeof pinned === "string" && pinned.trim() !== "") {
-		const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
-		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	} else if (pinned !== void 0 && typeof pinned === "object" && pinned !== null) {
-		const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
-		const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
-		if (cmd !== "" && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	}
+	return await pinnedCommand(opts.command) ?? await checkoutResolved() ?? await pathResolved() ?? await npxResolved(opts);
+}
+async function pinnedCommand(pinned) {
+	if (typeof pinned === "string") return pinnedStringCommand(pinned);
+	if (typeof pinned !== "object" || pinned === null) return null;
+	const cmd = typeof pinned.cmd === "string" ? pinned.cmd : "";
+	const args = Array.isArray(pinned.args) ? pinned.args.filter((a) => typeof a === "string") : [];
+	return cmd !== "" && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function pinnedStringCommand(pinned) {
+	const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
+	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
+		cmd,
+		args
+	} : null;
+}
+async function checkoutResolved() {
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
 		cmd: jsRuntime(),
 		args: [entry]
 	};
-	if (await exitsZero("bro", ["hooks"])) return {
+	return null;
+}
+async function pathResolved() {
+	return await exitsZero("bro", ["hooks"]) ? {
 		cmd: "bro",
 		args: []
-	};
+	} : null;
+}
+async function npxResolved(opts) {
 	const specs = opts.npxSpecs ?? (opts.npxPin !== void 0 ? [opts.npxPin] : []);
-	if (specs.length > 0 && await exitsZero("npx", ["--version"])) {
-		for (const spec of specs) if (await exitsZero("npx", [
+	if (specs.length === 0 || !await exitsZero("npx", ["--version"])) return null;
+	for (const spec of specs) if (await exitsZero("npx", [
+		"-y",
+		"--prefer-offline",
+		spec,
+		"hooks"
+	])) return {
+		cmd: "npx",
+		args: [
 			"-y",
 			"--prefer-offline",
-			spec,
-			"hooks"
-		])) return {
-			cmd: "npx",
-			args: [
-				"-y",
-				"--prefer-offline",
-				spec
-			]
-		};
-	}
+			spec
+		]
+	};
 	return null;
 }
 /**
@@ -184,7 +193,8 @@ function hookFailureText(failure) {
 * fail-open, but the second must not pass invisibly. A clean exit with
 * empty stdout is silence (failure null) — only real outage kinds set it.
 */
-async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEnv) {
+async function callHookDetailed(command, call) {
+	const { event, payload, cwd, timeoutMs, extraEnv } = call;
 	let input;
 	try {
 		input = JSON.stringify(payload);
@@ -285,13 +295,17 @@ async function callHookDetailed(command, event, payload, cwd, timeoutMs, extraEn
 * Scan for the first parseable control line — unrelated chatter on
 * stdout must not swallow the answer.
 */
+/** Non-null plain object — the control-line shape. */
+function isRecord(v) {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
 function parseControl(out) {
 	for (const line of out.split("\n")) {
 		const text = line.trim();
 		if (text === "") continue;
 		try {
 			const parsed = JSON.parse(text);
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+			if (isRecord(parsed)) return parsed;
 		} catch {}
 	}
 	return null;
@@ -332,51 +346,58 @@ function runCommand(command, args, options) {
 			});
 			return;
 		}
-		let settled = false;
-		const settle = (result) => {
-			if (!settled) {
-				settled = true;
-				resolve(result);
-			}
-		};
-		const cap = (buf, chunk) => buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
-		let stdout = "";
-		let stderr = "";
-		const timer = killAfter(child, options.timeoutMs, () => settle({
+		runCollect(child, options, resolve);
+	});
+}
+function runCollect(child, options, resolve) {
+	let settled = false;
+	const settle = (result) => {
+		if (!settled) {
+			settled = true;
+			resolve(result);
+		}
+	};
+	const cap = (buf, chunk) => buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+	let stdout = "";
+	let stderr = "";
+	const timer = killAfter(child, options.timeoutMs, () => settle({
+		code: null,
+		stdout,
+		stderr,
+		error: `timed out after ${options.timeoutMs}ms`
+	}));
+	wireCollect(child, options, (finish) => {
+		clearTimeout(timer);
+		settle(finish);
+	});
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk) => {
+		stdout = cap(stdout, chunk);
+	});
+	child.stderr?.setEncoding("utf8");
+	child.stderr?.on("data", (chunk) => {
+		stderr = cap(stderr, chunk);
+	});
+	child.on("error", (error) => {
+		clearTimeout(timer);
+		settle({
 			code: null,
 			stdout,
 			stderr,
-			error: `timed out after ${options.timeoutMs}ms`
-		}));
-		child.stdout?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk) => {
-			stdout = cap(stdout, chunk);
+			error: error.message
 		});
-		child.stderr?.setEncoding("utf8");
-		child.stderr?.on("data", (chunk) => {
-			stderr = cap(stderr, chunk);
-		});
-		child.on("error", (error) => {
-			clearTimeout(timer);
-			settle({
-				code: null,
-				stdout,
-				stderr,
-				error: error.message
-			});
-		});
-		child.on("close", (code) => {
-			clearTimeout(timer);
-			settle({
-				code,
-				stdout,
-				stderr,
-				error: null
-			});
-		});
-		child.stdin?.on("error", () => {});
-		child.stdin?.end(options.input ?? "");
 	});
+	child.on("close", (code) => {
+		clearTimeout(timer);
+		settle({
+			code,
+			stdout,
+			stderr,
+			error: null
+		});
+	});
+	child.stdin?.on("error", () => {});
+	child.stdin?.end(options.input ?? "");
 }
 /**
 * The lazy, retrying CLI resolver every adapter shares: resolution
@@ -387,8 +408,12 @@ function runCommand(command, args, options) {
 function createCommandResolver(opts = {}) {
 	let resolved;
 	let failedAt;
+	const cacheFresh = () => {
+		if (resolved === void 0) return false;
+		return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
+	};
 	return () => {
-		if (resolved !== void 0 && (failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS)) return resolved;
+		if (cacheFresh() && resolved !== void 0) return resolved;
 		failedAt = void 0;
 		resolved = resolveCommand(opts).then((cmd) => {
 			if (cmd === null) failedAt = Date.now();
@@ -415,6 +440,9 @@ const GATE_DIAG_INTERVAL_MS = 6e4;
 *  metacharacters in args (a metachar just means the ask goes to the
 *  user; auto-approve fails closed, never wrong). */
 const SAFE_CMD = [/^\s*(?:bro|bd)(?:\s+[^;&|`<>$()\\\n]*)?\s*$/, /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/];
+function asRecord(v) {
+	return typeof v === "object" && v !== null && !Array.isArray(v) ? v : null;
+}
 function hookOutcome(result) {
 	if (result.error !== null) return {
 		control: null,
@@ -424,25 +452,28 @@ function hookOutcome(result) {
 		control: null,
 		failure: `the hook exited ${result.code ?? "with no exit code"}`
 	};
-	if (result.stdout === "") return {
+	const control = firstControl(result.stdout);
+	if (control === null) return {
 		control: null,
+		failure: result.stdout === "" ? null : "the hook answered with no control object"
+	};
+	return {
+		control,
 		failure: null
 	};
-	for (const line of result.stdout.split("\n")) {
+}
+/** First JSON object on the hook's stdout; non-JSON lines are
+*  diagnostic chatter. null when nothing parses. */
+function firstControl(stdout) {
+	for (const line of stdout.split("\n")) {
 		const text = line.trim();
 		if (text === "") continue;
 		try {
-			const parsed = JSON.parse(text);
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return {
-				control: parsed,
-				failure: null
-			};
+			const parsed = asRecord(JSON.parse(text));
+			if (parsed !== null) return parsed;
 		} catch {}
 	}
-	return {
-		control: null,
-		failure: "the hook answered with no control object"
-	};
+	return null;
 }
 const BroPlugin = async (input) => {
 	const { directory, client } = input;
@@ -454,12 +485,24 @@ const BroPlugin = async (input) => {
 		if (broArgv !== void 0) return callHookDetailed({
 			cmd: broArgv[0] ?? "",
 			args: broArgv.slice(1)
-		}, event, input$1, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+		}, {
+			event,
+			payload: input$1,
+			cwd: directory,
+			timeoutMs: HOOK_TIMEOUT_MS,
+			extraEnv: HOOK_ENV
+		});
 		const resolved = await getCommand();
 		return resolved === null ? {
 			control: null,
 			failure: { kind: "no-cli" }
-		} : callHookDetailed(resolved, event, input$1, directory, HOOK_TIMEOUT_MS, HOOK_ENV);
+		} : callHookDetailed(resolved, {
+			event,
+			payload: input$1,
+			cwd: directory,
+			timeoutMs: HOOK_TIMEOUT_MS,
+			extraEnv: HOOK_ENV
+		});
 	};
 	const run = async (sub, args) => {
 		const resolved = await getCommand();
@@ -502,6 +545,46 @@ const BroPlugin = async (input) => {
 		}
 		return context;
 	};
+	const sessionIdOf = (event) => {
+		const props = asRecord(event.properties) ?? {};
+		const info = asRecord(props.info);
+		return typeof props.sessionID === "string" ? props.sessionID : typeof info?.id === "string" ? info.id : null;
+	};
+	const onSessionCreated = async (sid) => {
+		if (sid === null) return;
+		liveSessions.add(sid);
+		if (!hydratedContexts.has(sid)) await hydrate(sid);
+	};
+	const contextVisibleFor = (sessionKey) => sessionKey === "" || liveSessions.has(sessionKey);
+	const onSessionDeleted = (sid) => {
+		liveSessions.delete(sid ?? "");
+		if (sid === null) hydratedContexts.clear();
+		else hydratedContexts.delete(sid);
+	};
+	const reportStopGateDiag = async (failure) => {
+		const now = Date.now();
+		if (now - stopGateDiagAt < GATE_DIAG_INTERVAL_MS) return;
+		stopGateDiagAt = now;
+		try {
+			await client.app.log({ body: {
+				service: "bro",
+				level: "warn",
+				message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`
+			} }).catch(() => {});
+		} catch {}
+	};
+	const runStopGate = async (event) => {
+		const { control, failure } = await runBroHook("stop", { session_id: asRecord(event.properties)?.sessionID });
+		if (failure !== null) {
+			await reportStopGateDiag(failure);
+			return;
+		}
+		if (control?.decision === "block") await client.app.log({ body: {
+			service: "bro",
+			level: "warn",
+			message: `bro stop gate blocked: ${control.reason ?? "unfinished work"}`
+		} });
+	};
 	return {
 		tool: { bro: tool({
 			description: "Run a bro subcommand (act, debt, drill, convoy, work, stack, spec, fleet, agents, watch, serve, sync, setup, doctor, cleanup, next, loop, plan, plugins). Args after the subcommand are passed through verbatim.",
@@ -520,40 +603,14 @@ const BroPlugin = async (input) => {
 				await hydrate(sessionKey);
 			}
 			const context = contextForSession(sessionKey);
-			if (context && (!sessionKey || liveSessions.has(sessionKey))) output.system.push(`bro state — resume from here:\n${context}`);
+			if (context !== null && contextVisibleFor(sessionKey)) output.system.push(`bro state — resume from here:\n${context}`);
 		},
 		event: async ({ event }) => {
-			const props = event.properties ?? {};
-			const sid = typeof props.sessionID === "string" ? props.sessionID : typeof props.info?.id === "string" ? props.info.id : null;
-			if (event.type === "session.created" && sid !== null) {
-				liveSessions.add(sid);
-				if (!hydratedContexts.has(sid)) await hydrate(sid);
-			} else if (event.type === "session.deleted") {
-				liveSessions.delete(sid ?? "");
-				if (sid === null) hydratedContexts.clear();
-				else hydratedContexts.delete(sid);
-			}
+			const sid = sessionIdOf(event);
+			if (event.type === "session.created") await onSessionCreated(sid);
+			else if (event.type === "session.deleted") onSessionDeleted(sid);
 			if (event.type !== "session.idle") return;
-			const { control, failure } = await runBroHook("stop", { session_id: event.properties.sessionID });
-			if (failure !== null) {
-				const now = Date.now();
-				if (now - stopGateDiagAt >= GATE_DIAG_INTERVAL_MS) {
-					stopGateDiagAt = now;
-					try {
-						await client.app.log({ body: {
-							service: "bro",
-							level: "warn",
-							message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`
-						} }).catch(() => {});
-					} catch {}
-				}
-				return;
-			}
-			if (control?.decision === "block") await client.app.log({ body: {
-				service: "bro",
-				level: "warn",
-				message: `bro stop gate blocked: ${control.reason ?? "unfinished work"}`
-			} });
+			await runStopGate(event);
 		},
 		"permission.ask": async (input$1, output) => {
 			const pats = input$1.patterns ?? input$1.pattern;

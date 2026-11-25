@@ -358,7 +358,9 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return null;
     }
     const cmd = await command();
-    return cmd === null ? null : callHook(cmd, event, payload, cwd, timeoutMs, host.hookEnv);
+    return cmd === null
+      ? null
+      : callHook(cmd, { event, payload, cwd, timeoutMs, extraEnv: host.hookEnv });
   };
 
   const paint = (ctx: Ctx): void => {
@@ -452,7 +454,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
    *  picks the answer up, this turn never waits on it). */
   const consumeHydration = async (sessionId: string, cwd: string): Promise<string> => {
     const pending = hydration;
-    if (pending === undefined || pending.sessionId !== sessionId || hydrated === sessionId) {
+    if (pending === undefined) {
+      return '';
+    }
+    if (pending.sessionId !== sessionId || hydrated === sessionId) {
       return '';
     }
     // claim synchronously, before the await — two concurrent
@@ -463,19 +468,21 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return text;
     }
     hydrated = undefined;
-    if (hydrationFailed === sessionId && hydrationRetried !== sessionId) {
-      hydrationRetried = sessionId;
-      hydration = {
-        sessionId,
-        promise: probe(
-          'session-start',
-          { session_id: sessionId },
-          cwd,
-          REHYDRATION_TIMEOUT_MS
-        ).then(contextOf),
-      };
-    }
+    retryHydration(sessionId, cwd);
     return '';
+  };
+
+  const retryHydration = (sessionId: string, cwd: string): void => {
+    if (hydrationFailed !== sessionId || hydrationRetried === sessionId) {
+      return;
+    }
+    hydrationRetried = sessionId;
+    hydration = {
+      sessionId,
+      promise: probe('session-start', { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(
+        contextOf
+      ),
+    };
   };
 
   /** Register one handler if the host has that event. */
@@ -573,32 +580,42 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   // the stop gate: bro decides, the host refuses. The host's own
   // "already refused" flag goes back to bro so bro's one-shot rule
   // applies — the driver never loops the gate itself.
+  const alreadyGated = (event: unknown, sessionId: string): boolean =>
+    gatedSession === sessionId || host.stopAlreadyRefused(event) === true;
+
+  const notifyHint = (ctx: Ctx, control: HookControl | null): void => {
+    const hint = contextOf(control);
+    if (hint !== '') {
+      host.notify(ctx, hint, 'info');
+    }
+  };
+
+  const stopReason = (control: HookControl): string => {
+    const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
+    return reason === '' ? 'unfinished bro work' : reason;
+  };
+
   const stopGate = async (event: unknown, ctx: Ctx, sessionId: string): Promise<unknown> => {
     // an aborted or errored turn ends — the gate exists to keep
     // unfinished WORK in the session, never to resurrect a cancelled turn
     if (host.stopAborted?.(event) === true) {
       return undefined;
     }
-    const already = gatedSession === sessionId || host.stopAlreadyRefused(event);
     const control = await probe(
       'stop',
       {
         session_id: sessionId,
-        stop_hook_active: already,
+        stop_hook_active: alreadyGated(event, sessionId),
       },
       host.cwd(ctx)
     );
     if (control?.decision !== 'block') {
-      const hint = contextOf(control);
-      if (hint !== '') {
-        host.notify(ctx, hint, 'info');
-      }
+      notifyHint(ctx, control);
       return undefined;
     }
     gatedSession = sessionId;
-    const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
     void refreshBoard(ctx).catch(() => {});
-    return host.refuseStop(reason === '' ? 'unfinished bro work' : reason);
+    return host.refuseStop(stopReason(control));
   };
 
   /** In-flight stop probes by session id — two concurrent stops must
@@ -697,7 +714,8 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     loadMode: 'essential',
     approval: 'read',
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    async execute(...args: unknown[]) {
+      const ctx = args[4] as Ctx;
       const result = await run(['status', '--json'], host.cwd(ctx));
       return {
         content: [
@@ -735,19 +753,28 @@ async function runBro(
   if (command === null) {
     return { code: 127, stdout: '', stderr: 'bro CLI not found' };
   }
-  const { promise, resolve } = Promise.withResolvers<BroRunResult>();
-  let child: ChildProcess;
+  const child = spawnBro(command, args, cwd);
+  if (child === null) {
+    return { code: 127, stdout: '', stderr: 'spawn failed' };
+  }
+  return collectBro(child, timeoutMs);
+}
+
+function spawnBro(command: Command, args: string[], cwd: string): ChildProcess | null {
   try {
-    child = spawn(command.cmd, [...command.args, ...args], {
+    return spawn(command.cmd, [...command.args, ...args], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
-    resolve({ code: 127, stdout: '', stderr: 'spawn failed' });
-    return promise;
+    return null;
   }
+}
+
+function collectBro(child: ChildProcess, timeoutMs: number): Promise<BroRunResult> {
+  const { promise, resolve } = Promise.withResolvers<BroRunResult>();
   let out = '';
   let err = '';
   let settled = false;
@@ -760,15 +787,7 @@ async function runBro(
     resolve(result);
   };
   const timer = setTimeout(() => {
-    try {
-      if (child.pid !== undefined && process.platform !== 'win32') {
-        process.kill(-child.pid, 'SIGKILL');
-      } else {
-        child.kill('SIGKILL');
-      }
-    } catch {
-      // already dead — the close handler settles
-    }
+    killTree(child);
     settle({
       code: 1,
       stdout: out,
@@ -786,4 +805,16 @@ async function runBro(
   child.on('error', () => settle({ code: 127, stdout: '', stderr: 'spawn failed' }));
   child.on('close', code => settle({ code: code ?? 1, stdout: out, stderr: err }));
   return promise;
+}
+
+function killTree(child: ChildProcess): void {
+  try {
+    if (child.pid !== undefined && process.platform !== 'win32') {
+      process.kill(-child.pid, 'SIGKILL');
+    } else {
+      child.kill('SIGKILL');
+    }
+  } catch {
+    // already dead — the close handler settles
+  }
 }
