@@ -499,7 +499,11 @@ function reconcile(
       // and only while the leader's recorded identity still verifies
       // (pid+starttime — never a liveness guess a recycled pgid passes)
       for (const g of stopped) {
-        if (pidAlive(g.pid, g.pidStart)) {
+        // the unit is the GROUP, same as the thaw path: kill(-pgid)
+        // reaches members even when the wrapper leader already exited —
+        // gating on the leader alone would orphan a stopped group that
+        // no pause record covers
+        if (pidAlive(g.pid, g.pidStart) || groupMemberAlive(g.pid, g.pidStart)) {
           sig(g.pid, 'SIGCONT');
         }
       }
