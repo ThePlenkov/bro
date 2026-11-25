@@ -3,7 +3,13 @@
  *  work.ts would TDZ-crash — see plugins.ts's workConnector note).
  *  plugins.ts registers its merged section list here at module init;
  *  until then the gate validates core + caller-supplied sections only. */
-import { configPolicyErrors, type ConfigDiagnostic, type ConfigSection } from '@broject/core';
+import {
+  configPolicyErrors,
+  type ConfigDiagnostic,
+  type ConfigSection,
+  withFileLock,
+} from '@broject/core';
+import { join } from 'node:path';
 
 let policySections: () => Record<string, ConfigSection<unknown>> = () => ({});
 
@@ -43,4 +49,17 @@ export function assertMutableConfig(dir: string): void {
   if (errors.length > 0) {
     throw new ConfigPolicyError(errors as [ConfigDiagnostic, ...ConfigDiagnostic[]]);
   }
+}
+
+/** The writer/gate rendezvous: config writers mutate under
+ *  `<path>.lock` (providers/setup/spec/otel); the mutation gate must
+ *  validate under the SAME locks or a write landing between the read
+ *  and the claim commits policy the gate never saw (bro-gyvfp). Fixed
+ *  acquisition order — committed before local — so two sections can
+ *  never interleave into a deadlock. Re-entrancy in withFileLock makes
+ *  nested sections (a gate inside a writer) a no-op. */
+export function withConfigGateLock<T>(root: string, fn: () => T): T {
+  return withFileLock(join(root, 'bro.config.json.lock'), () =>
+    withFileLock(join(root, 'bro.config.local.json.lock'), fn)
+  );
 }
