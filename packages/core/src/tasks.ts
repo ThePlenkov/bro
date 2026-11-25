@@ -23,7 +23,7 @@
  * mol/wisp (molecules), provenance (evidence), kv/docs, config.
  * Those keep calling bd() until they get doc types.
  */
-import { readdirSync, statSync } from 'node:fs';
+import { type Dirent, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   bd,
@@ -69,20 +69,25 @@ export function bdSyncTimeoutMs(storeDir?: string): number {
 }
 
 /** Store size memoized per dir — the walk is synchronous and a big
- *  store must not re-pay it on every sync probe in the process. */
-const storeSizeCache = new Map<string, number>();
+ *  store must not re-pay it on every sync probe in the process. The
+ *  cache is TTL-bound: a store only grows, and a transient unreadable
+ *  entry must not pin a too-small budget forever (kody on bro-lvj0j). */
+const STORE_SIZE_TTL_MS = 60_000;
+const storeSizeCache = new Map<string, { bytes: number; at: number }>();
 
 function storeSizeBytes(storeDir: string): number {
   const hit = storeSizeCache.get(storeDir);
-  if (hit !== undefined) {
-    return hit;
+  if (hit !== undefined && Date.now() - hit.at < STORE_SIZE_TTL_MS) {
+    return hit.bytes;
   }
   let bytes = 0;
+  let clean = true;
   const walk = (dir: string): void => {
-    let entries;
+    let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
+      clean = false;
       return; // an unreadable dir contributes nothing, the walk survives
     }
     for (const e of entries) {
@@ -95,11 +100,16 @@ function storeSizeBytes(storeDir: string): number {
         }
       } catch {
         // a vanishing/unreadable entry loses its own bytes, never the walk
+        clean = false;
       }
     }
   };
   walk(storeDir);
-  storeSizeCache.set(storeDir, bytes);
+  // a partial measurement is never cached — next probe re-walks rather
+  // than pinning a low budget on a transient error
+  if (clean) {
+    storeSizeCache.set(storeDir, { bytes, at: Date.now() });
+  }
   return bytes;
 }
 
