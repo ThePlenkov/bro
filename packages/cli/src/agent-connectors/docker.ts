@@ -70,6 +70,46 @@ type DockerLaunchInput = {
   image: string;
 };
 
+/** The effective `--user` uid of operator runArgs — accepts every docker
+ *  spelling (`--user X`, `--user=X`, `-u X`, glued `-uX`). Returns the raw
+ *  value or undefined when no user flag rides the args. */
+function dockerUserOf(runArgs: string[]): string | undefined {
+  for (let i = 0; i < runArgs.length; i++) {
+    const a = runArgs[i];
+    if (a === '--user' || a === '-u') {
+      return runArgs[i + 1];
+    }
+    if (a.startsWith('--user=')) {
+      return a.slice('--user='.length);
+    }
+    if (a.startsWith('-u') && a.length > 2) {
+      return a.slice(2);
+    }
+  }
+  return undefined;
+}
+
+/** Refuse a numeric uid that can never traverse the mount permissions:
+ *  the agents dir is 0700 host-owned and prompt/log files 0600 — any uid
+ *  that is neither root nor the host uid dies with EACCES inside the
+ *  container and only stderr hints why. Named users can't be resolved
+ *  without inspecting the image — they pass through (bro-frida). */
+function assertDockerUserCompatible(runArgs: string[]): void {
+  const user = dockerUserOf(runArgs);
+  if (user === undefined || !/^\d+(?::\d+)?$/.test(user)) {
+    return;
+  }
+  const uid = Number(user.split(':')[0]);
+  const hostUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+  if (uid !== 0 && uid !== hostUid) {
+    throw new SpawnError(
+      `agents.docker.runArgs pins --user uid ${uid} — the mounted agents dir is 0700 uid ${hostUid}, ` +
+        `so the worker would die with EACCES. Use the host uid, root (0), or a named user the image resolves.`,
+      'config'
+    );
+  }
+}
+
 export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir;
   const knobs = env.agents['docker'] ?? {};
@@ -80,6 +120,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     env.loop?.agent ??
     '';
   const runArgs = dockerRunArgs(knobs.runArgs);
+  assertDockerUserCompatible(runArgs);
 
   const findEntry = (id: string) => findAgentEntry(dir, 'docker', id);
 
