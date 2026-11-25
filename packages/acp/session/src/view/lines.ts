@@ -293,46 +293,6 @@ const isWord = (char: string): boolean => {
   );
 };
 
-/** HTML-looking tags out of a line — a linear scan, no regex: `<`
- *  opens a tag that runs to `>`; an unclosed `<` keeps its char (it
- *  was never a tag) so ordinary text like `a < b` survives. */
-const stripTags = (s: string): string => {
-  let out = '';
-  let i = 0;
-  for (;;) {
-    const open = s.indexOf('<', i);
-    if (open === -1) return out + s.slice(i);
-    out += s.slice(i, open);
-    const close = s.indexOf('>', open + 1);
-    if (close === -1) return out + s.slice(open);
-    i = close + 1;
-  }
-};
-
-/** `<!-- ... -->` comments out of a line — a linear scan, no regex:
- *  an unterminated comment eats to end-of-line and no `<!--` can
- *  survive the pass (the scanner's injection/ReDoS flags). */
-const stripHtmlComments = (s: string): string => {
-  let out = '';
-  let rest = s;
-  for (;;) {
-    const i = rest.indexOf(open);
-    if (i === -1) return out + rest;
-    out += rest.slice(0, i);
-    const j = rest.indexOf(close, i + open.length);
-    if (j === -1) return keepUnclosed ? out + rest.slice(i) : out;
-    rest = rest.slice(j + close.length);
-  }
-};
-
-/** HTML-looking tags out of a line — `<` opens a tag that runs to
- *  `>`; an unclosed `<` keeps its char so ordinary text survives. */
-const stripTags = (s: string): string => stripDelims(s, '<', '>', true);
-
-/** `<!-- ... -->` comments out of a line — an unterminated comment
- *  eats to end-of-line so no `<!--` can survive the pass. */
-const stripHtmlComments = (s: string): string => stripDelims(s, '<!--', '-->', false);
-
 /** HTML-looking tags out of a line — `<` opens a tag that runs to
  *  `>`; an unclosed `<` keeps its char so ordinary text survives. */
 const stripTags = (s: string): string => stripDelims(s, '<', '>', true);
