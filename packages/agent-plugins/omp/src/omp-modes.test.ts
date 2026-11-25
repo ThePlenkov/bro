@@ -81,6 +81,26 @@ describe('omp mode bridges', () => {
     assert.match(content, /bro work goal/);
   });
 
+  test('a divergent objective names the drift; a matching one stays quiet', async () => {
+    const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+    const sent: SentMessage[] = [];
+    installModeBridges(api(handlers, sent), {
+      board: () => ({
+        beads: { inProgress: [{ id: 'bro-goal', title: 'Finish the goal' }] },
+      }),
+    });
+    const handler = handlers.get('goal_updated');
+    assert.ok(handler);
+
+    // divergent — no shared significant word
+    await handler({ goal: { objective: 'repair the router catalog' } }, context());
+    assert.match(sent[sent.length - 1].message.content, /diverged/);
+
+    // matching — 'finish' rides both sides
+    await handler({ goal: { objective: 'finish the goal wiring' } }, context());
+    assert.ok(!sent[sent.length - 1].message.content.includes('diverged'));
+  });
+
   test('a null board injects nothing even with a live objective', async () => {
     const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
     const sent: SentMessage[] = [];
