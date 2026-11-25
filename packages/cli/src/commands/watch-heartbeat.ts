@@ -63,32 +63,56 @@ export interface HeartbeatSummary {
  *  or a non-array `attention` all read as `null` — "never had a
  *  heartbeat" is an ordinary state for a repo, never an error, and a
  *  half-shaped snapshot must not pass for "quiet". */
+interface RawHeartbeat {
+  ts: string;
+  ms: number;
+  attention: number;
+  writerSkewed: boolean;
+}
+
+/** Raw-read half: parse the file, guard the shape, hand back the
+ *  pieces a summary needs. Null on any malformation — a corrupt
+ *  heartbeat reads the same as none. */
+function parseHeartbeat(file: string): RawHeartbeat | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const obj = raw as { ts?: unknown; attention?: unknown; clock?: { skewed?: unknown } };
+  const ms = typeof obj.ts === 'string' ? Date.parse(obj.ts) : Number.NaN;
+  if (!Number.isFinite(ms) || !Array.isArray(obj.attention)) {
+    return null;
+  }
+  return {
+    ts: obj.ts as string,
+    ms,
+    attention: obj.attention.length,
+    writerSkewed: obj.clock?.skewed === true,
+  };
+}
+
 export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary | null {
   const file = heartbeatFile(dir);
   if (file === null || !existsSync(file)) {
     return null;
   }
-  try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      ts?: unknown;
-      attention?: unknown;
-      clock?: { skewed?: unknown };
-    };
-    const ms = typeof raw.ts === 'string' ? Date.parse(raw.ts) : Number.NaN;
-    if (!Number.isFinite(ms) || !Array.isArray(raw.attention)) {
-      return null;
-    }
-    const ahead = ms - now;
-    return {
-      ts: raw.ts as string,
-      ageMs: Math.max(0, now - ms),
-      ...(ahead > CLOCK_SKEW_MS ? { futureMs: ahead } : {}),
-      ...(raw.clock?.skewed === true ? { writerSkewed: true } : {}),
-      attention: raw.attention.length,
-    };
-  } catch {
+  const raw = parseHeartbeat(file);
+  if (raw === null) {
     return null;
   }
+  const ahead = raw.ms - now;
+  return {
+    ts: raw.ts,
+    ageMs: Math.max(0, now - raw.ms),
+    ...(ahead > CLOCK_SKEW_MS ? { futureMs: ahead } : {}),
+    ...(raw.writerSkewed ? { writerSkewed: true } : {}),
+    attention: raw.attention,
+  };
 }
 
 /** Age in the smallest honest unit — `30s`, `4m`, `9h`, `2d`. */

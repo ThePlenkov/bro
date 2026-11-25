@@ -183,7 +183,7 @@ function validCounts(lim: RunLimits): boolean {
   );
 }
 
-function parseArgs(argv: string[]): Options {
+function readCounts(argv: string[]): RunLimits {
   const lim = {
     runs: Number(argValue(argv, '--runs') ?? 20),
     warmup: Number(argValue(argv, '--warmup') ?? 1),
@@ -192,6 +192,10 @@ function parseArgs(argv: string[]): Options {
     console.error('bench-hooks: need --runs ≥3 and --warmup ≥0');
     process.exit(2);
   }
+  return lim;
+}
+
+function readLanes(argv: string[]): Lane[] {
   const rawLanes = argValue(argv, '--lanes')?.split(',') ?? [...LANES];
   const bad = rawLanes.filter(l => !(LANES as readonly string[]).includes(l));
   if (bad.length > 0) {
@@ -200,6 +204,11 @@ function parseArgs(argv: string[]): Options {
     );
     process.exit(2);
   }
+  return rawLanes as Lane[];
+}
+
+function parseArgs(argv: string[]): Options {
+  const lim = readCounts(argv);
   return {
     runs: lim.runs,
     warmup: lim.warmup,
@@ -207,7 +216,7 @@ function parseArgs(argv: string[]): Options {
     budgetFile: argValue(argv, '--budget'),
     enforce: argv.includes('--enforce'),
     asJson: argv.includes('--json'),
-    lanes: rawLanes as Lane[],
+    lanes: readLanes(argv),
   };
 }
 
@@ -250,6 +259,22 @@ type FixtureKind = 'armed' | 'fast';
  *  and it lands after every config file so no CFGS entry is newer.
  *  BRO_HOOKS_NO_FALLBACK pins run.sh to the in-tree dist so a broken
  *  build can never hide behind a PATH-bro or npx fallback. */
+function writeNodeShim(binDir: string, nodeLog: string): void {
+  const shim = join(binDir, 'node');
+  writeFileSync(
+    shim,
+    '#!/bin/sh\n' +
+      'case "$1" in\n' +
+      '  */hooks.js|*/index.js)\n' +
+      '    for _l do :; done\n' +
+      `    printf '%s\\n' "$_l" >> ${JSON.stringify(nodeLog)}\n` +
+      '    ;;\n' +
+      'esac\n' +
+      `exec ${JSON.stringify(process.execPath)} "$@"\n`
+  );
+  chmodSync(shim, 0o755);
+}
+
 function buildFixture(kind: FixtureKind): Fixture {
   const { root, main } = initRepo(`bro-bench-hooks-${kind}-`, m => {
     writeFileSync(join(m, 'bro.config.json'), '{}\n');
@@ -276,19 +301,7 @@ function buildFixture(kind: FixtureKind): Fixture {
     // inside the latency budget (sourcery finding on the PR)
     nodeLog = join(root, 'node-dispatch.log');
     writeFileSync(nodeLog, '');
-    const shim = join(binDir, 'node');
-    writeFileSync(
-      shim,
-      '#!/bin/sh\n' +
-        'case "$1" in\n' +
-        '  */hooks.js|*/index.js)\n' +
-        '    for _l do :; done\n' +
-        `    printf '%s\\n' "$_l" >> ${JSON.stringify(nodeLog)}\n` +
-        '    ;;\n' +
-        'esac\n' +
-        `exec ${JSON.stringify(process.execPath)} "$@"\n`
-    );
-    chmodSync(shim, 0o755);
+    writeNodeShim(binDir, nodeLog);
   }
   const env = e2eEnv({
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
@@ -371,19 +384,45 @@ function rowKey(spec: RowSpec): string {
   return `${spec.lane}:${spec.event}`;
 }
 
-/** Warmup samples — failures are logged, never gated; a fatal attempt
- *  stops the phase early. Returns the fatal detail, '' when clean. */
-function warmupPhase(spec: RowSpec, fx: Fixture, lim: RunLimits): string {
+/** Shared fatal-stop loop: attempt samples while none is fatal,
+ *  handing each non-fatal attempt to `use`. Returns the fatal detail,
+ *  '' when clean. */
+interface AttemptsRun {
+  spec: RowSpec;
+  fx: Fixture;
+  count: number;
+  offset: number;
+  use: (a: Attempt, i: number) => void;
+}
+
+function runAttempts(run: AttemptsRun): string {
+  const { spec, fx, count, offset, use } = run;
   let fatalDetail = '';
-  for (let i = 0; i < lim.warmup && fatalDetail === ''; i += 1) {
+  for (let i = offset; i < offset + count && fatalDetail === ''; i += 1) {
     const a = attempt(spec, rowInput(spec, i), fx);
     if (a.fatal) {
       fatalDetail = a.detail;
-    } else if (!a.ok) {
-      console.error(`bench-hooks: ${rowKey(spec)} warmup failed — ${a.detail}`);
+    } else {
+      use(a, i);
     }
   }
   return fatalDetail;
+}
+
+/** Warmup samples — failures are logged, never gated; a fatal attempt
+ *  stops the phase early. Returns the fatal detail, '' when clean. */
+function warmupPhase(spec: RowSpec, fx: Fixture, lim: RunLimits): string {
+  return runAttempts({
+    spec,
+    fx,
+    count: lim.warmup,
+    offset: 0,
+    use: a => {
+      if (!a.ok) {
+        console.error(`bench-hooks: ${rowKey(spec)} warmup failed — ${a.detail}`);
+      }
+    },
+  });
 }
 
 interface Measured {
@@ -396,15 +435,16 @@ interface Measured {
  *  attempt stops the phase early. */
 function measuredPhase(spec: RowSpec, fx: Fixture, lim: RunLimits): Measured {
   const out: Measured = { times: [], errors: 0, fatalDetail: '' };
-  for (let i = lim.warmup; i < lim.warmup + lim.runs && out.fatalDetail === ''; i += 1) {
-    const a = attempt(spec, rowInput(spec, i), fx);
-    if (a.fatal) {
-      out.fatalDetail = a.detail;
-    } else {
+  out.fatalDetail = runAttempts({
+    spec,
+    fx,
+    count: lim.runs,
+    offset: lim.warmup,
+    use: (a, i) => {
       out.times.push(a.ms);
       out.errors += noteError(a, { key: rowKey(spec), i, prior: out.errors });
-    }
-  }
+    },
+  });
   return out;
 }
 
