@@ -96,11 +96,13 @@ function isForceToken(token: string): boolean {
  *  that is neither option nor push ends the call (it is the remote or
  *  a refspec of some OTHER git subcommand — or not git at all). */
 function pushArgsOf(segment: string): string[] | null {
-  // shell furniture is whitespace for the scan: `x=$(git` must yield a
+  // shell furniture is whitespace for the scan — redirections included:
+  // `--force>push.log` is the flag plus a redirect in shell reading,
+  // and `x=$(git` must yield a
   // bare `git` token exactly like `'git` does (the substitution sigil
   // precedes the word with no space)
   const tokens = segment
-    .replace(/[()'"\`$]/g, ' ')
+    .replace(/[()'"\`$<>]/g, ' ')
     .split(/\s+/)
     .filter(t => t !== '');
   for (let i = 0; i < tokens.length; i += 1) {

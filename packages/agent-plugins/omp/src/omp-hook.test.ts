@@ -77,4 +77,9 @@ describe('the omp force-push guard', () => {
     assert.equal(isForcePush('git log "$(git push --force origin main)"'), true);
     assert.equal(isForcePush('echo $(git push -f)'), true);
   });
+
+  void test('redirection does not glue onto the flag (macroscope)', () => {
+    assert.equal(isForcePush('git push origin main --force>push.log'), true);
+    assert.equal(isForcePush('git push -f 2>/dev/null'), true);
+  });
 });
