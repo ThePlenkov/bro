@@ -588,7 +588,27 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   const skillsDir = join(dir, '.agents', 'skills');
 
   if (!checkOnly && !dryRun) {
+    // the lockfile is the committed contract — `npx skills add` rewrites it
+    // with freshly fetched hashes, which would silently advance the lock on
+    // disk: later checks accept changed upstream content instead of reporting
+    // drift (bro-illox). Snapshot before, restore after; the in-memory drift
+    // check below already compares against the original.
+    const lockPath = join(dir, 'skills-lock.json');
+    let originalLock: string | null = null;
+    try {
+      originalLock = readFileSync(lockPath, 'utf8');
+    } catch {
+      originalLock = null;
+    }
     installLockedSkills(dir, locked, skillsDir);
+    if (originalLock !== null) {
+      try {
+        writeFileSync(lockPath, originalLock);
+      } catch {
+        // a failed restore leaves the installer-advanced lock — the drift
+        // report below still compares against the original in-memory snapshot
+      }
+    }
   }
 
   // Compare against the original committed lock snapshot, not a re-read:
