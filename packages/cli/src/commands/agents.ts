@@ -54,12 +54,15 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   CommandError,
   isCommandError,
+  bdAt,
   countSessionReservations,
   EXIT,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  getTasks,
   gitCommonDir,
   hasHelpFlag,
   isBatchSpawn,
@@ -77,6 +80,9 @@ import {
   stepClassInfo,
   taskStoreAt,
   type AgentConnector,
+  type TaskDepEdge,
+  type TaskRow,
+  type TaskStore,
   BATCH_MARKER_ENV,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -90,6 +96,7 @@ import type { AcpSeam, FetchFn } from '@broject/providers';
 import { otelHeader, otelSpan } from '@broject/providers';
 import { beadsDir } from '@broject/convoy';
 import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
+import { listLessonsAt, rankLessons } from '@broject/learn';
 import {
   agentPromptPath,
   applyFleetMatrix,
@@ -110,6 +117,7 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
+import { otherLiveWork } from './hooks.ts';
 import { devinSessionTranscript, devinTranscriptsDir, renderDevinTranscript } from '@broject/devin';
 import { flag, positionals } from './args.ts';
 import { mainWorktree, worktreePathFor } from './work.ts';
@@ -626,6 +634,7 @@ function resolvePrompt(
     );
   }
   const base = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
+  const store = taskStoreAt(beads);
   // presence, not rendered equality — a bead titled exactly its id
   // still carries a title; only a row with neither field is promptless
   const promptless =
@@ -640,7 +649,132 @@ function resolvePrompt(
   // wrapper regardless of which formula poured them. The --prompt-file,
   // stored-prompt, and literal-prompt paths stay the caller's verbatim
   // text: those are operator work orders, not bro-composed ones.
-  return `${base}\n\n${LEARN_RETRO_CLOSEOUT}`;
+  const ctx = spawnContext(dir, beads, store, molStep, base);
+  return ctx === ''
+    ? `${base}\n\n${LEARN_RETRO_CLOSEOUT}`
+    : `${base}\n\n${ctx}\n\n${LEARN_RETRO_CLOSEOUT}`;
+}
+
+/** Line cap per `## Context` part — the section stays lean even on a
+ *  dense store (bro-nfl0e). */
+const CONTEXT_PART_CAP = 10;
+
+/** Dep edges touching the bead — canonical `<issue> -[rel]-> <dep>`
+ *  reads "issue depends on dep via rel" (`bro-x -[blocked]-> bro-y` =
+ *  bro-x is blocked by bro-y); the OTHER endpoint's title rides along
+ *  when the store hydrates it. */
+function contextDepLines(store: TaskStore, molStep: string): string[] {
+  try {
+    const edges = store.deps<TaskDepEdge>([molStep]);
+    const others = [
+      ...new Set(edges.flatMap(e => [e.issue_id, e.depends_on_id]).filter(id => id !== molStep)),
+    ];
+    const titles = new Map(getTasks(store, others).map(r => [r.id, r.title ?? '']));
+    return edges
+      .map(e => {
+        const other = e.issue_id === molStep ? e.depends_on_id : e.issue_id;
+        const t = (titles.get(other) ?? '').trim();
+        return `- ${e.issue_id} -[${e.type}]-> ${e.depends_on_id}${t === '' ? '' : ` — ${t}`}`;
+      })
+      .slice(0, CONTEXT_PART_CAP);
+  } catch {
+    return [];
+  }
+}
+
+/** Open beads whose text reads near-identical to this work order —
+ *  the same promptSimilar floor the spawn-time duplicate advisory
+ *  uses, lifted into the prompt so the worker sees the collision. */
+function contextDuplicateLines(store: TaskStore, molStep: string, base: string): string[] {
+  try {
+    return store
+      .list({ status: 'open', limit: 200 })
+      .filter(
+        r => r.id !== molStep && promptSimilar(base, `${r.title ?? ''}\n${r.description ?? ''}`)
+      )
+      .slice(0, CONTEXT_PART_CAP)
+      .map(r => `- ${r.id}${(r.title ?? '').trim() === '' ? '' : ` — ${r.title}`}`);
+  } catch {
+    return [];
+  }
+}
+
+/** Lessons the store ranks against this work order — `bro learn
+ *  probe`'s matcher, fired at assembly time instead of leaving the
+ *  hit to chance hooks. */
+function contextLessonLines(beads: string, base: string): string[] {
+  try {
+    const { lessons } = listLessonsAt(beads);
+    return rankLessons(base, lessons)
+      .slice(0, CONTEXT_PART_CAP)
+      .map(h => `- ${h.lesson.id}: ${h.lesson.lesson}`);
+  } catch {
+    return [];
+  }
+}
+
+/** `bd remember` notes — the always-on memory plane, pinned to the
+ *  same store the worker claims from. */
+function contextMemoryLines(beads: string): string[] {
+  try {
+    const res = bdAt(beads, ['memories', '--json'], 10_000);
+    if (res.code !== 0) {
+      return [];
+    }
+    const v: unknown = JSON.parse(res.out);
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      return [];
+    }
+    return Object.entries(v as Record<string, unknown>)
+      .filter(([k, val]) => k !== 'schema_version' && typeof val === 'string')
+      .slice(0, CONTEXT_PART_CAP)
+      .map(([k, val]) => `- ${k}: ${val}`);
+  } catch {
+    return [];
+  }
+}
+
+/** Other sessions' live `.work` markers — markers live in the common
+ *  git dir, so this sees armed work in sibling worktrees too. The
+ *  caller's own process tree is already excluded inside
+ *  otherLiveWork's owner check. */
+function contextOverlapLines(dir: string): string[] {
+  try {
+    const gd = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+    if (gd === null) {
+      return [];
+    }
+    return otherLiveWork(join(gd, 'bro', 'hooks'), '')
+      .slice(0, CONTEXT_PART_CAP)
+      .map(w => `- session ${w.session.slice(0, 8)} armed work on ${w.detail}`);
+  } catch {
+    return [];
+  }
+}
+
+/** The composed work order's `## Context` section (bro-nfl0e): dep
+ *  tree, look-alike beads, matching learn lessons, bd memories, and
+ *  live `.work`-marker overlap — the pieces a worker would re-derive
+ *  or never see. Every part is fail-open and capped; a store or
+ *  marker plane that can't answer contributes nothing, never a
+ *  spawn failure. Only composed prompts get it — --prompt-file,
+ *  stored-prompt, and literal prompts stay verbatim. */
+function spawnContext(
+  dir: string,
+  beads: string,
+  store: TaskStore,
+  molStep: string,
+  base: string
+): string {
+  const parts: [string, string[]][] = [
+    ['### Dependencies', contextDepLines(store, molStep)],
+    ['### Similar beads', contextDuplicateLines(store, molStep, base)],
+    ['### Lessons', contextLessonLines(beads, base)],
+    ['### Notes', contextMemoryLines(beads)],
+    ['### Live work in this repo', contextOverlapLines(dir)],
+  ];
+  const body = parts.flatMap(([h, lines]) => (lines.length === 0 ? [] : [h, ...lines])).join('\n');
+  return body === '' ? '' : `## Context\n${body}`;
 }
 
 /** Bad spawn input (missing worktree/prompt file, exclusive fields) —
