@@ -7,7 +7,7 @@
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
-      "members": ["convoy", "next", "loop", "watchdog", "stack"]
+      "members": ["test", "convoy", "next", "loop", "watchdog", "stack"]
     },
     "fleet": {
       "summary": "agent plane — workers, serve, the board",
@@ -205,6 +205,26 @@
           "0": "MERGED — cycle complete",
           "1": "blocked gate, closed-unmerged PR, timeout, or merge failure",
           "2": "usage"
+        }
+      },
+      "external": false
+    },
+    "test": {
+      "name": "test",
+      "group": "flow",
+      "summary": "Scoped dev-side test lane — substring filters over the tsx harness (bro-6xjvb)",
+      "spellings": ["test", "flow test"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--e2e": "include the process-spawning e2e files in the selectable inventory"
+        },
+        "exits": {
+          "0": "selected tests passed",
+          "1": "a selected test failed",
+          "2": "usage — no filter, or no file matches"
         }
       },
       "external": false
