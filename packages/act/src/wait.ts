@@ -13,6 +13,14 @@ export interface GateWaitResult {
   polls: number;
 }
 
+/** The bare URL inside a `[#N](url)` facade link — emitted alone on
+ *  its own line so a soft-wrapping pane never splits the token mid-URL
+ *  (bro-w0lil: wrapped verdict lines rendered unclickable). Falls back
+ *  to the link verbatim when the shape is not the markdown form. */
+export function bareUrl(link: string): string {
+  return link.match(/\]\(([^)]+)\)/)?.[1] ?? link;
+}
+
 /** An external wake source — a subscription distilled to "something
  *  changed, poll early". `next()` resolves on the next relevant event;
  *  a dead or absent source degrades to pure timer polling (spec
