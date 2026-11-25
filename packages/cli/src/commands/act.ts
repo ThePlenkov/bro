@@ -255,12 +255,76 @@ function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): voi
   }
 }
 
-function cmdResolve(argv: string[]): void {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
-  const rev = reviewHost(undefined, loadBroConfig().connectors);
-  const id = threadArg(argv);
-  const comment = commentArg(argv);
-  const unresolve = argv.includes('--unresolve');
+/** Batch-file rows — `<id><TAB><body>` per line, `\\n`/`\\t` escapes
+ *  expanded. Reply and resolve share one parser: the file shape is the
+ *  same contract on both verbs (bro-71a10). Lines without the tab yield
+ *  a null body — resolve reads them as silent fixes, reply skips them. */
+function parseBatchRows(file: string): {
+  rows: { id: string; body: string }[];
+  tabless: string[];
+  blankId: number;
+} {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (err) {
+    // a missing batch file is a usage error, not a raw ENOENT stack
+    console.error(
+      `error: cannot read --file ${file} — ${err instanceof Error ? err.message : String(err)}`
+    );
+    process.exit(2);
+  }
+  // trimEnd only: the leading tab of a blank-id row is STRUCTURAL —
+  // trimming it away would turn the row into a bare "tabless" id and
+  // silently resolve whatever the comment column named (codeant)
+  const lines = text!
+    .split('\n')
+    .map(l => l.trimEnd())
+    .filter(l => l.trim().length > 0);
+  const rows: { id: string; body: string }[] = [];
+  const tabless: string[] = [];
+  let blankId = 0;
+  for (const line of lines) {
+    const tab = line.indexOf('\t');
+    if (tab === -1) {
+      // no structural tab — the whole line is the id, and whitespace
+      // around it is noise (the trimEnd above keeps leading spaces so
+      // the tab test stays honest; the id itself must not carry them —
+      // kody on #1203)
+      tabless.push(line.trim());
+      continue;
+    }
+    const id = line.slice(0, tab).trim();
+    // a tab-only line has no thread to act on — an empty id would hit
+    // the host API as a malformed mutation (amazon-q on #1203)
+    if (id === '') {
+      blankId += 1;
+      continue;
+    }
+    rows.push({
+      id,
+      body: line
+        .slice(tab + 1)
+        .replaceAll(String.raw`\n`, '\n')
+        .replaceAll(String.raw`\t`, '\t'),
+    });
+  }
+  if (blankId > 0) {
+    // silent skips read as success — the operator must know rows were
+    // dropped, or a malformed batch file looks fully applied (kody)
+    console.error(`act: note — ${blankId} blank-id row(s) skipped in the batch file`);
+  }
+  return { rows, tabless, blankId };
+}
+
+/** One thread through the resolve/unresolve flow — the batch --file
+ *  path and the single --thread path share it exactly (bro-71a10). */
+function resolveOne(
+  rev: ReviewFacade,
+  argv: string[],
+  opts: { id: string; comment?: string; unresolve: boolean }
+): void {
+  const { id, comment, unresolve } = opts;
   if (comment) {
     if (!unresolve) {
       // the verdict on a fix is the push — comments on resolved-as-fixed
@@ -294,6 +358,40 @@ function cmdResolve(argv: string[]): void {
       comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed'
     );
   }
+}
+
+/** Batch shape mirrors reply --file: one <thread_id> or
+ *  <thread_id><TAB><comment> per line — a resolve sweep over N threads
+ *  under one verdict comment is one command, not a hand-rolled loop
+ *  (bro-71a10). Commentless lines resolve silently (the fix verdict). */
+function cmdResolve(argv: string[]): void {
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const unresolve = argv.includes('--unresolve');
+  const fileIdx = argv.indexOf('--file');
+  if (fileIdx >= 0) {
+    const file = argv[fileIdx + 1];
+    if (!file) {
+      console.error('error: --file requires a path');
+      process.exit(2);
+    }
+    const { rows, tabless } = parseBatchRows(file);
+    let resolved = 0;
+    for (const row of rows) {
+      resolveOne(rev, argv, { id: row.id, comment: row.body, unresolve });
+      resolved += 1;
+    }
+    for (const id of tabless) {
+      resolveOne(rev, argv, { id, unresolve });
+      resolved += 1;
+    }
+    console.error(`act resolve: ${resolved} thread(s)`);
+    dropActState();
+    return;
+  }
+  const id = threadArg(argv);
+  const comment = commentArg(argv);
+  resolveOne(rev, argv, { id, comment: comment ?? undefined, unresolve });
   dropActState();
 }
 
@@ -307,27 +405,8 @@ function cmdReply(argv: string[]): void {
       console.error('error: --file requires a path');
       process.exit(2);
     }
-    const lines = readFileSync(file, 'utf8')
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0);
-    let skipped = 0;
-    const rows = lines
-      .map(l => {
-        const tab = l.indexOf('\t');
-        if (tab === -1) {
-          skipped += 1;
-          return null;
-        }
-        return {
-          id: l.slice(0, tab).trim(),
-          body: l
-            .slice(tab + 1)
-            .replaceAll(String.raw`\n`, '\n')
-            .replaceAll(String.raw`\t`, '\t'),
-        };
-      })
-      .filter((r): r is { id: string; body: string } => r !== null);
+    const { rows, tabless, blankId } = parseBatchRows(file);
+    const skipped = tabless.length;
     for (const row of rows) {
       rev.replyThread(row.id, row.body);
       console.error(`act: replied on ${row.id}`);
@@ -336,6 +415,11 @@ function cmdReply(argv: string[]): void {
     console.error(`act reply: ${rows.length} repl(ies)`);
     if (skipped > 0) {
       console.error(`warning: ${skipped} line(s) had no <thread_id><TAB><body> shape — skipped`);
+      process.exitCode = 1;
+    }
+    // a batch of ONLY malformed rows replied nothing at all — exiting 0
+    // would report success for a no-op (macroscope on #1203)
+    if (rows.length === 0 && blankId > 0) {
       process.exitCode = 1;
     }
     dropActState();

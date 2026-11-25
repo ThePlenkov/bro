@@ -29,9 +29,11 @@ Commands:
   resolve --thread ID [--comment T] Resolve a thread — a fix resolves silently
                                     (the push is the verdict); --comment is for
                                     reject/defer reasons
+        --file TSV                  Batch resolve: <thread_id>[\t<comment>] per line —
+                                    a resolve sweep over N threads in one command
+        --unresolve                 resolve → unresolve instead
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
-        --unresolve                 resolve → unresolve instead
   dismiss [PR] [--dry-run] [--message T]
                                     Dismiss stale veto reviews — standing
                                     CHANGES_REQUESTED reviews whose referenced
