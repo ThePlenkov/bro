@@ -24,8 +24,10 @@ describe('the pane impl seam', () => {
   test('argv beats env beats default', async () => {
     const fromArgv = await pickImpl('legacy', { BRO_TUI_IMPL: 'acp' });
     assert.equal(fromArgv.name, 'legacy');
-    const fromEnv = await pickImpl(undefined, { BRO_TUI_IMPL: 'legacy' });
-    assert.equal(fromEnv.name, 'legacy');
+    // Use the opposite fallback so this proves the environment is read
+    // rather than merely agreeing with the default.
+    const fromEnv = await pickImpl(undefined, { BRO_TUI_IMPL: 'acp' }, 'legacy');
+    assert.equal(fromEnv.name, 'acp');
   });
 
   test('an unknown name fails loud', async () => {
