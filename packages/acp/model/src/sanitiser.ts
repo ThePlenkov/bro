@@ -123,6 +123,11 @@ function escIntermediateStep(cp: number): Step {
 }
 
 function csiStep(cp: number): Step {
+  // CAN and SUB abort an in-progress CSI sequence (ECMA-48 §6.5). LF and HT
+  // are execute characters: retain them for the sanitised output, but keep
+  // scanning the CSI sequence afterwards.
+  if (cp === 0x18 || cp === 0x1a) return GROUND;
+  if (cp === 0x0a || cp === 0x09) return { state: "csi", emit: true };
   // parameter and intermediate bytes (and anything else, for malformed input): keep consuming
   return isFinalByte(cp) ? GROUND : CSI;
 }
