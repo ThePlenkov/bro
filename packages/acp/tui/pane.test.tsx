@@ -374,7 +374,7 @@ describe('the Solid session pane', () => {
     }
   });
 
-  test('a drag over text produces a renderer selection (OSC52 fires)', async () => {
+  test('a drag over text does not throw when the selection is unavailable', async () => {
     const p = await mount();
     try {
       p.model.feed(chunk('agent_message_chunk', 'hello selectable world'));
@@ -383,9 +383,9 @@ describe('the Solid session pane', () => {
       const y = frame.split('\n').findIndex(l => l.includes('hello selectable'));
       assert.ok(y >= 0, 'row not in frame');
       const mouse = createMockMouse(p.renderer);
-      // the drag itself is the contract — getSelection reads empty
-      // after release because onCopySelect already consumed it, so
-      // what this asserts is that no exception broke the gesture
+      // Selection is consumed by the copy handler before it can be observed
+      // here; this test only protects the renderer from throwing during the
+      // gesture.
       await mouse.drag(3, y, 20, y, 0);
       await p.flush();
     } finally {
