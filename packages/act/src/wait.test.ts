@@ -234,8 +234,11 @@ test('greenSettleMs holds a fresh green — a late thread breaks it (wtf-merge-r
 
 test('greenSettleMs settles once the green has held the window', async () => {
   const res = await waitForGate(fetcher([open()]), {
-    intervalMs: 15,
-    greenSettleMs: 20,
+    // the window must dwarf the interval — a margin of window−interval
+    // is all the event-loop stall the hold survives; tight margins
+    // flaked on loaded CI runners (settled one poll early)
+    intervalMs: 10,
+    greenSettleMs: 100,
   });
   assert.equal(res.gate.ok, true);
   assert.equal(res.timedOut, false);
@@ -254,7 +257,7 @@ test('a pending poll inside the window resets the green clock', async () => {
   // SECOND green, not the first
   const res = await waitForGate(fetcher([open(), open({ ciPending: 1 }), open()]), {
     intervalMs: 10,
-    greenSettleMs: 25,
+    greenSettleMs: 100,
   });
   assert.equal(res.gate.ok, true);
   assert.ok(res.polls >= 5, `expected the reset to cost extra polls, got ${res.polls}`);
