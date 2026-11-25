@@ -53,11 +53,13 @@ interface GoalUpdatedEvent {
 /** Bead and drill titles are user-controlled text interpolated into
  *  model instructions — a prompt-injection channel. Every title the
  *  bridges emit goes through here: control characters and newlines are
- *  stripped (one-line guarantee, no instruction smuggling across line
- *  breaks) and the text is wrapped in corner brackets as explicit
- *  untrusted-data delimiters. */
+ *  stripped — C0/DEL plus the Unicode line and paragraph separators
+ *  (one-line guarantee, no instruction smuggling across line breaks) —
+ *  the bracket characters themselves are blanked so a title cannot
+ *  close its own boundary, and the text is wrapped in corner brackets
+ *  as explicit untrusted-data delimiters. */
 export const untrusted = (s: string): string =>
-  `\u300c${s.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()}\u300d`;
+  `\u300c${s.replace(/[\u0000-\u001f\u007f\u2028\u2029\u300c\u300d]/g, ' ').trim()}\u300d`;
 
 /** The standing note every bridge message carries — once per message,
  *  next to the first interpolated title. */
