@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { AgentState, AgentRegistryEntry, SpawnSpec } from '@broject/core';
 import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
-import * as harness from './spawn-harness.ts';
+import * as harness from './core.ts';
 
 /** Factory-level probe — requires an actual city.toml (the authored
  *  city marker) so resolution prefers native when no Gas City exists,

@@ -6,8 +6,9 @@ import { dropWorkMarker } from './work-markers.ts';
 import { SpawnError } from '@broject/core';
 import { type CopilotTask, copilotTaskIdOf, copilotTaskState } from './copilot-tasks.ts';
 import type { AgentConnector, AgentInfo, ConnectorCtx, SpawnSpec } from './types.ts';
-import * as harness from './spawn-harness.ts';
+import * as harness from './core.ts';
 const {
+  registerAgentConnector,
   AgentNotFound,
   COPILOT_LIVE_STATES,
   agentsHome,
@@ -450,3 +451,5 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (shouldCancelCopilot(entry, taskId)) copilotCancelRemote(molStep, entry, taskId!);
   };
 }
+
+registerAgentConnector('copilot', makeCopilotConnector, {}, { builtin: true });

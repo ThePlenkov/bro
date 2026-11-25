@@ -9,8 +9,9 @@ import type {
   ConnectorCtx,
   SpawnSpec,
 } from './types.ts';
-import * as harness from './spawn-harness.ts';
+import * as harness from './core.ts';
 const {
+  registerAgentConnector,
   AgentNotFound,
   SpawnError,
   agentsHome,
@@ -494,3 +495,5 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
   };
 }
+
+registerAgentConnector('docker', makeDockerConnector, {}, { builtin: true });

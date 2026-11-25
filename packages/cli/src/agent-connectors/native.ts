@@ -312,9 +312,9 @@ import {
   laneGateTake,
   reconcileLanePauseForRegistry,
 } from '../lane.ts';
-import * as harness from './spawn-harness.ts';
+import * as harness from './core.ts';
 const {
-  agentRegistry,
+  registerAgentConnector,
   unregisterAgentConnector,
   agentConnectorNames,
   loadAgentEnv,
@@ -1241,3 +1241,5 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
   };
 }
+
+registerAgentConnector('native', makeNativeConnector, {}, { builtin: true });

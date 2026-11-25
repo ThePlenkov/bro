@@ -8,7 +8,7 @@ import type {
   ConnectorCtx,
   SpawnSpec,
 } from './types.ts';
-import type { AgentConnectorEnv, AgentState, GcSession, ListResult } from './spawn-harness.ts';
+import type { AgentConnectorEnv, AgentState, GcSession, ListResult } from './core.ts';
 import {
   AgentNotFound,
   SpawnError,
@@ -52,7 +52,8 @@ import {
   withAgentRegistryLock,
   writePrivateFileSync,
   entryRunId,
-} from './spawn-harness.ts';
+  registerAgentConnector,
+} from './core.ts';
 
 function resetGcSession(input: { id: string; city: string }): string {
   const reset = gcRun({ args: ['session', 'reset', input.id, '--city', input.city] });
@@ -691,3 +692,5 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     capabilities: () => ({ attach: true, respawn: true, workers: false, supervisor: 'required' }),
   };
 }
+
+registerAgentConnector('gascity', makeGascityConnector, {}, { builtin: true });

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import {
+  registerAgentConnector,
   AgentNotFound,
   type AgentConnectorEnv,
   SpawnError,
@@ -45,7 +46,7 @@ import {
   procStat,
   TMUX_DEAD_ERR,
   withAgentRegistryLock,
-} from './spawn-harness.ts';
+} from './core.ts';
 import type {
   AgentConnector,
   AgentInfo,
@@ -387,3 +388,5 @@ function listTmuxAgents(dir: string, socket: string) {
   const live = new Set(ls.out.split('\n').filter(s => s !== ''));
   return { agents: entries.map(([molStep, e]) => toTmuxInfo(socket, dir, home, molStep, e, live)) };
 }
+
+registerAgentConnector('tmux', makeTmuxConnector, {}, { builtin: true });

@@ -1,6 +1,6 @@
 /** Basic Docker command and descriptor helpers. */
 import { spawnSync } from 'node:child_process';
-import type { AgentRegistryEntry } from './spawn-harness.ts';
+import type { AgentRegistryEntry } from './core.ts';
 
 /** One docker call — PATH lookup is the same contract as git/gh/bd. */
 
