@@ -28,26 +28,134 @@ type State = "ground" | "esc" | "escIntermediate" | "csi" | "string" | "stringEs
  *     only at a line break and does not reorder or hide arbitrary characters the way bidi
  *     overrides and zero-width joiners do, so it is not treated as a spoofing vector.
  */
+/** Stripped ranges (inclusive code-point bounds), in the same order as the spec comment:
+ *  ALM, Mongolian vowel separator, ZWSP-RLM, bidi embeddings/overrides, word joiner,
+ *  bidi isolates, BOM. */
+const APPROVAL_STRIPPED_RANGES: readonly (readonly [number, number])[] = [
+  [0x061c, 0x061c], // Arabic Letter Mark
+  [0x180e, 0x180e], // Mongolian vowel separator (decision, see above)
+  [0x200b, 0x200f], // ZWSP, ZWNJ, ZWJ, LRM, RLM
+  [0x202a, 0x202e], // LRE, RLE, PDF, LRO, RLO
+  [0x2060, 0x2060], // word joiner
+  [0x2066, 0x2069], // LRI, RLI, FSI, PDI
+  [0xfeff, 0xfeff], // zero width no-break space / BOM
+];
+
 function isApprovalStripped(cp: number): boolean {
-  if (cp === 0x061c) return true; // Arabic Letter Mark
-  if (cp >= 0x200b && cp <= 0x200f) return true; // ZWSP, ZWNJ, ZWJ, LRM, RLM
-  if (cp === 0x180e) return true; // Mongolian vowel separator (decision, see above)
-  if (cp >= 0x202a && cp <= 0x202e) return true; // LRE, RLE, PDF, LRO, RLO
-  if (cp === 0x2060) return true; // word joiner
-  if (cp >= 0x2066 && cp <= 0x2069) return true; // LRI, RLI, FSI, PDI
-  if (cp === 0xfeff) return true; // zero width no-break space / BOM
-  return false;
+  return APPROVAL_STRIPPED_RANGES.some(([low, high]) => cp >= low && cp <= high);
 }
 
 const isFinalByte = (cp: number): boolean => cp >= 0x40 && cp <= 0x7e;
 const isIntermediateByte = (cp: number): boolean => cp >= 0x20 && cp <= 0x2f;
 const isGenericFinalByte = (cp: number): boolean => cp >= 0x30 && cp <= 0x7e;
 
+// -- The scanner, one step function per state --------------------------------------------------
+//
+// A step consumes a code point and reports the transition: `state` is the next state,
+// `reprocess` re-reads the same code point in it (the old `i--`), `emit` appends it to the
+// output. `approval` is only consulted by the ground state.
+
+interface Step {
+  readonly state: State;
+  readonly reprocess?: boolean;
+  readonly emit?: boolean;
+}
+
+const GROUND: Step = { state: "ground" };
+const EMIT: Step = { state: "ground", emit: true };
+const CSI: Step = { state: "csi" };
+const STRING: Step = { state: "string" };
+const REPROCESS_FROM_GROUND: Step = { state: "ground", reprocess: true };
+const REPROCESS_IN_STRING: Step = { state: "string", reprocess: true };
+
+/** 8-bit DCS, SOS, OSC, PM, APC introducers. */
+const C1_STRING_INTRODUCERS: ReadonlySet<number> = new Set([0x90, 0x98, 0x9d, 0x9e, 0x9f]);
+
+/** 7-bit OSC, DCS, APC, PM, SOS introducers (the character after ESC). */
+const ESC_STRING_INTRODUCERS: ReadonlySet<number> = new Set([0x5d, 0x50, 0x5f, 0x5e, 0x58]); // ] P _ ^ X
+
+/** Ground-state classification, in priority order; anything unlisted reaches the
+ *  approval-strip check / emit below. */
+const GROUND_TRANSITIONS: readonly { readonly test: (cp: number) => boolean; readonly step: Step }[] = [
+  { test: (cp) => cp === 0x1b, step: { state: "esc" } },
+  { test: (cp) => cp === 0x9b, step: CSI }, // 8-bit CSI introducer
+  { test: (cp) => C1_STRING_INTRODUCERS.has(cp), step: STRING },
+  // 8-bit ST (0x9c) seen outside a string, and every other C1 control: drop
+  { test: (cp) => cp >= 0x80 && cp <= 0x9f, step: GROUND },
+  // CRLF collapses to LF (handled when the LF itself is reached); a lone CR is dropped
+  { test: (cp) => cp === 0x0d, step: GROUND },
+  { test: (cp) => cp === 0x0a || cp === 0x09, step: EMIT },
+  { test: (cp) => cp < 0x20, step: GROUND }, // other C0 controls: drop
+  { test: (cp) => cp === 0x7f, step: GROUND }, // DEL: drop
+];
+
+function groundStep(cp: number, approval: boolean): Step {
+  for (const { test, step } of GROUND_TRANSITIONS) {
+    if (test(cp)) return step;
+  }
+  if (approval && isApprovalStripped(cp)) return GROUND;
+  return EMIT;
+}
+
+/** Esc-state transitions, in priority order; an unmatched code point is malformed input
+ *  (e.g. ESC followed by a control character): the lone ESC is dropped and the character
+ *  is reprocessed from ground. */
+const ESC_TRANSITIONS: readonly { readonly test: (cp: number) => boolean; readonly step: Step }[] = [
+  { test: (cp) => cp === 0x5b, step: CSI }, // '['
+  { test: (cp) => ESC_STRING_INTRODUCERS.has(cp), step: STRING },
+  { test: (cp) => cp === 0x5c, step: GROUND }, // stray '\\' terminator, no open string
+  { test: isIntermediateByte, step: { state: "escIntermediate" } },
+  // single-byte escape sequence (e.g. ESC 7, ESC c): fully consumed
+  { test: isGenericFinalByte, step: GROUND },
+];
+
+function escStep(cp: number): Step {
+  for (const { test, step } of ESC_TRANSITIONS) {
+    if (test(cp)) return step;
+  }
+  return REPROCESS_FROM_GROUND;
+}
+
+function escIntermediateStep(cp: number): Step {
+  if (isIntermediateByte(cp)) return { state: "escIntermediate" };
+  if (isGenericFinalByte(cp)) return GROUND;
+  return REPROCESS_FROM_GROUND;
+}
+
+function csiStep(cp: number): Step {
+  // parameter and intermediate bytes (and anything else, for malformed input): keep consuming
+  return isFinalByte(cp) ? GROUND : CSI;
+}
+
+function stringStep(cp: number): Step {
+  if (cp === 0x07) return GROUND; // BEL terminator
+  if (cp === 0x9c) return GROUND; // 8-bit ST terminator
+  if (cp === 0x1b) return { state: "stringEsc" };
+  return STRING; // consume
+}
+
+function stringEscStep(cp: number): Step {
+  // 7-bit ST (ESC \) terminator
+  if (cp === 0x5c) return GROUND;
+  // not a valid terminator: the ESC is still inside the string; reprocess this
+  // character as an ordinary string byte
+  return REPROCESS_IN_STRING;
+}
+
+const STEP_TABLE: Record<State, (cp: number, approval: boolean) => Step> = {
+  ground: groundStep,
+  esc: escStep,
+  escIntermediate: escIntermediateStep,
+  csi: csiStep,
+  string: stringStep,
+  stringEsc: stringEscStep,
+};
+
 /**
  * Sanitise a string for safe rendering. Pure and idempotent: sanitise(sanitise(x)) === sanitise(x)
  * for every input and mode (spec "Sanitisation is pure and idempotent").
  */
-export function sanitise(input: string, mode: SanitiseMode = "default"): string { // NOSONAR typescript:S3776 — vendored upstream; state machine stays verbatim
+export function sanitise(input: string, mode: SanitiseMode = "default"): string {
   const approval = mode === "approval";
   const chars = Array.from(input);
   let out = "";
@@ -56,132 +164,12 @@ export function sanitise(input: string, mode: SanitiseMode = "default"): string 
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i] as string;
     const cp = ch.codePointAt(0) as number;
-
-    switch (state) {
-      case "ground": {
-        if (cp === 0x1b) {
-          state = "esc";
-          break;
-        }
-        if (cp === 0x9b) {
-          // 8-bit CSI introducer
-          state = "csi";
-          break;
-        }
-        if (cp === 0x90 || cp === 0x98 || cp === 0x9d || cp === 0x9e || cp === 0x9f) {
-          // 8-bit DCS, SOS, OSC, PM, APC introducers
-          state = "string";
-          break;
-        }
-        if (cp >= 0x80 && cp <= 0x9f) {
-          // 8-bit ST (0x9c) seen outside a string, and every other C1 control: drop
-          break;
-        }
-        if (cp === 0x0d) {
-          // CRLF collapses to LF (handled when the LF itself is reached); a lone CR is dropped
-          break;
-        }
-        if (cp === 0x0a || cp === 0x09) {
-          out += ch;
-          break;
-        }
-        if (cp < 0x20) {
-          // other C0 controls: drop
-          break;
-        }
-        if (cp === 0x7f) {
-          // DEL: drop
-          break;
-        }
-        if (approval && isApprovalStripped(cp)) {
-          break;
-        }
-        out += ch;
-        break;
-      }
-
-      case "esc": {
-        if (ch === "[") {
-          state = "csi";
-          break;
-        }
-        if (ch === "]" || ch === "P" || ch === "_" || ch === "^" || ch === "X") {
-          // 7-bit OSC, DCS, APC, PM, SOS introducers
-          state = "string";
-          break;
-        }
-        if (ch === "\\") {
-          // stray string terminator with no open string: drop, back to ground
-          state = "ground";
-          break;
-        }
-        if (isIntermediateByte(cp)) {
-          state = "escIntermediate";
-          break;
-        }
-        if (isGenericFinalByte(cp)) {
-          // single-byte escape sequence (e.g. ESC 7, ESC c): fully consumed
-          state = "ground";
-          break;
-        }
-        // malformed (e.g. ESC followed by a control character): drop the lone ESC and
-        // reprocess this character from ground
-        state = "ground";
-        i--;
-        break;
-      }
-
-      case "escIntermediate": {
-        if (isIntermediateByte(cp)) {
-          break;
-        }
-        if (isGenericFinalByte(cp)) {
-          state = "ground";
-          break;
-        }
-        state = "ground";
-        i--;
-        break;
-      }
-
-      case "csi": {
-        if (isFinalByte(cp)) {
-          state = "ground";
-        }
-        // parameter and intermediate bytes (and anything else, for malformed input): keep consuming
-        break;
-      }
-
-      case "string": {
-        if (cp === 0x07) {
-          // BEL terminator
-          state = "ground";
-          break;
-        }
-        if (cp === 0x9c) {
-          // 8-bit ST terminator
-          state = "ground";
-          break;
-        }
-        if (cp === 0x1b) {
-          state = "stringEsc";
-          break;
-        }
-        break; // consume
-      }
-
-      case "stringEsc": {
-        if (ch === "\\") {
-          // 7-bit ST (ESC \) terminator
-          state = "ground";
-          break;
-        }
-        // not a valid terminator: the ESC is still inside the string; reprocess this
-        // character as an ordinary string byte
-        state = "string";
-        i--;
-        break;
-      }
+    const step: Step = STEP_TABLE[state](cp, approval);
+    state = step.state;
+    if (step.reprocess) {
+      i--;
+    } else if (step.emit) {
+      out += ch;
     }
   }
 

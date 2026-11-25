@@ -43,6 +43,10 @@ import type {
 
 // -- Small helpers -----------------------------------------------------------------------------
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function originFor(session: Session): ItemOrigin {
   if (session.replaying) return "replay";
   // an archive-sourced turn is observed activity — "self" is reserved
@@ -74,42 +78,58 @@ function finaliseItem(session: Session, id: string | null): Session {
 
 // -- Message and thought chunks (task 3.2) ----------------------------------------------------
 
+interface TextChunkTarget {
+  readonly itemId: string;
+  readonly isNew: boolean;
+}
+
+/** Where a chunk lands: a `messageId` pins the item id; an id-less chunk continues the active
+ *  run of the same kind, else opens a new run item. */
+function textChunkTarget(session: Session, kind: TextItemKind, messageId: string | null): TextChunkTarget {
+  if (messageId) {
+    const itemId = `${kind}:${messageId}`;
+    return { itemId, isNew: !session.items.has(itemId) };
+  }
+  if (session.activeRun && session.activeRun.kind === kind) {
+    return { itemId: session.activeRun.itemId, isNew: false };
+  }
+  return { itemId: `run:${kind}:${session.nextRunSeq}`, isNew: true };
+}
+
+interface NewTextItem {
+  readonly itemId: string;
+  readonly kind: TextItemKind;
+  readonly text: string;
+  readonly messageId: string | null;
+}
+
+function appendTextItem(session: Session, spec: NewTextItem): Session {
+  const item: Item = { id: spec.itemId, status: "live", origin: originFor(session), kind: spec.kind, text: spec.text };
+  const next = appendItem(session, item);
+  return spec.messageId ? next : { ...next, nextRunSeq: next.nextRunSeq + 1 };
+}
+
+function extendTextItem(session: Session, itemId: string, kind: TextItemKind, text: string): Session {
+  return updateItem(session, itemId, (existing) => {
+    if (existing.kind !== kind) return existing;
+    return { ...existing, text: existing.text + text, status: "live" };
+  });
+}
+
 function handleTextChunk(
   session: Session,
   kind: TextItemKind,
   messageId: string | null,
   text: string,
 ): Session {
-  let itemId: string;
-  let isNew: boolean;
-
-  if (messageId) {
-    itemId = `${kind}:${messageId}`;
-    isNew = !session.items.has(itemId);
-  } else if (session.activeRun && session.activeRun.kind === kind) {
-    itemId = session.activeRun.itemId;
-    isNew = false;
-  } else {
-    itemId = `run:${kind}:${session.nextRunSeq}`;
-    isNew = true;
-  }
+  const { itemId, isNew } = textChunkTarget(session, kind, messageId);
 
   // A different item beginning finalises whatever text item was previously live (spec: "Items
   // become final at defined points").
-  let next = isNew ? finaliseItem(session, session.liveTextItemId) : session;
-
-  if (isNew) {
-    const item: Item = { id: itemId, status: "live", origin: originFor(next), kind, text };
-    next = appendItem(next, item);
-    if (!messageId) {
-      next = { ...next, nextRunSeq: next.nextRunSeq + 1 };
-    }
-  } else {
-    next = updateItem(next, itemId, (existing) => {
-      if (existing.kind !== kind) return existing;
-      return { ...existing, text: existing.text + text, status: "live" };
-    });
-  }
+  const base = isNew ? finaliseItem(session, session.liveTextItemId) : session;
+  const next = isNew
+    ? appendTextItem(base, { itemId, kind, text, messageId })
+    : extendTextItem(base, itemId, kind, text);
 
   return {
     ...next,
@@ -137,11 +157,9 @@ interface ToolCallFields {
  *  anything else records nothing (undefined). Sanitised on entry like other agent text. */
 function rawOutputTextOf(rawOutput: unknown): string | undefined {
   if (typeof rawOutput === "string") return sanitise(rawOutput);
-  if (typeof rawOutput === "object" && rawOutput !== null && !Array.isArray(rawOutput)) {
-    const output = (rawOutput as { output?: unknown }).output;
-    if (typeof output === "string") return sanitise(output);
-  }
-  return undefined;
+  if (!isRecord(rawOutput)) return undefined;
+  const output = rawOutput.output;
+  return typeof output === "string" ? sanitise(output) : undefined;
 }
 
 function mapToolCallContent(content: readonly ToolCallContent[] | null | undefined): ToolCallItemContent[] | undefined {
@@ -182,52 +200,78 @@ function beginOtherItem(session: Session): Session {
   return { ...finaliseItem(session, session.liveTextItemId), liveTextItemId: null, activeRun: null };
 }
 
+function insertToolCall(session: Session, id: string, fields: ToolCallFields, at: number): Session {
+  session = beginOtherItem(session);
+  const status = fields.status ?? "pending";
+  const becomesFinal = isTerminalToolStatus(status);
+  const index = session.nextToolIndex;
+  const item: ToolCallItem = {
+    id,
+    status: becomesFinal ? "final" : "live",
+    origin: originFor(session),
+    kind: "tool_call",
+    toolCallId: fields.toolCallId,
+    index,
+    title: fields.title ? sanitise(fields.title) : "",
+    toolName: fields.name ? sanitise(fields.name) : null,
+    toolKind: fields.kind ?? null,
+    toolStatus: status,
+    content: mapToolCallContent(fields.content) ?? [],
+    locations: mapLocations(fields.locations) ?? [],
+    rawOutputText: rawOutputTextOf(fields.rawOutput) ?? null,
+    startedAt: at,
+    endedAt: becomesFinal ? at : null,
+  };
+  return { ...appendItem(session, item), nextToolIndex: index + 1 };
+}
+
+/** Text facets of a tool call: every supplied value is sanitised; absent fields keep the
+ *  recorded value. */
+function mergeToolCallText(item: ToolCallItem, fields: ToolCallFields): ToolCallItem {
+  return {
+    ...item,
+    title: fields.title != null ? sanitise(fields.title) : item.title,
+    toolName: fields.name != null ? sanitise(fields.name) : item.toolName,
+    toolKind: fields.kind ?? item.toolKind,
+  };
+}
+
+/** Payload facets: content/locations merge to the update's, else keep the recorded value;
+ *  `rawOutput` contributes only when it parses to text. */
+function mergeToolCallPayload(item: ToolCallItem, fields: ToolCallFields): ToolCallItem {
+  return {
+    ...item,
+    content: fields.content != null ? (mapToolCallContent(fields.content) ?? item.content) : item.content,
+    locations: fields.locations != null ? (mapLocations(fields.locations) ?? item.locations) : item.locations,
+    rawOutputText: rawOutputTextOf(fields.rawOutput) ?? item.rawOutputText,
+  };
+}
+
+/** Lifecycle facets: the supplied status wins; reaching a terminal status seals the item
+ *  and stamps its end (the first terminal stamp stands). */
+function mergeToolCallStatus(item: ToolCallItem, fields: ToolCallFields, at: number): ToolCallItem {
+  const nextStatus = fields.status ?? item.toolStatus;
+  const becomesFinal = isTerminalToolStatus(nextStatus);
+  return {
+    ...item,
+    toolStatus: nextStatus,
+    status: becomesFinal ? "final" : item.status,
+    endedAt: item.endedAt ?? (becomesFinal ? at : null),
+  };
+}
+
+function patchToolCall(session: Session, id: string, fields: ToolCallFields, at: number): Session {
+  return updateItem(session, id, (item) => {
+    if (item.kind !== "tool_call") return item;
+    return mergeToolCallStatus(mergeToolCallPayload(mergeToolCallText(item, fields), fields), fields, at);
+  });
+}
+
 function upsertToolCall(session: Session, fields: ToolCallFields, at: number): Session {
   const id = `tool:${fields.toolCallId}`;
   const existing = session.items.get(id);
-
-  if (!existing || existing.kind !== "tool_call") {
-    session = beginOtherItem(session);
-    const status = fields.status ?? "pending";
-    const becomesFinal = isTerminalToolStatus(status);
-    const index = session.nextToolIndex;
-    const item: ToolCallItem = {
-      id,
-      status: becomesFinal ? "final" : "live",
-      origin: originFor(session),
-      kind: "tool_call",
-      toolCallId: fields.toolCallId,
-      index,
-      title: fields.title ? sanitise(fields.title) : "",
-      toolName: fields.name ? sanitise(fields.name) : null,
-      toolKind: fields.kind ?? null,
-      toolStatus: status,
-      content: mapToolCallContent(fields.content) ?? [],
-      locations: mapLocations(fields.locations) ?? [],
-      rawOutputText: rawOutputTextOf(fields.rawOutput) ?? null,
-      startedAt: at,
-      endedAt: becomesFinal ? at : null,
-    };
-    return { ...appendItem(session, item), nextToolIndex: index + 1 };
-  }
-
-  return updateItem(session, id, (item) => {
-    if (item.kind !== "tool_call") return item;
-    const nextStatus = fields.status ?? item.toolStatus;
-    const becomesFinal = isTerminalToolStatus(nextStatus);
-    return {
-      ...item,
-      title: fields.title != null ? sanitise(fields.title) : item.title,
-      toolName: fields.name != null ? sanitise(fields.name) : item.toolName,
-      toolKind: fields.kind != null ? fields.kind : item.toolKind,
-      toolStatus: nextStatus,
-      status: becomesFinal ? "final" : item.status,
-      content: fields.content != null ? (mapToolCallContent(fields.content) ?? item.content) : item.content,
-      locations: fields.locations != null ? (mapLocations(fields.locations) ?? item.locations) : item.locations,
-      rawOutputText: rawOutputTextOf(fields.rawOutput) ?? item.rawOutputText,
-      endedAt: item.endedAt ?? (becomesFinal ? at : null),
-    };
-  });
+  if (!existing || existing.kind !== "tool_call") return insertToolCall(session, id, fields, at);
+  return patchToolCall(session, id, fields, at);
 }
 
 // -- Session metadata: config options, modes, agent identity --------------------------------------
@@ -307,8 +351,25 @@ function sanitiseModes(modes: SessionModeState): SessionModeState {
 // `unknown` and accepted only in the shape the older unstable API gave it. Anything else is
 // ignored and reported, never raised.
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** One `availableModels` entry in the shape the older unstable API gave it: string `modelId`
+ *  and `name`, optional string-or-null `description`. */
+interface LegacyModelEntry {
+  readonly modelId: string;
+  readonly name: string;
+  readonly description?: unknown;
+}
+
+function isLegacyModelEntry(value: unknown): value is LegacyModelEntry {
+  return (
+    isRecord(value) &&
+    typeof value.modelId === "string" &&
+    typeof value.name === "string" &&
+    (value.description == null || typeof value.description === "string")
+  );
+}
+
+function isLegacyModelShape(value: unknown): value is { currentModelId: string; availableModels: unknown[] } {
+  return isRecord(value) && typeof value.currentModelId === "string" && Array.isArray(value.availableModels);
 }
 
 /** A structural guard and sanitiser in one: the sanitised legacy model state, or null when
@@ -316,18 +377,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *  of objects with string `modelId` and `name` and an optional string-or-null `description`;
  *  other keys such as `_meta` are dropped). */
 function sanitiseLegacyModels(value: unknown): LegacyModelState | null {
-  if (!isRecord(value) || typeof value.currentModelId !== "string" || !Array.isArray(value.availableModels)) return null;
-  const availableModels = [];
-  for (const entry of value.availableModels as unknown[]) {
-    if (!isRecord(entry) || typeof entry.modelId !== "string" || typeof entry.name !== "string") return null;
-    const description = entry.description;
-    if (description != null && typeof description !== "string") return null;
-    availableModels.push({
-      modelId: sanitise(entry.modelId),
-      name: sanitise(entry.name),
-      description: typeof description === "string" ? sanitise(description) : null,
-    });
-  }
+  if (!isLegacyModelShape(value)) return null;
+  const entries = value.availableModels;
+  if (!entries.every(isLegacyModelEntry)) return null;
+  const availableModels = entries.map((entry) => ({
+    modelId: sanitise(entry.modelId),
+    name: sanitise(entry.name),
+    description: typeof entry.description === "string" ? sanitise(entry.description) : null,
+  }));
   return { currentModelId: sanitise(value.currentModelId), availableModels };
 }
 
@@ -543,25 +600,30 @@ function emptyTurn(startedAt: number, archive = false): NonNullable<Session["tur
 
 // -- Turn lifecycle (task 3.4) ------------------------------------------------------------------
 
+/** Seals one live tool call when its turn ends: a call the sealed turn abandoned never
+ *  completed — "failed" is the terminal the readers key liveness on (keeping pending/
+ *  in_progress would glow live forever), and the seal time is its end like every other
+ *  terminal. */
+function sealLiveToolCall(item: Item, at: number): Item {
+  if (item.kind !== "tool_call") return item;
+  return {
+    ...item,
+    status: "final",
+    toolStatus: isTerminalToolStatus(item.toolStatus) ? item.toolStatus : "failed",
+    endedAt: item.endedAt ?? at,
+  };
+}
+
+function isLiveToolCall(item: Item | undefined): item is ToolCallItem {
+  return item !== undefined && item.kind === "tool_call" && item.status === "live";
+}
+
 function finaliseLiveItems(session: Session, at: number): Session {
   let next = finaliseItem(session, session.liveTextItemId);
   for (const id of next.order) {
     const item = next.items.get(id);
-    if (item && item.kind === "tool_call" && item.status === "live") {
-      next = updateItem(next, id, (it) =>
-        it.kind === "tool_call"
-          ? {
-              ...it,
-              status: "final",
-              // a call the sealed turn abandoned never completed —
-              // "failed" is the terminal the readers key liveness on
-              // (keeping pending/in_progress would glow live forever),
-              // and the seal time is its end like every other terminal
-              toolStatus: isTerminalToolStatus(it.toolStatus) ? it.toolStatus : "failed",
-              endedAt: it.endedAt ?? at,
-            }
-          : it,
-      );
+    if (isLiveToolCall(item)) {
+      next = updateItem(next, id, (it) => sealLiveToolCall(it, at));
     }
   }
   return { ...next, liveTextItemId: null, activeRun: null };
@@ -615,108 +677,243 @@ function appendNoticeOrError(session: Session, markerKind: "error" | "notice", t
 
 // -- session/update dispatch ---------------------------------------------------------------------
 
+type SessionUpdateHandler<U extends SessionUpdate = SessionUpdate> = (
+  session: Session,
+  update: U,
+  at: number,
+  onDebug?: (info: ModelDebugInfo) => void,
+) => Session;
+
+function toolCallFieldsOf(update: Extract<SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>): ToolCallFields {
+  return {
+    toolCallId: update.toolCallId,
+    title: update.title,
+    name: update.name,
+    kind: update.kind,
+    status: update.status,
+    content: update.content,
+    locations: update.locations,
+    rawOutput: update.rawOutput,
+  };
+}
+
+/** `usage_update`: `cost` is the cumulative session cost, so an update without it keeps the
+ *  one recorded and only an explicit `null` clears it (`claude-agent-acp` sends cost-less
+ *  updates on every streamed message). The currency is shown, so it is sanitised like any
+ *  agent text; `_meta` is dropped. */
+function handleUsageUpdate(session: Session, update: Extract<SessionUpdate, { sessionUpdate: "usage_update" }>): Session {
+  const cost =
+    update.cost === undefined
+      ? (session.usage?.cost ?? null)
+      : update.cost
+        ? { amount: update.cost.amount, currency: sanitise(update.cost.currency) }
+        : null;
+  return { ...session, usage: { used: update.used, size: update.size, cost } };
+}
+
+function handlePlanUpdate(session: Session, update: Extract<SessionUpdate, { sessionUpdate: "plan" }>): Session {
+  const entries: readonly PlanEntry[] = update.entries.map((entry) => ({
+    ...entry,
+    content: sanitise(entry.content),
+  }));
+  return {
+    ...session,
+    plan: entries,
+    turn: session.turn ? { ...session.turn, planReportedThisTurn: true } : session.turn,
+  };
+}
+
+/** One entry per handled `sessionUpdate` variant — adding a variant is a table row, not a
+ *  switch arm. */
+const SESSION_UPDATE_HANDLERS: {
+  [U in SessionUpdate as U["sessionUpdate"]]?: SessionUpdateHandler<U>;
+} = {
+  user_message_chunk: (session, update) =>
+    handleTextChunk(session, "user_message", update.messageId ?? null, contentBlockText(update.content)),
+  agent_message_chunk: (session, update) =>
+    handleTextChunk(session, "agent_message", update.messageId ?? null, contentBlockText(update.content)),
+  agent_thought_chunk: (session, update) =>
+    handleTextChunk(session, "thought", update.messageId ?? null, contentBlockText(update.content)),
+  tool_call: (session, update, at) => upsertToolCall(session, toolCallFieldsOf(update), at),
+  tool_call_update: (session, update, at) => upsertToolCall(session, toolCallFieldsOf(update), at),
+  plan: handlePlanUpdate,
+  usage_update: handleUsageUpdate,
+  session_info_update: handleSessionInfo,
+  config_option_update: (session, update) => replaceConfigOptions(session, update.configOptions),
+  current_mode_update: (session, update, _at, onDebug) => handleCurrentMode(session, update.currentModeId, onDebug),
+  available_commands_update: (session, update) => ({ ...session, commands: sanitiseCommands(update.availableCommands) }),
+};
+
 function handleSessionUpdate(
   session: Session,
   update: SessionUpdate,
   at: number,
   onDebug?: (info: ModelDebugInfo) => void,
 ): Session {
-  switch (update.sessionUpdate) {
-    case "user_message_chunk":
-      return handleTextChunk(session, "user_message", update.messageId ?? null, contentBlockText(update.content));
-
-    case "agent_message_chunk":
-      return handleTextChunk(session, "agent_message", update.messageId ?? null, contentBlockText(update.content));
-
-    case "agent_thought_chunk":
-      return handleTextChunk(session, "thought", update.messageId ?? null, contentBlockText(update.content));
-
-    case "tool_call":
-      return upsertToolCall(
-        session,
-        {
-          toolCallId: update.toolCallId,
-          title: update.title,
-          name: update.name,
-          kind: update.kind,
-          status: update.status,
-          content: update.content,
-          locations: update.locations,
-          rawOutput: update.rawOutput,
-        },
-        at,
-      );
-
-    case "tool_call_update":
-      return upsertToolCall(
-        session,
-        {
-          toolCallId: update.toolCallId,
-          title: update.title,
-          name: update.name,
-          kind: update.kind,
-          status: update.status,
-          content: update.content,
-          locations: update.locations,
-          rawOutput: update.rawOutput,
-        },
-        at,
-      );
-
-    case "plan": {
-      const entries: readonly PlanEntry[] = update.entries.map((entry) => ({
-        ...entry,
-        content: sanitise(entry.content),
-      }));
-      return {
-        ...session,
-        plan: entries,
-        turn: session.turn ? { ...session.turn, planReportedThisTurn: true } : session.turn,
-      };
-    }
-
-    case "usage_update":
-      return {
-        ...session,
-        usage: {
-          used: update.used,
-          size: update.size,
-          // `cost` is the cumulative session cost, so an update without it keeps the one recorded
-          // and only an explicit `null` clears it (`claude-agent-acp` sends cost-less updates on
-          // every streamed message). The currency is shown, so it is sanitised like any agent
-          // text; `_meta` is dropped.
-          cost:
-            update.cost === undefined
-              ? (session.usage?.cost ?? null)
-              : update.cost
-                ? { amount: update.cost.amount, currency: sanitise(update.cost.currency) }
-                : null,
-        },
-      };
-
-    case "session_info_update":
-      return handleSessionInfo(session, update);
-
-    case "config_option_update":
-      return replaceConfigOptions(session, update.configOptions);
-
-    case "current_mode_update":
-      return handleCurrentMode(session, update.currentModeId, onDebug);
-
-    case "available_commands_update":
-      return { ...session, commands: sanitiseCommands(update.availableCommands) };
-
-    default:
-      // Every other variant (notice, compaction_update, compaction_summary_chunk, plan_update,
-      // plan_removed, and any string the v1 union does not define at all) is out of the
-      // implemented subset: ignored, not an error (spec "Unknown updates are ignored, not
-      // errors").
-      onDebug?.({ kind: "unknown_session_update", sessionUpdate: (update as { sessionUpdate: string }).sessionUpdate });
-      return session;
+  // Descriptor read, not `HANDLERS[key]`: outside data must not reach prototype keys.
+  const handler = Object.getOwnPropertyDescriptor(SESSION_UPDATE_HANDLERS, update.sessionUpdate)
+    ?.value as SessionUpdateHandler | undefined;
+  if (handler === undefined) {
+    // Every other variant (notice, compaction_update, compaction_summary_chunk, plan_update,
+    // plan_removed, and any string the v1 union does not define at all) is out of the
+    // implemented subset: ignored, not an error (spec "Unknown updates are ignored, not
+    // errors").
+    onDebug?.({ kind: "unknown_session_update", sessionUpdate: update.sessionUpdate });
+    return session;
   }
+  return handler(session, update, at, onDebug);
 }
 
 // -- Public reducer -------------------------------------------------------------------------------
+
+type EventReducer<E extends ModelEvent = ModelEvent> = (
+  session: Session,
+  event: E,
+  onDebug?: (info: ModelDebugInfo) => void,
+) => Session;
+
+function handleSessionCreated(session: Session, event: Extract<ModelEvent, { type: "session_created" }>, onDebug?: (info: ModelDebugInfo) => void): Session {
+  return {
+    ...session,
+    id: event.response.sessionId,
+    cwd: event.cwd,
+    additionalDirectories: [...(event.additionalDirectories ?? [])],
+    agent: agentInfoFrom(event.agentInfo),
+    connection: "connected",
+    configOptions: (event.response.configOptions ?? []).map(sanitiseConfigOption),
+    modes: event.response.modes ? sanitiseModes(event.response.modes) : null,
+    models: readLegacyModels(event.response, onDebug) ?? null,
+  };
+}
+
+function handleSessionOpening(session: Session, event: Extract<ModelEvent, { type: "session_opening" }>): Session {
+  return {
+    ...session,
+    id: event.sessionId,
+    cwd: event.cwd,
+    additionalDirectories: [...(event.additionalDirectories ?? [])],
+    agent: agentInfoFrom(event.agentInfo),
+    connection: "connected",
+    opening: event.mode,
+    replaying: event.mode === "load",
+  };
+}
+
+/** acp-tui's own notice (the session directory marker): not the agent's activity, so `replay`,
+ *  as the resume marker; sanitised all the same. */
+function handleClientNotice(session: Session, event: Extract<ModelEvent, { type: "client_notice" }>): Session {
+  const item: MarkerItem = {
+    id: `marker:${session.nextMarkerSeq}`,
+    status: "final",
+    origin: "replay",
+    kind: "marker",
+    markerKind: "notice",
+    text: sanitise(event.text),
+  };
+  return { ...appendItem(session, item), nextMarkerSeq: session.nextMarkerSeq + 1 };
+}
+
+function handlePromptSent(session: Session, event: Extract<ModelEvent, { type: "prompt_sent" }>): Session {
+  const item: Item = {
+    id: `user:${session.nextMarkerSeq}`,
+    status: "final",
+    origin: "self",
+    kind: "user_message",
+    text: sanitise(event.text),
+  };
+  const withItem = { ...appendItem(session, item), nextMarkerSeq: session.nextMarkerSeq + 1 };
+  return {
+    ...withItem,
+    state: "running",
+    stopReason: null,
+    turn: emptyTurn(event.at),
+  };
+}
+
+/** Archive-sourced turn open — no user item, just the lifecycle. A turn already open with a
+ *  pending request keeps its tracking (a dropped stop must not silently unblock it); with
+ *  nothing pending the prior stop was dropped, so the turn re-anchors to this start —
+ *  otherwise the next turn_end's duration spans the dead turn too. */
+function handleTurnStarted(session: Session, event: Extract<ModelEvent, { type: "turn_started" }>): Session {
+  const prev = session.turn;
+  const pending =
+    prev !== null &&
+    (prev.openPermissionToolCallIds.length > 0 || prev.openElicitationIds.length > 0);
+  if (pending) {
+    return { ...withOpenRequests(session, { ...prev, archive: true }), stopReason: null };
+  }
+  // a fresh archive turn — seal the dropped turn's live run too,
+  // or the next id-less chunk concatenates into a dead turn's
+  // item. The seal commits a reported plan like endTurn does —
+  // a dropped stop must not lose the plan it already printed
+  const sealed = commitPlanIfReported(finaliseLiveItems(session, event.at));
+  return { ...withOpenRequests(sealed, emptyTurn(event.at, true)), stopReason: null };
+}
+
+function handlePromptResponse(session: Session, event: Extract<ModelEvent, { type: "prompt_response" }>): Session {
+  // a turn anchored at epoch 0 (a stamp-less start row) would
+  // render an epoch-sized duration — only a real start anchors
+  const durationMs =
+    session.turn && session.turn.startedAt > 0
+      ? Math.max(0, event.at - session.turn.startedAt)
+      : 0;
+  const next = endTurn(session, event.at, {
+    kind: "marker",
+    markerKind: "turn_end",
+    stopReason: event.stopReason,
+    durationMs,
+    usage: session.usage,
+  });
+  return { ...next, stopReason: event.stopReason };
+}
+
+function handlePromptError(session: Session, event: Extract<ModelEvent, { type: "prompt_error" }>): Session {
+  const next = endTurn(session, event.at, null);
+  return appendNoticeOrError(next, "error", event.message);
+}
+
+function handleAgentExited(session: Session, event: Extract<ModelEvent, { type: "agent_exited" }>): Session {
+  const next = session.turn ? endTurn(session, event.at, null) : session;
+  const withNotice = appendNoticeOrError(
+    next,
+    "notice",
+    event.exitCode === null ? "agent exited" : `agent exited (code ${event.exitCode})`,
+  );
+  return { ...withNotice, connection: "disconnected" };
+}
+
+/** One entry per handled event type — adding a variant is a table row, not a switch arm. */
+const EVENT_REDUCERS: {
+  [E in ModelEvent as E["type"]]?: EventReducer<E>;
+} = {
+  session_created: handleSessionCreated,
+  session_opening: handleSessionOpening,
+  session_opened: (session, event, onDebug) => handleSessionOpened(session, event.response, onDebug),
+  additional_directories_replaced: (session, event) => ({
+    ...session,
+    additionalDirectories: [...event.additionalDirectories],
+  }),
+  session_update: (session, event, onDebug) => handleSessionUpdate(session, event.update, event.at, onDebug),
+  client_notice: handleClientNotice,
+  prompt_sent: handlePromptSent,
+  turn_started: handleTurnStarted,
+  prompt_response: handlePromptResponse,
+  prompt_error: handlePromptError,
+  permission_opened: (session, event) => handlePermissionOpened(session, event.toolCallId, event.request, event.at),
+  permission_answered: (session, event) =>
+    closePermission(session, event.toolCallId, {
+      type: "answered",
+      optionId: event.optionId,
+      optionKind: event.optionKind as PermissionOptionKind,
+    }),
+  permission_cancelled: (session, event) => closePermission(session, event.toolCallId, { type: "cancelled" }),
+  permission_withdrawn: (session, event) => closePermission(session, event.toolCallId, { type: "withdrawn" }),
+  elicitation_opened: (session, event) => openElicitation(session, event.elicitationId, event.at),
+  elicitation_closed: (session, event) => closeElicitation(session, event.elicitationId),
+  config_options_replaced: (session, event) => replaceConfigOptions(session, event.configOptions),
+  legacy_model_selected: (session, event, onDebug) => handleLegacyModelSelected(session, event.modelId, onDebug),
+  agent_exited: handleAgentExited,
+};
 
 /**
  * Fold one event into the session. Immutable: `session` is never mutated, and structural sharing
@@ -732,155 +929,9 @@ export function reduce(
   event: ModelEvent,
   onDebug?: (info: ModelDebugInfo) => void,
 ): Session {
-  switch (event.type) {
-    case "session_created":
-      return {
-        ...session,
-        id: event.response.sessionId,
-        cwd: event.cwd,
-        additionalDirectories: [...(event.additionalDirectories ?? [])],
-        agent: agentInfoFrom(event.agentInfo),
-        connection: "connected",
-        configOptions: (event.response.configOptions ?? []).map(sanitiseConfigOption),
-        modes: event.response.modes ? sanitiseModes(event.response.modes) : null,
-        models: readLegacyModels(event.response, onDebug) ?? null,
-      };
-
-    case "session_opening":
-      return {
-        ...session,
-        id: event.sessionId,
-        cwd: event.cwd,
-        additionalDirectories: [...(event.additionalDirectories ?? [])],
-        agent: agentInfoFrom(event.agentInfo),
-        connection: "connected",
-        opening: event.mode,
-        replaying: event.mode === "load",
-      };
-
-    case "session_opened":
-      return handleSessionOpened(session, event.response, onDebug);
-
-    case "additional_directories_replaced":
-      return { ...session, additionalDirectories: [...event.additionalDirectories] };
-
-    case "session_update":
-      return handleSessionUpdate(session, event.update, event.at, onDebug);
-
-    case "client_notice": {
-      // acp-tui's own notice (the session directory marker): not the agent's activity, so
-      // `replay`, as the resume marker; sanitised all the same.
-      const item: MarkerItem = {
-        id: `marker:${session.nextMarkerSeq}`,
-        status: "final",
-        origin: "replay",
-        kind: "marker",
-        markerKind: "notice",
-        text: sanitise(event.text),
-      };
-      return { ...appendItem(session, item), nextMarkerSeq: session.nextMarkerSeq + 1 };
-    }
-
-    case "prompt_sent": {
-      const item: Item = {
-        id: `user:${session.nextMarkerSeq}`,
-        status: "final",
-        origin: "self",
-        kind: "user_message",
-        text: sanitise(event.text),
-      };
-      const withItem = { ...appendItem(session, item), nextMarkerSeq: session.nextMarkerSeq + 1 };
-      return {
-        ...withItem,
-        state: "running",
-        stopReason: null,
-        turn: emptyTurn(event.at),
-      };
-    }
-
-    case "turn_started": {
-      // archive-sourced turn open — no user item, just the lifecycle.
-      // A turn already open with a pending request keeps its tracking
-      // (a dropped stop must not silently unblock it); with nothing
-      // pending the prior stop was dropped, so the turn re-anchors to
-      // this start — otherwise the next turn_end's duration spans the
-      // dead turn too
-      const prev = session.turn;
-      const pending =
-        prev !== null &&
-        (prev.openPermissionToolCallIds.length > 0 || prev.openElicitationIds.length > 0);
-      if (pending) {
-        return { ...withOpenRequests(session, { ...prev, archive: true }), stopReason: null };
-      }
-      // a fresh archive turn — seal the dropped turn's live run too,
-      // or the next id-less chunk concatenates into a dead turn's
-      // item. The seal commits a reported plan like endTurn does —
-      // a dropped stop must not lose the plan it already printed
-      const sealed = commitPlanIfReported(finaliseLiveItems(session, event.at));
-      return { ...withOpenRequests(sealed, emptyTurn(event.at, true)), stopReason: null };
-    }
-
-    case "prompt_response": {
-      // a turn anchored at epoch 0 (a stamp-less start row) would
-      // render an epoch-sized duration — only a real start anchors
-      const durationMs =
-        session.turn && session.turn.startedAt > 0
-          ? Math.max(0, event.at - session.turn.startedAt)
-          : 0;
-      const next = endTurn(session, event.at, {
-        kind: "marker",
-        markerKind: "turn_end",
-        stopReason: event.stopReason,
-        durationMs,
-        usage: session.usage,
-      });
-      return { ...next, stopReason: event.stopReason };
-    }
-
-    case "prompt_error": {
-      const next = endTurn(session, event.at, null);
-      return appendNoticeOrError(next, "error", event.message);
-    }
-
-    case "permission_opened":
-      return handlePermissionOpened(session, event.toolCallId, event.request, event.at);
-
-    case "permission_answered":
-      return closePermission(session, event.toolCallId, {
-        type: "answered",
-        optionId: event.optionId,
-        optionKind: event.optionKind as PermissionOptionKind,
-      });
-
-    case "permission_cancelled":
-      return closePermission(session, event.toolCallId, { type: "cancelled" });
-
-    case "permission_withdrawn":
-      return closePermission(session, event.toolCallId, { type: "withdrawn" });
-
-    case "elicitation_opened":
-      return openElicitation(session, event.elicitationId, event.at);
-
-    case "elicitation_closed":
-      return closeElicitation(session, event.elicitationId);
-
-    case "config_options_replaced":
-      return replaceConfigOptions(session, event.configOptions);
-
-    case "legacy_model_selected":
-      return handleLegacyModelSelected(session, event.modelId, onDebug);
-
-    case "agent_exited": {
-      const next = session.turn ? endTurn(session, event.at, null) : session;
-      const withNotice = appendNoticeOrError(
-        next,
-        "notice",
-        event.exitCode === null ? "agent exited" : `agent exited (code ${event.exitCode})`,
-      );
-      return { ...withNotice, connection: "disconnected" };
-    }
-
-    default:
-      return session;
-  }
+  // Descriptor read, not `EVENT_REDUCERS[key]`: an arbitrary type string must not reach
+  // prototype keys; an unknown event folds to the identity, same as the old default arm.
+  const reducer = Object.getOwnPropertyDescriptor(EVENT_REDUCERS, event.type)
+    ?.value as EventReducer | undefined;
+  return reducer === undefined ? session : reducer(session, event, onDebug);
 }
