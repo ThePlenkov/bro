@@ -50,54 +50,60 @@ function assertBroCommand(fb: FakeBro, label: string): void {
   );
 }
 
-test('pi: /bro <args> dispatches to bro with matrix argv (S4)', {
-  skip: which('pi') === null && 'pi binary not on PATH',
-}, async () => {
-  await using mock = await startMock();
-  mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
+type RpcReply = Awaited<ReturnType<typeof runRpcPrompt>>;
+const RPC_HOSTS = [
+  {
+    host: 'pi' as const,
+    writeConfig: writePiProviderConfig,
+    install: installPiPlugin,
+    ok: (r: RpcReply) => r.disposition === 'handled',
+  },
+  {
+    host: 'omp' as const,
+    writeConfig: writeOmpProviderConfig,
+    install: installOmpPlugin,
+    ok: (r: RpcReply) => r.success === true,
+  },
+];
+
+async function setupRpc(h: (typeof RPC_HOSTS)[number], mockUrl: string) {
   const e = makeEnv();
-  writePiProviderConfig(e, `${mock.url}/v1`);
-  const inst = await installPiPlugin(e);
-  assert.equal(inst.code, 0, `plugins install pi failed: ${inst.stderr.slice(-400)}`);
-  const fb = fakeBro().install(e);
+  h.writeConfig(e, `${mockUrl}/v1`);
+  const inst = await h.install(e);
+  assert.equal(inst.code, 0, `plugins install ${h.host} failed: ${inst.stderr.slice(-400)}`);
+  return e;
+}
 
-  const r = await runRpcPrompt(e, 'pi', `/bro ${CMD_KEY}`, { timeoutMs: 150_000 });
-  assert.equal(
-    r.disposition,
-    'handled',
-    `pi did not handle /bro: ${JSON.stringify(r.records.slice(-5))} stderr=${r.stderr.slice(-400)}`
-  );
-  assertBroCommand(fb, 'pi');
-  // an extension-handled command never becomes a model prompt, so
-  // prompt-submit legitimately does not fire — session-start is the
-  // lifecycle evidence that hooks are wired at all
-  assert.ok(
-    fb.hookEvents().includes('session-start'),
-    `pi hooks missing session-start: ${fb.hookEvents()}`
-  );
-});
+async function promptOk(
+  e: Awaited<ReturnType<typeof setupRpc>>,
+  h: (typeof RPC_HOSTS)[number],
+  cmd: string
+) {
+  const r = await runRpcPrompt(e, h.host, cmd, { timeoutMs: 150_000 });
+  assert.ok(h.ok(r), `${h.host} did not handle ${cmd}: ${JSON.stringify(r.records.slice(-5))}`);
+  return r;
+}
 
-test('omp: /bro <args> dispatches to bro with matrix argv (S4)', {
-  skip: which('omp') === null && 'omp binary not on PATH',
-}, async () => {
-  await using mock = await startMock();
-  mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
-  const e = makeEnv();
-  writeOmpProviderConfig(e, `${mock.url}/v1`);
-  const inst = await installOmpPlugin(e);
-  assert.equal(inst.code, 0, `plugins install omp failed: ${inst.stderr.slice(-400)}`);
-  const fb = fakeBro().install(e);
+for (const h of RPC_HOSTS) {
+  test(`${h.host}: /bro <args> dispatches to bro with matrix argv (S4)`, {
+    skip: which(h.host) === null && `${h.host} binary not on PATH`,
+  }, async () => {
+    await using mock = await startMock();
+    mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
+    const e = await setupRpc(h, mock.url);
+    const fb = fakeBro().install(e);
 
-  const r = await runRpcPrompt(e, 'omp', `/bro ${CMD_KEY}`);
-  // omp's response record carries success, not pi's data.disposition —
-  // the command argv in the journal is the dispatch proof either way
-  assert.equal(r.success, true, `omp /bro prompt failed: ${JSON.stringify(r.records.slice(-5))}`);
-  assertBroCommand(fb, 'omp');
-  assert.ok(
-    fb.hookEvents().includes('session-start'),
-    `omp hooks missing session-start: ${fb.hookEvents()}`
-  );
-});
+    await promptOk(e, h, `/bro ${CMD_KEY}`);
+    assertBroCommand(fb, h.host);
+    // an extension-handled command never becomes a model prompt, so
+    // prompt-submit legitimately does not fire — session-start is the
+    // lifecycle evidence that hooks are wired at all
+    assert.ok(
+      fb.hookEvents().includes('session-start'),
+      `${h.host} hooks missing session-start: ${fb.hookEvents()}`
+    );
+  });
+}
 
 test('opencode: /bro <args> via session command API → bro argv + follow-up turn (S4)', {
   skip: which('opencode') === null && 'opencode binary not on PATH',
@@ -175,25 +181,12 @@ test('pi: family commands dispatch bare names — /learn, /wtf multilingual (S4f
 }, async () => {
   await using mock = await startMock();
   mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
-  const e = makeEnv();
-  writePiProviderConfig(e, `${mock.url}/v1`);
-  const inst = await installPiPlugin(e);
-  assert.equal(inst.code, 0, `plugins install pi failed: ${inst.stderr.slice(-400)}`);
+  const e = await setupRpc(RPC_HOSTS[0]!, mock.url);
   const fb = familyFakeBro(['learn', 'backlog'], ['wtf', 'какого', 'черта']);
   fb.install(e);
 
-  const r1 = await runRpcPrompt(e, 'pi', '/learn backlog', { timeoutMs: 150_000 });
-  assert.equal(
-    r1.disposition,
-    'handled',
-    `pi /learn not handled: ${JSON.stringify(r1.records.slice(-5))} stderr=${r1.stderr.slice(-400)}`
-  );
-  const r2 = await runRpcPrompt(e, 'pi', '/wtf какого черта', { timeoutMs: 150_000 });
-  assert.equal(
-    r2.disposition,
-    'handled',
-    `pi /wtf not handled: ${JSON.stringify(r2.records.slice(-5))} stderr=${r2.stderr.slice(-400)}`
-  );
+  await promptOk(e, RPC_HOSTS[0]!, '/learn backlog');
+  await promptOk(e, RPC_HOSTS[0]!, '/wtf какого черта');
   assertArgv(fb, ['learn', 'backlog'], 'pi /learn');
   assertArgv(fb, ['wtf', 'какого', 'черта'], 'pi /wtf');
 });
@@ -203,19 +196,14 @@ test('omp: native /goal + /loop → bro:goal/bro:loop namespace, rest bare (S4f)
 }, async () => {
   await using mock = await startMock();
   mock.mock.on({ predicate: () => true }, { content: 'MOCK-OK' });
-  const e = makeEnv();
-  writeOmpProviderConfig(e, `${mock.url}/v1`);
-  const inst = await installOmpPlugin(e);
-  assert.equal(inst.code, 0, `plugins install omp failed: ${inst.stderr.slice(-400)}`);
+  const e = await setupRpc(RPC_HOSTS[1]!, mock.url);
   const fb = familyFakeBro(['goal', 'ship', 'it'], ['drill', 'auth-flow']);
   fb.install(e);
 
   // native /loop and /goal belong to omp — the bro aliases must live
   // under bro:<name> and still reach the same argv
-  const r1 = await runRpcPrompt(e, 'omp', '/bro:loop 3');
-  assert.equal(r1.success, true, `omp /bro:loop failed: ${JSON.stringify(r1.records.slice(-5))}`);
-  const r2 = await runRpcPrompt(e, 'omp', '/drill auth-flow');
-  assert.equal(r2.success, true, `omp /drill failed: ${JSON.stringify(r2.records.slice(-5))}`);
+  await promptOk(e, RPC_HOSTS[1]!, '/bro:loop 3');
+  await promptOk(e, RPC_HOSTS[1]!, '/drill auth-flow');
   assertArgv(fb, ['loop', '3'], 'omp /bro:loop');
   assertArgv(fb, ['drill', 'auth-flow'], 'omp /drill');
 });

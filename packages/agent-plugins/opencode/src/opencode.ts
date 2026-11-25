@@ -883,7 +883,7 @@ function frontmatter(markdown: string): string | null {
 }
 
 function readFrontmatterValue(front: string, key: string): string | undefined {
-  const pattern = key === 'name' ? /^\s*name:\s*(.+)$/m : /^\s*description:\s*(.+)$/m;
+  const pattern = key === 'name' ? /^\s*name:\s*(\S[^\r\n]*)/m : /^\s*description:\s*(\S[^\r\n]*)/m;
   return pattern.exec(front)?.[1]?.trim();
 }
 
