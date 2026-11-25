@@ -340,13 +340,16 @@ const groupStillLive = (pid: number, pidStart: string | undefined): boolean => {
 /** Thaw pass — a record survives while its provider still walls AND
  *  its group is still live. Gone or recycled groups drop WITHOUT a
  *  signal — never SIGCONT a stranger. */
-function thawLane(
-  paused: Record<string, PauseRecord>,
-  walled: ReadonlyMap<string, ProviderWall>,
-  env: AgentConnectorEnv,
-  registry: Record<string, AgentRegistryEntry>,
-  budget: { budgeted: ReadonlySet<string>; scope: string; now: number }
-): { next: Record<string, PauseRecord>; thawed: number } {
+interface ThawInput {
+  paused: Record<string, PauseRecord>;
+  walled: ReadonlyMap<string, ProviderWall>;
+  env: AgentConnectorEnv;
+  registry: Record<string, AgentRegistryEntry>;
+  budget: { budgeted: ReadonlySet<string>; scope: string; now: number };
+}
+
+function thawLane(input: ThawInput): { next: Record<string, PauseRecord>; thawed: number } {
+  const { paused, walled, env, registry, budget } = input;
   const next: Record<string, PauseRecord> = {};
   let thawed = 0;
   for (const [pidStr, rec] of Object.entries(paused)) {
@@ -475,10 +478,12 @@ function reconcile(
       file,
       now
     );
-    const { next, thawed } = thawLane(file.paused, walled, env, registry, {
-      budgeted,
-      scope,
-      now,
+    const { next, thawed } = thawLane({
+      paused: file.paused,
+      walled,
+      env,
+      registry,
+      budget: { budgeted, scope, now },
     });
     // a present file always syncs — even all-drained; nothing to
     // write only when no records moved AND no file exists
