@@ -39,6 +39,9 @@ case "$1" in
     if [ -n "$FAKE_BD_EPIC_PARENTS" ]; then
       case "$2" in *$FAKE_BD_EPIC_PARENTS*) type=epic ;; esac
     fi
+    if [ -n "$FAKE_BD_FOREIGN" ]; then
+      case "$2" in *$FAKE_BD_FOREIGN*) status=open; assignee=other-agent ;; esac
+    fi
     echo '[{"id":"'$2'","status":"'$status'","assignee":"'$assignee'","issue_type":"'$type'"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
@@ -123,7 +126,8 @@ function withFakeBd(
   claimFail = '',
   updateFail = '',
   prefix = '',
-  epicParents = ''
+  epicParents = '',
+  foreign = ''
 ): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
@@ -144,6 +148,7 @@ function withFakeBd(
       FAKE_BD_UPDATE_FAIL: updateFail,
       FAKE_BD_PREFIX: prefix === '' ? undefined : prefix,
       FAKE_BD_EPIC_PARENTS: epicParents === '' ? undefined : epicParents,
+      FAKE_BD_FOREIGN: foreign === '' ? undefined : foreign,
       FAKE_BD_CONFIG_FAIL: undefined,
     };
     const prev = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
@@ -220,6 +225,25 @@ describe('bro next', () => {
         assert.match(c.lines[0], /→ b-newer.*\(claimed\)/);
         assert.match(c.claims, /b-newer --claim/);
       },
+      'b-older'
+    )
+  );
+
+  it(
+    'an open row pinned to a foreign holder is skipped, not fatal (bro-c955a)',
+    withFakeBd(
+      MIXED,
+      async c => {
+        // b-older refuses the claim (bd pins the assignee) yet still
+        // reads open+foreign — the half-state that wedged the loop;
+        // the pick must fall through, not throw
+        await runNextCommand([]);
+        assert.match(c.lines[0], /→ b-newer.*\(claimed\)/);
+      },
+      'b-older',
+      '',
+      '',
+      '',
       'b-older'
     )
   );

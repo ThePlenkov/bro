@@ -219,7 +219,13 @@ export function classify(
  *  bro-4i4q4) — the infra error must surface, not masquerade as a
  *  race, or we'd skip a bead we own while the head waits for work
  *  that never starts. Actor '' is unverifiable — we cannot attribute
- *  the holder, so nothing is provably raced. */
+ *  the holder, so nothing is provably raced.
+ *
+ *  A pinned FOREIGN holder makes the claim unwinnable regardless of
+ *  status (bro-c955a): bd refuses --claim on the assignee pin alone,
+ *  so an open row already assigned to someone else wedges the loop
+ *  exactly like a non-open one — holders comma-join on shared claims,
+ *  the same shape rig-next's claimVerdict owns. */
 function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
   try {
     const ts = storeFor(dir, opts);
@@ -227,12 +233,19 @@ function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
     if (row === undefined) {
       return true; // the row vanished — moved on
     }
+    const actor = ts.actor?.() ?? '';
+    const holders = (row.assignee ?? '')
+      .split(',')
+      .map(a => a.trim())
+      .filter(a => a !== '');
+    if (holders.length > 0 && actor !== '' && !holders.includes(actor)) {
+      return true; // foreign pin — unwinnable at any status
+    }
     const status = (row.status ?? '').toLowerCase();
     if (status === 'open') {
       return false;
     }
-    const actor = ts.actor?.() ?? '';
-    return actor !== '' && (row.assignee ?? '').trim() !== actor;
+    return actor !== '' && !holders.includes(actor);
   } catch {
     return false; // show failed too — bd is down; the claim error is the diagnostic
   }
@@ -330,7 +343,7 @@ function printResult(result: NextResult, list: boolean, backend: string): void {
   if (result.beads.length === 0) {
     console.log(
       result.state === 'gated'
-        ? 'next: nothing claimable — filters, gates, epics, or molecule steps remain'
+        ? 'next: nothing claimable — filters, gates, epics, molecule steps, or foreign-held claims remain'
         : 'next: backlog empty — nothing ready'
     );
   }
@@ -435,7 +448,12 @@ function gateClaim(
  *  'idle' there would falsely tell the loop the backlog is empty. */
 function nextResult(c: ReturnType<typeof classify>, beads: ReadyBead[]): NextResult {
   const picked = new Set(beads.map(b => b.id));
-  const gatedLeft = c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0;
+  // unpicked queue members are work that lost its claim — raced away or
+  // pinned to a foreign holder (bro-c955a). Counting them as gated
+  // keeps 'idle' honest: the backlog is not empty, it is unwinnable
+  const unpicked = c.queue.filter(b => !picked.has(b.id)).length;
+  const gatedLeft =
+    unpicked + c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0;
   let state: NextResult['state'] = 'idle';
   if (beads.length > 0) {
     state = 'task';
