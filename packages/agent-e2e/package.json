@@ -10,5 +10,19 @@
   "devDependencies": {
     "@copilotkit/aimock": "^1.48.0",
     "@broject/bro": "^0.3.0"
+  },
+  "nx": {
+    "targets": {
+      "test:e2e": {
+        "dependsOn": [
+          "^build",
+          "build",
+          {
+            "target": "test:e2e",
+            "projects": "@broject/bro"
+          }
+        ]
+      }
+    }
   }
 }
