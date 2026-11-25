@@ -131,8 +131,8 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
   // temp + rename — a direct overwrite can leave a truncated file on a
   // mid-write crash; operator config loses every sibling section.
   const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
   try {
+    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`);
     // preserve the existing file's mode across the rename — exporter
     // headers can carry tokens, and a fresh tempfile wears the umask
     // default (0644 under 022), silently widening a 0600 config
