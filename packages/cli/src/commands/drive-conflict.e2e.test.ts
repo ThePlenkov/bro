@@ -34,6 +34,7 @@ const conflicting = {
     state: 'OPEN',
     headRef: 'work/fx-a',
     baseRef: 'main',
+    labels: ['bro-managed'],
     mergeable: 'CONFLICTING',
   },
 };
