@@ -111,39 +111,36 @@ const undouble = (s: string): string => {
 };
 
 /** One scalar token → typed value. */
-export const scalarValue = (s: string): unknown => {
-  const t = s.trim();
-  if (t === '') {
-    return null;
-  }
-  if (t.startsWith('"') || t.startsWith("'")) {
-    const end = closeQuote(t, 0);
-    const tail = t.slice(end).trim();
-    const v = end !== -1 && (tail === '' || tail.startsWith('#')) ? t.slice(0, end) : t;
-    const u = unquote(v);
-    if (v.startsWith('"')) {
-      return undouble(u);
-    }
-    return v.startsWith("'") && v.endsWith("'") ? u.replaceAll("''", "'") : u;
-  }
-  const c = commentStart(t);
-  const bare = (c === -1 ? t : t.slice(0, c)).trim();
-  if (bare === 'true') {
-    return true;
-  }
-  if (bare === 'false') {
-    return false;
-  }
-  if (bare === 'null' || bare === '~' || bare === '') {
-    return null;
-  }
-  if (/^-?\d+$/.test(bare)) {
-    return Number.parseInt(bare, 10);
-  }
+const quotedValue = (text: string): unknown => {
+  const end = closeQuote(text, 0);
+  const tail = text.slice(end).trim();
+  const value = end !== -1 && (tail === '' || tail.startsWith('#')) ? text.slice(0, end) : text;
+  const unquoted = unquote(value);
+  return value.startsWith('"')
+    ? undouble(unquoted)
+    : value.startsWith("'") && value.endsWith("'")
+      ? unquoted.replaceAll("''", "'")
+      : unquoted;
+};
+
+const bareValue = (text: string): unknown => {
+  const c = commentStart(text);
+  const bare = (c === -1 ? text : text.slice(0, c)).trim();
+  if (bare === 'true') return true;
+  if (bare === 'false') return false;
+  if (bare === 'null' || bare === '~' || bare === '') return null;
+  if (/^-?\d+$/.test(bare)) return Number.parseInt(bare, 10);
   if (/^-?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)$/.test(bare) || /^-?(\d+\.\d*|\.\d+)$/.test(bare)) {
     return Number.parseFloat(bare);
   }
   return bare;
+};
+
+export const scalarValue = (s: string): unknown => {
+  const t = s.trim();
+  if (t === '') return null;
+  if (t.startsWith('"') || t.startsWith("'")) return quotedValue(t);
+  return bareValue(t);
 };
 
 /** Split a flow body on top-level commas — brackets and quotes nest. */
@@ -479,47 +476,35 @@ const flowOut = (v: unknown): string => {
   return scalarOut(v);
 };
 
-const dumpLines = (obj: Record<string, unknown>, indent: string): string[] => {
-  const out: string[] = [];
-  for (const [k, v] of Object.entries(obj)) {
-    // keys get the full scalar predicate set — a bare `001` or `true`
-    // key re-reads as a number/boolean, so it emits quoted like a value.
-    const key = scalarOut(k);
-    if (Array.isArray(v)) {
-      if (v.length === 0) {
-        out.push(`${indent}${key}: []`);
-        continue;
-      }
-      out.push(`${indent}${key}:`);
-      for (const item of v) {
-        if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
-          const entries = dumpLines(item as Record<string, unknown>, `${indent}    `);
-          const first = entries[0];
-          if (first === undefined) {
-            out.push(`${indent}  - {}`);
-          } else {
-            out.push(`${indent}  - ${first.trimStart()}`);
-            out.push(...entries.slice(1));
-          }
-        } else if (Array.isArray(item)) {
-          out.push(`${indent}  - ${flowOut(item)}`);
-        } else {
-          out.push(`${indent}  - ${scalarOut(item)}`);
-        }
-      }
-    } else if (v !== null && typeof v === 'object') {
-      const entries = Object.entries(v as Record<string, unknown>);
-      if (entries.length === 0) {
-        out.push(`${indent}${key}: {}`);
-        continue;
-      }
-      out.push(`${indent}${key}:`);
-      out.push(...dumpLines(v as Record<string, unknown>, `${indent}  `));
-    } else {
-      out.push(`${indent}${key}: ${scalarOut(v)}`);
-    }
+const listItem = (item: unknown, indent: string): string[] => {
+  if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+    const entries = dumpLines(item as Record<string, unknown>, `${indent}    `);
+    const first = entries[0];
+    return first === undefined
+      ? [`${indent}  - {}`]
+      : [`${indent}  - ${first.trimStart()}`, ...entries.slice(1)];
   }
-  return out;
+  return [`${indent}  - ${Array.isArray(item) ? flowOut(item) : scalarOut(item)}`];
+};
+
+const propertyLines = (key: string, value: unknown, indent: string): string[] => {
+  const renderedKey = scalarOut(key);
+  if (Array.isArray(value)) {
+    return value.length === 0
+      ? [`${indent}${renderedKey}: []`]
+      : [`${indent}${renderedKey}:`, ...value.flatMap(item => listItem(item, indent))];
+  }
+  if (value !== null && typeof value === 'object') {
+    const nested = dumpLines(value as Record<string, unknown>, `${indent}  `);
+    return nested.length === 0
+      ? [`${indent}${renderedKey}: {}`]
+      : [`${indent}${renderedKey}:`, ...nested];
+  }
+  return [`${indent}${renderedKey}: ${scalarOut(value)}`];
+};
+
+const dumpLines = (obj: Record<string, unknown>, indent: string): string[] => {
+  return Object.entries(obj).flatMap(([key, value]) => propertyLines(key, value, indent));
 };
 
 /** Serialize a frontmatter record to the YAML subset — the inverse of
