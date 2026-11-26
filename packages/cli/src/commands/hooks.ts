@@ -236,7 +236,6 @@ let hookHost: string | undefined;
 /** The session repo's project id, resolved lazily on first snapshot
  *  need — sessionProject runs git probes, so it must not pay on events
  *  that never touch snapshots. `null` caches "unresolvable". */
-let hookProjectId: string | null | undefined;
 
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out;
@@ -875,17 +874,13 @@ function writeBoundModeFile(file: string | null, mode: Mode, dir: string): boole
   }
 }
 
-/** The session repo's project id for snapshot paths — resolved lazily
- *  (git probes) and cached per process; null = unresolvable. */
+/** The session repo's project id for snapshot paths. */
 function hookProjectIdFor(dir: string): string | null {
-  if (hookProjectId === undefined) {
-    try {
-      hookProjectId = sessionSnapshotProject(dir) ?? null;
-    } catch {
-      hookProjectId = null;
-    }
+  try {
+    return sessionSnapshotProject(dir) ?? null;
+  } catch {
+    return null;
   }
-  return hookProjectId;
 }
 
 /** cliEvent → snapshot event file — prompt-submit's cursor-hydrate leg
