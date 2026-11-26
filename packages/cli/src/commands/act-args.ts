@@ -4,7 +4,15 @@
  * the plugins/work imports the verbs need so any act module can pull it
  * in without closing a module cycle.
  */
-import { flag, printUsage, type ExitCode, type PrTarget, type ReviewFacade } from '@broject/core';
+import {
+  CommandError,
+  EXIT,
+  flag,
+  printUsage,
+  type ExitCode,
+  type PrTarget,
+  type ReviewFacade,
+} from '@broject/core';
 
 export function usage(exitCode: ExitCode = 2): never {
   printUsage(
@@ -94,14 +102,14 @@ function resolveImplicit(rev: ReviewFacade, repo: string, mode: ResolveMode): Re
     console.error(
       'error: no open PR for current branch — pass a PR number (`bro act status <PR>`), or run `bro watch` for the gated-PR board'
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   const link = rev.prLink(repo, auto.pr);
   if (mode === 'strict') {
     console.error(
       `error: refusing to act on auto-resolved PR ${link} — ` + 'pass a PR number explicitly'
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   if (mode === 'read') {
     console.error(`act: resolved current PR ${link} — most recently updated open PR`);
@@ -124,7 +132,7 @@ export function resolvePr(
   const pr = Number(prRaw);
   if (!Number.isInteger(pr) || pr <= 0) {
     console.error(`error: invalid PR number "${prRaw}"`);
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   return { repo, pr, source: 'explicit' };
 }

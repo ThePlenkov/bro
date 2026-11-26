@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ReviewFacade } from '@broject/core';
+import { isCommandError, type ReviewFacade } from '@broject/core';
 import { cleanupAfterMerge, resolvePr } from './act.ts';
 import { sweepMergedPrLabels } from './act-land.ts';
 import { git, initRepo, inside } from './testrepo.ts';
@@ -157,26 +157,15 @@ test('sweepMergedPrLabels removes transient bro labels but keeps debt markers', 
   assert.deepEqual(removed.sort(), ['bro-managed', 'bro-review', 'bro:bead'].sort());
 });
 
-/** Run fn with process.exit captured — returns the code it would exit
+/** Run fn with CommandError captured — returns the code it would exit
  *  with, or fails when fn returns normally. */
 function exitCodeOf(fn: () => unknown): number {
-  const orig = process.exit;
-  class Raised extends Error {
-    constructor(readonly code: number) {
-      super(`exit ${code}`);
-    }
-  }
-  process.exit = ((c?: number) => {
-    throw new Raised(c ?? 0);
-  }) as typeof process.exit;
   try {
     fn();
-    assert.fail('expected process.exit');
+    assert.fail('expected CommandError');
   } catch (e) {
-    if (e instanceof Raised) return e.code;
+    if (isCommandError(e)) return e.code;
     throw e;
-  } finally {
-    process.exit = orig;
   }
 }
 

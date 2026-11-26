@@ -45,6 +45,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
+  CommandError,
+  EXIT,
   getJson,
   hasHelpFlag,
   holdFileLock,
@@ -191,7 +193,7 @@ function endpointOrExit(dir: string): ProviderEndpoint {
     return ep;
   }
   console.error(`error: ${noEndpointError()}`);
-  process.exit(1);
+  throw new CommandError('', EXIT.error);
 }
 
 // --- the host listener ------------------------------------------------------------
@@ -278,7 +280,7 @@ function parsePort(argv: string[], defaultPort: number): number {
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     console.error(`error: --port needs an integer 0–65535, got "${raw}"`);
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   return port;
 }
@@ -319,7 +321,7 @@ async function cmdServe(argv: string[]): Promise<void> {
     console.error(
       `error: already serving ${live.url} (pid ${live.pid}) — one provider listener per host`
     );
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
 
   // Config resolves at the GLOBAL layer only — the host service must
@@ -343,7 +345,7 @@ async function cmdServe(argv: string[]): Promise<void> {
       'error: nothing to serve — no serve.backend in the global config and no upstream ' +
         'credential in the server env (BRO_PROVIDER_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)'
     );
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
   if (conductorCfg !== undefined) {
     // sessions anchor at a dedicated minimal workspace — $HOME made
@@ -363,7 +365,7 @@ async function cmdServe(argv: string[]): Promise<void> {
         `error: cannot create the acp session workspace '${conductorCfg.cwd}' — ` +
           `${err instanceof Error ? err.message : String(err)}`
       );
-      process.exit(1);
+      throw new CommandError('', EXIT.error);
     }
   }
   // the conductor plane carries dispose() — the pooled acp child pins
@@ -380,7 +382,7 @@ async function cmdServe(argv: string[]): Promise<void> {
     console.error(
       'error: another bro provider serve is starting or running (provider.json.lock held)'
     );
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
 
   const meta = { dir: process.cwd(), startedAt: '' };
@@ -416,7 +418,7 @@ async function cmdServe(argv: string[]): Promise<void> {
       // must not leave provider.json.lock held for the next one
       releaseLock();
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
+      throw new CommandError('', EXIT.error);
     }
 
     writeStateFile(statePath, {
@@ -607,7 +609,7 @@ async function cmdEnsure(argv: string[]): Promise<void> {
   const flagPort = parsePort(argv, -1);
   if (flagPort === 0) {
     console.error('error: ensure needs a fixed port — --port 0 can never be probed back');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   try {
     // the client's pin decides WHICH listener matters: a live endpoint —
@@ -634,7 +636,7 @@ async function cmdEnsure(argv: string[]): Promise<void> {
     console.log(await ensureProvider(port));
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
 }
 
@@ -678,7 +680,7 @@ async function cmdToken(argv: string[]): Promise<void> {
   }
   if (ep === undefined) {
     console.error(`error: ${noEndpointError()}`);
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
   // apiKeyHelper contract: the token alone on stdout — no decoration
   console.log(ep.token);

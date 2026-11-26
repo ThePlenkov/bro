@@ -8,6 +8,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  CommandError,
+  EXIT,
   bd,
   bdAt,
   facade,
@@ -99,14 +101,15 @@ function bindPeer(dir: string, b: { alias: string; rig: string; remote: string; 
       const peers = { ...mesh.peers }
       if (peers[b.alias] !== undefined) {
         console.error(`error: peer "${b.alias}" already bound — remove it first`)
-        process.exit(2)
+        throw new CommandError("", EXIT.usage);
       }
       peers[b.alias] = { rig: b.rig, remote: b.remote, ...(b.login !== undefined ? { login: b.login } : {}) }
       cfg.mesh = { ...mesh, peers }
     })
   } catch (e) {
+    if (e instanceof CommandError) throw e;
     console.error(`error: ${e instanceof Error ? e.message : e}`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
 }
 
@@ -115,15 +118,15 @@ function cmdPeersAdd(dir: string, args: string[]): void {
   // positional — a non-empty <remote> implies the two before it
   if (remote === '') {
     console.error('usage: bro mesh peers add <alias> <rig> <remote>')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   if (!/^[A-Za-z0-9_.-]+$/.test(alias)) {
     console.error(`error: peer alias "${alias}" — use letters, digits, ., _, -`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   if (parseRigUri(rig) === null) {
     console.error(`error: peer rig "${rig}" is not a mesh://<org>/<repo> uri`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   bindPeer(dir, { alias, rig, remote, login: flagValue(args, '--login') })
   console.log(`peer ${alias} → ${rig} (${remote})`)
@@ -133,7 +136,7 @@ function cmdPeersRemove(dir: string, args: string[]): void {
   const [alias] = args
   if (alias === undefined) {
     console.error('usage: bro mesh peers remove <alias>')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   try {
     withMeshConfig(dir, (cfg) => {
@@ -141,14 +144,15 @@ function cmdPeersRemove(dir: string, args: string[]): void {
       const peers = { ...mesh.peers }
       if (peers[alias] === undefined) {
         console.error(`error: no peer "${alias}"`)
-        process.exit(2)
+        throw new CommandError("", EXIT.usage);
       }
       delete peers[alias]
       cfg.mesh = { ...mesh, peers }
     })
   } catch (e) {
+    if (e instanceof CommandError) throw e;
     console.error(`error: ${e instanceof Error ? e.message : e}`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   console.log(`peer ${alias} removed`)
 }
@@ -159,7 +163,7 @@ function cmdMe(dir: string): void {
     console.error(
       'this rig is unaddressed: no mesh.rig pin in bro.config.json and origin is not a forge url — set "mesh": { "rig": "mesh://<org>/<repo>" }'
     )
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   console.log(rig)
   const descriptor = join(dir, '.bro-rig.json')
@@ -205,7 +209,7 @@ function cmdPull(dir: string): void {
   const common = gitCommonDir(dir)
   if (common === null) {
     console.error('bro mesh: not inside a git repository')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const peers = meshPeers(dir).filter((p) => p.transport === 'beads-remote')
   if (peers.length === 0) {
@@ -232,12 +236,12 @@ function cmdInbox(dir: string, args: string[]): void {
   const common = gitCommonDir(dir)
   if (common === null) {
     console.error('bro mesh: not inside a git repository')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const rig = selfRig(dir)
   if (rig === null) {
     console.error('this rig is unaddressed — set mesh.rig or a forge-url origin (see `bro mesh me`)')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const result = meshInbox(dir, meshPeers(dir), {
     selfRig: rig,
@@ -279,7 +283,7 @@ function requireRig(dir: string): string {
   const rig = selfRig(dir)
   if (rig === null) {
     console.error('this rig is unaddressed — set mesh.rig or a forge-url origin (see `bro mesh me`)')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   return rig
 }
@@ -294,11 +298,11 @@ export function parseRefs(args: string[], flag: string): MeshRef[] {
       const ref = v.slice(colon + 1)
       if (kind !== 'bead' && kind !== 'url' && kind !== 'pr') {
         console.error(`error: ${flag} wants <bead|url|pr>:<ref> — got "${v}"`)
-        process.exit(2)
+        throw new CommandError("", EXIT.usage);
       }
       if (ref === '') {
         console.error(`error: empty ref in "${v}"`)
-        process.exit(2)
+        throw new CommandError("", EXIT.usage);
       }
       out.push({ kind, ref })
     }
@@ -315,7 +319,7 @@ function commonSetup(dir: string): { rig: string; common: string; peers: MeshPee
   const common = gitCommonDir(dir)
   if (common === null) {
     console.error('bro mesh: not inside a git repository')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   return { rig: requireRig(dir), common, peers: meshPeers(dir) }
 }
@@ -326,14 +330,14 @@ function cmdRequest(dir: string, args: string[]): void {
   const target = to !== undefined ? parseRigUri(to) : null
   if (target === null || titleText === undefined || titleText.startsWith('--')) {
     console.error('usage: bro mesh request <rig> <title> [--body T] [--priority N] [--ref K:R]…')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const body = flagValue(rest, '--body')
   const prio = flagValue(rest, '--priority')
   const priority = prio === undefined ? undefined : Number.parseInt(prio, 10)
   if (priority !== undefined && (!Number.isInteger(priority) || priority < 0 || priority > 4)) {
     console.error('error: --priority wants 0-4')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const posted = postEnvelope({
     dir,
@@ -349,7 +353,7 @@ function cmdRequest(dir: string, args: string[]): void {
   })
   if (posted.error !== undefined) {
     console.error(`error: ${posted.error}`)
-    process.exit(1)
+    throw new CommandError("", EXIT.error);
   }
   console.log(`request ${posted.id} → ${formatRigUri(target)}`)
   const waiting = flagValue(rest, '--for')
@@ -374,7 +378,7 @@ function threadAnchor(dir: string, thread: string, pull: boolean) {
       console.error(`! ${e}`)
     }
     console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   return { rig, state }
 }
@@ -401,13 +405,13 @@ function workerTarget(ctx: LifecycleCtx): string {
   const { kind, rig, state, thread, request } = ctx
   if (request.to !== rig) {
     console.error(`error: thread "${thread}" is addressed to ${request.to}, not this rig (${rig})`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const expected = kind === 'claim' ? 'posted' : 'claimed'
   if (state.stage !== expected) {
     const verb = kind === 'result' ? 'done' : kind
     console.error(`error: cannot ${verb} thread "${thread}" in stage "${state.stage}"`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   return state.provenance[request.id] ?? request.from
 }
@@ -419,16 +423,16 @@ function requesterTarget(ctx: LifecycleCtx): string {
   const senderOf = (e: { id: string; from: string }): string => state.provenance[e.id] ?? e.from
   if (senderOf(request) !== rig) {
     console.error(`error: only the requester (${senderOf(request)}) can ${kind} thread "${thread}"`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   if (state.stage !== 'submitted') {
     console.error(`error: nothing to ${kind} — no result submitted on thread "${thread}" yet`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')
   if (worker === undefined) {
     console.error(`error: no result record on thread "${thread}"`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   return senderOf(worker)
 }
@@ -442,11 +446,11 @@ function lifecycleTarget(
   const request = state.request
   if (request === undefined) {
     console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   if (state.stage === 'accepted' || state.stage === 'rejected') {
     console.error(`error: thread "${thread}" is already ${state.stage}`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const ctx: LifecycleCtx = { kind, rig, state, thread, request }
   return kind === 'claim' || kind === 'result' ? workerTarget(ctx) : requesterTarget(ctx)
@@ -471,7 +475,7 @@ function resolveAnchor(dir: string, state: ReturnType<typeof meshThread>, thread
     console.error(
       `error: thread "${thread}" anchors at ${state.requestPeer.remote} — the checkout does not resolve`
     )
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   return checkout
 }
@@ -642,7 +646,7 @@ function writeRemote(w: RemoteWrite): void {
   }
   if (remoteErr !== undefined) {
     console.error(`error: ${remoteErr}`)
-    process.exit(1)
+    throw new CommandError("", EXIT.error);
   }
 }
 
@@ -708,14 +712,14 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const [thread, ...rest] = args
   if (thread === undefined) {
     console.error(`usage: bro mesh ${kind === 'result' ? 'done' : kind} <thread>`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
   const peers = meshPeers(dir)
   const request = state.request
   if (request === undefined) {
     console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const to = lifecycleTarget(kind, rig, state, thread)
   if (remoteLifecycle({ dir, kind, rig, state, thread, to, peers, rest })) {
@@ -737,7 +741,7 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   })
   if (posted.error !== undefined) {
     console.error(`error: ${posted.error}`)
-    process.exit(1)
+    throw new CommandError("", EXIT.error);
   }
   console.log(`${kind} ${posted.id} → ${to} (thread ${thread})`)
 
@@ -750,7 +754,7 @@ function cmdWait(dir: string, args: string[]): void {
   const [thread] = args
   if (thread === undefined) {
     console.error('usage: bro mesh wait <thread> [--json] [--no-pull]')
-    process.exit(2)
+    throw new CommandError("", EXIT.usage);
   }
   const { common, peers } = commonSetup(dir)
   const state = meshThread(dir, peers, thread, { gitCommon: common, pull: !args.includes('--no-pull') })
@@ -763,7 +767,7 @@ function cmdWait(dir: string, args: string[]): void {
   }
   if (state.request === undefined) {
     console.log(`${thread}: no request visible — pull peers or check the id`)
-    process.exit(1)
+    throw new CommandError("", EXIT.error);
   }
   const next = state.turn === undefined ? 'done' : `${state.turn}'s move`
   console.log(`${thread}: ${state.stage} — ${next} (${state.envelopes.length} envelope(s))`)

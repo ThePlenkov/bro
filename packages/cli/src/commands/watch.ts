@@ -37,6 +37,8 @@
  * transitions, not noise.
  */
 import {
+  CommandError,
+  EXIT,
   awaitFileLock,
   busProbe,
   busSocketPath,
@@ -1149,7 +1151,7 @@ function runWatchSched(argv: string[]): void {
     const r = uninstallWatch(dir);
     console.log(r.detail);
     if (r.state === 'error') {
-      process.exit(1);
+      throw new CommandError('', EXIT.error);
     }
     return;
   }
@@ -1161,7 +1163,7 @@ function runWatchSched(argv: string[]): void {
     console.error(
       `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   const r = installWatch(dir, {
     everySec,
@@ -1170,7 +1172,7 @@ function runWatchSched(argv: string[]): void {
   });
   console.log(r.detail);
   if (r.state === 'error') {
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
 }
 
@@ -1210,13 +1212,7 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   if (dispatchWatchPrelude(argv)) {
     return;
   }
-  let args: ReturnType<typeof watchArgs>;
-  try {
-    args = watchArgs(argv);
-  } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(2);
-  }
+  const args = parseWatchArgs(argv);
   const { json, notify, everySec, forSec } = args;
   const dir = process.cwd();
 
@@ -1262,6 +1258,15 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   await runWatchPulse(dir, everySec, forSec, tick, expired);
 }
 
+function parseWatchArgs(argv: string[]): ReturnType<typeof watchArgs> {
+  try {
+    return watchArgs(argv);
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    throw new CommandError('', EXIT.usage);
+  }
+}
+
 /** The session pulse (bro-killn): orchestrator-only, one per repo via
  *  `bro/pulse.lock`, bounded by --for measured from entry so a standby
  *  behind the incumbent spends the same budget as ticking. */
@@ -1280,7 +1285,7 @@ async function runWatchPulse(
       'error: BRO_AGENT_ID is set — spawned workers never arm the watch pulse; ' +
         'the orchestrator session owns the cadence'
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   // The bound starts here, before the lock wait: a standby behind the
   // incumbent spends the same --for budget as ticking — a wait that eats
