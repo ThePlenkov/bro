@@ -900,3 +900,14 @@ export {
   type SkillDrift,
   type SkillLockLocation,
 } from './skills-lock.ts';
+export {
+  registerSupervisionHost,
+  supervise,
+  supervisionHost,
+} from './supervision.ts';
+export type {
+  SupervisionHost,
+  SupervisionResult,
+  SupervisionSpec,
+  SupervisionSubstrate,
+} from './supervision.ts';

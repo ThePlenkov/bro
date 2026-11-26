@@ -42,6 +42,7 @@ import {
   ensureAuth,
   facade,
   gitCommonDir,
+  supervise,
   type PrTarget,
   type ReviewFacade,
   reviewHost,
@@ -560,7 +561,12 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
   const rev = reviewHost(undefined, loadBroConfig().connectors);
   const t = resolvePr(rev, argv, 'strict');
   const args = detachWaitArgs(argv, t.pr, interval, timeout);
-  const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() });
+  const supervised = await supervise({
+    name: `act wait ${t.pr}`,
+    detachedOnly: true,
+    detached: () => spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() }),
+  });
+  const r = supervised.handle;
   const link = rev.prLink(t.repo, t.pr);
   const log = waitLogPath(process.cwd(), t.pr);
   const logTag = (sep: string): string => (log === null ? '' : `${sep}log: ${log}`);
@@ -586,8 +592,9 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
     return;
   }
   console.log(
-    `act wait ${link} detached — pid ${r.pid} polling every ${interval}s, timeout ${timeout}m`
+    `act wait ${link} ${supervised.substrate} — pid ${r.pid} polling every ${interval}s, timeout ${timeout}m`
   );
+  if (supervised.reason !== undefined) console.error(`  supervision: ${supervised.reason}`);
   console.log(`  inspect: \`bro act status --pr ${t.pr}\`${logTag(' · ')}`);
   if (r.state === 'pending') {
     console.error('warning: marker not confirmed within 10s — the child may still be arming');

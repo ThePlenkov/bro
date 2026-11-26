@@ -55,6 +55,7 @@ import {
 } from '@broject/adapter-core/host';
 import { installModeBridges, type BoardSnapshot } from './omp-modes.ts';
 import type { OmpApi, OmpContext } from './omp-api.ts';
+import { installOmpSupervision, OMP_SUPERVISION_HOST } from './omp-supervision.ts';
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
@@ -98,6 +99,10 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
 
 /** The extension entry point — omp calls this with its API. */
 export default function broExtension(pi: OmpApi): void {
+  // Child bro commands inherit this capability marker. The facade still
+  // falls back safely when a shell is launched outside this extension.
+  process.env.BRO_SUPERVISION_HOST = OMP_SUPERVISION_HOST;
+  installOmpSupervision(pi);
   const driver = createBroDriver(binding(pi), pi);
 
   /** The mode bridges — bro's durable state handed to omp's native Plan,

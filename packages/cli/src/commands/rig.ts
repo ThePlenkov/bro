@@ -31,30 +31,30 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import type { ExitCode } from '@broject/core';
 import {
   awaitFileLock,
   dropMailbox,
   gitTry,
-  loadConfig,
-  LockTimeout,
-  mailboxDir,
   hasHelpFlag,
+  LockTimeout,
+  loadConfig,
+  mailboxDir,
   printUsage,
   shQuote,
   withFileLock,
   worktreeGitDir,
 } from '@broject/core';
-import type { ExitCode } from '@broject/core';
 import { flag, positionals } from './args.ts';
-import { MIN_INTERVAL_SEC, MAX_INTERVAL_SEC } from './drive-config.ts';
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import {
+  type FreshnessConfig,
   freshnessSection,
   postMergeDoneSha,
   resolveSteps,
   runPostMergeRefresh,
-  type FreshnessConfig,
 } from './postmerge.ts';
-import { rigSection, type RigConfig } from './rig-config.ts';
+import { type RigConfig, rigSection } from './rig-config.ts';
 import { runRigNext } from './rig-next.ts';
 import {
   armRigPulse,
@@ -509,6 +509,9 @@ async function cmdWatch(
   cfg: RigConfig,
   resolved: RigRepo | { error: string }
 ): Promise<void> {
+  console.error(
+    'warning: `bro fleet rig watch` is deprecated; use `bro fleet daemon up --rig` so freshness has a recorded owner'
+  );
   const { repo } = needRepo(resolved);
   const everySec = everyArg(argv, cfg);
   const forRaw = flag(argv, '--for');
@@ -568,6 +571,9 @@ async function cmdWatch(
 
 function cmdInstall(argv: string[], cfg: RigConfig, resolved: RigRepo | { error: string }): never {
   const { repo } = needRepo(resolved);
+  console.error(
+    'warning: `bro fleet rig install` is deprecated; use `bro fleet daemon up --rig` so freshness has a recorded owner'
+  );
   const everySec = everyArg(argv, cfg);
   const win = Math.max(cfg.pulseSec, everySec);
   const rearm = `bro rig watch --repo ${shQuote(repo)} --every ${everySec} --for ${win}`;

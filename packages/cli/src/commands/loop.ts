@@ -63,6 +63,7 @@ import {
   explainSlicesOrExit,
   facade,
   facadeName,
+  supervise,
   gitTry,
   ghTry,
   hasHelpFlag,
@@ -136,7 +137,7 @@ import { type AcpSeam, type FetchFn, otelHeader, otelSpan } from '@broject/provi
 import { loadBroConfig } from '../plugins.ts';
 import { runActCommand } from './act.ts';
 import { captureLessons } from '@broject/learn';
-import { flag, positionals } from './args.ts';
+import { deprecatedFlag, flag, positionals } from './args.ts';
 import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { listOpenFleetPrs, loopRefTails } from './fleet-prs.ts';
@@ -975,7 +976,10 @@ function everySecArg(argv: string[]): number | undefined {
  *  provider cannot spin the loop back into the burn. Anything else (quota,
  *  auth, reset-less rate limit, non-rate causes, unparseable reset) is not
  *  a wait — it parks. */
-export async function runLoopCommand(argv: string[]): Promise<void> {
+export async function runLoopCommand(
+  argv: string[],
+  opts: { daemon?: boolean } = {}
+): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
@@ -988,6 +992,13 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
     runLoopSchedLifecycle(argv, root, broCfg);
     return;
+  }
+  if (!opts.daemon) {
+    deprecatedFlag(
+      argv,
+      '--every',
+      'use `bro fleet daemon up --loop` (or `bro fleet daemon run --loop` internally) so the owner is recorded'
+    );
   }
   rejectStrayArgs(argv);
   const everySec = everySecArg(argv);
@@ -1087,7 +1098,17 @@ function runLoopSchedLifecycle(
 async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => void): Promise<void> {
   for (;;) {
     ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
-    await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+    await supervise({
+      // NOSONAR — sequential supervised passes must await each pass
+      name: 'loop pass',
+      native: async () => {
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+      },
+      detached: async () => {
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+      },
+      message: () => 'bro loop pass settled; the next pass is armed',
+    });
     await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
   }
 }

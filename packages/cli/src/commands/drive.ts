@@ -117,7 +117,7 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { reconcileLanePause } from '../lane.ts';
-import { flag } from './args.ts';
+import { deprecatedFlag, flag } from './args.ts';
 import { defaultBranch, runActCommand } from './act.ts';
 import { emitDevinUsage } from '@broject/devin';
 import {
@@ -1095,7 +1095,10 @@ async function acquireDriveLock(root: string): Promise<() => void> {
   });
 }
 
-export async function runDriveCommand(argv: string[]): Promise<void> {
+export async function runDriveCommand(
+  argv: string[],
+  opts: { daemon?: boolean } = {}
+): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
@@ -1114,6 +1117,13 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     }
     runDriveSched(argv, main.path, drive);
     return;
+  }
+  if (!opts.daemon) {
+    deprecatedFlag(
+      argv,
+      '--every',
+      'use `bro fleet daemon up` (or `bro fleet daemon run` internally) so the owner is recorded'
+    );
   }
   checkBeads();
   let args: DriveArgs;

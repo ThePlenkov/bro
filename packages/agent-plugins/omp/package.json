@@ -3,7 +3,8 @@
   "version": "0.3.0",
   "type": "module",
   "dependencies": {
-    "@broject/adapter-core": "^0.3.0"
+    "@broject/adapter-core": "^0.3.0",
+    "@broject/core": "^0.3.0"
   },
   "exports": {
     ".": {

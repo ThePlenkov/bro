@@ -974,10 +974,10 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       // the supervised loop — drive's own guard, lock and cadence apply;
       // reached directly only via `up`'s detached spawn
       if (isLoop) {
-        await runLoopCommand(['--every', String(interval)]);
+        await runLoopCommand(['--every', String(interval)], { daemon: true });
         return;
       }
-      await runDriveCommand(['--every', String(interval)]);
+      await runDriveCommand(['--every', String(interval)], { daemon: true });
       return;
     case 'status':
       daemonStatus(main);
