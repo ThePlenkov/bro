@@ -433,6 +433,7 @@ function settleFromPlanes(
       closedUnshipped(w, read);
       return;
     }
+    w.closedUnshipped = 0;
     console.error(
       `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
         (thread.turn !== undefined ? ` — ${thread.turn}'s move` : '')
