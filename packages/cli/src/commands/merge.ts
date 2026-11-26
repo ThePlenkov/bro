@@ -19,6 +19,7 @@ import {
   watchEnd,
 } from '@broject/act';
 import {
+  type ExitCode,
   emitLifecycle,
   ensureAuth,
   facadeName,
@@ -27,10 +28,9 @@ import {
   mergeQueueHost,
   osc8Link,
   printUsage,
+  type ReviewFacade,
   reviewHost,
   supportsOsc8,
-  type ExitCode,
-  type ReviewFacade,
 } from '@broject/core';
 import { recordRetro } from '@broject/retro';
 import { loadBroConfig } from '../plugins.ts';
@@ -47,6 +47,7 @@ import {
 } from './act.ts';
 import { sweepMergedPrLabels } from './act-land.ts';
 import { flag } from './args.ts';
+import { mergeCycleActions } from './merge-cycle.ts';
 import { reconcileOutcomes } from './outcome-report.ts';
 
 function usage(exitCode: ExitCode = 2): never {
@@ -637,16 +638,7 @@ function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult, landed: PrActState
         `fix rounds: ${state.fixRounds}`,
         `wall time: ${minutes}m`,
       ],
-      actions: [
-        {
-          title: `classify merge-cycle findings for ${link} into prevention actions`,
-          sink: 'backlog',
-          detail:
-            `The bro merge cycle recorded ${threadsAtStart.length} thread(s) and ` +
-            `${state.fixRounds} fix round(s). Review the retro's evidence and turn ` +
-            'recurring finding classes into AGENTS.md / skill / spec preventions.',
-        },
-      ],
+      actions: mergeCycleActions(link, threadsAtStart.length, state.fixRounds),
     });
     console.log(`merge: retro recorded as ${retro.retroId}`);
   } catch (err) {
