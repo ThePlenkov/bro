@@ -174,7 +174,7 @@ interface LedgerUpdateRequest {
 }
 
 function updateRemoteLedger(request: LedgerUpdateRequest): boolean {
-  const match = /^remote:(.*):([^:]+)$/.exec(request.handle);
+  const match = /^remote:(.+):([^:]+)$/.exec(request.handle);
   if (!match) return false;
   const [, root, id] = match;
   for (let attempt = 0; attempt < 3; attempt++) {

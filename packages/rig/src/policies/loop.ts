@@ -3499,13 +3499,14 @@ function reserveCeilingSlot(
   open: number,
   activeBranches: ReadonlySet<string>
 ): string | null {
+  const now = ctx.deps.now();
   const remote = reserveRemoteCeiling(
     {
       root: ctx.root,
       max: ctx.cfg.maxOpenTotal,
-      open,
-      now: ctx.deps.now(),
-      pid: process.pid,
+      open: Number.isInteger(open) ? open : 0,
+      now: Number.isInteger(now) ? now : Date.now(),
+      pid: Number.isInteger(process.pid) ? process.pid : 0,
       activeBranches,
     }
   );
