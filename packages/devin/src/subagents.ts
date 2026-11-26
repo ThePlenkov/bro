@@ -79,6 +79,7 @@ function validProfile(entry: ProfileEntry): boolean {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) return false;
   if (!isRecord(entry.profile) || typeof entry.profile.model !== 'string') return false;
   if (entry.profile.model.trim() === '') return false;
+  if (entry.profile.prompt !== undefined && typeof entry.profile.prompt !== 'string') return false;
   return (
     entry.profile.tools === undefined ||
     (Array.isArray(entry.profile.tools) &&

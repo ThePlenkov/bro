@@ -22,7 +22,7 @@ test('materializes profiles and the default model', () => {
   assert.equal(written.length, 2);
   assert.match(
     readFileSync(join(home, '.config', 'devin', 'agents', 'worker.md'), 'utf8'),
-    /model: swe-2-max[\s\S]*tools:\n  - shell[\s\S]*Work carefully\./
+    /model: swe-2-max[\s\S]*tools:\n {2}- shell[\s\S]*Work carefully\./
   );
   assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')), {
     agent: { other: true, subagent_model: 'swe-2-max' },
@@ -41,6 +41,17 @@ test('rejects unsafe profile names', () => {
       materializeDevinSubagents({
         home: mkdtempSync(join(tmpdir(), 'bro-devin-')),
         config: { profiles: { '../worker': { model: 'm' } } },
+      }),
+    /invalid Devin subagent profile/
+  );
+});
+
+test('rejects non-string prompts', () => {
+  assert.throws(
+    () =>
+      materializeDevinSubagents({
+        home: mkdtempSync(join(tmpdir(), 'bro-devin-')),
+        config: { profiles: { worker: { model: 'm', prompt: {} as unknown as string } } },
       }),
     /invalid Devin subagent profile/
   );

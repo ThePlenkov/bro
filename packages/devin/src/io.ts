@@ -1,10 +1,26 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 function withinRoot(root: string, path: string): string {
-  const resolvedRoot = resolve(root);
   const resolvedPath = resolve(path);
-  const remainder = relative(resolvedRoot, resolvedPath);
+  const resolvedRoot = realpathSync(resolve(root));
+  let existing = resolvedPath;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) {
+      throw new Error(`cannot resolve path: ${path}`);
+    }
+    existing = parent;
+  }
+  const realExisting = realpathSync(existing);
+  const remainder = relative(resolvedRoot, resolve(realExisting, relative(existing, resolvedPath)));
   const escapesRoot = [
     remainder === '..',
     remainder.startsWith(`..${sep}`),
