@@ -17,6 +17,7 @@ import {
   promptContextLines,
   registerConnector,
   sessionStartLines,
+  sessionStartProbe,
   stopGateContributions,
   tasksAsync,
   unregisterConnector,
@@ -404,6 +405,74 @@ describe('connectors', () => {
     assert.deepEqual(await promptContextLines({ dir }, 'no refs here'), []);
     const gates = await stopGateContributions({ dir });
     assert.ok(gates.some(g => g.aspect === 'jira' && g.block === 'acme: JIRA-1 open'));
+  });
+
+  test('starts independent session probes concurrently', async () => {
+    // Barrier, not wall-clock: probes record their start and then block on a
+    // gate the test controls. Concurrency means both starts land BEFORE the
+    // gate opens — under a serial executor the first probe would wait on the
+    // gate forever and the second start would never be observed.
+    const started: string[] = [];
+    const stopStarted: string[] = [];
+    let releaseSession!: () => void;
+    let releaseStop!: () => void;
+    const sessionBarrier = new Promise<void>(resolve => {
+      releaseSession = resolve;
+    });
+    const stopBarrier = new Promise<void>(resolve => {
+      releaseStop = resolve;
+    });
+    const flush = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
+    const mkProbe = (name: string): void => {
+      registerConnector({
+        name,
+        hooks: () => ({
+          sessionStart: async () => {
+            started.push(name);
+            await sessionBarrier;
+            return [name];
+          },
+          stopGate: async () => {
+            stopStarted.push(name);
+            await stopBarrier;
+            return [{ aspect: name, block: name }];
+          },
+        }),
+      });
+    };
+    mkProbe('acme-parallel-a');
+    mkProbe('acme-parallel-b');
+    try {
+      // Earlier tests intentionally install a rejecting connector without
+      // removing it; remove those test fixtures so their rejection cannot
+      // pollute this assertion.
+      unregisterConnector('acme-async');
+      unregisterConnector('acme-rejecting');
+      unregisterConnector('acme-rejecting-auth');
+      const pendingSession = sessionStartProbe({ dir: process.cwd() });
+      await flush();
+      assert.deepEqual(started.sort(), ['acme-parallel-a', 'acme-parallel-b']);
+      releaseSession();
+      const result = await pendingSession;
+      assert.ok(result.lines.includes('acme-parallel-a'));
+      assert.ok(result.lines.includes('acme-parallel-b'));
+
+      const pendingGates = stopGateContributions({ dir: process.cwd() });
+      await flush();
+      assert.deepEqual(stopStarted.sort(), ['acme-parallel-a', 'acme-parallel-b']);
+      releaseStop();
+      const gates = await pendingGates;
+      assert.deepEqual(
+        gates.filter(g => g.aspect === 'acme-parallel-a' || g.aspect === 'acme-parallel-b'),
+        [
+          { aspect: 'acme-parallel-a', block: 'acme-parallel-a' },
+          { aspect: 'acme-parallel-b', block: 'acme-parallel-b' },
+        ]
+      );
+    } finally {
+      unregisterConnector('acme-parallel-a');
+      unregisterConnector('acme-parallel-b');
+    }
   });
 
   test('bdActor prefers BEADS_ACTOR over git config', () => {
