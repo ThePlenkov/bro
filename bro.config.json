@@ -87,13 +87,6 @@
           }
         },
         "say": "vendor name in packages/core \u2014 REVIEW.md: core is vendor-neutral (major); move vendor knowledge to packages/cli/src/session-planes/ or a connector package"
-      },
-      {
-        "name": "retro-on-stop",
-        "when": {
-          "on": ["stop"]
-        },
-        "say": "session ending \u2014 run the retro checklist (skills/retro): loose ends, hand-rolled mechanics \u2192 bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
       }
     ]
   },
