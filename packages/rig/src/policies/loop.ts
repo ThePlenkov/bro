@@ -1193,7 +1193,7 @@ function stampLoopPr(
   beads: ReadyBead[],
   item: LoopItem,
   pr: number,
-  autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval
+  autoMergeArmed: boolean
 ): void {
   let draft = false;
   try {
