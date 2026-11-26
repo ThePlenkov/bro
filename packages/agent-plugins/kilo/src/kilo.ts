@@ -42,10 +42,36 @@ const GATE_DIAG_INTERVAL_MS = 60_000;
 /** Auto-approve only a plain bro/bd/npx-bro invocation — no shell
  *  metacharacters in args (a metachar just means the ask goes to the
  *  user; auto-approve fails closed, never wrong). */
-const SAFE_CMD = [
-  /^\s*(?:bro|bd)(?:\s+[^;&|`<>$()\\\n]*)?\s*$/,
-  /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/,
-];
+const SHELL_META_CHARACTERS = new Set([
+  ';',
+  '&',
+  '|',
+  '`',
+  '<',
+  '>',
+  '$',
+  '(',
+  ')',
+  '\\',
+  '\n',
+  '\r',
+]);
+
+function isSafeCommand(command: string): boolean {
+  const trimmed = command.trim();
+  if (trimmed === '' || [...trimmed].some(character => SHELL_META_CHARACTERS.has(character))) {
+    return false;
+  }
+  const words = trimmed.split(/\s+/);
+  if (words[0] === 'bro' || words[0] === 'bd') {
+    return true;
+  }
+  if (words[0] !== 'npx') {
+    return false;
+  }
+  const packageIndex = words[1] === '-y' ? 2 : 1;
+  return words[packageIndex] === '@broject/bro';
+}
 
 interface SpawnResult {
   code: number | null;
@@ -171,18 +197,15 @@ const BroPlugin: Plugin = async input => {
     if (sessionKey) {
       return hydratedContexts.get(sessionKey)?.context ?? null;
     }
-    let context: string | null = null;
+    const contexts: string[] = [];
     for (const liveSession of liveSessions) {
       const candidate = hydratedContexts.get(liveSession)?.context;
       if (candidate === null || candidate === undefined) {
         continue;
       }
-      if (context !== null) {
-        return null;
-      }
-      context = candidate;
+      contexts.push(candidate);
     }
-    return context;
+    return contexts.length === 1 ? (contexts[0] ?? null) : null;
   };
 
   const sessionIdOf = (event: { properties?: unknown }): string | null => {
@@ -234,7 +257,9 @@ const BroPlugin: Plugin = async input => {
             message: `bro stop gate did not run (${hookFailureText(failure)}) — the stop is unguarded`,
           },
         })
-        .catch(() => {});
+        .catch(() => {
+          // Diagnostics are best effort and must not affect the lifecycle hook.
+        });
     } catch {
       // Diagnostics are fail-open and must never break the lifecycle hook.
     }
@@ -337,7 +362,7 @@ const BroPlugin: Plugin = async input => {
       // approves the compound 'bro x && rm'.
       const pats = (input as { patterns?: string[] }).patterns ?? input.pattern;
       const cmds = pats === undefined ? [] : Array.isArray(pats) ? pats : [pats];
-      if (cmds.length > 0 && cmds.every(c => SAFE_CMD.some(re => re.test(c)))) {
+      if (cmds.length > 0 && cmds.every(isSafeCommand)) {
         output.status = 'allow';
       }
     },

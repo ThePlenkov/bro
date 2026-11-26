@@ -227,7 +227,9 @@ function makeCore(input: BroCoreInput) {
   });
 
   const notify = (level: Level, message: string): void => {
-    log(level, message).catch(() => {});
+    log(level, message).catch(() => {
+      // diagnostics are deliberately best-effort
+    });
   };
   let lastStopWarning = 0;
 
@@ -346,7 +348,9 @@ function makeCore(input: BroCoreInput) {
           }
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        // persistence is best-effort
+      })
       .finally(() => {
         persistLoaded = true;
         retiredDuringLoad.clear();
@@ -1286,7 +1290,10 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
     controller.abort();
     for (const pending of registrations) {
       try {
-        await (await pending)?.dispose?.();
+        const registration = await pending;
+        if (registration?.dispose) {
+          await registration.dispose();
+        }
       } catch {
         // teardown must not throw into the host's unload path
       }

@@ -117,7 +117,11 @@ function pushArgsOf(segment: string): string[] | null {
     }
     let j = i + 1;
     while (j < tokens.length) {
-      const word = bareWord(tokens[j]!);
+      const token = tokens[j];
+      if (token === undefined) {
+        break;
+      }
+      const word = bareWord(token);
       if (word === 'push') {
         return tokens.slice(j + 1);
       }

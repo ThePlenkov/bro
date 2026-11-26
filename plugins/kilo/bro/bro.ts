@@ -246,13 +246,15 @@ async function callHookDetailed(command, call) {
 			resolve(result);
 		}
 	};
-	const timer = killAfter(child, timeoutMs, () => settle({
-		control: null,
-		failure: {
-			kind: "timeout",
-			timeoutMs
-		}
-	}));
+	const timer = killAfter(child, timeoutMs, () => {
+		settle({
+			control: null,
+			failure: {
+				kind: "timeout",
+				timeoutMs
+			}
+		});
+	});
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -444,7 +446,28 @@ const GATE_DIAG_INTERVAL_MS = 6e4;
 /** Auto-approve only a plain bro/bd/npx-bro invocation — no shell
 *  metacharacters in args (a metachar just means the ask goes to the
 *  user; auto-approve fails closed, never wrong). */
-const SAFE_CMD = [/^\s*(?:bro|bd)(?:\s+[^;&|`<>$()\\\n]*)?\s*$/, /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/];
+const SHELL_META_CHARACTERS = new Set([
+	";",
+	"&",
+	"|",
+	"`",
+	"<",
+	">",
+	"$",
+	"(",
+	")",
+	"\\",
+	"\n",
+	"\r"
+]);
+function isSafeCommand(command) {
+	const trimmed = command.trim();
+	if (trimmed === "" || [...trimmed].some((character) => SHELL_META_CHARACTERS.has(character))) return false;
+	const words = trimmed.split(/\s+/);
+	if (words[0] === "bro" || words[0] === "bd") return true;
+	if (words[0] !== "npx") return false;
+	return words[words[1] === "-y" ? 2 : 1] === "@broject/bro";
+}
 function asRecord(v) {
 	return typeof v === "object" && v !== null && !Array.isArray(v) ? v : null;
 }
@@ -541,14 +564,13 @@ const BroPlugin = async (input) => {
 	};
 	const contextForSession = (sessionKey) => {
 		if (sessionKey) return hydratedContexts.get(sessionKey)?.context ?? null;
-		let context = null;
+		const contexts = [];
 		for (const liveSession of liveSessions) {
 			const candidate = hydratedContexts.get(liveSession)?.context;
 			if (candidate === null || candidate === void 0) continue;
-			if (context !== null) return null;
-			context = candidate;
+			contexts.push(candidate);
 		}
-		return context;
+		return contexts.length === 1 ? contexts[0] ?? null : null;
 	};
 	const sessionIdOf = (event) => {
 		const props = asRecord(event.properties) ?? {};
@@ -620,7 +642,7 @@ const BroPlugin = async (input) => {
 		"permission.ask": async (input$1, output) => {
 			const pats = input$1.patterns ?? input$1.pattern;
 			const cmds = pats === void 0 ? [] : Array.isArray(pats) ? pats : [pats];
-			if (cmds.length > 0 && cmds.every((c) => SAFE_CMD.some((re) => re.test(c)))) output.status = "allow";
+			if (cmds.length > 0 && cmds.every(isSafeCommand)) output.status = "allow";
 		}
 	};
 };

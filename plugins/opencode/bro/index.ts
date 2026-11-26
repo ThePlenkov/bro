@@ -298,13 +298,15 @@ async function callHookDetailed(command, call) {
 			resolve(result);
 		}
 	};
-	const timer = killAfter(child, timeoutMs, () => settle({
-		control: null,
-		failure: {
-			kind: "timeout",
-			timeoutMs
-		}
-	}));
+	const timer = killAfter(child, timeoutMs, () => {
+		settle({
+			control: null,
+			failure: {
+				kind: "timeout",
+				timeoutMs
+			}
+		});
+	});
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -1596,7 +1598,8 @@ async function BroSetup(ctx) {
 	return async () => {
 		controller.abort();
 		for (const pending of registrations) try {
-			await (await pending)?.dispose?.();
+			const registration = await pending;
+			if (registration?.dispose) await registration.dispose();
 		} catch {}
 	};
 }

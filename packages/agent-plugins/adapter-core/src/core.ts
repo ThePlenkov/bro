@@ -229,7 +229,9 @@ export async function exitsZero(cmd: string, args: string[]): Promise<boolean> {
     clearTimeout(timer);
     resolve(code === 0);
   });
-  child.stdin?.on('error', () => {});
+  child.stdin?.on('error', () => {
+    // stdin may close before the probe writes its payload
+  });
   child.stdin?.end('');
   return promise;
 }
@@ -439,9 +441,9 @@ export async function callHookDetailed(command: Command, call: HookCall): Promis
       resolve(result);
     }
   };
-  const timer = killAfter(child, timeoutMs, () =>
-    settle({ control: null, failure: { kind: 'timeout', timeoutMs } })
-  );
+  const timer = killAfter(child, timeoutMs, () => {
+    settle({ control: null, failure: { kind: 'timeout', timeoutMs } });
+  });
   let out = '';
   child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {
@@ -467,7 +469,9 @@ export async function callHookDetailed(command: Command, call: HookCall): Promis
     }
     settle({ control, failure: null });
   });
-  child.stdin?.on('error', () => {});
+  child.stdin?.on('error', () => {
+    // stdin may close before the probe writes its payload
+  });
   child.stdin?.end(input);
   return promise;
 }
@@ -594,9 +598,7 @@ export function displayWidth(text: string): number {
     ) {
       continue;
     }
-    const zeroWidth =
-      (code >= 0x200b && code <= 0x200d) ||
-      (code >= 0xfe00 && code <= 0xfe0f);
+    const zeroWidth = (code >= 0x200b && code <= 0x200d) || (code >= 0xfe00 && code <= 0xfe0f);
     if (zeroWidth) {
       continue;
     }
@@ -767,7 +769,9 @@ function runCollect(
     clearTimeout(timer);
     settle({ code, stdout, stderr, error: null });
   });
-  child.stdin?.on('error', () => {});
+  child.stdin?.on('error', () => {
+    // stdin may close before the probe writes its payload
+  });
   child.stdin?.end(options.input ?? '');
 }
 

@@ -25,6 +25,8 @@ import { Plugin } from '@opencode/plugin/tui';
 import { For, Show, createSignal } from 'solid-js';
 import { Bro, type BroBoard, boardHasContent } from './rpc.ts';
 
+type Theme = Plugin.Context['theme'];
+
 /** The board as the TUI holds it — the RPC shape, plus the moment it
  *  was read (the widget shows "watched Ns ago"). */
 interface BoardView extends BroBoard {
@@ -49,7 +51,7 @@ function ageStr(ms: number): string {
 }
 
 function fmtDuration(ms?: number): string {
-  if (ms === undefined || ms === null || ms <= 0) return '?';
+  if (ms === undefined || ms <= 0) return '?';
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -71,7 +73,8 @@ function clip(text: string, max = 3_000): string {
 function splitArgs(input: string): string[] {
   const args: string[] = [];
   for (const m of input.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
-    args.push(m[1] ?? m[2] ?? m[3] ?? m[0]);
+    const [doubleQuoted, singleQuoted, bare] = m.slice(1);
+    args.push(doubleQuoted || singleQuoted || bare || m[0]);
   }
   return args;
 }
@@ -82,7 +85,7 @@ function splitArgs(input: string): string[] {
 function InWorkItem(props: {
   b: { id: string; title: string };
   board: () => BoardView | null;
-  theme: any;
+  theme: Theme;
 }) {
   const cur = props.board();
   if (cur === null) return null;
@@ -99,16 +102,18 @@ function InWorkItem(props: {
       </text>
       <box flexDirection="row" gap={1} paddingLeft={2}>
         <Show when={pr}>
-          <text fg={theme.text.feedback.info.base}>
-            <u>#{pr!.pr}</u>
-          </text>
+          {currentPr => (
+            <text fg={theme.text.feedback.info.base}>
+              <u>#{currentPr().pr}</u>
+            </text>
+          )}
         </Show>
       </box>
     </box>
   );
 }
 
-function InWorkSection(props: { board: () => BoardView | null; theme: any }) {
+function InWorkSection(props: { board: () => BoardView | null; theme: Theme }) {
   const board = props.board;
   return (
     <Show when={(board()?.inWork.length ?? 0) > 0}>
@@ -120,7 +125,7 @@ function InWorkSection(props: { board: () => BoardView | null; theme: any }) {
   );
 }
 
-function ReadyRow(props: { b: { id: string; title: string }; theme: any }) {
+function ReadyRow(props: { b: { id: string; title: string }; theme: Theme }) {
   const theme = props.theme;
   const title = props.b.title.length > 40 ? `${props.b.title.slice(0, 40)}…` : props.b.title;
   return (
@@ -135,7 +140,7 @@ function ReadyRow(props: { b: { id: string; title: string }; theme: any }) {
   );
 }
 
-function ReadySection(props: { board: () => BoardView | null; theme: any }) {
+function ReadySection(props: { board: () => BoardView | null; theme: Theme }) {
   const board = props.board;
   return (
     <Show when={(board()?.readyTotal ?? 0) > 0}>
@@ -147,7 +152,7 @@ function ReadySection(props: { board: () => BoardView | null; theme: any }) {
   );
 }
 
-function FleetSection(props: { board: () => BoardView | null; theme: any }) {
+function FleetSection(props: { board: () => BoardView | null; theme: Theme }) {
   const board = props.board;
   const theme = props.theme;
   const live = () => (board()?.agents ?? []).filter(a => a.state === 'running');
@@ -156,7 +161,7 @@ function FleetSection(props: { board: () => BoardView | null; theme: any }) {
     <Show when={live().length > 0 || running().length > 0}>
       <text fg={theme.text.muted}>
         fleet {live().length}
-        <Show when={(board()?.fleetMax ?? 0) > 0}>/{board()!.fleetMax}</Show>
+        <Show when={(board()?.fleetMax ?? 0) > 0}>/{board()?.fleetMax}</Show>
         <Show when={running().length > 0}> · loop ×{running().length}</Show>
       </text>
       <For each={live().slice(0, 3)}>
@@ -171,7 +176,7 @@ function FleetSection(props: { board: () => BoardView | null; theme: any }) {
   );
 }
 
-function WatchSection(props: { board: () => BoardView | null; theme: any }) {
+function WatchSection(props: { board: () => BoardView | null; theme: Theme }) {
   const board = props.board;
   const theme = props.theme;
   return (
@@ -186,7 +191,7 @@ function WatchSection(props: { board: () => BoardView | null; theme: any }) {
   );
 }
 
-function BoardBody(props: { board: () => BoardView | null; theme: any }) {
+function BoardBody(props: { board: () => BoardView | null; theme: Theme }) {
   const board = props.board;
   const theme = props.theme;
   return (
@@ -196,7 +201,7 @@ function BoardBody(props: { board: () => BoardView | null; theme: any }) {
       <FleetSection board={board} theme={theme} />
       <WatchSection board={board} theme={theme} />
       <Show when={(board()?.dirty ?? 0) > 0}>
-        <text fg={theme.text.feedback.warning.base}>dirty ×{board()!.dirty}</text>
+        <text fg={theme.text.feedback.warning.base}>dirty ×{board()?.dirty}</text>
       </Show>
     </>
   );
@@ -209,8 +214,12 @@ function BroBoardWidget(props: { context: Plugin.Context; board: () => BoardView
     initial: { open: true },
   });
   const board = () => props.board();
+  const hasContent = (): boolean => {
+    const current = board();
+    return current !== null && boardHasContent(current);
+  };
   return (
-    <Show when={board() !== null && boardHasContent(board()!)}>
+    <Show when={hasContent()}>
       <box flexDirection="column">
         <box
           flexDirection="row"
@@ -227,8 +236,8 @@ function BroBoardWidget(props: { context: Plugin.Context; board: () => BoardView
             <Show when={!view.open && board() !== null}>
               <span style={{ fg: theme.text.muted }}>
                 {' '}
-                ({board()!.inWork.length} in work, {board()!.readyTotal} ready
-                {board()!.watch ? `, ${board()!.watch!.attention} attention` : ''})
+                ({board()?.inWork.length} in work, {board()?.readyTotal} ready
+                {board()?.watch ? `, ${board()?.watch?.attention} attention` : ''})
               </span>
             </Show>
           </text>
@@ -242,11 +251,7 @@ function BroBoardWidget(props: { context: Plugin.Context; board: () => BoardView
 }
 
 /** The session panel — the same board, full width, with a header. */
-function BroBoardPanel(props: {
-  context: Plugin.Context;
-  board: () => BoardView | null;
-  panel: any;
-}) {
+function BroBoardPanel(props: { context: Plugin.Context; board: () => BoardView | null }) {
   const theme = props.context.theme;
   const board = props.board;
   return (
@@ -254,7 +259,7 @@ function BroBoardPanel(props: {
       <text fg={theme.text.base}>
         <b>bro board</b>
         <Show when={board()?.branch}>
-          <span style={{ fg: theme.text.muted }}> · {board()!.branch}</span>
+          {branch => <span style={{ fg: theme.text.muted }}> · {branch()}</span>}
         </Show>
       </text>
       <Show
@@ -292,12 +297,12 @@ export default Plugin.define({
       if (refreshing) return;
       refreshing = true;
       try {
-        const board = await client().rpc(Bro).board({});
-        if (board === null || typeof board !== 'object') {
+        const result: unknown = await client().rpc(Bro).board({});
+        if (typeof result !== 'object' || result === null) {
           return;
         }
         failures = 0;
-        setBoard({ ...(board as BroBoard), readAt: Date.now() });
+        setBoard({ ...(result as BroBoard), readAt: Date.now() });
       } catch {
         // the server part is not there (or the rig has no bro) — keep the
         // last board rather than blanking the sidebar on a transient error
@@ -327,15 +332,11 @@ export default Plugin.define({
       );
       stops.push(
         sub.events.on('attention', event => {
-          const data = event?.data as { title?: string; message?: string; severity?: string };
-          const title = typeof data?.title === 'string' && data.title !== '' ? data.title : 'bro';
-          const message = typeof data?.message === 'string' ? data.message : '';
+          const data = event.data as { title?: string; message?: string; severity?: string };
+          const title = typeof data.title === 'string' && data.title !== '' ? data.title : 'bro';
+          const message = typeof data.message === 'string' ? data.message : '';
           const severity =
-            data?.severity === 'error'
-              ? 'error'
-              : data?.severity === 'warning'
-                ? 'warning'
-                : 'info';
+            data.severity === 'error' ? 'error' : data.severity === 'warning' ? 'warning' : 'info';
           toast.show({
             title: `bro • ${title}`,
             message: clip(message),
@@ -358,8 +359,10 @@ export default Plugin.define({
     }
 
     void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
-    timer.unref?.();
+    const timer = setInterval(() => {
+      void refresh();
+    }, POLL_MS);
+    timer.unref();
 
     // The palette/slash command — runs a bro verb and shows the output.
     context.keymap.layer(() => ({
@@ -425,9 +428,9 @@ export default Plugin.define({
 
     const releasePanel = context.ui.slot({
       append: 'session.panel',
-      render: (panel: any) => (
-        <Show when={panel?.name === 'bro.board'}>
-          <BroBoardPanel context={context} board={board} panel={panel} />
+      render: panel => (
+        <Show when={panel.name === 'bro.board'}>
+          <BroBoardPanel context={context} board={board} />
         </Show>
       ),
     });

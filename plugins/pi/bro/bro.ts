@@ -297,13 +297,15 @@ async function callHookDetailed(command, call) {
 			resolve(result);
 		}
 	};
-	const timer = killAfter(child, timeoutMs, () => settle({
-		control: null,
-		failure: {
-			kind: "timeout",
-			timeoutMs
-		}
-	}));
+	const timer = killAfter(child, timeoutMs, () => {
+		settle({
+			control: null,
+			failure: {
+				kind: "timeout",
+				timeoutMs
+			}
+		});
+	});
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {

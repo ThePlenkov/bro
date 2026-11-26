@@ -55,7 +55,7 @@ import {
 } from '@broject/adapter-core/host';
 import type { OmpApi, OmpContext } from './omp-api.ts';
 import { installOmpSupervision, OMP_SUPERVISION_HOST } from './omp-supervision.ts';
-import { type BoardSnapshot, installModeBridges } from './omp-modes.ts';
+import { installModeBridges } from './omp-modes.ts';
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
@@ -196,7 +196,7 @@ export default function broExtension(pi: OmpApi): void {
    *  Goal and Vibe modes. See omp-modes.ts for why bro adds state
    *  rather than a second implementation of each mode. */
   installModeBridges(pi, {
-    board: () => driver.board as BoardSnapshot | null,
+    board: () => driver.board,
     async modeContext(kind, cwd) {
       const args =
         kind === PREWALK_KIND
