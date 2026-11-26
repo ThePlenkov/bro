@@ -9,15 +9,18 @@
  * Absent = available: a model the ledger never heard of is not walled.
  */
 import {
-  healthKey,
   type HealthReason,
   type HealthSnapshot,
   type HealthVerdict,
+  healthKey,
 } from '@broject/core';
+import { and, gte, lte, sql } from 'drizzle-orm';
+import { usage } from './schema.ts';
 import { activeLimits, openSessions, type RouterDb } from './store.ts';
 
 /** The reasons a wall may carry — the shared vocabulary. */
 const REASONS: readonly HealthReason[] = ['rate-limited', 'quota', 'session-cap', 'lane-busy'];
+const WINDOW_MS = 3_600_000;
 
 /** A reason the ledger does not know still has to mean something — the
  *  wall is real even when the writer spelled it differently. */
@@ -60,6 +63,35 @@ async function sessionFacts(db: RouterDb, snapshot: HealthSnapshot): Promise<voi
   }
 }
 
+/** Add the traffic the router served during its current (hour) window.
+ * Usage is a fact, not a cap: the serving path owns the operator's quota
+ * policy. A usage-only model is still present in the snapshot as available. */
+async function usageFacts(db: RouterDb, snapshot: HealthSnapshot, now: number): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        provider: usage.provider,
+        model: usage.model,
+        requests: sql<number>`coalesce(sum(${usage.requests}), 0)`,
+        tokens: sql<number>`coalesce(sum(${usage.tokens}), 0)`,
+      })
+      .from(usage)
+      .where(and(gte(usage.windowStart, now - WINDOW_MS), lte(usage.windowStart, now)))
+      .groupBy(usage.provider, usage.model);
+    for (const row of rows) {
+      const key = healthKey(row.provider, row.model);
+      snapshot[key] = {
+        ...(snapshot[key] ?? { available: true }),
+        requests: row.requests,
+        tokens: row.tokens,
+      };
+    }
+  } catch {
+    // The store is best-effort. A missing usage read must not turn health
+    // into a gate, and the wall/session reads remain useful.
+  }
+}
+
 /** The snapshot — what the route resolver reads. */
 export async function healthSnapshot(
   db: RouterDb,
@@ -67,5 +99,6 @@ export async function healthSnapshot(
 ): Promise<HealthSnapshot> {
   const snapshot = await wallVerdicts(db, now);
   await sessionFacts(db, snapshot);
+  await usageFacts(db, snapshot, now);
   return snapshot;
 }

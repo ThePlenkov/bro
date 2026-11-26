@@ -25,6 +25,10 @@ export interface HealthVerdict {
   /** the sessions the router holds open — a fact the caller weighs
    *  against its OWN cap; the ledger does not know the cap */
   openSessions?: number;
+  /** requests served in the current router window */
+  requests?: number;
+  /** tokens served in the current router window */
+  tokens?: number;
 }
 
 /** provider/model → verdict. The snapshot is a point-in-time read. */
