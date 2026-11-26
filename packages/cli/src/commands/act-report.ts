@@ -72,6 +72,12 @@ export function waitVerdict(res: GateWaitResult): string {
   if (res.timedOut) {
     return 'timeout';
   }
+  // A landed PR satisfies a merge wait even when its last gate snapshot
+  // still contains blockers. The lifecycle state is the verdict; the gate
+  // only describes whether bro could have landed it itself.
+  if (res.state.state === 'MERGED') {
+    return 'merged';
+  }
   if (!res.gate.ok) {
     return 'blocked';
   }
