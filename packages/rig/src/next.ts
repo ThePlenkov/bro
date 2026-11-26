@@ -7,7 +7,7 @@
  *  Lives in @broject/rig (bro-jamp7): the CLI's `bro rig next` is the
  *  thin adapter over this — argv/stdout/exit stay in commands/. */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { deadWatchPlan } from '@broject/act';
 import {
@@ -105,13 +105,27 @@ function markerArmed(file: string): boolean {
     return false;
   }
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-    return (
-      typeof raw.armedAt === 'string' &&
-      typeof raw.everySec === 'number' &&
-      Number.isFinite(raw.everySec) &&
-      raw.everySec > 0
-    );
+    // The marker name is fixed, but the git common directory comes from the
+    // checkout being probed. Open it without following a final symlink and
+    // read through the descriptor so a replaced path cannot turn this probe
+    // into an arbitrary file read.
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      if (!fstatSync(fd).isFile()) {
+        return false;
+      }
+      const buffer = Buffer.alloc(64 * 1024);
+      const bytes = readSync(fd, buffer, 0, buffer.byteLength, 0);
+      const raw = JSON.parse(buffer.toString('utf8', 0, bytes)) as Record<string, unknown>;
+      return (
+        typeof raw.armedAt === 'string' &&
+        typeof raw.everySec === 'number' &&
+        Number.isFinite(raw.everySec) &&
+        raw.everySec > 0
+      );
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return false;
   }
