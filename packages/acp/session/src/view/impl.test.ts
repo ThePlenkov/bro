@@ -75,6 +75,29 @@ describe('the pane impl seam', () => {
     assert.match(v?.mode ?? '', /^since /);
   });
 
+  test('a failed turn carries its stop timestamp in the terminal label', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.feed({
+      kind: 'turn',
+      phase: 'stop',
+      error: 'provider crashed',
+      ts: '2026-01-01T00:01:00Z',
+    });
+    impl.beginLive();
+    const verdict = impl.verdict;
+    assert.equal(verdict?.led.state, 'blocked');
+    assert.match(verdict?.mode ?? '', /^turn error · since /);
+  });
+
+  test('an invalid stop timestamp does not leave a dangling since label', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.feed({ kind: 'turn', phase: 'stop', ts: 'not-a-timestamp' });
+    impl.beginLive();
+    assert.equal(impl.verdict?.mode, 'idle');
+  });
+
   test('an interactive permission: the ask opens, the answer closes it', async () => {
     const impl = await pickImpl('acp', {});
     impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });

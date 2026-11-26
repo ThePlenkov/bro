@@ -32,6 +32,18 @@ test('a denied permission row remains blocked', () => {
   );
 });
 
+test('turn terminal rows use their own journal timestamp', () => {
+  const ts = '2026-01-01T12:00:00.000Z';
+  assert.deepEqual(rowVerdict({ kind: 'turn', phase: 'stop', ts }), {
+    led: { state: 'idle' },
+    mode: 'turn complete · since 01 Jan 12:00',
+  });
+  assert.deepEqual(rowVerdict({ kind: 'turn', phase: 'stop', error: 'crash', ts }), {
+    led: { state: 'blocked' },
+    mode: 'turn error · since 01 Jan 12:00',
+  });
+});
+
 test('an archive with no row preserves an unknown worker verdict', () => {
   assert.deepEqual(eventsVerdict({ state: 'unknown' }, undefined), {
     led: { state: 'unknown' },

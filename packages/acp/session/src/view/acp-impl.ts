@@ -963,8 +963,10 @@ export class AcpImpl implements PaneImpl {
       return { led: { state: 'blocked' }, mode: this.since('turn error', this.lastStopTs) };
     }
     let mode = 'idle';
-    if (this.lastStopTs !== undefined) mode = `since ${fmtWhen(this.lastStopTs)}`;
-    else if (s.stopReason !== null) mode = 'turn complete';
+    if (this.lastStopTs !== undefined) {
+      const when = fmtWhen(this.lastStopTs);
+      mode = when === '' ? 'idle' : `since ${when}`;
+    } else if (s.stopReason !== null) mode = 'turn complete';
     return { led: { state: 'idle' }, mode };
   }
 
