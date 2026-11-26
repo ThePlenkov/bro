@@ -2414,21 +2414,26 @@ async function admitLanePlanes(args: {
   excludePids: ReadonlySet<number>;
 }): Promise<LaneAdmissionResult> {
   const admissions: SessionStartAdmission[] = [];
-  for (const plane of args.planes) {
-    const admission = await admitSessionStartAsync({
-      plane,
-      command: args.command,
-      agents: args.agents,
-      key: args.claimKey,
-      providerCap: args.providerCap,
-      excludePids: args.excludePids,
-      waitMs: CAP_LOCK_WAIT_MS,
-    });
-    if (admission === undefined) continue;
-    if (admission.refusal !== undefined) {
-      return { admissions, refusal: admission.refusal, capCause: admission.capCause };
+  try {
+    for (const plane of args.planes) {
+      const admission = await admitSessionStartAsync({
+        plane,
+        command: args.command,
+        agents: args.agents,
+        key: args.claimKey,
+        providerCap: args.providerCap,
+        excludePids: args.excludePids,
+        waitMs: CAP_LOCK_WAIT_MS,
+      });
+      if (admission === undefined) continue;
+      if (admission.refusal !== undefined) {
+        return { admissions, refusal: admission.refusal, capCause: admission.capCause };
+      }
+      admissions.push(admission);
     }
-    admissions.push(admission);
+  } catch (err) {
+    releaseSessionStart(admissions.flatMap(a => a.paths));
+    throw err;
   }
   return { admissions };
 }
