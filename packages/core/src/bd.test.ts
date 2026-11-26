@@ -378,4 +378,27 @@ describe('initBeadsStealth — shared store resolution (bro-mjlzp)', () => {
       fx.cleanup();
     }
   });
+
+  test('a stale BEADS_DIR does not hide the shared worktree store', () => {
+    if (WIN32) {
+      return;
+    }
+    const fx = fixture();
+    const cwd = process.cwd();
+    const previous = process.env.BEADS_DIR;
+    try {
+      process.chdir(fx.linked);
+      process.env.BEADS_DIR = join(fx.linked, '.beads');
+      assert.equal(existsSync(join(fx.linked, '.beads')), false);
+      assert.equal(initBeadsStealth(), false);
+    } finally {
+      process.chdir(cwd);
+      if (previous === undefined) {
+        delete process.env.BEADS_DIR;
+      } else {
+        process.env.BEADS_DIR = previous;
+      }
+      fx.cleanup();
+    }
+  });
 });

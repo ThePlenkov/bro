@@ -4,10 +4,10 @@
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { killGroup, spawnCollect } from './live-procs.ts';
 import { readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { gitTry, gitTryAsync } from './git.ts';
+import { killGroup, spawnCollect } from './live-procs.ts';
 
 /** `timeout` supervises every bd call — the caller's own deadline dies
  *  with the caller, and an orphaned bd waits on the embedded noms LOCK
@@ -471,22 +471,44 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
 
 /** Only a real `.beads` *directory* counts — a file or dangling path must
  *  not suppress init (it would fail loudly rather than be repaired). */
+function commonBeadsDir(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (r.code !== 0 || r.out.trim() === '') {
+    return null;
+  }
+  return join(dirname(r.out.trim()), '.beads');
+}
+
+function beadsDirCandidates(dir: string): string[] {
+  const configured = process.env.BEADS_DIR;
+  const common = commonBeadsDir(dir);
+  return [
+    ...new Set(
+      [configured, common, join(dir, '.beads')].filter(
+        (path): path is string => path !== undefined && path !== null && path !== ''
+      )
+    ),
+  ];
+}
+
 function beadsDirExists(): boolean {
   // the store is shared: linked worktrees resolve `.beads` beside the
   // COMMON git dir (the main checkout), not their own root — a cwd-local
   // probe misses it and the re-init dies against the already-initialized
   // shared dolt server (bro-mjlzp)
-  const resolved = beadsDir(process.cwd());
-  const probe = resolved ?? join(process.cwd(), '.beads');
-  try {
-    return statSync(probe).isDirectory();
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
-      return false;
+  for (const probe of beadsDirCandidates(process.cwd())) {
+    try {
+      if (statSync(probe).isDirectory()) {
+        return true;
+      }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        throw err; // EACCES/ELOOP etc. are real failures — don't mask as "absent"
+      }
     }
-    throw err; // EACCES/ELOOP etc. are real failures — don't mask as "absent"
   }
+  return false;
 }
 
 /**
