@@ -146,8 +146,8 @@ so the three land together in `plugins/bro/`. Two consequences:
   loads those too, and two bro plugins would fight over the session.
 - **The stop gate re-prompts instead of blocking.** OpenCode has no pre-stop
   hook; `session.idle` arrives after the turn is over. bro feeds the blocker
-  back as a synthetic turn **once per session** — a second block is logged, not
-  re-prompted. Same "gates, not loops" rule the other adapters get from
+  back as a synthetic turn **once per session** — a second block is logged but
+  never re-prompted. Same "gates, not loops" rule the other adapters get from
   `stop_hook_active`, and an aborted or errored turn never gates at all.
 
 ## Commands
