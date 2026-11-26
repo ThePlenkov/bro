@@ -62,59 +62,83 @@ const git = (dir: string, args: string[]): void => {
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
 };
 
-/** A real git repo + a scripted `bd` on PATH. The store, the registry
- *  dir, and the worktree plane are all real reads — only the backend
- *  binaries are canned. */
-function fixture(prefix = 'bro-rig-'): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+function createGitFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-rig-'));
   git(dir, ['init', '-b', 'main']);
   git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'init']);
+  return dir;
+}
+
+interface FakeBdSetup {
+  fakeDir: string;
+  files: Record<'ready' | 'deps' | 'queue' | 'drill', string>;
+  restore: () => void;
+}
+
+function setupFakeBd(): FakeBdSetup {
   const fakeDir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
   writeFileSync(join(fakeDir, 'bd'), FAKE_BD);
   chmodSync(join(fakeDir, 'bd'), 0o755);
-  const readyFile = join(fakeDir, 'ready.json');
-  const depsFile = join(fakeDir, 'deps.json');
-  const queueFile = join(fakeDir, 'queue.json');
-  const drillFile = join(fakeDir, 'drill.json');
-  writeFileSync(readyFile, '[]');
-  writeFileSync(depsFile, '[]');
-  writeFileSync(queueFile, '[]');
-  writeFileSync(drillFile, '[]');
-  const prev: Record<string, string | undefined> = {};
-  const set = (k: string, v: string | undefined): void => {
-    if (!(k in prev)) prev[k] = process.env[k];
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
+  const files = {
+    ready: join(fakeDir, 'ready.json'),
+    deps: join(fakeDir, 'deps.json'),
+    queue: join(fakeDir, 'queue.json'),
+    drill: join(fakeDir, 'drill.json'),
   };
-  set('PATH', `${fakeDir}:${process.env.PATH}`);
-  set('FAKE_BD_DIR', fakeDir);
-  set('FAKE_BD_READY', readyFile);
-  set('FAKE_BD_DEPS', depsFile);
-  set('FAKE_BD_QUEUE', queueFile);
-  set('FAKE_BD_DRILL', drillFile);
-  set('BEADS_ACTOR', 'tester');
-  // an inherited pin would route a real bd somewhere else — the fake
-  // ignores env, but the store's own probes read it
-  set('BEADS_DIR', undefined);
-  set('BD_ACTOR', undefined);
+  for (const file of Object.values(files)) {
+    writeFileSync(file, '[]');
+  }
+  const previous: Record<string, string | undefined> = {};
+  const setEnv = ({ key, value }: { key: string; value: string | undefined }): void => {
+    if (!(key in previous)) {
+      previous[key] = process.env[key];
+    }
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  };
+  setEnv({ key: 'PATH', value: `${fakeDir}:${process.env.PATH}` });
+  setEnv({ key: 'FAKE_BD_DIR', value: fakeDir });
+  setEnv({ key: 'FAKE_BD_READY', value: files.ready });
+  setEnv({ key: 'FAKE_BD_DEPS', value: files.deps });
+  setEnv({ key: 'FAKE_BD_QUEUE', value: files.queue });
+  setEnv({ key: 'FAKE_BD_DRILL', value: files.drill });
+  setEnv({ key: 'BEADS_ACTOR', value: 'tester' });
+  setEnv({ key: 'BEADS_DIR', value: undefined });
+  setEnv({ key: 'BD_ACTOR', value: undefined });
+  return {
+    fakeDir,
+    files,
+    restore: () => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    },
+  };
+}
+
+/** A real git repo + a scripted `bd` on PATH. The store, the registry
+ *  dir, and the worktree plane are all real reads — only the backend
+ *  binaries are canned. */
+function fixture(): Fixture {
+  const dir = createGitFixture();
+  const fake = setupFakeBd();
   return {
     dir,
-    row: (id, row) => writeFileSync(join(fakeDir, `show-${id}.json`), JSON.stringify([row])),
-    ready: rows => writeFileSync(readyFile, JSON.stringify(rows)),
-    deps: rows => writeFileSync(depsFile, JSON.stringify(rows)),
+    row: (id, row) => writeFileSync(join(fake.fakeDir, `show-${id}.json`), JSON.stringify([row])),
+    ready: rows => writeFileSync(fake.files.ready, JSON.stringify(rows)),
+    deps: rows => writeFileSync(fake.files.deps, JSON.stringify(rows)),
     listed: (rows, label = 'queue') =>
-      writeFileSync(label === 'queue' ? queueFile : drillFile, JSON.stringify(rows)),
+      writeFileSync(label === 'queue' ? fake.files.queue : fake.files.drill, JSON.stringify(rows)),
     agents: entries => {
       const bro = join(dir, '.git', 'bro');
       mkdirSync(bro, { recursive: true });
       writeFileSync(join(bro, 'agents.json'), JSON.stringify(entries));
     },
-    restore: () => {
-      for (const [k, v] of Object.entries(prev)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    },
+    restore: fake.restore,
   };
 }
 
@@ -272,6 +296,47 @@ describe('rigNext — the verdict ladder', () => {
       });
       assert.equal(rigNext(f.dir, 'g-1').verdict, 'blocked');
       assert.match(rigNext(f.dir, 'g-1').detail ?? '', /dep-gated by x-1/);
+    } finally {
+      f.restore();
+    }
+  });
+
+  test('dependency verdict wins over a future deferral', () => {
+    const f = fixture();
+    try {
+      f.row(
+        'g-1',
+        bead('g-1', {
+          defer_until: new Date(Date.now() + 60_000).toISOString(),
+        })
+      );
+      f.deps([{ ...bead('x-1'), dependency_type: 'blocks' }]);
+      assert.deepEqual(rigNext(f.dir, 'g-1'), {
+        verdict: 'blocked',
+        id: 'g-1',
+        detail: 'dep-gated by x-1',
+      });
+    } finally {
+      f.restore();
+    }
+  });
+
+  test('a future deferral only parks deferred rows', () => {
+    const f = fixture();
+    try {
+      const deferUntil = new Date(Date.now() + 60_000).toISOString();
+      f.row('o-1', bead('o-1', { defer_until: deferUntil }));
+      f.row('d-1', bead('d-1', { status: 'deferred', defer_until: deferUntil }));
+      assert.deepEqual(rigNext(f.dir, 'o-1'), {
+        verdict: 'step',
+        id: 'o-1',
+        detail: undefined,
+      });
+      assert.deepEqual(rigNext(f.dir, 'd-1'), {
+        verdict: 'blocked',
+        id: 'd-1',
+        detail: `deferred until ${deferUntil}`,
+      });
     } finally {
       f.restore();
     }

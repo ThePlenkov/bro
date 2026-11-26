@@ -340,6 +340,49 @@ function statusVerdict(row: TaskRow, ctx: VerdictCtx, deferAt: number): RigNext 
   return { verdict: 'blocked', id: ctx.id, detail: `status ${row.status ?? 'unproven'}` };
 }
 
+function deferVerdict(row: TaskRow, ctx: VerdictCtx): RigNext | undefined {
+  const deferUntil = (row as { defer_until?: unknown }).defer_until;
+  const deferAt = typeof deferUntil === 'string' ? Date.parse(deferUntil) : NaN;
+  if (row.status === 'deferred' && deferAt > Date.now()) {
+    return { verdict: 'blocked', id: ctx.id, detail: `deferred until ${deferUntil}` };
+  }
+  return statusVerdict(row, ctx, deferAt);
+}
+
+function dependencyVerdict(ctx: VerdictCtx): RigNext | undefined {
+  let blockers: TaskRow[];
+  try {
+    // 'down' follows id → its deps ('up' would answer dependents);
+    // with rel 'blocked' the down side IS the blocking set
+    blockers = ctx.store
+      .neighbors<TaskRow>(ctx.id, { direction: 'down', rel: 'blocked' })
+      .filter(r => r.status !== 'closed' && r.status !== 'done');
+  } catch {
+    // fail closed — an unreadable dep read must not read as actionable
+    return { verdict: 'blocked', id: ctx.id, detail: 'deps unreadable' };
+  }
+  if (blockers.length === 0) {
+    return undefined;
+  }
+  return {
+    verdict: 'blocked',
+    id: ctx.id,
+    detail: `dep-gated by ${blockers.map(r => r.id ?? '?').join(', ')}`,
+  };
+}
+
+function queueRank(ctx: VerdictCtx): number | undefined {
+  try {
+    return queueItems(queueScope(undefined, ctx.dir, { store: ctx.store }), ctx.dir, {
+      store: ctx.store,
+    }).find(q => q.id === ctx.id)?.rank;
+  } catch {
+    // display-only — a queue read failure must not turn an
+    // actionable bead unreadable
+    return undefined;
+  }
+}
+
 /** The work legs — reached only when no settled leg fired: an
  *  in-progress row steps for its owner alone, and an open row is
  *  judged directly — a non-open status parks it, open 'blocked' deps
@@ -356,45 +399,18 @@ function workVerdict(
   if (row.status === 'in_progress') {
     return claimVerdict(ctx, row, entry);
   }
-  const deferUntil = (row as { defer_until?: unknown }).defer_until;
-  const deferAt = typeof deferUntil === 'string' ? Date.parse(deferUntil) : NaN;
-  if (deferAt > Date.now()) {
-    return { verdict: 'blocked', id: ctx.id, detail: `deferred until ${deferUntil}` };
+  const dependency = dependencyVerdict(ctx);
+  if (dependency !== undefined) {
+    return dependency;
   }
-  const parked = statusVerdict(row, ctx, deferAt);
+  const parked = deferVerdict(row, ctx);
   if (parked !== undefined) {
     return parked;
-  }
-  let blockers: TaskRow[];
-  try {
-    // 'down' follows id → its deps ('up' would answer dependents);
-    // with rel 'blocked' the down side IS the blocking set
-    blockers = ctx.store
-      .neighbors<TaskRow>(ctx.id, { direction: 'down', rel: 'blocked' })
-      .filter(r => r.status !== 'closed' && r.status !== 'done');
-  } catch {
-    // fail closed — an unreadable dep read must not read as actionable
-    return { verdict: 'blocked', id: ctx.id, detail: 'deps unreadable' };
-  }
-  if (blockers.length > 0) {
-    return {
-      verdict: 'blocked',
-      id: ctx.id,
-      detail: `dep-gated by ${blockers.map(r => r.id ?? '?').join(', ')}`,
-    };
   }
   if (row.labels?.includes('gt:slot')) {
     return { verdict: 'blocked', id: ctx.id, detail: 'coordination slot' };
   }
-  let rank: number | undefined;
-  try {
-    rank = queueItems(queueScope(undefined, ctx.dir, { store: ctx.store }), ctx.dir, {
-      store: ctx.store,
-    }).find(q => q.id === ctx.id)?.rank;
-  } catch {
-    // display-only — a queue read failure must not turn an
-    // actionable bead unreadable
-  }
+  const rank = queueRank(ctx);
   return {
     verdict: 'step',
     id: ctx.id,

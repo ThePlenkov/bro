@@ -49,7 +49,7 @@ describe('bro rig next — the re-entry verb', () => {
       { id: 'd-1', title: 'dep-gated', status: 'open' },
       { id: 'x-1', title: 'live blocker', status: 'open' },
       { id: 'x-2', title: 'closed blocker', status: 'closed' },
-      { id: 'df-1', title: 'snoozed', status: 'open', defer_until: '2999-01-01' },
+      { id: 'df-1', title: 'snoozed', status: 'deferred', defer_until: '2999-01-01' },
       { id: 's-1', title: 'slot', status: 'open', labels: ['gt:slot'] },
       { id: 'b-1', title: 'blocked-status', status: 'blocked' },
       { id: 'p-1', title: 'past the page', status: 'open' },
@@ -79,6 +79,8 @@ describe('bro rig next — the re-entry verb', () => {
     assert.match(rig(main, env, ['next', 'p-1']).stdout, /rig next: step p-1/);
     raw.deps = [];
     writeFileSync(db, JSON.stringify(raw));
+    // A future wake parks an explicitly deferred row; an open row's
+    // incidental timestamp is ignored by the verdict ladder.
     assert.match(rig(main, env, ['next', 'df-1']).stdout, /rig next: blocked df-1 — deferred/);
     assert.match(
       rig(main, env, ['next', 's-1']).stdout,
