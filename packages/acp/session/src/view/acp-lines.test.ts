@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ToolCallItem } from '@broject/acp-model';
-import { acpCardRows, lineText } from './acp-lines.ts';
+import { acpCardRows, acpLine, lineText } from './acp-lines.ts';
 
 const toolWithDiff = (oldText: string, newText: string): ToolCallItem =>
   ({
@@ -24,4 +24,28 @@ describe('ACP diff card rows', () => {
       '+  3 new third',
     ]);
   });
+});
+
+const tool = (overrides: Record<string, unknown> = {}) =>
+  ({
+    kind: 'tool_call',
+    toolCallId: 't1',
+    toolName: 'shell',
+    title: 'a very long title\nleaked second line',
+    toolKind: null,
+    toolStatus: 'completed',
+    content: [],
+    index: 1,
+    ...overrides,
+  }) as never;
+
+test('tool titles are reduced to their first line', () => {
+  const row = acpLine(tool(), { width: 80, frame: 0, findTool: () => undefined });
+  assert.equal(lineText(row).includes('leaked second line'), false);
+});
+
+test('clipped tool rows retain the status glyph', () => {
+  const row = acpLine(tool(), { width: 20, frame: 0, findTool: () => undefined });
+  assert.equal(row[0]?.text, '✓ ');
+  assert.equal(lineText(row).startsWith('✓ '), true);
 });

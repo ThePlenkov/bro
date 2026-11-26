@@ -142,11 +142,12 @@ export function mdPlain(text: string): string[] {
   return out;
 }
 
-/** `open…close` spans out of a line — a linear scan, no regex (the
+/** `open…close` spans out of a string — a linear scan, no regex (the
  *  scanner's injection/ReDoS flags). `keepUnclosed` preserves the
  *  tail from an unterminated `open` (a lone `<` was never a tag, so
- *  `a < b` survives); without it the tail is eaten to end-of-line
- *  (an unterminated `<!--` can never survive the pass). */
+ *  `a < b` survives); without it the tail is eaten to the end of the
+ *  supplied string. Callers that scan lines must carry their state
+ *  across line boundaries for delimiters that may span lines. */
 const stripDelims = (s: string, open: string, close: string, keepUnclosed: boolean): string => {
   let out = '';
   let rest = s;
@@ -235,7 +236,7 @@ const stripLinkDefinition = (s: string): string => {
 };
 
 const stripDelimited = (s: string, marker: string): string => {
-  let out = '';
+  const chunks: string[] = [];
   let cursor = 0;
   let open = -1;
   for (let i = 0; i <= s.length - marker.length; i++) {
@@ -246,15 +247,16 @@ const stripDelimited = (s: string, marker: string): string => {
       continue;
     }
     if (i === open + marker.length) {
-      out += s.slice(cursor, i + marker.length);
+      chunks.push(s.slice(cursor, i + marker.length));
     } else {
-      out += s.slice(cursor, open) + s.slice(open + marker.length, i);
+      chunks.push(s.slice(cursor, open), s.slice(open + marker.length, i));
     }
     cursor = i + marker.length;
     open = -1;
     i += marker.length - 1;
   }
-  return out + s.slice(cursor);
+  chunks.push(s.slice(cursor));
+  return chunks.join('');
 };
 
 const stripUnderscores = (s: string): string => {
@@ -297,9 +299,35 @@ const isWord = (char: string): boolean => {
  *  `>`; an unclosed `<` keeps its char so ordinary text survives. */
 const stripTags = (s: string): string => stripDelims(s, '<', '>', true);
 
-/** `<!-- ... -->` comments out of a line — an unterminated comment
- *  eats to end-of-line so no `<!--` can survive the pass. */
-const stripHtmlComments = (s: string): string => stripDelims(s, '<!--', '-->', false);
+/** Strip comments while retaining whether a block continues past this
+ *  chunk. The markdown source scanner uses one chunk per non-fenced line,
+ *  so a comment cannot leak merely because it crosses a newline. */
+const stripHtmlCommentChunk = (
+  s: string,
+  inComment: boolean
+): { text: string; inComment: boolean } => {
+  let out = '';
+  let cursor = 0;
+  let open = inComment;
+  while (cursor < s.length) {
+    if (open) {
+      const close = s.indexOf('-->', cursor);
+      if (close < 0) return { text: out, inComment: true };
+      cursor = close + 3;
+      open = false;
+      continue;
+    }
+    const start = s.indexOf('<!--', cursor);
+    if (start < 0) {
+      out += s.slice(cursor);
+      return { text: out, inComment: false };
+    }
+    out += s.slice(cursor, start);
+    cursor = start + 4;
+    open = true;
+  }
+  return { text: out, inComment: open };
+};
 
 /** Markdown source for the `<markdown>` renderable — the renderable
  *  prints raw HTML tags literally, so review-tool furniture
@@ -309,17 +337,20 @@ const stripHtmlComments = (s: string): string => stripDelims(s, '<!--', '-->', f
 export function mdSource(text: string): string {
   const out: string[] = [];
   let fence = false;
+  let inComment = false;
   for (const raw of text.split('\n')) {
     if (/^\s*(`{3,}|~{3,})/.test(raw)) {
       fence = !fence;
       out.push(raw);
       continue;
     }
-    out.push(
-      fence
-        ? raw
-        : stripHtmlComments(raw).replace(/<\/?(?:sub|details|summary|review-threads?)\b[^>]*>/g, '')
-    );
+    if (fence) {
+      out.push(raw);
+      continue;
+    }
+    const comment = stripHtmlCommentChunk(raw, inComment);
+    inComment = comment.inComment;
+    out.push(comment.text.replace(/<\/?(?:sub|details|summary|review-threads?)\b[^>]*>/g, ''));
   }
   return out.join('\n');
 }
