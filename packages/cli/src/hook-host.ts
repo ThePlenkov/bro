@@ -6,11 +6,12 @@
  */
 const HOOK_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
-export function hookHostOf(env: NodeJS.ProcessEnv, raw?: unknown): string {
-  const configuredHost =
-    env.BRO_HOOK_HOST !== undefined && HOOK_HOST_RE.test(env.BRO_HOOK_HOST)
-      ? env.BRO_HOOK_HOST
-      : undefined;
+function configuredHostOf(env: NodeJS.ProcessEnv): string | undefined {
+  const host = env.BRO_HOOK_HOST;
+  return host !== undefined && HOOK_HOST_RE.test(host) ? host : undefined;
+}
+
+function markerHostOf(env: NodeJS.ProcessEnv): string | undefined {
   const envHosts: Array<[string | undefined, string]> = [
     [env.CURSOR_PLUGIN_ROOT, 'cursor'],
     [env.DEVIN_PLUGIN_ROOT, 'devin'],
@@ -20,12 +21,21 @@ export function hookHostOf(env: NodeJS.ProcessEnv, raw?: unknown): string {
     [env.PLUGIN_ROOT, 'codex'],
   ];
   const marker = envHosts.find(([value]) => value !== undefined && value !== '');
-  const serialized = raw === undefined || raw === null ? undefined : JSON.stringify(raw);
-  const payloadHost =
-    serialized?.includes('"cursor_version"') || serialized?.includes('"workspace_roots"')
-      ? 'cursor'
-      : serialized?.includes('"turn_id"')
-        ? 'codex'
-        : undefined;
-  return configuredHost ?? marker?.[1] ?? payloadHost ?? 'unknown';
+  return marker?.[1];
+}
+
+function payloadHostOf(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const serialized = JSON.stringify(raw);
+  return serialized.includes('"cursor_version"') || serialized.includes('"workspace_roots"')
+    ? 'cursor'
+    : serialized.includes('"turn_id"')
+      ? 'codex'
+      : undefined;
+}
+
+export function hookHostOf(env: NodeJS.ProcessEnv, raw?: unknown): string {
+  return configuredHostOf(env) ?? markerHostOf(env) ?? payloadHostOf(raw) ?? 'unknown';
 }
