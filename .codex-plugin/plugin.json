@@ -29,5 +29,5 @@
     "displayName": "bro"
   },
   "skills": "./skills/",
-  "hooks": "./integrations/codex/hooks/hooks.json"
+  "hooks": "./plugins/codex/bro/hooks/hooks.json"
 }

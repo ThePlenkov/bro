@@ -1,15 +1,15 @@
 {
   "$schema": "https://omp.sh/schemas/marketplace.json",
   "name": "bro",
-  "description": "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime.",
+  "description": "Agent's sidekick \u2014 deterministic lifecycle closure (task \u2192 agent \u2192 PR \u2192 gate \u2192 debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive \u2014 not a replacement runtime.",
   "owner": {
     "name": "Petr Plenkov"
   },
   "plugins": [
     {
       "name": "bro",
-      "source": "./integrations/omp",
-      "description": "Agent's sidekick for omp — the project board, the lifecycle mechanics, and the mode bridges: bro's durable state handed to omp's native Plan, Goal, Vibe, Prewalk and Advisor.",
+      "source": "./plugins/omp/bro",
+      "description": "Agent's sidekick for omp \u2014 the project board, the lifecycle mechanics, and the mode bridges: bro's durable state handed to omp's native Plan, Goal, Vibe, Prewalk and Advisor.",
       "version": "0.3.0",
       "license": "MIT",
       "keywords": [

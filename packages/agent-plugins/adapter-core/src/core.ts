@@ -578,9 +578,55 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
 
 const ELLIPSIS = '…';
 
+/** Return the terminal column width of a string without splitting Unicode
+ * code points. Combining marks occupy no columns; wide CJK and emoji occupy
+ * two. This small implementation keeps the bundled adapters dependency-free. */
+export function displayWidth(text: string): number {
+  let width = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (
+      (code >= 0x0300 && code <= 0x036f) ||
+      (code >= 0x1ab0 && code <= 0x1aff) ||
+      (code >= 0x1dc0 && code <= 0x1dff) ||
+      (code >= 0x20d0 && code <= 0x20ff) ||
+      (code >= 0xfe20 && code <= 0xfe2f)
+    ) {
+      continue;
+    }
+    const wide =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2329 && code <= 0x232a) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f000 && code <= 0x1faff);
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
 /** Clip to a width, marking the cut. */
 export function clip(text: string, width: number): string {
-  return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
+  if (displayWidth(text) <= width) {
+    return text;
+  }
+  const target = Math.max(0, width - displayWidth(ELLIPSIS));
+  let used = 0;
+  let prefix = '';
+  for (const char of text) {
+    const charWidth = displayWidth(char);
+    if (used + charWidth > target) {
+      break;
+    }
+    prefix += char;
+    used += charWidth;
+  }
+  return `${prefix}${ELLIPSIS}`;
 }
 
 /**
