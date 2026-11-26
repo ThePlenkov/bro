@@ -31,6 +31,7 @@ import {
   type ReviewFacade,
   reviewHost,
   supportsOsc8,
+  taskStore,
 } from '@broject/core';
 import { recordRetro } from '@broject/retro';
 import { loadBroConfig } from '../plugins.ts';
@@ -47,7 +48,7 @@ import {
 } from './act.ts';
 import { sweepMergedPrLabels } from './act-land.ts';
 import { flag } from './args.ts';
-import { mergeCycleActions } from './merge-cycle.ts';
+import { hasOpenClassifyBeadForPr, mergeCycleActions } from './merge-cycle.ts';
 import { reconcileOutcomes } from './outcome-report.ts';
 
 function usage(exitCode: ExitCode = 2): never {
@@ -620,6 +621,10 @@ function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult, landed: PrActState
   const link = ctx.rev.prLink(ctx.t.repo, ctx.t.pr);
   const minutes = Math.round((Date.now() - started) / 60_000);
   try {
+    const classifyAlreadyFiled = hasOpenClassifyBeadForPr(
+      taskStore().list({ all: true, limit: 0 }),
+      ctx.t.pr
+    );
     const retro = recordRetro({
       what: `merge cycle for ${link}: ${threadsAtStart.length} thread(s) at start, ${state.fixRounds} fix round(s), ${minutes}m wall`,
       why: 'full MR cycle retro — `bro merge` records what the gate and reviewers surfaced so prevention lands where the finding lives',
@@ -638,7 +643,12 @@ function recordCycleRetro(ctx: MergeCtx, res: GateWaitResult, landed: PrActState
         `fix rounds: ${state.fixRounds}`,
         `wall time: ${minutes}m`,
       ],
-      actions: mergeCycleActions(link, threadsAtStart.length, state.fixRounds),
+      actions: mergeCycleActions(
+        link,
+        threadsAtStart.length,
+        state.fixRounds,
+        classifyAlreadyFiled
+      ),
     });
     console.log(`merge: retro recorded as ${retro.retroId}`);
   } catch (err) {
