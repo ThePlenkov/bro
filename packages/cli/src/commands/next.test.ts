@@ -28,6 +28,9 @@ case "$1" in
       *) echo "$3 (not set)" ;;
     esac ;;
   show)
+    if [ -n "$FAKE_BD_SHOW_FAIL" ]; then
+      case "$2" in *$FAKE_BD_SHOW_FAIL*) exit 1 ;; esac
+    fi
     status=open
     assignee=
     if grep -qx "$2" "$FAKE_BD_CLAIMED" 2>/dev/null; then
@@ -47,7 +50,7 @@ case "$1" in
     echo '[{"id":"'$2'","status":"'$status'","assignee":"'$assignee'","issue_type":"'$type'"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
-      case "$2" in *$FAKE_BD_CLAIM_FAIL*) exit 1 ;; esac
+      case "$2" in *$FAKE_BD_CLAIM_FAIL*) echo "$FAKE_BD_CLAIM_ERROR" >&2; exit 1 ;; esac
     fi
     if [ -n "$FAKE_BD_UPDATE_FAIL" ]; then
       case "$2" in *$FAKE_BD_UPDATE_FAIL*) echo 'db locked' >&2; exit 1 ;; esac
@@ -130,7 +133,9 @@ function withFakeBd(
   prefix = '',
   epicParents = '',
   foreign = '',
-  actorFail = false
+  actorFail = false,
+  claimError = '',
+  showFail = ''
 ): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
@@ -154,6 +159,8 @@ function withFakeBd(
       FAKE_BD_FOREIGN: foreign === '' ? undefined : foreign,
       FAKE_BD_CONFIG_FAIL: undefined,
       FAKE_BD_ACTOR_FAIL: actorFail ? '1' : undefined,
+      FAKE_BD_CLAIM_ERROR: claimError === '' ? undefined : claimError,
+      FAKE_BD_SHOW_FAIL: showFail === '' ? undefined : showFail,
     };
     const prev = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
     for (const [k, v] of Object.entries(env)) {
@@ -248,6 +255,25 @@ describe('bro next', () => {
       '',
       '',
       '',
+      'b-older'
+    )
+  );
+
+  it(
+    'an already-assigned claim error skips without a contended re-read',
+    withFakeBd(
+      MIXED,
+      async c => {
+        await runNextCommand([]);
+        assert.match(c.lines[0], /→ b-newer.*\(claimed\)/);
+      },
+      'b-older',
+      '',
+      '',
+      '',
+      'b-older',
+      false,
+      'already assigned to other-agent',
       'b-older'
     )
   );
