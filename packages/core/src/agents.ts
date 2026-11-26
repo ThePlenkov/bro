@@ -159,25 +159,16 @@ function relReset(text: string, now: number): string | undefined {
   return undefined;
 }
 
-/** Whitespace run — bounded at 4k so a giant tail can't backtrack
- *  the scan polynomially. */
-function skipBlank(text: string, i: number): number {
-  let j = i;
-  while (j < text.length && j - i < 4096 && [32, 9, 10, 13, 12, 11].includes(text.charCodeAt(j))) {
-    j++;
-  }
-  return j;
-}
+/** Whitespace runs are bounded so a giant tail cannot make the parser do
+ * unbounded work. Sticky regexes keep each helper local to `i`. */
+const INLINE_BLANK = /[ \t\f\v]{1,4096}/y;
 
 /** Whitespace on the SAME line — unlike skipBlank this never crosses
  *  a newline, so a duration phrase can't pair with numbers printed on
  *  an unrelated later line. */
 function skipBlankInline(text: string, i: number): number {
-  let j = i;
-  while (j < text.length && j - i < 4096 && [32, 9, 12, 11].includes(text.charCodeAt(j))) {
-    j++;
-  }
-  return j;
+  INLINE_BLANK.lastIndex = i;
+  return i + (INLINE_BLANK.exec(text)?.[0].length ?? 0);
 }
 
 /** One duration separator — a comma and/or a word-bounded 'and'
@@ -199,16 +190,14 @@ function separatorEnd(text: string, i: number): number {
   return j;
 }
 
-/** Up to 6 digits at i — the value and the index past them, or
- *  undefined when i is not a digit. */
+const DIGITS = /\d{1,6}/y;
+
+/** Up to 6 digits at i — the value and the index past them, or undefined
+ * when i is not a digit. */
 function digitsAt(text: string, i: number): { value: number; end: number } | undefined {
-  let value = 0;
-  let j = i;
-  while (j < text.length && j - i < 6 && text.charCodeAt(j) >= 48 && text.charCodeAt(j) <= 57) {
-    value = value * 10 + (text.charCodeAt(j) - 48);
-    j++;
-  }
-  return j === i ? undefined : { value, end: j };
+  DIGITS.lastIndex = i;
+  const match = DIGITS.exec(text);
+  return match === null ? undefined : { value: Number(match[0]), end: i + match[0].length };
 }
 
 /** Exact duration units — a bare first-letter fallback maps any
@@ -238,30 +227,50 @@ const UNIT_WORDS: Record<string, 'h' | 'm' | 's' | 'ms'> = {
   milliseconds: 'ms',
 };
 
+const UNIT_WORD = /[A-Za-z]{1,11}/y;
+
 /** The alphabetic run at i as a UNIT_MS key — undefined when the word
  *  is not an exact unit. */
 function unitKeyAt(
   text: string,
   i: number
 ): { key: 'h' | 'm' | 's' | 'ms'; end: number } | undefined {
-  let j = i;
-  while (j < text.length && j - i <= 10) {
-    const cc = text.charCodeAt(j);
-    if ((cc < 65 || cc > 90) && (cc < 97 || cc > 122)) {
-      break;
-    }
-    j++;
+  UNIT_WORD.lastIndex = i;
+  const match = UNIT_WORD.exec(text);
+  if (match === null) {
+    return undefined;
   }
-  const key = UNIT_WORDS[text.slice(i, j).toLowerCase()];
-  return key === undefined ? undefined : { key, end: j };
+  const key = UNIT_WORDS[match[0].toLowerCase()];
+  return key === undefined ? undefined : { key, end: i + match[0].length };
+}
+
+function skipDurationSeparators(text: string, i: number): number {
+  let next = separatorEnd(text, i);
+  while (next !== i) {
+    i = next;
+    next = separatorEnd(text, i);
+  }
+  return i;
+}
+
+function durationPairAt(
+  text: string,
+  i: number
+): { milliseconds: number; end: number } | undefined {
+  const number = digitsAt(text, i);
+  if (number === undefined) {
+    return undefined;
+  }
+  const unit = unitKeyAt(text, skipBlankInline(text, number.end));
+  return unit === undefined
+    ? undefined
+    : { milliseconds: number.value * (UNIT_MS[unit.key] ?? 1_000), end: unit.end };
 }
 
 /** The duration tail of one `... in ` match — the summed number+unit
  *  pairs in milliseconds (margin included), or undefined when the
  *  phrase carries none. */
 function relScanFrom(text: string, start: number): number | undefined {
-  let ms = 0;
-  let found = false;
   // pairs bind to the phrase line — the scan can't cross a newline,
   // so the line end is the loop bound instead of a bail-out branch
   let lineEnd = text.indexOf('\n', start);
@@ -269,31 +278,20 @@ function relScanFrom(text: string, start: number): number | undefined {
     lineEnd = text.length;
   }
   let i = start;
+  let ms = 0;
+  let found = false;
   while (i < lineEnd) {
-    i = skipBlankInline(text, i);
-    // separators can chain ('…and, 5 minutes' — odd but harmless to
-    // keep reading); each pass ends where nothing else consumed
-    for (;;) {
-      const after = separatorEnd(text, i);
-      if (after === i) {
-        break;
-      }
-      i = after;
-    }
-    const num = digitsAt(text, i);
-    if (num === undefined) {
+    i = skipDurationSeparators(text, skipBlankInline(text, i));
+    const pair = durationPairAt(text, i);
+    if (pair === undefined) {
       break;
     }
-    const unit = unitKeyAt(text, skipBlankInline(text, num.end));
-    if (unit === undefined) {
-      break;
-    }
-    ms += num.value * (UNIT_MS[unit.key] ?? 1_000);
-    i = unit.end;
+    ms += pair.milliseconds;
+    i = pair.end;
     found = true;
     // '_' closes the phrase ('5m_ago' is not a duration); a digit is
     // the NEXT compact pair ('1h30m'), not a boundary
-    if (text.charCodeAt(i) === 95) {
+    if (text[i] === '_') {
       break;
     }
   }
