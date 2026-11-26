@@ -1,7 +1,7 @@
 ---
 
 name: herdr-orchestrate
-description: "Use when an agent orchestrates worker agents through Herdr — spawn an isolated worktree workspace per task, start any supported agent kind in it, brief it, wait on semantic state, verify the gate, tear down. Provider-agnostic: the mechanics are `herdr` CLI + git worktrees; any supported agent kind is an interchangeable worker. Covers the spawn sequence, blocking waits, label-vs-state semantics, sequential budget, and teardown order. In a bro-managed repo, spawn through `bro fleet agents`/`bro flow convoy` instead — this recipe is for herdr-only environments and herdr plugin internals."
+description: "Use when an agent orchestrates worker agents through Herdr — spawn an isolated worktree workspace per task, start any supported agent kind in it, brief it, wait on semantic state, verify the gate, tear down. Provider-agnostic: the mechanics are `herdr` CLI + git worktrees; any supported agent kind is an interchangeable worker. Covers the spawn sequence, blocking waits, label-vs-state semantics, sequential budget, and teardown order. In a bro-managed repo, use `bro agents run --backend herdr` (or the matching `bro agents up` form) so claims, registry, caps, status, and down remain under bro supervision."
 ---
 
 # herdr-orchestrate — driving worker agents through Herdr
@@ -11,9 +11,10 @@ socket API (`herdr` CLI) over git worktrees. You never implement tasks
 yourself — you spawn, brief, wait, verify, and tear down.
 
 **Scope rule:** in a repo managed by `bro`, spawn through
-`bro fleet agents` / `bro flow convoy run` — a raw `herdr agent start`
-worker has no claim, no exit record, and runs outside the fleet cap and
-`status`/`down` supervision. This recipe is for herdr-only environments
+`bro agents run --backend herdr` (or `bro agents up --backend herdr`) —
+never a raw `herdr agent start`. The bro backend keeps the claim, registry,
+fleet cap, `status`, and `down` supervision while placing the worker in a
+visible Herdr pane. This recipe remains useful for herdr-only environments
 and for the herdr plugin's own internals.
 
 All mechanics below are the verified `herdr` CLI surface. Placeholders:
