@@ -2026,10 +2026,20 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
   // the branch retires only when the tree is gone (or, under dry-run,
   // would be): a kept tree keeps its branch — it is still checked out
   // there, and a dry-run 'would delete' line on a kept tree is a lie
-  if (reapTreeUnderLock(c.w, c, ctx, label)) {
-    if (opts.keepBranches !== true) {
-      retireLitterBranch(c, ctx, pr);
-    }
+  reapWorktreeCandidate(c, ctx, label, pr);
+}
+
+function reapWorktreeCandidate(
+  c: LitterCandidate,
+  ctx: LitterCtx,
+  label: string,
+  pr: PrEvidence
+): void {
+  if (!reapTreeUnderLock(c.w!, c, ctx, label)) {
+    return;
+  }
+  if (ctx.opts.keepBranches !== true) {
+    retireLitterBranch(c, ctx, pr);
   }
 }
 
@@ -2085,19 +2095,8 @@ function reapTreeUnderLock(
       rep.kept.push(`${label} (grace window)`);
       return false;
     }
-    if (ctx.opts.backupNonEmptyDiff === true && c.branch !== '') {
-      const diff = gitTry(['-C', c.w!.path, 'diff', '--quiet', 'origin/main...HEAD']);
-      if (diff.code > 1) {
-        rep.kept.push(`${label} (base diff unverifiable)`);
-        return false;
-      }
-      if (diff.code === 1) {
-        const push = gitTry(['-C', c.w!.path, 'push', 'origin', `HEAD:${c.branch}`]);
-        if (push.code !== 0) {
-          rep.errors.push(`worktree ${c.w!.path} backup push failed — ${push.err || 'git error'}`);
-          return false;
-        }
-      }
+    if (!backupFleetDiff(c, ctx, label)) {
+      return false;
     }
     if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
       rep.errors.push(`worktree ${w.path} not removed`);
@@ -2108,6 +2107,26 @@ function reapTreeUnderLock(
   } finally {
     release();
   }
+}
+
+function backupFleetDiff(c: LitterCandidate, ctx: LitterCtx, label: string): boolean {
+  if (ctx.opts.backupNonEmptyDiff !== true || c.branch === '') {
+    return true;
+  }
+  const diff = gitTry(['-C', c.w!.path, 'diff', '--quiet', 'origin/main...HEAD']);
+  if (diff.code > 1) {
+    ctx.rep.kept.push(`${label} (base diff unverifiable)`);
+    return false;
+  }
+  if (diff.code !== 1) {
+    return true;
+  }
+  const push = gitTry(['-C', c.w!.path, 'push', 'origin', `HEAD:${c.branch}`]);
+  if (push.code === 0) {
+    return true;
+  }
+  ctx.rep.errors.push(`worktree ${c.w!.path} backup push failed — ${push.err || 'git error'}`);
+  return false;
 }
 
 /** Persist the first eligible observation in the shared git dir. A file in
