@@ -37,6 +37,17 @@ describe('testGitEnv', () => {
 })
 
 describe('testGit/testGitSpawn', () => {
+  test('rejects transport command overrides', () => {
+    for (const option of ['--upload-pack', '--receive-pack', '--exec-path', '--html-path']) {
+      for (const argument of [option, `${option}=sh -c whoami`]) {
+        assert.throws(
+          () => testGit(['clone', argument, 'source', 'target']),
+          /does not permit custom git transport commands/
+        )
+      }
+    }
+  })
+
   test('a poisoned ambient env cannot inject config into a fixture git child', () => {
     // a pinned core.hooksPath riding GIT_CONFIG_* is the hook-injection
     // class the bead closes — the scrubbed child must answer 'unset'

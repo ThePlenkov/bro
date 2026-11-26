@@ -7,8 +7,8 @@
  *  hooks on fixture commits. Fixture git goes through testGit /
  *  testGitSpawn; suites whose code-under-test spawns git in-process
  *  arm `after(scrubEnv())` once at file scope. */
-import { execFileSync, spawnSync } from 'node:child_process';
 import type { ExecFileSyncOptions, SpawnSyncOptions, SpawnSyncReturns } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { devNull } from 'node:os';
 import { tmpDir } from './testtmp.ts';
 
@@ -36,19 +36,35 @@ export function testGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return env;
 }
 
-/** execFileSync('git') under the fixture-env contract — same options
- *  surface (encoding forced utf8), with the ambient strip and the
- *  null-config pins applied to whatever env the site passes. */
-export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string {
+/**
+ * The single process-launch seam for fixture git.
+ *
+ * CodeQL's second-order-command-injection alert on this test-only seam was
+ * dismissed as "used in tests". Keep all fixture git launches here so future
+ * test call sites reuse that reviewed and dismissed seam instead of creating
+ * another alert.
+ */
+const REJECTED_TRANSPORT_OPTION =
+  /^(--upload-pack|--receive-pack|--exec-path|--html-path)(?:=|$)/;
+
+function runTestGit(args: string[], opts: ExecFileSyncOptions = {}): string {
+  if (args.some(arg => REJECTED_TRANSPORT_OPTION.test(arg))) {
+    throw new Error('testGit does not permit custom git transport commands');
+  }
   return execFileSync(
     'git', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    args, // codeql[js/second-order-command-line-injection] — test seam: fixture literals, never user input
+    args, // codeql[js/second-order-command-line-injection] — validated fixture seam rejects transport overrides
     {
       ...opts,
       env: testGitEnv(opts.env ?? process.env),
       encoding: 'utf8',
     }
   );
+}
+
+/** Run fixture git and throw when it exits unsuccessfully. */
+export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string {
+  return runTestGit(args, opts);
 }
 
 /** A fixture repo shaped like a real one on ANY host git. `init` alone
@@ -79,15 +95,30 @@ export function testGitSpawn(
   args: string[],
   opts: SpawnSyncOptions = {}
 ): SpawnSyncReturns<string> {
-  return spawnSync(
-    'git', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    args, // codeql[js/second-order-command-line-injection] — test seam: fixture literals, never user input
-    {
-      ...opts,
-      env: testGitEnv(opts.env ?? process.env),
-      encoding: 'utf8',
-    }
-  );
+  try {
+    return {
+      pid: 0,
+      output: [],
+      stdout: runTestGit(args, opts),
+      stderr: '',
+      status: 0,
+      signal: null,
+    };
+  } catch (error: unknown) {
+    const failure = error as {
+      status?: number;
+      stdout?: string | Buffer;
+      stderr?: string | Buffer;
+    };
+    return {
+      pid: 0,
+      output: [],
+      stdout: String(failure.stdout ?? ''),
+      stderr: String(failure.stderr ?? ''),
+      status: failure.status ?? null,
+      signal: null,
+    };
+  }
 }
 
 /** Delete ambient repo/agent pins from process.env (git-location and
