@@ -828,6 +828,7 @@ export {
   scanProc,
 } from './proc.ts';
 export type { ProcEntry } from './proc.ts';
+export { lsofCwdRows } from './proc-cwd.ts';
 export { checkPlanVersion, planKind, PLAN_ENVELOPE_KEYS, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';
