@@ -20,13 +20,6 @@ import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  type Connector,
-  type ConnectorCtx,
-  loadConfig,
-  type SpecNode,
-  type SpecStore,
-} from '@broject/core';
-import {
   create,
   get,
   type Protocol,
@@ -35,8 +28,15 @@ import {
   specTemplateDir,
   update,
 } from '@broject/brotocol';
-import { findSpec, hasSpecFile, indexSpecDir, repoRoot, specDirAbs, specScope } from './legacy.ts';
+import {
+  type Connector,
+  type ConnectorCtx,
+  loadConfig,
+  type SpecNode,
+  type SpecStore,
+} from '@broject/core';
 import { ioExists, ioRead, ioReadDir } from './io.ts';
+import { findSpec, hasSpecFile, indexSpecDir, repoRoot, specDirAbs, specScope } from './legacy.ts';
 
 /** Any `*.spec.md` under dir, early exit — the format-presence signal
  *  matchDir claims on. Bounded by the tree itself; spec dirs are small.
@@ -116,45 +116,106 @@ function degradedStore(): SpecStore {
   };
 }
 
+type ProtocolView = {
+  byPath: Map<string, SpecNode>;
+  dirDocs: { id: string; dir: string }[];
+};
+
+type IndexedView = {
+  byPath: Map<string, SpecNode>;
+  absByNode: Map<SpecNode, string>;
+};
+
+function scanProtocolView(root: string, specRoot: string, protocol: Protocol): ProtocolView {
+  const byPath = new Map<string, SpecNode>();
+  const dirDocs: { id: string; dir: string }[] = [];
+  if (!ioExists(specRoot)) {
+    return { byPath, dirDocs };
+  }
+  for (const d of scan(protocol)) {
+    const node: SpecNode = {
+      id: d.id,
+      path: relative(root, d.path),
+    };
+    if (d.parentId !== undefined) {
+      node.parent = d.parentId;
+    }
+    if (d.parentEdge === 'frontmatter' || d.parentEdge === 'position') {
+      node.parentVia = d.parentEdge;
+    }
+    byPath.set(d.path, node);
+    if (d.isDirDoc) {
+      dirDocs.push({ id: d.id, dir: dirname(d.path) });
+    }
+  }
+  return { byPath, dirDocs };
+}
+
+function indexLegacyView(specRoot: string, specDir: string): IndexedView {
+  const byPath = new Map<string, SpecNode>();
+  const absByNode = new Map<SpecNode, string>();
+  for (const n of indexSpecDir(specRoot, specDir)) {
+    const { abs, dirSpec: _d, ...node } = n;
+    byPath.set(abs, node);
+    absByNode.set(node, abs);
+  }
+  return { byPath, absByNode };
+}
+
+function mergeSpecViews(legacy: IndexedView, protocol: ProtocolView): IndexedView {
+  const byPath = new Map(legacy.byPath);
+  const absByNode = new Map(legacy.absByNode);
+  for (const [abs, node] of protocol.byPath) {
+    byPath.set(abs, node);
+    absByNode.set(node, abs);
+  }
+  return { byPath, absByNode };
+}
+
+function repairDanglingParents(
+  nodes: SpecNode[],
+  absByNode: Map<SpecNode, string>,
+  dirDocs: { id: string; dir: string }[]
+): void {
+  const ids = new Set(nodes.map(n => n.id));
+  for (const n of nodes) {
+    if (n.parent === undefined || ids.has(n.parent)) {
+      continue;
+    }
+    const abs = absByNode.get(n);
+    if (abs === undefined) {
+      continue;
+    }
+    const owner = dirDocs
+      .filter(d => abs.startsWith(d.dir + sep))
+      .sort((a, b) => b.dir.length - a.dir.length)[0];
+    if (owner !== undefined) {
+      n.parent = owner.id;
+      n.parentVia = 'position';
+    }
+  }
+}
+
+function mergedTree(
+  root: string,
+  specDir: string,
+  specRoot: string,
+  protocol: Protocol
+): SpecNode[] {
+  const legacy = indexLegacyView(specRoot, specDir);
+  const protocolView = scanProtocolView(root, specRoot, protocol);
+  const merged = mergeSpecViews(legacy, protocolView);
+  const nodes = [...merged.byPath.values()];
+  repairDanglingParents(nodes, merged.absByNode, protocolView.dirDocs);
+  return nodes.sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function specStoreOver(
   root: string,
   specDir: string,
   specRoot: string,
   protocol: Protocol
 ): SpecStore {
-  /** Protocol docs keyed by absolute path — they override the legacy
-   *  index entry for the same file (frontmatter `id:` is authoritative
-   *  over the path-derived legacy id). Dir-docs also feed the orphan
-   *  fixup: a legacy child whose positional parent was renamed by a
-   *  frontmatter id re-parents to the doc now owning its directory. */
-  const protocolScan = (): {
-    byPath: Map<string, SpecNode>;
-    dirDocs: { id: string; dir: string }[];
-  } => {
-    const byPath = new Map<string, SpecNode>();
-    const dirDocs: { id: string; dir: string }[] = [];
-    if (!ioExists(specRoot)) {
-      return { byPath, dirDocs };
-    }
-    for (const d of scan(protocol)) {
-      const node: SpecNode = {
-        id: d.id,
-        path: relative(root, d.path),
-      };
-      if (d.parentId !== undefined) {
-        node.parent = d.parentId;
-      }
-      if (d.parentEdge === 'frontmatter' || d.parentEdge === 'position') {
-        node.parentVia = d.parentEdge;
-      }
-      byPath.set(d.path, node);
-      if (d.isDirDoc) {
-        dirDocs.push({ id: d.id, dir: dirname(d.path) });
-      }
-    }
-    return { byPath, dirDocs };
-  };
-
   return {
     hasSpec: id => {
       const d = get(protocol, id);
@@ -208,40 +269,7 @@ function specStoreOver(
       if (!ioExists(specRoot)) {
         return [];
       }
-      const byPath = new Map<string, SpecNode>();
-      const absByNode = new Map<SpecNode, string>();
-      for (const n of indexSpecDir(specRoot, specDir)) {
-        const { abs, dirSpec: _d, ...node } = n;
-        byPath.set(abs, node);
-        absByNode.set(node, abs);
-      }
-      const { byPath: proto, dirDocs } = protocolScan();
-      for (const [abs, node] of proto) {
-        byPath.set(abs, node);
-        absByNode.set(node, abs);
-      }
-      const nodes = [...byPath.values()];
-      // merged views can disagree on a dir's id (legacy path-derived vs
-      // frontmatter `id:`) — a child edge naming the loser dangles.
-      // Re-parent it to the nearest dir-doc that still contains it.
-      const ids = new Set(nodes.map(n => n.id));
-      for (const n of nodes) {
-        if (n.parent === undefined || ids.has(n.parent)) {
-          continue;
-        }
-        const abs = absByNode.get(n);
-        if (abs === undefined) {
-          continue;
-        }
-        const owner = dirDocs
-          .filter(d => abs.startsWith(d.dir + sep))
-          .sort((a, b) => b.dir.length - a.dir.length)[0];
-        if (owner !== undefined) {
-          n.parent = owner.id;
-          n.parentVia = 'position';
-        }
-      }
-      return nodes.sort((a, b) => a.id.localeCompare(b.id));
+      return mergedTree(root, specDir, specRoot, protocol);
     },
     scope: id => {
       const d = get(protocol, id);
