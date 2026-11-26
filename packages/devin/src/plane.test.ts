@@ -55,6 +55,11 @@ const withLockDir = (fn: (dir: string) => void): void => {
   }
 };
 
+// spawn() returns at fork, while the /proc identity used by the plane only
+// becomes observable after execve. Allow the child to land under Nx CPU
+// contention instead of making the test depend on an idle host.
+const SPAWN_SETTLE_TIMEOUT_MS = 20_000;
+
 /** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
  *  scripts them; absent files read as "no data" like on macOS. `tty`
  *  (a controlling-terminal device number) additionally scripts
@@ -745,7 +750,7 @@ describe('countDevinWorkers', () => {
       // cmdline} still read the PARENT (the flake the scripted-proc test
       // below names). Wait for the exec'd identity AND the badge to be
       // visible before counting.
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + SPAWN_SETTLE_TIMEOUT_MS;
       while (Date.now() < deadline) {
         let cmdline = '';
         let env = '';
@@ -893,7 +898,7 @@ describe('listDevinSessions', () => {
       // lands — inside spawn's fork window it still reads the parent's
       // (no badge), and a lock written that early classifies the pid a
       // non-worker. Wait for the child's badge to be visible.
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + SPAWN_SETTLE_TIMEOUT_MS;
       for (;;) {
         try {
           if (
