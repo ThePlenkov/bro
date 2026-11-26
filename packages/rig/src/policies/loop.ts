@@ -1904,7 +1904,11 @@ function serviceLost(ctx: LoopCtx, m: LoopMember): ServiceVerdict {
   // ownership marking (spec bro-c650l) — the registry-spawn path's
   // discovery is HERE, not pushItem: a detached worker's PR only
   // exists once this settle pass finds it
-  m.autoMergeArmed ??= ctx.cfg.autoMerge && !ctx.act.requireApproval;
+  m.autoMergeArmed = autoMergeArmedForMember(
+    m.autoMergeArmed,
+    ctx.cfg.autoMerge,
+    ctx.act.requireApproval
+  );
   stampLoopPr(ctx, m.beads, m.item, pr, m.autoMergeArmed);
   m.since = ctx.deps.now();
   ctx.deps.say(`loop: ${m.beads.map(b => b.id).join(', ')} → PR ${prRef(ctx, pr)}`);
