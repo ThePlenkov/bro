@@ -18,6 +18,7 @@ import {
   parseSkillSource,
   resolveSkillsBin,
   runSync,
+  runSkillMutation,
   type SkillsConfig,
   type SpawnRunner,
 } from './skills.ts';
@@ -201,6 +202,67 @@ describe('resolveSkillsBin', () => {
   });
   test('a configured relative path resolves against root', () => {
     assert.equal(resolveSkillsBin('/x', 'bin/skills').file, join('/x', 'bin/skills'));
+  });
+});
+
+describe('skill mutations', () => {
+  test('add delegates the source to the project-scoped skills CLI', () => {
+    const root = tmp();
+    const { spawn, calls } = fakeSpawn();
+    const result = runSkillMutation({
+      command: 'add',
+      source: 'o/r',
+      root,
+      cfg: cfg([]),
+      spawn,
+      bin: { file: 'skills', args: [] },
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls, [['add', 'o/r', '-a', 'universal', '-y']]);
+  });
+
+  test('update and remove resolve a repository source through the lock', () => {
+    const root = tmp();
+    writeLock(root, {
+      first: { source: 'o/r', computedHash: 'hash' },
+      second: { source: 'o/r', computedHash: 'hash' },
+    });
+    const { spawn, calls } = fakeSpawn();
+    const update = runSkillMutation({
+      command: 'update',
+      source: 'o/r',
+      root,
+      cfg: cfg([]),
+      spawn,
+      bin: { file: 'skills', args: [] },
+    });
+    const remove = runSkillMutation({
+      command: 'remove',
+      source: 'o/r',
+      root,
+      cfg: cfg([]),
+      spawn,
+      bin: { file: 'skills', args: [] },
+    });
+    assert.equal(update.ok, true);
+    assert.equal(remove.ok, true);
+    assert.deepEqual(calls, [
+      ['update', 'first', 'second', '-y'],
+      ['remove', 'first', 'second', '-y'],
+    ]);
+  });
+
+  test('update refuses a source absent from the lock', () => {
+    const result = runSkillMutation({
+      command: 'update',
+      source: 'o/r',
+      root: tmp(),
+      cfg: cfg([]),
+      spawn: fakeSpawn().spawn,
+      bin: { file: 'skills', args: [] },
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.detail ?? '', /no locked skills/);
   });
 });
 

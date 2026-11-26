@@ -418,6 +418,9 @@ function usage(exitCode: ExitCode = 2): never {
 Materialise config-declared agent-skill deps into .agents/skills/.
 
 Commands:
+  add <source>    add an external source to the project vendor tree
+  update <source> update locked skills from an external source
+  remove <source> remove all locked skills from an external source
   sync    install the skills.install sources — npx skills add per
           github/URL source, a bro-managed symlink per local: dir,
           experimental_install for lock gaps, then verify the lock
@@ -473,18 +476,101 @@ function rejectStrays(rest: string[]): void {
   }
 }
 
-function parseSkillsArgs(argv: string[]): { sub: string; root: string; json: boolean } {
+function parseSkillsArgs(argv: string[]): {
+  sub: string;
+  source?: string;
+  root: string;
+  json: boolean;
+} {
   const sub = argv[0];
-  if (sub !== 'sync' && sub !== 'list') {
+  if (sub !== 'sync' && sub !== 'list' && sub !== 'add' && sub !== 'update' && sub !== 'remove') {
     usage(2);
   }
+  const needsSource = sub === 'add' || sub === 'update' || sub === 'remove';
   const rest = argv.slice(1);
+  const source = needsSource ? rest.shift() : undefined;
+  if (needsSource && (source === undefined || source.startsWith('-'))) {
+    console.error(`error: ${sub} needs one <source> — see \`bro skills --help\``);
+    process.exit(2);
+  }
   rejectStrays(rest);
   return {
     sub,
+    source,
     root: resolve(flag(rest, '--root') ?? process.cwd()),
     json: rest.includes('--json'),
   };
+}
+
+interface SkillMutation {
+  command: 'add' | 'update' | 'remove';
+  source: string;
+  root: string;
+  cfg: SkillsConfig;
+  bin?: SkillsBin;
+  spawn?: SpawnRunner;
+  probe?: BinProbe;
+}
+
+/** Resolve the names covered by a source.  The lock is authoritative for
+ * update/remove because the upstream CLI's update/remove commands take skill
+ * names, while bro's public API takes the original source. */
+function mutationNames(source: SkillSource, root: string): string[] {
+  const locked = readSkillLock(root);
+  if (source.kind === 'github' || source.kind === 'url') {
+    return lockNamesFor(source, locked);
+  }
+  return source.kind === 'invalid' ? [] : [localSkillName(root, source.path)];
+}
+
+export function runSkillMutation(input: SkillMutation): {
+  ok: boolean;
+  args: string[];
+  detail?: string;
+} {
+  const source = parseSkillSource(input.source);
+  if (source.kind === 'invalid' || source.kind === 'local') {
+    return {
+      ok: false,
+      args: [],
+      detail:
+        source.kind === 'invalid'
+          ? source.reason
+          : 'mutating external skills requires a github or https source',
+    };
+  }
+  const bin = input.bin ?? resolveSkillsBin(input.root, input.cfg.bin, input.probe);
+  const spawn = input.spawn ?? spawnSkills;
+  const names = mutationNames(source, input.root);
+  const args =
+    input.command === 'add' ? addArgs(source, input.cfg.agents) : [input.command, ...names, '-y'];
+  if (input.command !== 'add' && names.length === 0) {
+    return {
+      ok: false,
+      args,
+      detail: `no locked skills match ${input.source}`,
+    };
+  }
+  const proc = spawn(bin, input.root, args);
+  return spawnFailed(proc) ? { ok: false, args, detail: spawnDetail(proc) } : { ok: true, args };
+}
+
+function cmdMutation(
+  command: 'add' | 'update' | 'remove',
+  source: string,
+  root: string,
+  cfg: SkillsConfig,
+  json: boolean
+): void {
+  const result = runSkillMutation({ command, source, root, cfg });
+  if (json) {
+    console.log(JSON.stringify({ command: `skills ${command}`, data: result }));
+  } else if (result.ok) {
+    console.log(`✓ ${command} ${source}`);
+  } else {
+    console.error(`✗ ${command} ${source} — ${result.detail ?? 'failed'}`);
+  }
+  process.exitCode = result.ok ? 0 : 1;
 }
 
 function cmdSync(root: string, cfg: SkillsConfig, json: boolean): void {
@@ -524,9 +610,11 @@ export function runSkillsCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  const { sub, root, json } = parseSkillsArgs(argv);
+  const { sub, source, root, json } = parseSkillsArgs(argv);
   const cfg = (loadBroConfig(root).skills ?? skillsSection(undefined)) as SkillsConfig;
-  if (sub === 'sync') {
+  if (sub === 'add' || sub === 'update' || sub === 'remove') {
+    cmdMutation(sub, source!, root, cfg, json);
+  } else if (sub === 'sync') {
     cmdSync(root, cfg, json);
   } else {
     cmdList(root, cfg, json);
