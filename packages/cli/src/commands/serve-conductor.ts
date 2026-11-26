@@ -156,6 +156,8 @@ export interface ConductorConfig {
   /** The per-entry quota budgets (spec bro-ezboq) — `serve.limits`
    *  keyed by lane entry. Absent/empty ⇒ every lane ungated. */
   limits?: Record<string, ServeLaneLimits>;
+  /** Maximum live ACP children owned by this rig. 0 disables the wall. */
+  rigChildCap?: number;
   /** The dead-loop budgets (spec bro-b961a) — sessions opened and not
    *  completed, per conversation (maxOpens) and per peer
    *  (maxAbandoned). Absent = the defaults. */
@@ -513,6 +515,7 @@ export function conductorConfig(
     // the per-entry quota budgets (spec bro-ezboq) — the file's own
     // section, no env pin: a budget is policy, like the session cap
     limits: cfg.serve?.limits,
+    rigChildCap: cfg.fleet?.maxConcurrent,
     // the wall cooldown (spec bro-i6811) — ONE instance for the whole
     // conductor: the default lane and the brokered transport ride the
     // same account, so a wall that closed one must close the other.
@@ -1066,6 +1069,7 @@ export interface AcpLinkPool {
  *  a per-pool `process.once` leaked a listener per instantiation
  *  (amazon-q #581); dead peers drop out as their abort fires. */
 const pooledPeers = new Set<AcpPeer>();
+const rigChildCounts = new Map<string, number>();
 let poolExitArmed = false;
 
 /** The pids of every live pooled peer this process holds — the lane
@@ -1090,12 +1094,32 @@ export function pooledPeerPids(): ReadonlySet<number> {
   return pids;
 }
 
+/** Reserve one served child for a rig. The serve state is singleton per rig,
+ * so this process-local lease is the atomic wall; release is idempotent. */
+export function claimRigChild(rig: string, cap = 0): () => void {
+  if (cap <= 0) return () => {};
+  const held = rigChildCounts.get(rig) ?? 0;
+  if (held >= cap) {
+    throw new SpawnError(`rig ACP child cap reached — ${held}/${cap} live children`, 'cap');
+  }
+  rigChildCounts.set(rig, held + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = (rigChildCounts.get(rig) ?? 1) - 1;
+    if (next <= 0) rigChildCounts.delete(rig);
+    else rigChildCounts.set(rig, next);
+  };
+}
+
 export function acpLinkPool(
   by: string,
   entry: AcpEntry,
-  opts: ProviderWireOpts,
+  wireOpts: ProviderWireOpts,
   timeoutMs: number,
-  idleReleaseMs = 0
+  idleReleaseMs = 0,
+  poolOpts: { claimSpawn?: () => Promise<() => void> } = {}
 ): AcpLinkPool {
   let link: Promise<AcpPeer> | undefined;
   let live: AcpPeer | undefined;
@@ -1108,6 +1132,7 @@ export function acpLinkPool(
   let inflight = 0;
   /** The idle release timer — unref'd, so it never holds the process. */
   let idleTimer: NodeJS.Timeout | undefined;
+  let spawnRelease: (() => void) | undefined;
   const clearIdleTimer = (): void => {
     if (idleTimer !== undefined) {
       clearTimeout(idleTimer);
@@ -1126,6 +1151,8 @@ export function acpLinkPool(
     clearIdleTimer();
     link = undefined;
     live = undefined;
+    spawnRelease?.();
+    spawnRelease = undefined;
     pooledPeers.delete(p);
     for (const cb of deathHooks) {
       cb();
@@ -1185,11 +1212,24 @@ export function acpLinkPool(
     link(parent) {
       if (link === undefined) {
         otelEvent('acp.spawn', { backend: by });
-        link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent);
+        link = (async (): Promise<AcpPeer> => {
+          if (poolOpts.claimSpawn !== undefined) {
+            spawnRelease = await poolOpts.claimSpawn();
+          }
+          try {
+            return await acpOpen(by, entry, wireOpts, Date.now() + timeoutMs, parent);
+          } catch (err) {
+            spawnRelease?.();
+            spawnRelease = undefined;
+            throw err;
+          }
+        })();
         link.then(
           p => {
             if (disposed) {
               link = undefined;
+              spawnRelease?.();
+              spawnRelease = undefined;
               p.close();
               return;
             }
@@ -1218,6 +1258,8 @@ export function acpLinkPool(
       link = undefined;
       if (p !== undefined) {
         pooledPeers.delete(p);
+        spawnRelease?.();
+        spawnRelease = undefined;
         p.close();
       }
     },
@@ -5822,7 +5864,13 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
-    acp: { cwd: cfg.cwd, signal: poolAbort.signal, ...opts.acp },
+    acp: {
+      cwd: cfg.cwd,
+      signal: poolAbort.signal,
+      parentToken: randomUUID(),
+      idleTtlMs: cfg.idleReleaseMs ?? 300_000,
+      ...opts.acp,
+    },
   };
   // the store-side evidence trail — every conductor.* event lands as a
   // JSONL row next to serve.json so a dogfood analyst can read routing,
@@ -5894,7 +5942,10 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       laneCfg.timeoutMs,
       // the idle window (spec bro-7ira8) — the request-scoped plane
       // releases its peer; the /api/v1/acp transport keeps its own
-      laneCfg.idleReleaseMs ?? 300_000
+      laneCfg.idleReleaseMs ?? 300_000,
+      {
+        claimSpawn: async () => claimRigChild(laneCfg.cwd, laneCfg.rigChildCap),
+      }
     );
     // retained conversations — one acp session per client conversation
     // (x-bro-session pin or history fingerprint). Transport death kills

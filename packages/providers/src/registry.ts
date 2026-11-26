@@ -86,6 +86,11 @@ export interface AcpSeam {
    *  and the rest get the SDK's method-not-found. Only meaningful on
    *  the pooled path (acpOpen); one-shot calls keep the deny posture. */
   bridge?: AcpClientBridge;
+  /** Identity carried by a served child so a later orphan sweep can
+   * distinguish it from an operator-launched ACP process. */
+  parentToken?: string;
+  /** The served child's orphan/idle lease, in milliseconds. */
+  idleTtlMs?: number;
 }
 
 /** Load an entry → its typed client. `name` is the registry key —
