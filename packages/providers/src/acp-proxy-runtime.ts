@@ -98,6 +98,8 @@ export async function acpProxy(
    *  their agents with it so the child's hooks and the proxy's in-process
    *  pass never double up — spec bro-u2eps §3). */
   const hooksOff = process.env.BRO_HOOKS === '0';
+  const seamCallback = <K extends keyof AcpProxySeam>(key: K): AcpProxySeam[K] =>
+    (opts.seam === undefined ? undefined : Reflect.get(opts.seam, key)) as AcpProxySeam[K];
   /** Proxy-originated gate re-prompt ids — namespaced strings so they
    *  can never collide with a client's numeric id space. */
   let gateSeq = 0;
@@ -115,11 +117,12 @@ export async function acpProxy(
     : Math.min(Math.max(rawStall, 1), MAX_TIMER_MS);
   const downOut = outbound(downWriter, downDead, stallMs);
   const upOut = outbound(upWriter, upDead, stallMs);
+  const isDownDead = (): boolean => downDead.fired;
   const writeDown = (m: AnyMessage): void => {
-    downOut.send(m);
+    void downOut.send(m);
   };
   const writeUp = (m: AnyMessage): void => {
-    upOut.send(m);
+    void upOut.send(m);
   };
 
   /** Set the moment a pump's EOF/death wins the verdict — BEFORE the
@@ -159,7 +162,7 @@ export async function acpProxy(
     const release = downOut.hold();
     const queued = (): void => {
       release();
-      if (!downDead.fired) {
+      if (!isDownDead()) {
         writeDown(m);
       }
     };
@@ -223,8 +226,8 @@ export async function acpProxy(
         ? Promise.resolve<{ text?: string; settled: boolean }>({
             settled: true,
           })
-        : seamSessionCall(opts.seam?.sessionContext, session, sessionId),
-      seamCall(opts.seam?.promptContext, session, sessionId, text),
+        : seamSessionCall(seamCallback('sessionContext'), session, sessionId),
+      seamCall(seamCallback('promptContext'), session, sessionId, text),
     ]);
     // an unsettled collection still contributes what it has — the hook
     // emits partial output the same way — but the slot stays open so
@@ -386,7 +389,7 @@ export async function acpProxy(
    *  check points bracket the seam collection — the abortable
    *  window. */
   const crossable = (id: JsonRpcId, own: PendingRequest): boolean =>
-    pending.get(id) === own && !downDead.fired && !wireDone;
+    pending.get(id) === own && !isDownDead() && !wireDone;
 
   /** Up-leg room for a LOCAL turn's answer — the c2a intake bound
    *  watches the DOWN leg only, so a client that keeps prompting but
@@ -417,7 +420,9 @@ export async function acpProxy(
   }): Promise<OverlayOutcome> => {
     const { overlay, id, own, sessionId, ses, params } = context;
     const ctrl = new AbortController();
-    own.abort = () => ctrl.abort();
+    own.abort = () => {
+      ctrl.abort();
+    };
     try {
       const result = await overlay({
         sessionId,
@@ -631,7 +636,8 @@ export async function acpProxy(
   const abortIntakePrompts = (sessionId: string): number => {
     let aborted = 0;
     for (let i = heldC2A.length - 1; i >= 0; i--) {
-      const m = heldC2A[i] as AnyMessage;
+      const m = heldC2A.at(i);
+      if (m === undefined) continue;
       if (wire(m).method !== 'session/prompt' || sessionIdOf(m) !== sessionId) {
         continue;
       }
@@ -654,7 +660,8 @@ export async function acpProxy(
   const abortIntakeAsks = (sessionId: string, reason: string): number => {
     let aborted = 0;
     for (let i = heldA2C.length - 1; i >= 0; i--) {
-      const m = heldA2C[i] as AnyMessage;
+      const m = heldA2C.at(i);
+      if (m === undefined) continue;
       if (wire(m).method !== PERMISSION_METHOD || wire(m).id === undefined) {
         continue;
       }
@@ -815,7 +822,7 @@ export async function acpProxy(
     ses: ProxySession,
     sessionId: string
   ): void => {
-    const toolCall = opts.seam?.toolCall;
+    const toolCall = seamCallback('toolCall');
     const cwd = ses.cwd;
     if (hooksOff || toolCall === undefined || cwd === undefined) {
       return;
@@ -1044,7 +1051,7 @@ export async function acpProxy(
       permission: perm,
     };
     pendingA2C.set(id, entry);
-    const fn = opts.seam?.permission;
+    const fn = seamCallback('permission');
     const cwd = ses?.cwd;
     if (
       hooksOff ||
@@ -1254,7 +1261,7 @@ export async function acpProxy(
     sessions.set(sid, {
       cwd,
       seenPrompt: false,
-      sessionCtxDone: opts.seam?.sessionContext === undefined,
+      sessionCtxDone: seamCallback('sessionContext') === undefined,
       held: new Set(),
       writeQ: Promise.resolve(),
       advisory: [],
@@ -1333,13 +1340,13 @@ export async function acpProxy(
    *    rule as the hook Stop gate's stop_hook_active. */
   const stopProbeOutages = new Map<string, number>();
   const evalStopGate = (clientId: JsonRpcId, ses: ProxySession, sessionId: string): void => {
-    const gate = opts.seam?.stopGate;
+    const gate = seamCallback('stopGate');
     const cwd = ses.cwd;
     if (gate === undefined || cwd === undefined) {
       return;
     }
     ses.writeQ = ses.writeQ.then(async () => {
-      if (!pending.has(clientId) || downDead.fired) {
+      if (!pending.has(clientId) || isDownDead()) {
         return;
       }
       const outcome = await runStopGateProbe({
@@ -1350,7 +1357,7 @@ export async function acpProxy(
         log,
       });
       // a cancel raced the eval — its 'cancelled' already landed
-      if (!pending.has(clientId) || downDead.fired) {
+      if (!pending.has(clientId) || isDownDead()) {
         return;
       }
       const held = pending.get(clientId)?.heldResponse;
@@ -1853,12 +1860,14 @@ export async function acpProxy(
  * exec'd directly — never through a shell.
  */
 export async function runAcpProxy(command: string[], opts: AcpProxyOptions = {}): Promise<number> {
-  const log = opts.log ?? ((line: string) => console.error(line));
-  const bin = command[0];
-  if (bin === undefined) {
+  const log = opts.log ?? ((line: string) => {
+    console.error(line);
+  });
+  if (command.length === 0) {
     log('acp proxy: empty downstream command');
     return 2;
   }
+  const bin = command[0];
   const child: ChildProcess = spawn(bin, command.slice(1), {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: acpChildEnv(),

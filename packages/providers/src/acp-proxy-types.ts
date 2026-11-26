@@ -105,18 +105,18 @@ export interface AcpProxySeam {
    *  the slot stays open and the next prompt retries; a settled run
    *  that crosses closes it. `cwd` is the session/new-supplied
    *  repo. */
-  sessionContext?(
+  sessionContext?: (
     cwd: string,
     sessionId: string
-  ): Promise<{ text?: string; settled?: boolean } | undefined>;
+  ) => Promise<{ text?: string; settled?: boolean } | undefined>;
   /** Prompt-submit context — runs per prompt on the flattened text. */
-  promptContext?(cwd: string, sessionId: string, prompt: string): Promise<string | undefined>;
+  promptContext?: (cwd: string, sessionId: string, prompt: string) => Promise<string | undefined>;
   /** Per-tool-call hook channel — the in-process equivalent of the
    *  PostToolUse event (session-marker arming + guard defs, spec
    *  bro-u2eps). Returned lines are advisory text the proxy buffers
    *  onto the next crossed prompt — the seam that already carries
    *  advisory text, never a fabricated wire message. */
-  toolCall?(cwd: string, sessionId: string, call: AcpProxyToolCall): Promise<string[] | undefined>;
+  toolCall?: (cwd: string, sessionId: string, call: AcpProxyToolCall) => Promise<string[] | undefined>;
   /** Turn-end stop gate — evaluated when a session/prompt response
    *  lands, before it crosses upstream. `block` holds the response and
    *  sends exactly one gate re-prompt (the held response never crosses;
@@ -124,20 +124,20 @@ export interface AcpProxySeam {
    *  request resolves once, with the final turn's verdict). `hints`
    *  ride the next crossed prompt as advisory text. A throw is
    *  fail-open: the held response forwards verbatim. */
-  stopGate?(
+  stopGate?: (
     cwd: string,
     sessionId: string
-  ): Promise<{ block?: string; hints?: string[] } | undefined>;
+  ) => Promise<{ block?: string; hints?: string[] } | undefined>;
   /** Permission policy — the in-process equivalent of the
    *  PermissionRequest hook (spec bro-9qopj): evaluate once per
    *  `session/request_permission`, return the verdict the proxy maps
    *  onto the wire. Fail-open like every seam leg: absent, throwing,
    *  or 'ask' forwards the ask to the client verbatim. */
-  permission?(
+  permission?: (
     cwd: string,
     sessionId: string,
     call: AcpProxyPermissionCall
-  ): Promise<AcpProxyPermissionVerdict | undefined>;
+  ) => Promise<AcpProxyPermissionVerdict | undefined>;
 }
 
 /** One local turn on bro's side of the wire (spec bro-tegz2) — a

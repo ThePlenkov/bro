@@ -175,7 +175,8 @@ class PumpMachine {
     if (precede !== undefined) {
       let keep = 0;
       for (let i = 0; i < held.length; i++) {
-        const h = held[i] as AnyMessage;
+        const h = held.at(i);
+        if (h === undefined) continue;
         if (precede(h, m)) {
           this.bypass();
           this.deliver(h);
@@ -265,7 +266,8 @@ class PumpMachine {
       while (held.length > 0 && out.spare()) this.deliver(held.shift() as AnyMessage);
       const state = this.stateFor();
       if (state === 'done') break;
-      if (!(await handlers[state]())) break;
+      const handler = Object.getOwnPropertyDescriptor(handlers, state)?.value;
+      if (handler === undefined || !(await handler())) break;
     }
     // flush the hold — a message the pump accepted is never dropped
     // unrouted: registered now, its pending entry exists before the
