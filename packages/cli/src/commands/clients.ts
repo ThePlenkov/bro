@@ -295,6 +295,7 @@ function piArtifact(cwd: string): string | null {
   // The generated checkout artifact and package dist entry are bundled
   // specifically for this no-node_modules host.
   return firstExisting([
+    root === null ? null : join(root, 'integrations', 'pi', 'bro.ts'),
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
     ap === null ? null : join(ap, 'dist', 'pi.js'),
