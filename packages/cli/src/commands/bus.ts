@@ -28,7 +28,7 @@ import {
   type EventInput,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
-import { flag, flagAll, positionals } from './args.ts';
+import { flag, flagAll, flagZone, positionals } from './args.ts';
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--topic',
@@ -99,7 +99,7 @@ function die(msg: string): never {
 /** A misspelled option is a typo, not input — writes fail closed. */
 function rejectUnknownFlags(sub: string, rest: string[]): void {
   const known = KNOWN_FLAGS[sub] ?? new Set<string>();
-  for (const arg of rest) {
+  for (const arg of flagZone(rest)) {
     if (!arg.startsWith('--')) {
       continue;
     }
@@ -143,7 +143,7 @@ function filterFrom(rest: string[]): BusFilter {
 }
 
 async function cmdServe(rest: string[]): Promise<void> {
-  const json = rest.includes('--json');
+  const json = flagZone(rest).includes('--json');
   let broker;
   try {
     broker = await startBusBroker(process.cwd());
@@ -217,7 +217,7 @@ async function cmdPublish(rest: string[]): Promise<void> {
   // this edge bypasses the events facade — sinks fan out here too or a
   // hand-published human-moment event would never reach a person
   void deliverSinks(process.cwd(), event);
-  const json = rest.includes('--json');
+  const json = flagZone(rest).includes('--json');
   if (!result.published) {
     // Not a failure: the broker being down is a routine state, and a
     // publisher that made it here explicitly is reporting, not erroring.
@@ -248,7 +248,7 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
     }
     since = Math.floor(parsed);
   }
-  const json = rest.includes('--json');
+  const json = flagZone(rest).includes('--json');
   // Armed before the subscribe, because the end can arrive before the
   // first event: a broker that shuts down mid-stream must end the
   // command, not leave it blocked on a signal for a socket that can
@@ -311,7 +311,7 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
 async function cmdStatus(rest: string[]): Promise<void> {
   const socketPath = socketOrDie();
   const status = await busStatus(socketPath);
-  if (rest.includes('--json')) {
+  if (flagZone(rest).includes('--json')) {
     console.log(JSON.stringify(status));
     return;
   }

@@ -13,3 +13,9 @@ export {
   flagValue,
   positionals,
 } from '@broject/core';
+
+/** Return only the portion of argv where option parsing is active. */
+export const flagZone = (argv: readonly string[]): readonly string[] => {
+  const end = argv.indexOf('--');
+  return end === -1 ? argv : argv.slice(0, end);
+};

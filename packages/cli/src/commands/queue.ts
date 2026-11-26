@@ -12,7 +12,7 @@
 import { printUsage } from '@broject/core'
 import type { ExitCode } from '@broject/core'
 import { checkBeads, queueAdd, queueBump, queueDrill, queueDrop, queueItems, queueScope } from '@broject/drill'
-import { flag, positionals } from './args.ts'
+import { flag, flagZone, positionals } from './args.ts'
 
 const VALUE_FLAGS = new Set(['--under', '--to', '--description', '--priority'])
 const positionalsOf = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
@@ -56,7 +56,7 @@ function intFlag(argv: string[], name: string): number | undefined {
 /** Intake words are subjects — a `--underer=x` typo must error, never
  *  silently queue into the default scope. */
 function rejectUnknownFlags(argv: string[]): void {
-  for (const arg of argv) {
+  for (const arg of flagZone(argv)) {
     const key = arg.split('=', 1)[0]!
     if (key.length > 1 && key.startsWith('-') && !VALUE_FLAGS.has(key)) {
       console.error(`error: unknown option "${key}"`)

@@ -42,7 +42,7 @@ import type {
   LessonTrigger,
   TriggerMatch,
 } from '@broject/learn';
-import { flag, flagAll, positionals } from './args.ts';
+import { flag, flagAll, flagZone, positionals } from './args.ts';
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
@@ -137,7 +137,7 @@ const learnPositionals = (argv: string[]): string[] => positionals(argv, VALUE_F
 /** A misspelled option is a typo, not input — writes fail closed. */
 function rejectUnknownFlags(sub: string, rest: string[]): void {
   const known = KNOWN_FLAGS[sub] ?? new Set<string>();
-  for (const arg of rest) {
+  for (const arg of flagZone(rest)) {
     if (arg.startsWith('--') && !known.has(arg.split('=')[0]!)) {
       console.error(`error: unknown option "${arg}" for learn ${sub}`);
       process.exit(2);
