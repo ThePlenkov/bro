@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 
 export const CEILING_REMOTE_REF = 'refs/bro/ceiling/ledger';
 const ENTRY_TTL_MS = 30 * 60_000;
@@ -147,7 +148,7 @@ export function reserveRemoteCeiling(options: RemoteCeilingOptions): string | nu
       return null;
     }
     if (open + entries.length >= max) return 'remote-held';
-    const id = `${pid}-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `${pid}-${now}-${randomBytes(4).toString('hex')}`;
     const commit = commitLedger({
       root,
       entries: [...entries, { id, pid, branch, ts: now }],
