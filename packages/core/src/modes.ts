@@ -204,58 +204,6 @@ export function sessionIdFromEnv(env: NodeJS.ProcessEnv = process.env): string |
   return undefined;
 }
 
-/** The in-process adapters stamp this on the `bro hooks` spawn they own
- *  — presence marks a direct adapter launch (no run.sh), the value the
- *  ledger's host column. Slug-shaped only: a malformed marker is no
- *  identity at all and falls through to inference. */
-const HOOK_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
-
-/** Host detection — an EXACT mirror of hooks/run.sh's HOOK_SPOOL_HOST
- *  block plus one edge the shell never sees: `BRO_HOOK_HOST` first —
- *  the in-process adapters (opencode/kilo/pi/omp) bypass run.sh and
- *  stamp their host name on the `bro hooks` spawn, an explicit claim
- *  stronger than any env/payload inference (specs/bro-izpyk.9.md).
- *  Then: env markers (the *_PLUGIN_ROOT vars each client exports, then
- *  *_PROJECT_DIR corroboration, then bare PLUGIN_ROOT = codex),
- *  payload fingerprint only when env detection found nothing. run.sh
- *  decides the observe fast-path on this answer and hooks.js resolves
- *  the mode file under the same name — the two must never disagree. */
-export function hookHostOf(env: NodeJS.ProcessEnv, raw?: unknown): string {
-  if (env.BRO_HOOK_HOST !== undefined && HOOK_HOST_RE.test(env.BRO_HOOK_HOST)) {
-    return env.BRO_HOOK_HOST;
-  }
-  if (env.CURSOR_PLUGIN_ROOT) {
-    return 'cursor';
-  }
-  if (env.DEVIN_PLUGIN_ROOT) {
-    return 'devin';
-  }
-  if (env.CLAUDE_PLUGIN_ROOT) {
-    return 'claude';
-  }
-  if (env.CURSOR_PROJECT_DIR) {
-    return 'cursor';
-  }
-  if (env.DEVIN_PROJECT_DIR) {
-    return 'devin';
-  }
-  if (env.PLUGIN_ROOT) {
-    return 'codex';
-  }
-  if (raw !== undefined && raw !== null) {
-    // run.sh greps the raw payload text for the literal key strings —
-    // stringify is the same substring test, false positives included
-    const s = JSON.stringify(raw);
-    if (s.includes('"cursor_version"') || s.includes('"workspace_roots"')) {
-      return 'cursor';
-    }
-    if (s.includes('"turn_id"')) {
-      return 'codex';
-    }
-  }
-  return 'unknown';
-}
-
 // --- resolution ------------------------------------------------------------------
 
 export type ModeSource = 'file' | 'default' | 'observe';

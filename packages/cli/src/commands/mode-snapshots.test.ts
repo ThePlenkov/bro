@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import {
   MODE_SNAPSHOT_EVENTS,
   readModeSnapshot,
-  sessionProject,
+  sessionSnapshotProject,
   snapshotFresh,
   type ProbeResult,
 } from '@broject/core';
@@ -46,7 +46,7 @@ describe('renderModeSnapshots', () => {
       assert.match(seen[0]?.agentId ?? '', /^snapshot-render-\d+$/);
       // and the caller's env is restored afterwards
       assert.equal(process.env.BRO_AGENT_ID, 'worker-7');
-      const project = sessionProject(repo.main);
+      const project = sessionSnapshotProject(repo.main);
       assert.ok(project !== undefined);
       for (const event of MODE_SNAPSHOT_EVENTS) {
         assert.equal(readModeSnapshot(f.env, project, 'code', event), 'line-a\nline-b');
@@ -69,7 +69,7 @@ describe('renderModeSnapshots', () => {
       assert.ok(result !== null);
       assert.equal(result.ok, false);
       assert.equal(result.events.length, 0);
-      const project = sessionProject(repo.main);
+      const project = sessionSnapshotProject(repo.main);
       assert.ok(project !== undefined);
       assert.equal(snapshotFresh(f.env, project, 'plan'), false);
       assert.equal(readModeSnapshot(f.env, project, 'plan', 'session-start'), undefined);
@@ -89,7 +89,7 @@ describe('renderModeSnapshots', () => {
       assert.ok(result !== null);
       assert.equal(result.ok, false);
       assert.equal(process.env.BRO_AGENT_ID, undefined);
-      const project = sessionProject(repo.main);
+      const project = sessionSnapshotProject(repo.main);
       assert.ok(project !== undefined);
       assert.equal(snapshotFresh(f.env, project, 'review'), false);
     } finally {

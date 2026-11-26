@@ -78,7 +78,6 @@ import {
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   gitTry,
-  hookHostOf,
   isMode,
   ledgerFacade,
   loadConfig,
@@ -92,6 +91,7 @@ import {
   repoOptedIn,
   sessionMode,
   sessionProject,
+  sessionSnapshotProject,
   sessionStartProbe,
   snapshotModeDir,
   stopGateContributions,
@@ -188,6 +188,7 @@ interface HookInput {
   stop_hook_active?: unknown;
   session_id?: unknown;
 }
+import { hookHostOf } from '../hook-host.ts';
 
 /** A repo opts in to bro hooks with any bro.config.* file or a .beads/
  *  dir — the local layer counts too (spec: specs/bro-9vmx.md). Shared
@@ -879,7 +880,7 @@ function writeBoundModeFile(file: string | null, mode: Mode, dir: string): boole
 function hookProjectIdFor(dir: string): string | null {
   if (hookProjectId === undefined) {
     try {
-      hookProjectId = sessionProject(dir) ?? null;
+      hookProjectId = sessionSnapshotProject(dir) ?? null;
     } catch {
       hookProjectId = null;
     }

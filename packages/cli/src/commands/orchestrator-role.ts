@@ -19,7 +19,6 @@
  */
 import {
   facade,
-  hookHostOf,
   loadConfig,
   orchestratorRoleUri,
   sessionProject,
@@ -27,6 +26,7 @@ import {
   type ClaimResult,
   type SessionKey,
 } from '@broject/core';
+import { hookHostOf } from '../hook-host.ts';
 import { agentOwner } from '@broject/rig';
 
 export interface RoleSession {

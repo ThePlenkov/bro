@@ -21,7 +21,7 @@
 import { rmSync } from 'node:fs';
 import {
   MODE_SNAPSHOT_EVENTS,
-  sessionProject,
+  sessionSnapshotProject,
   sessionStartProbe,
   snapshotEventPath,
   touchSnapshotStamp,
@@ -57,7 +57,7 @@ export async function renderModeSnapshots(
   env: NodeJS.ProcessEnv = process.env,
   sweep: SnapshotSweep = sessionStartProbe
 ): Promise<RenderSnapshotsResult | null> {
-  const project = sessionProject(dir);
+  const project = sessionSnapshotProject(dir);
   if (project === undefined) {
     return null;
   }
