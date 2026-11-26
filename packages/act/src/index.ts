@@ -4,6 +4,7 @@ export { detectReopenedThreads } from './reopened.ts';
 export type { ResolveEvent, ResolveLedger } from './resolve-log.ts';
 export { fileResolveLog, resolveLedger, resolveLogPath } from './resolve-log.ts';
 export { fetchPrActState } from './state.ts';
+export { staleStatus } from './stale-status.ts';
 export { failingCiChecks, gatedCiChecks, isSast, liveSastChecks } from './state.ts';
 export type { FetchPrActStateOpts } from './state.ts';
 export {
