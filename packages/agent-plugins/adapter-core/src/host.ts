@@ -321,6 +321,37 @@ export interface BroDriverDeps {
   resolve?(opts: ResolveOptions): Promise<Command | null>;
 }
 
+function mergeHydrationText(priorCarry: string, text: string): string {
+  if (priorCarry === '') {
+    return text;
+  }
+  return text === '' ? priorCarry : `${priorCarry}\n\n${text}`;
+}
+
+function trackHydration(options: {
+  raw: Promise<HookControl | null>;
+  started: Promise<string>;
+  isCurrent: () => boolean;
+  onFailure: () => void;
+  clear: () => void;
+}): void {
+  const { raw, started, isCurrent, onFailure, clear } = options;
+  void raw
+    .then(control => {
+      if (control === null && isCurrent()) {
+        onFailure();
+      }
+    })
+    .catch(() => {});
+  void started
+    .then(text => {
+      if (isCurrent() && text === '') {
+        clear();
+      }
+    })
+    .catch(() => {});
+}
+
 /**
  * Wire bro into a host. `api` is the host's own extension API — the
  * driver passes it through so the client can register commands and
@@ -480,11 +511,7 @@ export function createBroDriver<Ctx>(
       event === 'post-compaction' && carry?.sessionId === sessionId ? carry.text : '';
     carry = undefined;
     const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
-    const started = raw
-      .then(contextOf)
-      .then(text =>
-        priorCarry === '' ? text : text === '' ? priorCarry : `${priorCarry}\n\n${text}`
-      );
+    const started = raw.then(contextOf).then(text => mergeHydrationText(priorCarry, text));
     hydration = { sessionId, promise: started };
     // re-priming (compaction) earns a fresh inject for this session;
     // a different session's claim is untouched
@@ -497,22 +524,17 @@ export function createBroDriver<Ctx>(
     // a failed probe is not the session's verdict — remember it so a
     // later turn can re-probe instead of running the session contextless
     hydrationFailed = undefined;
-    void raw
-      .then(control => {
-        if (control === null && hydration?.promise === started) {
-          hydrationFailed = sessionId;
-        }
-      })
-      .catch(() => {});
-    // an empty answer has nothing to inject — drop the cache entry so
-    // the next turn sees no stale '' instead of claiming the session
-    void started
-      .then(text => {
-        if (hydration?.promise === started && text === '') {
-          hydration = undefined;
-        }
-      })
-      .catch(() => {});
+    trackHydration({
+      raw,
+      started,
+      isCurrent: () => hydration?.promise === started,
+      onFailure: () => {
+        hydrationFailed = sessionId;
+      },
+      clear: () => {
+        hydration = undefined;
+      },
+    });
   };
 
   /** The session's context text, consumed from the cached probe. An
@@ -842,6 +864,16 @@ async function runBro(
     resolve({ code: 127, stdout: '', stderr: 'spawn failed' });
     return promise;
   }
+  return wireBroProcess({ child, promise, resolve, timeoutMs });
+}
+
+function wireBroProcess(options: {
+  child: ChildProcess;
+  promise: Promise<BroRunResult>;
+  resolve: (result: BroRunResult) => void;
+  timeoutMs: number;
+}): Promise<BroRunResult> {
+  const { child, promise, resolve, timeoutMs } = options;
   let out = '';
   let err = '';
   let settled = false;
@@ -854,15 +886,7 @@ async function runBro(
     resolve(result);
   };
   const timer = setTimeout(() => {
-    try {
-      if (child.pid !== undefined && process.platform !== 'win32') {
-        process.kill(-child.pid, 'SIGKILL');
-      } else {
-        child.kill('SIGKILL');
-      }
-    } catch {
-      // already dead — the close handler settles
-    }
+    killChild(child);
     settle({
       code: 1,
       stdout: out,
@@ -872,12 +896,28 @@ async function runBro(
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {
-    if (out.length < 1 << 20) out += chunk;
+    out = appendOutput(out, chunk);
   });
   child.stderr?.on('data', (chunk: string) => {
-    if (err.length < 1 << 20) err += chunk;
+    err = appendOutput(err, chunk);
   });
   child.on('error', () => settle({ code: 127, stdout: '', stderr: 'spawn failed' }));
   child.on('close', code => settle({ code: code ?? 1, stdout: out, stderr: err }));
   return promise;
+}
+
+function appendOutput(current: string, chunk: string): string {
+  return current.length < 1 << 20 ? current + chunk : current;
+}
+
+function killChild(child: ChildProcess): void {
+  try {
+    if (child.pid !== undefined && process.platform !== 'win32') {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    }
+    child.kill('SIGKILL');
+  } catch {
+    // already dead — the close handler settles
+  }
 }
