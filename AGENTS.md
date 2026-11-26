@@ -140,6 +140,19 @@ Developing bro itself: see CONTRIBUTING.md.
   operator-visible error signal. For replication, capture the exact object
   (commit/ref) before pushing, report best-effort mirror failures, and never
   publish a value reread after a concurrent writer can change it.
+  Batch-2 additions: parse CLI arguments only in their flag zone (everything
+  after `--` is positional), and reject an explicitly supplied empty or
+  malformed value rather than treating it as a missing flag. Validate nullable
+  or external rows before reducing them, and assert the full response contract
+  (not only a zero exit status) when probing a subprocess or connector.
+  Preserve identity across state transitions: correlation fallbacks must be
+  stable for the whole request, cache keys and reset metadata must use the
+  same canonical identity, and capped/orphan events must not inflate counters.
+  Every async/process/resource path needs a visible terminal cleanup (close
+  descriptors, release reservations, kill timed-out children, and handle
+  rejected background promises); network fetches need a bounded timeout. Never
+  turn an upstream failure into an empty successful result or retry a
+  non-retryable error; retain the original operator-visible cause.
 - **Loop with retro** — when a gate or check fails, iterate until it is
   green and learn from each failure: after every red round, name the
   concrete finding (which rule, which function), the shape that caused
