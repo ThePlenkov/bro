@@ -22,7 +22,9 @@ case "$1" in
     if [ -n "$FAKE_BD_CONFIG_FAIL" ]; then exit 1; fi
     case "$3" in
       issue_prefix) echo "\${FAKE_BD_PREFIX:-issue_prefix (not set)}" ;;
-      actor) echo "actor = fake-actor" ;;
+      actor)
+        if [ -n "$FAKE_BD_ACTOR_FAIL" ]; then exit 0; fi
+        echo "actor = fake-actor" ;;
       *) echo "$3 (not set)" ;;
     esac ;;
   show)
@@ -127,7 +129,8 @@ function withFakeBd(
   updateFail = '',
   prefix = '',
   epicParents = '',
-  foreign = ''
+  foreign = '',
+  actorFail = false
 ): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
@@ -150,6 +153,7 @@ function withFakeBd(
       FAKE_BD_EPIC_PARENTS: epicParents === '' ? undefined : epicParents,
       FAKE_BD_FOREIGN: foreign === '' ? undefined : foreign,
       FAKE_BD_CONFIG_FAIL: undefined,
+      FAKE_BD_ACTOR_FAIL: actorFail ? '1' : undefined,
     };
     const prev = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
     for (const [k, v] of Object.entries(env)) {
@@ -245,6 +249,23 @@ describe('bro next', () => {
       '',
       '',
       'b-older'
+    )
+  );
+
+  it(
+    'an open foreign pin skips even when actor resolution is unavailable',
+    withFakeBd(
+      MIXED,
+      async c => {
+        await runNextCommand([]);
+        assert.match(c.lines[0], /→ b-newer.*\(claimed\)/);
+      },
+      'b-older',
+      '',
+      '',
+      '',
+      'b-older',
+      true
     )
   );
 
