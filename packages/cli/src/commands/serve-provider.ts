@@ -239,6 +239,7 @@ function pipeUpstream(upstream: Response, res: ServerResponse, drop: () => void)
   const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
   body.on('error', () => res.destroy());
   body.on('end', drop);
+  body.on('close', drop);
   body.pipe(res);
 }
 

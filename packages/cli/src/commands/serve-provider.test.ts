@@ -2,7 +2,12 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { fileProviderConfig, providerConfig, providerProxy } from './serve-provider.ts';
+import {
+  fileProviderConfig,
+  forwardBody,
+  providerConfig,
+  providerProxy,
+} from './serve-provider.ts';
 import {
   authHeaders as auth,
   listen,
@@ -300,6 +305,44 @@ describe('providerProxy — byte proxy to the upstream', () => {
     } finally {
       await serve.close();
       await up.close();
+    }
+  });
+
+  test('a body close releases the lane deadline after a mid-stream failure', async () => {
+    const originalFetch = globalThis.fetch;
+    let aborted = false;
+    globalThis.fetch = async (_input, init) => {
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true;
+      });
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('partial'));
+          controller.error(new Error('upstream stream failed'));
+        },
+      });
+      return new Response(body, { status: 200 });
+    };
+    const server = createServer((req, res) => {
+      void forwardBody(
+        req,
+        res,
+        { upstream: 'http://upstream.test', apiKey: 'k' },
+        { payload: '{}', timeoutMs: 30 }
+      );
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        headers: auth,
+        signal: AbortSignal.timeout(500),
+      }).catch(() => undefined);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      assert.equal(aborted, false, 'body close must clear the lane deadline');
+    } finally {
+      globalThis.fetch = originalFetch;
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 
