@@ -316,10 +316,10 @@ async function rigPulseCheckpoint(
     if (!(await orchestratorRoleAllows({ dir, session: roleSessionOf({ sessionId }) }))) {
       return [];
     }
-    const ownership = await supervise({
+    const ownership = await supervise<number | null>({
       name: 'rig freshness',
       env: process.env,
-      detached: () => spawnRigPulse(dir, r.repo, r.everySec, r.forSec),
+      detached: async () => spawnRigPulse(dir, r.repo, r.everySec, r.forSec),
     });
     const pid = ownership.handle;
     if (pid === null) {
