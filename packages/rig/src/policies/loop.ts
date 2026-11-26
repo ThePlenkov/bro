@@ -3493,13 +3493,21 @@ function sweepCeilingReservations(dir: string, fleet: FleetPrRow[]): number {
 /** Write one reservation under the caller's lock — null when the file
  *  can't be proven to exist (the slot then counts as held, not free). */
 
-function reserveCeilingSlot(ctx: LoopCtx, dir: string, open: number): string | null {
+function reserveCeilingSlot(
+  ctx: LoopCtx,
+  dir: string,
+  open: number,
+  activeBranches: ReadonlySet<string>
+): string | null {
   const remote = reserveRemoteCeiling(
-    ctx.root,
-    ctx.cfg.maxOpenTotal,
-    open,
-    ctx.deps.now(),
-    process.pid
+    {
+      root: ctx.root,
+      max: ctx.cfg.maxOpenTotal,
+      open,
+      now: ctx.deps.now(),
+      pid: process.pid,
+      activeBranches,
+    }
   );
   if (remote === 'remote-held') return null;
   if (remote !== null) return remote;
@@ -3654,7 +3662,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
         // stack admits nothing this pass, so it reserves nothing —
         // the listing above still served the hold line
         if (!stackFull && resDir !== null) {
-          ceilingRes = reserveCeilingSlot(ctx, resDir, open);
+          ceilingRes = reserveCeilingSlot(ctx, resDir, open, new Set(fleet.map(row => row.headRef)));
           if (ceilingRes === null) {
             if (!ctx.claimsHeld) {
               ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };

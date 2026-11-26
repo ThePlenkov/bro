@@ -25,8 +25,8 @@ test('remote ceiling CAS admits only one of two clones', () => {
   const b = join(root, 'b');
   git(root, 'clone', '-q', bare, a);
   git(root, 'clone', '-q', bare, b);
-  const first = reserveRemoteCeiling(a, 1, 0, 1, 101);
-  const second = reserveRemoteCeiling(b, 1, 0, 1, 202);
+  const first = reserveRemoteCeiling({ root: a, max: 1, open: 0, now: 1, pid: 101 });
+  const second = reserveRemoteCeiling({ root: b, max: 1, open: 0, now: 1, pid: 202 });
   assert.notEqual(first, null);
   assert.equal(second, 'remote-held');
   assert.equal(typeof first, 'string');

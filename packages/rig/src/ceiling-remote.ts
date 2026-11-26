@@ -29,6 +29,12 @@ function remoteSha(root: string, remote: string): string | undefined {
   return sha || undefined;
 }
 
+function isEntry(value: unknown): value is RemoteCeilingEntry {
+  if (typeof value !== 'object' || value === null) return false;
+  const entry = value as Partial<RemoteCeilingEntry>;
+  return typeof entry.id === 'string' && typeof entry.pid === 'number' && typeof entry.ts === 'number';
+}
+
 function readEntries(root: string, remote: string, sha: string | undefined): RemoteCeilingEntry[] {
   if (sha === undefined) return [];
   const fetched = git(root, [
@@ -42,14 +48,7 @@ function readEntries(root: string, remote: string, sha: string | undefined): Rem
   if (r.status !== 0) throw new Error('ceiling remote ledger is corrupt');
   const parsed: unknown = JSON.parse(r.stdout);
   if (!Array.isArray(parsed)) throw new Error('ceiling remote ledger is corrupt');
-  return parsed.filter(
-    (x): x is RemoteCeilingEntry =>
-      typeof x === 'object' &&
-      x !== null &&
-      typeof (x as RemoteCeilingEntry).id === 'string' &&
-      typeof (x as RemoteCeilingEntry).pid === 'number' &&
-      typeof (x as RemoteCeilingEntry).ts === 'number'
-  );
+  return parsed.filter(isEntry);
 }
 
 function commitLedger(root: string, entries: RemoteCeilingEntry[], parent?: string): string {
@@ -84,21 +83,27 @@ function commitLedger(root: string, entries: RemoteCeilingEntry[], parent?: stri
 /** CAS a reservation into one remote ref. The single ledger ref is important:
  * separate refs per pid would still let two clones both observe the same free
  * slot before creating their refs. */
-export function reserveRemoteCeiling(
-  root: string,
-  max: number,
-  open: number,
-  now: number,
-  pid: number,
-  branch?: string
-): string | null {
+export interface RemoteCeilingOptions {
+  root: string;
+  max: number;
+  open: number;
+  now: number;
+  pid: number;
+  branch?: string;
+  activeBranches?: ReadonlySet<string>;
+}
+
+export function reserveRemoteCeiling(options: RemoteCeilingOptions): string | null {
+  const { root, max, open, now, pid, branch, activeBranches = new Set<string>() } = options;
   const remote = 'origin';
   for (let attempt = 0; attempt < 3; attempt++) {
     const before = remoteSha(root, remote);
     if (before === undefined && git(root, ['remote', 'get-url', remote]).status !== 0) return null;
     let entries: RemoteCeilingEntry[];
     try {
-      entries = readEntries(root, remote, before).filter(e => now - e.ts < ENTRY_TTL_MS);
+      entries = readEntries(root, remote, before).filter(
+        e => now - e.ts < ENTRY_TTL_MS && (e.branch === undefined || !activeBranches.has(e.branch))
+      );
     } catch {
       return null;
     }
@@ -115,36 +120,9 @@ export function reserveRemoteCeiling(
   return 'remote-held';
 }
 
-export function releaseRemoteCeiling(handle: string): boolean {
-  const match = /^remote:(.*):([^:]+)$/.exec(handle);
-  if (!match) return false;
-  const [, root, id] = match;
-  const remote = 'origin';
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const before = remoteSha(root, remote);
-    if (before === undefined) return true;
-    let entries: RemoteCeilingEntry[];
-    try {
-      entries = readEntries(root, remote, before).filter(e => e.id !== id);
-    } catch {
-      return false;
-    }
-    const commit = commitLedger(root, entries, before);
-    if (
-      git(root, [
-        'push',
-        '--quiet',
-        `--force-with-lease=${CEILING_REMOTE_REF}:${before}`,
-        remote,
-        `${commit}:${CEILING_REMOTE_REF}`,
-      ]).status === 0
-    )
-      return true;
-  }
-  return false;
-}
+type LedgerUpdate = (entries: RemoteCeilingEntry[], id: string) => RemoteCeilingEntry[];
 
-export function stampRemoteCeiling(handle: string, branch: string): boolean {
+function updateRemoteLedger(handle: string, update: LedgerUpdate): boolean {
   const match = /^remote:(.*):([^:]+)$/.exec(handle);
   if (!match) return false;
   const [, root, id] = match;
@@ -153,12 +131,11 @@ export function stampRemoteCeiling(handle: string, branch: string): boolean {
     if (before === undefined) return false;
     let entries: RemoteCeilingEntry[];
     try {
-      entries = readEntries(root, 'origin', before);
+      entries = update(readEntries(root, 'origin', before), id);
     } catch {
       return false;
     }
-    const next = entries.map(e => (e.id === id ? { ...e, branch } : e));
-    const commit = commitLedger(root, next, before);
+    const commit = commitLedger(root, entries, before);
     if (
       git(root, [
         'push',
@@ -171,4 +148,14 @@ export function stampRemoteCeiling(handle: string, branch: string): boolean {
       return true;
   }
   return false;
+}
+
+export function releaseRemoteCeiling(handle: string): boolean {
+  return updateRemoteLedger(handle, (entries, id) => entries.filter(e => e.id !== id));
+}
+
+export function stampRemoteCeiling(handle: string, branch: string): boolean {
+  return updateRemoteLedger(handle, (entries, id) =>
+    entries.map(e => (e.id === id ? { ...e, branch } : e))
+  );
 }
