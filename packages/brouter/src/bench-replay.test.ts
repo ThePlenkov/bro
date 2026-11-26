@@ -90,23 +90,24 @@ async function store(name: string): Promise<{ s: Store; close: () => void; path:
 }
 
 let seq = 0;
-/** Journal one decision — `at` pins created_at for the recall freeze. */
-async function journal(
-  s: Store,
-  over: {
-    contextId?: string;
-    at?: number;
-    taskText?: string | null;
-    candidates?: unknown;
-    table?: unknown;
-    stages?: unknown;
-    route?: string | null;
-    persistText?: boolean;
-    successPredicate?: string;
-  } = {}
-): Promise<string> {
-  const decisionId = newDecisionId();
-  const ok = await recordDecision(s, {
+type JournalOverrides = {
+  contextId?: string;
+  at?: number;
+  taskText?: string | null;
+  candidates?: unknown;
+  table?: unknown;
+  stages?: unknown;
+  route?: string | null;
+  persistText?: boolean;
+  successPredicate?: string;
+};
+
+/** Build the journal row — `at` pins created_at for the recall freeze. */
+function journalRow(
+  decisionId: string,
+  over: JournalOverrides
+): Parameters<typeof recordDecision>[1] {
+  return {
     kind: 'route',
     contextId: over.contextId ?? 'ctx:bench',
     decisionId,
@@ -126,7 +127,13 @@ async function journal(
     picked: 'static',
     successPredicate: over.successPredicate,
     persistText: over.persistText,
-  });
+  };
+}
+
+/** Journal one decision — `at` pins created_at for the recall freeze. */
+async function journal(s: Store, over: JournalOverrides = {}): Promise<string> {
+  const decisionId = newDecisionId();
+  const ok = await recordDecision(s, journalRow(decisionId, over));
   assert.equal(ok, true);
   return decisionId;
 }
