@@ -9,6 +9,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { ArchiveRow, ToolItem } from '../../../../packages/acp/session/src/index.ts';
 import { AcpImpl } from '../../../../packages/acp/session/src/view/acp-impl.ts';
+import { pickImpl } from '../../../../packages/acp/session/src/view/impl.ts';
 
 const update = (u: Record<string, unknown>): ArchiveRow => ({
   kind: 'update',
@@ -31,6 +32,21 @@ const toolRows: ArchiveRow[] = [
     content: [{ type: 'content', content: { type: 'text', text: 'file a\nfile b' } }],
   }),
 ];
+
+test('a new session binding gets a fresh implementation model', async () => {
+  const first = await pickImpl('acp', {});
+  first.feed(
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old agent' } })
+  );
+  first.beginLive();
+  expect(first.dump().join('\n')).toContain('old agent');
+
+  // This is the lifecycle contract used by herdr when targetKey changes:
+  // the feed and implementation are replaced together, rather than
+  // reusing the previous agent's accumulated model.
+  const switched = await pickImpl('acp', {});
+  expect(switched.dump()).toEqual([]);
+});
 
 describe('the acp impl', () => {
   test('a finished tool call appends a content card, folded by default', () => {
