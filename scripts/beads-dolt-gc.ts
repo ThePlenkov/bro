@@ -12,7 +12,7 @@
  * bd put BEADS_DIR in its argv (it commonly comes from the environment).
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -87,11 +87,17 @@ function recoverLock(path: string): void {
 }
 
 function lockOwner(path: string): number | undefined {
+  let fd: number | undefined
   try {
-    const value = readFileSync(join(path, 'pid'), 'utf8') // NOSONAR -- path is the realpathed operator-selected beads store plus a fixed lock filename.
+    fd = openSync(join(path, 'pid'), 'r') // NOSONAR -- path is the realpathed operator-selected beads store plus a fixed lock filename.
+    const buffer = Buffer.alloc(32)
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0)
+    const value = buffer.subarray(0, bytes).toString('utf8')
     return /^\d+$/.test(value.trim()) ? Number(value.trim()) : undefined
   } catch {
     return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 
