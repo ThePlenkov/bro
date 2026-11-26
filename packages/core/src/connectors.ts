@@ -24,20 +24,20 @@
 import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { checkBeads } from './bd.ts';
-import { loadConfig } from './config.ts';
-import { gitTry, gitTryAsync, gitWorktreeRoots } from './git.ts';
-import { cacheKey, hookCacheDir, isJsonData, readCacheFile, writeCacheFile } from './hook-cache.ts';
-import { markerOwner } from './proc.ts';
-import type { EventsFacade } from './events.ts';
 import type { ClaimFacade } from './claims.ts';
 import { claimsFacade } from './claims-store.ts';
-import type { LedgerFacade, Mode } from './ledger.ts';
-import { ledgerFacade } from './ledger-store.ts';
-import type { QueryFacade } from './queries.ts';
-import type { JudgeFacade } from './judge.ts';
-import type { MergeQueueFacade, ReviewFacade } from './review.ts';
+import { loadConfig } from './config.ts';
+import type { EventsFacade } from './events.ts';
+import { gitTry, gitTryAsync, gitWorktreeRoots } from './git.ts';
 import type { Guard } from './guards.ts';
 import { guardProblems } from './guards.ts';
+import { cacheKey, hookCacheDir, isJsonData, readCacheFile, writeCacheFile } from './hook-cache.ts';
+import type { JudgeFacade } from './judge.ts';
+import type { LedgerFacade, Mode } from './ledger.ts';
+import { ledgerFacade } from './ledger-store.ts';
+import { markerOwner } from './proc.ts';
+import type { QueryFacade } from './queries.ts';
+import type { MergeQueueFacade, ReviewFacade } from './review.ts';
 import type { SpecStore } from './specs.ts';
 import type { StackFacade } from './stacks.ts';
 import { gitStacks } from './stacks.ts';
@@ -607,7 +607,14 @@ let claimsSingleton: ClaimFacade | undefined;
 const ledgerConnector: Connector = {
   name: 'ledger',
   ledger: () => (ledgerSingleton ??= ledgerFacade()),
-  claims: () => (claimsSingleton ??= claimsFacade()),
+  claims: () =>
+    (claimsSingleton ??= claimsFacade({
+      // Claims are a ledger capability, but task:* is explicitly owned by
+      // the configured tasks connector. Resolve it at claim time because
+      // the project directory (and therefore its config) is only known
+      // when ClaimFacade.claim/release receives the request.
+      tasksForDir: dir => facade('tasks', { dir }, { prefer: loadConfig(dir).connectors }),
+    })),
 };
 
 // --- registry ------------------------------------------------------------------

@@ -1,12 +1,15 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { after, describe, test } from 'node:test';
+import { loadConfig } from './config.ts';
+import type { Connector } from './connectors.ts';
 import {
   connectors,
   facade,
   facadeAuth,
+  facadeName,
   isOwnClaim,
   parallelWorkLines,
   postToolLines,
@@ -18,10 +21,9 @@ import {
   tasksAsync,
   unregisterConnector,
 } from './connectors.ts';
-import type { Connector } from './connectors.ts';
-import { bdActor } from './tasks.ts';
-import type { TaskStore } from './tasks.ts';
 import { procStat } from './proc.ts';
+import type { TaskStore } from './tasks.ts';
+import { bdActor } from './tasks.ts';
 import { scrubEnv, testGit } from './testkit.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -414,6 +416,51 @@ describe('connectors', () => {
       else process.env.BEADS_ACTOR = prev;
     }
   });
+});
+
+test('claims task resources resolve the configured tasks connector', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-claims-provider-'));
+  const state = mkdtempSync(join(tmpdir(), 'bro-claims-state-'));
+  const saved = {
+    BRO_HOOK_SPOOL: process.env.BRO_HOOK_SPOOL,
+    XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+  };
+  const claimed: string[] = [];
+  let assigned = '';
+  const taskStore = {
+    get: (id: string) =>
+      id === 'remote-1'
+        ? ({ id, status: assigned === '' ? 'open' : 'in_progress', assignee: assigned } as const)
+        : undefined,
+    actor: () => 'configured-agent',
+    claim: (id: string) => {
+      claimed.push(id);
+      assigned = 'configured-agent';
+    },
+  } as unknown as TaskStore;
+  testGit(['init', '-q', dir]);
+  writeFileSync(join(dir, 'bro.config.json'), '{"connectors":{"tasks":"test-tasks"}}');
+  registerConnector({ name: 'test-tasks', tasks: () => taskStore });
+  process.env.BRO_HOOK_SPOOL = '0';
+  process.env.XDG_STATE_HOME = state;
+  try {
+    assert.equal(
+      facadeName('tasks', { dir }, { prefer: loadConfig(dir).connectors }),
+      'test-tasks'
+    );
+    const claims = facade('claims', { dir });
+    const result = await claims.claim('task:remote-1', { host: 'test', sid: 'session' }, { dir });
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(claimed, ['remote-1']);
+  } finally {
+    unregisterConnector('test-tasks');
+    if (saved.BRO_HOOK_SPOOL === undefined) delete process.env.BRO_HOOK_SPOOL;
+    else process.env.BRO_HOOK_SPOOL = saved.BRO_HOOK_SPOOL;
+    if (saved.XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = saved.XDG_STATE_HOME;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(state, { recursive: true, force: true });
+  }
 });
 
 describe('isOwnClaim', () => {
