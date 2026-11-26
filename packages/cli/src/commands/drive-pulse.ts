@@ -64,7 +64,7 @@ async function supervisorCheckpoint(
     }
     // role gate (bro-izpyk.3) — the exclusive orchestrator claim decides
     // who may resurrect the supervisor; unclaimed stays fail-open
-    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+    if (!(await orchestratorRoleAllows({ dir, session: roleSessionOf({ sessionId }) }))) {
       return [];
     }
     const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true });

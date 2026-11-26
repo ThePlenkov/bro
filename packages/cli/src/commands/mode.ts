@@ -280,7 +280,7 @@ async function ensureOrchestratorClaim(
       EXIT.usage
     );
   }
-  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession });
+  const role = await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession } });
   if (!role.ok) {
     const c = role.conflict;
     throw new CommandError(
@@ -316,7 +316,7 @@ async function runSet(
   // snapshot that so a failed write undoes only a FRESH acquire (the
   // pre-existing claim belongs to the mode file still on disk)
   const preHeld =
-    args.mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
+    args.mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
   const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env, ownSession);
   try {
     writeModeFile(file, args.mode, project);
@@ -326,7 +326,7 @@ async function runSet(
     // the next orchestrator for up to the TTL. A renewed pre-existing
     // role stays: the old file may still say orchestrate.
     if (roleAcquired && !preHeld) {
-      await releaseOrchestratorRole(dir, sessionKey);
+      await releaseOrchestratorRole({ dir, session: sessionKey });
     }
     throw err;
   }
@@ -334,7 +334,7 @@ async function runSet(
   // leaving orchestrate (or never holding it) releases the role claim —
   // best-effort; a stuck row dies with its TTL/pid anyway
   if (args.mode !== 'orchestrate') {
-    await releaseOrchestratorRole(dir, sessionKey);
+    await releaseOrchestratorRole({ dir, session: sessionKey });
   }
   // Tier-1 snapshots render for the mode just set — the next
   // session-start/post-compaction reads them instead of the live sweep.
@@ -404,12 +404,12 @@ async function runClear(
   // willOrchestrate — is the truth the role reconciles against.
   if (res.mode === 'orchestrate') {
     if (!gated) {
-      await acquireOrchestratorRole(dir, sessionKey, { ownSession }).catch(() => ({
+      await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession } }).catch(() => ({
         ok: false,
       }));
     }
   } else {
-    await releaseOrchestratorRole(dir, sessionKey);
+    await releaseOrchestratorRole({ dir, session: sessionKey });
   }
   if (args.json) {
     console.log(

@@ -786,7 +786,7 @@ async function bindModeCommand(cmd: string, sessionId: string, dir: string): Pro
   // a re-bind of orchestrate renews a role the session may already hold —
   // snapshot that so a failed write undoes only a FRESH acquire (the
   // pre-existing claim belongs to the mode file still on disk)
-  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy(dir, sessionKey) : false;
+  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
   const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
   if (refusal !== null) {
     return [refusal];
@@ -813,12 +813,12 @@ async function finishModeBind(
     // orchestrate; a FAILED write on a non-orchestrate bind keeps it
     // for the same reason.
     if ((mode === 'orchestrate' && !preHeld) || (mode !== 'orchestrate' && file === null)) {
-      await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
+      await releaseOrchestratorRole({ dir, session: sessionKey }).catch(() => {});
     }
     return [];
   }
   if (mode !== 'orchestrate') {
-    await releaseOrchestratorRole(dir, sessionKey).catch(() => {});
+    await releaseOrchestratorRole({ dir, session: sessionKey }).catch(() => {});
   }
   void ledgerFacade()
     .setMode({ host: sessionKey.host, sid: sessionKey.sid }, mode)
@@ -843,7 +843,7 @@ async function bindOrchestrateRole(
   }
   // the hook fires inside the target session — its agent pid is the
   // right liveness proof for the claim
-  const role = await acquireOrchestratorRole(dir, sessionKey, { ownSession: true }).catch(() => ({
+  const role = await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession: true } }).catch(() => ({
     ok: false as const,
     conflict: null,
   }));

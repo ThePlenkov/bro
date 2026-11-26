@@ -312,7 +312,7 @@ async function rigPulseCheckpoint(
     }
     // role gate (bro-izpyk.3) — only when a rearm is due, same ordering
     // argument as watch-pulse's checkpoint
-    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+    if (!(await orchestratorRoleAllows({ dir, session: roleSessionOf({ sessionId }) }))) {
       return [];
     }
     const pid = spawnRigPulse(dir, r.repo, r.everySec, r.forSec);

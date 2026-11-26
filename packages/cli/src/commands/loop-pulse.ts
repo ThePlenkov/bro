@@ -35,7 +35,7 @@ async function supervisorCheckpoint(
       return [];
     }
     // role gate (bro-izpyk.3) — same contract as drive-pulse
-    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+    if (!(await orchestratorRoleAllows({ dir, session: roleSessionOf({ sessionId }) }))) {
       return [];
     }
     const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true, loop: true });
