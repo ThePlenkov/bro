@@ -62,8 +62,8 @@ const git = (dir: string, args: string[]): void => {
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
 };
 
-function createGitFixture(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+function createGitFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-rig-'));
   git(dir, ['init', '-b', 'main']);
   git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'init']);
   return dir;
@@ -123,8 +123,8 @@ function setupFakeBd(): FakeBdSetup {
 /** A real git repo + a scripted `bd` on PATH. The store, the registry
  *  dir, and the worktree plane are all real reads — only the backend
  *  binaries are canned. */
-function fixture(prefix = 'bro-rig-'): Fixture {
-  const dir = createGitFixture(prefix);
+function fixture(): Fixture {
+  const dir = createGitFixture();
   const fake = setupFakeBd();
   return {
     dir,
