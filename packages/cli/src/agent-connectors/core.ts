@@ -3823,11 +3823,22 @@ export function isCurrentExitGeneration(
   entry: AgentRegistryEntry
 ): boolean {
   const current = readAgentRegistry(dir)[molStep];
+  return isSameExitGeneration(current, entry);
+}
+
+/** A missing row is treated as current for read-only snapshots: there is
+ *  no replacement generation that could receive the old run's facts. */
+export function isSameExitGeneration(
+  current: AgentRegistryEntry | undefined,
+  entry: AgentRegistryEntry
+): boolean {
+  if (current === undefined) {
+    return true;
+  }
   return (
-    current === undefined ||
-    (current.agentId === entry.agentId &&
-      current.spawnedAt === entry.spawnedAt &&
-      current.runId === entry.runId)
+    current.agentId === entry.agentId &&
+    current.spawnedAt === entry.spawnedAt &&
+    current.runId === entry.runId
   );
 }
 
@@ -3963,12 +3974,7 @@ export function persistClassifiedExit(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const current = reg[molStep];
-      if (
-        current === undefined ||
-        current.agentId !== entry.agentId ||
-        current.spawnedAt !== entry.spawnedAt ||
-        current.runId !== entry.runId
-      ) {
+      if (!isSameExitGeneration(current, entry)) {
         return;
       }
       releaseClassifiedLease(dir, current);
@@ -4018,13 +4024,15 @@ export function ensureExitCause(
    *  a config read inside the caller's registry lock. */
   wallTtls?: Partial<FleetWallTtls>
 ): void {
-  if (entry.exitStatus === undefined && home !== null) {
-    const exitStatus = readExitFile(home, entry.agentId, entryRunId(entry));
-    if (exitStatus !== undefined) {
-      entry.exitStatus = exitStatus;
-    }
+  const recordedExitStatus = readExitStatus(home, entry);
+  if (recordedExitStatus !== undefined) {
+    entry.exitStatus = recordedExitStatus;
   }
-  if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
+  if (!needsExitClassification(entry)) {
+    return;
+  }
+  const exitStatus = entry.exitStatus;
+  if (typeof exitStatus !== 'number') {
     return;
   }
   // the .exit file's mtime is the honest death stamp — the harvest's own
@@ -4046,11 +4054,7 @@ export function ensureExitCause(
   // across the boundary ('…4' + '29…' → '429'). A remote backend records
   // no stderr capture — readLogTail maps the missing path to an empty
   // tail, the same verdict an unwritten file gets
-  const c = classifyExitCauseParts(
-    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
-    entry.exitStatus,
-    exitAt ?? Date.now()
-  );
+  const c = classifyEntryExit(entry, exitStatus, exitAt ?? Date.now());
   // the tails were read off-lock — a respawn stamping the entry between
   // the two reads feeds the old run new-run bytes; a DIFFERENT
   // generation owning the step now suppresses classify + emit. A
@@ -4068,7 +4072,7 @@ export function ensureExitCause(
   entry.rateStreak = back.streak > 0 ? back.streak : undefined;
   emitProviderWall(entry, molStep, c.cause, back.resetAt);
   recordClassifiedWall(dir, molStep, entry, c.cause, back.resetAt, wallTtls);
-  emitClassifiedExitLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause);
+  emitClassifiedExitLifecycle(dir, home, molStep, entry, exitStatus, c.cause);
   // learn/retro artifact check (spec bro-xkv42.2) — once per run, inside
   // the same classify block the carried-cause early return dedupes.
   // The verdict persists on the entry; a proven-absent run also earns
@@ -4095,9 +4099,35 @@ export function ensureExitCause(
   entry.learnCheck = learn.verdict;
   entry.learnEvidence = learn.evidence;
   if (learn.verdict === 'miss') {
-    emitLearnMissLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause);
+    emitLearnMissLifecycle(dir, home, molStep, entry, exitStatus, c.cause);
   }
-  persistClassifiedExit(dir, molStep, entry, entry.exitStatus, c.cause, back.resetAt);
+  persistClassifiedExit(dir, molStep, entry, exitStatus, c.cause, back.resetAt);
+}
+
+function readExitStatus(home: string | null, entry: AgentRegistryEntry): number | undefined {
+  if (typeof entry.exitStatus === 'number') {
+    return entry.exitStatus;
+  }
+  if (home === null) {
+    return undefined;
+  }
+  return readExitFile(home, entry.agentId, entryRunId(entry));
+}
+
+function needsExitClassification(entry: AgentRegistryEntry): boolean {
+  return typeof entry.exitStatus === 'number' && !isAgentCause(entry.cause);
+}
+
+function classifyEntryExit(
+  entry: AgentRegistryEntry,
+  exitStatus: number,
+  exitAt: number
+): { cause: AgentCause; resetAt?: string } {
+  return classifyExitCauseParts(
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    exitStatus,
+    exitAt
+  );
 }
 
 /** The recorded-death ladder both backends walk once liveness fails —
@@ -4517,12 +4547,7 @@ function adoptNativeEntry(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (
-        cur === undefined ||
-        cur.agentId !== entry.agentId ||
-        cur.spawnedAt !== entry.spawnedAt ||
-        cur.runId !== entry.runId
-      ) {
+      if (!isSameExitGeneration(cur, entry)) {
         return;
       }
       reg[molStep] = { ...cur, pid, pidStart: start };
@@ -5460,12 +5485,7 @@ export function copilotPatch(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (
-        cur === undefined ||
-        cur.agentId !== entry.agentId ||
-        cur.spawnedAt !== entry.spawnedAt ||
-        cur.runId !== entry.runId
-      ) {
+      if (!isSameExitGeneration(cur, entry)) {
         return;
       }
       reg[molStep] = { ...cur, ...patch };
@@ -5503,16 +5523,9 @@ export function copilotTerminalPatch(
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
   }
-  // terminal verdicts are idempotent — a repeated harvest of the same
-  // classified death must not stack another backoff streak, or one
-  // failure escalates 30s→60s→120s on nothing but status reads
-  if (entry.cause !== undefined && entry.cause !== 'ok') {
-    return {
-      exitStatus: typeof entry.exitStatus === 'number' ? entry.exitStatus : 1,
-      cause: entry.cause,
-      resetAt: entry.resetAt,
-      rateStreak: entry.rateStreak,
-    };
+  const idempotent = copilotIdempotentVerdict(entry);
+  if (idempotent !== undefined) {
+    return idempotent;
   }
   const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
   const c =
@@ -5521,23 +5534,44 @@ export function copilotTerminalPatch(
       : // a valid stamp is the death clock relative resets count from;
         // without one the poll clock is the only approximation left
         classifyExitCause(copilotSessionError(task), 1, Number.isNaN(stamp) ? undefined : stamp);
+  return copilotBackoffVerdict(entry, c.cause, c.resetAt, stamp);
+}
+
+function copilotIdempotentVerdict(
+  entry: AgentRegistryEntry
+): Record<string, unknown> | undefined {
+  // Repeated harvests must not stack another backoff streak.
+  if (entry.cause === undefined || entry.cause === 'ok') {
+    return undefined;
+  }
+  return {
+    exitStatus: typeof entry.exitStatus === 'number' ? entry.exitStatus : 1,
+    cause: entry.cause,
+    resetAt: entry.resetAt,
+    rateStreak: entry.rateStreak,
+  };
+}
+
+function copilotBackoffVerdict(
+  entry: AgentRegistryEntry,
+  cause: AgentCause,
+  resetAt: string | undefined,
+  stamp: number
+): Record<string, unknown> {
   if (Number.isNaN(stamp)) {
-    // no honest death stamp — never fabricate one out of the poll clock:
-    // a Date.now() exitAt inflates the session lifetime (instant deaths
-    // read as slow, the streak clears when it should escalate) or shrinks
-    // it to zero. Where the lifetime cannot be determined the streak is
-    // simply carried — neither escalation nor amnesty (bro-j0v8e)
+    // Without an honest death stamp, carry the streak rather than inventing
+    // a lifetime that would incorrectly escalate or clear it.
     return {
       exitStatus: 1,
-      cause: c.cause,
-      resetAt: c.resetAt,
+      cause,
+      resetAt,
       rateStreak: typeof entry.rateStreak === 'number' ? entry.rateStreak : undefined,
     };
   }
-  const back = rateDeathBackoff(entry, c.cause, c.resetAt, stamp);
+  const back = rateDeathBackoff(entry, cause, resetAt, stamp);
   return {
     exitStatus: 1,
-    cause: c.cause,
+    cause,
     resetAt: back.resetAt,
     rateStreak: back.streak > 0 ? back.streak : undefined,
   };
