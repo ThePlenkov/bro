@@ -5,10 +5,20 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { pickOrphanProcs, sweepOrphanProcs, type ProcRow } from './live-procs.ts'
+import { lsofCwdRows } from './proc-cwd.ts'
 
 const NOW = Date.parse('2026-10-10T07:00:00Z')
 const OLD = NOW - 120_000 // well past the 60s age floor
 const YOUNG = NOW - 5_000 // a live, in-flight call
+
+test('lsofCwdRows folds pid/name records into the cwd map', () => {
+  const cwdMap = new Map<number, string>()
+  lsofCwdRows('p12\nncwd/12\np13\nncwd/13\n', cwdMap)
+  assert.deepEqual([...cwdMap], [
+    [12, 'cwd/12'],
+    [13, 'cwd/13'],
+  ])
+})
 
 function row(partial: Partial<ProcRow>): ProcRow {
   return {

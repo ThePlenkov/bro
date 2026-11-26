@@ -11,6 +11,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import type { Socket } from 'node:net';
+import { lsofCwdRows } from './proc-cwd.ts';
 
 const live = new Set<ChildProcess>();
 
@@ -248,22 +249,6 @@ function lstartComm(parts: string[]): { lstart: string; comm: string } | null {
 /** basename of a comm spelling — `ps` may print the full path. */
 function commBase(comm: string): string {
   return (comm.includes('/') ? (comm.split('/').pop() ?? comm) : comm) || '';
-}
-
-/** one `lsof -Fn` batch → `p<pid>`/`n<path>` rows folded into the
- *  cwd map — the row parser, split out so the chunk loop stays flat */
-function lsofCwdRows(lout: string, cwdMap: Map<number, string>): void {
-  let currentPid: number | null = null;
-  for (const l of lout.split('\n')) {
-    if (l.startsWith('p')) {
-      const v = Number(l.slice(1));
-      currentPid = Number.isInteger(v) ? v : null;
-      continue;
-    }
-    if (l.startsWith('n') && currentPid !== null) {
-      cwdMap.set(currentPid, l.slice(1));
-    }
-  }
 }
 
 /** pid → cwd for every live pid, batched through chunked
