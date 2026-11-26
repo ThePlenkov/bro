@@ -524,13 +524,15 @@ function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
     console.error(`error: ${err}`);
     process.exit(1);
   }
-  if (
-    flag(argv, '--base') === undefined &&
-    !argv.includes('--stack') &&
-    current !== undefined &&
-    current !== defaultRef &&
-    base === defaultBase
-  ) {
+  const warnAboutBase = [
+    flag(argv, '--base') === undefined,
+    !argv.includes('--stack'),
+    current !== undefined,
+    defaultRef !== undefined,
+    current !== defaultRef,
+    base === defaultBase,
+  ].every(Boolean);
+  if (warnAboutBase) {
     console.error(
       `warning: current checkout is on ${current}; using ${base} (the default branch) as the worktree base`
     );
@@ -554,7 +556,8 @@ export function defaultBranchName(): string | undefined {
   }
   const shown = gitTry(['remote', 'show', 'origin']);
   const advertised = shown.out.match(/^\s*HEAD branch:\s*(\S+)/m)?.[1];
-  if (advertised !== undefined && advertised !== '') {
+  const unusableAdvertised = [undefined, '', '(unknown)'];
+  if (!unusableAdvertised.includes(advertised)) {
     return advertised;
   }
   const local = gitTry(['branch', '--format=%(refname:short)'])
