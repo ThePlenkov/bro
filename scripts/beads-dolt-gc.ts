@@ -50,21 +50,25 @@ export function commandsFor(beads: string): MaintenanceCommand[] {
 }
 
 export function runningProcesses(selfPid = process.pid): ProcessProbe[] {
-  const result = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 10_000 })
+  const result = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 10_000 }) // NOSONAR -- ps is a fixed executable name; the operator cannot influence this argv.
   if (result.status !== 0) throw new Error(`cannot inspect processes: ${result.stderr?.trim() || 'ps failed'}`)
   return (result.stdout ?? '')
     .split('\n')
     .flatMap((line) => {
-      const match = /^\s*(\d+)\s+(.+)$/.exec(line)
-      if (!match || Number(match[1]) === selfPid || !/(?:^|\s)(?:bd|dolt)(?:\s|$)/.test(match[2])) return []
-      return [{ pid: Number(match[1]), command: match[2] }]
+      const trimmed = line.trim()
+      const separator = trimmed.indexOf(' ')
+      if (separator < 1) return []
+      const pid = Number(trimmed.slice(0, separator))
+      const command = trimmed.slice(separator).trim()
+      if (!Number.isInteger(pid) || pid === selfPid || !command.split(/\s+/).some((part) => part === 'bd' || part === 'dolt')) return []
+      return [{ pid, command }]
     })
 }
 
 export function acquireLock(beads: string): () => void {
   const path = join(beads, lockName)
   try {
-    mkdirSync(path)
+    mkdirSync(path) // NOSONAR -- path is realpathed from the operator-selected beads store and ends in a fixed lock name.
     writeFileSync(join(path, 'pid'), `${process.pid}\n`) // NOSONAR -- path is the realpathed operator-selected beads store plus a fixed lock filename.
   } catch {
     recoverLock(path)
@@ -123,7 +127,7 @@ export function main(argv: string[]): void {
   const commands = commandsFor(beads)
   const active = runningProcesses()
   if (active.length > 0) {
-    throw new Error(`quiet window unavailable; active bd/dolt processes: ${active.map((p) => `${p.pid} ${p.command}`).join('; ')}`)
+    throw new Error(`quiet window unavailable; active bd/dolt processes: ${active.map(formatProcess).join('; ')}`)
   }
   console.log(`beads: ${beads}`)
   console.log(commands.length ? commands.map((command) => `would run: ${command.label}`).join('\n') : 'no Dolt stores or origin mirror found')
@@ -139,6 +143,10 @@ export function main(argv: string[]): void {
   } finally {
     release()
   }
+}
+
+function formatProcess(process: ProcessProbe): string {
+  return `${process.pid} ${process.command}`
 }
 
 const script = process.argv[1] ? realpathSync(resolve(process.argv[1])) : ''
