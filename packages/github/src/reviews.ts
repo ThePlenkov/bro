@@ -144,7 +144,7 @@ const refMatches = (pattern: string, ref: string): boolean => {
       refIndex += 1;
       continue;
     }
-    if (token === '*') {
+    if (['*'].includes(token)) {
       starIndex = patternIndex++;
       starRefIndex = refIndex;
       continue;
