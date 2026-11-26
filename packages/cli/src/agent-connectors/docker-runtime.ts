@@ -203,12 +203,13 @@ function dockerEnvValue({
   policy,
   dropped,
 }: DockerEnvContext): string | undefined {
-  if (
-    value === undefined ||
-    !/^[A-Za-z_]\w*$/.test(key) ||
-    envKeyDropped(key, false) ||
-    GIT_REPOSITORY_ENV_KEYS.has(key)
-  ) {
+  const invalidKey = [
+    value === undefined,
+    !/^[A-Za-z_]\w*$/.test(key),
+    envKeyDropped(key, false),
+    GIT_REPOSITORY_ENV_KEYS.has(key),
+  ].some(Boolean);
+  if (invalidKey) {
     return undefined;
   }
   if (value.includes('\n') || value.includes('\r')) {

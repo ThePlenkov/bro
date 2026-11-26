@@ -45,10 +45,7 @@ export function readDevcontainer(dcPath: string): Devcontainer {
  *  directory — a compose-only or absent-build config is a named gap,
  *  never a silent fallback. */
 export function devcontainerDockerfile(dcPath: string, dc: Devcontainer): string {
-  const b = dc.build;
-  const df = [b?.dockerfile, b?.dockerFile].find(
-    (candidate): candidate is string => typeof candidate === 'string' && candidate !== ''
-  );
+  const df = configuredDockerfile(dc);
   if (df === undefined) {
     throw new SpawnError(`no usable image in ${dcPath} — ${missingImageHint(dc)}`, 'config');
   }
@@ -59,10 +56,19 @@ export function devcontainerDockerfile(dcPath: string, dc: Devcontainer): string
   return dockerfile;
 }
 
+function configuredDockerfile(dc: Devcontainer): string | undefined {
+  const candidates = [dc.build?.dockerfile, dc.build?.dockerFile];
+  return candidates.find(
+    (candidate): candidate is string => typeof candidate === 'string' && candidate !== ''
+  );
+}
+
 function missingImageHint(dc: Devcontainer): string {
-  return dc.dockerComposeFile !== undefined
-    ? 'dockerComposeFile devcontainers are not supported — set agents.docker.image'
-    : 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"';
+  const hints = new Map<boolean, string>([
+    [true, 'dockerComposeFile devcontainers are not supported — set agents.docker.image'],
+    [false, 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"'],
+  ]);
+  return hints.get(dc.dockerComposeFile !== undefined)!;
 }
 
 /** Build the devcontainer's dockerfile under a content-keyed tag. The
@@ -115,16 +121,21 @@ function devcontainerTag(dcPath: string, dockerfile: string): string {
  *  lock — a first-build pays minutes that must not serialize other
  *  spawns. */
 export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>): string {
-  const kImage = knobs.image;
-  if (typeof kImage === 'string' && kImage.trim() !== '') {
-    return ensureDockerImage(kImage.trim());
+  const configuredImage = imageValue(knobs.image);
+  if (configuredImage !== undefined) {
+    return ensureDockerImage(configuredImage);
   }
   const dcPath = devcontainerPath(spec, knobs);
   const dc = readDevcontainer(dcPath);
-  if (typeof dc.image === 'string' && dc.image.trim() !== '') {
-    return ensureDockerImage(dc.image.trim());
+  const devcontainerImage = imageValue(dc.image);
+  if (devcontainerImage !== undefined) {
+    return ensureDockerImage(devcontainerImage);
   }
   return buildDevcontainerImage(dcPath, devcontainerDockerfile(dcPath, dc), dc);
+}
+
+function imageValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
 /** A verbatim image (knob or devcontainer `image:`) must exist BEFORE
