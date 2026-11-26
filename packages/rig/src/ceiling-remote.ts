@@ -50,6 +50,10 @@ interface LedgerReadRequest extends RemoteRefRequest {
   sha: string | undefined;
 }
 
+function ledgerPath(sha: string): string {
+  return `${sha}:reservations.json`;
+}
+
 function readEntries(request: LedgerReadRequest): RemoteCeilingEntry[] {
   if (request.sha === undefined) return [];
   const fetched = git({
@@ -59,7 +63,7 @@ function readEntries(request: LedgerReadRequest): RemoteCeilingEntry[] {
   if (fetched.status !== 0) throw new Error('ceiling remote fetch failed');
   const r = git({
     root: request.root,
-    args: ['show', `${request.sha}:reservations.json`],
+    args: ['show', ledgerPath(request.sha)],
   });
   if (r.status !== 0) throw new Error('ceiling remote ledger is corrupt');
   const parsed: unknown = JSON.parse(r.stdout);
@@ -110,6 +114,10 @@ function commitLedger(request: LedgerCommitRequest): string {
   return (commit.stdout ?? '').trim();
 }
 
+function ledgerLease(before: string | undefined): string {
+  return `--force-with-lease=${CEILING_REMOTE_REF}:${before ?? ''}`;
+}
+
 /** CAS a reservation into one remote ref. The single ledger ref is important:
  * separate refs per pid would still let two clones both observe the same free
  * slot before creating their refs. */
@@ -145,7 +153,7 @@ export function reserveRemoteCeiling(options: RemoteCeilingOptions): string | nu
       entries: [...entries, { id, pid, branch, ts: now }],
       parent: before,
     });
-    const lease = `--force-with-lease=${CEILING_REMOTE_REF}:${before ?? ''}`;
+    const lease = ledgerLease(before);
     const pushed = git({
       root,
       args: ['push', '--quiet', lease, remote, `${commit}:${CEILING_REMOTE_REF}`],
