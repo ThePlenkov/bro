@@ -136,6 +136,11 @@ exclude_paths:
   - 'packages/brose/src/io.ts'
   - 'packages/brotocol/src/io.ts'
   - 'packages/spec/src/io.ts'
+  # Devin's io module is the guarded filesystem seam: every path is
+  # canonicalized and proven inside the operator-selected home root before
+  # reaching fs. Codacy's non-literal-path rule cannot model that proof and
+  # would flag the seam itself rather than an unsafe caller.
+  - 'packages/devin/src/io.ts'
 
   # The frontmatter lexer IS bounded-cursor character reading: `t[i]`/
   # `t[i]!` on the input string are its fundamental operations, the same
