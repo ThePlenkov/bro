@@ -1935,11 +1935,12 @@ function removeGithubReaction(
   reaction: ReactionKind,
   kind: string
 ): ReactionResult {
-  const id = viewerReactionId(content, kind);
-  if (!id) return { artifact: content, reaction, removed: true, counts: {} };
+  if (!viewerReactionId(content, kind)) {
+    return { artifact: content, reaction, removed: true, counts: {} };
+  }
   graphql(
     'mutation($id:ID!,$content:ReactionContent!){removeReaction(input:{subjectId:$id,content:$content}){reaction{id}}}',
-    { id, content: kind }
+    { id: content, content: kind }
   );
   return { artifact: content, reaction, removed: true, counts: {} };
 }
