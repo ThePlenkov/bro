@@ -123,6 +123,8 @@ interface Tally {
   pending: number;
   /** When the current window opened, ms. */
   since: number;
+  /** Monotonic identity of the current window. */
+  generation: number;
   /** When the scope may be probed again, ms (0 = not tripped). */
   trippedUntil: number;
   /** A half-open probe is in flight — the scope admits ONE open until
@@ -186,22 +188,28 @@ export class AcpDeadLoopGuard {
 
   /** The peer's half of the charge — the tally it was counted in and the
    *  window it stood at. Undefined for a target with no peer. */
-  private chargePeer(target: AcpTarget, now: number): { tally: Tally; since: number } | undefined {
+  private chargePeer(
+    target: AcpTarget,
+    now: number
+  ): { tally: Tally; generation: number } | undefined {
     if (target.peer === undefined) {
       return undefined;
     }
     const tally = this.tally(this.peers, target.peer, now);
     tally.pending += 1;
-    return { tally, since: tally.since };
+    return { tally, generation: tally.generation };
   }
 
   /** The charge the caller settles when the session's turn completes —
    *  the scope's own debt and the peer's, each in the window it was
    *  counted in. */
-  private charge(tally: Tally, peer: { tally: Tally; since: number } | undefined): AcpCharge {
+  private charge(
+    tally: Tally,
+    peer: { tally: Tally; generation: number } | undefined
+  ): AcpCharge {
     // the window the charge was counted in — a rolled window already
     // wrote this charge off, so resolve() checks it before freeing
-    const since = tally.since;
+    const generation = tally.generation;
     let resolved = false;
     return {
       resolve: () => {
@@ -212,14 +220,14 @@ export class AcpDeadLoopGuard {
         // the window this charge was counted in rolled — the reset
         // already wrote it off; freeing it now would hide a NEWER
         // session's open behind this completion
-        this.releasePending(tally, since);
+        this.releasePending(tally, generation);
         // a completed turn clears the trip outright — a working
         // conversation is never stuck behind a stale refusal
         tally.trippedUntil = 0;
         // the probe answered — the scope is healthy again
         tally.probeInFlight = false;
         if (peer !== undefined) {
-          this.releasePending(peer.tally, peer.since);
+          this.releasePending(peer.tally, peer.generation);
         }
       },
     };
@@ -227,8 +235,8 @@ export class AcpDeadLoopGuard {
 
   /** One pending count down — only if the window the charge was counted
    *  in is still the current one (a rolled window already wrote it off). */
-  private releasePending(tally: Tally, since: number): void {
-    if (tally.since !== since) {
+  private releasePending(tally: Tally, generation: number): void {
+    if (tally.generation !== generation) {
       return;
     }
     if (tally.pending === 0) {
@@ -378,7 +386,13 @@ export class AcpDeadLoopGuard {
   private tally(map: Map<string, Tally>, key: string, now: number): Tally {
     const fresh = map.get(key);
     if (fresh === undefined) {
-      const created: Tally = { pending: 0, since: now, trippedUntil: 0, probeInFlight: false };
+      const created: Tally = {
+        pending: 0,
+        since: now,
+        generation: 0,
+        trippedUntil: 0,
+        probeInFlight: false,
+      };
       map.set(key, created);
       return created;
     }
@@ -389,6 +403,7 @@ export class AcpDeadLoopGuard {
       // it tripped in is already gone.
       fresh.pending = 0;
       fresh.since = now;
+      fresh.generation += 1;
       // the probe's window is over — the scope is not half-open anymore
       fresh.probeInFlight = false;
     }
