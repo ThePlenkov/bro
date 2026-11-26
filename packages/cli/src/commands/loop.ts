@@ -63,6 +63,7 @@ import {
   explainSlicesOrExit,
   facade,
   facadeName,
+  supervise,
   gitTry,
   ghTry,
   hasHelpFlag,
@@ -1087,7 +1088,16 @@ function runLoopSchedLifecycle(
 async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => void): Promise<void> {
   for (;;) {
     ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
-    await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+    await supervise({
+      name: 'loop pass',
+      native: async () => {
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+      },
+      detached: async () => {
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+      },
+      message: () => 'bro loop pass settled; the next pass is armed',
+    });
     await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
   }
 }
