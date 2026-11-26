@@ -15,7 +15,7 @@ import {
   type AgentState,
 } from '@broject/core';
 import type { ConvoyNext, Molecule } from '@broject/convoy';
-import { runMol, runQueue, type RunDeps } from './convoy.ts';
+import { convoyPolicy, runMol, runQueue, type RunDeps } from './convoy.ts';
 
 const mol = (id: string): Molecule => ({
   root: { id, title: id, status: 'open', issue_type: 'molecule' },
@@ -66,18 +66,8 @@ interface World {
   full: boolean;
 }
 
-function world(over: Partial<World> = {}): World {
-  const w: World = {
-    spawns: [],
-    sleeps: [],
-    nexts: new Map(),
-    states: new Map(),
-    entries: new Map(),
-    full: false,
-    ...over,
-    deps: undefined as unknown as RunDeps,
-  };
-  w.deps = {
+function worldDeps(w: World): RunDeps {
+  return {
     loadMol: id => {
       if (!w.nexts.has(id)) throw new Error(`molecule ${id} not found`);
       return mol(id);
@@ -105,6 +95,20 @@ function world(over: Partial<World> = {}): World {
     now: () => 1_000_000,
     say: () => {},
   };
+}
+
+function world(over: Partial<World> = {}): World {
+  const w: World = {
+    spawns: [],
+    sleeps: [],
+    nexts: new Map(),
+    states: new Map(),
+    entries: new Map(),
+    full: false,
+    ...over,
+    deps: undefined as unknown as RunDeps,
+  };
+  w.deps = worldDeps(w);
   return w;
 }
 
@@ -442,6 +446,50 @@ describe('runQueue', () => {
       ['done', 'done']
     );
     assert.deepEqual(seq, ['done:m-1', 'done:m-2']);
+  });
+
+  test('continues when a settle hook rejects', async () => {
+    const w = world();
+    const messages: string[] = [];
+    w.nexts.set('m-1', [next('complete')]);
+    w.nexts.set('m-2', [next('complete')]);
+    w.deps.onDone = async () => {
+      throw new Error('notification unavailable');
+    };
+    w.deps.say = message => messages.push(message);
+    const rs = await runQueue(w.deps, { ...CFG, mols: ['m-1', 'm-2'] });
+    assert.deepEqual(
+      rs.map(r => r.verdict),
+      ['done', 'done']
+    );
+    assert.deepEqual(messages, [
+      'run: done hook failed for m-1: notification unavailable',
+      'run: done hook failed for m-2: notification unavailable',
+    ]);
+  });
+
+  test('turns an unexpected policy error into an error result and continues', async () => {
+    const w = world();
+    w.nexts.set('m-2', [next('complete')]);
+    const originalRun = convoyPolicy.run;
+    let calls = 0;
+    convoyPolicy.run = async (ctx, item) => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('policy state unavailable');
+      }
+      return originalRun.call(convoyPolicy, ctx, item);
+    };
+    try {
+      const rs = await runQueue(w.deps, { ...CFG, mols: ['m-1', 'm-2'] });
+      assert.deepEqual(
+        rs.map(r => r.verdict),
+        ['error', 'done']
+      );
+      assert.equal(rs[0]?.detail, 'convoyPolicy.run error: policy state unavailable');
+    } finally {
+      convoyPolicy.run = originalRun;
+    }
   });
 
   test('a gated verdict fires onGated at settle — before the next mol runs', async () => {

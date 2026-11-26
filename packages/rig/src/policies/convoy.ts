@@ -257,6 +257,53 @@ export interface ConvoyPolicy extends Policy<ConvoyItem, ConvoyCtx, RunStep> {
   runQueue(ctx: ConvoyCtx): Promise<MolResult[]>;
 }
 
+function seedQueue(ctx: ConvoyCtx): void {
+  const ids = [...ctx.cfg.mols];
+  if (ctx.cfg.open) {
+    for (const candidate of ctx.deps.listOpen()) {
+      if (!ids.includes(candidate.id)) {
+        ids.push(candidate.id);
+      }
+    }
+  }
+  ctx.queue = ids;
+}
+
+async function dispatchSettle(ctx: ConvoyCtx, result: MolResult): Promise<void> {
+  const hooks: Partial<
+    Record<MolResult['verdict'], ((r: MolResult) => void | Promise<void>) | undefined>
+  > = {
+    gated: ctx.deps.onGated,
+    done: ctx.deps.onDone,
+    parked: ctx.deps.onParked,
+    stopped: ctx.deps.onStopped,
+    failed: ctx.deps.onFailed,
+  };
+  const hook = Object.getOwnPropertyDescriptor(hooks, result.verdict)?.value;
+  if (typeof hook === 'function') {
+    try {
+      await hook(result); // NOSONAR — serial by contract
+    } catch (err) {
+      ctx.deps.say(`run: ${result.verdict} hook failed for ${result.mol}: ${errText(err)}`);
+    }
+  }
+}
+
+async function parkQueue(ctx: ConvoyCtx, result: MolResult, results: MolResult[]): Promise<void> {
+  const why = result.detail ?? 'infra down';
+  ctx.deps.say(`run: queue stopped — ${why}`);
+  for (const mol of ctx.queue ?? []) {
+    const parked: MolResult = {
+      mol,
+      verdict: 'parked',
+      attempts: 0,
+      detail: `queue stopped — ${why}`,
+    };
+    await dispatchSettle(ctx, parked);
+    results.push(parked);
+  }
+}
+
 export const convoyPolicy: ConvoyPolicy = {
   /** select — the next mol in queue order; undefined drains. */
   select(ctx) {
@@ -299,50 +346,31 @@ export const convoyPolicy: ConvoyPolicy = {
   },
 
   async runQueue(ctx) {
-    const ids = [...ctx.cfg.mols];
-    if (ctx.cfg.open) {
-      for (const m of ctx.deps.listOpen()) {
-        if (!ids.includes(m.id)) {
-          ids.push(m.id);
-        }
-      }
-    }
-    ctx.queue = ids;
+    seedQueue(ctx);
     const results: MolResult[] = [];
     for (;;) {
       const item = convoyPolicy.select(ctx);
       if (item === undefined) {
         break;
       }
-      const r = await convoyPolicy.run(ctx, item); // NOSONAR — a convoy runs its mols in order, never fanned out
-      if (r.verdict === 'gated') {
-        await ctx.deps.onGated?.(r); // NOSONAR — serial by contract
-      } else if (r.verdict === 'done') {
-        await ctx.deps.onDone?.(r); // NOSONAR — serial by contract
-      } else if (r.verdict === 'parked') {
-        await ctx.deps.onParked?.(r);
-      } else if (r.verdict === 'stopped') {
-        await ctx.deps.onStopped?.(r);
-      } else if (r.verdict === 'failed') {
-        await ctx.deps.onFailed?.(r);
+      let r: MolResult;
+      try {
+        r = await convoyPolicy.run(ctx, item); // NOSONAR — a convoy runs its mols in order, never fanned out
+      } catch (err) {
+        r = {
+          mol: item.mol,
+          verdict: 'error',
+          attempts: item.attempts,
+          detail: `convoyPolicy.run error: ${errText(err)}`,
+        };
       }
+      await dispatchSettle(ctx, r);
       results.push(r);
       if (r.queueStop === true) {
         // the infra streak tripped — park the rest of the queue
         // untouched; a dead spawn boundary must not be fed mol after
         // mol (spec bro-zaydc)
-        const why = r.detail ?? 'infra down';
-        ctx.deps.say(`run: queue stopped — ${why}`);
-        for (const mol of ctx.queue ?? []) {
-          const parked: MolResult = {
-            mol,
-            verdict: 'parked',
-            attempts: 0,
-            detail: `queue stopped — ${why}`,
-          };
-          await ctx.deps.onParked?.(parked); // NOSONAR — serial by contract
-          results.push(parked);
-        }
+        await parkQueue(ctx, r, results);
         break;
       }
     }
@@ -380,6 +408,21 @@ function infraFail(ctx: ConvoyCtx, item: ConvoyItem, why: string): RunStep {
       `retry in ${ctx.cfg.pollSec}s`
   );
   return { waitSec: ctx.cfg.pollSec };
+}
+
+function classifyEntry(
+  ctx: ConvoyCtx,
+  item: ConvoyItem,
+  entry: AgentRegistryEntry,
+  message: string
+): RunStep | undefined {
+  const state = ctx.deps.entryState(entry);
+  const verdicts: Partial<Record<string, RunStep>> = {
+    running: { mol: item.mol, verdict: 'occupied', attempts: item.attempts, detail: message },
+    spawned: { mol: item.mol, verdict: 'occupied', attempts: item.attempts, detail: message },
+    stopped: { mol: item.mol, verdict: 'stopped', attempts: item.attempts },
+  };
+  return Object.getOwnPropertyDescriptor(verdicts, state)?.value;
 }
 
 /** A read failure — the mol or its probes could not be read (a stalled
@@ -446,12 +489,9 @@ function refusalStep(ctx: ConvoyCtx, item: ConvoyItem, err: SpawnError): RunStep
     return d;
   }
   if (e !== undefined) {
-    const st = deps.entryState(e);
-    if (st === 'running' || st === 'spawned') {
-      return { mol: item.mol, verdict: 'occupied', attempts: item.attempts, detail: err.message };
-    }
-    if (st === 'stopped') {
-      return { mol: item.mol, verdict: 'stopped', attempts: item.attempts };
+    const classified = classifyEntry(ctx, item, e, err.message);
+    if (classified !== undefined) {
+      return classified;
     }
   }
   // an untyped refusal while the fleet reads full is capacity — same

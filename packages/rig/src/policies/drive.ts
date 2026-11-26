@@ -921,6 +921,46 @@ async function spawnFixer(
   });
 }
 
+interface RebaseTarget {
+  base: string;
+  baseTip: BaseTip;
+}
+
+async function resolveRetargetedBase(
+  ctx: DriveCtx,
+  pr: number,
+  link: string,
+  wt: string,
+  after: PrMeta,
+  retireCreated: () => Promise<void>
+): Promise<RebaseTarget | PrVerdict> {
+  const moved = fetchBaseTip(wt, after.baseRef);
+  if (moved.tip === undefined) {
+    await retireCreated();
+    return { pr, link, verdict: 'rebase-base-unavailable', detail: moved.err };
+  }
+  // The second fetch is another await-free window in which GitHub can
+  // retarget the PR again. Do not pair this newly fetched tip with a
+  // third base name: the next drive pass will resolve that target.
+  let latest: PrMeta;
+  try {
+    latest = await metaOf(ctx, pr);
+  } catch (err) {
+    await retireCreated();
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) };
+  }
+  if (latest.baseRef !== after.baseRef) {
+    await retireCreated();
+    return {
+      pr,
+      link,
+      verdict: 'retargeted',
+      detail: `base moved again from ${after.baseRef} to ${latest.baseRef}`,
+    };
+  }
+  return { base: after.baseRef, baseTip: moved.tip };
+}
+
 /** The conflict fixer — mergeable=CONFLICTING on an orphaned PR gets
  *  the same fixer spawn with a rebase work order (bro-glkes). The
  *  prMeta probe doubles as the still-conflicted re-check: a conflict
@@ -1024,13 +1064,12 @@ async function spawnRebaseFixer(
   // the base the PR wants — resolve the new one instead of pairing the
   // old tip with the new name
   if (after.baseRef !== meta.baseRef) {
-    const moved = fetchBaseTip(wt, after.baseRef);
-    if (moved.tip === undefined) {
-      await retireCreated();
-      return { pr, link, verdict: 'rebase-base-unavailable', detail: moved.err };
+    const retargeted = await resolveRetargetedBase(ctx, pr, link, wt, after, retireCreated);
+    if ('verdict' in retargeted) {
+      return retargeted;
     }
-    base = after.baseRef;
-    baseTip = moved.tip;
+    base = retargeted.base;
+    baseTip = retargeted.baseTip;
   }
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
@@ -1789,6 +1828,27 @@ async function serviceGate(
   );
 }
 
+function settleClosedPr(
+  ctx: DriveCtx,
+  pr: number,
+  link: string,
+  state: PrActState,
+  fixer: TaskRow | undefined
+): PrVerdict {
+  try {
+    ctx.deps.settleSessions({
+      worktree: ctx.work.worktreeByBranch.get(state.headRef),
+      molSteps: fixer ? [fixer.id] : undefined,
+    });
+  } catch {
+    // advisory
+  }
+  if (fixer) {
+    closeFixer(ctx, fixer.id, `${link} ${state.state.toLowerCase()} — fixer done`);
+  }
+  return { pr, link, verdict: 'settled', detail: state.state.toLowerCase() };
+}
+
 async function drivePr(ctx: DriveCtx, pr: number): Promise<PrVerdict> {
   const link = ctx.deps.rev.prLink(ctx.repo, pr);
   let state: PrActState;
@@ -1818,18 +1878,7 @@ async function drivePr(ctx: DriveCtx, pr: number): Promise<PrVerdict> {
   ctx.work.heads.set(pr, state.headSha);
   const fixer = fixerBeadFor(ctx.deps.store, pr);
   if (state.state !== 'OPEN') {
-    try {
-      ctx.deps.settleSessions({
-        worktree: ctx.work.worktreeByBranch.get(state.headRef),
-        molSteps: fixer ? [fixer.id] : undefined,
-      });
-    } catch {
-      // advisory
-    }
-    if (fixer) {
-      closeFixer(ctx, fixer.id, `${link} ${state.state.toLowerCase()} — fixer done`);
-    }
-    return { pr, link, verdict: 'settled', detail: state.state.toLowerCase() };
+    return settleClosedPr(ctx, pr, link, state, fixer);
   }
   const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval });
   const humanThreads = humanThreadSweep(ctx, pr, state, link);
