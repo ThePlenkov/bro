@@ -1269,10 +1269,12 @@ async function checksAsync(t: PrTarget, requiredOnly = false): Promise<CheckInfo
 
 async function requiredStatusChecksAsync(t: PrTarget): Promise<string[]> {
   const { baseRef } = await prMetaAsync(t);
-  const rulesets = await ghJsonAsync<Ruleset[]>([
+  const raw = await ghJsonAsync<unknown>([
     'api',
     `repos/${t.repo}/rulesets?includes_parents=true&per_page=100`,
   ]);
+  if (!Array.isArray(raw)) return [];
+  const rulesets = raw.filter((item): item is Ruleset => typeof item === 'object' && item !== null);
   return requiredContexts(rulesets, baseRef);
 }
 
