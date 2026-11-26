@@ -34,10 +34,9 @@ interface DefaultModel {
 }
 
 function profileText(profile: DevinSubagentProfile): string {
-  const tools =
-    profile.tools === undefined
-      ? ''
-      : `tools:\n${profile.tools.map(tool => `  - ${tool}`).join('\n')}\n`;
+  const tools = !Array.isArray(profile.tools)
+    ? ''
+    : `tools:\n${profile.tools.map(tool => `  - ${tool}`).join('\n')}\n`;
   return `---\nmodel: ${profile.model}\n${tools}---\n${profile.prompt ?? ''}\n`;
 }
 

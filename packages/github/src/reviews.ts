@@ -183,10 +183,16 @@ const requiredContexts = (rulesets: Ruleset[], baseRef: string): string[] => [
 
 function requiredStatusChecks(t: PrTarget): string[] {
   const { baseRef } = prMeta(t);
-  const rulesets = ghJson<Ruleset[]>([
+  const raw = ghJson<unknown>([
     'api',
+    '--paginate',
+    '--slurp',
     `repos/${t.repo}/rulesets?includes_parents=true&per_page=100`,
   ]);
+  const pages = Array.isArray(raw) ? raw : [];
+  const rulesets = pages
+    .flatMap(page => (Array.isArray(page) ? page : [page]))
+    .filter((item): item is Ruleset => typeof item === 'object' && item !== null);
   return requiredContexts(rulesets, baseRef);
 }
 
@@ -1271,10 +1277,14 @@ async function requiredStatusChecksAsync(t: PrTarget): Promise<string[]> {
   const { baseRef } = await prMetaAsync(t);
   const raw = await ghJsonAsync<unknown>([
     'api',
+    '--paginate',
+    '--slurp',
     `repos/${t.repo}/rulesets?includes_parents=true&per_page=100`,
   ]);
-  if (!Array.isArray(raw)) return [];
-  const rulesets = raw.filter((item): item is Ruleset => typeof item === 'object' && item !== null);
+  const pages = Array.isArray(raw) ? raw : [];
+  const rulesets = pages
+    .flatMap(page => (Array.isArray(page) ? page : [page]))
+    .filter((item): item is Ruleset => typeof item === 'object' && item !== null);
   return requiredContexts(rulesets, baseRef);
 }
 

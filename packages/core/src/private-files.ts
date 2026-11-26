@@ -27,6 +27,7 @@ import {
   ftruncateSync,
   mkdirSync,
   openSync,
+  readFileSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -134,6 +135,17 @@ export function writePrivateFileSync({ path, data }: PrivateFileWrite): void {
   try {
     privateFs.truncate(fd, 0);
     privateFs.write(fd, data);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Read an owner-only artifact through a verified descriptor. The path is
+ * checked with the same no-follow and ownership rules as private writes. */
+export function readPrivateFileSync({ path }: PrivatePath): string {
+  const fd = openPrivateSync({ path, flags: constants.O_RDONLY });
+  try {
+    return readFileSync(fd, 'utf8');
   } finally {
     closeSync(fd);
   }

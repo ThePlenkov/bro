@@ -435,7 +435,7 @@ async function fetchState(
   const requiredStatusChecks =
     rev.requiredStatusChecksAsync === undefined
       ? Promise.resolve().then(() => rev.requiredStatusChecks?.(target) ?? [])
-      : Promise.resolve().then(() => rev.requiredStatusChecksAsync!(target));
+      : Promise.resolve().then(() => rev.requiredStatusChecksAsync?.(target) ?? []);
   const [meta, threads, checksAll, required, shas, rulesetRequired] = await Promise.all([
     orSync(rev.prMetaAsync?.bind(rev), (t: PrTarget) => rev.prMeta(t), target),
     rev.reviewThreads(target),
@@ -445,7 +445,7 @@ async function fetchState(
     orSync(rev.reviewedShasAsync?.bind(rev), (t: PrTarget) => rev.reviewedShas(t), target).catch(
       (): string[] => []
     ),
-    requiredStatusChecks.catch((): string[] => []),
+    requiredStatusChecks,
   ]);
   const rules = ignoreRules(opts?.ignoreChecks ?? []);
   const alerts: string[] = [];
