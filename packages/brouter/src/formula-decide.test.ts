@@ -628,6 +628,15 @@ describe('the pick shape', () => {
     assert.equal(decision.route?.name, 'free');
     assert.equal(decision.picked, 'model');
     assert.equal(calls.length, 1);
+    const stage = decision.cascade?.stages.at(-1);
+    assert.deepEqual(stage && { ...stage, latencyMs: 0 }, {
+      stage: 'T2',
+      before: ['pro', 'free'],
+      after: ['free'],
+      latencyMs: 0,
+      note: 'the judge picked free',
+    });
+    assert.ok((stage?.latencyMs ?? 0) >= 0);
   });
 
   test('shadow pick journals but the table order stands', async () => {

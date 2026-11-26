@@ -425,6 +425,7 @@ async function askOrReplayFormula(args: {
 }): Promise<{
   asked: Awaited<ReturnType<typeof askQuestions>>;
   t3Used: boolean;
+  t3Attempted: boolean;
   cache: RouteCacheInfo | undefined;
 }> {
   const { decision, judge, formula, mode, cascade, stages } = args;
@@ -455,6 +456,7 @@ async function askOrReplayFormula(args: {
       : undefined;
   let asked: Awaited<ReturnType<typeof askQuestions>> = null;
   let t3Used = false;
+  let t3Attempted = false;
   let cache: RouteCacheInfo | undefined;
   if (hit !== undefined) {
     // replay — the cached DecideResult stands in for a fresh ask;
@@ -465,17 +467,19 @@ async function askOrReplayFormula(args: {
     asked = { res: hit.res, questions: formulaQuestions(formula), features, answers };
     t3Used = hit.t3;
     cache = cacheInfo(plan, true);
+    const contenders = cascade.candidates.map(c => c.route.name);
     stages.push(
-      stageRecord(
-        t3Used ? 'T3' : 'T2',
-        cascade.candidates.map(c => c.route.name),
-        [],
-        consultMs,
-        {
-          note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
-        }
-      )
+      stageRecord('T2', contenders, contenders, consultMs, {
+        note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
+      })
     );
+    if (t3Used) {
+      stages.push(
+        stageRecord('T3', contenders, contenders, 0, {
+          note: 'cache hit — the escalate answer was replayed',
+        })
+      );
+    }
   } else if (mayAsk) {
     const t2Start = Date.now();
     asked = await askQuestions({ router, judge: judge!, formula, text });
@@ -484,6 +488,7 @@ async function askOrReplayFormula(args: {
     // lowConfidence; a confident T2 never reaches it, and an absent
     // escalate leaves the table order standing
     if (asked !== null && asked.res.lowConfidence.length > 0 && decision.escalate !== undefined) {
+      t3Attempted = true;
       const escalated = await escalateLowConfidence({
         dir,
         router,
@@ -494,25 +499,28 @@ async function askOrReplayFormula(args: {
         asked,
       });
       if (escalated !== null) {
-        asked = escalated;
-        t3Used = true;
+        asked = escalated.result;
+        t3Used = escalated.merged;
       }
     }
+    const contenders = cascade.candidates.map(c => c.route.name);
     stages.push(
-      stageRecord(
-        t3Used ? 'T3' : 'T2',
-        cascade.candidates.map(c => c.route.name),
-        [],
-        Date.now() - t2Start,
-        {
+      stageRecord('T2', contenders, contenders, Date.now() - t2Start, {
+        note:
+          asked === null
+            ? 'the judge did not answer — inputs stay unresolved'
+            : 'the judge answered the formula questions',
+      })
+    );
+    if (t3Attempted) {
+      stages.push(
+        stageRecord('T3', contenders, contenders, 0, {
           note: t3Used
             ? 'T2 low-confidence — the escalate provider re-answered'
-            : asked === null
-              ? 'the judge did not answer — inputs stay unresolved'
-              : 'the judge answered the formula questions',
-        }
-      )
-    );
+            : 'the escalate provider changed nothing — T2 stands',
+        })
+      );
+    }
     // memoize the stage answers — a judge that did not answer leaves
     // nothing worth replaying (transient failures are never cached);
     // the CAS write rejects it if an invalidation landed mid-T2
@@ -533,7 +541,7 @@ async function askOrReplayFormula(args: {
       })
     );
   }
-  return { asked, t3Used, cache };
+  return { asked, t3Used, t3Attempted, cache };
 }
 
 /** Why the formula's inputs stayed unresolved — no model configured,
@@ -738,6 +746,31 @@ async function pickByFormula(input: {
           resolved,
           mode: formulaMode(router),
           ...(escalate === undefined ? {} : { escalate }),
+          onTrace: pickTrace => {
+            const contenders = set.candidates.map(c => c.route.name);
+            const t2After = pickTrace.t2Pick === undefined ? contenders : [pickTrace.t2Pick];
+            stages.push(
+              stageRecord('T2', contenders, t2After, pickTrace.t2LatencyMs, {
+                note:
+                  pickTrace.t2Pick === undefined
+                    ? 'the judge named no confident candidate'
+                    : `the judge picked ${pickTrace.t2Pick}`,
+              })
+            );
+            if (pickTrace.t3Attempted) {
+              const t3After = pickTrace.finalPick === undefined ? t2After : [pickTrace.finalPick];
+              stages.push(
+                stageRecord('T3', t2After, t3After, pickTrace.t3LatencyMs, {
+                  ...(pickTrace.t3Merged && pickTrace.finalPick !== undefined
+                    ? { decided: pickTrace.finalPick }
+                    : {}),
+                  note: pickTrace.t3Merged
+                    ? `the escalate provider picked ${pickTrace.finalPick}`
+                    : 'the escalate provider changed nothing — T2 stands',
+                })
+              );
+            }
+          },
         });
       } catch (err) {
         console.error(
@@ -746,20 +779,22 @@ async function pickByFormula(input: {
         );
       }
     }
-    stages.push(
-      stageRecord(
-        'T2',
-        cascade.candidates.map(c => c.route.name),
-        set.candidates.map(c => c.route.name),
-        Date.now() - t2Start,
-        {
-          note:
-            named === undefined
-              ? 'the judge named no confident candidate'
-              : `the judge picked ${named}`,
-        }
-      )
-    );
+    if (stages.at(-1)?.stage !== 'T2' && stages.at(-1)?.stage !== 'T3') {
+      stages.push(
+        stageRecord(
+          'T2',
+          set.candidates.map(c => c.route.name),
+          named === undefined ? set.candidates.map(c => c.route.name) : [named],
+          Date.now() - t2Start,
+          {
+            note:
+              named === undefined
+                ? 'the judge named no confident candidate'
+                : `the judge picked ${named}`,
+          }
+        )
+      );
+    }
     // memoize the stage answer — a pick formula's T2 output IS the
     // pick name; the CAS write rejects it if an invalidation landed
     // while the judge was thinking
@@ -847,7 +882,10 @@ async function escalateLowConfidence(input: {
   formula: Formula;
   text: string;
   asked: NonNullable<Awaited<ReturnType<typeof askQuestions>>>;
-}): Promise<NonNullable<Awaited<ReturnType<typeof askQuestions>>> | null> {
+}): Promise<{
+  result: NonNullable<Awaited<ReturnType<typeof askQuestions>>>;
+  merged: boolean;
+} | null> {
   const { dir, router, provider, formula, text, asked } = input;
   try {
     const escJudge = await decisionJudge(dir, {
@@ -878,6 +916,7 @@ async function escalateLowConfidence(input: {
     const mergedAnswers = { ...asked.res.answers };
     const mergedLow = new Set(res.lowConfidence);
     const lowKeys = new Set(asked.res.lowConfidence);
+    let merged = false;
     for (const [key, answer] of Object.entries(res.answers)) {
       if (!mergedLow.has(key) && lowKeys.has(key)) {
         Object.defineProperty(mergedAnswers, key, {
@@ -886,6 +925,7 @@ async function escalateLowConfidence(input: {
           writable: true,
           configurable: true,
         });
+        merged = true;
       }
     }
     const mergedRes: DecideResult = {
@@ -897,7 +937,7 @@ async function escalateLowConfidence(input: {
       model: res.model ?? asked.res.model,
     };
     const { features, answers } = formulaAnswersToFeatures(formula, mergedRes);
-    return { res: mergedRes, questions: asked.questions, features, answers };
+    return { result: { res: mergedRes, questions: asked.questions, features, answers }, merged };
   } catch {
     return null;
   }

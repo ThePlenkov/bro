@@ -49,6 +49,17 @@ export interface RoutePickOpts {
    *  judge's answer sits in lowConfidence; its confident answers merge
    *  back before the pick is read. Absent = no escalation. */
   escalate?: JudgeFacade;
+  /** Observability-only trace of the two judge calls. */
+  onTrace?: (trace: RoutePickTrace) => void;
+}
+
+export interface RoutePickTrace {
+  t2Pick: string | undefined;
+  t3Attempted: boolean;
+  t3Merged: boolean;
+  finalPick: string | undefined;
+  t2LatencyMs: number;
+  t3LatencyMs: number;
 }
 
 /** The chooser's one question — a `choice` whose options are exactly the
@@ -155,12 +166,18 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
   }
   const questions = routePickQuestions(opts.options);
   let res = await opts.judge.decide(opts.state, questions);
+  const t2Pick = candidatePick(opts.options, confidentChoice(res));
+  let t3Attempted = false;
+  let t3Merged = false;
+  let t3LatencyMs = 0;
   // T3 — the escalate judge re-answers ONLY the keys the first judge
   // left low-confidence; a confident first answer never reaches it, and
   // an escalate failure leaves the first result standing (fail-open)
   if (opts.escalate !== undefined && res.lowConfidence.length > 0) {
+    t3Attempted = true;
     try {
       const esc = await opts.escalate.decide(opts.state, questions);
+      t3LatencyMs = esc.latencyMs;
       const low = new Set(res.lowConfidence);
       const escLow = new Set(esc.lowConfidence);
       const mergedAnswers = { ...res.answers };
@@ -216,11 +233,20 @@ export async function routePick(opts: RoutePickOpts): Promise<string | undefined
               },
             }),
       };
+      t3Merged = mergedAny;
     } catch {
       /* the escalate judge failed — the first answer stands */
     }
   }
   const pick = candidatePick(opts.options, confidentChoice(res));
+  opts.onTrace?.({
+    t2Pick,
+    t3Attempted,
+    t3Merged,
+    finalPick: pick,
+    t2LatencyMs: res.latencyMs - t3LatencyMs,
+    t3LatencyMs,
+  });
   const outcome = outcomeFor(opts.mode, pick, opts.resolved);
   appendRow(opts.dir, verdictOf(opts, questions, res, outcome));
   return opts.mode === 'enforce' ? pick : undefined;
