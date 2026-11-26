@@ -601,8 +601,8 @@ function makeCore(input: BroCoreInput) {
   /** Sessions whose last assistant turn finished cleanly. */
   const clean = new Set<string>();
   /** Sessions observed alive. `session.deleted` is the only retirement, and
-   * the idle gate suspends on real I/O — liveness is re-checked after each
-   * suspending await before the re-prompt goes out, never assumed. The
+   * the idle gate suspends on real I/O — liveness is re-checked after the
+   * probe await before the gate is set, rather than assumed. The
    * value is an instance token minted per observing event, not membership:
    * a delete followed by an id-reusing create leaves the map occupied by a
    * *different* session, and a bare `has` would wave a stale gate through
