@@ -118,7 +118,7 @@ function pushArgsOf(segment: string): string[] | null {
     let j = i + 1;
     while (j < tokens.length) {
       const token = tokens[j];
-      if (token === undefined) {
+      if (Object.is(token, undefined)) {
         break;
       }
       const word = bareWord(token);
