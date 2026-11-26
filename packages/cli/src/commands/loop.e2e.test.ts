@@ -377,10 +377,11 @@ describe('bro loop e2e', () => {
     inside(f.main, f.root, () => {
       const r = f.run();
       assert.match(r.stdout, /loop: fx-a landed/);
-      // the stamp lands at findPr — every loop PR crosses it, no
-      // worker pr-create flag needed
+      // The stamp lands at findPr — every loop PR crosses it, no worker
+      // pr-create flag needed. Once the PR lands, the transient marker is
+      // swept while the provenance trailer remains.
       const host = readHostState(f.hostState);
-      assert.deepEqual(host.labels, ['bro-managed']);
+      assert.deepEqual(host.labels ?? [], []);
       assert.equal(
         host.prBody,
         '<!-- bro: {"managed":true,"bead":"fx-a","mode":"loop","run":"loop/fx-a"} -->'
