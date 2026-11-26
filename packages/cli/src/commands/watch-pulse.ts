@@ -26,10 +26,11 @@ import {
   staleLock,
   type Connector,
 } from '@broject/core';
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
 import { SELF_ENTRY } from './self-entry.ts';
 import { readWantMarker } from './want-marker.ts';
-import { watchSection, type WatchConfig } from './watch-config.ts';
-import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
+import { type WatchConfig, watchSection } from './watch-config.ts';
 
 export interface PulseMarker {
   /** tick cadence the armed pulse runs `--every` at */
@@ -59,6 +60,11 @@ export type ArmState = 'armed' | 'updated' | 'already';
  *  cadence is `already` and leaves the file alone; a changed one is
  *  `updated`. */
 export function armPulse(dir: string, everySec: number): { state: ArmState; marker: PulseMarker } {
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    throw new Error(
+      `pulse cadence needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everySec}"`
+    );
+  }
   const file = pulseMarkerPath(dir);
   if (file === null) {
     throw new Error('not a git repository — the pulse marker has no common dir to live in');
