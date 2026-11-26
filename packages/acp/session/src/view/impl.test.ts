@@ -353,4 +353,41 @@ describe('the pane impl seam', () => {
     }
     assert.match(impl.dump().join('\n'), /6\.0s/);
   });
+
+  test('folds each turn onto its own tool when turns share a drain', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.beginLive();
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:01Z',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 't1',
+        title: 'first',
+        status: 'completed',
+      } as never,
+    });
+    impl.feed({ kind: 'turn', phase: 'stop', ts: '2026-01-01T00:00:06Z' });
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:10Z' });
+    impl.feed({
+      kind: 'update',
+      ts: '2026-01-01T00:00:11Z',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 't2',
+        title: 'second',
+        status: 'completed',
+      } as never,
+    });
+    impl.feed({ kind: 'turn', phase: 'stop', ts: '2026-01-01T00:00:14Z' });
+
+    const tools = impl
+      .drain()
+      .filter((op): op is Extract<typeof op, { op: 'tool' }> => op.op === 'tool');
+    assert.equal(tools.length, 2);
+    assert.match(tools[0]?.item.arg ?? '', /6\.0s/);
+    assert.doesNotMatch(tools[0]?.item.arg ?? '', /4\.0s/);
+    assert.match(tools[1]?.item.arg ?? '', /4\.0s/);
+  });
 });
