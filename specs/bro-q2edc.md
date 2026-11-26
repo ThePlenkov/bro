@@ -1,7 +1,7 @@
 # bro-q2edc — the session pane renders through @opentui/solid
 
 The pane shipped in `562e1c70` as an imperative `@opentui/core`
-shell: `tui/main.ts` hand-builds a `TextRenderable` banner, a
+shell: `plugins/herdr/tui/main.ts` hand-builds a `TextRenderable` banner, a
 `ScrollBoxRenderable`, and one renderable per item, then keeps
 `views`/`cards` maps and replays a manual op stream onto them. It
 works, but the shell is ~250 lines of renderable bookkeeping whose
@@ -73,14 +73,14 @@ nothing Solid.
 
 Three layers, each with one job.
 
-### `tui/model.ts` — pure, unchanged, node-testable
+### `packages/acp/session/src/model/items.ts` — pure, unchanged, node-testable
 
 Archive rows → an item tree plus an op stream. No renderables, no
 fs, no timers, no framework. It is the piece the CI gates can
 actually check, and this migration does not touch it. The Solid
 layer consumes it; it does not absorb it.
 
-### `tui/app.tsx` — the Solid tree (new)
+### `packages/acp/tui/app.tsx` — the Solid tree (new)
 
 The declarative renderer. The shell's imperative state becomes Solid
 state:
@@ -110,14 +110,17 @@ Component mapping, from the imperative shell to the catalogue:
 | `BoxRenderable` tool card      | `<box>`       |
 | `TextRenderable` styled header | `<text>`      |
 
-### `tui/main.ts` — the shell (slimmer)
+### `plugins/herdr/tui/main.ts` — the shell (slimmer)
 
 Keeps everything that is _not_ rendering: argument parsing, the
 `--dump` headless readout, target resolution, the archive tail pump,
 the LED verdict, and the release envelope. It hands the store to the
 Solid tree and lets the reconciler own the renderables.
 
-### `tui/theme.ts`, `tui/view.ts`, `tui/state.ts` — the look and the fold
+### `packages/acp/session/src/view/theme.ts`
+
+`packages/acp/session/src/view/lines.ts`, and
+`packages/acp/session/src/view/state.ts` — the look and the fold
 
 - `theme.ts` is the semantic palette (`accent`, `success`, `error`,
   `warning`, `muted`, `surface`, `border`, `text`) — tokens, not raw
@@ -152,7 +155,7 @@ in the plugin directory is not reliably found. The transform is
 therefore registered **in the entry file itself**:
 
 ```ts
-// tui/main.ts
+// plugins/herdr/tui/main.ts
 await import('@opentui/solid/preload'); // registers the Bun plugin
 const { mountPane } = await import('./app.tsx'); // .tsx, transformed on load
 ```
@@ -200,8 +203,9 @@ Two test surfaces, split by what can run where:
 - **The model** stays under `tsx --test` (Node). It is unchanged, so
   its existing tests stay green — that is the regression net for the
   item tree.
-- **The state fold** (`tui/state.ts`) is pure data, so it is Node-
-  testable too: `plugins/herdr/test/tui-state.test.ts` covers the
+- **The state fold** (`packages/acp/session/src/view/state.ts`) is pure
+  data, so it is Node-testable too:
+  `packages/acp/session/src/view/state.test.ts` covers the
   fold's semantics — eviction, late ops for evicted items, the
   tool-only selection walk — without a renderer.
 - **The Solid tree** is tested through `createTestRenderer` from
@@ -213,7 +217,8 @@ Two test surfaces, split by what can run where:
   not on internal state.
 
 The tree test needs the Solid runtime, so it runs under `bun test`
-and lives beside the app it exercises (`tui/pane.test.tsx`). It loads
+and lives beside the app it exercises
+(`packages/acp/tui/pane.test.tsx`). It loads
 the preload **dynamically**, in the same order the entry does — a
 test that imported the app statically would load `solid-js` as the
 server build and assert on a tree that never updates.
@@ -242,16 +247,17 @@ self-contained, and what to adopt.
 
 ### The vendor
 
-`plugins/herdr/tui/vendor/acp-tui` is a **git submodule** pinned at
-upstream `70b8a6d` (v0.2.0) — upstream tracking stays cheap
+The historical spike used a **git submodule** pinned at upstream
+`70b8a6d` (v0.2.0) — upstream tracking stayed cheap
 (`git submodule update --remote`), `.gitmodules` records the source.
-`tui/package.json` resolves the model as a `file:` dependency:
+The historical `packages/acp/tui/package.json` resolved the model as a
+`file:` dependency:
 
 ```json
 "acp-model": "file:vendor/acp-tui/packages/acp-model"
 ```
 
-`bun install` copies the package into `tui/node_modules` and pulls
+`bun install` copied the package into `packages/acp/tui/node_modules` and pulled
 its declared dep — `@agentclientprotocol/sdk@1.5.0`, their exact
 pin, isolated inside tui scope (repo root carries `^1.7.0`, no
 conflict). `marked@17.0.1` and `zod` also resolve — bun walked the
@@ -302,7 +308,8 @@ is the same as ours.
 
 ### What imports standalone
 
-Probed by importing each module directly under bun from `tui/`:
+Probed by importing each module directly under bun from
+`packages/acp/tui/`:
 
 | module                                                                                                                | verdict                  | what it takes                                                                                                                                                                                                                                                                                                                                                               |
 | --------------------------------------------------------------------------------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -341,9 +348,10 @@ glyph language, a model that has already eaten a 23 MB real
 archive. Re-evaluate the markdown subtree (Option A) only if the
 look still misses after the card engine lands.
 
-Spike artifacts: `vendor/acp-tui` (submodule @ `70b8a6d`),
-`tui/spike-feed.ts` (the replay probe + adapter), this section.
-`main.ts`/`app.tsx` untouched — adoption is a follow-on decision.
+Spike artifacts: the historical `vendor/acp-tui` submodule
+(@ `70b8a6d`) and `packages/acp/tui/spike-feed.ts` (the replay
+probe + adapter), this section. The live shell and tree are
+`plugins/herdr/tui/main.ts` and `packages/acp/tui/app.tsx`.
 
 ## Phase 2 — the seam and the `acp` impl
 
@@ -354,7 +362,7 @@ proved itself in the live pane. That live review landed: the default
 flipped to `acp` (`--impl legacy`/`BRO_TUI_IMPL` keep it reachable —
 the unflagged `--dump` path now loads `acp-model` too).
 
-### The seam contract (`tui/impl.ts`)
+### The seam contract (`packages/acp/session/src/view/impl.ts`)
 
 The shell (`main.ts`) speaks one interface:
 
@@ -370,8 +378,10 @@ interface PaneImpl {
 }
 ```
 
-The seam's currency is the `Op` stream `state.ts` already consumes —
-`app.tsx`, the writer, and the key bindings are impl-agnostic by
+The seam's currency is the `Op` stream
+`packages/acp/session/src/view/state.ts` already consumes —
+`packages/acp/tui/app.tsx`, the writer, and the key bindings are
+impl-agnostic by
 construction; a third impl registers one factory in `IMPLS` and
 nothing else moves. Selection resolves `--impl <name>` >
 `BRO_TUI_IMPL` > `'acp'` (`pickImpl`/`implArg`), and the `acp`
@@ -384,9 +394,9 @@ vendored view-model's `expanded(item) === false` baseline — the
 "too verbose" answer). A `tool` op may now omit `collapsed` so an
 update never stomps the user's toggle.
 
-### The `acp` impl (`tui/acp/`)
+### The `acp` impl (`packages/acp/session/src/view/`)
 
-- `model.ts` — `AcpImpl`: the vendored session behind the seam. The
+- `acp-impl.ts` — `AcpImpl`: the session behind the seam. The
   feed adapter is the spike's verbatim (`session_opening(load)` →
   `session_update` per row → `prompt_response` per `turn stop` →
   `permission_opened` per permission row); `beginLive()` reduces
@@ -401,7 +411,7 @@ update never stomps the user's toggle.
   `replaying` → working/replaying, `disconnected` → blocked,
   `requires_action` → blocked/permission, `running` → working/turn,
   `idle` → idle (+`turn complete` when a stop reason stands).
-- `lines.ts` — the vendored **row language**: `toolLine` /
+- `acp-lines.ts` — the **row language**: `toolLine` /
   `thoughtLine` / `planLine` / `permissionLine` / `turnEndLine` from
   their `conversation/format.ts`, plus `LIVE_GLYPHS` and
   `DEFAULT_THEME` — imported straight from the submodule (it loads
@@ -474,12 +484,14 @@ model keeps diffs our repeat-status dedupe drops. `note` collapses
 537 → 0: `usage_update`, `current_mode_update`,
 `available_commands_update`, `session_info_update` become session
 state in their model instead of scrollback noise — the other half
-of "too verbose". `bun run tui/acp/conform.ts <events.jsonl>`
+of "too verbose". `bun run plugins/herdr/tui/acp/conform.ts <events.jsonl>`
 re-runs the check on any archive.
 
 ### Before/after
 
-- `model.ts`/`state.ts`/`app.tsx` unchanged as the default path —
+- `packages/acp/session/src/model/items.ts`,
+  `packages/acp/session/src/view/state.ts`, and
+  `packages/acp/tui/app.tsx` unchanged as the default path —
   `SessionModel` is now `LegacyImpl` (zero delegation loss).
 - `main.ts` resolves `pickImpl` once and speaks the seam —
   `--impl acp` flips a pane; `--dump` honors it too.
@@ -494,16 +506,15 @@ pane (or `BRO_TUI_IMPL=acp` for a whole attach). The one-line
 
 ## Phase 3 — own control kit, the prompt, and the audit
 
-**Vendoring** (addendum 6): the git dependency is gone — the
-`vendor/acp-tui` submodule was removed; only `packages/acp-model`'s
-source is vendored at `tui/vendor/acp-model/src/` (Apache-2.0
-LICENSE + NOTICE preserved, `ATTRIBUTION.md` pins upstream
-`70b8a6d`). The acp impl imports `vendor/acp-model/src/index.ts`
-directly — no submodule, no `file:` workspace indirection.
-`vendor-env.d.ts` died with the submodule (acp-model's src is pure
-TS, only `import type` on the sdk).
+**Vendoring** (addendum 6): the git dependency is gone. The
+Apache-2.0 model source now lives at
+`packages/acp/model/src/` with its `LICENSE`, `NOTICE`, and
+`ATTRIBUTION.md`; `packages/acp/session/src/view/acp-impl.ts` imports
+it through the `@broject/acp-model` package — no submodule or
+`file:` workspace indirection.
 
-**Own control kit**: `tui/acp/lines.ts` is now OUR implementation of
+**Own control kit**:
+`packages/acp/session/src/view/acp-lines.ts` is now OUR implementation of
 the row language we studied — the `conversation/` layer stays a
 reference, never an import. `acpLine` renders their one-liners
 (`$ ✓ execute  Bash …  #N` with the right-aligned index tail, `∴`
@@ -541,7 +552,8 @@ kind-shaped. On the grep-storm archive the item stream drops to
 less than half (appended 9583→4479) with tool coverage unchanged
 (5248 member-counted, conform compares members not group rows).
 
-**Judge verdicts** (addendum 4): `tui/verdict.ts` — a data-driven
+**Judge verdicts** (addendum 4):
+`packages/acp/session/src/model/verdict.ts` — a data-driven
 shape table over the typed-answer wire (`noul`/`choice`/`score`,
 provider-judge's contract). Classification is shape-based — every
 answer must match the table, so prose never trips it — because the
