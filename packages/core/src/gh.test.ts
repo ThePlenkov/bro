@@ -18,6 +18,13 @@ describe('prRefs', () => {
     ]);
   });
 
+  test('the GitLab merge-request form carries its project and vendor shape', () => {
+    assert.deepEqual(
+      prRefs('merged [!42](https://gitlab.example/group/subproject/-/merge_requests/42)'),
+      [{ pr: 42, repo: 'group/subproject', host: 'gitlab.example', kind: 'gitlab' }]
+    );
+  });
+
   test('the link form is one reference — its own #N is not a second hit', () => {
     const refs = prRefs('see [#958](https://github.com/o/r/pull/958)');
     assert.equal(refs.length, 1);

@@ -159,6 +159,11 @@ async function probePr(target: MergeTarget): Promise<MergeProbe> {
   return { state: meta.state, mergedBy: meta.mergedBy, mergeSha: meta.mergeSha };
 }
 
+/** The selected review connector is the authority for link identity. */
+function connectorHost(rev: ReturnType<typeof reviewHost>): string {
+  return new URL(rev.prLink('owner/repo', 1)).host;
+}
+
 const slugify = (s: string): string =>
   s
     .toLowerCase()
@@ -363,7 +368,15 @@ export async function runConvoyCommand(
       // before.
       const mergeClaim = mergeClaimFor(mol, step, result, flag(rest, '--pr'));
       if (mergeClaim) {
-        const verdict = await verifyMergeClose(mergeClaim, deps?.probe ?? probePr);
+        const probe = deps?.probe ?? probePr;
+        const host =
+          deps?.probe === undefined
+            ? connectorHost(reviewHost(undefined, loadBroConfig().connectors))
+            : undefined;
+        const verdict =
+          host === undefined
+            ? await verifyMergeClose(mergeClaim, probe)
+            : await verifyMergeClose(mergeClaim, probe, host);
         if (!verdict.ok) {
           // exitCode + return, never process.exit: the caller reads the
           // code, and a hard exit would truncate a piped line
