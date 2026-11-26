@@ -217,6 +217,7 @@ export const groups: Group[] = [
         tab: 'handoff',
         lines: [
           agent('auth.2 is mid-migration. I am mid-something-else.'),
+          agent('The step name is auth.2; its mailbox address is the minted worker ID native-7f3a9b2c.'),
           hook('PostToolUse · bro comms notify: ask from native-7f3a9b2c — "users table needs a column. additive ok?"'),
           bash('bro comms notify --to native-7f3a9b2c --kind result --in-reply-to auth.2 "yes, additive only"'),
           out('addressed drop → native-7f3a9b2c · single consumer'),
