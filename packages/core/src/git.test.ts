@@ -660,6 +660,27 @@ describe('gitUpstreamBehind', () => {
       assert.equal(gitUpstreamBehind(dir), null);
     });
   });
+
+  test('a stalled git probe fails open within its deadline', {
+    skip: process.platform === 'win32',
+  }, () => {
+    withRepo(dir => {
+      const shim = mkdtempSync(join(tmpdir(), 'bro-git-upstream-shim-'));
+      try {
+        writeFileSync(join(shim, 'git'), '#!/bin/sh\nsleep 60\n', { mode: 0o755 });
+        const previousPath = process.env.PATH;
+        process.env.PATH = `${shim}:${previousPath ?? ''}`;
+        try {
+          assert.equal(gitUpstreamBehind(dir, 1), null);
+        } finally {
+          if (previousPath === undefined) delete process.env.PATH;
+          else process.env.PATH = previousPath;
+        }
+      } finally {
+        rmSync(shim, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe('gitTryAsync', () => {
