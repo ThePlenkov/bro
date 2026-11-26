@@ -63,6 +63,7 @@ import {
   acpLinkPool,
   admitLaneCap,
   admitLaneCapUnlocked,
+  claimRigChild,
   disposeQuiet,
   type ConductorConfig,
 } from './serve-conductor.ts';
@@ -335,6 +336,8 @@ export function acpTransport(
       cwd: cfg.cwd,
       clientCapabilities: BROKER_CLIENT_CAPS,
       signal: poolAbort.signal,
+      parentToken: randomUUID(),
+      idleTtlMs: 0,
       ...opts.acp,
       bridge,
     },
@@ -343,7 +346,9 @@ export function acpTransport(
   // long-lived ACP link, so the idle release stays OFF here (spec
   // bro-7ira8) — killing the peer mid-conversation breaks the contract
   // the client holds.
-  const pool = acpLinkPool(by, cfg.entry, wireOpts, cfg.timeoutMs, 0);
+  const pool = acpLinkPool(by, cfg.entry, wireOpts, cfg.timeoutMs, 0, {
+    claimSpawn: async () => claimRigChild(cfg.cwd, cfg.rigChildCap),
+  });
 
   /** Out of every index + the local handle dropped — the caller owns
    *  whether upstream gets a session/close first (it can't once the

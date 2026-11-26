@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import type { ProviderEntry } from '@broject/core';
-import { acpLinkPool, conductorProxy } from './serve-conductor.ts';
+import { acpLinkPool, claimRigChild, conductorProxy } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 
@@ -23,6 +23,12 @@ const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' };
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 describe('the pooled peer idle release (bro-7ira8)', () => {
+  test('the rig child wall refuses past its cap and releases cleanly', () => {
+    const release = claimRigChild('rig-cap-test', 1);
+    assert.throws(() => claimRigChild('rig-cap-test', 1), /rig ACP child cap reached/);
+    release();
+    assert.doesNotThrow(() => claimRigChild('rig-cap-test', 1)());
+  });
   test('an idle peer is released — the listener stops holding the account', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok' });
     const pool = acpLinkPool('conductor:t', ENTRY, { acp: { peer: fake.app } }, 10_000, 40);

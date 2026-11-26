@@ -51,7 +51,13 @@ import { AcpTerminals } from './acp-terminal.ts';
 import { AcpDeadLoopError, type AcpGuardCtx } from './acp-guard.ts';
 import { AcpCooldownError } from './acp-cooldown.ts';
 import { objOr, remaining, splitShellWords } from './http.ts';
-import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
+import type {
+  AcpSeam,
+  ProviderCall,
+  ProviderChat,
+  ProviderChatResult,
+  ProviderClient,
+} from './registry.ts';
 import type { ProviderWireOpts } from './systemone.ts';
 import { mapTypedAnswers } from './typed.ts';
 
@@ -126,8 +132,14 @@ export function shellWords(command: string): string[] {
  *  session/new serving a disposable conductor/judge turn never pays
  *  session-start rehydrate probes written for a human session. A
  *  default, not a lock — an explicit ambient `BRO_HOOKS` wins. */
-export function acpChildEnv(): NodeJS.ProcessEnv {
-  return { BRO_HOOKS: '0', ...process.env };
+export function acpChildEnv(seam?: AcpSeam): NodeJS.ProcessEnv {
+  return {
+    BRO_HOOKS: '0',
+    ...(seam?.parentToken === undefined ? {} : { BRO_ACP_PARENT_TOKEN: seam.parentToken }),
+    ...(seam?.idleTtlMs === undefined ? {} : { BRO_ACP_IDLE_TTL_MS: String(seam.idleTtlMs) }),
+    BRO_ACP_PARENT_PID: String(process.pid),
+    ...process.env,
+  };
 }
 
 /** The last bytes of peer stderr — the diagnostic that survives the
@@ -1070,7 +1082,8 @@ function spawnAcpChild(
   app: ReturnType<typeof pooledClientApp>,
   entry: AcpEntry,
   by: string,
-  fail: (err: unknown) => never
+  fail: (err: unknown) => never,
+  seam?: AcpSeam
 ): {
   conn: ReturnType<typeof app.connect>;
   child: ChildProcess;
@@ -1088,7 +1101,11 @@ function spawnAcpChild(
   // detached: the child leads its own process group — the pool's close
   // must take the whole group: a backend that forked children holding
   // an account lane frees it only when every descendant dies
-  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv(), detached: true });
+  const proc = spawn(bin, argv.slice(1), {
+    stdio: 'pipe',
+    env: acpChildEnv(seam),
+    detached: true,
+  });
   proc.unref();
   for (const s of proc.stdio) {
     (s as unknown as { unref?: () => void } | null)?.unref?.();
@@ -1162,7 +1179,7 @@ export async function acpOpen(
   if (peer !== undefined) {
     conn = app.connect(peer);
   } else {
-    const spawned = spawnAcpChild(app, entry, by, fail);
+    const spawned = spawnAcpChild(app, entry, by, fail, opts.acp);
     conn = spawned.conn;
     child = spawned.child;
     tail = spawned.tail;

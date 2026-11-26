@@ -682,7 +682,12 @@ describe('acpOpen teardown — the pool abort seam', () => {
       }
     };
     try {
-      const pending = acpOpen('conductor:group', entry, { acp: { signal: ctl.signal } }, deadline());
+      const pending = acpOpen(
+        'conductor:group',
+        entry,
+        { acp: { signal: ctl.signal } },
+        deadline()
+      );
       const until = Date.now() + 5_000;
       while (!existsSync(marker) && Date.now() < until) {
         await new Promise(resolve => setTimeout(resolve, 10));
@@ -756,6 +761,13 @@ describe('acpChildEnv', () => {
       if (prev === undefined) delete process.env.BRO_HOOKS;
       else process.env.BRO_HOOKS = prev;
     }
+  });
+
+  test('marks served children with a parent token, pid, and idle lease', () => {
+    const env = acpChildEnv({ parentToken: 'rig-token', idleTtlMs: 1234 });
+    assert.equal(env.BRO_ACP_PARENT_TOKEN, 'rig-token');
+    assert.equal(env.BRO_ACP_PARENT_PID, String(process.pid));
+    assert.equal(env.BRO_ACP_IDLE_TTL_MS, '1234');
   });
 });
 
