@@ -262,40 +262,46 @@ const MODE_CMD_FORBIDDEN = /[;&|`$()<>\n\\]/;
  *  must precede the mode match or `bro mode code --session s1` would
  *  bind the calling session too). Flags that take a value are skipped
  *  with their value; unknown flags are doubt → no bind. */
-function modeCommandTarget(rest: string): string | null {
-  const tokens = rest
-    .trim()
-    .split(/\s+/)
-    .filter(t => t !== '');
-  // pass 1 — explicit targeting vetoes regardless of position
-  for (const t of tokens) {
-    if (
-      t === '--session' ||
-      t === '--host' ||
-      t.startsWith('--session=') ||
-      t.startsWith('--host=')
-    ) {
+class ModeCommandParser {
+  readonly tokens: string[];
+
+  constructor(rest: string) {
+    this.tokens = rest
+      .trim()
+      .split(/\s+/)
+      .filter(t => t !== '');
+  }
+
+  target(): string | null {
+    if (this.tokens.some(t => this.isExplicitTarget(t))) {
       return null;
     }
-  }
-  // pass 2 — collect non-flag positionals; exactly one is the mode
-  // name (a second positional is malformed usage — doubt = no bind)
-  const pos: string[] = [];
-  for (const t of tokens) {
-    // --json is a harmless output modifier; --help/-h are NOT ignored —
-    // the CLI prints help and sets nothing, so binding here would pin a
-    // mode the user never applied. They fall through to the unknown-
-    // flag veto below (doubt = no bind).
-    if (t === '--json') {
-      continue;
+    const pos: string[] = [];
+    for (const t of this.tokens) {
+      // --json is a harmless output modifier; --help/-h are NOT ignored —
+      // the CLI prints help and sets nothing, so binding here would pin a
+      // mode the user never applied. They fall through to the unknown-
+      // flag veto below (doubt = no bind).
+      if (t === '--json') {
+        continue;
+      }
+      if (t.startsWith('-')) {
+        // unknown flag — could be a value-taking one; doubt = no bind
+        return null;
+      }
+      pos.push(t);
     }
-    if (t.startsWith('-')) {
-      // unknown flag — could be a value-taking one; doubt = no bind
-      return null;
-    }
-    pos.push(t);
+    return pos.length === 1 ? pos[0]! : null;
   }
-  return pos.length === 1 ? pos[0]! : null;
+
+  private isExplicitTarget(token: string): boolean {
+    return (
+      token === '--session' ||
+      token === '--host' ||
+      token.startsWith('--session=') ||
+      token.startsWith('--host=')
+    );
+  }
 }
 
 /** `-p`/`--package` in every spelling npx accepts — the package-set
@@ -315,9 +321,7 @@ const MODE_NO_VALUE_NPX_FLAGS = new Set(['-y', '--yes', '--no-install', '-q', '-
  *  rename the run). Tokenized, not regex — the `npx [flags]* bro`
  *  shape is ReDoS-prone (js/redos). */
 function modeNpxExecIndex(tokens: string[]): number {
-  if (tokens.some(t => MODE_NPX_PACKAGE_RE.test(t))) {
-    return -1;
-  }
+  if (tokens.some(t => MODE_NPX_PACKAGE_RE.test(t))) return -1;
   const i = tokens.findIndex(t => !MODE_NO_VALUE_NPX_FLAGS.has(t));
   return i >= 0 && !tokens[i]!.startsWith('-') ? i : -1;
 }
@@ -361,7 +365,7 @@ export function parseModeCommand(cmd: string): Mode | null {
   if (rest.length === 0 || rest[0]!.toLowerCase() !== 'mode') {
     return null;
   }
-  const target = modeCommandTarget(rest.slice(1).join(' '));
+  const target = new ModeCommandParser(rest.slice(1).join(' ')).target();
   if (target === null) {
     return null;
   }
@@ -386,90 +390,112 @@ export type ModeSnapshotEvent = (typeof MODE_SNAPSHOT_EVENTS)[number];
  *  marginally, and the live path still answers when stale. */
 export const MODE_SNAPSHOT_TTL_MS = 5 * 60_000;
 
-function snapshotsRoot(env: NodeJS.ProcessEnv): string | null {
-  const dir = broStateDir(env);
-  return dir === null ? null : join(dir, 'snapshots');
+/** Snapshot paths and IO share one validated store. The function exports below
+ * retain the small public API used by hooks while keeping the invariants here. */
+export class SnapshotStore {
+  constructor(private readonly env: NodeJS.ProcessEnv) {}
+
+  modeDir(project: string, mode: Mode): string | null {
+    const dir = broStateDir(this.env);
+    if (dir === null || !/^[A-Za-z0-9_-]+$/.test(project) || !isMode(mode)) return null;
+    return join(dir, 'snapshots', project, mode);
+  }
+
+  eventPath(project: string, mode: Mode, event: ModeSnapshotEvent): string | null {
+    const dir = this.modeDir(project, mode);
+    return dir === null ? null : join(dir, `${event}.txt`);
+  }
+
+  stampPath(project: string, mode: Mode): string | null {
+    const dir = this.modeDir(project, mode);
+    return dir === null ? null : join(dir, '.stamp');
+  }
+
+  fresh(project: string, mode: Mode, now = Date.now()): boolean {
+    const stamp = this.stampPath(project, mode);
+    if (stamp === null) return false;
+    try {
+      return now - statSync(stamp).mtimeMs < MODE_SNAPSHOT_TTL_MS;
+    } catch {
+      return false;
+    }
+  }
+
+  read(project: string, mode: Mode, event: ModeSnapshotEvent): string | undefined {
+    if (!this.fresh(project, mode)) return undefined;
+    const path = this.eventPath(project, mode, event);
+    if (path === null) return undefined;
+    try {
+      return readFileSync(path, 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+
+  write(project: string, mode: Mode, event: ModeSnapshotEvent, text: string): boolean {
+    const path = this.eventPath(project, mode, event);
+    if (path === null) return false;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      const tmp = `${path}.${process.pid}.tmp`;
+      writeFileSync(tmp, text);
+      renameSync(tmp, path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  touch(project: string, mode: Mode): void {
+    const stamp = this.stampPath(project, mode);
+    if (stamp === null) return;
+    try {
+      mkdirSync(dirname(stamp), { recursive: true });
+      writeFileSync(stamp, `${Date.now()}\n`);
+    } catch {
+      // stamp is best-effort — a missing stamp just reads stale
+    }
+  }
 }
 
-/** `snapshots/<project>/<mode>/` — project ids are hex hashes and modes
- *  are the closed MODES vocabulary, but both are validated before they
- *  touch a path (a hand-edited caller must not escape the root). */
 export function snapshotModeDir(
   env: NodeJS.ProcessEnv,
   project: string,
   mode: Mode
 ): string | null {
-  const root = snapshotsRoot(env);
-  if (root === null || !/^[A-Za-z0-9_-]+$/.test(project) || !isMode(mode)) {
-    return null;
-  }
-  return join(root, project, mode);
+  return new SnapshotStore(env).modeDir(project, mode);
 }
-
 export function snapshotEventPath(
   env: NodeJS.ProcessEnv,
   project: string,
   mode: Mode,
   event: ModeSnapshotEvent
 ): string | null {
-  const dir = snapshotModeDir(env, project, mode);
-  return dir === null ? null : join(dir, `${event}.txt`);
+  return new SnapshotStore(env).eventPath(project, mode, event);
 }
-
 export function snapshotStampPath(
   env: NodeJS.ProcessEnv,
   project: string,
   mode: Mode
 ): string | null {
-  const dir = snapshotModeDir(env, project, mode);
-  return dir === null ? null : join(dir, '.stamp');
+  return new SnapshotStore(env).stampPath(project, mode);
 }
-
-/** A snapshot answers only while its stamp is younger than the TTL —
- *  the stamp (not per-file mtimes) is the anchor so a partially-written
- *  render never passes as fresh. */
 export function snapshotFresh(
   env: NodeJS.ProcessEnv,
   project: string,
   mode: Mode,
-  now: number = Date.now()
+  now?: number
 ): boolean {
-  const stamp = snapshotStampPath(env, project, mode);
-  if (stamp === null) {
-    return false;
-  }
-  try {
-    return now - statSync(stamp).mtimeMs < MODE_SNAPSHOT_TTL_MS;
-  } catch {
-    return false;
-  }
+  return new SnapshotStore(env).fresh(project, mode, now);
 }
-
-/** The snapshot's additionalContext text for one event — undefined on
- *  miss, stale stamp, or an unreadable file. An EMPTY string is a valid
- *  answer ("rendered, nothing to say") and returns ''. */
 export function readModeSnapshot(
   env: NodeJS.ProcessEnv,
   project: string,
   mode: Mode,
   event: ModeSnapshotEvent
 ): string | undefined {
-  if (!snapshotFresh(env, project, mode)) {
-    return undefined;
-  }
-  const path = snapshotEventPath(env, project, mode, event);
-  if (path === null) {
-    return undefined;
-  }
-  try {
-    return readFileSync(path, 'utf8');
-  } catch {
-    return undefined;
-  }
+  return new SnapshotStore(env).read(project, mode, event);
 }
-
-/** Write one event's snapshot + refresh the stamp — the renderer calls
- *  this per event then stamps once at the end. */
 export function writeModeSnapshot(
   env: NodeJS.ProcessEnv,
   project: string,
@@ -477,32 +503,10 @@ export function writeModeSnapshot(
   event: ModeSnapshotEvent,
   text: string
 ): boolean {
-  const path = snapshotEventPath(env, project, mode, event);
-  if (path === null) {
-    return false;
-  }
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, text);
-    renameSync(tmp, path);
-    return true;
-  } catch {
-    return false;
-  }
+  return new SnapshotStore(env).write(project, mode, event, text);
 }
-
 export function touchSnapshotStamp(env: NodeJS.ProcessEnv, project: string, mode: Mode): void {
-  const stamp = snapshotStampPath(env, project, mode);
-  if (stamp === null) {
-    return;
-  }
-  try {
-    mkdirSync(dirname(stamp), { recursive: true });
-    writeFileSync(stamp, `${Date.now()}\n`);
-  } catch {
-    // stamp is best-effort — a missing stamp just reads stale
-  }
+  new SnapshotStore(env).touch(project, mode);
 }
 
 // --- inbox (F4 forward-compat — run.sh's Tier-0 wake reads the same path) -----
@@ -520,5 +524,5 @@ export function inboxPath(env: NodeJS.ProcessEnv, host: string, sid: string): st
 
 // --- modes vocabulary re-export ----------------------------------------------------
 
-export { isMode, MODES };
 export type { Mode };
+export { isMode, MODES };
