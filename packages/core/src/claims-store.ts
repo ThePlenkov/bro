@@ -312,6 +312,7 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
       }
     }
     return live;
+  };
 
 
   /** `task:*` delegation — the bd claim is the source of truth. The
