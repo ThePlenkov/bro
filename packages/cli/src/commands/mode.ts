@@ -316,7 +316,9 @@ async function runSet(
   // snapshot that so a failed write undoes only a FRESH acquire (the
   // pre-existing claim belongs to the mode file still on disk)
   const preHeld =
-    args.mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
+    args.mode === 'orchestrate'
+      ? await orchestratorRoleHeldBy({ dir, session: sessionKey })
+      : false;
   const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env, ownSession);
   try {
     writeModeFile(file, args.mode, project);
@@ -404,9 +406,11 @@ async function runClear(
   // willOrchestrate — is the truth the role reconciles against.
   if (res.mode === 'orchestrate') {
     if (!gated) {
-      await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession } }).catch(() => ({
-        ok: false,
-      }));
+      await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession } }).catch(
+        () => ({
+          ok: false,
+        })
+      );
     }
   } else {
     await releaseOrchestratorRole({ dir, session: sessionKey });
@@ -610,8 +614,8 @@ export async function runModeCommand(argv: string[], deps: ModeDeps = {}): Promi
     list: () => runList(args, env, ledger),
     render: () => runRender(args, dir, render),
   };
-  const early = earlyHandlers[args.sub];
-  if (early !== undefined) {
+  const early = Object.getOwnPropertyDescriptor(earlyHandlers, args.sub)?.value;
+  if (typeof early === 'function') {
     await early();
     return;
   }
@@ -651,8 +655,8 @@ export async function runModeCommand(argv: string[], deps: ModeDeps = {}): Promi
         : () => runSet({ ...args, mode }, sess, dir, env, ledger, render),
     clear: () => runClear(args, sess, dir, env, ledger),
   };
-  const handler = handlers[args.sub];
-  if (handler === undefined) {
+  const handler = Object.getOwnPropertyDescriptor(handlers, args.sub)?.value;
+  if (typeof handler !== 'function') {
     throw new CommandError(`error: unhandled mode subcommand\n${USAGE}`, EXIT.usage);
   }
   await handler();
