@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { ioRead, ioWriteAtomic } from './io.ts';
 
 export interface DevinSubagentProfile {
   model: string;
@@ -17,11 +17,6 @@ export interface DevinSubagentConfig {
 export interface DevinMaterializeOptions {
   config: DevinSubagentConfig;
   home?: string;
-}
-
-interface FileContent {
-  path: string;
-  content: string;
 }
 
 interface ProfileEntry {
@@ -46,13 +41,6 @@ function profileText(profile: DevinSubagentProfile): string {
   return `---\nmodel: ${profile.model}\n${tools}---\n${profile.prompt ?? ''}\n`;
 }
 
-function writeAtomic(file: FileContent): void {
-  mkdirSync(dirname(file.path), { recursive: true });
-  const temporary = `${file.path}.${process.pid}.tmp`;
-  writeFileSync(temporary, file.content, 'utf8');
-  renameSync(temporary, file.path);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Object.prototype.toString.call(value) === '[object Object]';
 }
@@ -61,9 +49,9 @@ function existingAgent(existing: Record<string, unknown>): Record<string, unknow
   return isRecord(existing.agent) ? existing.agent : {};
 }
 
-function readConfig(file: ConfigFile): Record<string, unknown> {
+function readConfig(root: string, file: ConfigFile): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(file.path, 'utf8'));
+    const parsed: unknown = JSON.parse(ioRead(root, file.path));
     if (!isRecord(parsed)) return {};
     return parsed;
   } catch (error) {
@@ -74,16 +62,17 @@ function readConfig(file: ConfigFile): Record<string, unknown> {
   }
 }
 
-function mergeDefaultModel(file: DefaultModel): void {
-  const existing = readConfig(file);
-  writeAtomic({
-    path: file.path,
-    content: `${JSON.stringify(
+function mergeDefaultModel(root: string, file: DefaultModel): void {
+  const existing = readConfig(root, file);
+  ioWriteAtomic(
+    root,
+    file.path,
+    `${JSON.stringify(
       { ...existing, agent: { ...existingAgent(existing), subagent_model: file.model } },
       null,
       2
-    )}\n`,
-  });
+    )}\n`
+  );
 }
 
 function validProfile(entry: ProfileEntry): boolean {
@@ -104,6 +93,7 @@ function defaultModel(config: DevinSubagentConfig): string | undefined {
 export function materializeDevinSubagents(options: DevinMaterializeOptions): string[] {
   const { config } = options;
   const home = options.home ?? homedir();
+  const root = home;
   const written: string[] = [];
   const profiles = config.profiles ?? config.subagents ?? {};
   for (const [name, profile] of Object.entries(profiles)) {
@@ -111,13 +101,13 @@ export function materializeDevinSubagents(options: DevinMaterializeOptions): str
       throw new Error(`invalid Devin subagent profile: ${name}`);
     }
     const path = join(home, '.config', 'devin', 'agents', `${name}.md`);
-    writeAtomic({ path, content: profileText(profile) });
+    ioWriteAtomic(root, path, profileText(profile));
     written.push(path);
   }
   const model = defaultModel(config);
   if (model !== undefined) {
     const path = join(home, '.config', 'devin', 'config.json');
-    mergeDefaultModel({ path, model });
+    mergeDefaultModel(root, { path, model });
     written.push(path);
   }
   return written;
