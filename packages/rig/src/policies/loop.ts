@@ -1147,7 +1147,7 @@ export function autoMergeArmedForMember(
 function persistedAutoMergeArmed(ctx: LoopCtx, pr: number): boolean | undefined {
   try {
     const body = ctx.deps.rev.prBody?.({ repo: ctx.repo, pr });
-    const value = body === undefined ? undefined : bodyMeta(body).autoMergeArmed;
+    const value = bodyMeta(body).autoMergeArmed;
     return typeof value === 'boolean' ? value : undefined;
   } catch {
     return undefined;
