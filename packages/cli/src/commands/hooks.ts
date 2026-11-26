@@ -1028,10 +1028,7 @@ export async function otherLiveClaims(
 ): Promise<ClaimRow[]> {
   try {
     const host = deps?.host ?? hookHost;
-    if (sessionId === '' || host === undefined) {
-      return [];
-    }
-    if (host === '' || host === 'unknown') {
+    if (sessionId === '' || !identifiedHost(host)) {
       return [];
     }
     const claims = deps?.claims ?? (hookClaims ??= claimsFacade());
@@ -1043,6 +1040,12 @@ export async function otherLiveClaims(
   } catch {
     return [];
   }
+}
+
+/** Only a concrete host identity can safely self-exclude this session's
+ * claims. Empty and sentinel host values are machine-wide, not identities. */
+function identifiedHost(host: string | undefined): host is string {
+  return host !== undefined && host !== '' && host !== 'unknown';
 }
 
 /** Parallel-session nudge at session start: another live session armed

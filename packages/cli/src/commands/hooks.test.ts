@@ -849,19 +849,21 @@ describe('otherLiveClaims — the nudge leg stays project-scoped (bro-izpyk.10, 
     assert.deepEqual(rows, []);
   });
 
-  test('an unproven host self-excludes before the project read', async () => {
-    const seen: unknown[] = [];
-    const rows = await otherLiveClaims('/any/dir', 'sess-x', {
-      host: 'unknown',
-      claims: facade(async (q: unknown) => {
-        seen.push(q);
-        return [row];
-      }),
-      project: 'p1',
+  for (const host of [undefined, '', 'unknown']) {
+    test(`an unproven host (${String(host)}) self-excludes before the project read`, async () => {
+      const seen: unknown[] = [];
+      const rows = await otherLiveClaims('/any/dir', 'sess-x', {
+        host,
+        claims: facade(async (q: unknown) => {
+          seen.push(q);
+          return [row];
+        }),
+        project: 'p1',
+      });
+      assert.deepEqual(rows, []);
+      assert.deepEqual(seen, []);
     });
-    assert.deepEqual(rows, []);
-    assert.deepEqual(seen, []);
-  });
+  }
 });
 
 describe('recordGuardEvents (bro-arm83)', () => {
