@@ -522,19 +522,22 @@ describe('runSessionView --once', () => {
     assert.match(text, /⚠ permission ‹rm -rf \/› — denied/, 'the ask surfaces with its verdict');
     // `bro: status` folds in — the projector's status string prints once
     assert.match(text, /── working·#7 ──/);
-    // pane reports are advisory child processes; wait for the terminal
-    // blocked report before inspecting the detached call log.
+    // report-agent is deliberately fire-and-forget; wait for the detached
+    // child carrying the terminal archive verdict before sampling the log.
     await waitForCall(
       f.log,
       c => c[1] === 'report-agent' && c[c.indexOf('--state') + 1] === 'blocked'
     );
     const calls = callsOf(f.log);
-    const reports = calls.filter(c => c[1] === 'report-agent');
-    // the archive verdict moved through the stream: working while the
-    // turn ran, idle at the stop, blocked at the permission row
+    const reports = callsOf(f.log).filter(c => c[1] === 'report-agent');
+    // The archive verdict moved through the stream: working while the
+    // turn ran, idle at the stop, blocked at the permission row.
+    // Detached advisory calls can finish out of order, so terminal
+    // permission is established by presence, not log position.
     const states = reports.map(c => c[c.indexOf('--state') + 1]);
     const report = latestReport(calls);
     assert.equal(report?.[report.indexOf('--state') + 1], 'blocked');
+    assert.ok(states.includes('blocked'));
     assert.ok(states.includes('working'));
   });
 
