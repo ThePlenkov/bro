@@ -3,7 +3,7 @@
   "groups": {
     "review": {
       "summary": "PR review loop — gates, threads, debt",
-      "members": ["debt", "act", "merge", "watch", "drive", "cleanup"]
+      "members": ["react", "debt", "act", "merge", "watch", "drive", "cleanup"]
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
@@ -72,6 +72,29 @@
     }
   },
   "commands": {
+    "react": {
+      "name": "react",
+      "group": "review",
+      "summary": "React to a PR or review finding: <target> <+1|-1|emoji>",
+      "spellings": ["react", "review react"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "act",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--remove": "remove the reaction",
+          "--json": "emit the reaction result as JSON",
+          "--tsv": "emit a tab-separated result"
+        },
+        "exits": {
+          "0": "reaction applied",
+          "1": "host rejected the reaction",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
     "debt": {
       "name": "debt",
       "group": "review",

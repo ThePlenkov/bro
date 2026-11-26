@@ -141,6 +141,15 @@ export interface ReviewThread {
   comments?: ReviewComment[];
 }
 
+export type ReactionKind = '+1' | '-1' | 'thumbs_up' | 'thumbs_down' | 'eyes';
+
+export interface ReactionResult {
+  artifact: string;
+  reaction: ReactionKind;
+  removed: boolean;
+  counts: Record<string, number>;
+}
+
 export interface MergedPr {
   number: number;
   mergedAt: string | null;
@@ -372,6 +381,9 @@ export interface ReviewFacade {
   prFilesAsync?(t: PrTarget): Promise<string[]>;
 
   reviewThreads(t: PrTarget): Promise<ReviewThread[]>;
+  /** Apply or remove a host reaction. A PR target reacts to the PR itself;
+   * a host-native node id reacts to that review artifact. */
+  react?(target: PrTarget | string, reaction: ReactionKind, remove?: boolean): ReactionResult;
   resolveThread(id: string, unresolve?: boolean): void;
   replyThread(id: string, body: string): void;
   /** Dismiss a review — clears its standing verdict on the host so

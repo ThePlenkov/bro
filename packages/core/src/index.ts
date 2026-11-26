@@ -371,6 +371,8 @@ export type {
   PrLabelOp,
   PrMeta,
   PrTarget,
+  ReactionKind,
+  ReactionResult,
   ReviewComment,
   ReviewFacade,
   ReviewThread,
