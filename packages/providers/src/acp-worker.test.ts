@@ -18,6 +18,12 @@ import { fakeAcpAgent } from './testkit.ts';
 // inside its own window, so only the incidental emissions die.
 process.env.BRO_TELEMETRY = '0';
 
+// The worker and its broker/telemetry child are real spawned processes.
+// Under Nx --parallel, scheduling latency is substantially higher than in a
+// standalone package run, so these observation windows must not encode an
+// idle-machine assumption.
+const SPAWN_SETTLE_TIMEOUT_MS = 20_000;
+
 const MODEL_OPTION: SessionConfigOption = {
   type: 'select',
   id: 'model-pick',
@@ -191,7 +197,7 @@ describe('runAcpWorker', () => {
         filter: { topics: ['agent'] },
         windowMs: 50,
       });
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + SPAWN_SETTLE_TIMEOUT_MS;
       while (probed.events.length < want.length && Date.now() < deadline) {
         await new Promise(r => setTimeout(r, 100));
         probed = await busProbe(busSocketPath(dir)!, {
@@ -720,7 +726,7 @@ describe('runAcpWorker', () => {
     try {
       assert.equal(await runAcpWorker(spec), 0);
       // span ends queue and flush on the unref'd timer — poll the wire
-      const deadline = Date.now() + 8_000;
+      const deadline = Date.now() + SPAWN_SETTLE_TIMEOUT_MS;
       let spans: {
         name: string;
         spanId: string;

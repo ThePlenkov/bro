@@ -11,6 +11,11 @@ import { fileURLToPath } from 'node:url';
 import { otelEvent, otelSpan, postDetached } from './otel.ts';
 
 const OTEL_TS = fileURLToPath(new URL('./otel.ts', import.meta.url));
+// Spawned emitters can take several seconds to get scheduled when Nx is
+// running the workspace at high parallelism. This is a test observation
+// bound, not a production timeout: keep polling long enough to distinguish
+// CPU contention from a lost emission.
+const WIRE_TIMEOUT_MS = 20_000;
 
 interface Hit {
   path: string;
@@ -42,7 +47,7 @@ function collector(): Promise<{ server: Server; port: number; hits: Hit[] }> {
   });
 }
 
-async function until(pred: () => boolean, what: string, ms = 6_000): Promise<void> {
+async function until(pred: () => boolean, what: string, ms = WIRE_TIMEOUT_MS): Promise<void> {
   const t0 = Date.now();
   while (!pred()) {
     if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
