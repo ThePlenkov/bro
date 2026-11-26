@@ -77,7 +77,7 @@ const at = (row: ArchiveRow): number => {
 /** One archive row → the ModelEvents it means (usually one; `turn
  *  start` maps to `turn_started` — `prompt_sent` would fabricate a
  *  user message the archive does not carry). */
-function eventsOf(row: ArchiveRow): ModelEvent[] {
+function eventsOf(row: ArchiveRow, position: number, fallbackId?: string): ModelEvent[] {
   const t = at(row);
   switch (row.kind) {
     case 'update':
@@ -87,7 +87,7 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
     case 'turn':
       return turnEvents(row, t);
     case 'permission':
-      return permissionEvents(row, t);
+      return permissionEvents(row, t, position, fallbackId);
     default:
       return [];
   }
@@ -127,8 +127,15 @@ const turnEvents = (row: ArchiveRow, t: number): ModelEvent[] => {
  *  ONE row that carries the verdict and no phase — for that shape
  *  the row opens AND closes, which is what keeps the archive's
  *  single-row permission working. */
-const permissionEvents = (row: ArchiveRow, t: number): ModelEvent[] => {
-  const toolCallId = (row.toolCallId ?? 'unknown') as never;
+const permissionEvents = (
+  row: ArchiveRow,
+  t: number,
+  position: number,
+  fallbackId?: string
+): ModelEvent[] => {
+  // Headless archives omit the tool call id. Use a stable per-row fallback
+  // so concurrent asks do not overwrite one another in the ACP model.
+  const toolCallId = (row.toolCallId ?? fallbackId ?? `archive-permission-${position}`) as never;
   const events: ModelEvent[] = [];
   if (row.phase !== 'answer') {
     events.push({
@@ -776,6 +783,10 @@ export class AcpImpl implements PaneImpl {
   /** Their sid → the turn origin at item birth (update rows carry no
    *  `by`; the turn's `by` is on the start row). */
   private readonly sidBy = new Map<string, string>();
+  /** Archive row position, used to identify permission asks without ids. */
+  private feedPosition = 0;
+  /** Missing-id permission answers reuse the matching ask's fallback id. */
+  private readonly pendingPermissionIds = new Map<string, string[]>();
   private ops: Op[] = [];
 
   /** The shell's context — agent/worktree for the feed header. */
@@ -784,6 +795,7 @@ export class AcpImpl implements PaneImpl {
   }
 
   feed(row: ArchiveRow): void /* NOSONAR typescript:S3776 */ {
+    const position = this.feedPosition++;
     this.launchTs ??= row.ts;
     if (row.ts !== undefined) this.lastActivityTs = row.ts;
     // the provider label is any `acp provider 'X'`/`provider:X` by —
@@ -851,7 +863,8 @@ export class AcpImpl implements PaneImpl {
     }
     const wasAction = this.session.state === 'requires_action';
     const orderLen = this.session.order.length;
-    for (const ev of eventsOf(row)) {
+    const fallbackId = this.permissionFallbackId(row, position);
+    for (const ev of eventsOf(row, position, fallbackId)) {
       this.session = reduce(this.session, ev);
     }
     // the blocked clock starts when the ask lands — a stamp-less
@@ -879,6 +892,23 @@ export class AcpImpl implements PaneImpl {
     // the stop's marker sid was born internal — the flag clears only
     // after the birth loop ran (addendum 27)
     if (row.kind === 'turn' && row.phase === 'stop') this.curInternal = false;
+  }
+
+  private permissionFallbackId(row: ArchiveRow, position: number): string | undefined {
+    if (row.kind !== 'permission' || row.toolCallId !== undefined) return undefined;
+    const key = JSON.stringify([row.title ?? 'permission']);
+    const ids = this.pendingPermissionIds.get(key) ?? [];
+    if (row.phase === 'answer') {
+      const id = ids.shift();
+      if (ids.length === 0) this.pendingPermissionIds.delete(key);
+      return id;
+    }
+    const id = `archive-permission-${position}`;
+    if (row.verdict === undefined || row.verdict === '') {
+      ids.push(id);
+      this.pendingPermissionIds.set(key, ids);
+    }
+    return id;
   }
 
   beginLive(): void {

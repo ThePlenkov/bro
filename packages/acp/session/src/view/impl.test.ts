@@ -109,6 +109,29 @@ describe('the pane impl seam', () => {
     assert.notEqual(impl.verdict?.led.state, 'blocked');
   });
 
+  test('an id-less answer closes its matching id-less ask', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({
+      kind: 'permission',
+      phase: 'ask',
+      title: 'write /x',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      ts: '2026-01-01T00:00:30Z',
+    });
+    impl.beginLive();
+    assert.equal(impl.verdict?.led.state, 'blocked');
+    impl.feed({
+      kind: 'permission',
+      phase: 'answer',
+      title: 'write /x',
+      verdict: 'approved',
+      optionId: 'allow',
+      optionKind: 'allow_once',
+      ts: '2026-01-01T00:00:40Z',
+    });
+    assert.notEqual(impl.verdict?.led.state, 'blocked');
+  });
+
   test('the permission clock starts at the ask — later rows do not move it', async () => {
     const impl = await pickImpl('acp', {});
     impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
@@ -245,7 +268,6 @@ describe('the pane impl seam', () => {
     assert.doesNotMatch(text, /▸ 3 tool calls/);
     assert.match(text, /▸ 1 internal call/);
   });
-
   test('the dump only classifies structured replies from judge-labelled turns', async () => {
     const reply = JSON.stringify({ answers: { route: { type: 'choice', choice: 'a' } } });
     const normal = await pickImpl('acp', {});
@@ -276,5 +298,25 @@ describe('the pane impl seam', () => {
       } as never,
     });
     assert.match(judge.dump().join('\n'), /⛨ .*route choice: a/);
+  });
+  test('concurrent archived permission asks keep separate records', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({
+      kind: 'permission',
+      title: 'write /first',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      ts: '2026-01-01T00:00:01Z',
+    });
+    impl.feed({
+      kind: 'permission',
+      title: 'write /second',
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      ts: '2026-01-01T00:00:02Z',
+    });
+    impl.beginLive();
+
+    const dump = impl.dump().join('\n');
+    assert.match(dump, /write \/first/);
+    assert.match(dump, /write \/second/);
   });
 });
