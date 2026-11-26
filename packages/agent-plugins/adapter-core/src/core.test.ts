@@ -93,6 +93,12 @@ test('clip: combining marks are zero-width', () => {
   assert.equal(clip(accented.repeat(10), 5), `${'e\u0301'.repeat(4)}…`);
 });
 
+test('displayWidth: handles zero-width joiners and supplementary CJK gaps', () => {
+  assert.equal(displayWidth('\u200b\u200c\u200d'), 0);
+  assert.equal(displayWidth(String.fromCodePoint(0x2fffe)), 1);
+  assert.equal(displayWidth(String.fromCodePoint(0x30000)), 2);
+});
+
 test('broEnabled: a repo with a bro config opts in', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-enabled-'));
   try {

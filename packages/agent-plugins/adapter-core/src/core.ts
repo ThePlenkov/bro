@@ -594,6 +594,12 @@ export function displayWidth(text: string): number {
     ) {
       continue;
     }
+    const zeroWidth =
+      (code >= 0x200b && code <= 0x200d) ||
+      (code >= 0xfe00 && code <= 0xfe0f);
+    if (zeroWidth) {
+      continue;
+    }
     const wide =
       (code >= 0x1100 && code <= 0x115f) ||
       (code >= 0x2329 && code <= 0x232a) ||
@@ -604,7 +610,9 @@ export function displayWidth(text: string): number {
       (code >= 0xfe30 && code <= 0xfe6f) ||
       (code >= 0xff00 && code <= 0xff60) ||
       (code >= 0xffe0 && code <= 0xffe6) ||
-      (code >= 0x1f000 && code <= 0x1faff);
+      (code >= 0x1f000 && code <= 0x1faff) ||
+      (code >= 0x20000 && code <= 0x2fffd) ||
+      (code >= 0x30000 && code <= 0x3fffd);
     width += wide ? 2 : 1;
   }
   return width;

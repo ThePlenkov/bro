@@ -2827,6 +2827,9 @@ function emitPreToolDeny(reason: string): void {
  *  applies them over the original tool_input. No verdicts → silence →
  *  the call runs untouched (fail-open, like every hook). */
 async function emitPreTool(input: HookInput): Promise<void> {
+  if (hookMode === 'observe') {
+    return;
+  }
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;

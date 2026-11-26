@@ -47,7 +47,7 @@ test('S8: failing bd dep — hooks stay fail-open, dep journal records the call'
 
   const calls = bd.journal().map(j => j.argv.join(' '));
   assert.ok(
-    calls.some(a => a.startsWith('kv list')),
+    calls.some(a => a === 'kv list'),
     `expected a bd kv list probe, journal: ${JSON.stringify(calls)}`
   );
 });
