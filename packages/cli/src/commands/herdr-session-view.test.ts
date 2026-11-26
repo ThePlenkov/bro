@@ -522,23 +522,64 @@ describe('runSessionView --once', () => {
     assert.match(text, /⚠ permission ‹rm -rf \/› — denied/, 'the ask surfaces with its verdict');
     // `bro: status` folds in — the projector's status string prints once
     assert.match(text, /── working·#7 ──/);
-    // report-agent is deliberately fire-and-forget; wait for the detached
-    // child carrying the terminal archive verdict before sampling the log.
-    await waitForCall(
+    const calls = callsOf(f.log);
+    const reports = calls.filter(c => c[1] === 'report-agent');
+    // Reports are advisory child processes; wait for the terminal report
+    // before inspecting the fire-and-forget log. Otherwise a busy runner
+    // can observe the earlier working report while the blocked report is
+    // still being written.
+    const terminal = await waitForCall(
       f.log,
       c => c[1] === 'report-agent' && c[c.indexOf('--state') + 1] === 'blocked'
     );
-    const calls = callsOf(f.log);
-    const reports = callsOf(f.log).filter(c => c[1] === 'report-agent');
-    // The archive verdict moved through the stream: working while the
-    // turn ran, idle at the stop, blocked at the permission row.
-    // Detached advisory calls can finish out of order, so terminal
-    // permission is established by presence, not log position.
-    const states = reports.map(c => c[c.indexOf('--state') + 1]);
-    const report = latestReport(calls);
-    assert.equal(report?.[report.indexOf('--state') + 1], 'blocked');
-    assert.ok(states.includes('blocked'));
+    // the archive verdict moved through the stream: working while the
+    // turn ran, idle at the stop, blocked at the permission row
+    const states = [...reports, terminal].map(c => c[c.indexOf('--state') + 1]);
+    assert.deepEqual(states[states.length - 1], 'blocked');
     assert.ok(states.includes('working'));
+  });
+
+  test('a direct --events/--agent binding renders without the fleet doc', async () => {
+    const f = fixture();
+    const eventsPath = f.write(
+      'a.events.jsonl',
+      [
+        { ts: '2026-01-01T00:00:00Z', session: 'ses_1', kind: 'turn', phase: 'start' },
+        {
+          ts: '2026-01-01T00:00:01Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'DIRECT-CHUNK' },
+          },
+        },
+        { ts: '2026-01-01T00:00:02Z', session: 'ses_1', kind: 'turn', phase: 'stop' },
+      ]
+        .map(r => JSON.stringify(r))
+        .join('\n') + '\n'
+    );
+    // no fleet doc at all — the line-mode pane the builders arm
+    // (`session-view <wt> --events <e> --agent <id>`) must still
+    // render; worktree-only resolution dropped native journals
+    await withEnv(f.env, () =>
+      runSessionView([f.worktree, '--once', '--events', eventsPath, '--agent', 'native-x'], f.opts)
+    );
+    const text = f.stdout();
+    assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
+    const calls = callsOf(f.log);
+    // the highest-sequence report is the verdict — detached herdr
+    // helper processes can append their records out of order. The first fires before the
+    // archive drains and would read 'idle' even on an empty journal;
+    // the floor is 'unknown' (no registry entry), so the archive's
+    // own verdict (turn stopped → idle) is what rides on top
+    const report = await waitForCall(
+      f.log,
+      c => c[1] === 'report-agent' && c[c.indexOf('--state') + 1] === 'idle'
+    );
+    assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
+    const meta = calls.find(c => c.includes('--display-agent'));
+    assert.equal(meta?.[meta.indexOf('--display-agent') + 1], 'native-x');
   });
 
   test('a cli provider state never spawns — the log tail renders', async () => {
