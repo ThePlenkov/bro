@@ -34,7 +34,6 @@ import {
   EXIT,
   facade,
   hasHelpFlag,
-  hookHostOf,
   isMode,
   listModeFiles,
   loadConfig,
@@ -51,6 +50,7 @@ import {
   type SessionKey,
   type SessionRow,
 } from '@broject/core';
+import { hookHostOf } from '../hook-host.ts';
 import { flag, positionals } from './args.ts';
 import {
   acquireOrchestratorRole,

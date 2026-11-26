@@ -281,6 +281,21 @@ export function sessionProject(cwd: string): string | undefined {
   }
 }
 
+/** Snapshot identity for a checkout. Linked worktrees share a project id but
+ * may carry different bro.config files, so Tier-1 renders must not cross
+ * checkout boundaries. */
+export function sessionSnapshotProject(cwd: string): string | undefined {
+  const project = sessionProject(cwd);
+  if (project === undefined) {
+    return undefined;
+  }
+  try {
+    return `${project}-${digest(realpathSync(cwd))}`;
+  } catch {
+    return project;
+  }
+}
+
 function sessionBranch(cwd: string): string | undefined {
   const r = gitTry(['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], 1000);
   if (r.code !== 0) {

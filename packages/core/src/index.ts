@@ -437,6 +437,7 @@ export {
   ledgerFacade,
   openLedgerStore,
   sessionProject,
+  sessionSnapshotProject,
   spoolCursorKey,
 } from './ledger-store.ts';
 export type {
@@ -462,7 +463,6 @@ export type { SpoolOutcome, SpoolRow } from './hook-spool.ts';
 export { isMode, MODES } from './ledger.ts';
 export {
   broStateDir,
-  hookHostOf,
   inboxPath,
   listModeFiles,
   MODE_SNAPSHOT_EVENTS,

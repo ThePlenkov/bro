@@ -78,7 +78,6 @@ import {
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   gitTry,
-  hookHostOf,
   isMode,
   ledgerFacade,
   loadConfig,
@@ -92,6 +91,7 @@ import {
   repoOptedIn,
   sessionMode,
   sessionProject,
+  sessionSnapshotProject,
   sessionStartProbe,
   snapshotModeDir,
   stopGateContributions,
@@ -112,6 +112,7 @@ import {
   type ProbeResult,
   type ProbeTiming,
 } from '@broject/core';
+import { hookHostOf } from '../hook-host.ts';
 import {
   agentOwner,
   CHECKOUT_DETAIL_PREFIX,
@@ -235,7 +236,6 @@ let hookHost: string | undefined;
 /** The session repo's project id, resolved lazily on first snapshot
  *  need — sessionProject runs git probes, so it must not pay on events
  *  that never touch snapshots. `null` caches "unresolvable". */
-let hookProjectId: string | null | undefined;
 
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out;
@@ -786,7 +786,8 @@ async function bindModeCommand(cmd: string, sessionId: string, dir: string): Pro
   // a re-bind of orchestrate renews a role the session may already hold —
   // snapshot that so a failed write undoes only a FRESH acquire (the
   // pre-existing claim belongs to the mode file still on disk)
-  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
+  const preHeld =
+    mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
   const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
   if (refusal !== null) {
     return [refusal];
@@ -843,7 +844,11 @@ async function bindOrchestrateRole(
   }
   // the hook fires inside the target session — its agent pid is the
   // right liveness proof for the claim
-  const role = await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession: true } }).catch(() => ({
+  const role = await acquireOrchestratorRole({
+    dir,
+    session: sessionKey,
+    opts: { ownSession: true },
+  }).catch(() => ({
     ok: false as const,
     conflict: null,
   }));
@@ -874,17 +879,13 @@ function writeBoundModeFile(file: string | null, mode: Mode, dir: string): boole
   }
 }
 
-/** The session repo's project id for snapshot paths — resolved lazily
- *  (git probes) and cached per process; null = unresolvable. */
+/** The session repo's project id for snapshot paths. */
 function hookProjectIdFor(dir: string): string | null {
-  if (hookProjectId === undefined) {
-    try {
-      hookProjectId = sessionProject(dir) ?? null;
-    } catch {
-      hookProjectId = null;
-    }
+  try {
+    return sessionSnapshotProject(dir) ?? null;
+  } catch {
+    return null;
   }
-  return hookProjectId;
 }
 
 /** cliEvent → snapshot event file — prompt-submit's cursor-hydrate leg
@@ -3495,7 +3496,6 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   emitBytesTotal = 0;
   hookMode = undefined;
   hookHost = undefined;
-  hookProjectId = undefined;
   // run.sh spools a start/end pair on every launch — including the
   // early-return paths below (operator commands, the capability probe,
   // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
