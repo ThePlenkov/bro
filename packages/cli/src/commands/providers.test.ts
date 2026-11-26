@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
-import { runProvidersCommand } from './providers.ts';
+import { PROVIDER_PRESETS, runProvidersCommand } from './providers.ts';
 import { capture } from './testrepo.ts';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -119,6 +119,20 @@ describe('bro providers models', () => {
     const r = await capture(() => runProvidersCommand(['-h'], { providers: {} }));
     assert.equal(r.code, 0);
     assert.match(r.out.join('\n'), /bro providers/);
+  });
+});
+
+describe('provider preset registry', () => {
+  test('contains only verified presets and preserves their spawn commands', () => {
+    const acpPresets = Object.entries(PROVIDER_PRESETS).filter(([, preset]) => preset.type === 'acp');
+    assert.deepEqual(
+      acpPresets.map(([name]) => name),
+      ['kilo', 'claude-code', 'claude-acp', 'codex', 'gemini-cli', 'goose', 'opencode', 'devin']
+    );
+    for (const [, preset] of acpPresets) {
+      assert.notEqual(preset.verified, '');
+      assert.equal(preset.command, preset.verified);
+    }
   });
 });
 
