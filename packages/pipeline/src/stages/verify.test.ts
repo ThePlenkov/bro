@@ -120,15 +120,31 @@ const call = (over: Partial<StageCall> = {}): StageCall =>
     ...over,
   }) as StageCall;
 
-const deps = (sp: SpecSpy, e2e: VerifyDeps['e2e']): VerifyDeps => ({
+const deps = (
+  sp: SpecSpy,
+  e2e: VerifyDeps['e2e'],
+  extra: Partial<VerifyDeps> = {}
+): VerifyDeps => ({
   taskSpec: sp.seam,
   e2e,
+  ...extra,
 });
 
 const invoke = async (sp: SpecSpy, e2e: VerifyDeps['e2e'], over: Partial<StageCall> = {}) =>
   settled(await verifyStage(deps(sp, e2e)).invoke(call(over)));
 
 describe('verify — the AC list', () => {
+  test('stage-entry probe lessons are journaled in the verify payload', async () => {
+    const sp = specSpy(spec(ACS));
+    const result = await settled(
+      await verifyStage(
+        deps(sp, async (_call, ac) => ({ ac, verdict: 'pass', proof: 'test' }), {
+          probe: question => ({ question, hits: [{ lesson: 'known AC gap' }] }),
+        })
+      ).invoke(call())
+    );
+    assert.equal((result.payload as VerifyPayload).learning?.lessons[0]?.lesson, 'known AC gap');
+  });
   test('one e2e call per declared AC, in declared order', async () => {
     const sp = specSpy(spec(ACS));
     const e = e2eSpy({});

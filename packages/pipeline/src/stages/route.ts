@@ -47,6 +47,7 @@ import type {
 import { CLASS_LABEL_PREFIX, resolveStepClass } from '@broject/core';
 import { journalRecords, type JournalRow } from '../journal.ts';
 import type { EngineHandler, EngineResult, StageCall } from '../runner.ts';
+import { probeStage, type StageLearning, type StageProbe } from '../learning.ts';
 import { affirmed, choiceOf, confident } from './answers.ts';
 
 /** `orch` — the orchestration lane the spec declares (acp session /
@@ -98,6 +99,7 @@ export interface RoutePayload {
   /** question ids left under-confidence — telemetry, dimmed answers
    *  were not honored */
   lowConfidence?: string[];
+  learning?: StageLearning;
 }
 
 /** The task-store seam — route reads the item and writes its `class:`
@@ -140,6 +142,8 @@ export interface RouteDeps {
   /** derived provider walls — prod binds `deriveProviderWalls` over
    *  the agents registry. Absent → nothing reads as walled. */
   walls?: () => ProviderWall[];
+  /** Optional learning-plane read, consulted at every route entry. */
+  probe?: StageProbe;
   /** write the `class:` label — default true */
   labels?: boolean;
 }
@@ -167,6 +171,7 @@ interface Cx {
   res: DecideResult;
   load: RouteLoad | undefined;
   walled: Set<string>;
+  learning?: StageLearning;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -509,6 +514,7 @@ function payloadOf(cx: Cx, resolved: ResolvedClass): RoutePayload {
   if (cx.res.lowConfidence.length > 0) {
     p.lowConfidence = [...cx.res.lowConfidence];
   }
+  if (cx.learning !== undefined) p.learning = cx.learning;
   return p;
 }
 
@@ -573,6 +579,7 @@ interface WallCx {
   hit: WallHit;
   load: RouteLoad | undefined;
   walled: Set<string>;
+  learning?: StageLearning;
 }
 
 /** The wall path — no decide: the journaled routing fields stand and
@@ -594,6 +601,7 @@ function wallVerdict(cx: WallCx): EngineResult {
     orch: isOrch(hit.prev.orch) ? hit.prev.orch : DEFAULT_ROUTE_ORCH,
     timing: 'queue',
   };
+  if (cx.learning !== undefined) p.learning = cx.learning;
   if (hit.wall.provider !== '') {
     p.wall = hit.wall;
   }
@@ -645,10 +653,15 @@ export function routeStage(deps: RouteDeps): EngineHandler {
       }
       const load = loadFor(deps);
       const walls = deps.walls === undefined ? [] : deps.walls();
+      const learning = await probeStage(
+        deps.probe,
+        `route provider health and wall-rate lessons for ${item.id}`,
+        call
+      );
       const walled = new Set(walls.map(w => w.provider));
       const hit = wallHit(call, deps.routing);
       if (hit !== undefined) {
-        return wallVerdict({ deps, item, hit, load, walled });
+        return wallVerdict({ deps, item, hit, load, walled, learning });
       }
       const res = await deps.judge.decide(stateFor(item, load, walls), routeQuestions(deps));
       const cx: Cx = {
@@ -659,7 +672,7 @@ export function routeStage(deps: RouteDeps): EngineHandler {
         load,
         walled,
       };
-      return freshVerdict(cx);
+      return freshVerdict({ ...cx, learning });
     },
   };
 }

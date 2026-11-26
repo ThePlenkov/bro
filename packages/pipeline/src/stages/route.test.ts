@@ -101,6 +101,17 @@ const wallJournal = (
 };
 
 describe('route — the decide', () => {
+  test('stage-entry probe lessons are journaled in the route payload', async () => {
+    const result = await invoke(judge({}), backlog([row(ITEM)]), {
+      probe: question => ({
+        question,
+        hits: [{ id: 'lesson-1', lesson: 'avoid the unhealthy provider', score: 1 }],
+      }),
+    });
+    assert.deepEqual((result.payload as RoutePayload).learning?.lessons, [
+      { id: 'lesson-1', lesson: 'avoid the unhealthy provider', score: 1 },
+    ]);
+  });
   test('confident picks → spawn carrying class/kind/orch/timing + resolved provider/model', async () => {
     const j = judge({
       class: choice('feature'),

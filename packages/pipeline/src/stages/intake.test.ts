@@ -111,10 +111,16 @@ const call = (over: Partial<StageCall> = {}): StageCall =>
     ...over,
   }) as StageCall;
 
-const deps = (spy: IntakeSpy, specs: SpecStoreSpy, feed?: AnswerFeedSpy): IntakeDeps => ({
+const deps = (
+  spy: IntakeSpy,
+  specs: SpecStoreSpy,
+  feed?: AnswerFeedSpy,
+  extra: Partial<IntakeDeps> = {}
+): IntakeDeps => ({
   taskSpec: specs,
   intake: spy.fn,
   ...(feed !== undefined ? { answers: feed.fn } : {}),
+  ...extra,
 });
 
 /** A mutable answer feed — `records` is what the next invoke drains;
@@ -157,6 +163,19 @@ const invoke = async (
 ) => settled(await intakeStage(deps(spy, specs, feed)).invoke(call(over)));
 
 describe('intake — the spec read', () => {
+  test('stage-entry probe lessons are journaled in the intake payload', async () => {
+    const result = await settled(
+      await intakeStage(
+        deps(intakeSpy({ verdict: 'accepted' }), specStore([row(ITEM)]), undefined, {
+          probe: question => ({ question, hits: [{ lesson: 'recurring DoR gap' }] }),
+        })
+      ).invoke(call())
+    );
+    assert.equal(
+      (result.payload as IntakePayload).learning?.lessons[0]?.lesson,
+      'recurring DoR gap'
+    );
+  });
   test('the seam judges the spec the facade parsed — AC/DoR/scenarios/body', async () => {
     const spy = intakeSpy({ verdict: 'accepted' });
     await invoke(spy);

@@ -1,4 +1,5 @@
 export type { AwaitingRun, AwaitTarget } from './awaiting.ts';
+export type { StageLearning, StageProbe, StageProbeHit, StageProbeResult } from './learning.ts';
 export { awaitingCustomerRuns } from './awaiting.ts';
 export type {
   AnswerFeed,

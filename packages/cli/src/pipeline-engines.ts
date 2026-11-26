@@ -66,6 +66,7 @@ import {
   pipelineDir,
   reviewStage,
   routeStage,
+  type StageProbe,
   stageDispatch,
   taskBacklog,
   verifyStage,
@@ -79,7 +80,7 @@ import {
   gatePending,
 } from '@broject/act';
 import { judgeFacade } from '@broject/judge';
-import { captureLessons } from '@broject/learn';
+import { captureLessons, probeQuestion } from '@broject/learn';
 import { fleetCapOf, fleetOccupancyFor, loadAgentEnv } from './agent-connectors.ts';
 import { type StepSpawnRequest, spawnStepAgent } from './commands/agents.ts';
 import { pipelineEmit } from './pipeline-emit.ts';
@@ -196,11 +197,35 @@ function judgeEngine(
   return stageDispatch(
     {
       classify: classifyStage({ judge, backlog }),
-      route: routeStage({ judge, backlog, routing, providers, occupancy, walls }),
+      route: routeStage({
+        judge,
+        backlog,
+        routing,
+        providers,
+        occupancy,
+        walls,
+        probe: learnProbe(dir),
+      }),
       review: reviewStage({ judge, backlog, routing, providers, diff: gitDiff, walls }),
     },
     admitIntents
   );
+}
+
+/** Adapter keeps the pipeline store-agnostic while production stages read
+ * the same lesson store as `bro self learn probe`. */
+function learnProbe(dir: string): StageProbe {
+  return question => {
+    const result = probeQuestion(question, { dir });
+    return {
+      question: result.question,
+      hits: result.hits.map(hit => ({
+        id: hit.lesson.id,
+        lesson: hit.lesson.lesson,
+        score: hit.score,
+      })),
+    };
+  };
 }
 
 // --- intake engine ----------------------------------------------------------
@@ -531,6 +556,7 @@ export function engines(dir: string, opts: ProductionEnginesOptions = {}): Engin
       taskSpec: taskSpecFacade(store),
       answers: fileAnswerFeed(dir),
       intake: intakeJudgment(judge),
+      probe: learnProbe(dir),
     }),
     fleet: workStage(fleetEngine(dir, env, formulaName, formulaSha)),
     e2e: verifyStageWithDir(dir),
@@ -549,5 +575,6 @@ function verifyStageWithDir(dir: string): EngineMap['e2e'] {
     e2e: () => {
       throw new Error('no e2e runner bound — inject engines via --engines');
     },
+    probe: learnProbe(dir),
   });
 }
