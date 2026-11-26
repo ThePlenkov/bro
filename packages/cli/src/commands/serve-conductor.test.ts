@@ -1691,7 +1691,7 @@ describe('serve /v1/* — retained acp sessions', () => {
     opts: {
       headers?: Record<string, string>;
       model?: string;
-      userId?: string;
+      userId?: string | number;
     } = {}
   ): Promise<Response> =>
     fetch(`${url}/v1/messages`, {
@@ -1810,6 +1810,13 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.equal(fake.prompts.length, 3);
       assert.match(fake.prompts[2] ?? '', /next turn/);
       assert.doesNotMatch(fake.prompts[2] ?? '', /same first turn/);
+    }));
+
+  test('a non-string metadata.user_id falls back to the fingerprint', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const msgs = [{ role: 'user', content: 'numeric identity' }];
+      assert.equal((await post(url, msgs, { userId: 42 })).status, 200);
+      assert.equal(fake.sessions.length, 1);
     }));
 
   test('a named session outlives the anonymous TTL — probes reuse across cadence', () => {

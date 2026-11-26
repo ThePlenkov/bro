@@ -954,7 +954,8 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   if (first === undefined) {
     return undefined;
   }
-  const native = body.metadata?.user_id?.trim();
+  const native =
+    typeof body.metadata?.user_id === 'string' ? body.metadata.user_id.trim() : undefined;
   if (native !== undefined && native !== '') {
     // Keep the client identifier out of map keys, telemetry, and response
     // headers while preserving its identity semantics across rewritten
