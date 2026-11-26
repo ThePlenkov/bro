@@ -1905,26 +1905,6 @@ const REACTION_ALIASES: Record<ReactionKind, string> = {
   eyes: 'EYES',
 };
 
-function reactionTarget(target: PrTarget | string): string {
-  if (typeof target === 'string') return target;
-  const { owner, name } = parts(target.repo);
-  const result = ghJson<{ data?: { repository?: { pullRequest?: { id?: string } } } }>([
-    'api',
-    'graphql',
-    '-f',
-    'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}',
-    '-f',
-    `o=${owner}`,
-    '-f',
-    `r=${name}`,
-    '-F',
-    `n=${target.pr}`,
-  ]);
-  const id = result.data?.repository?.pullRequest?.id;
-  if (!id) throw new Error(`pull request #${target.pr} not found`);
-  return id;
-}
-
 function viewerReactionId(content: string, kind: string): string | undefined {
   const found = ghJson<{
     data?: {
@@ -1989,7 +1969,27 @@ function githubReaction(
   reaction: ReactionKind,
   remove = false
 ): ReactionResult {
-  const content = reactionTarget(target);
+  const content =
+    typeof target === 'string'
+      ? target
+      : (() => {
+          const { owner, name } = parts(target.repo);
+          const result = ghJson<{ data?: { repository?: { pullRequest?: { id?: string } } } }>([
+            'api',
+            'graphql',
+            '-f',
+            'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}',
+            '-f',
+            `o=${owner}`,
+            '-f',
+            `r=${name}`,
+            '-F',
+            `n=${target.pr}`,
+          ]);
+          const id = result.data?.repository?.pullRequest?.id;
+          if (!id) throw new Error(`pull request #${target.pr} not found`);
+          return id;
+        })();
   const kind = REACTION_ALIASES[reaction];
   return remove
     ? removeGithubReaction(content, reaction, kind)
