@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpDir } from './testtmp.ts';
 import { loadConfig } from './config.ts';
@@ -50,6 +50,27 @@ describe('isEnvName', () => {
 });
 
 describe('providers section', () => {
+  test('does not read providers from the operator home config', () => {
+    const home = tmpDir('bro-provider-home-');
+    mkdirSync(join(home, '.config', 'bro'), { recursive: true });
+    writeFileSync(
+      join(home, '.config', 'bro', 'config.json'),
+      JSON.stringify({
+        providers: {
+          ambient: { type: 'cli', command: 'ambient-provider' },
+        },
+      })
+    );
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      assert.deepEqual(load().providers, {});
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   test('absent section → empty registry', () => {
     assert.deepEqual(load().providers, {});
     assert.deepEqual(load({}).providers, {});
