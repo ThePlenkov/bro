@@ -101,6 +101,48 @@ function addFixerWorktree(
   return { err: retry.err || add.err };
 }
 
+type FixerWorktreeResult = { path?: string; created?: boolean; err?: string; occupied?: string };
+
+interface ExistingFixerWorktreeOptions {
+  dir: string;
+  branch: string;
+  opts:
+    | {
+        guard?: (dir: string) => string | undefined;
+        lock?: (dir: string) => () => void;
+      }
+    | undefined;
+}
+
+function existingFixerWorktree({ dir, branch, opts }: ExistingFixerWorktreeOptions): {
+  found: boolean;
+  result?: FixerWorktreeResult;
+} {
+  if (!existsSync(dir)) {
+    return { found: false };
+  }
+  const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
+  if (on !== branch) {
+    return { found: true };
+  }
+  let release: () => void = () => {};
+  try {
+    release = opts?.lock?.(dir) ?? (() => {});
+  } catch (err) {
+    return { found: true, result: { occupied: `occupancy re-check failed — ${errText(err)}` } };
+  }
+  try {
+    const owner = opts?.guard?.(dir);
+    if (owner !== undefined) {
+      return { found: true, result: { occupied: owner } };
+    }
+    const reused = reuseFixerWorktree(dir, branch);
+    return { found: true, result: reused };
+  } finally {
+    release();
+  }
+}
+
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
  *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
  *  caller can retire it when the work evaporates. A dir standing on
@@ -136,41 +178,27 @@ export function ensureFixerWorktree(
   if (!remoteLinear(mainRoot, branch, branch)) {
     return { err: `${branch} diverged from origin/${branch}` };
   }
+  let lastError: string | undefined;
   for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
     const dir = worktreePathFor(mainRoot, name);
-    if (existsSync(dir)) {
-      // a dir standing on ANOTHER branch is not this branch's checkout:
-      // it is never clobbered, and it must not consume the occupancy
-      // guard either — the namespaced fallback still has to be tried
-      const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
-      if (on !== branch) {
-        continue;
-      }
-      // the guard and the refresh share the occupancy locks: a session
-      // that claims this checkout after the guard would have its branch
-      // moved under it
-      let release: () => void = () => {};
-      try {
-        release = opts?.lock?.(dir) ?? (() => {});
-      } catch (err) {
-        // a lock we can't take is indistinguishable from an active claimer
-        return { occupied: `occupancy re-check failed — ${errText(err)}` };
-      }
-      try {
-        const owner = opts?.guard?.(dir);
-        if (owner !== undefined) {
-          return { occupied: owner };
-        }
-        const r = reuseFixerWorktree(dir, branch);
-        if (r !== undefined) {
-          return r;
-        }
-      } finally {
-        release();
+    const existing = existingFixerWorktree({ dir, branch, opts });
+    if (existing.found) {
+      if (existing.result !== undefined) {
+        return existing.result;
       }
       continue;
     }
-    return addFixerWorktree(mainRoot, dir, branch);
+    const added = addFixerWorktree(mainRoot, dir, branch);
+    if (added.path !== undefined) {
+      return added;
+    }
+    // A failed add is not terminal: the other candidate may already hold
+    // this branch (for example the namespaced path after the slug path was
+    // removed).  Keep looking before reporting failure.
+    lastError = added.err;
+  }
+  if (lastError !== undefined) {
+    return { err: lastError };
   }
   return {
     err: `every worktree path for ${branch} is held by a foreign branch`,

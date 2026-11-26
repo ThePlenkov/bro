@@ -782,7 +782,13 @@ async function spawnFixerAgent(ctx: DriveCtx, pr: number, s: FixerSpawn): Promis
         env: { BRO_PR: String(pr), BRO_PR_URL: link },
       });
       if (s.attempt !== undefined) {
-        recordFixerAttempt(ctx.mainRoot, bead.id, prevEntry, s.attempt.head, s.attempt.cls);
+        recordFixerAttempt({
+          dir: ctx.mainRoot,
+          molStep: bead.id,
+          prevEntry,
+          head: s.attempt.head,
+          cls: s.attempt.cls,
+        });
       }
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`;
       const tag = s.tag ?? '';
@@ -869,15 +875,15 @@ async function spawnFixer(
       // outside those locks, so the claims leg re-reads here — a claim
       // written during the refetch await is otherwise invisible to the
       // pass snapshot (bro-izpyk.10)
-      const retire = retireOrphanedWorktree(
-        ctx.mainRoot,
+      const retire = retireOrphanedWorktree({
+        dir: ctx.mainRoot,
         pr,
         wt,
-        state.headRef,
-        fixer?.id,
+        branch: state.headRef,
+        fixerBeadId: fixer?.id,
         known,
-        await claimsRefresh(ctx)
-      );
+        claims: await claimsRefresh(ctx),
+      });
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire };
       }
@@ -957,17 +963,17 @@ async function spawnRebaseFixer(
     if (lane.created !== true) {
       return;
     }
-    retireOrphanedWorktree(
-      ctx.mainRoot,
+    retireOrphanedWorktree({
+      dir: ctx.mainRoot,
       pr,
       wt,
-      state.headRef,
-      fixer?.id,
-      ctx.work.agents,
+      branch: state.headRef,
+      fixerBeadId: fixer?.id,
+      known: ctx.work.agents,
       // the same post-await re-read spawnFixer runs — a ledger claim
       // landing during the fetch/probe window above vetoes the removal
-      await claimsRefresh(ctx)
-    );
+      claims: await claimsRefresh(ctx),
+    });
   };
   // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are
   // as old as the last fetch anybody in the repo ran, and the drive lane

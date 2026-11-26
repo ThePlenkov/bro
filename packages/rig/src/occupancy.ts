@@ -479,15 +479,25 @@ const errText = (e: unknown): string => (e instanceof Error ? e.message : String
  *  taken, undefined when retired. `fixerBeadId` is the PR's fixer bead
  *  when one exists — its live agent reads as ours, not a foreign
  *  occupant. */
-export function retireOrphanedWorktree(
-  dir: string,
-  pr: number,
-  wt: string,
-  branch: string,
-  fixerBeadId: string | undefined,
-  known: AgentInfo[],
-  claims: ClaimRow[] = []
-): string | undefined {
+export interface RetireOrphanedWorktreeOptions {
+  dir: string;
+  pr: number;
+  wt: string;
+  branch: string;
+  fixerBeadId: string | undefined;
+  known: AgentInfo[];
+  claims?: ClaimRow[];
+}
+
+export function retireOrphanedWorktree({
+  dir,
+  pr,
+  wt,
+  branch,
+  fixerBeadId,
+  known,
+  claims = [],
+}: RetireOrphanedWorktreeOptions): string | undefined {
   let release: () => void;
   try {
     release = acquireOccupancyLocks(dir, wt);
