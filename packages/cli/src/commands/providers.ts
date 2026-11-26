@@ -104,27 +104,40 @@ function readConfigJson(path: string): Record<string, unknown> {
   }
 }
 
-/** The `bro providers add` table — verified command lines keyed by
+/** A verified provider preset. Keeping the command as the final shell
+ *  string is intentional: ProviderEntry is the config contract and the
+ *  command is also what ACP spawn diagnostics display to operators.
+ *  Verification notes stay next to the command so adding a name cannot
+ *  silently turn an unverified agent into a supported preset.
+ */
+export interface ProviderPreset {
+  readonly type: 'acp' | 'cli';
+  readonly command: string;
+  readonly verified: string;
+}
+
+/** The `bro providers add` registry — verified command lines keyed by
  *  preset name, each carrying the kind its entry is written with.
  *  `claude` is the cli preset (spec bro-yslbm): current claude builds
  *  expose no `--acp` flag, so `claude -p` on the prompt file's stdin is
  *  the worker shape; `claude-acp` is the ACP route through the Zed
  *  adapter binary. */
-const PRESETS: Record<string, { type: 'acp' | 'cli'; command: string }> = {
-  kilo: { type: 'acp', command: 'kilo --acp' },
-  'claude-code': { type: 'acp', command: 'claude --acp' },
+export const PROVIDER_PRESETS: Readonly<Record<string, ProviderPreset>> = Object.freeze({
+  kilo: { type: 'acp', command: 'kilo --acp', verified: 'kilo --acp' },
+  'claude-code': { type: 'acp', command: 'claude --acp', verified: 'claude --acp' },
   claude: {
     type: 'cli',
     command:
       'claude -p --dangerously-skip-permissions --output-format stream-json --verbose < {promptFile}',
+    verified: 'claude -p',
   },
-  'claude-acp': { type: 'acp', command: 'claude-code-acp' },
-  codex: { type: 'acp', command: 'codex --acp' },
-  'gemini-cli': { type: 'acp', command: 'gemini --acp' },
-  goose: { type: 'acp', command: 'goose acp' },
-  opencode: { type: 'acp', command: 'opencode acp' },
-  devin: { type: 'acp', command: 'devin --acp' },
-};
+  'claude-acp': { type: 'acp', command: 'claude-code-acp', verified: 'claude-code-acp' },
+  codex: { type: 'acp', command: 'codex --acp', verified: 'codex --acp' },
+  'gemini-cli': { type: 'acp', command: 'gemini --acp', verified: 'gemini --acp' },
+  goose: { type: 'acp', command: 'goose acp', verified: 'goose acp' },
+  opencode: { type: 'acp', command: 'opencode acp', verified: 'opencode acp' },
+  devin: { type: 'acp', command: 'devin --acp', verified: 'devin --acp' },
+});
 
 interface Opts {
   acp?: AcpSeam;
@@ -385,11 +398,13 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
   if (parsed.preset === undefined) {
     die('usage: bro providers add <preset> [--name <name>] [--global] [--force]');
   }
-  const presetName = parsed.preset!;
-  const p = PRESETS[presetName];
-  if (p === undefined) {
-    die(`unknown preset ${presetName} — available: ${Object.keys(PRESETS).join(', ')}`);
-  }
+  const presetName = parsed.preset ?? die('missing preset');
+  const p = Object.getOwnPropertyDescriptor(PROVIDER_PRESETS, presetName)?.value as
+    | ProviderPreset
+    | undefined;
+  const preset =
+    p ??
+    die(`unknown preset ${presetName} — available: ${Object.keys(PROVIDER_PRESETS).join(', ')}`);
   const providerName = parsed.name ?? presetName;
   if (!/^(?!__proto__$|constructor$|prototype$)[A-Za-z0-9][\w.-]*$/.test(providerName)) {
     die(
@@ -406,7 +421,7 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     if (Object.hasOwn(providers, providerName) && !parsed.force) {
       die(`providers.${providerName} already exists — use --force to overwrite`);
     }
-    const entry: ProviderEntry = { type: p.type, command: p.command };
+    const entry: ProviderEntry = { type: preset.type, command: preset.command };
     if (parseProviderEntry(providerName, entry) === null) {
       die('generated entry failed validation');
     }
