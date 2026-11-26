@@ -94,14 +94,11 @@ function validProfileTools(profile: DevinSubagentProfile): boolean {
 }
 
 function validProfile(entry: ProfileEntry): boolean {
-  const checks = [
-    validProfileName(entry.name),
-    isRecord(entry.profile),
-    validProfileModel(entry.profile),
-    validProfilePrompt(entry.profile),
-    validProfileTools(entry.profile),
-  ];
-  return checks.every(Boolean);
+  if (!validProfileName(entry.name)) return false;
+  if (!isRecord(entry.profile)) return false;
+  return [validProfileModel, validProfilePrompt, validProfileTools].every(check =>
+    check(entry.profile)
+  );
 }
 
 function defaultModel(config: DevinSubagentConfig): string | undefined {

@@ -57,17 +57,6 @@ test('rejects non-string prompts', () => {
   );
 });
 
-test('rejects non-string prompts', () => {
-  assert.throws(
-    () =>
-      materializeDevinSubagents({
-        home: mkdtempSync(join(tmpdir(), 'bro-devin-')),
-        config: { profiles: { worker: { model: 'm', prompt: {} as unknown as string } } },
-      }),
-    /invalid Devin subagent profile/
-  );
-});
-
 test('rejects malformed profile objects', () => {
   assert.throws(
     () =>
