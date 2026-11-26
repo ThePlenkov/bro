@@ -1,8 +1,8 @@
-import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { describe, test } from 'node:test';
 import type {
   CreateTerminalRequest,
   KillTerminalRequest,
@@ -38,7 +38,22 @@ const rel = (terminalId: TerminalId): ReleaseTerminalRequest => ({
 const kil = (terminalId: TerminalId): KillTerminalRequest => ({ sessionId: 'sess-1', terminalId });
 const ctx = <P>(params: P) => ({ params }) as never;
 
-/** Poll until the shell reports the backgrounded grandchild's pid. */
+const shell = (command: string): CreateTerminalRequest =>
+  process.platform === 'win32'
+    ? create('cmd.exe', ['/d', '/s', '/c', command])
+    : create('sh', ['-c', command]);
+const node = (script: string, outputByteLimit?: number): CreateTerminalRequest =>
+  create(process.execPath, ['-e', script], outputByteLimit);
+const nodeWithEnv = (
+  script: string,
+  env: string,
+  outputByteLimit?: number
+): CreateTerminalRequest => ({
+  ...node(script, outputByteLimit),
+  env: [{ name: 'BRO_TEST_PID_FILE', value: env }],
+});
+
+/** Poll until the child reports the backgrounded grandchild's pid. */
 const pollPidFile = async (file: string): Promise<number> => {
   for (let i = 0; i < 300; i++) {
     try {
@@ -71,7 +86,7 @@ describe('AcpTerminals', () => {
   test('create → wait_for_exit → output → release round-trips a real child', async () => {
     const t = new AcpTerminals();
     try {
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'echo terminal-works'])));
+      const { terminalId } = await t.create(ctx(shell('echo terminal-works')));
       const status = await t.waitForExit(ctx(wait(terminalId)));
       assert.equal(status.exitCode, 0);
       const snap = await t.output(ctx(out(terminalId)));
@@ -152,7 +167,11 @@ describe('AcpTerminals', () => {
     const t = new AcpTerminals();
     try {
       const { terminalId } = await t.create(
-        ctx(create('sh', ['-c', 'echo early; sleep 0.2; echo late']))
+        ctx(
+          node(
+            "process.stdout.write('early\\n'); setTimeout(() => process.stdout.write('late\\n'), 200)"
+          )
+        )
       );
       const first = await t.output(ctx(out(terminalId)));
       assert.equal(first.exitStatus ?? null, null);
@@ -170,7 +189,7 @@ describe('AcpTerminals', () => {
     const t = new AcpTerminals();
     try {
       const { terminalId } = await t.create(
-        ctx(create('sh', ['-c', 'printf %090d 0; echo MARK'], 40))
+        ctx(node("process.stdout.write('0'.repeat(90) + ' MARK\\n')", 40))
       );
       await t.waitForExit(ctx(wait(terminalId)));
       const snap = await t.output(ctx(out(terminalId)));
@@ -187,7 +206,7 @@ describe('AcpTerminals', () => {
     try {
       // 🙂 is 4 bytes — three of them + 'X' = 13 bytes; limit 5 keeps
       // exactly one emoji + X, cut lands mid-emoji and must skip forward
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', "printf '🙂🙂🙂X'"], 5)));
+      const { terminalId } = await t.create(ctx(node("process.stdout.write('🙂🙂🙂X')", 5)));
       await t.waitForExit(ctx(wait(terminalId)));
       const snap = await t.output(ctx(out(terminalId)));
       assert.equal(snap.truncated, true);
@@ -200,7 +219,7 @@ describe('AcpTerminals', () => {
   test('outputByteLimit 0 keeps the buffer bounded instead of unbounded', async () => {
     const t = new AcpTerminals();
     try {
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'echo dropped'], 0)));
+      const { terminalId } = await t.create(ctx(node("console.log('dropped')", 0)));
       await t.waitForExit(ctx(wait(terminalId)));
       const snap = await t.output(ctx(out(terminalId)));
       assert.equal(snap.output, '');
@@ -241,8 +260,11 @@ describe('AcpTerminals', () => {
       // hijack; brO_t_var proves normal mixed-case names still merge
       const req: CreateTerminalRequest = {
         sessionId: 'sess-1',
-        command: 'sh',
-        args: ['-c', 'echo "p=[$pAtH] v=[$brO_t_var]"'],
+        command: process.execPath,
+        args: [
+          '-e',
+          'console.log(JSON.stringify({ path: process.env.pAtH ?? "", value: process.env.brO_t_var ?? "" }))',
+        ],
         env: [
           { name: 'pAtH', value: '/evil' },
           { name: 'brO_t_var', value: 'yes' },
@@ -252,7 +274,9 @@ describe('AcpTerminals', () => {
       const status = await t.waitForExit(ctx(wait(terminalId)));
       assert.equal(status.exitCode, 0);
       const snap = await t.output(ctx(out(terminalId)));
-      assert.match(snap.output, /p=\[\] v=\[yes\]/);
+      const result = JSON.parse(snap.output) as { path: string; value: string };
+      assert.equal(result.value, 'yes');
+      assert.notEqual(result.path, '/evil');
     } finally {
       t.dispose();
     }
@@ -261,7 +285,7 @@ describe('AcpTerminals', () => {
   test('release resolves a pending wait_for_exit with the real status', async () => {
     const t = new AcpTerminals();
     try {
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'sleep 60'])));
+      const { terminalId } = await t.create(ctx(node('setTimeout(() => {}, 60_000)')));
       const pending = t.waitForExit(ctx(wait(terminalId)));
       await t.release(ctx(rel(terminalId)));
       const status = await pending;
@@ -276,7 +300,9 @@ describe('AcpTerminals', () => {
     try {
       // the backgrounded subshell inherits stdout — 'exit' fires for the
       // main child while 'close' is held open until the sleep ends
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'sleep 5 & exit 0'])));
+      const { terminalId } = await t.create(
+        ctx(node('setTimeout(() => {}, 5_000); process.exit(0)'))
+      );
       for (let i = 0; i < 100; i++) {
         const snap = await t.output(ctx(out(terminalId)));
         if (snap.exitStatus !== null) {
@@ -296,7 +322,9 @@ describe('AcpTerminals', () => {
   test('kill stops the child but the terminal stays readable until release', async () => {
     const t = new AcpTerminals();
     try {
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'echo hi; sleep 60'])));
+      const { terminalId } = await t.create(
+        ctx(node("process.stdout.write('hi\\n'); setTimeout(() => {}, 60_000)"))
+      );
       // wait for the first output to land — SIGTERM before the flush
       // races the 'data' event and the test reads an empty buffer
       for (let i = 0; i < 100; i++) {
@@ -328,7 +356,12 @@ describe('AcpTerminals', () => {
       const t = new AcpTerminals();
       try {
         const { terminalId } = await t.create(
-          ctx(create('sh', ['-c', `sleep 60 & echo $! > '${pidFile}'; wait`]))
+          ctx(
+            nodeWithEnv(
+              `const { spawn } = require('node:child_process'); const fs = require('node:fs'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' }); fs.writeFileSync(process.env.BRO_TEST_PID_FILE, String(child.pid)); setTimeout(() => {}, 60_000)`,
+              pidFile
+            )
+          )
         );
         const gpid = await pollPidFile(pidFile);
         await t.release(ctx(rel(terminalId)));
@@ -358,7 +391,12 @@ describe('AcpTerminals', () => {
       const t = new AcpTerminals();
       try {
         const { terminalId } = await t.create(
-          ctx(create('sh', ['-c', `sleep 30 & echo $! > '${pidFile}'; exit 0`]))
+          ctx(
+            nodeWithEnv(
+              `const { spawn } = require('node:child_process'); const fs = require('node:fs'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' }); fs.writeFileSync(process.env.BRO_TEST_PID_FILE, String(child.pid)); process.exit(0)`,
+              pidFile
+            )
+          )
         );
         const gpid = await pollPidFile(pidFile);
         // wait for the leader's 'exit' — release must take the post-exit
@@ -379,7 +417,7 @@ describe('AcpTerminals', () => {
 
   test('a leaked long-running child dies with dispose', async () => {
     const t = new AcpTerminals();
-    const { terminalId } = await t.create(ctx(create('sh', ['-c', 'sleep 60'])));
+    const { terminalId } = await t.create(ctx(node('setTimeout(() => {}, 60_000)')));
     t.dispose();
     assert.throws(() => t.output(ctx(out(terminalId))), /Unknown terminal/);
   });
@@ -399,7 +437,9 @@ describe('AcpTerminals', () => {
     const t = new AcpTerminals();
     try {
       assert.equal(t.size, 0);
-      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'echo first; sleep 60'])));
+      const { terminalId } = await t.create(
+        ctx(node("process.stdout.write('first\\n'); setTimeout(() => {}, 60_000)"))
+      );
       assert.equal(t.size, 1);
       const chunks: string[] = [];
       const exits: unknown[] = [];
@@ -445,7 +485,11 @@ describe('AcpTerminals', () => {
       // 😀 is f0 9f 98 80 — the lead byte lands alone, the rest after a
       // delay, so the entry decoder sits mid-character at follow() time
       const { terminalId } = await t.create(
-        ctx(create('sh', ['-c', "printf '\\360'; sleep 0.5; printf '\\237\\230\\200'"]))
+        ctx(
+          node(
+            'process.stdout.write(Buffer.from([0xf0])); setTimeout(() => process.stdout.write(Buffer.from([0x9f, 0x98, 0x80])), 500)'
+          )
+        )
       );
       // poll until the lead byte is buffered — through snapshot()'s
       // plain toString a lone pending byte reads as U+FFFD

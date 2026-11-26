@@ -598,13 +598,15 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
         dim('── waiting for the daemon projector ──');
       }
     }
-    report(t, viewVerdict(t, cur ?? { mode: 'none', acp: 'none' }));
     // tailed streams can grow without a state-file move — pump every poll
     if (cur !== undefined && t !== undefined) {
       pumpLog(cur);
       if (cur.mode === 'log' && t.workerLed.state === 'blocked') pumpLog(cur, true);
       pumpEvents(cur, t);
     }
+    // Report after consuming the archive so a refresh cannot publish the
+    // worker floor over a terminal row that was already on disk.
+    report(t, viewVerdict(t, cur ?? { mode: 'none', acp: 'none' }));
   };
 
   refresh();
