@@ -23,6 +23,13 @@ export function call(args: string[]): void {
     child.on('error', () => {
       // every report is advisory — a dead socket retires to the watch loop
     });
+    const timer = setTimeout(() => {
+      child.kill();
+    }, HERDR_TIMEOUT_MS);
+    timer.unref();
+    child.on('close', () => {
+      clearTimeout(timer);
+    });
     child.unref();
   } catch {
     // every report is advisory — a dead socket retires to the watch loop
