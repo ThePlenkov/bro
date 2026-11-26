@@ -532,10 +532,15 @@ describe('runSessionView --once', () => {
       f.log,
       c => c[1] === 'report-agent' && c[c.indexOf('--state') + 1] === 'blocked'
     );
-    // the archive verdict moved through the stream: working while the
-    // turn ran, idle at the stop, blocked at the permission row
-    const states = [...reports, terminal].map(c => c[c.indexOf('--state') + 1]);
-    assert.deepEqual(states[states.length - 1], 'blocked');
+    assert.equal(terminal[terminal.indexOf('--state') + 1], 'blocked');
+    // The archive verdict moved through the stream: working while the
+    // turn ran, idle at the stop, blocked at the permission row.
+    // Detached advisory calls can finish out of order, so terminal
+    // permission is established by presence, not log position.
+    const states = reports.map(c => c[c.indexOf('--state') + 1]);
+    const report = latestReport(calls);
+    assert.equal(report?.[report.indexOf('--state') + 1], 'blocked');
+    assert.ok(states.includes('blocked'));
     assert.ok(states.includes('working'));
   });
 
