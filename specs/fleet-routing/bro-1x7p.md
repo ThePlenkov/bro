@@ -242,6 +242,13 @@ telemetry buffers, never wakes. Commands that supervise
 (`convoy run`, `drive`, `watch`) audit against this rule; a new
 watcher without an exit condition does not merge.
 
+This is the target contract for the fleet-routing implementation, not a
+claim that every milestone is already shipped. In particular, until the
+finite-supervision milestone lands, `drive` must not advertise or silently
+accept `--for`; the bound below is the required shape when that option is
+implemented. Existing `watch --for` behavior remains the reference for
+deadline parsing and monotonic-clock semantics.
+
 The ban lands on the infinite form, not on detached coverage — the
 stop gate counts a live `drive --every` as PR coverage through its
 pid-keyed heartbeat markers, so `drive` keeps finite supervision
