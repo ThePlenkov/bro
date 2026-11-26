@@ -313,17 +313,18 @@ Developing bro itself: see CONTRIBUTING.md.
   then fix in ascending estimated cost, stopping with a near-budget marker.
 - **Foreign findings become requests, never patches** — work that
   belongs to another repo is posted to that rig's inbox, never
-  edited in place: `bro request <repo> <title> --for <bead>` drops
+  edited in place: `bro mesh request <repo> <title> --for <bead>` drops
   the request bead and pins an `external:<rig>:<id>` edge on mine —
   a marker, not a gate; `bro mesh wait <id>` point-checks the
-  answer between turns, and `bro wait external:<rig>:<id>` is the
-  bounded watcher when the wait must block — armed like `act wait`,
-  never a foreground idle. The dep edge in bd is the truth that
+  answer between turns. Do not use `bro wait` for a point check:
+  `bro wait external:<rig>:<id>` is the bounded watcher when the
+  wait must block — armed like `act wait`, never a foreground idle.
+  The dep edge in bd is the truth that
   frees the work; the watcher is a convenience, and its exit code
   is the verdict (0 free · 1 unreadable · 2 unresolved ·
   3 actionable · 4 timeout). A rig with no checkout is reached over
   the remote planes (specs/cross-repo/bro-kim1e): a `github` peer
-  binding (github.com remote + `login`) delivers `bro request` as a
+  binding (github.com remote + `login`) delivers `bro mesh request` as a
   prose issue + `request` record comment and reads replies back
   through issue comments; a `wasteland` binding (`wl://`) posts a
   wanted row onto the commons board. Both mirror a bead into the
