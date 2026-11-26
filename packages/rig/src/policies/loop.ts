@@ -120,6 +120,11 @@ import {
   projectBeads,
   type ReconcileBead,
 } from '@broject/loop';
+import {
+  releaseRemoteCeiling,
+  reserveRemoteCeiling,
+  stampRemoteCeiling,
+} from '../ceiling-remote.ts';
 import { rigNext } from '../next.ts';
 import type { Policy } from '../policy.ts';
 import { processesRootedIn, worktreeHasLiveSession } from '../proc-owner.ts';
@@ -3488,7 +3493,25 @@ function sweepCeilingReservations(dir: string, fleet: FleetPrRow[]): number {
 /** Write one reservation under the caller's lock — null when the file
  *  can't be proven to exist (the slot then counts as held, not free). */
 
-function reserveCeilingSlot(ctx: LoopCtx, dir: string): string | null {
+function reserveCeilingSlot(
+  ctx: LoopCtx,
+  dir: string,
+  open: number,
+  activeBranches: ReadonlySet<string>
+): string | null {
+  const now = ctx.deps.now();
+  const remote = reserveRemoteCeiling(
+    {
+      root: ctx.root,
+      max: ctx.cfg.maxOpenTotal,
+      open: Number.isInteger(open) ? open : 0,
+      now: Number.isInteger(now) ? now : Date.now(),
+      pid: Number.isInteger(process.pid) ? process.pid : 0,
+      activeBranches,
+    }
+  );
+  if (remote === 'remote-held') return null;
+  if (remote !== null) return remote;
   try {
     mkdirSync(dir, { recursive: true });
     const p = join(dir, `${CEILING_RES_PREFIX}${process.pid}-${ctx.deps.now()}.json`);
@@ -3509,6 +3532,10 @@ function reserveCeilingSlot(ctx: LoopCtx, dir: string): string | null {
  *  'worker still spawning' from 'listing already counts this slot'. */
 
 function stampCeilingReservation(file: string, branch: string): void {
+  if (file.startsWith('remote:')) {
+    stampRemoteCeiling({ handle: file, branch });
+    return;
+  }
   try {
     const res = JSON.parse(readFileSync(file, 'utf8')) as CeilingRes;
     res.branch = branch;
@@ -3518,8 +3545,18 @@ function stampCeilingReservation(file: string, branch: string): void {
   }
 }
 
-function releaseCeilingFile(file: string | null): void {
+function releaseCeilingFile(file: string | null, say: (message: string) => void): void {
   if (file === null) {
+    return;
+  }
+  if (file.startsWith('remote:')) {
+    try {
+      releaseRemoteCeiling({ handle: file });
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      /* The lease expires during the next sweep, but keep the operational failure visible. */
+      say(`loop: remote ceiling release failed for ${file}: ${detail}`);
+    }
     return;
   }
   try {
@@ -3538,7 +3575,7 @@ function releaseMemberReservation(ctx: LoopCtx, member: LoopMember): void {
     return;
   }
   ctx.q.ceilingRes.delete(member.item.branch);
-  releaseCeilingFile(file);
+  releaseCeilingFile(file, ctx.deps.say);
 }
 
 /** The push half of a tick — true when a bead was claimed (drained or
@@ -3632,7 +3669,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
         // stack admits nothing this pass, so it reserves nothing —
         // the listing above still served the hold line
         if (!stackFull && resDir !== null) {
-          ceilingRes = reserveCeilingSlot(ctx, resDir);
+          ceilingRes = reserveCeilingSlot(ctx, resDir, open, new Set(fleet.map(row => row.headRef)));
           if (ceilingRes === null) {
             if (!ctx.claimsHeld) {
               ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
@@ -3685,7 +3722,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, ctx.q.diskProbeWarned), ctx.cfg);
   if (breach !== undefined) {
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     return holdForDisk(ctx, breach);
   }
   if (ctx.q.diskHeld) {
@@ -3702,11 +3739,11 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // a wedged task store surfaces HERE — `bd ready`/`bd update --claim`
     // rethrow by design ("a bd outage must surface", next.ts) — as a
     // held push, never a dead supervisor (bro-cu3q8)
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     return holdForInfra(ctx, 'claim', err);
   }
   if (clump === undefined) {
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     ctx.q.drained = true;
     return false;
   }
@@ -3723,7 +3760,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // a throw past pushItem's own settle arms still owes the claims a
     // release — the same settle its worktree/prompt arms run — then the
     // clump un-sees so the held retry re-picks it (bro-cu3q8)
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     const msg = err instanceof Error ? err.message : String(err);
     const ours = ctx.deps.agents === undefined ? clump : clump.slice(1);
     for (const b of openBeads(ctx, ours)) {
@@ -3740,7 +3777,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // clump is un-seen, and pushes hold (the wall's reset when one was
     // reported) so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     unseeClump(ctx, clump, out.untilMs);
     return false;
   }
@@ -3748,7 +3785,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // the spawn's own backend wedged — claimStep's store refused on an
     // outage, not a race. The same hold the claim boundary runs:
     // un-see, hold an interval, retry (spec bro-cu3q8)
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     unseeClump(ctx, clump);
     return holdForInfra(ctx, 'claim', out.why);
   }
@@ -3762,7 +3799,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     }
   } else {
     // parked/failed — no PR will ever list for this admission
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
   }
   await recordClaimOutcome(ctx, ids, out);
   return true;
