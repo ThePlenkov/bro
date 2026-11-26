@@ -285,10 +285,13 @@ function parseControl(out) {
     if (text === '') continue;
     try {
       const parsed = JSON.parse(text);
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      if (isControlObject(parsed)) return parsed;
     } catch {}
   }
   return null;
+}
+function isControlObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 /**
  * The context half of a control object: bro's "here is what you should
@@ -545,6 +548,12 @@ function mergeHydrationText(priorCarry, text) {
   if (priorCarry === '') return text;
   return text === '' ? priorCarry : `${priorCarry}\n\n${text}`;
 }
+function canReuseCommand(resolved, failedAt) {
+  return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
+}
+function canConsumeHydration(pending, sessionId, hydrated) {
+  return pending !== void 0 && pending.sessionId === sessionId && hydrated !== sessionId;
+}
 function trackHydration(options) {
   const { raw, started, isCurrent, onFailure, clear } = options;
   raw
@@ -604,11 +613,8 @@ function createBroDriver(host, api, deps = {}) {
   let resolvedFailedAt;
   const resolve = deps.resolve ?? resolveCommand;
   const command = () => {
-    if (
-      resolved !== void 0 &&
-      (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)
-    )
-      return resolved;
+    if (resolved === void 0) {
+    } else if (canReuseCommand(resolved, resolvedFailedAt)) return resolved;
     resolvedFailedAt = void 0;
     resolved = resolve({ npxPin: host.npxPin }).then(cmd => {
       if (cmd === null) resolvedFailedAt = Date.now();
@@ -709,7 +715,8 @@ function createBroDriver(host, api, deps = {}) {
    *  picks the answer up, this turn never waits on it). */
   const consumeHydration = async (sessionId, cwd) => {
     const pending = hydration;
-    if (pending === void 0 || pending.sessionId !== sessionId || hydrated === sessionId) return '';
+    if (pending === void 0) return '';
+    if (!canConsumeHydration(pending, sessionId, hydrated)) return '';
     hydrated = sessionId;
     const text = (await pending.promise).trim();
     if (text !== '') return text;
@@ -929,7 +936,8 @@ function createBroDriver(host, api, deps = {}) {
       properties: {},
       additionalProperties: false,
     },
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    async execute(...toolArgs) {
+      const ctx = toolArgs[4];
       const result = await run(['status', '--json'], host.cwd(ctx));
       return {
         content: [

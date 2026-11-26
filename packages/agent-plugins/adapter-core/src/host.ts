@@ -328,6 +328,18 @@ function mergeHydrationText(priorCarry: string, text: string): string {
   return text === '' ? priorCarry : `${priorCarry}\n\n${text}`;
 }
 
+function canReuseCommand(resolved: Promise<Command | null>, failedAt: number | undefined): boolean {
+  return failedAt === undefined || Date.now() - failedAt < RESOLVE_RETRY_MS;
+}
+
+function canConsumeHydration(
+  pending: { sessionId: string; promise: Promise<string> } | undefined,
+  sessionId: string,
+  hydrated: string | undefined
+): boolean {
+  return pending !== undefined && pending.sessionId === sessionId && hydrated !== sessionId;
+}
+
 function trackHydration(options: {
   raw: Promise<HookControl | null>;
   started: Promise<string>;
@@ -404,10 +416,9 @@ export function createBroDriver<Ctx>(
   let resolvedFailedAt: number | undefined;
   const resolve = deps.resolve ?? resolveCommand;
   const command = (): Promise<Command | null> => {
-    if (
-      resolved !== undefined &&
-      (resolvedFailedAt === undefined || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)
-    ) {
+    if (resolved === undefined) {
+      // resolve below
+    } else if (canReuseCommand(resolved, resolvedFailedAt)) {
       return resolved;
     }
     resolvedFailedAt = undefined;
@@ -543,7 +554,10 @@ export function createBroDriver<Ctx>(
    *  picks the answer up, this turn never waits on it). */
   const consumeHydration = async (sessionId: string, cwd: string): Promise<string> => {
     const pending = hydration;
-    if (pending === undefined || pending.sessionId !== sessionId || hydrated === sessionId) {
+    if (pending === undefined) {
+      return '';
+    }
+    if (!canConsumeHydration(pending, sessionId, hydrated)) {
       return '';
     }
     // claim synchronously, before the await — two concurrent
@@ -813,7 +827,8 @@ export function createBroDriver<Ctx>(
     description:
       'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    async execute(...toolArgs: [string, unknown, AbortSignal | undefined, unknown, Ctx]) {
+      const ctx = toolArgs[4];
       const result = await run(['status', '--json'], host.cwd(ctx));
       return {
         content: [
