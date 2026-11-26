@@ -59,13 +59,17 @@ export function recallTuning(raw?: {
   minAgreement?: number;
   minRows?: number;
 }): RecallTuning {
-  const k = finiteOr(raw?.k, DEFAULT_RECALL.k, value => value >= 1);
+  const k = finiteOr(raw?.k, DEFAULT_RECALL.k, value => Number.isInteger(value) && value >= 1);
   const minAgreement = finiteOr(raw?.minAgreement, DEFAULT_RECALL.minAgreement, value => value > 0);
-  const minRows = finiteOr(raw?.minRows, DEFAULT_RECALL.minRows, value => value >= 1);
+  const minRows = finiteOr(
+    raw?.minRows,
+    DEFAULT_RECALL.minRows,
+    value => Number.isInteger(value) && value >= 1
+  );
   return {
-    k: Math.floor(k),
+    k,
     minAgreement: Math.min(1, minAgreement),
-    minRows: Math.floor(minRows),
+    minRows,
   };
 }
 

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { RouteTable } from '@broject/router-routes';
+import { routeTable } from '@broject/router-routes';
 import type { RecallOutcomeRow } from '@broject/router-store';
 import { runT1, shouldInvokeT2 } from './cascade.ts';
 import { recallDecision, recallTuning, recallVotes } from './recall.ts';
-import type { RouteTable } from '@broject/router-routes';
-import { routeTable } from '@broject/router-routes';
 
 /** One recalled row — verified outcomes only ever reach recallVotes. */
 const row = (
@@ -23,9 +23,14 @@ test('recallTuning — defaults apply, nonsense clamps rather than disables', ()
     minRows: 3,
   });
   assert.deepEqual(recallTuning({ k: 2.9, minAgreement: 1.4, minRows: 7 }), {
-    k: 2,
+    k: 5,
     minAgreement: 1,
     minRows: 7,
+  });
+  assert.deepEqual(recallTuning({ k: 2.9, minRows: 7.2 }), {
+    k: 5,
+    minAgreement: 0.6,
+    minRows: 3,
   });
 });
 
