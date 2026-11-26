@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { nextStep, pourFormula, stepKind, stepsOf } from './molecule.ts';
+import { formulaSteps, nextStep, pourFormula, stepKind, stepsOf } from './molecule.ts';
 import type { Molecule, MolIssue } from './types.ts';
 
 const issue = (id: string, over: Partial<MolIssue> = {}): MolIssue => ({
@@ -244,4 +244,10 @@ describe('pourFormula', () => {
       );
     })
   );
+});
+
+describe('formulaSteps', () => {
+  it('rejects formula names that could escape the formulas directory', () => {
+    assert.throws(() => formulaSteps('../package'), /invalid formula name/);
+  });
 });
