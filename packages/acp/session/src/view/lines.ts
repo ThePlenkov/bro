@@ -236,7 +236,7 @@ const stripLinkDefinition = (s: string): string => {
 };
 
 const stripDelimited = (s: string, marker: string): string => {
-  let out = '';
+  const chunks: string[] = [];
   let cursor = 0;
   let open = -1;
   for (let i = 0; i <= s.length - marker.length; i++) {
@@ -247,15 +247,16 @@ const stripDelimited = (s: string, marker: string): string => {
       continue;
     }
     if (i === open + marker.length) {
-      out += s.slice(cursor, i + marker.length);
+      chunks.push(s.slice(cursor, i + marker.length));
     } else {
-      out += s.slice(cursor, open) + s.slice(open + marker.length, i);
+      chunks.push(s.slice(cursor, open), s.slice(open + marker.length, i));
     }
     cursor = i + marker.length;
     open = -1;
     i += marker.length - 1;
   }
-  return out + s.slice(cursor);
+  chunks.push(s.slice(cursor));
+  return chunks.join('');
 };
 
 const stripUnderscores = (s: string): string => {
