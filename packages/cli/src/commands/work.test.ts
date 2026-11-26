@@ -139,30 +139,36 @@ describe('resolveEnterBase', () => {
   });
 
   test('manual mode pins the main branch — no accidental stacking on HEAD', () => {
-    assert.deepEqual(resolveEnterBase(undefined, false, false, 'work/a', 'main'), { base: 'main' });
+    assert.deepEqual(resolveEnterBase(undefined, false, false, 'work/a', 'origin/main'), {
+      base: 'origin/main',
+    });
   });
 
   test('auto mode bases on the current work branch, quiet on main', () => {
     assert.deepEqual(resolveEnterBase(undefined, false, true, 'work/a', 'main'), {
       base: 'work/a',
     });
-    assert.deepEqual(resolveEnterBase(undefined, false, true, 'main', 'main'), { base: 'main' });
-    assert.deepEqual(resolveEnterBase(undefined, false, true, undefined, 'main'), { base: 'main' });
+    assert.deepEqual(resolveEnterBase(undefined, false, true, 'main', 'origin/main', 'main'), {
+      base: 'origin/main',
+    });
+    assert.deepEqual(resolveEnterBase(undefined, false, true, undefined, 'origin/main', 'main'), {
+      base: 'origin/main',
+    });
   });
 
   test('explicit --stack errors on the default branch or detached', () => {
-    assert.ok(resolveEnterBase(undefined, true, false, 'main', 'main').err);
-    assert.ok(resolveEnterBase(undefined, true, false, undefined, 'main').err);
+    assert.ok(resolveEnterBase(undefined, true, false, 'main', 'origin/main', 'main').err);
+    assert.ok(resolveEnterBase(undefined, true, false, undefined, 'origin/main', 'main').err);
     assert.deepEqual(resolveEnterBase(undefined, true, false, 'work/a', 'main'), {
       base: 'work/a',
     });
   });
 
   test('a detached main still pins a base — its commit, not ambient HEAD', () => {
-    assert.deepEqual(resolveEnterBase(undefined, false, false, 'work/a', 'c0ffee'), {
-      base: 'c0ffee',
+    assert.deepEqual(resolveEnterBase(undefined, false, false, 'work/a', 'origin/main', 'main'), {
+      base: 'origin/main',
     });
-    assert.deepEqual(resolveEnterBase(undefined, false, true, 'work/a', 'c0ffee'), {
+    assert.deepEqual(resolveEnterBase(undefined, false, true, 'work/a', 'origin/main', 'main'), {
       base: 'work/a',
     });
   });

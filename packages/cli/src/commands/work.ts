@@ -504,17 +504,39 @@ export function initSubmodules(path: string): void {
 
 /** Everything that decides where the new branch forks from. */
 function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
+  const defaultRef = defaultBranchName();
+  const defaultBase =
+    defaultRef !== undefined &&
+    gitTry(['rev-parse', '--verify', '--quiet', `origin/${defaultRef}`]).code === 0
+      ? `origin/${defaultRef}`
+      : defaultRef !== undefined
+        ? defaultRef
+        : 'main';
+  const current = gitTry(['branch', '--show-current']).out.trim() || undefined;
   const { base, err } = resolveEnterBase(
     flag(argv, '--base'),
     argv.includes('--stack'),
     stackMode() === 'auto',
-    gitTry(['branch', '--show-current']).out.trim() || undefined,
-    main.branch ?? main.head,
-    defaultBranchName()
+    current,
+    defaultBase,
+    defaultRef
   );
   if (err) {
     console.error(`error: ${err}`);
     process.exit(1);
+  }
+  const warnAboutBase = [
+    flag(argv, '--base') === undefined,
+    !argv.includes('--stack'),
+    current !== undefined,
+    defaultRef !== undefined,
+    current !== defaultRef,
+    base === defaultBase,
+  ].every(Boolean);
+  if (warnAboutBase) {
+    console.error(
+      `warning: current checkout is on ${current}; using ${base} (the default branch) as the worktree base`
+    );
   }
   return { base };
 }
@@ -532,6 +554,19 @@ export function defaultBranchName(): string | undefined {
     if (head.code === 0) {
       return head.out.trim().replace(/^[^/]+\//, '');
     }
+  }
+  const shown = gitTry(['remote', 'show', 'origin']);
+  const advertised = shown.out.match(/^\s*HEAD branch:\s*(\S+)/m)?.[1];
+  const unusableAdvertised = [undefined, '', '(unknown)'];
+  if (!unusableAdvertised.includes(advertised)) {
+    return advertised;
+  }
+  const local = gitTry(['branch', '--format=%(refname:short)'])
+    .out.split('\n')
+    .map(s => s.trim())
+    .find(branch => branch === 'main' || branch === 'master');
+  if (local !== undefined) {
+    return local;
   }
   return undefined;
 }

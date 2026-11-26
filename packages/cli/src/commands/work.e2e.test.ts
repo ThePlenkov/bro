@@ -39,6 +39,12 @@ function workFixture(): { root: string; main: string } {
   return initRepo('bro-work-e2e-');
 }
 
+const originRemote = (root: string, main: string): void => {
+  git(['init', '--bare', '-q', join(root, 'origin.git')], main);
+  git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+  git(['push', '-q', '-u', 'origin', 'main'], main);
+};
+
 const worktreeOf = (root: string, slug: string): string => join(root, `main--${slug}`);
 
 /** loop/* litter made by hand — the sweep treats a closed bead as the
@@ -169,13 +175,11 @@ describe('bro work e2e — enter base-ahead warning (bro-9cxhp)', () => {
     const { root, main } = workFixture();
     inside(main, root, () => {
       // a bare origin carrying main, then one unpushed local commit
-      git(['init', '--bare', '-q', join(root, 'origin.git')], main);
-      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
-      git(['push', '-q', '-u', 'origin', 'main'], main);
+      originRemote(root, main);
       writeFileSync(join(main, 'unpushed.txt'), 'x');
       git(['add', 'unpushed.txt'], main);
       git(['commit', '-q', '-m', 'unpushed'], main);
-      const r = runCli(['work', 'enter', 'fix-upstream'], { cwd: main });
+      const r = runCli(['work', 'enter', '--base', 'main', 'fix-upstream'], { cwd: main });
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stderr, /base main is 1 commit\(s\) ahead of/);
     });
@@ -184,12 +188,35 @@ describe('bro work e2e — enter base-ahead warning (bro-9cxhp)', () => {
   test('enter stays silent when the base is even with its upstream', () => {
     const { root, main } = workFixture();
     inside(main, root, () => {
-      git(['init', '--bare', '-q', join(root, 'origin.git')], main);
-      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
-      git(['push', '-q', '-u', 'origin', 'main'], main);
+      originRemote(root, main);
       const r = runCli(['work', 'enter', 'fix-even'], { cwd: main });
       assert.equal(r.code, 0, r.stderr);
       assert.doesNotMatch(r.stderr, /ahead of/);
+    });
+  });
+});
+
+describe('bro work e2e — enter uses the remote default base (bro-k0kzv)', () => {
+  test('a foreign current branch does not become the new worktree base', () => {
+    const { root, main } = workFixture();
+    inside(main, root, () => {
+      originRemote(root, main);
+      writeFileSync(join(main, 'foreign.txt'), 'foreign');
+      git(['add', 'foreign.txt'], main);
+      git(['commit', '-q', '-m', 'foreign WIP'], main);
+      git(['branch', 'foreign-wip'], main);
+      git(['checkout', '-q', 'foreign-wip'], main);
+
+      const r = runCli(['work', 'enter', 'fix-origin-base'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /using origin\/main \(the default branch\)/);
+      const wt = worktreeOf(root, 'fix-origin-base');
+      const originMain = git(['rev-parse', 'origin/main'], main).trim();
+      assert.equal(
+        git(['merge-base', 'origin/main', 'work/fix-origin-base'], wt).trim(),
+        originMain
+      );
+      assert.equal(git(['rev-parse', 'work/fix-origin-base'], wt).trim(), originMain);
     });
   });
 });
