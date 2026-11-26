@@ -75,16 +75,34 @@ function mergeDefaultModel(root: string, file: DefaultModel): void {
   );
 }
 
-function validProfile(entry: ProfileEntry): boolean {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) return false;
-  if (!isRecord(entry.profile) || typeof entry.profile.model !== 'string') return false;
-  if (entry.profile.model.trim() === '') return false;
-  if (entry.profile.prompt !== undefined && typeof entry.profile.prompt !== 'string') return false;
+function validProfileName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name);
+}
+
+function validProfileModel(profile: DevinSubagentProfile): boolean {
+  return typeof profile.model === 'string' && profile.model.trim() !== '';
+}
+
+function validProfilePrompt(profile: DevinSubagentProfile): boolean {
+  return profile.prompt === undefined || typeof profile.prompt === 'string';
+}
+
+function validProfileTools(profile: DevinSubagentProfile): boolean {
   return (
-    entry.profile.tools === undefined ||
-    (Array.isArray(entry.profile.tools) &&
-      entry.profile.tools.every(tool => typeof tool === 'string'))
+    profile.tools === undefined ||
+    (Array.isArray(profile.tools) && profile.tools.every(tool => typeof tool === 'string'))
   );
+}
+
+function validProfile(entry: ProfileEntry): boolean {
+  const checks = [
+    validProfileName(entry.name),
+    isRecord(entry.profile),
+    validProfileModel(entry.profile),
+    validProfilePrompt(entry.profile),
+    validProfileTools(entry.profile),
+  ];
+  return checks.every(Boolean);
 }
 
 function defaultModel(config: DevinSubagentConfig): string | undefined {
