@@ -620,9 +620,6 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       await Promise.race([cur.handshake, sleep(20_000)]);
       await sleep(300);
       if (cur.mode === 'log') pumpLog(cur, true);
-      // Re-evaluate after the bounded drain so the final report reflects
-      // the archive's terminal row rather than the initial worker floor.
-      refresh();
     }
     detach();
     renderer?.end();
