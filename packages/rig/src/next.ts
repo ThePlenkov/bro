@@ -6,20 +6,27 @@
  *
  *  Lives in @broject/rig (bro-jamp7): the CLI's `bro rig next` is the
  *  thin adapter over this — argv/stdout/exit stay in commands/. */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { deadWatchPlan } from '@broject/act';
 import {
+  type AgentRegistryEntry,
   bdActor,
   facadeName,
+  gitCommonDir,
   gitTry,
+  loadConfig,
+  lockHolderPid,
   mainWorktreeRoot,
   pidAlive,
+  type ReviewFacade,
   readAgentRegistry,
   reviewHost,
-  loadConfig,
-  worktreePathFor,
-  type AgentRegistryEntry,
-  type ReviewFacade,
+  staleLock,
   type TaskRow,
   type TaskStore,
+  worktreePathFor,
 } from '@broject/core';
 import { currentFrame, queueItems, queueScope, WAITING_LABEL } from '@broject/drill';
 import { readyBeads, storeFor } from './ready.ts';
@@ -55,6 +62,59 @@ interface VerdictCtx extends NextScope {
 function wakePredicate(row: TaskRow): string | undefined {
   const wakes = (row.notes?.split('\n') ?? []).filter(l => l.startsWith('WAKE: '));
   return wakes.at(-1)?.slice(6);
+}
+
+/** The re-entry planes that do not belong to a bead.  A dead wait is a
+ * promise to resurrect the bounded observer; an armed marker is a promise
+ * to resurrect its supervisor.  Keep these as verdict inputs rather than
+ * letting each session checkpoint invent its own re-entry ladder. */
+function supervisionVerdict(dir: string): RigNext | undefined {
+  const watches = deadWatchPlan(dir);
+  if (watches.length > 0) {
+    return {
+      verdict: 'step',
+      detail: `dead act-wait marker for PR #${watches[0]?.pr} — act rearm`,
+    };
+  }
+  const common = gitCommonDir(dir);
+  if (common === null) {
+    return undefined;
+  }
+  const bro = join(common, 'bro');
+  const dead = ['pulse', 'drive', 'loop']
+    .map(kind => ({ kind, file: join(bro, `${kind}.json`), lock: join(bro, `${kind}.lock`) }))
+    .find(({ file, lock }) => markerArmed(file) && !lockLive(lock));
+  return dead === undefined
+    ? undefined
+    : {
+        verdict: 'step',
+        detail: `armed ${dead.kind} marker is dead — rearm`,
+      };
+}
+
+function lockLive(file: string): boolean {
+  if (!existsSync(file) || staleLock(file)) {
+    return false;
+  }
+  const pid = lockHolderPid(file);
+  return pid !== null && pidAlive(pid);
+}
+
+function markerArmed(file: string): boolean {
+  if (!existsSync(file)) {
+    return false;
+  }
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    return (
+      typeof raw.armedAt === 'string' &&
+      typeof raw.everySec === 'number' &&
+      Number.isFinite(raw.everySec) &&
+      raw.everySec > 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** No-arg focus: the current frame's queue top (intake order), else
@@ -342,6 +402,12 @@ export function rigNext(
   opts?: { gate?: boolean; store?: TaskStore }
 ): RigNext {
   const store = opts?.store ?? storeFor(dir);
+  if (item === undefined) {
+    const supervision = supervisionVerdict(dir);
+    if (supervision !== undefined) {
+      return supervision;
+    }
+  }
   const id = item ?? rigFocus(dir, { store });
   if (id === undefined) {
     return { verdict: 'done' };
