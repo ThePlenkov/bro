@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { healthSnapshot } from './health.ts';
 import { migrateStore } from './migrations.ts';
-import { openSession, openStore, recordLimit } from './store.ts';
+import { openSession, openStore, recordLimit, recordUsage } from './store.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'router-health-test-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -89,5 +89,36 @@ test('a reason the ledger does not know still means a wall', async () => {
   const verdict = (await healthSnapshot(s.db, 2))['p/m'];
   assert.equal(verdict?.available, false);
   assert.equal(verdict?.reason, 'rate-limited');
+  s.close();
+});
+
+test('the snapshot includes usage in the current hour window', async () => {
+  const s = await store('usage');
+  await recordUsage(s.db, {
+    provider: 'p',
+    model: 'm',
+    windowStart: 400,
+    requests: 3,
+    tokens: 30,
+  });
+  await recordUsage(s.db, {
+    provider: 'p',
+    model: 'm',
+    windowStart: 700,
+    requests: 2,
+    tokens: 20,
+  });
+  await recordUsage(s.db, {
+    provider: 'p',
+    model: 'm',
+    windowStart: 5_000_000,
+    requests: 99,
+    tokens: 99,
+  });
+  const verdict = (await healthSnapshot(s.db, 1_000))['p/m'];
+  assert.deepEqual(
+    { requests: verdict?.requests, tokens: verdict?.tokens, available: verdict?.available },
+    { requests: 5, tokens: 50, available: true }
+  );
   s.close();
 });
