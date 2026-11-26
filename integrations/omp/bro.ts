@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerSupervisionHost } from "@broject/core";
 
 //#region packages/agent-plugins/adapter-core/src/core.ts
 /** How long a normal hook probe may take. */
@@ -1118,6 +1119,53 @@ function installModeBridges(pi, source) {
 }
 
 //#endregion
+//#region packages/agent-plugins/omp/src/omp-supervision.ts
+const DEFAULT_POLL_MS = 5e3;
+/**
+* Install omp's in-process supervision adapter. A timer is deliberately
+* unref'd: an extension wait must never keep the editor alive by itself.
+* Completion is a steer message, rather than a notification, so the model
+* receives the verdict on its next scheduling point.
+*/
+function installOmpSupervision(api, intervalMs = DEFAULT_POLL_MS) {
+	return registerSupervisionHost("omp", { async supervise(spec) {
+		if (spec.native === void 0) throw new Error("omp supervision requires a native poll");
+		const native = spec.native;
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (fn) => {
+				if (settled) return;
+				settled = true;
+				clearInterval(timer);
+				fn();
+			};
+			const poll = async () => {
+				try {
+					const value = await native();
+					const message = spec.message?.(value) ?? `${spec.name} settled`;
+					api.sendMessage({
+						customType: "bro-supervision",
+						content: message,
+						display: false,
+						details: value
+					}, {
+						deliverAs: "steer",
+						triggerTurn: true
+					});
+					finish(() => resolve(value));
+				} catch (error) {
+					finish(() => reject(error));
+				}
+			};
+			const timer = setInterval(() => void poll(), Math.max(1, intervalMs));
+			timer.unref();
+			poll();
+		});
+	} });
+}
+const OMP_SUPERVISION_HOST = "omp";
+
+//#endregion
 //#region packages/agent-plugins/omp/src/omp.ts
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
@@ -1157,6 +1205,8 @@ function binding(pi) {
 }
 /** The extension entry point — omp calls this with its API. */
 function broExtension(pi) {
+	process.env.BRO_SUPERVISION_HOST = OMP_SUPERVISION_HOST;
+	installOmpSupervision(pi);
 	const driver = createBroDriver(binding(pi), pi);
 	/** The mode bridges — bro's durable state handed to omp's native Plan,
 	*  Goal and Vibe modes. See omp-modes.ts for why bro adds state
