@@ -78,6 +78,35 @@ export interface FleetRow {
   prNums?: number[];
 }
 
+export interface FleetSpawnCheck {
+  provider: string;
+  canSpawn: boolean;
+  wall?: ProviderWall['cause'];
+  resetAt?: string;
+}
+
+/** Read-only admission probe used before dispatch. */
+export function canSpawnFor(
+  provider: string,
+  walls: readonly ProviderWall[],
+  now = Date.now()
+): FleetSpawnCheck {
+  const wall = walls
+    .filter(candidate => candidate.provider === provider)
+    .sort((a, b) => Date.parse(b.until ?? '') - Date.parse(a.until ?? ''))[0];
+  if (wall === undefined) {
+    return { provider, canSpawn: true };
+  }
+  const resetAt = wall.until;
+  const lifted = resetAt !== undefined && Date.parse(resetAt) <= now;
+  return {
+    provider,
+    canSpawn: lifted,
+    wall: wall.cause,
+    ...(resetAt === undefined ? {} : { resetAt }),
+  };
+}
+
 /** The fleet's agent plane — merged across every registered backend.
  *  A throwing connector — factory or list() — is degrade-equivalent:
  *  it contributes no agents and one `degraded` note, never a hard
@@ -627,6 +656,15 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
 }
 
 async function dispatchFleetSubcommand(dir: string, argv: string[]): Promise<boolean> {
+  if (argv[0] === 'can-spawn') {
+    try {
+      runFleetCanSpawnCommand(dir, argv.slice(1));
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 2;
+    }
+    return true;
+  }
   if (argv[0] === 'leases') {
     try {
       runFleetLeasesCommand(dir, argv.slice(1));
@@ -652,6 +690,23 @@ async function dispatchFleetSubcommand(dir: string, argv: string[]): Promise<boo
     return true;
   }
   return false;
+}
+
+function runFleetCanSpawnCommand(dir: string, argv: string[]): void {
+  const json = argv.at(-1) === '--json';
+  const values = json ? argv.slice(0, -1) : argv;
+  const provider = values[0];
+  if (provider === undefined || provider.trim() === '' || values.length !== 1) {
+    throw new Error('usage: bro fleet can-spawn <provider> [--json]');
+  }
+  const env = loadAgentEnv(dir);
+  const result = canSpawnFor(provider, providerWallsFor(dir, env));
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  const reset = result.resetAt === undefined ? '' : ` resetAt=${result.resetAt}`;
+  console.log(`${provider} ${result.canSpawn ? 'can-spawn' : `blocked${reset}`}`);
 }
 
 type FleetLeasesAction = { kind: 'list'; json: boolean } | { kind: 'release'; key: string };

@@ -465,6 +465,13 @@ export const PLUGINS: BroPlugin[] = [
         '--every N': 'repaint cadence seconds — implies --live',
       },
       subs: {
+        'can-spawn': {
+          flags: {
+            '<provider>': 'provider lane to probe without dispatching',
+            '--json': '{provider,canSpawn,wall?,resetAt?}',
+          },
+          exits: { 0: 'admission probe printed', 2: 'usage' },
+        },
         hosts: {
           flags: {
             '--json':

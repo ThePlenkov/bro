@@ -39,6 +39,18 @@ export const LEARN_RETRO_CLOSEOUT = `Close out before your final message — lea
 - Session-scale review → the retro checklist: loose ends, hand-rolled mechanics → bd gap beads, call economy, debt sweep.
 - \`bro self learn capture --dry-run\` previews artifact harvest — capture is cheap and deduped, safe to run at close.`;
 
+/** The quota guard shared by every detached worker order. Keeping this in
+ * the prompt seam prevents loop, convoy, and fixer wording from drifting. */
+export const SPAWN_QUOTA_POLICY = `# Quota and stop policy
+
+- Treat a rate-limit or ProviderWall response as a hard stop. Stop immediately,
+  do not retry, and report the partial progress and the wall/reset time.
+- Keep this round bounded to at most 20 combined \`bro\`/ \`gh\` calls. Before
+  the next expensive call, leave a clear STOP marker in your report when the
+  budget is nearly exhausted.
+- Fixer rounds are cheap-first: first read status and unresolved threads for
+  every assigned PR; only then fix PRs in ascending estimated cost.`;
+
 /** The merge rule — `loop.autoMerge` arms GitHub's own auto-merge and
  *  ends the order there: no orchestrator gate, no fix rounds, the PR
  *  lands when its checks go green. Off keeps the supervisor-driven
@@ -115,6 +127,8 @@ ${mergeRule(autoMerge)}- Report verdicts through the task store: if the task nee
   dead or silent sibling run is reported in your final message, not
   respawned: respawns are the supervisor's job.
 
+${SPAWN_QUOTA_POLICY}
+
 ${LEARN_RETRO_CLOSEOUT}
 `;
 }
@@ -186,6 +200,8 @@ ${mergeRule(autoMerge)}- Beads you cannot finish stay open — the run re-queues
   sibling agent processes or edit registry/loop records yourself — a
   dead or silent sibling run is reported in your final message, not
   respawned: respawns are the supervisor's job.
+
+${SPAWN_QUOTA_POLICY}
 
 ${LEARN_RETRO_CLOSEOUT}
 `;
@@ -261,6 +277,8 @@ ${coverageRule}- For each thread you MUST take an action before you stop: either
 - Push your fixes if you make code changes. Unresolved threads without a
   verdict block the merge; leaving threads open with no action is a failure.
 
+${SPAWN_QUOTA_POLICY}
+
 ${LEARN_RETRO_CLOSEOUT}
 `;
 }
@@ -304,6 +322,8 @@ resolve the conflicts, and push:
   before pushing.
 - If the conflicts genuinely can't be resolved without redesign, say
   so as your final message — do not leave the rebase half-done.
+
+${SPAWN_QUOTA_POLICY}
 
 ${LEARN_RETRO_CLOSEOUT}
 `;
