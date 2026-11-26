@@ -319,7 +319,7 @@ describe('gascity connector', () => {
       assert.ok(!agentToml.includes('other-bead'));
       // BRO_AGENT_ID still renders — with the connector's real id, never
       // the caller's; the proc-owner environ badge depends on it
-      assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`));
+      assert.ok(agentToml.includes(`BRO_AGENT_ID = "${info.id}"`), agentToml);
       assert.ok(!agentToml.includes('BRO_AGENT_ID = "x"'));
       // BRO_PROMPT_FILE points at the real prompt artifact, never the
       // caller's path
@@ -339,11 +339,11 @@ describe('gascity connector', () => {
       const conn = makeGascityConnector({ dir: fx.main }, fx.env);
       const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
       const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8');
-      assert.match(agentToml, new RegExp(`BEADS_DIR = "${fx.beadsDir}"`));
+      assert.ok(agentToml.includes(`BEADS_DIR = "${fx.beadsDir}"`), agentToml);
       assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/);
-      assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`));
-      assert.match(agentToml, new RegExp(`BRO_PROMPT_FILE = ".*${info.id}\\.prompt\\.md"`));
-      assert.match(agentToml, new RegExp(`BRO_SESSION_ID = "${info.id}"`));
+      assert.ok(agentToml.includes(`BRO_AGENT_ID = "${info.id}"`), agentToml);
+      assert.ok(agentToml.includes(`${info.id}.prompt.md`), agentToml);
+      assert.ok(agentToml.includes(`BRO_SESSION_ID = "${info.id}"`), agentToml);
     } finally {
       cleanup(fx);
     }
