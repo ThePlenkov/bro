@@ -34,13 +34,35 @@ export interface RoleSession {
   sid: string;
 }
 
+export interface RoleSessionArgs {
+  sessionId: string | undefined;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface OrchestratorRoleArgs {
+  dir: string;
+  session: RoleSession | null;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface HeldOrchestratorRoleArgs {
+  dir: string;
+  session: RoleSession;
+}
+
+export interface OrchestratorRoleClaimArgs {
+  dir: string;
+  session: SessionKey;
+}
+
+export interface AcquireOrchestratorRoleArgs extends OrchestratorRoleClaimArgs {
+  opts?: { ttlMs?: number; ownSession?: boolean };
+}
+
 /** Resolve the firing session for a hook/CLI context — explicit
  *  sessionId+host win; host falls back to the env detection the hook
  *  spool uses. null = no session identity (caller keeps legacy rules). */
-export function roleSessionOf(
-  sessionId: string | undefined,
-  env: NodeJS.ProcessEnv = process.env
-): RoleSession | null {
+export function roleSessionOf({ sessionId, env = process.env }: RoleSessionArgs): RoleSession | null {
   const sid = sessionId?.trim();
   if (sid === undefined || sid === '') {
     return null;
@@ -68,11 +90,11 @@ async function roleClaims(dir: string, project: string) {
 /** May this session act as the project orchestrator? See the module
  *  comment for the verdict table. `session` null → env-only legacy
  *  answer (true when BRO_AGENT_ID is unset). */
-export async function orchestratorRoleAllows(
-  dir: string,
-  session: RoleSession | null,
-  env: NodeJS.ProcessEnv = process.env
-): Promise<boolean> {
+export async function orchestratorRoleAllows({
+  dir,
+  session,
+  env = process.env,
+}: OrchestratorRoleArgs): Promise<boolean> {
   const agentId = env.BRO_AGENT_ID;
   if (agentId !== undefined && agentId !== '') {
     return false;
@@ -95,7 +117,10 @@ export async function orchestratorRoleAllows(
 /** Does `session` currently hold the role claim? Tells a fresh acquire
  *  from a renewal — a failed mode write undoes only the fresh claim;
  *  a pre-existing role belongs to the mode file still on disk. */
-export async function orchestratorRoleHeldBy(dir: string, session: RoleSession): Promise<boolean> {
+export async function orchestratorRoleHeldBy({
+  dir,
+  session,
+}: HeldOrchestratorRoleArgs): Promise<boolean> {
   const project = sessionProject(dir);
   if (project === undefined) {
     return false;
@@ -115,11 +140,11 @@ export async function orchestratorRoleHeldBy(dir: string, session: RoleSession):
  *  claim probe. An explicitly targeted session (--session/--host) gets
  *  a pid-less claim — attaching the caller's pid would let the caller's
  *  death sweep a claim the target session still needs. */
-export async function acquireOrchestratorRole(
-  dir: string,
-  session: SessionKey,
-  opts: { ttlMs?: number; ownSession?: boolean } = {}
-): Promise<ClaimResult> {
+export async function acquireOrchestratorRole({
+  dir,
+  session,
+  opts = {},
+}: AcquireOrchestratorRoleArgs): Promise<ClaimResult> {
   const project = sessionProject(dir);
   if (project === undefined) {
     return { ok: false, conflict: null };
@@ -135,7 +160,10 @@ export async function acquireOrchestratorRole(
 
 /** Release the role claim when this session holds it — mode leaves
  *  orchestrate. Best-effort: a missing row is already released. */
-export async function releaseOrchestratorRole(dir: string, session: SessionKey): Promise<void> {
+export async function releaseOrchestratorRole({
+  dir,
+  session,
+}: OrchestratorRoleClaimArgs): Promise<void> {
   const project = sessionProject(dir);
   if (project === undefined) {
     return;

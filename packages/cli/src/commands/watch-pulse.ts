@@ -306,7 +306,7 @@ async function pulseCheckpoint(dir: string, where: string, sessionId?: string): 
     if (r.kind !== 'rearm') {
       return [];
     }
-    if (!(await orchestratorRoleAllows(dir, roleSessionOf(sessionId)))) {
+    if (!(await orchestratorRoleAllows({ dir, session: roleSessionOf({ sessionId }) }))) {
       return [];
     }
     const pid = spawnPulse(dir, r.everySec, r.forSec);
