@@ -11,12 +11,25 @@
  * — the client adapter that carries bro's skills and hooks into the
  * devin CLI. That one inherits this facade; it does not contain it.
  */
+
+export type {
+  DevinAccountDiagnostic,
+  DevinConsumer,
+  DevinDiagnosticOptions,
+  DevinRateLimitDiagnostic,
+  DevinRateLimitHit,
+  DevinServeTurnSummary,
+} from './diagnostics.ts';
+export {
+  diagnoseDevinRateLimit,
+  inspectDevinAccount,
+} from './diagnostics.ts';
 export {
   countDevinBatchWorkers,
   countDevinSessions,
   countDevinWorkers,
-  devinLogsDir,
   devinLocksDir,
+  devinLogsDir,
   devinPidAgentId,
   devinPidBead,
   devinPidCwd,
@@ -30,8 +43,14 @@ export {
   listDevinSessions,
   renderDevinTranscript,
 } from './plane.ts';
-export { countDevinSessionStarts } from './starts.ts';
 export { commandCliNames, commandWorkerClis } from './shell.ts';
+export { countDevinSessionStarts } from './starts.ts';
+export type {
+  DevinLaneCounts,
+  DevinModelUsage,
+  DevinUsageSample,
+  DevinUsageState,
+} from './usage.ts';
 export {
   devinStorePath,
   devinUsageStatePath,
@@ -39,10 +58,4 @@ export {
   readDevinUsageState,
   sampleDevinUsage,
   writeDevinUsageState,
-} from './usage.ts';
-export type {
-  DevinLaneCounts,
-  DevinModelUsage,
-  DevinUsageSample,
-  DevinUsageState,
 } from './usage.ts';
