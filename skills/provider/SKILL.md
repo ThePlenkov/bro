@@ -15,6 +15,17 @@ the real credential from the server env), never the protocol. SSE
 streams, tool_use, and `/v1/models` discovery all pass through
 untouched.
 
+## Claude model discovery timeout
+
+Claude Code's dynamic gateway model picker gives `GET /v1/models` a
+**3-second default timeout** (`CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY_TIMEOUT_MS`).
+The conductor warms and caches the merged lane catalog, so normal discovery
+requests return in milliseconds. The first request after startup or after the
+short cache TTL can still enumerate ACP lanes; when using a cold or
+slowly-starting conductor, set the timeout to at least **20 seconds** (for
+example, `CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY_TIMEOUT_MS=20000`) so discovery
+does not fall back to Claude's static model list.
+
 **Opt-in transport.** The gate/debt workflow (`bro review act`, `bro
 review debt`) needs no listener, no provider entry, and no upstream
 key — this plane exists only for clients that point a base URL at it:
