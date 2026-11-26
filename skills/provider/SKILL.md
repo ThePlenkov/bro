@@ -15,7 +15,7 @@ the real credential from the server env), never the protocol. SSE
 streams, tool_use, and `/v1/models` discovery all pass through
 untouched.
 
-### Claude model discovery timeout
+## Claude model discovery timeout
 
 Claude Code's dynamic gateway model picker gives `GET /v1/models` a
 **3-second default timeout** (`CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY_TIMEOUT_MS`).
