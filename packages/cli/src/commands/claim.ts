@@ -23,25 +23,25 @@
  * tasks store and the bd claim stays the source of truth.
  */
 import {
+  type ClaimFacade,
+  type ClaimResult,
+  type ClaimRow,
   CommandError,
+  type EventsFacade,
   EXIT,
   facade,
   gitTry,
   hasHelpFlag,
   hookHostOf,
+  type LedgerFacade,
   loadConfig,
   printUsage,
+  type SessionKey,
   sessionIdFromEnv,
   sessionProject,
-  type ClaimFacade,
-  type ClaimResult,
-  type ClaimRow,
-  type EventsFacade,
-  type LedgerFacade,
-  type SessionKey,
 } from '@broject/core';
-import { flag, positionals } from './args.ts';
 import { agentOwner } from '@broject/rig';
+import { flag, positionals } from './args.ts';
 import {
   claimGlobWithinBounds,
   MAX_CLAIM_GLOB_LENGTH,
@@ -485,6 +485,57 @@ function claimEvents(dir: string, deps: ClaimDeps): EventsFacade | undefined {
   }
 }
 
+function printClaimResult(
+  args: ClaimArgs,
+  result: ClaimResult,
+  resource: string,
+  key: SessionKey
+): void {
+  if (args.json) {
+    console.log(
+      JSON.stringify(
+        { ok: result.ok, resource, session: key, conflict: result.conflict ?? null },
+        null,
+        2
+      )
+    );
+    return;
+  }
+  if (result.ok) {
+    console.log(`claimed ${resource} for ${key.host}-${key.sid}`);
+    return;
+  }
+  const holder =
+    result.conflict === undefined || result.conflict === null
+      ? 'another session'
+      : `${result.conflict.host}-${result.conflict.sid}`;
+  console.log(`claim refused — ${resource} held by ${holder}`);
+}
+
+async function reportRefusedClaim(
+  result: ClaimResult,
+  resource: string,
+  key: SessionKey,
+  dir: string,
+  deps: ClaimDeps
+): Promise<void> {
+  if (result.ok) return;
+  process.exitCode = EXIT.error;
+  const env = deps.env ?? process.env;
+  const ledger = claimLedger(dir, deps);
+  const events = claimEvents(dir, deps);
+  await noteRefusedClaim({
+    dir,
+    env,
+    session: key,
+    resource,
+    conflict: result.conflict,
+    ...(ledger !== undefined ? { ledger } : {}),
+    ...(events !== undefined ? { events } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  });
+}
+
 async function runClaimAcquire(
   args: ClaimArgs,
   claims: ClaimFacade,
@@ -516,42 +567,8 @@ async function runClaimAcquire(
   } catch (err) {
     throw new CommandError(`error: claim failed — ${errText(err)}`, EXIT.error);
   }
-  if (args.json) {
-    console.log(
-      JSON.stringify(
-        { ok: result.ok, resource, session: key, conflict: result.conflict ?? null },
-        null,
-        2
-      )
-    );
-  } else if (result.ok) {
-    console.log(`claimed ${resource} for ${key.host}-${key.sid}`);
-  } else {
-    const c = result.conflict;
-    console.log(
-      `claim refused — ${resource} held by ${c === undefined || c === null ? 'another session' : `${c.host}-${c.sid}`}`
-    );
-  }
-  // a refused claim is a verdict, not a crash — exit 1 so scripts see it
-  if (!result.ok) {
-    process.exitCode = EXIT.error;
-    // the spec's observe half (bro-izpyk.8): the refused session's inbox
-    // carries the conflict into context on the next hook. Active-mode
-    // callers get nothing — the pre-tool verdict re-derives it.
-    const env = deps.env ?? process.env;
-    const ledger = claimLedger(dir, deps);
-    const events = claimEvents(dir, deps);
-    await noteRefusedClaim({
-      dir,
-      env,
-      session: key,
-      resource,
-      conflict: result.conflict,
-      ...(ledger !== undefined ? { ledger } : {}),
-      ...(events !== undefined ? { events } : {}),
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
-    });
-  }
+  printClaimResult(args, result, resource, key);
+  await reportRefusedClaim(result, resource, key, dir, deps);
 }
 
 export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Promise<void> {
