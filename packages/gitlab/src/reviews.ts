@@ -662,6 +662,12 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
   }
 
   return {
+    refIdentity: {
+      host: hostOnce(),
+      sameHost: (left: string, right: string): boolean =>
+        left.toLowerCase() === right.toLowerCase(),
+      sameRepo: (left: string, right: string): boolean => left === right,
+    },
     resolveRepo,
     prLink: link,
     currentPr() {

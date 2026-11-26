@@ -103,7 +103,33 @@ describe('mergeClaimTarget', () => {
       kind: 'gitlab',
     });
   });
+  test('GitHub identity rules fold case-only host and repository spellings', () => {
+    const { target, message } = mergeClaimTarget(
+      {
+        result: 'merged [#958](https://GITHUB.com/ThePlenkov/bro/pull/958#discussion_r1) and #958',
+      },
+      {
+        host: 'github.com',
+        sameHost: (left, right) => left.toLowerCase() === right.toLowerCase(),
+        sameRepo: (left, right) => left.toLowerCase() === right.toLowerCase(),
+      }
+    );
+    assert.equal(message, undefined);
+    assert.deepEqual(target, { pr: 958, repo: 'ThePlenkov/bro', host: 'GITHUB.com' });
 
+    const folded = mergeClaimTarget(
+      {
+        result:
+          'merged [#958](https://github.com/ThePlenkov/bro/pull/958) and [#958](https://github.com/theplenkov/BRO/pull/958/files)',
+      },
+      {
+        host: 'github.com',
+        sameHost: (left, right) => left.toLowerCase() === right.toLowerCase(),
+        sameRepo: (left, right) => left.toLowerCase() === right.toLowerCase(),
+      }
+    );
+    assert.equal(folded.message, undefined);
+  });
   test('one PR number in two repositories is ambiguous, not a guess', () => {
     const { target, message } = mergeClaimTarget({
       result:

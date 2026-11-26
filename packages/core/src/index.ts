@@ -2,6 +2,7 @@ export {
   gh,
   ghAsync,
   ghHost,
+  githubRefIdentity,
   ghJson,
   ghJsonAsync,
   ghTry,
