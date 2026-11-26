@@ -23,6 +23,7 @@
  *      compare-and-delete, no restore. */
 import { randomBytes } from 'node:crypto';
 import {
+  existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -175,7 +176,7 @@ const lockEntries = (lock: string): Entries | null => {
     if (owner === null) {
       out.junk.push(e);
     } else {
-      (pidAlive(owner) ? out.live : out.dead).push(e);
+      (owner === process.pid || pidAlive(owner) ? out.live : out.dead).push(e);
     }
   }
   return out;
@@ -407,6 +408,10 @@ const dropOwnInstance = (lock: string, entry: string, id: string): void => {
   }
   try {
     if (lockDirId(lock) === id) {
+      const entries = lockEntries(lock);
+      for (const name of entries?.dead ?? []) {
+        rmSync(join(lock, name), { force: true });
+      }
       rmdirSync(lock);
     }
   } catch {
@@ -458,7 +463,8 @@ const tryAcquireLockDir = (lock: string, entry: string, token: string): string |
     return null; // our dir vanished mid-publish — the retry rebuilds
   }
   try {
-    if (dirId(lstatSync(lock)) !== id) {
+    const published = readFileSync(join(lock, entry), 'utf8') === token;
+    if (dirId(lstatSync(lock)) !== id || !published) {
       rmSync(join(lock, entry), { force: true }); // our stray in a foreign dir
       return null;
     }
@@ -536,6 +542,9 @@ const releaseLock = (lock: string, hold: Hold): void => {
   if (removed) {
     try {
       if (ours()) {
+        for (const name of lockEntries(lock)?.dead ?? []) {
+          rmSync(join(lock, name), { force: true });
+        }
         rmdirSync(lock);
       }
     } catch {
@@ -711,9 +720,18 @@ export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => vo
   // acquireFileLock guarantees our hold is registered — re-entrant
   // holds share the outer hold's entry and dir, which is the same claim
   const hold = heldLocks.get(lock)!;
+  const entryMatches = (): boolean => {
+    try {
+      const entryPath = join(lock, hold.entry);
+      return !existsSync(entryPath) || readFileSync(entryPath, 'utf8') === hold.token;
+    } catch {
+      return false;
+    }
+  };
   const beat = (): void => {
     const cur = lstatOrNull(lock);
-    if (cur !== null && cur.isDirectory() && dirId(cur) === hold.dirId) {
+    const ours = cur?.isDirectory() && dirId(cur) === hold.dirId && entryMatches();
+    if (ours) {
       // our instance still stands — re-assert the entry (an abandoned-
       // bound steal may have unlinked it) and freshen the dir mtime
       try {

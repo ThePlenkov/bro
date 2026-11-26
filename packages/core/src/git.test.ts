@@ -65,6 +65,22 @@ function makeRepo(branch = 'main'): string {
   return dir;
 }
 
+/** A bare repository with an initial commit, suitable for linked worktrees. */
+function makeBareRepo(root: string): string {
+  const bare = join(root, 'repo.git');
+  const seed = join(root, 'seed');
+  mkdirSync(seed);
+  git(root, ['init', '-q', '--bare', '-b', 'main', bare]);
+  git(seed, ['init', '-q', '-b', 'main']);
+  git(seed, ['config', 'user.email', 't@t']);
+  git(seed, ['config', 'user.name', 't']);
+  git(seed, ['commit', '-qm', 'init', '--allow-empty']);
+  git(seed, ['remote', 'add', 'origin', bare]);
+  git(seed, ['push', '-q', 'origin', 'main']);
+  rmSync(seed, { recursive: true, force: true });
+  return bare;
+}
+
 function commit(dir: string, subject: string, files: Record<string, string>): string {
   for (const [p, content] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, p)), { recursive: true });
@@ -853,7 +869,7 @@ describe('mainWorktreeRoot', () => {
     const linked = mkdtempSync(join(tmpdir(), 'bro-git-barew-'));
     try {
       const bare = join(root, 'repo.git');
-      git(root, ['init', '-q', '--bare', '-b', 'main', bare]);
+      makeBareRepo(root);
       git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare']);
       // from the linked checkout: no main worktree exists, so null —
       // the caller keeps its own dir rather than anchoring to git storage
@@ -900,7 +916,7 @@ describe('gitWorktreeRoots', () => {
     const linked = mkdtempSync(join(tmpdir(), 'bro-git-rootbarew-'));
     try {
       const bare = join(root, 'repo.git');
-      git(root, ['init', '-q', '--bare', '-b', 'main', bare]);
+      makeBareRepo(root);
       git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare']);
       assert.deepEqual(gitWorktreeRoots(bare), [linked]);
       assert.deepEqual(gitWorktreeRoots(linked), [linked]);

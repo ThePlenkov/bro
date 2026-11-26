@@ -475,21 +475,6 @@ async function askOrReplayFormula(args: {
     cache = cacheInfo(plan, true);
     const contenders = cascade.candidates.map(c => c.route.name);
     stages.push(
-<<<<<<< HEAD
-      stageRecord('T2', contenders, contenders, consultMs, {
-        note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
-      })
-||||||| parent of 3378e2cb (refactor(brouter): decompose recall cascade helpers)
-      stageRecord(
-        t3Used ? 'T3' : 'T2',
-        cascade.candidates.map(c => c.route.name),
-        [],
-        consultMs,
-        {
-          note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
-        }
-      )
-=======
       stageRecord({
         stage: t3Used ? 'T3' : 'T2',
         before: cascade.candidates.map(c => c.route.name),
@@ -499,7 +484,6 @@ async function askOrReplayFormula(args: {
           note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
         },
       })
->>>>>>> 3378e2cb (refactor(brouter): decompose recall cascade helpers)
     );
     if (t3Used) {
       stages.push(
@@ -533,54 +517,20 @@ async function askOrReplayFormula(args: {
     }
     const contenders = cascade.candidates.map(c => c.route.name);
     stages.push(
-<<<<<<< HEAD
-      stageRecord('T2', contenders, contenders, Date.now() - t2Start, {
-        note:
-          asked === null
-            ? 'the judge did not answer — inputs stay unresolved'
-            : 'the judge answered the formula questions',
-      })
-    );
-    if (t3Attempted) {
-      stages.push(
-        stageRecord('T3', contenders, contenders, 0, {
-||||||| parent of 3378e2cb (refactor(brouter): decompose recall cascade helpers)
-      stageRecord(
-        t3Used ? 'T3' : 'T2',
-        cascade.candidates.map(c => c.route.name),
-        [],
-        Date.now() - t2Start,
-        {
-=======
       stageRecord({
         stage: t3Used ? 'T3' : 'T2',
         before: cascade.candidates.map(c => c.route.name),
         after: [],
         latencyMs: Date.now() - t2Start,
         ...{
->>>>>>> 3378e2cb (refactor(brouter): decompose recall cascade helpers)
           note: t3Used
             ? 'T2 low-confidence — the escalate provider re-answered'
-<<<<<<< HEAD
-            : 'the escalate provider changed nothing — T2 stands',
-        })
-      );
-    }
-||||||| parent of 3378e2cb (refactor(brouter): decompose recall cascade helpers)
-            : asked === null
-              ? 'the judge did not answer — inputs stay unresolved'
-              : 'the judge answered the formula questions',
-        }
-      )
-    );
-=======
             : asked === null
               ? 'the judge did not answer — inputs stay unresolved'
               : 'the judge answered the formula questions',
         },
       })
     );
->>>>>>> 3378e2cb (refactor(brouter): decompose recall cascade helpers)
     // memoize the stage answers — a judge that did not answer leaves
     // nothing worth replaying (transient failures are never cached);
     // the CAS write rejects it if an invalidation landed mid-T2
@@ -859,39 +809,6 @@ async function pickByFormula(input: {
         );
       }
     }
-<<<<<<< HEAD
-    if (stages.at(-1)?.stage !== 'T2' && stages.at(-1)?.stage !== 'T3') {
-      stages.push(
-        stageRecord(
-          'T2',
-          set.candidates.map(c => c.route.name),
-          named === undefined ? set.candidates.map(c => c.route.name) : [named],
-          Date.now() - t2Start,
-          {
-            note:
-              named === undefined
-                ? 'the judge named no confident candidate'
-                : `the judge picked ${named}`,
-          }
-        )
-      );
-    }
-||||||| parent of 3378e2cb (refactor(brouter): decompose recall cascade helpers)
-    stages.push(
-      stageRecord(
-        'T2',
-        cascade.candidates.map(c => c.route.name),
-        set.candidates.map(c => c.route.name),
-        Date.now() - t2Start,
-        {
-          note:
-            named === undefined
-              ? 'the judge named no confident candidate'
-              : `the judge picked ${named}`,
-        }
-      )
-    );
-=======
     stages.push(
       stageRecord({
         stage: 'T2',
@@ -906,7 +823,6 @@ async function pickByFormula(input: {
         },
       })
     );
->>>>>>> 3378e2cb (refactor(brouter): decompose recall cascade helpers)
     // memoize the stage answer — a pick formula's T2 output IS the
     // pick name; the CAS write rejects it if an invalidation landed
     // while the judge was thinking
