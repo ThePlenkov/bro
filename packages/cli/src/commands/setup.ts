@@ -292,6 +292,16 @@ export function writeConfig(opts: {
 
 /** Install files under root; returns installed count. Warns on drift. */
 export function installFiles(root: string, files: Record<string, string>, what: string): number {
+  if (refuseSymlinkedSkills(root, what)) {
+    return 0;
+  }
+  return Object.entries(files).reduce(
+    (installed, [rel, content]) => installed + installFile(root, rel, content, what),
+    0
+  );
+}
+
+function refuseSymlinkedSkills(root: string, what: string): boolean {
   // `.agents/skills/` is also the generated link plane used by
   // `bro skills sync`. Writing through one of its entries would follow the
   // link into the repo-owned source tree (and can overwrite SKILL.md).
@@ -299,45 +309,53 @@ export function installFiles(root: string, files: Record<string, string>, what: 
   // repoint a link that another command owns.
   if (root === join('.agents', 'skills')) {
     const skillsRoot = join(process.cwd(), root);
-    let linked: string[] = [];
-    try {
-      if (lstatSync(skillsRoot).isSymbolicLink()) {
-        linked = ['.agents/skills'];
-      } else if (statSync(skillsRoot).isDirectory()) {
-        linked = readdirSync(skillsRoot).filter(name => {
-          try {
-            return lstatSync(join(skillsRoot, name)).isSymbolicLink();
-          } catch {
-            return false;
-          }
-        });
-      }
-    } catch {
-      // An absent skills root is safe: mkdirSync below will create it.
-    }
+    const linked = linkedSkillEntries(skillsRoot);
     if (linked.length > 0) {
       console.error(
         `  refusing to materialise ${what}s through symlinked .agents/skills ` +
           `(${linked.join(', ')}); run \`bro skills sync\` instead`
       );
-      return 0;
+      return true;
     }
   }
-  let n = 0;
-  for (const [rel, content] of Object.entries(files)) {
-    const path = join(process.cwd(), root, rel);
-    if (existsSync(path)) {
-      if (readFileSync(path, 'utf8') === content) {
-        continue;
-      }
-      console.error(`  warning: overwriting modified ${what} ${rel}`);
+  return false;
+}
+
+function linkedSkillEntries(skillsRoot: string): string[] {
+  try {
+    if (lstatSync(skillsRoot).isSymbolicLink()) {
+      return ['.agents/skills'];
     }
-    mkdirSync(join(path, '..'), { recursive: true });
-    writeFileSync(path, content, 'utf8');
-    n += 1;
-    console.error(`  installed ${root}/${rel}`);
+    if (!statSync(skillsRoot).isDirectory()) {
+      return [];
+    }
+    return readdirSync(skillsRoot).filter(name => isSymlink(join(skillsRoot, name)));
+  } catch {
+    // An absent skills root is safe: mkdirSync below will create it.
+    return [];
   }
-  return n;
+}
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function installFile(root: string, rel: string, content: string, what: string): number {
+  const path = join(process.cwd(), root, rel);
+  if (existsSync(path) && readFileSync(path, 'utf8') === content) {
+    return 0;
+  }
+  if (existsSync(path)) {
+    console.error(`  warning: overwriting modified ${what} ${rel}`);
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, content, 'utf8');
+  console.error(`  installed ${root}/${rel}`);
+  return 1;
 }
 
 const DEFAULT_PACK = '@broject/bro-pack';
