@@ -29,6 +29,8 @@
  * durable want-marker that carries the session's cadence across
  * restarts. Orchestrator-only: refuses under BRO_AGENT_ID, the same
  * guard `bro watch --every` carries — workers never arm the cadence.
+ * `bro review watch install` remains the canonical explicit command for
+ * this marker; `bro pulse --arm` is intentionally not a parallel spelling.
  * Usable anywhere: outside a repo there is no marker/lock/mailbox, the
  * warnings say so once, and the metronome still beats.
  */
