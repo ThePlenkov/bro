@@ -67,8 +67,22 @@ export const fieldValueError = (value: unknown, spec: FieldSpec): string | undef
  *  that level — literal parts still pin (`RFC {{n}}` ≈ /^RFC .+$/).
  *  Whitespace between literals is significant (`RFC {{n}}` needs the
  *  space); only the pattern's outer edges trim, matching doc.trim(). */
+const wildcardParts = (template: string): string[] =>
+  template
+    .split(/\{\{[^}]*\}\}/)
+    .map((part, index, all) =>
+      index === 0 ? part.trimStart() : index === all.length - 1 ? part.trimEnd() : part
+    );
+
+const findLiteral = (text: string, literal: string, cursor: number, suffix: boolean): number => {
+  if (suffix) {
+    return text.endsWith(literal) ? text.length - literal.length : -1;
+  }
+  return text.indexOf(literal, cursor);
+};
+
 const titleMatch = (tpl: string, doc: string): boolean => {
-  if (!/\{\{/.test(tpl)) {
+  if (!tpl.includes('{{')) {
     return tpl.trim() === doc.trim();
   }
   // Wildcard match without RegExp: literals split on `{{…}}` are found
@@ -77,9 +91,7 @@ const titleMatch = (tpl: string, doc: string): boolean => {
   // opens the pattern; the last must reach the end unless the pattern
   // ends with a wildcard.
   const text = doc.trim();
-  const parts = tpl
-    .split(/\{\{[^}]*\}\}/)
-    .map((p, i, a) => (i === 0 ? p.trimStart() : i === a.length - 1 ? p.trimEnd() : p));
+  const parts = wildcardParts(tpl);
   let cursor = 0;
   let sawLiteral = false;
   for (const [i, p] of parts.entries()) {
@@ -90,7 +102,7 @@ const titleMatch = (tpl: string, doc: string): boolean => {
     // earlier and leave the end check unreachable (`{{n}} Spec` vs
     // 'Alpha Spec Spec').
     const isLast = i === parts.length - 1;
-    let pos = isLast ? (text.endsWith(p) ? text.length - p.length : -1) : text.indexOf(p, cursor);
+    let pos = findLiteral(text, p, cursor, isLast);
     while (!isLast && sawLiteral && pos !== -1 && pos <= cursor) {
       pos = text.indexOf(p, pos + 1);
     }
