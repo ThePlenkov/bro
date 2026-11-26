@@ -985,6 +985,40 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   });
 
+  test('Anthropic thinking budget is an accepted no-op, not a thought-level mapping', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'ok',
+      configOptions: [
+        MODEL_OPTION,
+        {
+          id: 'thought_level',
+          name: 'Thinking',
+          category: 'thought_level',
+          type: 'select',
+          currentValue: 'high',
+          options: [
+            { value: 'medium', name: 'medium' },
+            { value: 'high', name: 'high' },
+          ],
+        },
+      ],
+    });
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-y',
+      thinking: { type: 'enabled', budget_tokens: 32_000 },
+      messages: [{ role: 'user', content: 'think carefully' }],
+      stream: false,
+    });
+    try {
+      assert.equal(r.status, 200);
+      // The model pin is honored, but budget_tokens must not invent a
+      // threshold mapping to ACP's unrelated session-level pin.
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }]);
+    } finally {
+      await close();
+    }
+  });
+
   test('a spawn-pinned composite already live skips the set calls', async () => {
     const LIVE: SessionConfigOption[] = [
       {

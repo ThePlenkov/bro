@@ -546,9 +546,18 @@ interface ImageBlock {
   source?: { type?: string; media_type?: string; data?: string; url?: string };
 }
 
+interface MessagesThinking {
+  type?: 'enabled' | 'disabled';
+  budget_tokens?: number;
+}
+
 interface MessagesRequest {
   model?: string;
   metadata?: { user_id?: string };
+  /** Accepted for Anthropic compatibility, but intentionally ignored:
+   *  ACP exposes a session-level thought_level pin rather than a
+   *  per-request token budget (spec bro-bvipw). */
+  thinking?: MessagesThinking;
   system?: string | { text?: string }[];
   messages?: { role?: string; content?: string | InBlock[] }[];
   /** `role:'system'` turns lifted out of `messages` — context the client
