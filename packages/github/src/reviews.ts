@@ -121,6 +121,81 @@ function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
   return [];
 }
 
+type Ruleset = {
+  enforcement?: string;
+  conditions?: { ref_name?: { include?: string[] } };
+  rules?: Array<{
+    type?: string;
+    parameters?: { required_status_checks?: Array<{ context?: string }> };
+  }>;
+};
+
+/** Match the limited glob syntax used by ruleset ref conditions without
+ * compiling operator-provided text as a regular expression. */
+const refMatches = (pattern: string, ref: string): boolean => {
+  let patternIndex = 0;
+  let refIndex = 0;
+  let starIndex = -1;
+  let starRefIndex = -1;
+  while (refIndex < ref.length) {
+    const token = pattern[patternIndex];
+    if (token === '?' || token === ref[refIndex]) {
+      patternIndex += 1;
+      refIndex += 1;
+      continue;
+    }
+    if (['*'].includes(token)) {
+      starIndex = patternIndex++;
+      starRefIndex = refIndex;
+      continue;
+    }
+    if (starIndex < 0) {
+      return false;
+    }
+    patternIndex = starIndex + 1;
+    refIndex = ++starRefIndex;
+  }
+  while (pattern[patternIndex] === '*') {
+    patternIndex += 1;
+  }
+  return patternIndex === pattern.length;
+};
+
+const requiredContexts = (rulesets: Ruleset[], baseRef: string): string[] => [
+  ...new Set(
+    rulesets
+      .filter(r => r.enforcement !== 'disabled')
+      .filter(r => {
+        const refs = r.conditions?.ref_name?.include;
+        return refs === undefined || refs.some(ref => refMatches(ref, baseRef));
+      })
+      .flatMap(r =>
+        (r.rules ?? [])
+          .filter(rule => rule.type === 'required_status_checks')
+          .flatMap(rule =>
+            (rule.parameters?.required_status_checks ?? []).flatMap(check =>
+              check.context === undefined ? [] : [check.context]
+            )
+          )
+      )
+  ),
+];
+
+function requiredStatusChecks(t: PrTarget): string[] {
+  const { baseRef } = prMeta(t);
+  const raw = ghJson<unknown>([
+    'api',
+    '--paginate',
+    '--slurp',
+    `repos/${t.repo}/rulesets?includes_parents=true&per_page=100`,
+  ]);
+  const pages = Array.isArray(raw) ? raw : [];
+  const rulesets = pages
+    .flatMap(page => (Array.isArray(page) ? page : [page]))
+    .filter((item): item is Ruleset => typeof item === 'object' && item !== null);
+  return requiredContexts(rulesets, baseRef);
+}
+
 function checkAnnotations(
   repo: string,
   headSha: string,
@@ -1198,6 +1273,21 @@ async function checksAsync(t: PrTarget, requiredOnly = false): Promise<CheckInfo
   return [];
 }
 
+async function requiredStatusChecksAsync(t: PrTarget): Promise<string[]> {
+  const { baseRef } = await prMetaAsync(t);
+  const raw = await ghJsonAsync<unknown>([
+    'api',
+    '--paginate',
+    '--slurp',
+    `repos/${t.repo}/rulesets?includes_parents=true&per_page=100`,
+  ]);
+  const pages = Array.isArray(raw) ? raw : [];
+  const rulesets = pages
+    .flatMap(page => (Array.isArray(page) ? page : [page]))
+    .filter((item): item is Ruleset => typeof item === 'object' && item !== null);
+  return requiredContexts(rulesets, baseRef);
+}
+
 async function checkAnnotationsAsync(
   repo: string,
   headSha: string,
@@ -2101,6 +2191,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     scanMergedPrs,
     labelPrs,
     checks,
+    requiredStatusChecks,
     checkAnnotations,
     reviewedShas,
 
@@ -2109,6 +2200,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     humanApprovedAsync,
     vetoReviews,
     checksAsync,
+    requiredStatusChecksAsync,
     checkAnnotationsAsync,
     reviewedShasAsync,
     prFilesAsync,

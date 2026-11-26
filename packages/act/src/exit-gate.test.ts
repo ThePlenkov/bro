@@ -52,6 +52,14 @@ describe('evaluateExitGate', () => {
     assert.equal(g.reviewers_failing, 2);
   });
 
+  it('blocks when a ruleset-required context is absent from the rollup', () => {
+    const gate = evaluateExitGate(open({ requiredChecksMissing: ['SonarCloud Code Analysis'] }));
+    assert.equal(gate.ok, false);
+    assert.deepEqual(gate.blockers, [
+      'required status check "SonarCloud Code Analysis" is missing from the head',
+    ]);
+  });
+
   it('blocks on SAST findings, conflicts, drafts, unknown mergeability', () => {
     assert.equal(evaluateExitGate(open({ sastPending: 1 })).ok, false);
     assert.equal(evaluateExitGate(open({ sastUnknown: 1 })).ok, false);

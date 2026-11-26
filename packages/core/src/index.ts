@@ -790,6 +790,7 @@ export {
   appendPrivateFileSync,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  readPrivateFileSync,
   PRIVATE_DIR_MODE,
   PRIVATE_FILE_MODE,
   type PrivateFileData,

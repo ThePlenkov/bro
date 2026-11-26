@@ -52,6 +52,8 @@ export interface PrActState {
    *  failure + fresh thread activity). The silent-reviewer signal:
    *  visible, never blocking. */
   alerts: string[];
+  /** Ruleset-required contexts absent from the head's check rollup. */
+  requiredChecksMissing?: string[];
   /** Host review verdict ('APPROVED' etc.) — undefined when the facade
    *  can't say. Probed lazily via the facade's optional reviewDecision
    *  when meta doesn't carry it (GitLab approvals are a second call). */

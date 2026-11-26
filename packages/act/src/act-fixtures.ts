@@ -5,7 +5,7 @@
  * "a clean open PR" fixture. One definition keeps them in step — a
  * field added to `PrActState` lands in both instead of one.
  */
-import type { PrActState } from './types.ts'
+import type { PrActState } from './types.ts';
 
 /** A clean open PR — no blockers of any kind. */
 export function openActState(over: Partial<PrActState> = {}): PrActState {
@@ -30,7 +30,8 @@ export function openActState(over: Partial<PrActState> = {}): PrActState {
     maxRounds: 3,
     docsOnly: false,
     alerts: [],
+    requiredChecksMissing: [],
     reopenedThreads: [],
     ...over,
-  }
+  };
 }

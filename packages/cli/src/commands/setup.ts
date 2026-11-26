@@ -865,6 +865,10 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     setupLockedSkills(process.cwd(), dryRun, checkOnly);
   }
 
+  if (!checkOnly && !dryRun) {
+    materializeConfiguredDevinSubagents();
+  }
+
   console.error(
     'bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.'
   );
