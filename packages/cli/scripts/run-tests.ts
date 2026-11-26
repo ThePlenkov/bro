@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+import { createTestSandbox } from './test-sandbox.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -29,7 +30,7 @@ function walk(dir: string, pattern: string): string[] {
   const wantE2e = pattern.includes('.e2e');
   for (const entry of entries) {
     const full = join(dir, entry);
-    let stat;
+    let stat: ReturnType<typeof statSync>;
     try {
       stat = statSync(full);
     } catch {
@@ -100,7 +101,13 @@ if (files.length === 0 && pattern.includes('.e2e')) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...files], {
-  stdio: 'inherit',
-});
-process.exit(result.status ?? 1);
+const sandbox = createTestSandbox();
+try {
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...files], {
+    stdio: 'inherit',
+    env: sandbox.env,
+  });
+  process.exitCode = result.status ?? 1;
+} finally {
+  sandbox.cleanup();
+}
