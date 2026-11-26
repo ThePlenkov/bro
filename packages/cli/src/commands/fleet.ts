@@ -93,7 +93,12 @@ export function canSpawnFor(
 ): FleetSpawnCheck {
   const wall = walls
     .filter(candidate => candidate.provider === provider)
-    .sort((a, b) => Date.parse(b.until ?? '') - Date.parse(a.until ?? ''))[0];
+    .sort((a, b) => {
+      if (a.until === undefined) {
+        return b.until === undefined ? 0 : -1;
+      }
+      return b.until === undefined ? 1 : Date.parse(b.until) - Date.parse(a.until);
+    })[0];
   if (wall === undefined) {
     return { provider, canSpawn: true };
   }

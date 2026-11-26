@@ -62,6 +62,24 @@ describe('fleet can-spawn pre-flight', () => {
       }
     );
   });
+
+  test('blocks when any matching wall has no reset horizon', () => {
+    assert.deepEqual(
+      canSpawnFor(
+        'kilo',
+        [
+          { provider: 'kilo', cause: 'rate_limited', until: '2026-01-01T01:00:00Z' },
+          { provider: 'kilo', cause: 'quota' },
+        ],
+        Date.parse('2026-01-01T02:00:00Z')
+      ),
+      {
+        provider: 'kilo',
+        canSpawn: false,
+        wall: 'quota',
+      }
+    );
+  });
 });
 
 const step = (state: ConvoyStep['state']): ConvoyStep => ({
