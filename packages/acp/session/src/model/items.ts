@@ -562,7 +562,11 @@ export class SessionModel {
     if (b.pendDetail >= 0) {
       b.pendText += t;
       b.details[b.pendDetail] = this.microDetail();
-    } else {
+    } else if (b.pendBy === '') {
+      // An orphan chunk (no open turn) — its own call line. Chunks
+      // belonging to a capped open turn are still the same call that
+      // microStart already counted; never let the detail cap change
+      // the call tally.
       b.calls++;
       if (b.details.length < SessionModel.MICRO_DETAILS) {
         const o = shortBy(row.by) ?? '?';
