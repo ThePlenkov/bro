@@ -135,6 +135,7 @@ import {
   writeAgentRegistry,
   writePrivateFileSync,
 } from '@broject/core';
+import { captureLessons } from '@broject/learn';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
@@ -4102,6 +4103,26 @@ export function ensureExitCause(
     emitLearnMissLifecycle(dir, home, molStep, entry, exitStatus, c.cause);
   }
   persistClassifiedExit(dir, molStep, entry, exitStatus, c.cause, back.resetAt);
+  if (c.cause === 'ok') deferLessonCapture(dir, molStep);
+}
+
+function deferLessonCapture(dir: string, molStep: string): void {
+  const capture = (): void => {
+    if (agentRegistryLockDepth() > 0) {
+      queueMicrotask(capture);
+      return;
+    }
+    try {
+      captureLessons({ sources: ['drill', 'retro', 'act'], dir });
+    } catch (err) {
+      console.error(
+        `warning: learn capture failed after ${molStep} exit — ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+  capture();
 }
 
 function readExitStatus(home: string | null, entry: AgentRegistryEntry): number | undefined {

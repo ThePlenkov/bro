@@ -430,6 +430,20 @@ describe('runQueue', () => {
     );
   });
 
+  test('fires onDone for each completed molecule before the next one starts', async () => {
+    const w = world();
+    const seq: string[] = [];
+    w.nexts.set('m-1', [next('complete')]);
+    w.nexts.set('m-2', [next('complete')]);
+    w.deps.onDone = async r => void seq.push(`done:${r.mol}`);
+    const rs = await runQueue(w.deps, { ...CFG, mols: ['m-1', 'm-2'] });
+    assert.deepEqual(
+      rs.map(r => r.verdict),
+      ['done', 'done']
+    );
+    assert.deepEqual(seq, ['done:m-1', 'done:m-2']);
+  });
+
   test('a gated verdict fires onGated at settle — before the next mol runs', async () => {
     const w = world();
     const seq: string[] = [];
