@@ -81,6 +81,7 @@ describe('bro guard list', () => {
       });
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /^test-coverage-on-stop\tguard\tstop\t1\tok$/m);
+      assert.match(r.stdout, /^retro-on-stop\tguard\tstop\t1\tok$/m);
     });
   });
 

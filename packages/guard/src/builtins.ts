@@ -22,6 +22,11 @@ export const BUILTIN_GUARDS: Guard[] = [
     },
     say: 'src changed and no test file moved — is the new behavior covered?',
   },
+  {
+    name: 'retro-on-stop',
+    when: { on: ['stop'] },
+    say: 'session ending — run the retro checklist (skills/retro)',
+  },
 ]
 
 /** Contributes the builtins — every repo running bro's hooks gets them;
