@@ -142,6 +142,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Readable } from 'node:stream';
 import {
+  CommandError,
+  EXIT,
   busPublish,
   busSocketPath,
   busSubscribe,
@@ -2147,13 +2149,13 @@ async function cmdEnsure(argv: string[]): Promise<void> {
   const port = Number(portRaw);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     console.error(`error: --port needs an integer 1–65535, got "${portRaw}"`);
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   try {
     console.log(await ensureServe(process.cwd(), port));
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
 }
 
@@ -2226,12 +2228,12 @@ async function cmdWatchdog(argv: string[]): Promise<void> {
   const pid = Number(flag(argv, '--pid'));
   if (!intInRange(port, 1, 65535) || !intInRange(pid, 1, Number.MAX_SAFE_INTEGER)) {
     console.error('error: watchdog needs --port <n> and --pid <n>');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   const dir = process.cwd();
   const statePath = serveStatePath(dir);
   if (statePath === null) {
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
   const logDir = dirname(statePath);
   for (;;) {
@@ -2300,7 +2302,7 @@ function parseServePort(argv: string[]): number {
   const port = Number(portRaw);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     console.error(`error: --port needs an integer 0–65535, got "${portRaw}"`);
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   return port;
 }
@@ -2405,17 +2407,17 @@ function prepareServe(argv: string[]): ServeContext {
   const statePath = serveStatePath(dir);
   if (statePath === null) {
     console.error('error: not inside a git repository — bro serve needs the git common dir');
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
   const live = liveServeState(dir);
   if (live !== undefined) {
     console.error(`error: already serving ${live.url} (pid ${live.pid}) — one host per repo`);
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
   const releaseLock = acquireServeLock(dir);
   if (releaseLock === undefined) {
     console.error('error: another bro serve is starting or running (serve.json.lock held)');
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
   const env = loadAgentEnv(dir);
   const meta: ServeMeta = { dir, startedAt: '' };
@@ -2452,7 +2454,7 @@ async function startServeListener(
     });
   }).catch((err: unknown) => {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   });
   writeServeState(context.dir, {
     pid: process.pid,

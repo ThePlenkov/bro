@@ -36,6 +36,7 @@ import {
 } from '@broject/act';
 import {
   acquireFileLock,
+  CommandError,
   emitLifecycle,
   ensureAuth,
   facade,
@@ -43,6 +44,7 @@ import {
   type PrTarget,
   type ReviewFacade,
   reviewHost,
+  EXIT,
 } from '@broject/core';
 import { githubPrWake } from '@broject/github';
 import { loadBroConfig } from '../plugins.ts';
@@ -72,7 +74,7 @@ export async function cmdWait(argv: string[]): Promise<void> {
   // the whole wait already ran
   if (argv.includes('--squash') && argv.includes('--rebase')) {
     console.error('error: conflicting merge strategies: --squash --rebase');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   if (argv.includes('--detach')) {
     return cmdWaitDetach(argv);
@@ -93,7 +95,7 @@ export async function cmdWait(argv: string[]): Promise<void> {
   const timeout = Number(flag(argv, '--timeout') ?? '45');
   if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
     console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   // the wait's polls ride the shared feed — loop/watch/drive passes
   // share the same entries; the settle→merge dispatch re-gates
@@ -543,13 +545,13 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
   const timeout = Number(flag(argv, '--timeout') ?? '45');
   if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
     console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   // a detached child hitting this post-settle reports into a log nobody
   // reads — refuse in the parent where the error is seen
   if (argv.includes('--cleanup') && !argv.includes('--merge')) {
     console.error('error: --cleanup requires --merge — nothing to clean without it');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
   const rev = reviewHost(undefined, loadBroConfig().connectors);

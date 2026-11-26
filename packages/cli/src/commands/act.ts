@@ -22,6 +22,8 @@ import {
   resolveLedger,
 } from '@broject/act';
 import {
+  CommandError,
+  EXIT,
   emitLifecycle,
   ensureAuth,
   hasHelpFlag,
@@ -272,7 +274,7 @@ function parseBatchRows(file: string): {
     console.error(
       `error: cannot read --file ${file} — ${err instanceof Error ? err.message : String(err)}`
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   // trimEnd only: the leading tab of a blank-id row is STRUCTURAL —
   // trimming it away would turn the row into a bare "tabless" id and
@@ -373,7 +375,7 @@ function cmdResolve(argv: string[]): void {
     const file = argv[fileIdx + 1];
     if (!file) {
       console.error('error: --file requires a path');
-      process.exit(2);
+      throw new CommandError('', EXIT.usage);
     }
     const { rows, tabless } = parseBatchRows(file);
     let resolved = 0;
@@ -403,7 +405,7 @@ function cmdReply(argv: string[]): void {
     const file = argv[fileIdx + 1];
     if (!file) {
       console.error('error: --file requires a path');
-      process.exit(2);
+      throw new CommandError('', EXIT.usage);
     }
     const { rows, tabless, blankId } = parseBatchRows(file);
     const skipped = tabless.length;

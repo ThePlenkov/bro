@@ -73,6 +73,8 @@ import { type FSWatcher, watch } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import {
+  CommandError,
+  EXIT,
   awaitFileLock,
   busSocketPath,
   busStatus,
@@ -225,7 +227,7 @@ function everyToken(argv: string[]): EveryToken | undefined {
     });
   if (every.length > 1) {
     console.error('error: --every may be given only once');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   return every[0];
 }
@@ -243,7 +245,7 @@ function everyArgument(argv: string[], defaultEverySec: number): number | undefi
   const everyRaw = everyValue(argv, token);
   if (everyRaw !== undefined && everyRaw.trim() === '') {
     console.error('error: --every requires a value');
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   const everySec = everyRaw === undefined ? defaultEverySec : Number(everyRaw);
   if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
@@ -974,7 +976,7 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
     const r = uninstallDrive(dir);
     console.log(r.detail);
     if (r.state === 'error') {
-      process.exit(1);
+      throw new CommandError('', EXIT.error);
     }
     return;
   }
@@ -985,14 +987,14 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
       'error: BRO_AGENT_ID is set — spawned workers never arm the supervisor; ' +
         'the orchestrator session owns it'
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   const everyRaw = flag(argv, '--every');
   const everySec = scheduleInterval(everyRaw, drive.intervalSec);
   const r = installDrive(dir, { everySec, print: argv.includes('--print') });
   console.log(r.detail);
   if (r.state === 'error') {
-    process.exit(1);
+    throw new CommandError('', EXIT.error);
   }
 }
 
@@ -1006,7 +1008,7 @@ function scheduleInterval(raw: string | undefined, fallback: number): number {
   console.error(
     `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${raw ?? everySec}"`
   );
-  process.exit(2);
+  throw new CommandError('', EXIT.usage);
 }
 
 async function runSupervisedDrive(
@@ -1023,7 +1025,7 @@ async function runSupervisedDrive(
       'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
         'the orchestrator session owns the cadence'
     );
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   // One drive per repo: a respawn wrapper's duplicate stands by behind
   // the incumbent's hold and supervises once it exits — two drives on
@@ -1119,7 +1121,7 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     args = driveArgs(argv, drive.intervalSec);
   } catch (err) {
     console.error(`error: ${errText(err)}`);
-    process.exit(2);
+    throw new CommandError('', EXIT.usage);
   }
   await runSupervisedDrive(main, broCfg, drive, args);
 }
