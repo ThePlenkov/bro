@@ -35,30 +35,30 @@ import {
   facade,
   hasHelpFlag,
   isMode,
+  type LedgerFacade,
   listModeFiles,
   loadConfig,
-  modeFilePath,
   MODES,
+  type Mode,
+  modeFilePath,
   printUsage,
   removeModeFile,
+  type SessionKey,
+  type SessionRow,
   sessionIdFromEnv,
   sessionMode,
   sessionProject,
   writeModeFile,
-  type LedgerFacade,
-  type Mode,
-  type SessionKey,
-  type SessionRow,
 } from '@broject/core';
 import { hookHostOf } from '../hook-host.ts';
+import { loadBroConfig } from '../plugins.ts';
 import { flag, positionals } from './args.ts';
+import { renderModeSnapshots, SNAPSHOT_MODES } from './mode-snapshots.ts';
 import {
   acquireOrchestratorRole,
   orchestratorRoleHeldBy,
   releaseOrchestratorRole,
 } from './orchestrator-role.ts';
-import { loadBroConfig } from '../plugins.ts';
-import { renderModeSnapshots, SNAPSHOT_MODES } from './mode-snapshots.ts';
 
 const USAGE = `usage: bro mode [get] [--session <sid>] [--host <h>] [--json]
        bro mode <${MODES.join('|')}|off> [--session <sid>] [--host <h>]
@@ -316,7 +316,9 @@ async function runSet(
   // snapshot that so a failed write undoes only a FRESH acquire (the
   // pre-existing claim belongs to the mode file still on disk)
   const preHeld =
-    args.mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
+    args.mode === 'orchestrate'
+      ? await orchestratorRoleHeldBy({ dir, session: sessionKey })
+      : false;
   const roleAcquired = await ensureOrchestratorClaim(args.mode, dir, sessionKey, env, ownSession);
   try {
     writeModeFile(file, args.mode, project);
@@ -404,9 +406,11 @@ async function runClear(
   // willOrchestrate — is the truth the role reconciles against.
   if (res.mode === 'orchestrate') {
     if (!gated) {
-      await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession } }).catch(() => ({
-        ok: false,
-      }));
+      await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession } }).catch(
+        () => ({
+          ok: false,
+        })
+      );
     }
   } else {
     await releaseOrchestratorRole({ dir, session: sessionKey });
@@ -605,12 +609,14 @@ export async function runModeCommand(argv: string[], deps: ModeDeps = {}): Promi
   const env = deps.env ?? process.env;
   const render = deps.render ?? ((d: string, m: Mode) => renderModeSnapshots(d, m, env));
 
-  if (args.sub === 'list') {
-    await runList(args, env, modeLedger(dir, deps));
-    return;
-  }
-  if (args.sub === 'render') {
-    await runRender(args, dir, render);
+  const ledger = modeLedger(dir, deps);
+  const earlyHandlers: Partial<Record<ModeArgs['sub'], () => Promise<void>>> = {
+    list: () => runList(args, env, ledger),
+    render: () => runRender(args, dir, render),
+  };
+  const early = Object.getOwnPropertyDescriptor(earlyHandlers, args.sub)?.value;
+  if (typeof early === 'function') {
+    await early();
     return;
   }
 
@@ -640,17 +646,18 @@ export async function runModeCommand(argv: string[], deps: ModeDeps = {}): Promi
     );
   }
 
-  if (args.sub === 'get') {
-    await runGet(args, sess, dir, env, []);
-    return;
+  const mode = args.mode;
+  const handlers: Partial<Record<ModeArgs['sub'], () => Promise<void>>> = {
+    get: () => runGet(args, sess, dir, env, []),
+    set:
+      mode === undefined
+        ? undefined
+        : () => runSet({ ...args, mode }, sess, dir, env, ledger, render),
+    clear: () => runClear(args, sess, dir, env, ledger),
+  };
+  const handler = Object.getOwnPropertyDescriptor(handlers, args.sub)?.value;
+  if (typeof handler !== 'function') {
+    throw new CommandError(`error: unhandled mode subcommand\n${USAGE}`, EXIT.usage);
   }
-  if (args.sub === 'set' && args.mode !== undefined) {
-    await runSet({ ...args, mode: args.mode }, sess, dir, env, modeLedger(dir, deps), render);
-    return;
-  }
-  if (args.sub === 'clear') {
-    await runClear(args, sess, dir, env, modeLedger(dir, deps));
-    return;
-  }
-  throw new CommandError(`error: unhandled mode subcommand\n${USAGE}`, EXIT.usage);
+  await handler();
 }
