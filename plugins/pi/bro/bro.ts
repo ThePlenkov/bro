@@ -590,7 +590,8 @@ function sharedBinding(host) {
 		stopAborted: host.stopAborted,
 		promptOf(event) {
 			const turn = event;
-			return typeof turn.prompt === "string" ? turn.prompt : "";
+			if (typeof turn.prompt === "string") return turn.prompt;
+			return typeof turn.text === "string" ? turn.text : "";
 		},
 		inject(text) {
 			return { message: {

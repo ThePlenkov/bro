@@ -166,8 +166,11 @@ export function sharedBinding<Ctx extends BroContext>(
     stopAlreadyRefused: host.stopAlreadyRefused,
     stopAborted: host.stopAborted,
     promptOf(event) {
-      const turn = event as { prompt?: string };
-      return typeof turn.prompt === 'string' ? turn.prompt : '';
+      const turn = event as { prompt?: string; text?: string };
+      if (typeof turn.prompt === 'string') {
+        return turn.prompt;
+      }
+      return typeof turn.text === 'string' ? turn.text : '';
     },
     inject(text) {
       return {
