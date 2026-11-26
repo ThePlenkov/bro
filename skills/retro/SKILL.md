@@ -26,8 +26,9 @@ deliverable didn't capture: tool gaps, repeated mechanics, ignored debt.
    command could batch them, that is the same kind of gap bead.
 4. **Lessons.** Persist what this session learned — a dry-run alone
    stores nothing. `bro self learn capture --dry-run` previews what finished
-   artifacts would distill — capture has no session filter, so a plan
-   that is all this session's gets stored by rerunning bare `capture`;
+   artifacts would distill. To persist the reusable lessons, rerun the
+   command without `--dry-run` (capture has no session filter, so a plan
+   that is all this session's gets stored by rerunning bare `capture`);
    otherwise store just this session's insight with
    `bro self learn add --lesson "…" --on … --evidence …`, so the next
    session starts smarter, not just the next human.

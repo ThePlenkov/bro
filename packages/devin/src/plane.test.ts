@@ -78,7 +78,6 @@ const withProc = (
       environ: string | null,
       stdinTo: string | null,
       argv0?: string,
-      tty?: number,
       startJiffies?: number
     ) => void
   ) => void
@@ -89,7 +88,6 @@ const withProc = (
     environ: string | null,
     stdinTo: string | null,
     argv0 = 'devin',
-    tty?: number,
     startJiffies?: number
   ): void => {
     const dir = join(procDir, String(pid));
@@ -100,7 +98,7 @@ const withProc = (
     if (stdinTo !== null) {
       symlinkSync(stdinTo, join(dir, 'fd', '0'));
     }
-    if (tty !== undefined || startJiffies !== undefined) {
+    if (startJiffies !== undefined) {
       // the real shape: pid (comm) state ppid pgrp session tty_nr …
       // …starttime(22) — the comm may wrap in parens and hold spaces,
       // so both parsers go after the last ')' and index the tail:
@@ -112,7 +110,6 @@ const withProc = (
       rest[1] = '1'; // ppid
       rest[2] = '1'; // pgrp
       rest[3] = '1'; // session
-      rest[4] = String(tty ?? 0); // tty_nr — field 7
       rest[19] = String(startJiffies ?? 0); // starttime — field 22
       writeFileSync(join(dir, 'stat'), `${pid} (devin acp) ${rest.join(' ')}\n`);
     }
@@ -333,7 +330,7 @@ describe('countDevinSessions', () => {
         // (bro-q0v0e): a dead session's number landed on `devin acp` /
         // `devin rm`. The lock's own write bound is what proves it a
         // stranger: this pid started minutes after the file changed.
-        mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies());
+        mk(process.pid, 'PATH=/bin\0', null, 'devin', nowJiffies());
         const lock = join(dir, 'recycled.lock');
         writeFileSync(lock, String(process.pid));
         const aged = new Date(Date.now() - 10 * 60_000);
@@ -349,7 +346,7 @@ describe('countDevinSessions', () => {
         // observed live: a `devin --resume`'s acp child can start a
         // second or two after the lock lands — the pin's tolerance is
         // 60s, and 30s inside it stays a session
-        mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies());
+        mk(process.pid, 'PATH=/bin\0', null, 'devin', nowJiffies());
         const lock = join(dir, 'resumed.lock');
         writeFileSync(lock, String(process.pid));
         const aged = new Date(Date.now() - 30_000);
@@ -368,14 +365,7 @@ describe('countDevinSessions', () => {
         // pid, and a negative start reads as unparseable → fail-open,
         // which would pass without exercising the pin. A boot-time
         // start still precedes the just-written lock's bound.
-        mk(
-          process.pid,
-          'PATH=/bin\0',
-          null,
-          'devin',
-          undefined,
-          Math.max(1, nowJiffies() - 60_000)
-        );
+        mk(process.pid, 'PATH=/bin\0', null, 'devin', Math.max(1, nowJiffies() - 60_000));
         writeFileSync(join(dir, 'live.lock'), String(process.pid));
         assert.equal(countDevinSessions([dir], undefined, procDir), 1);
       });
@@ -653,30 +643,27 @@ describe('devinPidIsWorker', () => {
     });
   });
 
-  test("the REPL's spawned acp child — piped fd/0 but the REPL's terminal — is not a worker", () => {
+  test('a piped child is a worker unless it carries the explicit worker badge', () => {
     withProc((procDir, mk) => {
-      // the devin CLI's chisel_acp_client child holds the session lock
-      // with a piped fd/0 while sharing the REPL's controlling terminal
-      // (observed 2026-11-04: two such children read as 'devin workers:
-      // 2/1 live' and walled the whole devin spawn lane)
-      mk(501, 'PATH=/bin\0', 'pipe:[33601833]', 'devin', 34822);
-      assert.equal(devinPidIsWorker(501, procDir), false);
-      // the REPL itself reads interactive on either probe
-      mk(502, 'PATH=/bin\0', '/dev/pts/6', 'devin', 34822);
+      // A controlling terminal is not proof that a piped worker belongs to
+      // the REPL; only stdin and explicit environment badges classify it.
+      mk(501, 'PATH=/bin\0', 'pipe:[33601833]', 'devin');
+      assert.equal(devinPidIsWorker(501, procDir), true);
+      mk(502, 'PATH=/bin\0', '/dev/pts/6', 'devin');
       assert.equal(devinPidIsWorker(502, procDir), false);
     });
   });
 
   test('the worker badge still wins over a controlling terminal', () => {
     withProc((procDir, mk) => {
-      mk(511, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0', 'pipe:[2]', 'devin', 34822);
+      mk(511, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0', 'pipe:[2]', 'devin');
       assert.equal(devinPidIsWorker(511, procDir), true);
     });
   });
 
   test('a terminal-less pid with piped stdin is still a spawned worker', () => {
     withProc((procDir, mk) => {
-      mk(521, 'PATH=/bin\0', 'pipe:[42]', 'devin', 0);
+      mk(521, 'PATH=/bin\0', 'pipe:[42]', 'devin');
       assert.equal(devinPidIsWorker(521, procDir), true);
     });
   });
@@ -866,7 +853,7 @@ describe('listDevinSessions', () => {
 
   test('a stale (recycled-pid) lock yields no row — the write bound rejects it', () => {
     withProc((procDir, mk) => {
-      mk(process.pid, 'PATH=/bin\0', null, 'devin', undefined, nowJiffies());
+      mk(process.pid, 'PATH=/bin\0', null, 'devin', nowJiffies());
       withLockDir(dir => {
         const lock = join(dir, 'phantom.lock');
         writeFileSync(lock, String(process.pid));
