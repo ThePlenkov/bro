@@ -1939,9 +1939,7 @@ function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence):
     if (del.code === 0) {
       rep.branches.push(c.branch);
     } else {
-      rep.kept.push(
-        `${c.branch} (${/not fully merged/i.test(del.err) ? 'unlanded commits' : 'branch delete refused'})`
-      );
+      rep.kept.push(`${c.branch} (unpublished commits)`);
     }
     return;
   }
