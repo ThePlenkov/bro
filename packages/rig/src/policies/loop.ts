@@ -3550,7 +3550,11 @@ function releaseCeilingFile(file: string | null): void {
     return;
   }
   if (file.startsWith('remote:')) {
-    releaseRemoteCeiling({ handle: file });
+    try {
+      releaseRemoteCeiling({ handle: file });
+    } catch {
+      /* remote release failed; the lease will expire during the next sweep */
+    }
     return;
   }
   try {
