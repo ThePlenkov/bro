@@ -25,6 +25,7 @@ export function installOmpSupervision(
       const native = spec.native;
       return new Promise<T>((resolve, reject) => {
         let settled = false;
+        let inFlight = false;
         const finish = (fn: () => void): void => {
           if (settled) return;
           settled = true;
@@ -32,6 +33,8 @@ export function installOmpSupervision(
           fn();
         };
         const poll = async (): Promise<void> => {
+          if (settled || inFlight) return;
+          inFlight = true;
           try {
             const value = await native();
             const message = spec.message?.(value) ?? `${spec.name} settled`;
@@ -42,6 +45,8 @@ export function installOmpSupervision(
             finish(() => resolve(value));
           } catch (error) {
             finish(() => reject(error));
+          } finally {
+            inFlight = false;
           }
         };
         const timer = setInterval(() => void poll(), Math.max(1, intervalMs));

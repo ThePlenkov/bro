@@ -25,3 +25,30 @@ test('omp polls and steer-delivers the settled value', async () => {
     remove();
   }
 });
+
+test('omp does not overlap native polls', async () => {
+  let active = 0;
+  let peak = 0;
+  const remove = installOmpSupervision({
+    sendMessage() {},
+  }, 1);
+  try {
+    const { supervise } = await import('@broject/core');
+    const result = await supervise({
+      name: 'slow gate',
+      env: { BRO_SUPERVISION_HOST: 'omp' },
+      native: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        active -= 1;
+        return 'green';
+      },
+      detached: async () => 'detached',
+    });
+    assert.equal(result.handle, 'green');
+    assert.equal(peak, 1);
+  } finally {
+    remove();
+  }
+});

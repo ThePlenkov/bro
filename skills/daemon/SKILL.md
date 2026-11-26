@@ -13,11 +13,11 @@ architecture; raw `drive --every` / `loop --every` / `rig watch` still
 works for compatibility but is deprecated and unrecorded,
 and everything else is a pass, an observer, or a policy alias):
 
-| Role     | Command                                                                                    | Lifetime                        |
-| -------- | ------------------------------------------------------------------------------------------ | ------------------------------- |
-| Owner    | `bro fleet daemon up` — spawns the recorded `daemon run` loop detached                     | long-lived, until `down`        |
-| Wake     | `bro pulse <S>` — the session-owned metronome; mailbox beats are the session's wakes       | until the arming shell kills it |
-| Re-entry | `bro fleet rig next` — durable state → step\|gate\|wait\|done\|blocked                     | per call — stateless            |
+|Role|Command|Lifetime|
+|---|---|---|
+|Owner|`bro fleet daemon up` — spawns the recorded `daemon run` loop detached|long-lived, until `down`|
+|Wake|`bro pulse <S>` — the session-owned metronome; mailbox beats are the session's wakes|until the arming shell kills it|
+|Re-entry|`bro fleet rig next` — durable state → step\|gate\|wait\|done\|blocked|per call — stateless|
 
 Bounded observers (never cadence owners): `bro review watch
 [--once|--every N --for S]`, `bro review act wait [PR]`, `bro wait
