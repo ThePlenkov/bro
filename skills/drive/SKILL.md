@@ -52,15 +52,15 @@ never age: an occupied thread/conflict PR stays occupied.
 
 ## Commands
 
-| Command                                          | What it does                                                                                                                                                                                                  |
+| Command | What it does |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bro review drive [--once]`                      | one supervision pass (default)                                                                                                                                                                                |
-| `bro review drive --every [N]`                   | a pass every N seconds — the loop `bro fleet daemon run` owns in-process; running it raw makes an unrecorded owner (spec bro-wb3yc) — prefer `bro fleet daemon up`; a bare `--every` uses `drive.intervalSec` |
-| `bro review drive --no-merge`                    | supervise only — never merge (config: `drive.merge: "never"`)                                                                                                                                                 |
-| `bro review drive --connector <name>`            | spawn fixers on one backend                                                                                                                                                                                   |
-| `bro review drive --json`                        | one JSON line per PR verdict                                                                                                                                                                                  |
-| `bro review drive install [--every N] [--print]` | **Install contract:** arm the merge-path want-marker and bring `bro fleet daemon` up now; checkpoints rearm a dead owner. Writes `bro/drive.json`; cadence `--every N` or `drive.intervalSec`                  |
-| `bro review drive uninstall`                     | disarm the marker + stop the supervisor                                                                                                                                                                       |
+| `bro review drive [--once]` | one supervision pass (default) |
+| `bro review drive --every [N]` | a pass every N seconds — the loop `bro fleet daemon run` owns in-process; running it raw makes an unrecorded owner (spec bro-wb3yc) — prefer `bro fleet daemon up`; a bare `--every` uses `drive.intervalSec` |
+| `bro review drive --no-merge` | supervise only — never merge (config: `drive.merge: "never"`) |
+| `bro review drive --connector <name>` | spawn fixers on one backend |
+| `bro review drive --json` | one JSON line per PR verdict |
+| `bro review drive install [--every N] [--print]` | **Install contract:** arm the merge-path want-marker and bring `bro fleet daemon` up now; checkpoints rearm a dead owner. Writes `bro/drive.json`; cadence `--every N` or `drive.intervalSec` |
+| `bro review drive uninstall` | disarm the marker + stop the supervisor |
 
 Config: `drive.intervalSec` (300), `drive.merge` (`auto`|`never`),
 `drive.occupancyTtlSec` (7200 — the merge-path activity bound).
