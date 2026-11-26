@@ -786,7 +786,8 @@ async function bindModeCommand(cmd: string, sessionId: string, dir: string): Pro
   // a re-bind of orchestrate renews a role the session may already hold —
   // snapshot that so a failed write undoes only a FRESH acquire (the
   // pre-existing claim belongs to the mode file still on disk)
-  const preHeld = mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
+  const preHeld =
+    mode === 'orchestrate' ? await orchestratorRoleHeldBy({ dir, session: sessionKey }) : false;
   const refusal = await bindOrchestrateRole(mode, dir, sessionKey);
   if (refusal !== null) {
     return [refusal];
@@ -843,7 +844,11 @@ async function bindOrchestrateRole(
   }
   // the hook fires inside the target session — its agent pid is the
   // right liveness proof for the claim
-  const role = await acquireOrchestratorRole({ dir, session: sessionKey, opts: { ownSession: true } }).catch(() => ({
+  const role = await acquireOrchestratorRole({
+    dir,
+    session: sessionKey,
+    opts: { ownSession: true },
+  }).catch(() => ({
     ok: false as const,
     conflict: null,
   }));
@@ -3381,7 +3386,6 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   emitBytesTotal = 0;
   hookMode = undefined;
   hookHost = undefined;
-  hookProjectId = undefined;
   // run.sh spools a start/end pair on every launch — including the
   // early-return paths below (operator commands, the capability probe,
   // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
