@@ -112,7 +112,7 @@ function pushArgsOf(segment: string): string[] | null {
     .split(/\s+/)
     .filter(t => t !== '');
   for (let i = 0; i < tokens.length; i += 1) {
-    if (tokens[i] !== 'git') {
+    if (!['git'].includes(tokens[i] ?? '')) {
       continue;
     }
     let j = i + 1;
