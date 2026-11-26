@@ -14,6 +14,7 @@
       "!prompts/bro.md",
       "!.opencode/command/bro.md",
       "!plugins/*/bro/*.ts",
+      "!plugins/*/bro/README.md",
       "!site/content/docs/reference",
       "!specs/**/*.md",
       "!packages/brose/**/*.md",
