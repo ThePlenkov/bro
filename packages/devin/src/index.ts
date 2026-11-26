@@ -45,6 +45,12 @@ export {
 } from './plane.ts';
 export { commandCliNames, commandWorkerClis } from './shell.ts';
 export { countDevinSessionStarts } from './starts.ts';
+export {
+  type DevinMaterializeOptions,
+  type DevinSubagentConfig,
+  type DevinSubagentProfile,
+  materializeDevinSubagents,
+} from './subagents.ts';
 export type {
   DevinLaneCounts,
   DevinModelUsage,

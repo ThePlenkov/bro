@@ -40,6 +40,7 @@ import {
   type SkillDrift,
   withFileLock,
 } from '@broject/core';
+import { materializeDevinSubagents } from '@broject/devin';
 import { loadBroConfig } from '../plugins.ts';
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts';
 import {
@@ -788,6 +789,7 @@ function runSetupMutations(m: SetupMutations): void {
   }
 
   installGitHooks();
+  materializeConfiguredDevinSubagents();
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
@@ -866,4 +868,30 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   console.error(
     'bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.'
   );
+}
+
+function materializeConfiguredDevinSubagents(): void {
+  const configuredAgents = loadBroConfig().agents as Record<string, unknown> | undefined;
+  const devin = configuredAgents?.devin;
+  if (devin === undefined || devin === null || typeof devin !== 'object') return;
+
+  const config = devin as { subagent_model?: unknown; profiles?: unknown; subagents?: unknown };
+  const configuredProfiles = config.profiles ?? config.subagents;
+  const profiles =
+    typeof configuredProfiles === 'object' &&
+    configuredProfiles !== null &&
+    !Array.isArray(configuredProfiles)
+      ? configuredProfiles
+      : {};
+  const written = materializeDevinSubagents({
+    config: {
+      ...(typeof config.subagent_model === 'string'
+        ? { subagent_model: config.subagent_model }
+        : {}),
+      profiles: profiles as Record<string, { model: string; tools?: string[]; prompt?: string }>,
+    },
+  });
+  if (written.length > 0) {
+    console.error(`bro setup: materialized ${written.length} Devin subagent file(s)`);
+  }
 }
