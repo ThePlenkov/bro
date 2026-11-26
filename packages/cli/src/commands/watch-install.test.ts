@@ -17,6 +17,7 @@ import {
   watchCommonDir,
   watchUnitHash,
   cronTag,
+  hasSchedulerControlChar,
   type SchedRun,
   type SchedRunner,
 } from './watch-install.ts'
@@ -62,6 +63,12 @@ const legacyCronLine = (common: string): string =>
   `*/2 * * * * cd '/repo' && sh -c 'bro watch --once --notify' >/dev/null 2>&1 ${cronTag(common)}`
 
 describe('naming', () => {
+  test('scheduler paths reject line and shell control characters', () => {
+    assert.equal(hasSchedulerControlChar('/repo/with\nnewline'), true)
+    assert.equal(hasSchedulerControlChar('/repo/with\0nul'), true)
+    assert.equal(hasSchedulerControlChar('/repo/with space'), false)
+  })
+
   test('unit name + cron tag hash the common dir, 8 hex', () => {
     const h = watchUnitHash('/repo/.git')
     assert.match(h, /^[0-9a-f]{8}$/)
@@ -122,6 +129,25 @@ describe('installWatch', () => {
       const faster = installWatch(main, { everySec: 30, pulseSec: 900 }, { run, home, env: {} })
       assert.equal(faster.state, 'updated')
       assert.equal(JSON.parse(readFileSync(pulseMarkerPath(main)!, 'utf8')).everySec, 30)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('long cadences never become invalid cron minute steps', () => {
+    const { root, main } = initRepo('bro-watch-long-')
+    const home = tmp()
+    const { calls, run } = systemdRun()
+    try {
+      const r = installWatch(
+        main,
+        { everySec: 90 * 60, pulseSec: 2 * 90 * 60 },
+        { run, home, env: {} }
+      )
+      assert.equal(r.state, 'installed')
+      assert.ok(!calls.some(c => c.args.some(arg => arg.includes('*/90'))))
+      assert.ok(!calls.some(c => c.cmd === 'crontab' && c.args[0] === '-'))
     } finally {
       rmSync(home, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })
@@ -330,7 +356,7 @@ describe('uninstallWatch', () => {
     }
   })
 
-  test('a failed systemd disable removes files but warns — the timer may linger', () => {
+  test('a failed systemd disable aborts migration and preserves the unit', () => {
     const { root, main } = initRepo('bro-watch-uwd-')
     const home = tmp()
     try {
@@ -349,9 +375,10 @@ describe('uninstallWatch', () => {
         crontab: (args) =>
           args[0] === '-l' ? { code: 1, out: '', err: 'no crontab for me' } : ok(),
       })
-      const r = uninstallWatch(main, { run, home, env: {} })
-      assert.equal(r.state, 'removed') // files ARE gone
-      assert.match(r.detail, /live timer may linger/)
+      const r = installWatch(main, { everySec: 60, pulseSec: 900 }, { run, home, env: {} })
+      assert.equal(r.state, 'error')
+      assert.match(r.detail, /migration stopped/)
+      assert.ok(existsSync(join(unitDir, `${unit}.service`)))
     } finally {
       rmSync(home, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })

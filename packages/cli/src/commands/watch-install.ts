@@ -50,16 +50,30 @@ export interface WatchSchedDeps {
   home?: string;
 }
 
+/** Scheduler formats are line-oriented.  Do not ever pass a path containing
+ * a control character to a legacy scheduler writer (or to a shell command
+ * assembled by one).  The writers are retired today, but keeping this check
+ * at the boundary protects migrations and future backends too. */
+export function hasSchedulerControlChar(path: string): boolean {
+  return [...path].some(char => {
+    const code = char.codePointAt(0) ?? 0;
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
 /** The absolute git common dir — units hash on this so a repo's timer
  *  survives a moved checkout and worktrees share one entry. */
 export function watchCommonDir(dir: string): string | null {
+  if (hasSchedulerControlChar(dir)) {
+    return null;
+  }
   const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
   let common = r.code === 0 ? r.out.trim() : '';
   if (common === '') {
     const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir']);
     common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : '';
   }
-  return common === '' ? null : common;
+  return common === '' || hasSchedulerControlChar(common) ? null : common;
 }
 
 export function watchUnitHash(commonDir: string): string {
@@ -151,13 +165,19 @@ function stripCronTag(
 
 /** systemd side of the legacy strip: disable the timer, delete both
  *  unit files, reload so the manager re-reads the dir. A disable that
- *  fails while units existed warns — files are gone but the loaded
- *  timer may linger, and a clean 'removed' would lie. */
+ *  fails while units existed aborts before deleting anything, preserving
+ *  a retryable migration state. */
 function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
   const hadUnits =
     existsSync(join(r.unitDir, `${r.unit}.service`)) ||
     existsSync(join(r.unitDir, `${r.unit}.timer`));
   const disable = r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`]);
+  if (hadUnits && disable.code !== 0) {
+    return {
+      removed: false,
+      warn: `warning: systemd disable failed — migration stopped and unit files were preserved (${disable.err.trim() || `exited ${disable.code}`})`,
+    };
+  }
   let removed = false;
   for (const ext of ['service', 'timer']) {
     const p = join(r.unitDir, `${r.unit}.${ext}`);
@@ -171,10 +191,7 @@ function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
   }
   return {
     removed,
-    warn:
-      hadUnits && disable.code !== 0
-        ? `warning: systemd disable failed — a live timer may linger (${disable.err.trim() || `exited ${disable.code}`})`
-        : '',
+    warn: '',
   };
 }
 
@@ -183,15 +200,20 @@ function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
  *  cadence. Removal only; nothing here writes a scheduler entry. */
 function stripLegacy(r: Resolved): { removed: boolean; warn: string } | { failed: string } {
   const tag = cronTag(r.common);
+  const stripped = stripCronTag(r.run, tag);
+  if ('failed' in stripped) {
+    // the managed line may still be in the table — 'absent' would lie
+    return { failed: `crontab strip failed — the managed line may remain: ${stripped.failed}` };
+  }
+  // Remove the cron side first. If it cannot be read or rewritten, leave the
+  // systemd timer untouched so migration is fail-closed and retryable.
   const backend = detectBackend(r.run);
   const retired =
     backend === 'systemd' || r.run('systemctl', ['--version']).code !== 127
       ? retireSystemdUnits(r)
       : { removed: false, warn: '' };
-  const stripped = stripCronTag(r.run, tag);
-  if ('failed' in stripped) {
-    // the managed line may still be in the table — 'absent' would lie
-    return { failed: `crontab strip failed — the managed line may remain: ${stripped.failed}` };
+  if (retired.warn !== '') {
+    return { failed: retired.warn };
   }
   return {
     removed: retired.removed || ('removed' in stripped && stripped.removed > 0),
