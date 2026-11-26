@@ -190,13 +190,18 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
       .split('\n')
       .map(l => JSON.parse(l) as string[]);
 
-  const waitForCalls = async (log: string): Promise<string[][]> => {
+  const waitForCalls = async (
+    log: string,
+    ready: (calls: string[][]) => boolean = () => true
+  ): Promise<string[][]> => {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        return callsOf(log);
+        const calls = callsOf(log);
+        if (ready(calls)) return calls;
       } catch {
-        await new Promise(resolve => setTimeout(resolve, 10));
+        // The detached advisory child has not written its first report yet.
       }
+      await new Promise(resolve => setTimeout(resolve, 10));
     }
     return callsOf(log);
   };
@@ -238,7 +243,12 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
       () => runStatusView([worktree, '--once'])
     );
 
-    const calls = await waitForCalls(log);
+    const calls = await waitForCalls(
+      log,
+      calls =>
+        calls.some(c => c[1] === 'report-agent') &&
+        calls.some(c => c[1] === 'report-metadata' && c.includes('--display-agent'))
+    );
     const report = calls.find(c => c[1] === 'report-agent');
     assert.ok(report !== undefined);
     assert.equal(report[2], 'w1:p9');
@@ -268,7 +278,9 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
       () => runStatusView([worktree, '--once'])
     );
 
-    const report = (await waitForCalls(log)).find(c => c[1] === 'report-agent');
+    const report = (
+      await waitForCalls(log, calls => calls.some(c => c[1] === 'report-agent'))
+    ).find(c => c[1] === 'report-agent');
     assert.equal(report?.[report.indexOf('--state') + 1], 'unknown');
   });
 
