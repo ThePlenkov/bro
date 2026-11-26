@@ -146,6 +146,35 @@ test('agent start probes prompt-submit on hosts without a user-input event', asy
   });
 });
 
+test('a new session start does not inherit a compaction carry', async () => {
+  respond({
+    'session-start': '{"hookSpecificOutput":{"additionalContext":"fresh session"}}',
+    'pre-compact': '{"hookSpecificOutput":{"additionalContext":"old checkpoint"}}',
+  });
+  const { ctx, handlers } = makeHost();
+  const start = handlers.get('session_start');
+  const compact = handlers.get('session_before_compact');
+  const before = handlers.get('before_agent_start');
+  assert.ok(start !== undefined);
+  assert.ok(compact !== undefined);
+  assert.ok(before !== undefined);
+
+  await start({}, ctx);
+  await before({}, ctx);
+  await compact({}, ctx);
+
+  // Pi can reuse the id when it replaces an extension/session state object.
+  // session_start still denotes a new transcript and must discard the old
+  // pre-compaction checkpoint.
+  respond({
+    'session-start': '{"hookSpecificOutput":{"additionalContext":"replacement"}}',
+  });
+  await start({}, ctx);
+  assert.deepEqual(await before({}, ctx), {
+    message: { customType: 'bro-context', content: 'replacement', display: false },
+  });
+});
+
 const API: BroHostApi<TestCtx> = {
   registerCommand() {},
   registerTool() {},

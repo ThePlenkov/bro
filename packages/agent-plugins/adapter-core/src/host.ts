@@ -472,7 +472,12 @@ export function createBroDriver<Ctx>(
   const hydrate = (ctx: Ctx, event: 'session-start' | 'post-compaction'): void => {
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
-    const priorCarry = carry?.sessionId === sessionId ? carry.text : '';
+    // Only compaction is a continuation. A session_start is a new
+    // transcript, even when the host reuses the same session id while
+    // replacing the extension. Carrying the old hydration/carry into that
+    // branch leaks the previous session's instructions and checkpoint.
+    const priorCarry =
+      event === 'post-compaction' && carry?.sessionId === sessionId ? carry.text : '';
     carry = undefined;
     const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
     const started = raw
@@ -483,8 +488,11 @@ export function createBroDriver<Ctx>(
     hydration = { sessionId, promise: started };
     // re-priming (compaction) earns a fresh inject for this session;
     // a different session's claim is untouched
-    if (hydrated === sessionId) {
+    if (event === 'session-start' || hydrated === sessionId) {
       hydrated = undefined;
+    }
+    if (event === 'session-start') {
+      hydrationRetried = undefined;
     }
     // a failed probe is not the session's verdict — remember it so a
     // later turn can re-probe instead of running the session contextless
