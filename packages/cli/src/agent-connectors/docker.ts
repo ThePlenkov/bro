@@ -264,10 +264,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
   }): string[] => {
     const { name, spec, envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper } =
       input;
-    return dockerRunArgv(
+    return dockerRunArgv({
       name,
       spec,
-      dockerMounts(spec),
+      mounts: dockerMounts(spec),
       envFile,
       agentId,
       promptFile,
@@ -276,8 +276,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       runArgs,
       image,
       wrapper,
-      getCredentialScope(env, 'docker').strictEnv
-    );
+      strictEnv: getCredentialScope(env, 'docker').strictEnv,
+    });
   };
 
   const releaseDockerSpawn = (input: {
@@ -392,7 +392,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     rebindSpawnLease(root, spawnLease, localPid ? { host: hostname(), pid: insp.pid } : {});
     if (localPid && insp.pid !== undefined) retagSessionSlots([slot, ...otherSlots], insp.pid);
     writeWorkMarker(root, id, spawnSpec.molStep, insp.pid);
-    return toDockerInfo(root, agentHome, spawnSpec.molStep, spawned);
+    return toDockerInfo({ dir: root, home: agentHome, molStep: spawnSpec.molStep, entry: spawned });
   };
 
   const recordDockerContainer = (input: {
@@ -487,7 +487,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           return { agents: [], degraded: 'docker ps failed — daemon unreachable' };
         }
         return {
-          agents: entries.map(([molStep, e]) => toDockerInfo(dir, home, molStep, e, live)),
+          agents: entries.map(([molStep, e]) =>
+            toDockerInfo({ dir, home, molStep, entry: e, live })
+          ),
         };
       } catch (err) {
         return {
@@ -503,7 +505,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       if (!hit) {
         throw new AgentNotFound(`no docker agent ${id}`);
       }
-      return toDockerInfo(dir, agentsHome(dir), hit[0], hit[1]);
+      return toDockerInfo({ dir, home: agentsHome(dir), molStep: hit[0], entry: hit[1] });
     },
 
     async stop(id: string): Promise<void> {

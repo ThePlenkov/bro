@@ -59,10 +59,7 @@ export function dockerMounts(spec: SpawnSpec): DockerMount[] {
       // not created yet — docker will create the source root-owned,
       // which is the operator's path to give
     }
-    if (
-      target !== '' &&
-      !mounts.some(m => target === m.target || target.startsWith(`${m.target}/`))
-    ) {
+    if (target !== '' && !isCoveredMount(target, mounts)) {
       mounts.push({ source, target });
     }
   };
@@ -79,6 +76,10 @@ export function dockerMounts(spec: SpawnSpec): DockerMount[] {
   }
   add(spec.beadsDir);
   return mounts;
+}
+
+function isCoveredMount(target: string, mounts: DockerMount[]): boolean {
+  return mounts.some(m => target === m.target || target.startsWith(`${m.target}/`));
 }
 
 export interface Devcontainer {
@@ -122,24 +123,23 @@ export function readDevcontainer(dcPath: string): Devcontainer {
  *  never a silent fallback. */
 export function devcontainerDockerfile(dcPath: string, dc: Devcontainer): string {
   const b = dc.build;
-  let df: string | undefined;
-  if (typeof b?.dockerfile === 'string' && b.dockerfile !== '') {
-    df = b.dockerfile;
-  } else if (typeof b?.dockerFile === 'string' && b.dockerFile !== '') {
-    df = b.dockerFile;
-  }
+  const df = [b?.dockerfile, b?.dockerFile].find(
+    (candidate): candidate is string => typeof candidate === 'string' && candidate !== ''
+  );
   if (df === undefined) {
-    const hint =
-      dc.dockerComposeFile !== undefined
-        ? 'dockerComposeFile devcontainers are not supported — set agents.docker.image'
-        : 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"';
-    throw new SpawnError(`no usable image in ${dcPath} — ${hint}`, 'config');
+    throw new SpawnError(`no usable image in ${dcPath} — ${missingImageHint(dc)}`, 'config');
   }
   const dockerfile = isAbsolute(df) ? df : join(dirname(dcPath), df);
   if (!existsSync(dockerfile)) {
     throw new SpawnError(`devcontainer dockerfile ${dockerfile} does not exist`, 'config');
   }
   return dockerfile;
+}
+
+function missingImageHint(dc: Devcontainer): string {
+  return dc.dockerComposeFile !== undefined
+    ? 'dockerComposeFile devcontainers are not supported — set agents.docker.image'
+    : 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"';
 }
 
 /** Build the devcontainer's dockerfile under a content-keyed tag. The
@@ -152,17 +152,9 @@ export function buildDevcontainerImage(
   dc: Devcontainer
 ): string {
   const dcDir = dirname(dcPath);
-  const ctxRaw = typeof dc.build?.context === 'string' ? dc.build.context : '.';
-  const context = isAbsolute(ctxRaw) ? ctxRaw : join(dcDir, ctxRaw);
-  const buildArgs = Object.entries(
-    typeof dc.build?.args === 'object' && dc.build.args !== null ? dc.build.args : {}
-  ).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`]);
-  const tag = `bro-dev-${createHash('sha256')
-    .update(readFileSync(dcPath, 'utf8'))
-    .update('\n')
-    .update(readFileSync(dockerfile, 'utf8'))
-    .digest('hex')
-    .slice(0, 12)}`;
+  const context = resolveBuildContext(dcDir, dc);
+  const buildArgs = resolveBuildArgs(dc);
+  const tag = devcontainerTag(dcPath, dockerfile);
   const b = dockerRun({
     args: ['build', '-t', tag, '-f', dockerfile, ...buildArgs, context],
     timeoutMs: 600_000,
@@ -172,6 +164,25 @@ export function buildDevcontainerImage(
     throw new SpawnError(`docker build ${dockerfile} failed — ${why}`, 'unavailable');
   }
   return tag;
+}
+
+function resolveBuildContext(dcDir: string, dc: Devcontainer): string {
+  const configured = typeof dc.build?.context === 'string' ? dc.build.context : '.';
+  return isAbsolute(configured) ? configured : join(dcDir, configured);
+}
+
+function resolveBuildArgs(dc: Devcontainer): string[] {
+  const args = typeof dc.build?.args === 'object' && dc.build.args !== null ? dc.build.args : {};
+  return Object.entries(args).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`]);
+}
+
+function devcontainerTag(dcPath: string, dockerfile: string): string {
+  return `bro-dev-${createHash('sha256')
+    .update(readFileSync(dcPath, 'utf8'))
+    .update('\n')
+    .update(readFileSync(dockerfile, 'utf8'))
+    .digest('hex')
+    .slice(0, 12)}`;
 }
 
 /** Resolved image for a spawn — `agents.docker.image` wins; else the
@@ -217,13 +228,15 @@ export function dockerProbeVerdict(entry: AgentRegistryEntry, live?: Set<string>
   return name === undefined ? 'dead' : dockerInspect({ name }).live;
 }
 
-export function toDockerInfo(
-  dir: string,
-  home: string | null,
-  molStep: string,
-  entry: AgentRegistryEntry,
-  live?: Set<string>
-): AgentInfo {
+export interface DockerInfoContext {
+  dir: string;
+  home: string | null;
+  molStep: string;
+  entry: AgentRegistryEntry;
+  live?: Set<string>;
+}
+
+export function toDockerInfo({ dir, home, molStep, entry, live }: DockerInfoContext): AgentInfo {
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
@@ -296,14 +309,23 @@ export function filterStrictRunArgs(runArgs: string[], strictEnv: boolean): stri
   return kept;
 }
 
-function dockerEnvValue(
-  key: string,
-  value: string | undefined,
-  spec: SpawnSpec,
-  env: AgentConnectorEnv | undefined,
-  policy: { strictEnv: boolean; envAllowlist: string[] | undefined },
-  dropped: string[]
-): string | undefined {
+interface DockerEnvContext {
+  key: string;
+  value: string | undefined;
+  spec: SpawnSpec;
+  env: AgentConnectorEnv | undefined;
+  policy: { strictEnv: boolean; envAllowlist: string[] | undefined };
+  dropped: string[];
+}
+
+function dockerEnvValue({
+  key,
+  value,
+  spec,
+  env,
+  policy,
+  dropped,
+}: DockerEnvContext): string | undefined {
   if (
     value === undefined ||
     !/^[A-Za-z_]\w*$/.test(key) ||
@@ -353,7 +375,7 @@ export function writeDockerEnvFile(
     ...baseEnv,
     ...spec.env,
   })
-    .map(([key, value]) => dockerEnvValue(key, value, spec, env, policy, dropped))
+    .map(([key, value]) => dockerEnvValue({ key, value, spec, env, policy, dropped }))
     .filter((line): line is string => line !== undefined)
     .join('\n');
   if (dropped.length > 0) {
@@ -371,20 +393,35 @@ export function writeDockerEnvFile(
  *  root-owned files in the mounted worktree/git dir/beads store, and
  *  every later host-side git/rm hits EACCES; an operator `-u`/`--user`
  *  in runArgs still wins because the default is skipped, not shadowed. */
-export function dockerRunArgv(
-  name: string,
-  spec: SpawnSpec,
-  mounts: DockerMount[],
-  envFile: string,
-  agentId: string,
-  promptFile: string,
-  cliBadge: string | undefined,
-  mol: string | undefined,
-  runArgs: string[],
-  image: string,
-  wrapper: string,
-  strictEnv: boolean
-): string[] {
+export interface DockerRunContext {
+  name: string;
+  spec: SpawnSpec;
+  mounts: DockerMount[];
+  envFile: string;
+  agentId: string;
+  promptFile: string;
+  cliBadge: string | undefined;
+  mol: string | undefined;
+  runArgs: string[];
+  image: string;
+  wrapper: string;
+  strictEnv: boolean;
+}
+
+export function dockerRunArgv({
+  name,
+  spec,
+  mounts,
+  envFile,
+  agentId,
+  promptFile,
+  cliBadge,
+  mol,
+  runArgs,
+  image,
+  wrapper,
+  strictEnv,
+}: DockerRunContext): string[] {
   const userArgs =
     typeof process.getuid === 'function' &&
     !runArgs.some(a => a === '--user' || a === '-u' || a.startsWith('--user='))
