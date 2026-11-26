@@ -251,6 +251,14 @@ function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
   }
 }
 
+/** A claim backend can publish the race verdict in its refusal itself.
+ *  Prefer that evidence over a second read: under contention the read may
+ *  time out even though the claim error is authoritative. */
+function claimErrorProvesRace(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /\balready\s+(?:claimed|assigned)\b/i.test(message);
+}
+
 /** One claim attempt — claim, journal, then let the caller collect.
  *  Returns false only when the bead provably raced away; any other
  *  store error propagates (a bd outage must surface). */
@@ -272,7 +280,7 @@ function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | unde
     });
     return true;
   } catch (err) {
-    if (racedAway(b, dir, opts)) {
+    if (claimErrorProvesRace(err) || racedAway(b, dir, opts)) {
       return false; // genuinely raced away — try the next candidate
     }
     throw err;
