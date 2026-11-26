@@ -78,8 +78,11 @@ function jsoncCopyToken(input: { text: string; i: number; out: string[] }): numb
   if (c === '"') return jsoncCopyString(text, i, out);
   if (text.startsWith('//', i)) return jsoncSkipLineComment(text, i);
   if (text.startsWith('/*', i)) return jsoncSkipBlockComment(text, i);
-  const next = text[jsoncSkipTrivia(text, i + 1)];
   if (c === ',') {
+    // Only a comma can introduce a trailing-comma lookahead.  Running
+    // this scan for every character rescans a whitespace run once per
+    // character and makes whitespace-heavy descriptors quadratic.
+    const next = text[jsoncSkipTrivia(text, i + 1)];
     if (next === '}' || next === ']') return i + 1;
   }
   out.push(c);
