@@ -1,7 +1,7 @@
 ---
 
 name: act
-description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro review act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @broject/bro@0) and gh."
+description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro review act status` is the exit gate as code and the only source for user-facing PR-state claims; resolve/reply are mutations. Requires `bro` (npx -y @broject/bro@0) and gh."
 ---
 
 # /act (bro)
@@ -12,6 +12,31 @@ reimplement what `bro review act` already does.
 Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned). Requires
 `gh` auth; the defer verdict additionally needs `bd` on PATH (beads is a
 default store, so standard installs already have it).
+
+## Claim gate for PR-state reports
+
+`bro review act status` is the authoritative snapshot for every user-facing
+statement about a PR's state, including whether it is mergeable, whether
+threads or checks remain, and whether the exit gate is green. Never report
+that state from memory, an earlier command, `threads`, `wait`, GitHub UI
+context, or a paraphrase of a stale snapshot.
+
+After **every push**, run `bro review act status [PR]` again. Before reporting
+any PR state, run it once more and capture the command's completion timestamp.
+The report must quote the freshest `exit_gate=` and `mergeable=` lines
+**verbatim**, with that timestamp recorded after the latest push. If either
+line is absent, truncated, or older than the latest push, do not make a
+state claim; rerun the status command and capture complete output. A status
+exit code alone is not a substitute for the lines.
+
+Use the PR link printed by `status` (for example,
+`[#123](https://github.com/OWNER/REPO/pull/123)`) and a report shape like:
+
+```text
+Status captured at 2025-01-01T12:34:56Z, after the latest push:
+exit_gate=<paste the exact line from `bro review act status`>
+mergeable=<paste the exact line from `bro review act status`>
+```
 
 ## Commands
 
