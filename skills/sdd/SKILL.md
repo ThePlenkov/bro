@@ -75,13 +75,13 @@ coverage as incomplete rather than covered.
 
 ## Commands
 
-| Command                | What it does                                                                                                                                                                     |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able                                                   |
+| Command                | What it does                                                                                                                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able                                                              |
 | `bro spec drift [id…]` | Compatibility audit for spec/code conformance (`--all` scans all linked work): `conformant` / `spec-ahead` / `code-ahead`, plus explicit unknown inputs; commit timestamps are not evidence |
-| `bro spec new <id>`    | Scaffold a product spec for a change bead — target model renders the `brotocol/spec@N` template with an allocated KEY-N id; `--parent <id>` links the tree                     |
-| `bro spec tree`        | The spec hierarchy — roots, children, MISSING for claimed beads with none                                                                                                        |
-| `bro spec init`        | Bootstrap SDD: detects `.specify/`/`openspec/` and writes `connectors.specs` + `sdd.mode: remind`; on a bare repo scaffolds a native `specs/` root. `--tool` overrides detection |
+| `bro spec new <id>`    | Scaffold a product spec for a change bead — target model renders the `brotocol/spec@N` template with an allocated KEY-N id; `--parent <id>` links the tree                                  |
+| `bro spec tree`        | The spec hierarchy — roots, children, MISSING for claimed beads with none                                                                                                                   |
+| `bro spec init`        | Bootstrap SDD: detects `.specify/`/`openspec/` and writes `connectors.specs` + `sdd.mode: remind`; on a bare repo scaffolds a native `specs/` root. `--tool` overrides detection            |
 
 Engine status: `check`/`drift`/`tree`/`init` run today over the native
 connector (`*.spec.md` + dir specs included); KEY-N allocation in
