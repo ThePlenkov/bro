@@ -23,8 +23,8 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bro fleet rig sync [--repo <dir>]`           | One freshness pass on the resolved checkout: guards (dirty → skip, no upstream/diverged → error) → fetch → ff-only merge → install→build→patch refresh. Exit 1 on error or an incomplete refresh (done-sha ≠ HEAD).                                                                                                                      |
 | `bro fleet rig status [--repo] [--json]`      | Read plane, no network — branch → upstream, ahead/behind vs the stored ref, dirty count, done-sha freshness, resolved refresh steps, rig-pulse state                                                                                                                                                                                     |
-| `bro fleet rig watch [--every N] [--for S]`   | Foreground freshness cadence — `rig sync` per tick under `bro/rig-pulse.lock` (one per repo, standby on contention); cadence `rig.intervalSec` (default 600s); `--for` bounds a session-side run. Orchestrator-only — refuses under `BRO_AGENT_ID`. A second owner-cadence stack slated to fold into `bro fleet daemon` (spec bro-wb3yc) |
-| `bro fleet rig install [--every N] [--print]` | Arm the freshness cadence — writes `bro/rig-pulse.json`; the session's checkpoints rearm a bounded `bro fleet rig watch` window from it (bro-killn: no OS timer is written). Slated to fold with the rig-pulse stack (spec bro-wb3yc)                                                                                                    |
+| `bro fleet rig watch [--every N] [--for S]`   | Deprecated foreground compatibility cadence — use `bro fleet daemon up --rig` so freshness has a recorded owner |
+| `bro fleet rig install [--every N] [--print]` | Deprecated compatibility arm — use `bro fleet daemon up --rig`; existing `bro/rig-pulse.json` intent is retained for migration                                                                                                    |
 | `bro fleet rig uninstall`                     | Disarm the marker — a live `rig watch` keeps its lock until it exits                                                                                                                                                                                                                                                                     |
 | `bro fleet rig next [<item>] [--json]`        | **The** re-entry verdict over durable state (spec bro-wb3yc — the only re-entry): `step` (work it), `gate` (PR open — gate decision), `wait` (parked frame or live worker — a signal re-enters), `done`, `blocked` (foreign claim/deps). Stateless and read-only — races resolve on the next call                                        |
 
@@ -50,8 +50,9 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
   resurrection path. `rig next` only computes the verdict — restoring
   dead processes is the executors' job (`bro fleet resume`, `bro review
   act rearm`), and post-restart recovery runs `bro fleet resume`.
-- **Arm, don't babysit.** `rig watch` is the debug/foreground shape —
-  for a durable poll use `bro fleet rig install`: the want-marker survives
+- **Use the owner.** `rig watch` is retained only as a compatibility/debug
+  shape; for a durable poll use `bro fleet daemon up --rig`. Existing
+  want-marker intent survives
   reboots and session deaths, the orchestrator session's checkpoints
   rearm a bounded window whenever the pulse is dead (bro-killn — the
   same model `bro review watch install` rides). Transitional — the arm

@@ -24,6 +24,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
+  type Connector,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   loadConfig,
@@ -31,19 +32,19 @@ import {
   pidAlive,
   procStat,
   staleLock,
+  supervise,
   worktreeGitDir,
-  type Connector,
 } from '@broject/core';
+import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
+import { type RigConfig, rigSection } from './rig-config.ts';
+import { SELF_ENTRY } from './self-entry.ts';
 import { readWantMarker } from './want-marker.ts';
 import {
   isOrchestratorSession,
+  type PulseSpawn,
   parsePulseSpawn,
   spawnedAlive,
-  type PulseSpawn,
 } from './watch-pulse.ts';
-import { orchestratorRoleAllows, roleSessionOf } from './orchestrator-role.ts';
-import { rigSection, type RigConfig } from './rig-config.ts';
-import { SELF_ENTRY } from './self-entry.ts';
 
 export interface RigPulseMarker {
   /** the resolved rig checkout — `bro rig watch --repo` on rearm */
@@ -315,7 +316,12 @@ async function rigPulseCheckpoint(
     if (!(await orchestratorRoleAllows({ dir, session: roleSessionOf({ sessionId }) }))) {
       return [];
     }
-    const pid = spawnRigPulse(dir, r.repo, r.everySec, r.forSec);
+    const ownership = await supervise({
+      name: 'rig freshness',
+      env: process.env,
+      detached: async () => spawnRigPulse(dir, r.repo, r.everySec, r.forSec),
+    });
+    const pid = ownership.handle;
     if (pid === null) {
       return [];
     }

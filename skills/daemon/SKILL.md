@@ -9,13 +9,13 @@ description: "Use when the project needs a supervisor that outlives the session 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
 Three liveness mechanisms, one role each (spec bro-wb3yc — the target
-architecture; until the migration beads land, a raw `drive --every` /
-`loop --every` / `rig watch` still works but is a transitional owner,
+architecture; raw `drive --every` / `loop --every` / `rig watch` still
+works for compatibility but is deprecated and unrecorded,
 and everything else is a pass, an observer, or a policy alias):
 
 | Role     | Command                                                                                    | Lifetime                        |
 | -------- | ------------------------------------------------------------------------------------------ | ------------------------------- |
-| Owner    | `bro fleet daemon up` — spawns `daemon run` (the `bro review drive --every` loop) detached | long-lived, until `down`        |
+| Owner    | `bro fleet daemon up` — spawns the recorded `daemon run` loop detached | long-lived, until `down`        |
 | Wake     | `bro pulse <S>` — the session-owned metronome; mailbox beats are the session's wakes       | until the arming shell kills it |
 | Re-entry | `bro fleet rig next` — durable state → step\|gate\|wait\|done\|blocked                     | per call — stateless            |
 
