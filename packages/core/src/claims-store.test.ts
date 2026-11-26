@@ -80,6 +80,20 @@ test('pid-less TTL-expired claim dies with a silent session', async () => {
   assert.equal((await c.list({ resource: 'path:src/**' })).length, 0);
 });
 
+test('list does not sweep a lease renewed before its write-lock sweep', async () => {
+  let clock = 1_000_000;
+  const dbPath = join(root, `claims-renew-race-${n++}.db`);
+  const c = facade({ dbPath, now: () => clock, pidAliveFn: () => true });
+  const renewer = facade({ dbPath, now: () => clock, pidAliveFn: () => true });
+  await c.claim('path:renew-race', A, { ttlMs: 1_000 });
+  clock += 2_000;
+
+  clock += 1;
+  assert.equal((await renewer.claim('path:renew-race', A, { ttlMs: 10_000 })).ok, true);
+
+  assert.equal((await c.list({ resource: 'path:renew-race' })).length, 1);
+});
+
 let taskFixtureN = 0;
 /** Shared task:* fixture — an in-memory TaskStore whose actor is
  *  `actor` (default 'me'), behind a fresh claims facade on its own
