@@ -5,11 +5,12 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["pr", "exit_gate"],
-  "properties": {
-    "pr": {
-      "$ref": "#/$defs/PrActState"
-    },
-    "exit_gate": {
+    "properties": {
+      "pr": {
+        "$ref": "#/$defs/PrActState"
+      },
+      "stale": { "type": "boolean" },
+      "exit_gate": {
       "$ref": "#/$defs/ExitGate"
     }
   },
