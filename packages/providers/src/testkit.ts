@@ -185,7 +185,7 @@ export function fakeAcpAgent(
      *  arrives as "Internal error" like any backend flake would,
      *  'auth-gateway-504' an auth-worded outage message that must
      *  classify as availability, never config. */
-    failPrompt?: 'auth' | 'generic' | 'auth-gateway-504' | 'rate-limit';
+    failPrompt?: 'auth' | 'generic' | 'auth-gateway-504' | 'auth-message' | 'rate-limit';
     /** Awaited after every update is notified, before session/prompt
      *  returns — a test gate holding the turn open so a consumer must
      *  prove it saw deltas before end_turn. */
@@ -333,6 +333,9 @@ export function fakeAcpAgent(
       }
       if (opts.failPrompt === 'auth-gateway-504') {
         throw new RequestError(-32603, 'auth gateway returned HTTP 504');
+      }
+      if (opts.failPrompt === 'auth-message') {
+        throw new Error('authentication backend unavailable');
       }
       if (opts.failPrompt === 'rate-limit') {
         throw new RequestError(-32603, 'rate limit exceeded — retry later');

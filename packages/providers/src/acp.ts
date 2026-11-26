@@ -432,15 +432,11 @@ async function acpInit(
   const authHint = (): string =>
     authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
   const asAuthError = (err: unknown): never => {
-    // availability vocabulary beats auth vocabulary: an 'auth-gateway
-    // timeout' is an outage (fallbackable), not a config bug — only a
-    // message that reads as auth REQUIRED names an interactive login
-    const avail =
-      err instanceof Error &&
-      /timeout|timed out|unavailable|network|econn|socket|502|503|504|deadline/i.test(err.message);
-    const isAuth =
-      (err instanceof RequestError && err.code === -32000) ||
-      (!avail && err instanceof Error && /auth|login|credential/i.test(err.message));
+    // Error text is backend-controlled and often mentions auth for an
+    // outage (for example, an auth gateway timeout). Only ACP's explicit
+    // auth_required code is strong enough to identify an operator config
+    // problem; all other failures stay availability failures for fallback.
+    const isAuth = err instanceof RequestError && err.code === -32000;
     throw isAuth
       ? new AcpConfigError(
           `${by}: agent requires interactive auth${authHint()} — a judge call can't log in; authenticate the agent CLI itself`,

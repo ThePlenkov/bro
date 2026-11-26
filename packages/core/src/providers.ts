@@ -41,6 +41,17 @@ export function modelBase(model: string): string {
   return inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw;
 }
 
+function isSystemoneVersion(value: string): boolean {
+  if (value === 'latest') return true;
+  const segments = value.split('.');
+  return (
+    segments.length > 0 &&
+    segments.every(
+      segment => segment.length > 0 && [...segment].every(char => char >= '0' && char <= '9')
+    )
+  );
+}
+
 /** A systemone-family model id — `typesafe/jev-<version|latest>`,
  *  possibly router-prefixed (`kilo/orcarouter/typesafe/jev-1.13`), or a
  *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
@@ -51,11 +62,17 @@ export function modelBase(model: string): string {
  *  context suffix is the same model under an opt-in — it strips before
  *  the test. Lives in core because api-entry normalization consumes it
  *  at parse time, before any provider binding exists. */
-export const isSystemoneFamily = (model: string | undefined): boolean =>
-  model !== undefined &&
-  /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(
-    modelBase(model)
-  );
+export function isSystemoneFamily(model: string | undefined): boolean {
+  if (model === undefined) return false;
+  const segments = modelBase(model).split('/');
+  const leaf = segments.at(-1);
+  const isBareModel = segments.length === 1 && leaf?.startsWith('jev-');
+  const isNamespacedModel =
+    segments.length >= 2 && segments.at(-2) === 'typesafe' && leaf?.startsWith('jev-');
+  const candidate =
+    (isBareModel || isNamespacedModel) && leaf !== undefined ? leaf.slice(4) : undefined;
+  return candidate !== undefined && isSystemoneVersion(candidate);
+}
 
 export type ProviderEntry =
   | {
