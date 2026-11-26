@@ -484,7 +484,7 @@ function beadsDirCandidates(dir: string): string[] {
   const common = commonBeadsDir(dir);
   return [
     ...new Set(
-      [configured, common].filter(
+      [configured, common, join(dir, '.beads')].filter(
         (path): path is string => path !== undefined && path !== null && path !== ''
       )
     ),
