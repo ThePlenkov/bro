@@ -441,7 +441,7 @@ export async function runConvoyCommand(
         );
         process.exit(2);
       }
-      const json = rest.includes('--json');
+      const json = flagZone(rest).includes('--json');
       // monotonic clock for the bound — a wall-clock step backward must
       // not stretch a --timeout past its elapsed budget
       const deadline = timeout > 0 ? performance.now() + timeout * 1000 : Number.POSITIVE_INFINITY;
