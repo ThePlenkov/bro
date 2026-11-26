@@ -40,6 +40,7 @@ import {
   type SkillDrift,
   withFileLock,
 } from '@broject/core';
+import { materializeDevinSubagents } from '@broject/devin';
 import { loadBroConfig } from '../plugins.ts';
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts';
 import {
@@ -861,6 +862,29 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
 
   if (lock) {
     setupLockedSkills(process.cwd(), dryRun, checkOnly);
+  }
+
+  const configuredAgents = loadBroConfig().agents as Record<string, unknown> | undefined;
+  const devin = configuredAgents?.devin;
+  if (!checkOnly && !dryRun && devin !== undefined) {
+    const config = devin as { subagent_model?: unknown; profiles?: unknown; subagents?: unknown };
+    const profiles =
+      typeof (config.profiles ?? config.subagents) === 'object' &&
+      (config.profiles ?? config.subagents) !== null &&
+      !Array.isArray(config.profiles ?? config.subagents)
+        ? (config.profiles ?? config.subagents)
+        : {};
+    const written = materializeDevinSubagents({
+      config: {
+        ...(typeof config.subagent_model === 'string'
+          ? { subagent_model: config.subagent_model }
+          : {}),
+        profiles: profiles as Record<string, { model: string; tools?: string[]; prompt?: string }>,
+      },
+    });
+    if (written.length > 0) {
+      console.error(`bro setup: materialized ${written.length} Devin subagent file(s)`);
+    }
   }
 
   console.error(
