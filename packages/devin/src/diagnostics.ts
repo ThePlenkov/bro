@@ -3,8 +3,9 @@
  * provider facade: the core can ask a provider for visibility without
  * learning that provider's process, sqlite, or journal formats.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { createReadStream, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { devinLocksDir, devinPidCwd, devinPidIsOwned, listDevinSessions } from './plane.ts';
 import { devinStorePath } from './usage.ts';
 
@@ -208,11 +209,15 @@ async function rateLimitHits(
   }
 }
 
-function serveSummary(path: string | undefined): { summary: DevinServeTurnSummary; ok: boolean } {
+async function serveSummary(
+  path: string | undefined
+): Promise<{ summary: DevinServeTurnSummary; ok: boolean }> {
   const summary: DevinServeTurnSummary = { turns: 0, spawns: 0, deadloops: 0, rateLimits: 0 };
   if (path === undefined) return { summary, ok: true };
   try {
-    for (const line of readFileSync(path, 'utf8').split('\n').filter(Boolean)) {
+    const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (line.length === 0) continue;
       const row = JSON.parse(line) as Record<string, unknown>;
       const event = String(field(row, 'event') ?? '').toLowerCase();
       summary.turns += event.includes('turn') ? 1 : 0;
@@ -237,7 +242,7 @@ export async function diagnoseDevinRateLimit(
     options.limit ?? 20_000
   );
   if (!hitsResult.ok) warnings.push('Devin sessions.db unavailable');
-  const serve = serveSummary(options.serveTurnsPath);
+  const serve = await serveSummary(options.serveTurnsPath);
   if (!serve.ok) warnings.push('serve-turns journal unavailable');
   const consumers = inspectDevinAccount(options);
   warnings.push(...consumers.warnings);
