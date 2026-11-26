@@ -32,6 +32,7 @@ import {
   facade,
   gitTry,
   hasHelpFlag,
+  hookHostOf,
   type LedgerFacade,
   loadConfig,
   printUsage,
@@ -40,7 +41,6 @@ import {
   sessionProject,
 } from '@broject/core';
 import { agentOwner } from '@broject/rig';
-import { hookHostOf } from '../hook-host.ts';
 import { flag, positionals } from './args.ts';
 import {
   claimGlobWithinBounds,
@@ -154,6 +154,31 @@ interface ResolvedSession {
   ok: boolean;
 }
 
+interface ClaimListContext {
+  args: ClaimArgs;
+  claims: ClaimFacade;
+  session: ResolvedSession;
+  dir: string;
+  now: number;
+}
+
+interface ClaimReleaseContext {
+  args: ClaimArgs;
+  claims: ClaimFacade;
+  key: SessionKey;
+  uri: string;
+  dir: string;
+}
+
+interface ClaimAcquireContext {
+  args: ClaimArgs;
+  claims: ClaimFacade;
+  key: SessionKey;
+  resource: string;
+  dir: string;
+  deps: ClaimDeps;
+}
+
 function resolveSession(
   args: Pick<ClaimArgs, 'session' | 'host'>,
   env: NodeJS.ProcessEnv
@@ -199,30 +224,33 @@ function branchResource(dir: string): string {
  *  errors here too (defensive — expandResourceWords intercepts the
  *  two-word forms first). */
 function expandBareResource(a: string, dir: string): string {
-  switch (a) {
-    case 'worktree':
-      return `worktree:${dir}`;
-    case 'branch':
-      return branchResource(dir);
-    case 'role':
+  const direct: Record<string, () => string> = {
+    worktree: () => `worktree:${dir}`,
+    branch: () => branchResource(dir),
+    role: () => {
       throw new CommandError('error: role needs a name — `bro claim role <name>`', EXIT.usage);
-    case 'task':
+    },
+    task: () => {
       throw new CommandError('error: task needs an id — `bro claim task <id>`', EXIT.usage);
-    case 'pr':
-    case 'path':
-      throw new CommandError(
-        `error: ${a} needs a value — \`bro claim ${a} <${a === 'pr' ? 'n' : 'glob'}>\``,
-        EXIT.usage
-      );
-    default:
-      // a bare word that is no shorthand and carries no `scheme:` is a
-      // misspelling (`bro claim brnch`), never a resource URI — claims
-      // are explicit, so garbage in must not mint a garbage lease
-      throw new CommandError(
-        `error: unknown resource "${a}" — shorthand: worktree|branch|pr|path|role|task, or a <scheme>:<rest> URI\n${USAGE}`,
-        EXIT.usage
-      );
+    },
+    pr: () => missingBareValue('pr', 'n'),
+    path: () => missingBareValue('path', 'glob'),
+  };
+  const resolver = Object.getOwnPropertyDescriptor(direct, a)?.value;
+  if (resolver !== undefined) {
+    return resolver();
   }
+  throw new CommandError(
+    `error: unknown resource "${a}" — shorthand: worktree|branch|pr|path|role|task, or a <scheme>:<rest> URI\n${USAGE}`,
+    EXIT.usage
+  );
+}
+
+function missingBareValue(name: string, value: string): never {
+  throw new CommandError(
+    `error: ${name} needs a value — \`bro claim ${name} <${value}>\``,
+    EXIT.usage
+  );
 }
 
 /** Expand a resource argument to a URI — shorthands resolve against
@@ -303,24 +331,23 @@ export function expandResourceWords(words: string[], dir: string): string {
     return prNumberUri(head.slice(1));
   }
   const value = rest.join(' ').trim();
-  switch (head) {
-    case 'role':
-      return roleResourceUri(value, dir);
-    case 'task':
-      return taskResourceUri(value);
-    case 'pr':
-      return prResourceUri(value);
-    case 'path':
-      return pathResourceUri(value);
-    default:
-      if (words.length > 1) {
-        throw new CommandError(
-          `error: unrecognized resource "${words.join(' ')}" — pass a <scheme>:<rest> URI or a known shorthand\n${USAGE}`,
-          EXIT.usage
-        );
-      }
-      return expandResourceArg(head, dir);
+  const shorthand: Record<string, () => string> = {
+    role: () => roleResourceUri(value, dir),
+    task: () => taskResourceUri(value),
+    pr: () => prResourceUri(value),
+    path: () => pathResourceUri(value),
+  };
+  const resolver = Object.getOwnPropertyDescriptor(shorthand, head)?.value;
+  if (resolver !== undefined) {
+    return resolver();
   }
+  if (words.length > 1) {
+    throw new CommandError(
+      `error: unrecognized resource "${words.join(' ')}" — pass a <scheme>:<rest> URI or a known shorthand\n${USAGE}`,
+      EXIT.usage
+    );
+  }
+  return expandResourceArg(head, dir);
 }
 
 function fmtLeaseUntil(ms: number | null, now: number): string {
@@ -400,13 +427,8 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-async function runClaimList(
-  args: ClaimArgs,
-  claims: ClaimFacade,
-  sess: ResolvedSession,
-  dir: string,
-  now: number
-): Promise<void> {
+async function runClaimList(ctx: ClaimListContext): Promise<void> {
+  const { args, claims, session: sess, dir, now } = ctx;
   const project = args.project ? sessionProject(dir) : undefined;
   let rows: ClaimRow[];
   try {
@@ -437,13 +459,8 @@ async function runClaimList(
   }
 }
 
-async function runClaimRelease(
-  args: ClaimArgs,
-  claims: ClaimFacade,
-  key: SessionKey,
-  uri: string,
-  dir: string
-): Promise<void> {
+async function runClaimRelease(ctx: ClaimReleaseContext): Promise<void> {
+  const { args, claims, key, uri, dir } = ctx;
   try {
     // dir rides along so a task:* release resolves the same store a
     // dir-scoped claim wrote to even when the session row has no cwd
@@ -536,14 +553,8 @@ async function reportRefusedClaim(
   });
 }
 
-async function runClaimAcquire(
-  args: ClaimArgs,
-  claims: ClaimFacade,
-  key: SessionKey,
-  resource: string,
-  dir: string,
-  deps: ClaimDeps
-): Promise<void> {
+async function runClaimAcquire(ctx: ClaimAcquireContext): Promise<void> {
+  const { args, claims, key, resource, dir, deps } = ctx;
   // the glob bound is an acquire gate, not a URI gate: expansion is
   // shared with release, which must reach the store for any `path:` URI
   // including one a pre-bound `bro claim` managed to store
@@ -582,7 +593,7 @@ export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Pro
   const sess = resolveSession(args, env);
 
   if (args.sub === 'list') {
-    await runClaimList(args, claims, sess, dir, deps.now ?? Date.now());
+    await runClaimList({ args, claims, session: sess, dir, now: deps.now ?? Date.now() });
     return;
   }
 
@@ -597,8 +608,8 @@ export async function runClaimCommand(argv: string[], deps: ClaimDeps = {}): Pro
   const uri = expandResourceWords(words, dir);
 
   if (args.sub === 'release') {
-    await runClaimRelease(args, claims, key, uri, dir);
+    await runClaimRelease({ args, claims, key, uri, dir });
     return;
   }
-  await runClaimAcquire(args, claims, key, uri, dir, deps);
+  await runClaimAcquire({ args, claims, key, resource: uri, dir, deps });
 }

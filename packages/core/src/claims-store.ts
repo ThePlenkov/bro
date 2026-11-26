@@ -22,16 +22,6 @@
  *  `pidAlive`, and `bootTimeMs` without touching /proc or the clock.
  */
 import { uptime } from 'node:os';
-import { resolveHookSpoolPath } from './hook-spool.ts';
-import {
-  drainIntoStore,
-  ledgerDbPath,
-  openLedgerStore,
-  type ClaimDbRow,
-  type LedgerStore,
-} from './ledger-store.ts';
-import { pidAlive } from './proc.ts';
-import { claimRemote, taskStore, type TaskRow, type TaskStore } from './tasks.ts';
 import {
   CLAIM_DEFAULT_TTL_MS,
   type ClaimFacade,
@@ -41,7 +31,17 @@ import {
   type ClaimResult,
   type ClaimRow,
 } from './claims.ts';
+import { resolveHookSpoolPath } from './hook-spool.ts';
 import type { SessionKey, SessionRow } from './ledger.ts';
+import {
+  type ClaimDbRow,
+  drainIntoStore,
+  type LedgerStore,
+  ledgerDbPath,
+  openLedgerStore,
+} from './ledger-store.ts';
+import { pidAlive } from './proc.ts';
+import { claimRemote, type TaskRow, type TaskStore, taskStore } from './tasks.ts';
 
 /** A pid-less claim whose TTL expired dies only when its session has
  *  been silent this long — the same freshness horizon the `.work`
@@ -64,6 +64,18 @@ interface LiveCtx {
   bootTimeMs: number;
   sessions: Map<string, SessionRow>;
   pidAliveFn: (pid: number, pidStart?: string) => boolean;
+}
+
+interface TaskClaimContext {
+  resource: string;
+  session: SessionKey;
+  options: ClaimOptions;
+}
+
+interface TaskReleaseContext {
+  resource: string;
+  session: SessionKey;
+  options: ClaimReleaseOptions;
 }
 
 function sessKey(host: string, sid: string): string {
@@ -276,11 +288,9 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
   /** Liveness context — one sessions scan per call; the claims table
    *  is small (per-session resource leases) so a full scan is honest. */
   const liveCtx = async (s: LedgerStore): Promise<LiveCtx> => {
-    const stored = await s.sessions({});
-    const sessions = new Map<string, SessionRow>();
-    for (const row of stored) {
-      sessions.set(sessKey(row.host, row.sid), row);
-    }
+    const sessions = new Map(
+      (await s.sessions({})).map(row => [sessKey(row.host, row.sid), row] as const)
+    );
     return { now: now(), bootTimeMs: bootTimeMs(), sessions, pidAliveFn };
   };
 
@@ -302,16 +312,16 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
       }
     }
     return live;
-  };
+
 
   /** `task:*` delegation — the bd claim is the source of truth. The
    *  facade verifies/assigns through the tasks store; it never writes
    *  a claims-table row for these URIs. */
-  const taskClaim = async (
-    resource: string,
-    session: SessionKey,
-    o: ClaimOptions
-  ): Promise<ClaimResult> => {
+  const taskClaim = async ({
+    resource,
+    session,
+    options: o,
+  }: TaskClaimContext): Promise<ClaimResult> => {
     const id = resource.slice(TASK_PREFIX.length).trim();
     if (id === '') {
       throw new Error(`malformed task claim resource: ${JSON.stringify(resource)}`);
@@ -345,11 +355,11 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
     return remoteTaskClaim(ts, resource, id, actor);
   };
 
-  const taskRelease = async (
-    resource: string,
-    session: SessionKey,
-    o: ClaimReleaseOptions
-  ): Promise<void> => {
+  const taskRelease = async ({
+    resource,
+    session,
+    options: o,
+  }: TaskReleaseContext): Promise<void> => {
     const id = resource.slice(TASK_PREFIX.length).trim();
     if (id === '') {
       return;
@@ -380,7 +390,7 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
         throw new Error('claim needs a non-empty resource URI and session key');
       }
       if (uri.startsWith(TASK_PREFIX)) {
-        return taskClaim(uri, session, o);
+        return taskClaim({ resource: uri, session, options: o });
       }
       const s = await store();
       fresh(s);
@@ -430,7 +440,7 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
         return;
       }
       if (uri.startsWith(TASK_PREFIX)) {
-        await taskRelease(uri, session, o);
+        await taskRelease({ resource: uri, session, options: o });
         return;
       }
       const s = await store();
