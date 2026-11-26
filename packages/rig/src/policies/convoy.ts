@@ -279,8 +279,8 @@ async function dispatchSettle(ctx: ConvoyCtx, result: MolResult): Promise<void> 
     stopped: ctx.deps.onStopped,
     failed: ctx.deps.onFailed,
   };
-  const hook = hooks[result.verdict];
-  if (hook !== undefined) {
+  const hook = Object.getOwnPropertyDescriptor(hooks, result.verdict)?.value;
+  if (typeof hook === 'function') {
     await hook(result); // NOSONAR — serial by contract
   }
 }
@@ -408,7 +408,7 @@ function classifyEntry(
     spawned: { mol: item.mol, verdict: 'occupied', attempts: item.attempts, detail: message },
     stopped: { mol: item.mol, verdict: 'stopped', attempts: item.attempts },
   };
-  return verdicts[state];
+  return Object.getOwnPropertyDescriptor(verdicts, state)?.value;
 }
 
 /** A read failure — the mol or its probes could not be read (a stalled
