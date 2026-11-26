@@ -102,6 +102,27 @@ default store, so standard installs already have it).
   next code is born clean — the "Green on first write" lists in
   AGENTS.md (shape + semantics) are the catalog; a finding class they
   don't name yet gets a new entry there, not just a fix here.
+- **A finding names an invariant, not a line.** Before pushing a fix round,
+  state the violated behavior and define the operation it governs (for
+  example, one request, serialization pipeline, command, or state
+  transition). Then enumerate every other producer, consumer, branch, and
+  representation of that invariant inside the same operation — not only the
+  line the reviewer annotated. The common classes are:
+  - **round-trip:** every encode/decode or write/read path preserves the
+    contract;
+  - **identity stability:** every path that carries the same entity keeps its
+    identity, including aliases and retries;
+  - **edge resolvability:** every emitted reference has a corresponding
+    target, including optional and error paths; and
+  - **containment:** every path keeps data within its declared scope/root,
+    including symlink, fallback, and cleanup paths.
+
+  Write that inventory down in the fix notes, inspect each site against the
+  same invariant, and fix the complete set in one commit. A round that fixes
+  only the flagged line is incomplete: do not push it as a fix round. Re-run
+  the relevant tests and the local finding sweep over the whole diff after
+  the set is complete; a newly discovered sibling site belongs to the same
+  round rather than a follow-up push.
 - **Exhaust findings locally before pushing.** A push that flies blind on
   what remote engines will say is the wave generator — each push
   re-triggers reviewers whose next annotations were already computable.
