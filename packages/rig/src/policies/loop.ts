@@ -2080,7 +2080,11 @@ async function serviceGate(ctx: LoopCtx, m: LoopMember): Promise<ServiceVerdict>
   // act.requireApproval is set — mirror that predicate here so the
   // gate keeps supervisor semantics (merge stays approval-gated)
   // instead of waiting on an auto-merge that was never armed.
-  const autoMergeArmed = m.autoMergeArmed ?? (ctx.cfg.autoMerge && !ctx.act.requireApproval);
+  const autoMergeArmed = autoMergeArmedForMember(
+    m.autoMergeArmed,
+    ctx.cfg.autoMerge,
+    ctx.act.requireApproval === true
+  );
   const autoMergeTimedOut = ctx.deps.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
   const kind =
     autoMergeArmed && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
