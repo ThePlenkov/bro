@@ -44,20 +44,26 @@ jobs:
         id: tar
         run: |
           # workflow_dispatch input is free text — require a full vX.Y.Z
-          # tag: shell metacharacters stay out, and a partial tag like
-          # v0.2 can't reach npm as a range resolving a different version
+          # tag so the npm spec below names one version, not a range.
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
             || { echo "::error::TAG '$TAG' is not a full vX.Y.Z tag"; exit 1; }
           pkg="@broject/bro"
+          version="${TAG#v}"
           # publish.yml runs npm ci + build + test + per-package publishes
           # first — poll until the version resolves (~30 min budget).
           url=""
           for i in $(seq 1 90); do
-            url=$(npm view "$pkg@${TAG#v}" dist.tarball 2>/dev/null || true)
+            # Check the returned version as well as the tarball URL. This
+            # makes the tag-to-formula contract explicit if this query is
+            # ever changed back to accept a less specific npm spec.
+            resolved=$(npm view "$pkg@$version" version 2>/dev/null || true)
+            if [ "$resolved" = "$version" ]; then
+              url=$(npm view "$pkg@$version" dist.tarball 2>/dev/null || true)
+            fi
             [ -n "$url" ] && break
             sleep 20
           done
-          [ -n "$url" ] || { echo "::error::$pkg@${TAG#v} not on npm after ~30min — did publish.yml fail?"; exit 1; }
+          [ -n "$url" ] || { echo "::error::$pkg@$version not on npm after ~30min — did publish.yml fail?"; exit 1; }
           [[ "$url" =~ ^https://registry\.npmjs\.org/@broject/bro/-/bro-.+\.tgz$ ]] \
             || { echo "::error::unexpected tarball url: '$url'"; exit 1; }
           # download first, hash after — a piped curl can hand sha256sum
@@ -108,9 +114,16 @@ jobs:
             [[ $a == *-* ]] && { apre=${a#*-}; a=${a%%-*}; }
             [[ $b == *-* ]] && { bpre=${b#*-}; b=${b%%-*}; }
             if [ "$a" != "$b" ]; then
-              # cores are digits-and-dots only — sort -V is exact there
-              [ "$(printf '%s\n' "$a" "$b" | sort -V | head -1)" = "$a" ]
-              return
+              # Compare the three numeric core fields directly. sort -V
+              # puts a final release before a prerelease when the core
+              # matches, and its ordering rules are not SemVer's rules.
+              local -a ac bc
+              IFS=. read -ra ac <<<"$a"; IFS=. read -ra bc <<<"$b"
+              for ((i = 0; i < 3; i++)); do
+                x=${ac[i]} y=${bc[i]}
+                ((10#$x < 10#$y)) && return 0
+                ((10#$x > 10#$y)) && return 1
+              done
             fi
             [ -z "$apre" ] && return 1   # final sorts above any prerelease
             [ -z "$bpre" ] && return 0
