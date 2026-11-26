@@ -326,6 +326,11 @@ const callsOf = (log: string): string[][] =>
     .split('\n')
     .map(l => JSON.parse(l) as string[]);
 
+const latestReport = (calls: string[][]): string[] | undefined =>
+  calls
+    .filter(c => c[1] === 'report-agent' && c.includes('--state'))
+    .toSorted((a, b) => Number(b[b.indexOf('--seq') + 1]) - Number(a[a.indexOf('--seq') + 1]))[0];
+
 const waitForCall = async (
   log: string,
   predicate: (call: string[]) => boolean
@@ -522,7 +527,8 @@ describe('runSessionView --once', () => {
     // the archive verdict moved through the stream: working while the
     // turn ran, idle at the stop, blocked at the permission row
     const states = reports.map(c => c[c.indexOf('--state') + 1]);
-    assert.deepEqual(states[states.length - 1], 'blocked');
+    const report = latestReport(calls);
+    assert.equal(report?.[report.indexOf('--state') + 1], 'blocked');
     assert.ok(states.includes('working'));
   });
 
@@ -555,12 +561,12 @@ describe('runSessionView --once', () => {
     const text = f.stdout();
     assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
     const calls = callsOf(f.log);
-    const reports = calls.filter(c => c[1] === 'report-agent' && c.includes('--state'));
-    // the FINAL report is the verdict — the first fires before the
+    // the highest-sequence report is the verdict — detached herdr
+    // helper processes can append their records out of order. The first fires before the
     // archive drains and would read 'idle' even on an empty journal;
     // the floor is 'unknown' (no registry entry), so the archive's
     // own verdict (turn stopped → idle) is what rides on top
-    const report = reports.at(-1);
+    const report = latestReport(calls);
     assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
     const meta = calls.find(c => c.includes('--display-agent'));
     assert.equal(meta?.[meta.indexOf('--display-agent') + 1], 'native-x');
