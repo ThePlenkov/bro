@@ -424,8 +424,15 @@ function settleFromPlanes(
     return;
   }
   if (thread.scanFailed === true) {
-    // a failed peer scan settles nothing — not free, not
-    // closed-unshipped; the watch stays unsettled and retries
+    // A failed thread scan settles neither free nor reject, but it must not
+    // erase the posting store's close→ship observation. The peer read has
+    // already established that no provides row is visible; retain that
+    // lifecycle signal so a closed request cannot time out forever merely
+    // because the independent thread read was transiently unavailable.
+    if (req.status === 'closed') {
+      closedUnshipped(w, read);
+      return;
+    }
     w.closedUnshipped = 0;
     console.error(
       `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +

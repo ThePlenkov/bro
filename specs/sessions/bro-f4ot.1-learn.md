@@ -168,6 +168,10 @@ probe — a wedged store yields zero lines, never a stalled hook.
   and renders at most `budget` fires per lesson per session — the fired
   set lives in `<git-common>/bro/hooks/fired/<session>` (subdir for the
   same reason) so restarts don't re-fire.
+  Concretely, `journalTrace` in the hooks layer sweeps `trace/` after
+  a session's first append, and the learn connector's `recordFired`
+  sweeps `fired/` after each append. Both remove entries older than
+  the same 7-day marker TTL, and both are best-effort.
 
   The journal records what the hook payload actually carries —
   `HookInput` widens to read `tool_name` and the path-bearing
