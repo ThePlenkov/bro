@@ -233,18 +233,18 @@ function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
     if (row === undefined) {
       return true; // the row vanished — moved on
     }
-    const actor = ts.actor?.() ?? '';
     const holders = (row.assignee ?? '')
       .split(',')
       .map(a => a.trim())
       .filter(a => a !== '');
-    if (holders.length > 0 && actor !== '' && !holders.includes(actor)) {
-      return true; // foreign pin — unwinnable at any status
-    }
     const status = (row.status ?? '').toLowerCase();
     if (status === 'open') {
-      return false;
+      // An open row with any assignee is already pinned. bd rejects a
+      // claim on that pin before actor resolution, so do not make the
+      // fall-through depend on a second `bd config get actor` succeeding.
+      return holders.length > 0;
     }
+    const actor = ts.actor?.() ?? '';
     return actor !== '' && !holders.includes(actor);
   } catch {
     return false; // show failed too — bd is down; the claim error is the diagnostic
