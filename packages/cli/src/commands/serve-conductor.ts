@@ -37,6 +37,7 @@ import {
   laneGateTake,
   loadConfig,
   MAX_TIMER_MS,
+  type ProviderCapLane,
   planesStartingSessions,
   providerCapCensus,
   providerCapHeldRefusal,
@@ -44,14 +45,13 @@ import {
   providerSlotsKind,
   releaseSessionStart,
   reserveSessionStart,
+  type SessionPlane,
+  type SessionStartAdmission,
+  SpawnError,
   sessionCapHeldRefusal,
   sessionCapViews,
   sessionStartCensusDir,
-  SpawnError,
   stateCommonDir,
-  type ProviderCapLane,
-  type SessionPlane,
-  type SessionStartAdmission,
 } from '@broject/core';
 import type {
   AcpContentBlock,
@@ -83,10 +83,10 @@ import {
 } from '@broject/providers';
 import { peerAttrs } from './peer.ts';
 import { type CatalogModel, catalogModels } from './providers.ts';
-import { resolveSurface, SURFACE_ENDPOINTS, surfaceAddress } from './serve-surfaces.ts';
 import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
 import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
 import { forwardBody, type ProviderConfig, providerConfig } from './serve-provider.ts';
+import { resolveSurface, SURFACE_ENDPOINTS, surfaceAddress } from './serve-surfaces.ts';
 import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
@@ -2396,6 +2396,55 @@ function laneProviderCap(cfg: ConductorConfig): ProviderCapLane | undefined {
   return { provider: cfg.backend, cap };
 }
 
+interface LaneAdmissionResult {
+  admissions: SessionStartAdmission[];
+  refusal?: string;
+  capCause?: 'provider_cap';
+}
+
+/** Admit each session-starting plane against the shared census. A command
+ * can have several kind planes; the provider-only case is intentionally
+ * handled by its own helper below. */
+async function admitLanePlanes(args: {
+  planes: SessionPlane[];
+  command: string;
+  agents: Record<string, Record<string, unknown>>;
+  claimKey: string;
+  providerCap: ProviderCapLane | undefined;
+  excludePids: ReadonlySet<number>;
+}): Promise<LaneAdmissionResult> {
+  const admissions: SessionStartAdmission[] = [];
+  for (const plane of args.planes) {
+    const admission = await admitSessionStartAsync({
+      plane,
+      command: args.command,
+      agents: args.agents,
+      key: args.claimKey,
+      providerCap: args.providerCap,
+      excludePids: args.excludePids,
+      waitMs: CAP_LOCK_WAIT_MS,
+    });
+    if (admission === undefined) continue;
+    if (admission.refusal !== undefined) {
+      return { admissions, refusal: admission.refusal, capCause: admission.capCause };
+    }
+    admissions.push(admission);
+  }
+  return { admissions };
+}
+
+/** Admit a provider cap for a command with no kind plane. Its
+ * provider-namespaced claim ledger is the complete census for that lane. */
+async function admitProviderOnlyLane(
+  providerCap: ProviderCapLane,
+  claimKey: string
+): Promise<SessionStartAdmission | undefined> {
+  return admitProviderSlotAsync(providerCap, () => 0, {
+    key: claimKey,
+    waitMs: CAP_LOCK_WAIT_MS,
+  });
+}
+
 /** The lane's full session admission — every capped plane the entry's
  *  command claims PLUS the provider lane cap (spec bro-x601l), under
  *  the same host-wide mutexes the spawn's admission takes. Shared by
@@ -2433,34 +2482,22 @@ export async function admitLaneCap(
   let capCause: 'provider_cap' | undefined;
   const planes = planesStartingSessions(command);
   try {
-    for (const plane of planes) {
-      const admission = await admitSessionStartAsync({
-        plane,
-        command,
-        agents: cfg.agents,
-        key: claimKey,
-        providerCap,
-        excludePids,
-        waitMs: CAP_LOCK_WAIT_MS,
-      });
-      if (admission === undefined) {
-        continue;
-      }
-      if (admission.refusal !== undefined) {
-        refusal = admission.refusal;
-        capCause = admission.capCause;
-        break;
-      }
-      admissions.push(admission);
-    }
+    const planeResult = await admitLanePlanes({
+      planes,
+      command,
+      agents: cfg.agents,
+      claimKey,
+      providerCap,
+      excludePids,
+    });
+    admissions.push(...planeResult.admissions);
+    refusal = planeResult.refusal;
+    capCause = planeResult.capCause;
     // a provider NO plane counts still gates (spec bro-x601l): the claim
     // ledger is its whole census — the lane's held claims are already
     // inside it, so the caller's own count adds nothing
     if (refusal === undefined && planes.length === 0 && providerCap !== undefined) {
-      const admission = await admitProviderSlotAsync(providerCap, () => 0, {
-        key: claimKey,
-        waitMs: CAP_LOCK_WAIT_MS,
-      });
+      const admission = await admitProviderOnlyLane(providerCap, claimKey);
       if (admission !== undefined) {
         if (admission.refusal !== undefined) {
           refusal = admission.refusal;
