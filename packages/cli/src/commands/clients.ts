@@ -289,10 +289,14 @@ function piArtifact(cwd: string): string | null {
   const ap = agentPluginPackageRoot('pi');
   const pkg = packageRoot();
   const root = gitRoot(cwd);
+  // Never fall back to src/pi.ts: pi loads the installed file directly
+  // with jiti, so the source module's adapter-core import (and any
+  // relative sibling it gains) is not guaranteed to exist beside it.
+  // The generated checkout artifact and package dist entry are bundled
+  // specifically for this no-node_modules host.
   return firstExisting([
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
     ap === null ? null : join(ap, 'dist', 'pi.js'),
-    ap === null ? null : join(ap, 'src', 'pi.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
   ]);
 }

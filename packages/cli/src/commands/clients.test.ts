@@ -420,7 +420,7 @@ describe('clients install/uninstall/list', () => {
     assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent']);
   });
 
-  test('pi install lands in .pi/extensions/ and the agent dir', () => {
+  test('pi install lands a self-contained adapter in both extension dirs', () => {
     const f = fixture();
     const out = installClient('pi', ['global', 'local'], f.opts);
     assert.deepEqual(
@@ -439,6 +439,11 @@ describe('clients install/uninstall/list', () => {
     assert.deepEqual(
       [...installed.matchAll(/from\s+['"](\.[^'"]*)['"]/g)].map(m => m[1] ?? ''),
       []
+    );
+    assert.doesNotMatch(
+      installed,
+      /@broject\/adapter-core/,
+      'the source module must not be copied into pi: its host import is not installed beside it'
     );
   });
 });
