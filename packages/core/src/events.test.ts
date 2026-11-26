@@ -57,9 +57,14 @@ describe('event contract', () => {
   test('addressed events match only the declared recipient', () => {
     const addressed = { topic: 'notify', kind: 'ask', to: 'fixer-1' }
     const broadcast = { topic: 'notify', kind: 'note' }
+    const emptyAddress = { topic: 'notify', kind: 'ask', to: '' }
     assert.equal(eventMatches({ to: 'fixer-1' }, addressed), true)
     assert.equal(eventMatches({ to: 'fixer-9' }, addressed), false)
     assert.equal(eventMatches({}, addressed), false)
+    // Empty is malformed, not the absence of an address. Keep the matcher
+    // strict too: the bus can receive frames independently of publish().
+    assert.equal(eventMatches({}, emptyAddress), false)
+    assert.equal(eventMatches({ to: 'fixer-1' }, emptyAddress), false)
     // broadcast reaches everyone, whatever address a subscriber declares
     assert.equal(eventMatches({ to: 'fixer-9' }, broadcast), true)
     assert.equal(eventMatches({}, broadcast), true)
