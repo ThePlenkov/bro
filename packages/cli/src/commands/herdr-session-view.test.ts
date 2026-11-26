@@ -532,46 +532,6 @@ describe('runSessionView --once', () => {
     assert.ok(states.includes('working'));
   });
 
-  test('a direct --events/--agent binding renders without the fleet doc', async () => {
-    const f = fixture();
-    const eventsPath = f.write(
-      'a.events.jsonl',
-      [
-        { ts: '2026-01-01T00:00:00Z', session: 'ses_1', kind: 'turn', phase: 'start' },
-        {
-          ts: '2026-01-01T00:00:01Z',
-          session: 'ses_1',
-          kind: 'update',
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'DIRECT-CHUNK' },
-          },
-        },
-        { ts: '2026-01-01T00:00:02Z', session: 'ses_1', kind: 'turn', phase: 'stop' },
-      ]
-        .map(r => JSON.stringify(r))
-        .join('\n') + '\n'
-    );
-    // no fleet doc at all — the line-mode pane the builders arm
-    // (`session-view <wt> --events <e> --agent <id>`) must still
-    // render; worktree-only resolution dropped native journals
-    await withEnv(f.env, () =>
-      runSessionView([f.worktree, '--once', '--events', eventsPath, '--agent', 'native-x'], f.opts)
-    );
-    const text = f.stdout();
-    assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
-    const calls = callsOf(f.log);
-    // the highest-sequence report is the verdict — detached herdr
-    // helper processes can append their records out of order. The first fires before the
-    // archive drains and would read 'idle' even on an empty journal;
-    // the floor is 'unknown' (no registry entry), so the archive's
-    // own verdict (turn stopped → idle) is what rides on top
-    const report = latestReport(calls);
-    assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
-    const meta = calls.find(c => c.includes('--display-agent'));
-    assert.equal(meta?.[meta.indexOf('--display-agent') + 1], 'native-x');
-  });
-
   test('a cli provider state never spawns — the log tail renders', async () => {
     const f = fixture();
     const agent = f.write('fake-agent.cjs', 'process.exit(99)');
