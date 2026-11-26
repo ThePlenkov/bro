@@ -180,8 +180,8 @@ describe('readCodexInstructions', () => {
     assert.equal(readCodexInstructions(undefined), undefined);
     assert.equal(readCodexInstructions('relative/root'), undefined);
     assert.equal(readCodexInstructions(root), undefined);
-    const path = join(root, 'integrations/codex/INSTRUCTIONS.md');
-    mkdirSync(join(root, 'integrations/codex'), { recursive: true });
+    const path = join(root, 'plugins/codex/bro/INSTRUCTIONS.md');
+    mkdirSync(join(root, 'plugins/codex/bro'), { recursive: true });
     writeFileSync(path, '\n# bro on Codex\n\n| When | Codex |\n');
     assert.match(readCodexInstructions(root) ?? '', /# bro on Codex/);
     writeFileSync(path, '   \n');
