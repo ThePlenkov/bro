@@ -17,6 +17,7 @@ import {
   promptContextLines,
   registerConnector,
   sessionStartLines,
+  sessionStartProbe,
   stopGateContributions,
   tasksAsync,
   unregisterConnector,
@@ -404,6 +405,71 @@ describe('connectors', () => {
     assert.deepEqual(await promptContextLines({ dir }, 'no refs here'), []);
     const gates = await stopGateContributions({ dir });
     assert.ok(gates.some(g => g.aspect === 'jira' && g.block === 'acme: JIRA-1 open'));
+  });
+
+  test('starts independent session probes concurrently', async () => {
+    const delay = 40;
+    const starts: number[] = [];
+    const stopStarts: number[] = [];
+    const wait = async (line: string): Promise<string[]> => {
+      await new Promise<void>(resolve => setTimeout(resolve, delay));
+      return [line];
+    };
+    registerConnector({
+      name: 'acme-parallel-a',
+      hooks: () => ({
+        sessionStart: () => {
+          starts.push(Date.now());
+          return wait('a');
+        },
+        stopGate: async () => {
+          stopStarts.push(Date.now());
+          await new Promise<void>(resolve => setTimeout(resolve, delay));
+          return [{ aspect: 'a', block: 'a' }];
+        },
+      }),
+    });
+    registerConnector({
+      name: 'acme-parallel-b',
+      hooks: () => ({
+        sessionStart: () => {
+          starts.push(Date.now());
+          return wait('b');
+        },
+        stopGate: async () => {
+          stopStarts.push(Date.now());
+          await new Promise<void>(resolve => setTimeout(resolve, delay));
+          return [{ aspect: 'b', block: 'b' }];
+        },
+      }),
+    });
+    try {
+      // Earlier tests intentionally install a rejecting connector without
+      // removing it; remove those test fixtures so their timeout cannot
+      // dominate this wall-clock assertion.
+      unregisterConnector('acme-async');
+      unregisterConnector('acme-rejecting');
+      unregisterConnector('acme-rejecting-auth');
+      const result = await sessionStartProbe({ dir: process.cwd() });
+      assert.ok(result.lines.includes('a'));
+      assert.ok(result.lines.includes('b'));
+      assert.equal(starts.length, 2);
+      assert.ok(Math.max(...starts) - Math.min(...starts) < delay / 2);
+
+      const gates = await stopGateContributions({ dir: process.cwd() });
+      assert.deepEqual(
+        gates.filter(g => g.aspect === 'a' || g.aspect === 'b'),
+        [
+          { aspect: 'a', block: 'a' },
+          { aspect: 'b', block: 'b' },
+        ]
+      );
+      assert.equal(stopStarts.length, 2);
+      assert.ok(Math.max(...stopStarts) - Math.min(...stopStarts) < delay / 2);
+    } finally {
+      unregisterConnector('acme-parallel-a');
+      unregisterConnector('acme-parallel-b');
+    }
   });
 
   test('bdActor prefers BEADS_ACTOR over git config', () => {

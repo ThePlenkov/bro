@@ -6,65 +6,47 @@ parent: bro-5tpx0
 
 ## Problem
 
-Session-start and stop hook invocations are slow enough that the latency
-budget needs tightening. The 2026-10-16 architecture review identified
-probe serialization and repeated reads as cost drivers. Bro-qbnre
-established the baseline and CI budget; bro-arm83 handles the no-op
-fast-path; this bead cuts live session-start/stop cost via caching and
-parallelism.
+Session-start and stop are latency-sensitive hook events. Independent
+connector probes should not pay the sum of their latencies. The first
+measurement used `scripts/bench-hooks.ts` with
+`--runs 3 --warmup 0 --lanes runsh,dist`, but the generated CLI could not
+load the unbuilt workspace package `@broject/rig/dist/index.js`. Every sample
+therefore errored; the reported p50s (dist session-start 112 ms and dist stop
+110 ms) are not valid before/after evidence.
+
+Source inspection found that `packages/core/src/connectors.ts` already starts
+active connector probes with `Promise.all`. `packages/cli/src/commands/hooks.ts`
+also already overlaps the independent session-start and stop legs. A cache is
+not safe to add without a correctness key and invalidation policy for mutable
+beads, claims, gates, and worktree state.
 
 ## Design
 
-### 1) Profile (telemetry spans)
+Keep this first slice narrow: preserve and regression-test the existing
+parallel collection contract rather than introducing a general cache.
+`collectLines` starts every active connector probe before awaiting any result,
+so wall-clock cost is bounded by the slowest probe (or the probe timeout).
+Session-start rehydration and stop-gate callers continue to overlap their
+independent connector, occupancy, guard, goal, and heartbeat reads while
+preserving registry/output order.
 
-Use existing `otelSpan`/perf journal to identify the top probes on
-session-start and stop. Spans already wrap probes in hooks.ts
-(`probeReporter` opens `hook.probe.*` spans). No new heavy profiler
-required — rely on the existing telemetry.
-
-### 2) Parallelise probes
-
-- `rehydrateLines`: run `goalContextLines` and `heartbeatLine` in
-  parallel with the probe sweep (or with each other). They are
-  independent of `sessionStartProbe`/`parallelWorkProbe`.
-- `parallelLines`: run local marker scan (`liveSessionLines`) in parallel
-  with `parallelWorkProbe` (connector probes). They are independent.
-- `emitStopGateBody`: already parallelises `goalP`, `stopGateContributions`,
-  and `guardLines`. Ensure `goalContextLines`/heartbeat reads are not
-  blocking unnecessarily and that any remaining serialization is removed.
-- Keep registry order for outputs where it matters; parallelise reads,
-  not semantic ordering of emitted blocks.
-
-### 3) Cache probe results
-
-- Cache network-free/session-stable reads per (dir, sessionId) with a
-  short TTL (align with existing `CONTEXT_CACHE_TTL_MS = 30_000` where
-  appropriate).
-- `sessionContextTextCached` already exists (30s). Extend caching to
-  `goalContextLines` reads and `heartbeatLine` where cheap/safe (or
-  memoize within the hook invocation).
-- In connector probes, leverage existing timeouts and avoid repeated
-  work; prefer cached values when safe.
-- Cache must be best-effort and fail-open (never block on cache I/O).
-
-### 4) Lazy-import heavy modules in hook entry
-
-In `packages/cli/src/commands/hooks.ts`, move heavy imports used only in
-specific paths to dynamic `import()` inside the functions that need them
-(or gate behind usage). Examples: `otelSpan` is used throughout but can
-be imported lazily where it adds overhead; `runGuards`/guard code paths
-are heavy — lazy load when guards actually run; judge modules lazy load
-on demand. Keep startup cost down for no-op/fast paths.
+Existing mode snapshots and the session-context cache remain unchanged; they
+already have explicit scope and TTLs. No new lifecycle result cache is
+introduced until a clean benchmark identifies a stable value and its
+invalidation inputs.
 
 ## Acceptance criteria
 
-- E1 bench: session-start and stop p50 ≤ 300 ms (budget tightened in CI)
-- No behavior change to hook semantics (blocks, hints, arming remain
-  correct)
-- Fail-open on all caching/lazy-loading paths
+- Connector session-start probes begin concurrently.
+- Connector stop-gate probes begin concurrently.
+- Probe output and fail-open/timeout semantics remain unchanged.
+- No cache returns mutable lifecycle state after its correctness window.
 
 ## Verify
 
-- `node scripts/bench-hooks.ts` shows session-start and stop p50 ≤ 300 ms
-- `npm test` passes
-- Hook behavior unchanged in integration tests
+- `npx tsx --test packages/core/src/connectors.test.ts` passes, including two
+  delayed connector probes for both session-start and stop-gate.
+- `npx nx run @broject/core:typecheck --skip-nx-cache` passes.
+- Re-run `scripts/bench-hooks.ts` after all workspace packages are built and
+  record a clean before/after comparison in the PR. The attempted local run
+  is not a performance gate because every sample failed dispatch.
