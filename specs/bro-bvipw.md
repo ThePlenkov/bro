@@ -52,7 +52,7 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 | `stop_sequences` | ✅ | incremental `StopFilter` cuts deltas at the marker (cross-chunk safe); `stop_reason: stop_sequence` + `stop_sequence` field; recorded reply = emitted text |
 | `tool_choice` | ✅ | auto/none → contract on/off; any/tool → "must call" contract line |
 | `temperature`, `top_p`, `top_k` | ⚠️ ignored | no ACP knob — accepted no-op, documented |
-| `thinking` / extended thinking | ❌ | **decide**: map budget → thought_level pin, or emit thinking blocks? |
+| `thinking` / extended thinking | ⚠️ ignored | Accepted no-op: ACP's `thought_level` is a session pin, while Anthropic's `budget_tokens` is a backend-specific per-request hint; mapping token thresholds would be lossy and could select the wrong model level. No ACP thinking blocks are synthesized. |
 | `metadata.user_id` | ⚠️ ignored | accepted no-op (privacy-safe) |
 | `cache_control` | ⚠️ ignored | retained session *is* the cache — document |
 | `service_tier`, `context_management`, `container`, mcp-in-request | ⚠️ ignored | accepted no-op |
