@@ -26,15 +26,9 @@
  * unavailable store costs the row, never the decision — the id still
  * returns for the pins.
  */
-import type { BrouterRouter, FleetRouter, HealthSnapshot, JudgeFacade } from '@broject/core';
+
 import { readFileSync } from 'node:fs';
-import {
-  candidates,
-  FormulaError,
-  parseFormulaText,
-  resolveRoute,
-  validateFormulaTable,
-} from '@broject/router-routes';
+import type { BrouterRouter, FleetRouter, HealthSnapshot, JudgeFacade } from '@broject/core';
 import type {
   CascadeDecider,
   CascadeStage,
@@ -46,9 +40,17 @@ import type {
   RouteTable,
   RouteTask,
 } from '@broject/router-routes';
-import { newDecisionId, DEFAULT_SUCCESS_PREDICATE } from '@broject/router-store';
-import { journalDecision } from './context.ts';
+import {
+  candidates,
+  FormulaError,
+  parseFormulaText,
+  resolveRoute,
+  validateFormulaTable,
+} from '@broject/router-routes';
 import type { DecisionKind } from '@broject/router-store';
+import { DEFAULT_SUCCESS_PREDICATE, newDecisionId } from '@broject/router-store';
+import { type InvokeMode, runT1, shouldInvokeT2, stageRecord } from './cascade.ts';
+import { journalDecision } from './context.ts';
 import {
   cacheConfig,
   cacheInfo,
@@ -60,7 +62,6 @@ import { decisionJudge } from './decision-model.ts';
 import { decideByFormula, type FormulaTaskDecision } from './formula-decide.ts';
 import { ledgerHealth } from './ledger.ts';
 import { routerOutcomeStats } from './outcome-stats.ts';
-import { runT1, shouldInvokeT2, stageRecord, type InvokeMode } from './cascade.ts';
 import { recallTuning } from './recall.ts';
 
 /** The verdict for a task — the route, and whether the health was known. */
@@ -229,8 +230,14 @@ export async function decideRoute(input: {
           const t0Start = Date.now();
           const names = found.candidates.map(c => c.route.name);
           stages.push(
-            stageRecord('T0', names, names, Date.now() - t0Start, {
-              note: `${names.length} candidate(s) survived rules + health`,
+            stageRecord({
+              stage: 'T0',
+              before: names,
+              after: names,
+              latencyMs: Date.now() - t0Start,
+              ...{
+                note: `${names.length} candidate(s) survived rules + health`,
+              },
             })
           );
           // T1 — outcome recall over the candidates (bro-0ykhg.2)
@@ -259,7 +266,13 @@ export async function decideRoute(input: {
           const t2CanOverride = invoke === 'always' && input.router?.mode === 'enforce';
           if (t1.decided !== undefined && !t2CanOverride) {
             stages.push(
-              stageRecord('T2', [], [], 0, { note: 'skipped — outcome recall already decided' })
+              stageRecord({
+                stage: 'T2',
+                before: [],
+                after: [],
+                latencyMs: 0,
+                ...{ note: 'skipped — outcome recall already decided' },
+              })
             );
             const decision = resolveRoute(input.table, input.task, snapshot, () => t1.decided, {
               set,
@@ -319,15 +332,15 @@ export async function decideRoute(input: {
             named = hit.pick ?? undefined;
             cache = cacheInfo(plan, true);
             stages.push(
-              stageRecord(
-                'T2',
-                reordered.map(c => c.route.name),
-                named !== undefined ? [named] : reordered.map(c => c.route.name),
-                consultMs,
-                {
+              stageRecord({
+                stage: 'T2',
+                before: reordered.map(c => c.route.name),
+                after: named !== undefined ? [named] : reordered.map(c => c.route.name),
+                latencyMs: consultMs,
+                ...{
                   note: `cache hit — the judge's pick replayed (${formatCacheAge(hit.ageMs)} old)`,
-                }
-              )
+                },
+              })
             );
             decidedBy = input.router!.mode === 'enforce' && named !== undefined ? 'judge' : 'rules';
           } else if (mayAsk) {
@@ -349,20 +362,20 @@ export async function decideRoute(input: {
               ...(escalate === undefined ? {} : { escalate }),
             });
             stages.push(
-              stageRecord(
-                'T2',
-                reordered.map(c => c.route.name),
-                // the pick narrows the set to the named route — an
-                // unanswered judge leaves every contender standing
-                named !== undefined ? [named] : reordered.map(c => c.route.name),
-                Date.now() - t2Start,
-                {
+              stageRecord({
+                stage: 'T2',
+                before: reordered.map(c => c.route.name),
+                after: // the pick narrows the set to the named route — an
+                  // unanswered judge leaves every contender standing
+                  named !== undefined ? [named] : reordered.map(c => c.route.name),
+                latencyMs: Date.now() - t2Start,
+                ...{
                   note:
                     named === undefined
                       ? 'the judge named no confident candidate'
                       : `the judge picked ${named}`,
-                }
-              )
+                },
+              })
             );
             // memoize the stage answer — the pick name IS the T2
             // output here; the CAS write rejects it if an
@@ -381,14 +394,20 @@ export async function decideRoute(input: {
             decidedBy = input.router!.mode === 'enforce' && named !== undefined ? 'judge' : 'rules';
           } else {
             stages.push(
-              stageRecord('T2', [], [], 0, {
-                note:
-                  gate.reason +
-                  (input.router === undefined
-                    ? ' — no decision model configured'
-                    : input.router.mode === 'off'
-                      ? ' — the decision model is off'
-                      : ''),
+              stageRecord({
+                stage: 'T2',
+                before: [],
+                after: [],
+                latencyMs: 0,
+                ...{
+                  note:
+                    gate.reason +
+                    (input.router === undefined
+                      ? ' — no decision model configured'
+                      : input.router.mode === 'off'
+                        ? ' — the decision model is off'
+                        : ''),
+                },
               })
             );
           }
