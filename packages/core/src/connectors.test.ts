@@ -408,64 +408,67 @@ describe('connectors', () => {
   });
 
   test('starts independent session probes concurrently', async () => {
-    const delay = 40;
-    const starts: number[] = [];
-    const stopStarts: number[] = [];
-    const wait = async (line: string): Promise<string[]> => {
-      await new Promise<void>(resolve => setTimeout(resolve, delay));
-      return [line];
+    // Barrier, not wall-clock: probes record their start and then block on a
+    // gate the test controls. Concurrency means both starts land BEFORE the
+    // gate opens — under a serial executor the first probe would wait on the
+    // gate forever and the second start would never be observed.
+    const started: string[] = [];
+    const stopStarted: string[] = [];
+    let releaseSession!: () => void;
+    let releaseStop!: () => void;
+    const sessionBarrier = new Promise<void>(resolve => {
+      releaseSession = resolve;
+    });
+    const stopBarrier = new Promise<void>(resolve => {
+      releaseStop = resolve;
+    });
+    const flush = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
+    const mkProbe = (name: string): void => {
+      registerConnector({
+        name,
+        hooks: () => ({
+          sessionStart: async () => {
+            started.push(name);
+            await sessionBarrier;
+            return [name];
+          },
+          stopGate: async () => {
+            stopStarted.push(name);
+            await stopBarrier;
+            return [{ aspect: name, block: name }];
+          },
+        }),
+      });
     };
-    registerConnector({
-      name: 'acme-parallel-a',
-      hooks: () => ({
-        sessionStart: () => {
-          starts.push(Date.now());
-          return wait('a');
-        },
-        stopGate: async () => {
-          stopStarts.push(Date.now());
-          await new Promise<void>(resolve => setTimeout(resolve, delay));
-          return [{ aspect: 'a', block: 'a' }];
-        },
-      }),
-    });
-    registerConnector({
-      name: 'acme-parallel-b',
-      hooks: () => ({
-        sessionStart: () => {
-          starts.push(Date.now());
-          return wait('b');
-        },
-        stopGate: async () => {
-          stopStarts.push(Date.now());
-          await new Promise<void>(resolve => setTimeout(resolve, delay));
-          return [{ aspect: 'b', block: 'b' }];
-        },
-      }),
-    });
+    mkProbe('acme-parallel-a');
+    mkProbe('acme-parallel-b');
     try {
       // Earlier tests intentionally install a rejecting connector without
-      // removing it; remove those test fixtures so their timeout cannot
-      // dominate this wall-clock assertion.
+      // removing it; remove those test fixtures so their rejection cannot
+      // pollute this assertion.
       unregisterConnector('acme-async');
       unregisterConnector('acme-rejecting');
       unregisterConnector('acme-rejecting-auth');
-      const result = await sessionStartProbe({ dir: process.cwd() });
-      assert.ok(result.lines.includes('a'));
-      assert.ok(result.lines.includes('b'));
-      assert.equal(starts.length, 2);
-      assert.ok(Math.max(...starts) - Math.min(...starts) < delay / 2);
+      const pendingSession = sessionStartProbe({ dir: process.cwd() });
+      await flush();
+      assert.deepEqual(started.sort(), ['acme-parallel-a', 'acme-parallel-b']);
+      releaseSession();
+      const result = await pendingSession;
+      assert.ok(result.lines.includes('acme-parallel-a'));
+      assert.ok(result.lines.includes('acme-parallel-b'));
 
-      const gates = await stopGateContributions({ dir: process.cwd() });
+      const pendingGates = stopGateContributions({ dir: process.cwd() });
+      await flush();
+      assert.deepEqual(stopStarted.sort(), ['acme-parallel-a', 'acme-parallel-b']);
+      releaseStop();
+      const gates = await pendingGates;
       assert.deepEqual(
-        gates.filter(g => g.aspect === 'a' || g.aspect === 'b'),
+        gates.filter(g => g.aspect === 'acme-parallel-a' || g.aspect === 'acme-parallel-b'),
         [
-          { aspect: 'a', block: 'a' },
-          { aspect: 'b', block: 'b' },
+          { aspect: 'acme-parallel-a', block: 'acme-parallel-a' },
+          { aspect: 'acme-parallel-b', block: 'acme-parallel-b' },
         ]
       );
-      assert.equal(stopStarts.length, 2);
-      assert.ok(Math.max(...stopStarts) - Math.min(...stopStarts) < delay / 2);
     } finally {
       unregisterConnector('acme-parallel-a');
       unregisterConnector('acme-parallel-b');
