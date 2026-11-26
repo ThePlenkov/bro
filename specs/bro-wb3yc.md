@@ -141,7 +141,7 @@ not parallel ladders.
 | --- | --- | --- |
 | `bro review watch [--once]` | keep — canonical | the bounded observer's single tick |
 | `bro review watch --every N --for S [--notify]` | keep — observer + pulse fallback | document as the spawned fallback leg of `bro pulse`, never a session-facing arming verb; skills stop presenting it as the way to watch |
-| `bro review watch install\|uninstall` | keep — policy alias | arms `pulse.json` = the wake's want; document as "arm/disarm the wake". A later spelling may move under `pulse`; no `deprecated:` yet — the arm verb is still live |
+| `bro review watch install\|uninstall` | keep — policy alias and canonical wake-arm spelling | arms `pulse.json` = the wake's want; document as "arm/disarm the wake". This remains the canonical spelling for the wake marker; `bro pulse --arm` is not introduced. No `deprecated:` — the arm verb is still live |
 | `bro pulse [S]` | keep — canonical | the only session wake |
 | `bro review drive [--once]` | keep — canonical | the pass |
 | `bro review drive --every N` | deprecate → `bro fleet daemon up` | identical loop, unrecorded owner — `daemon up` is the operator spelling (`daemon run` is the internal leg `up` spawns, not for direct use). Deprecation is flag-level (`deprecatedFlag`/`deprecatedSub`), NOT plugin-level: `daemon run` calls `runDriveCommand(['--every'])` in-process, so the warning must be gated on entry argv (or daemon passes a hidden spawn marker). Follow-up bead owns the seam |
@@ -199,7 +199,9 @@ Order (each is a follow-up bead — this PR ships the spec + skills only):
 4. **Arm-verb convergence** (`watch install` vs `pulse`'s implicit arm
    vs `drive install` vs `loop install`) → one documented arm contract:
    `install` = arm the want + bring the owner up now; each plane keeps
-   its verb as a policy alias.
+   its verb as a policy alias. Keep `bro review watch install` as the
+   canonical spelling for arming `pulse.json`; do not add a parallel
+   `bro pulse --arm` spelling.
 
 ## Follow-up beads
 

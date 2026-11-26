@@ -20,7 +20,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 | `bro review watch --every N --for S` | The bounded observer window — also the spawned fallback leg of `bro pulse` (the wake): ticks the snapshot every N seconds under `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` bounds the window — omitting it leaves an unbounded watcher only an external supervisor may own |
 | `bro review watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
 | `bro review watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
-| `bro review watch install [--every N] [--print]` | **Install contract:** arm the wake want-marker, bring the pulse owner up (or leave the already-live owner in place), and leave the checkpoint rearm path enabled. Writes `<git-common>/bro/pulse.json` and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |
+| `bro review watch install [--every N] [--print]` | **Install contract:** arm the wake want-marker, bring the pulse owner up (or leave the already-live owner in place), and leave the checkpoint rearm path enabled. This is the canonical spelling for arming `<git-common>/bro/pulse.json`; there is no `bro pulse --arm` alias. It strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |
 | `bro review watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 
 Every tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
@@ -52,8 +52,9 @@ context), never an inference from whether a session was polled.
   default 900s), is the unattended leg — what the checkpoint respawns
   from `pulse.json` when no session's pulse holds the lock. Never sit
   in a foreground poll, never nohup an unbounded `--every`.
-- **Armed-but-dead rearms itself.** `bro review watch install` (and
-  every `bro pulse` start) writes `bro/pulse.json` — the durable
+- **Armed-but-dead rearms itself.** `bro review watch install` (the
+  canonical wake-arm spelling; `bro pulse --arm` does not exist) and
+  every `bro pulse` start writes `bro/pulse.json` — the durable
   want-record. A session start (or post-compaction) that finds the
   marker armed but no live pulse lock gets the rearm nudge; the
   orchestrator re-arms the leg. OS timers are retired — systemd/crontab
