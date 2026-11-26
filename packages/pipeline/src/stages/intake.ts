@@ -81,6 +81,7 @@ import {
   PARK_ALERTS,
   type StageCall,
 } from '../runner.ts';
+import { probeStage, type StageLearning, type StageProbe } from '../learning.ts';
 
 /** The intake verdicts — the formula's declared enum. */
 export const INTAKE_VERDICTS = ['accepted', 'questions', 'declined'] as const;
@@ -147,6 +148,7 @@ export interface IntakePayload {
    *  pipeline context (route's flat-merged fields); nested so later
    *  stages' own provider/model keys can't rewrite it */
   worker?: { provider?: string; model?: string; kind?: string; orch?: string };
+  learning?: StageLearning;
 }
 
 export interface IntakeDeps {
@@ -168,6 +170,8 @@ export interface IntakeDeps {
    *  stage judges the spec as it stands (the answer CLI's record
    *  then stays harmlessly unconsumed). */
   answers?: (call: StageCall) => MaybePromise<AnswerFeed>;
+  /** Optional learning-plane read, consulted at every intake entry. */
+  probe?: StageProbe;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -510,7 +514,12 @@ async function drainAnswers(
  *  the fingerprint of the spec that was judged, the arm's own fields
  *  (a `questions` list, a `declined` feedback string), and the routed
  *  worker slot when one rode the context. */
-function intakePayload(call: StageCall, out: IntakeOutcome, spec: TaskSpec): IntakePayload {
+function intakePayload(
+  call: StageCall,
+  out: IntakeOutcome,
+  spec: TaskSpec,
+  learning?: StageLearning
+): IntakePayload {
   const p: IntakePayload = { verdict: out.verdict, spec: fingerprint(spec) };
   if (out.verdict === 'questions') {
     p.questions = [...out.questions];
@@ -521,6 +530,7 @@ function intakePayload(call: StageCall, out: IntakeOutcome, spec: TaskSpec): Int
   if (worker !== undefined) {
     p.worker = worker;
   }
+  if (learning !== undefined) p.learning = learning;
   return p;
 }
 
@@ -543,6 +553,11 @@ export function intakeStage(deps: IntakeDeps): EngineHandler {
       if (spec === undefined) {
         throw new Error(`intake: item "${call.item}" is not in the task store`);
       }
+      const learning = await probeStage(
+        deps.probe,
+        `intake recurring definition-of-ready failures for ${call.item}`,
+        call
+      );
       const landed = await drainAnswers(deps, call, spec);
       if ('alert' in landed) {
         return landed.alert;
@@ -550,7 +565,7 @@ export function intakeStage(deps: IntakeDeps): EngineHandler {
       const out = await deps.intake(call, landed.spec);
       checkOutcome(out);
       annotateArtifact(deps, call.item, out);
-      return { verdict: out.verdict, payload: intakePayload(call, out, landed.spec) };
+      return { verdict: out.verdict, payload: intakePayload(call, out, landed.spec, learning) };
     },
   };
 }

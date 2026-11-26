@@ -41,6 +41,7 @@
  */
 import type { MaybePromise, TaskSpec } from '@broject/core';
 import type { EngineHandler, EngineResult, StageCall } from '../runner.ts';
+import { probeStage, type StageLearning, type StageProbe } from '../learning.ts';
 
 /** The stage's declared verdicts — the formula's enum. */
 export const VERIFY_VERDICTS = ['verified', 'failed', 'unverifiable'] as const;
@@ -105,6 +106,8 @@ export interface VerifyDeps {
    *  runner. `proof` may be the typed {@link ProofRef} or a legacy
    *  bare string (normalized — see {@link SeamEvidenceRow}). */
   e2e: (call: StageCall, ac: string) => MaybePromise<SeamEvidenceRow>;
+  /** Optional learning-plane read, consulted at every verify entry. */
+  probe?: StageProbe;
 }
 
 /** The stage's typed payload — merged into the pipeline context flat
@@ -119,6 +122,7 @@ export interface VerifyPayload {
   /** the fix scope — REQUIRED non-empty on `failed` (composed from
    *  the failing rows; review's notes contract) */
   notes?: string;
+  learning?: StageLearning;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -298,11 +302,23 @@ export function verifyStage(deps: VerifyDeps): EngineHandler {
       if (spec === undefined) {
         throw new Error(`verify: item "${call.item}" is not in the task spec store`);
       }
+      const learning = await probeStage(
+        deps.probe,
+        `verify known acceptance-criteria gaps for ${call.item}`,
+        call
+      );
       const acs = acListOf(spec);
       if (acs.length === 0) {
-        return { verdict: 'unverifiable', payload: unverifiablePayload() };
+        return {
+          verdict: 'unverifiable',
+          payload: { ...unverifiablePayload(), ...(learning === undefined ? {} : { learning }) },
+        };
       }
-      return verdictOf(await evidenceRows(deps, call, acs));
+      const result = verdictOf(await evidenceRows(deps, call, acs));
+      if (learning !== undefined && result.payload !== undefined) {
+        result.payload = { ...(result.payload as VerifyPayload), learning };
+      }
+      return result;
     },
   };
 }
