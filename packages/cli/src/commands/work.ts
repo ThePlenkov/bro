@@ -2086,27 +2086,37 @@ function reapTreeUnderLock(
     return false;
   }
   try {
-    const why = litterTreeVerdict(c, ctx);
-    if (why !== undefined) {
-      rep.kept.push(`${label} (${why})`);
-      return false;
-    }
-    if (!fleetGraceSatisfied(c.w!.path, ctx.opts)) {
-      rep.kept.push(`${label} (grace window)`);
-      return false;
-    }
-    if (!backupFleetDiff(c, ctx, label)) {
-      return false;
-    }
-    if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
-      rep.errors.push(`worktree ${w.path} not removed`);
-      return false;
-    }
-    rep.reaped.push(litterReapedLabel(c));
-    return true;
+    return reapTreeLocked(w, c, ctx, label);
   } finally {
     release();
   }
+}
+
+function reapTreeLocked(
+  w: WorktreeInfo,
+  c: LitterCandidate,
+  ctx: LitterCtx,
+  label: string
+): boolean {
+  const { opts, rep, main } = ctx;
+  const why = litterTreeVerdict(c, ctx);
+  if (why !== undefined) {
+    rep.kept.push(`${label} (${why})`);
+    return false;
+  }
+  if (!fleetGraceSatisfied(c.w!.path, ctx.opts)) {
+    rep.kept.push(`${label} (grace window)`);
+    return false;
+  }
+  if (!backupFleetDiff(c, ctx, label)) {
+    return false;
+  }
+  if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
+    rep.errors.push(`worktree ${w.path} not removed`);
+    return false;
+  }
+  rep.reaped.push(litterReapedLabel(c));
+  return true;
 }
 
 function backupFleetDiff(c: LitterCandidate, ctx: LitterCtx, label: string): boolean {
