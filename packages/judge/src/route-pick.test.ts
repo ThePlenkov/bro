@@ -284,4 +284,31 @@ describe('routePick', () => {
       assert.equal(v.latencyMs, 30);
       assert.equal(v.costUsd, 0.75);
     }));
+
+  test('reports both stages and does not mark a no-op escalation as used', async () =>
+    withRepo(async dir => {
+      const trace: Parameters<NonNullable<Parameters<typeof routePick>[0]['onTrace']>>[0][] = [];
+      const got = await routePick({
+        dir,
+        judge: judgeReturning({ answers: {}, lowConfidence: ['route'], latencyMs: 10 }),
+        escalate: judgeReturning({ ...pick('design'), lowConfidence: ['route'], latencyMs: 20 }),
+        options: OPTIONS,
+        state,
+        subject: 'task-1',
+        resolved: 'edit',
+        mode: 'enforce',
+        onTrace: value => trace.push(value),
+      });
+      assert.equal(got, undefined);
+      assert.deepEqual(trace, [
+        {
+          t2Pick: undefined,
+          t3Attempted: true,
+          t3Merged: false,
+          finalPick: undefined,
+          t2LatencyMs: 10,
+          t3LatencyMs: 20,
+        },
+      ]);
+    }));
 });
