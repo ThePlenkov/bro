@@ -1808,6 +1808,34 @@ function connectorContract(b: BackendCase): void {
     }
   });
 
+  test('spawn pins the complete worker identity, including prompt and session', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(
+        SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BEADS_DIR, process.env.BRO_BEAD_ID, process.env.BRO_AGENT_ID, process.env.BRO_PROMPT_FILE, process.env.BRO_SESSION_ID].join('|'))"
+        )
+      );
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const [store, bead, agent, prompt, session] = readFileSync(
+        join(f.main, 'env.out'),
+        'utf8'
+      ).split('|');
+      assert.equal(store, f.beadsDir);
+      assert.equal(bead, 'fx-1');
+      assert.equal(agent, info.id);
+      assert.ok(prompt?.endsWith(`${info.id}.prompt.md`), prompt);
+      assert.equal(session, info.id);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('ambient + spec.env repo pins never reach the worker — spawn targets its own worktree', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
     const saved = {
@@ -3134,6 +3162,11 @@ describe('docker connector', () => {
       // identity pins are -e args; the ambient env file is consumed and gone
       assert.ok(argv.includes(`BRO_BEAD_ID=fx-1`), argv.join(' '));
       assert.ok(argv.includes(`BRO_AGENT_ID=${info.id}`), argv.join(' '));
+      assert.ok(
+        argv.some(a => a.endsWith(`${info.id}.prompt.md`)),
+        argv.join(' ')
+      );
+      assert.ok(argv.includes(`BRO_SESSION_ID=${info.id}`), argv.join(' '));
       assert.ok(argv.includes('--env-file'), argv.join(' '));
       assert.ok(!existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.env`)));
       // the configured image and the operator runArgs rode the same run
