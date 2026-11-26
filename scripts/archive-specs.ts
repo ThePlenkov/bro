@@ -123,16 +123,24 @@ class Repository {
     }
   }
 
+  private referencedIn(
+    file: string,
+    ids: Set<string>,
+    selfPath: (word: string) => string | undefined
+  ): string[] {
+    const relativePath = relative(this.root, file);
+    if (relativePath.startsWith(`specs${sep}archive${sep}`)) return [];
+    const words = this.read(file)?.match(WORDS) ?? [];
+    return words.filter(word => ids.has(word) && selfPath(word) !== relativePath);
+  }
+
   references(candidates: string[]): Set<string> {
     const ids = new Set(candidates.map(path => basename(path, '.md')));
     const candidateById = new Map(candidates.map(path => [basename(path, '.md'), path]));
     const referenced = new Set<string>();
     for (const file of this.filesIn(this.root)) {
-      const relativePath = relative(this.root, file);
-      if (relativePath.startsWith(`specs${sep}archive${sep}`)) continue;
-      const words = this.read(file)?.match(WORDS) ?? [];
-      for (const word of words) {
-        if (ids.has(word) && candidateById.get(word) !== relativePath) referenced.add(word);
+      for (const word of this.referencedIn(file, ids, w => candidateById.get(w))) {
+        referenced.add(word);
       }
     }
     return referenced;
