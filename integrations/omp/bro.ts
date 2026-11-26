@@ -7099,29 +7099,6 @@ function ledgerFacade(opts = {}) {
 
 //#endregion
 //#region packages/core/src/claims-store.ts
-/**
-* claimsFacade — the first ClaimFacade provider (epic spec
-* specs/sessions/bro-izpyk.md "Claims and conflicts"; impl spec
-* specs/bro-izpyk.3.md). Every non-`task:*` resource URI is a lease row
-* in the sqlite ledger's `claims` table; `task:*` delegates to the
-* tasks facade so the bd claim stays the source of truth.
-*
-* Lease semantics (spec):
-*  - TTL + heartbeat — any hook event from the holder renews its leases
-*    (the ingest path does this in ledger-store); `ttlMs` defaults to
-*    CLAIM_DEFAULT_TTL_MS, 0 means no time expiry.
-*  - Release — the session ends (state `ended` or derived
-*    `interrupted`, the same rule `bro sessions` applies), the holder
-*    pid is provably dead, or the TTL expired and the pid-less holder's
-*    session has gone silent.
-*  - Conflict — a different live session already holds the resource and
-*    either side is exclusive → `{ ok:false, conflict }`. Shared+shared
-*    coexist. `role:*` URIs default exclusive.
-*
-* Liveness deliberately lives HERE, not in the store: the SQL layer
-*  never learns pid/session semantics, and tests inject `now`,
-*  `pidAlive`, and `bootTimeMs` without touching /proc or the clock.
-*/
 /** A pid-less claim whose TTL expired dies only when its session has
 *  been silent this long — the same freshness horizon the `.work`
 *  marker liveness window uses (proc-owner LIVE_MARKER_MS). */

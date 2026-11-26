@@ -1109,7 +1109,6 @@ async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => vo
       },
       message: () => 'bro loop pass settled; the next pass is armed',
     });
-    await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
     await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
   }
 }
