@@ -865,27 +865,8 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     setupLockedSkills(process.cwd(), dryRun, checkOnly);
   }
 
-  const configuredAgents = loadBroConfig().agents as Record<string, unknown> | undefined;
-  const devin = configuredAgents?.devin;
-  if (!checkOnly && !dryRun && devin !== undefined) {
-    const config = devin as { subagent_model?: unknown; profiles?: unknown; subagents?: unknown };
-    const profiles =
-      typeof (config.profiles ?? config.subagents) === 'object' &&
-      (config.profiles ?? config.subagents) !== null &&
-      !Array.isArray(config.profiles ?? config.subagents)
-        ? (config.profiles ?? config.subagents)
-        : {};
-    const written = materializeDevinSubagents({
-      config: {
-        ...(typeof config.subagent_model === 'string'
-          ? { subagent_model: config.subagent_model }
-          : {}),
-        profiles: profiles as Record<string, { model: string; tools?: string[]; prompt?: string }>,
-      },
-    });
-    if (written.length > 0) {
-      console.error(`bro setup: materialized ${written.length} Devin subagent file(s)`);
-    }
+  if (!checkOnly && !dryRun) {
+    materializeConfiguredDevinSubagents();
   }
 
   console.error(
