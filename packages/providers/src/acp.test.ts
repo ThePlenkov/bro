@@ -1046,6 +1046,46 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
   });
 });
 
+// bro-vknim — the warm peer carries independent sessions concurrently. ACP
+// multiplexes requests on one JSON-RPC link; the provider must not add a
+// process-wide turn mutex and turn updates remain session-routed.
+describe('acpPooledTurn — independent sessions share one peer', () => {
+  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' };
+
+  test('two sessions can keep turns in flight on the same peer', { timeout: 5_000 }, async () => {
+    let reached = 0;
+    let release!: () => void;
+    const bothReached = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const fake = fakeAcpAgent({
+      replyText: 'ok',
+      uniqueSessions: true,
+      holdEnd: async () => {
+        reached += 1;
+        if (reached === 2) release();
+        await bothReached;
+      },
+    });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
+    try {
+      const turn = (prompt: string) =>
+        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, prompt, deadline(), {
+          by: `conductor:${prompt}`,
+        });
+      const first = turn('first');
+      const second = turn('second');
+      await Promise.all([first, second]);
+      assert.equal(reached, 2);
+      assert.deepEqual(fake.prompts.sort(), ['first', 'second']);
+      assert.equal(fake.sessions.length, 2);
+    } finally {
+      release();
+      peer.close();
+    }
+  });
+});
+
 // bro-whn25 — a conductor conversation is N anthropic turns over ONE
 // acp session: session/new once, prompt per turn, dispose on eviction.
 describe('acpSessionRetain — one session, many turns', () => {
