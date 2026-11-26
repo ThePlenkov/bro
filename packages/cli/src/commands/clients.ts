@@ -296,8 +296,8 @@ function piArtifact(cwd: string): string | null {
   // specifically for this no-node_modules host.
   return firstExisting([
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
-    ap === null ? null : join(ap, 'dist', 'pi.js'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
+    ap === null ? null : join(ap, 'dist', 'pi.js'),
   ]);
 }
 
