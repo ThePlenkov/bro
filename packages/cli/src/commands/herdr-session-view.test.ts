@@ -522,6 +522,12 @@ describe('runSessionView --once', () => {
     assert.match(text, /⚠ permission ‹rm -rf \/› — denied/, 'the ask surfaces with its verdict');
     // `bro: status` folds in — the projector's status string prints once
     assert.match(text, /── working·#7 ──/);
+    // pane reports are advisory child processes; wait for the terminal
+    // blocked report before inspecting the detached call log.
+    await waitForCall(
+      f.log,
+      c => c[1] === 'report-agent' && c[c.indexOf('--state') + 1] === 'blocked'
+    );
     const calls = callsOf(f.log);
     const reports = calls.filter(c => c[1] === 'report-agent');
     // the archive verdict moved through the stream: working while the
