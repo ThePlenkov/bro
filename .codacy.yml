@@ -182,3 +182,14 @@ exclude_paths:
   # The JSON.parse of bro's own trace lines reads as object-injection
   # for the same reason the contract fixture paths did.
   - 'packages/cli/src/commands/deadloop.ts'
+
+  # The shipped adapter bundles are GENERATED — `node scripts/gen-plugins.ts`
+  # folds packages/agent-plugins/*/src into single files that must stand alone
+  # in the host. Every finding in them reports a folded-copy line number that
+  # no edit can fix at the source seam, and the bundling itself (inlined core,
+  # computed fs paths in the repo-opt-in walk) trips rules whose domain never
+  # appears here: no secrets cross a shell-word tokenizer, no user data names
+  # a path bro builds from its own markers. Same doctrine as
+  # sonar.exclusions=integrations/** — the sources carry the bar.
+  - 'integrations/**'
+  - 'plugins/*/bro/**'
