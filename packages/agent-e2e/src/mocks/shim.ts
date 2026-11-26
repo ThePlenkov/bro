@@ -5,7 +5,7 @@
  *  substring, first hit wins, `default` catches the rest.
  *
  *  Same constraint as FakeBro: config is baked JSON — data only. For
- *  logic beyond substring matching, match on a distinctive argv token
+ *  logic beyond prefix matching, match on a distinctive argv token
  *  (`bd ready --json` vs `bd show`) or extend the rule shape. */
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +42,7 @@ const BIN = __BIN__;
 const argv = process.argv.slice(2);
 try { appendFileSync(JOURNAL, JSON.stringify({ bin: BIN, argv, cwd: process.cwd(), ts: Date.now() }) + '\\n'); } catch {}
 const hay = argv.join(' ');
-const rule = (CONFIG.rules || []).find(r => hay.includes(r.match));
+const rule = (CONFIG.rules || []).find(r => hay.startsWith(r.match));
 const reply = rule || CONFIG.fallback || {};
 if (reply.stdout) process.stdout.write(reply.stdout);
 if (reply.stderr) process.stderr.write(reply.stderr);
