@@ -1,20 +1,28 @@
-import { EXIT, isCommandError, printUsage } from '@broject/core';
+import { EXIT, type CommandError, isCommandError, printUsage } from '@broject/core';
+
+function presentUsage(err: CommandError): void {
+  try {
+    printUsage(err.usage as string, err.code);
+  } catch {
+    // printUsage writes before throwing its boundary error.
+  }
+}
+
+function presentCommandError(err: CommandError): void {
+  const out = err.code === EXIT.ok ? console.log : console.error;
+  const distinct = err.message !== err.usage;
+  if (err.message && distinct) out(err.message);
+  if (err.usage !== undefined && distinct) {
+    presentUsage(err);
+  }
+}
 
 /** The one process boundary for command failures (spec bro-fl5o5). */
 export function dispatchFatal(err: unknown): void {
-  if (isCommandError(err)) {
-    const code = typeof err.code === 'number' ? err.code : EXIT.error;
-    const out = code === EXIT.ok ? console.log : console.error;
-    if (err.message && err.message !== err.usage) out(err.message);
-    if (err.usage !== undefined && err.message !== err.usage) {
-      try {
-        printUsage(err.usage, err.code);
-      } catch {
-        // printUsage writes before throwing its boundary error.
-      }
-    }
-    process.exit(code === EXIT.ok ? 0 : code);
+  if (!isCommandError(err)) {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(EXIT.error);
   }
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(EXIT.error);
+  presentCommandError(err);
+  process.exit(err.code);
 }
