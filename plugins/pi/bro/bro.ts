@@ -645,7 +645,7 @@ function createBroDriver(host, api, deps = {}) {
 	const hydrate = (ctx, event) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const priorCarry = carry?.sessionId === sessionId ? carry.text : "";
+		const priorCarry = event === "post-compaction" && carry?.sessionId === sessionId ? carry.text : "";
 		carry = void 0;
 		const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
 		const started = raw.then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
@@ -653,7 +653,8 @@ function createBroDriver(host, api, deps = {}) {
 			sessionId,
 			promise: started
 		};
-		if (hydrated === sessionId) hydrated = void 0;
+		if (event === "session-start" || hydrated === sessionId) hydrated = void 0;
+		if (event === "session-start") hydrationRetried = void 0;
 		hydrationFailed = void 0;
 		raw.then((control) => {
 			if (control === null && hydration?.promise === started) hydrationFailed = sessionId;
