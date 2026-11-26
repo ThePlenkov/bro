@@ -38,14 +38,14 @@ describe('testGitEnv', () => {
 
 describe('testGit/testGitSpawn', () => {
   test('rejects transport command overrides', () => {
-    assert.throws(
-      () => testGit(['clone', '--upload-pack=sh -c whoami', 'source', 'target']),
-      /does not permit custom git transport commands/
-    )
-    assert.throws(
-      () => testGit(['push', '--receive-pack', 'sh -c whoami', 'origin', 'main']),
-      /does not permit custom git transport commands/
-    )
+    for (const option of ['--upload-pack', '--receive-pack', '--exec-path', '--html-path']) {
+      for (const argument of [option, `${option}=sh -c whoami`]) {
+        assert.throws(
+          () => testGit(['clone', argument, 'source', 'target']),
+          /does not permit custom git transport commands/
+        )
+      }
+    }
   })
 
   test('a poisoned ambient env cannot inject config into a fixture git child', () => {

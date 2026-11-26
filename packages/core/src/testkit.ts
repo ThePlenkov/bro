@@ -44,21 +44,16 @@ export function testGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
  * test call sites reuse that reviewed and dismissed seam instead of creating
  * another alert.
  */
+const REJECTED_TRANSPORT_OPTION =
+  /^(--upload-pack|--receive-pack|--exec-path|--html-path)(?:=|$)/;
+
 function runTestGit(args: string[], opts: ExecFileSyncOptions = {}): string {
-  if (
-    args.some(
-      arg =>
-        arg === '--upload-pack' ||
-        arg.startsWith('--upload-pack=') ||
-        arg === '--receive-pack' ||
-        arg.startsWith('--receive-pack=')
-    )
-  ) {
+  if (args.some(arg => REJECTED_TRANSPORT_OPTION.test(arg))) {
     throw new Error('testGit does not permit custom git transport commands');
   }
   return execFileSync(
     'git', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    args,
+    args, // codeql[js/second-order-command-line-injection] — validated fixture seam rejects transport overrides
     {
       ...opts,
       env: testGitEnv(opts.env ?? process.env),
