@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { emitLifecycle } from '@broject/core';
+import { emitLifecycle, testGit } from '@broject/core';
 import { staleStatus } from './stale-status.ts';
-import { tmpDir } from './testtmp.ts';
 import type { PrStateCache } from './state-cache.ts';
+import { tmpDir } from './testtmp.ts';
 import type { PrActState } from './types.ts';
-import { testGit } from '@broject/core';
 
 const state: PrActState = {
   pr: 7,
@@ -59,6 +58,18 @@ describe('staleStatus', () => {
       pr: state.pr,
       ts: Date.now() - 1_000,
       detail: { sha: 'b'.repeat(40) },
+    });
+    assert.equal(staleStatus(dir, { repo: 'o/r', pr: state.pr }, state, cacheAt(fetchedAt)), false);
+  });
+
+  test('ignores lifecycle events without a head SHA', () => {
+    const dir = tmpDir('bro-stale-status-');
+    testGit(['init', '-q', dir]);
+    const fetchedAt = Date.now() - 2_000;
+    emitLifecycle(dir, {
+      kind: 'gate',
+      pr: state.pr,
+      ts: Date.now() - 1_000,
     });
     assert.equal(staleStatus(dir, { repo: 'o/r', pr: state.pr }, state, cacheAt(fetchedAt)), false);
   });

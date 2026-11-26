@@ -1,4 +1,4 @@
-import { readLifecycle, type PrTarget } from '@broject/core';
+import { type PrTarget, readLifecycle } from '@broject/core';
 import type { PrStateCache } from './state-cache.ts';
 import type { PrActState } from './types.ts';
 
@@ -16,13 +16,12 @@ export function staleStatus(
   }
   return readLifecycle(dir, { pr: target.pr }).some(event => {
     const eventAt = Date.parse(event.ts);
-    if (!Number.isFinite(eventAt) || eventAt <= fetchedAt) {
-      return false;
-    }
     const detail = event.detail;
-    if (detail === undefined || typeof detail.sha !== 'string') {
-      return event.kind === 'gate' || event.kind === 'verdict';
-    }
-    return detail.sha === state.headSha;
+    return (
+      Number.isFinite(eventAt) &&
+      eventAt > fetchedAt &&
+      typeof detail?.sha === 'string' &&
+      detail.sha === state.headSha
+    );
   });
 }
