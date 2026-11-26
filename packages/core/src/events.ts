@@ -157,7 +157,7 @@ export function eventMatches(filter: EventFilter, event: { topic: string; kind: 
   // Addressed events reach only the declared recipient — anything else
   // is a leak (EventInput.to's contract). Broadcast events reach all.
   const to = (event as { to?: unknown }).to
-  if (typeof to === 'string' && to !== '' && to !== filter.to) {
+  if (to !== undefined && (typeof to !== 'string' || to === '' || to !== filter.to)) {
     return false
   }
   // A keys filter is a subject restriction, not an address: an event
