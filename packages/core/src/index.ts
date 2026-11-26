@@ -819,6 +819,7 @@ export {
 export { deprecatedFlag, flag, flagAll, flagValue, flagZone, positionals } from './cli-args.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
 export { CommandError, isCommandError } from './errors.ts';
+export type { CommandErrorClassification } from './errors.ts';
 export {
   groupMemberAlive,
   handleOwner,

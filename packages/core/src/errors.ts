@@ -5,17 +5,27 @@
  */
 import { EXIT, type ExitCode } from './exits.ts';
 
+export type CommandErrorClassification = 'usage' | 'config' | 'runtime' | 'internal';
+
 export class CommandError extends Error {
   code: ExitCode;
+  classification: CommandErrorClassification;
   usage?: string;
   /** structured context for machine consumers — free-form, the
    *  dispatcher prints only message/usage */
   details?: unknown;
 
-  constructor(message: string, code: ExitCode = EXIT.error, usage?: string, details?: unknown) {
+  constructor(
+    message: string,
+    code: ExitCode = EXIT.error,
+    usage?: string,
+    details?: unknown,
+    classification: CommandErrorClassification = code === EXIT.usage ? 'usage' : 'runtime'
+  ) {
     super(message);
     this.name = 'CommandError';
     this.code = code;
+    this.classification = classification;
     this.usage = usage;
     this.details = details;
     // Ensure proper prototype chain for instanceof
@@ -33,5 +43,5 @@ export function isCommandError(err: unknown): err is CommandError {
   );
 }
 
-export { EXIT };
 export type { ExitCode };
+export { EXIT };

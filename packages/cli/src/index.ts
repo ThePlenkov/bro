@@ -13,13 +13,13 @@
  * group) is reachable both ways.
  */
 import { defineCommand, runCommand, type CommandPlugin } from '@broject/command';
-import { EXIT, isCommandError, printUsage } from '@broject/core';
+import { otelSpan, setAmbient } from '@broject/providers';
 import { journalCommand } from './commands/hooks.ts';
 import { registerTelegramSink } from './commands/sinks-telegram.ts';
-import { otelSpan, setAmbient } from '@broject/providers';
+import { dispatchFatal } from './dispatch-error.ts';
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts';
 import { installLogTimestamps } from './log-timestamps.ts';
-import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts';
+import { GROUP_META, loadExternalPlugins, PLUGINS, pluginGroups } from './plugins.ts';
 import { VERSION } from './version.ts';
 
 installLogTimestamps();
@@ -99,31 +99,5 @@ const cli = defineCommand({
   },
   fallback: async (cmd, rest) => runDocVerb(cmd, rest),
 });
-
-// A command throws CommandError instead of exiting — this catch is
-// the single dispatcher exit the type exists for: usage text and
-// code ride the error, the stream follows the code (isCommandError
-// also catches a bundled duplicate module's copy of the type).
-function dispatchFatal(err: unknown): void {
-  if (isCommandError(err)) {
-    const e = err;
-    const code = typeof e.code === 'number' ? e.code : 1;
-    // A printUsage-thrown error already wrote its usage (message===usage
-    // marks that case); a directly-thrown one prints the error line then
-    // its usage — exactly once each, conventional order.
-    const out = code === EXIT.ok ? console.log : console.error;
-    if (e.message && e.message !== e.usage) out(e.message);
-    if (e.usage !== undefined && e.message !== e.usage) {
-      try {
-        printUsage(e.usage, e.code);
-      } catch {
-        // printUsage itself throws CommandError — the write already landed
-      }
-    }
-    process.exit(code === EXIT.ok ? 0 : code);
-  }
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-}
 
 runCommand(cli, process.argv.slice(2), { mounted: true }).catch(dispatchFatal);
