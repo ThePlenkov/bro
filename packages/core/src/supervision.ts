@@ -60,13 +60,14 @@ export async function supervise<T>(spec: SupervisionSpec<T>): Promise<Supervisio
       // still be armed, and the caller receives an explicit ownership reason.
     }
   }
+  const reason = spec.detachedOnly
+    ? 'detached explicitly requested'
+    : hostName === undefined
+      ? 'no host supervision capability'
+      : `host supervision unavailable: ${hostName}`;
   return {
     substrate: 'detached',
     handle: await spec.detached(),
-    reason: spec.detachedOnly
-      ? 'detached explicitly requested'
-      : hostName === undefined
-        ? 'no host supervision capability'
-        : `host supervision unavailable: ${hostName}`,
+    reason,
   };
 }

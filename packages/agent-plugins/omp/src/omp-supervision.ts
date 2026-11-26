@@ -46,7 +46,7 @@ export function installOmpSupervision(
         };
         const timer = setInterval(() => void poll(), Math.max(1, intervalMs));
         timer.unref();
-        void poll();
+        void poll().catch(() => undefined);
       });
     },
   };

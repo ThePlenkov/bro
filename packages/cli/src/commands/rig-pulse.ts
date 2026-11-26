@@ -319,7 +319,7 @@ async function rigPulseCheckpoint(
     const ownership = await supervise({
       name: 'rig freshness',
       env: process.env,
-      detached: async () => spawnRigPulse(dir, r.repo, r.everySec, r.forSec),
+      detached: () => spawnRigPulse(dir, r.repo, r.everySec, r.forSec),
     });
     const pid = ownership.handle;
     if (pid === null) {

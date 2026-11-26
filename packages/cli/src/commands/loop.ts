@@ -1099,6 +1099,7 @@ async function supervisedPasses(ctx: Ctx, everySec: number, releaseAll: () => vo
   for (;;) {
     ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
     await supervise({
+      // NOSONAR — sequential supervised passes must await each pass
       name: 'loop pass',
       native: async () => {
         await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes

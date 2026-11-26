@@ -13,6 +13,7 @@ import { rolldown } from 'rolldown';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ADAPTER_CORE = join(ROOT, 'packages/agent-plugins/adapter-core/src');
+const BRO_CORE = join(ROOT, 'packages/core/src/index.ts');
 
 /** The ownership sentinel every shipped adapter carries. */
 const SENTINEL =
@@ -30,6 +31,7 @@ export async function bundleAdapter(entry: string): Promise<string> {
           '@broject/adapter-core/host': join(ADAPTER_CORE, 'host.ts'),
           '@broject/adapter-core/core': join(ADAPTER_CORE, 'core.ts'),
           '@broject/adapter-core': join(ADAPTER_CORE, 'index.ts'),
+          '@broject/core': BRO_CORE,
         },
       },
     });
