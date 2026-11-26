@@ -20,7 +20,7 @@ import {
   tailWindow,
   utf8End,
 } from '@broject/acp-session';
-import { gitCommonDir, stateCommonDir, type ProviderEntry } from '@broject/core';
+import { gitCommonDir, type ProviderEntry, stateCommonDir } from '@broject/core';
 import type {
   AcpRenderer as AcpRendererT,
   AcpSessionViewResult,
@@ -34,9 +34,9 @@ import {
   logStem,
   type PaneLed,
   release as paneRelease,
-  registryHomeOf,
   report as paneReport,
   plain,
+  registryHomeOf,
   SESSION_IDENTITY,
   workerLedState,
 } from '../client/index.ts';
@@ -618,6 +618,9 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       await Promise.race([cur.handshake, sleep(20_000)]);
       await sleep(300);
       if (cur.mode === 'log') pumpLog(cur, true);
+      // Re-evaluate after the bounded drain so the final report reflects
+      // the archive's terminal row rather than the initial worker floor.
+      refresh();
     }
     detach();
     renderer?.end();
