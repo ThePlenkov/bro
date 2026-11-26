@@ -287,10 +287,18 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
   const sweep = (s: LedgerStore, rows: ClaimDbRow[], ctx: LiveCtx): ClaimDbRow[] => {
     const live: ClaimDbRow[] = [];
     for (const row of rows) {
-      if (claimDead(row, ctx)) {
-        s.claims.remove(row.resource, row.host, row.sid);
+      // `rows` may have been read before the write lock was acquired.
+      // Re-read the identity under that lock before deleting: a heartbeat
+      // can renew a pid-less lease in the meantime.
+      const current = s.claims
+        .resourceRows(row.resource)
+        .find(candidate => candidate.host === row.host && candidate.sid === row.sid);
+      if (current === undefined || claimDead(current, ctx)) {
+        if (current !== undefined) {
+          s.claims.remove(current.resource, current.host, current.sid);
+        }
       } else {
-        live.push(row);
+        live.push(current);
       }
     }
     return live;
@@ -434,15 +442,13 @@ export function claimsFacade(opts: ClaimsFacadeOptions = {}): ClaimFacade {
       const s = await store();
       fresh(s);
       const ctx = await liveCtx(s);
-      const rows = sweep(
-        s,
-        s.claims.rows({
-          ...(q.project !== undefined ? { project: q.project } : {}),
-          ...(q.session !== undefined ? { host: q.session.host, sid: q.session.sid } : {}),
-          ...(q.resource !== undefined ? { resourcePrefix: q.resource } : {}),
-        }),
-        ctx
-      );
+      const query = {
+        ...(q.project !== undefined ? { project: q.project } : {}),
+        ...(q.session !== undefined ? { host: q.session.host, sid: q.session.sid } : {}),
+        ...(q.resource !== undefined ? { resourcePrefix: q.resource } : {}),
+      };
+      const collect = (): ClaimDbRow[] => sweep(s, s.claims.rows(query), ctx);
+      const rows = s.claims.withLock === undefined ? collect() : s.claims.withLock(collect);
       return rows.map(toClaimRow);
     },
   };
