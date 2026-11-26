@@ -258,7 +258,8 @@ export async function runPulseCommand(argv: string[]): Promise<void> {
     watchSection(undefined)
   const sec = args.sec ?? cfg.intervalSec
 
-  // the durable want-marker — the checkpoint respawns the unattended
+  // Shared install contract: arm the want-marker and bring this owner
+  // up in the same operation; the checkpoint respawns the unattended
   // leg from it when every holder dies. Outside a repo armPulse throws
   // 'not a git repository' — no marker to write, still beats.
   try {

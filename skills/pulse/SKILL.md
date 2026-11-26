@@ -52,6 +52,12 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
   reads: armed but no live lock → rearm the unattended leg (`bro
   review watch --every S --for S --notify`, the bounded fallback for
   when no session is attending). `bro review watch uninstall` disarms.
+- **The implicit arm follows the install contract.** Starting `bro
+  pulse` arms `pulse.json` and brings the pulse owner up in the same
+  operation; the checkpoint can rearm it if that owner dies. This is
+  the same shape as `watch install`, `drive install`, and `loop
+  install`: want-marker + owner-up-now + checkpoint rearm. There is no
+  separate `pulse --arm` mechanism.
 - **Usable anywhere.** Outside a repo there is no marker, no lock, no
   mailbox — the warning says so once and the metronome still beats on
   stdout. A pure timer with an optional point-check.

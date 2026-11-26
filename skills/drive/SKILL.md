@@ -59,7 +59,7 @@ never age: an occupied thread/conflict PR stays occupied.
 | `bro review drive --no-merge`                    | supervise only — never merge (config: `drive.merge: "never"`)                                                                                                                                                 |
 | `bro review drive --connector <name>`            | spawn fixers on one backend                                                                                                                                                                                   |
 | `bro review drive --json`                        | one JSON line per PR verdict                                                                                                                                                                                  |
-| `bro review drive install [--every N] [--print]` | arm the merge path — writes `bro/drive.json` (the want-marker session checkpoints rearm a dead supervisor from) and brings `bro fleet daemon` up; cadence `--every N` or `drive.intervalSec`                  |
+| `bro review drive install [--every N] [--print]` | **Install contract:** arm the merge-path want-marker and bring `bro fleet daemon` up now; checkpoints rearm a dead owner. Writes `bro/drive.json`; cadence `--every N` or `drive.intervalSec`                  |
 | `bro review drive uninstall`                     | disarm the marker + stop the supervisor                                                                                                                                                                       |
 
 Config: `drive.intervalSec` (300), `drive.merge` (`auto`|`never`),
@@ -87,6 +87,10 @@ The fixer agent's command resolves exactly like `bro fleet agents up` —
   (sessionStart + postTool, orchestrator-only). `bro fleet daemon down`
   under an install is a transient stop — the next checkpoint brings it
   back; `uninstall` is the disarm.
+- This is the shared arm contract: `install` always means
+  want-marker + owner-up-now + checkpoint rearm. `watch install`,
+  `pulse`'s implicit arm, and `loop install` are policy aliases on
+  their own planes, not separate supervision mechanisms.
 - **Occupied is not an error.** A skipped PR means a live session owns
   it — report and move on; never force-spawn into someone's worktree.
 - **The fixer bead is the handle.** `bro fleet agents status <bead>` shows
