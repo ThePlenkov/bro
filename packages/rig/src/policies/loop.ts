@@ -1139,7 +1139,7 @@ function findPr(ctx: LoopCtx, branch: string): number | null | 'lookup-error' {
 export function autoMergeArmedForMember(
   recorded: boolean | undefined,
   autoMerge: boolean,
-  requireApproval: boolean
+  requireApproval: boolean | undefined
 ): boolean {
   return recorded ?? (autoMerge && !requireApproval);
 }
@@ -2083,7 +2083,7 @@ async function serviceGate(ctx: LoopCtx, m: LoopMember): Promise<ServiceVerdict>
   const autoMergeArmed = autoMergeArmedForMember(
     m.autoMergeArmed,
     ctx.cfg.autoMerge,
-    ctx.act.requireApproval === true
+    ctx.act.requireApproval
   );
   const autoMergeTimedOut = ctx.deps.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
   const kind =
@@ -2400,7 +2400,7 @@ function armMember(
   const autoMergeArmed = autoMergeArmedForMember(
     persistedAutoMergeArmed(ctx, pr),
     ctx.cfg.autoMerge,
-    ctx.act.requireApproval === true
+    ctx.act.requireApproval
   );
   if (ctx.act.requireApproval && autoMergeArmed) {
     ctx.deps.disableAutoMerge(pr);
