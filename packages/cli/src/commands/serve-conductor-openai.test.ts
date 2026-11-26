@@ -96,6 +96,44 @@ async function evs(r: Response): Promise<{ event: string; data: Record<string, u
 }
 
 describe('serve /v1/responses — the openai dialect', () => {
+  test('x-bro-probe uses a dedicated session without consuming response chains', async () => {
+    const fake = fakeAcpAgent({ replyText: 'pong', configOptions: [MODEL_OPTION] });
+    const { url, close } = await boot(fake);
+    try {
+      const headers = { ...auth, 'content-type': 'application/json' };
+      const first = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ input: 'first', stream: false }),
+      });
+      const firstBody = (await first.json()) as { id: string };
+      const probe = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...headers, 'x-bro-probe': 'live-check' },
+        body: JSON.stringify({
+          input: 'probe',
+          previous_response_id: firstBody.id,
+          stream: false,
+        }),
+      });
+      assert.equal(probe.status, 200);
+      const continuation = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          input: 'continuation',
+          previous_response_id: firstBody.id,
+          stream: false,
+        }),
+      });
+      assert.equal(continuation.status, 200);
+      assert.equal(fake.sessions.length, 2);
+      assert.equal(fake.prompts.length, 3);
+    } finally {
+      await close();
+    }
+  });
+
   test('input string answers a buffered Response object with usage', async () => {
     const fake = fakeAcpAgent({ replyText: 'pong', configOptions: [MODEL_OPTION] });
     const { r, close } = await postResponses(fake, { input: 'ping', stream: false });
@@ -491,6 +529,27 @@ describe('serve /v1/responses — the openai dialect', () => {
       assert.ok(r.headers.get('retry-after') !== null);
       const body = await r.json();
       assert.equal(body.error.type, 'rate_limit_error');
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('serve /v1/chat/completions probes', () => {
+  test('x-bro-probe reuses its lane session and bypasses conversation proofs', async () => {
+    const fake = fakeAcpAgent({ replyText: 'pong', configOptions: [MODEL_OPTION] });
+    const { url, close } = await boot(fake);
+    try {
+      const postProbe = (input: string) =>
+        fetch(`${url}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json', 'x-bro-probe': 'health' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: input }], stream: false }),
+        });
+      assert.equal((await postProbe('one')).status, 200);
+      assert.equal((await postProbe('two')).status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 2);
     } finally {
       await close();
     }

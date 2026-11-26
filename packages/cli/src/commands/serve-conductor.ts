@@ -2883,6 +2883,8 @@ async function probeTurn(env: TurnEnv): Promise<TurnOutcome> {
       // opens fresh rather than piling onto unknown state
       evict(env.sessions, key, cand);
       throw err;
+    } finally {
+      if (env.sessions.get(key ?? '') === cand) cand.busy = false;
     }
   }
   // a stale candidate (dead peer, wrong class) retires before the fresh
@@ -4630,9 +4632,12 @@ async function responses(
   const t0 = Date.now();
   const store = rreq.store !== false;
   const respId = `resp_${randomBytes(12).toString('hex')}`;
+  const probe = probeLabelOf(req);
   const hit =
-    rreq.previous_response_id !== undefined ? chains.get(rreq.previous_response_id) : undefined;
-  if (rreq.previous_response_id !== undefined && hit === undefined) {
+    probe === undefined && rreq.previous_response_id !== undefined
+      ? chains.get(rreq.previous_response_id)
+      : undefined;
+  if (probe === undefined && rreq.previous_response_id !== undefined && hit === undefined) {
     openaiError(
       res,
       400,
@@ -4648,6 +4653,8 @@ async function responses(
   // the predecessor answered under; a fresh one rides the provider its
   // model names.
   const { lane, route } = routeOf(wire, requestModelOf(body), hit);
+  const turnKey = probe === undefined ? key : `probe:${lane.entry}`;
+  if (probe !== undefined && probeWallRefusal(res, lane, route, t0, probe)) return;
   let live: RespLive | undefined;
   let out: TurnOutcome;
   try {
@@ -4657,11 +4664,12 @@ async function responses(
     out = await acpTurn({
       ...laneTurnEnv(lane, peer, {
         body,
-        key,
+        key: turnKey,
         stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
         parent,
         requestModel: requestModelOf(body),
         signal: ac.signal,
+        probe,
       }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
@@ -4680,7 +4688,7 @@ async function responses(
     return;
   }
   if (out.replay === true) {
-    responsesReplay(res, wire, { rreq, out, respId, key, store, chains, lane, route });
+    responsesReplay(res, wire, { rreq, out, respId, key: turnKey, store, chains, lane, route });
     return;
   }
   responsesDeliver(res, wire, {
@@ -4688,12 +4696,13 @@ async function responses(
     body,
     out,
     respId,
-    key,
+    key: turnKey,
     store,
     chains,
     live,
     t0,
     chained: hit !== undefined,
+    probe,
     lane,
     route,
   });
@@ -4732,6 +4741,7 @@ function responsesDeliver(
     live: RespLive | undefined;
     t0: number;
     chained: boolean;
+    probe?: string;
     lane: ProviderLane;
     /** The route the turn ANSWERED under — the predecessor's for a
      *  chained request. */
@@ -4774,13 +4784,15 @@ function responsesDeliver(
       // from the client's view (bro-vfbyc)
       capped.capped || d.live?.capped === true
     );
-    registerChain(
-      d.chains,
-      wire.lanes,
-      { store: d.store, respId: d.respId, key: d.key, consumed: d.out.conv.consumed },
-      d.lane.entry,
-      d.route
-    );
+    if (d.probe === undefined) {
+      registerChain(
+        d.chains,
+        wire.lanes,
+        { store: d.store, respId: d.respId, key: d.key, consumed: d.out.conv.consumed },
+        d.lane.entry,
+        d.route
+      );
+    }
   }
   otelEvent('conductor.turn', {
     // the ROUTE that answered — for a chained turn the predecessor's
@@ -4791,6 +4803,9 @@ function responsesDeliver(
     stream: d.rreq.stream === true,
     session_reused: d.out.reused,
     session_key_ns: keyNs(d.key),
+    ...(d.probe === undefined
+      ? {}
+      : { probe: true, probe_label: d.probe, session_key_ns: 'probe' }),
     input_tokens: inputTokens,
     output_tokens: outTokens,
     duration_ms: Date.now() - d.t0,
@@ -5245,7 +5260,7 @@ async function chatCompletions(
   if (parsed === undefined) return;
   const { rreq: creq, body } = parsed;
   const t0 = Date.now();
-  const key = conversationKey(req, body);
+  const probe = probeLabelOf(req);
   const chatId = `chatcmpl-${randomBytes(12).toString('hex')}`;
   const created = Math.floor(Date.now() / 1000);
   // the lane this request rides — the model's route prefix names it —
@@ -5253,6 +5268,8 @@ async function chatCompletions(
   // records)
   const requestModel = requestModelOf(body);
   const { lane, route } = routeOf(wire, requestModel);
+  const key = probe === undefined ? conversationKey(req, body) : `probe:${lane.entry}`;
+  if (probe !== undefined && probeWallRefusal(res, lane, route, t0, probe)) return;
   const model = servedModel(requestModel, lane.opts, lane.cfg, body);
   const tools = body.tool_choice?.type !== 'none';
   // one filter per turn — the streamed leg feeds it delta-by-delta,
@@ -5273,6 +5290,7 @@ async function chatCompletions(
         parent,
         requestModel,
         signal: ac.signal,
+        probe,
       }),
       openStream:
         creq.stream === true
@@ -5312,6 +5330,7 @@ async function chatCompletions(
     t0,
     lane,
     route,
+    probe,
   });
 }
 
@@ -5336,6 +5355,7 @@ function chatDeliver(
     lane: ProviderLane;
     /** The route the turn ANSWERED under — the journal's public identity. */
     route: string;
+    probe?: string;
   }
 ): void {
   const o = chatOutcome(d.out, d.tools);
@@ -5395,6 +5415,9 @@ function chatDeliver(
     input_tokens: o.inputTokens,
     output_tokens: outTokens,
     duration_ms: Date.now() - d.t0,
+    ...(d.probe === undefined
+      ? {}
+      : { probe: true, probe_label: d.probe, session_key_ns: 'probe' }),
   });
   const usageOrUndef = d.creq.stream_options?.include_usage === true ? usage : undefined;
   if (o.replay && d.creq.stream === true) {
