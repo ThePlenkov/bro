@@ -165,6 +165,7 @@ export function prStateCache(
         const rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<CacheRecord>;
         if (
           typeof rec.fetchedAt !== 'number' ||
+          !Number.isInteger(rec.fetchedAt) ||
           !Number.isFinite(rec.fetchedAt) ||
           rec.state?.pr !== t.pr
         ) {
@@ -183,7 +184,11 @@ export function prStateCache(
       const file = fileFor(root, t);
       try {
         const rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<CacheRecord>;
-        return typeof rec.fetchedAt === 'number' && Number.isFinite(rec.fetchedAt)
+        return (
+          typeof rec.fetchedAt === 'number' &&
+          Number.isInteger(rec.fetchedAt) &&
+          Number.isFinite(rec.fetchedAt)
+        )
           ? rec.fetchedAt
           : null;
       } catch {

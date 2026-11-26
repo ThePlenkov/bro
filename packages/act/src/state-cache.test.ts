@@ -67,6 +67,16 @@ describe('prStateCache', () => {
     assert.equal(cache.read(target), null)
   })
 
+  test('a non-integer fetchedAt is rejected as corrupt', () => {
+    const dir = repo()
+    const cache = prStateCache(dir)!
+    mkdirSync(join(dir, '.git', 'bro', 'act-state'), { recursive: true })
+    const file = join(dir, '.git', 'bro', 'act-state', 'o%2Fr-7.json')
+    writeFileSync(file, JSON.stringify({ fetchedAt: Date.now() + 0.5, state: stateFor(7) }))
+    assert.equal(cache.read(target), null)
+    assert.equal(cache.fetchedAt(target), null)
+  })
+
   test('a corrupt file reads as a miss, never a throw', () => {
     const dir = repo()
     const cache = prStateCache(dir)!
