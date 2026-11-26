@@ -77,8 +77,13 @@ function mergeDefaultModel(root: string, file: DefaultModel): void {
 
 function validProfile(entry: ProfileEntry): boolean {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) return false;
-  if (typeof entry.profile.model !== 'string') return false;
-  return entry.profile.model.trim() !== '';
+  if (!isRecord(entry.profile) || typeof entry.profile.model !== 'string') return false;
+  if (entry.profile.model.trim() === '') return false;
+  return (
+    entry.profile.tools === undefined ||
+    (Array.isArray(entry.profile.tools) &&
+      entry.profile.tools.every(tool => typeof tool === 'string'))
+  );
 }
 
 function defaultModel(config: DevinSubagentConfig): string | undefined {
@@ -96,10 +101,13 @@ export function materializeDevinSubagents(options: DevinMaterializeOptions): str
   const root = home;
   const written: string[] = [];
   const profiles = config.profiles ?? config.subagents ?? {};
-  for (const [name, profile] of Object.entries(profiles)) {
+  const entries = Object.entries(profiles);
+  for (const [name, profile] of entries) {
     if (!validProfile({ name, profile })) {
       throw new Error(`invalid Devin subagent profile: ${name}`);
     }
+  }
+  for (const [name, profile] of entries) {
     const path = join(home, '.config', 'devin', 'agents', `${name}.md`);
     ioWriteAtomic(root, path, profileText(profile));
     written.push(path);
