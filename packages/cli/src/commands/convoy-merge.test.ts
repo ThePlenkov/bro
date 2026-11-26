@@ -23,7 +23,9 @@ case "$1" in
     esac ;;
   formula)
     case "$2" in
-      show) cat "$FAKE_BD_FORMULA" ;;
+      show)
+        if [ "$FAKE_BD_FORMULA_MODE" = "missing" ]; then exit 1; fi
+        cat "$FAKE_BD_FORMULA" ;;
     esac ;;
   show) cat "$FAKE_BD_TASKS" ;;
   close) printf '%s\\n' "$*" >> "$FAKE_BD_LOG" ;;
@@ -102,7 +104,14 @@ interface BdFiles {
 /** Point the environment at the fake bd and its files — the restore
  *  comes back with it. */
 function fakeBdEnv(files: BdFiles): () => void {
-  const keys = ['PATH', 'FAKE_BD_MOL', 'FAKE_BD_FORMULA', 'FAKE_BD_TASKS', 'FAKE_BD_LOG'];
+  const keys = [
+    'PATH',
+    'FAKE_BD_MOL',
+    'FAKE_BD_FORMULA',
+    'FAKE_BD_FORMULA_MODE',
+    'FAKE_BD_TASKS',
+    'FAKE_BD_LOG',
+  ];
   const prev = new Map(keys.map(k => [k, process.env[k]]));
   process.env.PATH = `${files.dir}:${prev.get('PATH') ?? ''}`;
   process.env.FAKE_BD_MOL = files.mol;
@@ -122,6 +131,7 @@ function fixture(opts: {
   mergeType: string;
   formulaType: string;
   upstreamReason?: string;
+  formulaMissing?: boolean;
 }): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'bro-convoy-merge-'));
   writeFileSync(join(dir, 'bd'), FAKE_BD);
@@ -142,6 +152,7 @@ function fixture(opts: {
     })
   );
   const restore = fakeBdEnv(files);
+  if (opts.formulaMissing) process.env.FAKE_BD_FORMULA_MODE = 'missing';
   return {
     closes: () => (existsSync(files.log) ? readFileSync(files.log, 'utf8') : ''),
     cleanup: () => {
@@ -163,6 +174,8 @@ interface Scenario {
   mergeType?: string;
   /** the type the formula declares */
   formulaType?: string;
+  /** bd cannot read the poured formula */
+  formulaMissing?: boolean;
   /** the upstream step's close reason */
   upstreamReason?: string;
   /** the agent's own sentence */
@@ -206,6 +219,7 @@ async function runScenario(s: Scenario): Promise<void> {
     mergeType: s.mergeType ?? 'merge-step',
     formulaType: s.formulaType ?? 'merge-step',
     upstreamReason: s.upstreamReason,
+    formulaMissing: s.formulaMissing,
   });
   const asked: number[] = [];
   const answer = s.answer;
@@ -275,6 +289,16 @@ const SCENARIOS: Scenario[] = [
     result: 'done',
     closed: [/close s-1 --reason done/],
     asked: [],
+  },
+  {
+    name: 'an unreadable formula fails closed instead of closing a flattened merge step',
+    mergeType: 'task',
+    formulaType: 'merge-step',
+    formulaMissing: true,
+    result: 'done',
+    exit: 3,
+    answer: async () => ({ state: 'OPEN' }),
+    asked: [PR],
   },
 ];
 

@@ -1,5 +1,7 @@
-import { dirname } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { bd, bdJson, getTasks, taskStore } from '@broject/core';
+import { parse } from 'smol-toml';
 import type {
   ConvoyNext,
   ConvoyStep,
@@ -184,9 +186,38 @@ export function beadsDir(): string {
  *  step, whatever the condition type (human, gh:run, timer, …) — the
  *  same classification `stepKind` applies post-pour. */
 export function formulaSteps(formula: string): MolIssue[] {
-  const doc = bdJson<{
+  let doc: {
     steps?: { id?: string; title?: string; type?: string; gate?: { type?: string } }[];
-  }>(['formula', 'show', formula]);
+  };
+  try {
+    doc = bdJson<{
+      steps?: { id?: string; title?: string; type?: string; gate?: { type?: string } }[];
+    }>(['formula', 'show', formula]);
+  } catch (error) {
+    // bd's formula registry is mutable and can lose a formula after pour.
+    // The checked-in formula is a surviving declaration, so prefer it over
+    // silently treating every flattened task as an ordinary step.
+    if (formula !== basename(formula)) {
+      throw new Error(`invalid formula name: ${formula}`);
+    }
+    const formulasRoot = resolve(process.cwd(), 'formulas');
+    const file = [
+      resolve(formulasRoot, `${formula}.formula.toml`),
+      resolve(formulasRoot, `${formula}.toml`),
+    ].find(path => {
+      if (path !== formulasRoot && !path.startsWith(`${formulasRoot}${sep}`)) {
+        return false;
+      }
+      try {
+        readFileSync(path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (file === undefined) throw error;
+    doc = parse(readFileSync(file, 'utf8')) as typeof doc;
+  }
   return (doc.steps ?? []).map(s => ({
     id: s.id ?? '',
     title: s.title ?? '',
