@@ -31,6 +31,7 @@ import {
   type RearmPlan,
   rearmWatches,
   resolveLedger,
+  staleStatus,
   waitForGate,
   watchVerdict,
 } from '@broject/act';
@@ -106,6 +107,7 @@ export async function cmdWait(argv: string[]): Promise<void> {
     gateStateFetcher(rev, t, act, cache, ledger),
     waitOpts(rev, t, argv, { interval, timeout }, cache)
   );
+  const stale = staleStatus(process.cwd(), t, res.state, cache);
   // the settled wait is one gate verdict — timeout, blocked, externally
   // settled, or green. Poll snapshots inside waitForGate are noise;
   // only the decision journals here.
@@ -130,6 +132,7 @@ export async function cmdWait(argv: string[]): Promise<void> {
           pr: res.state,
           exit_gate: res.gate,
           timed_out: res.timedOut,
+          stale,
           ...(verdict === undefined ? {} : { verdict }),
         },
         null,
@@ -137,7 +140,7 @@ export async function cmdWait(argv: string[]): Promise<void> {
       )
     );
   } else {
-    printStatus(res.state, res.gate);
+    printStatus(res.state, res.gate, stale);
     if (res.timedOut) {
       console.log(`wait: timed out after ${timeout}m — still pending`);
     }
@@ -254,7 +257,7 @@ export function waitOpts(
     },
     onPoll: (s, g) =>
       console.error(
-        `${bareUrl(rev.prLink(t.repo, s.pr))}\n${label}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+        `${bareUrl(rev.prLink(t.repo, s.pr))}\n${label}: ${staleStatus(process.cwd(), t, s, cache) ? 'STALE ' : ''}threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
       ),
     onError: (err, n) =>
       console.error(

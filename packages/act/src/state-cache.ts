@@ -57,6 +57,8 @@ export interface PrStateCache {
   /** A fresh cached state — null on miss, expiry, corruption, or a
    *  read failure. */
   read(target: PrTarget): PrActState | null;
+  /** Completion time of the cached fetch, or null when it is absent. */
+  fetchedAt?(target: PrTarget): number | null;
   /** Atomic publish (tmp write + rename); reaps stale siblings so a
    *  long-lived fleet dir stays bounded. */
   write(target: PrTarget, state: PrActState): void;
@@ -163,6 +165,7 @@ export function prStateCache(
         const rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<CacheRecord>;
         if (
           typeof rec.fetchedAt !== 'number' ||
+          !Number.isInteger(rec.fetchedAt) ||
           !Number.isFinite(rec.fetchedAt) ||
           rec.state?.pr !== t.pr
         ) {
@@ -173,6 +176,21 @@ export function prStateCache(
           return null;
         }
         return rec.state;
+      } catch {
+        return null;
+      }
+    },
+    fetchedAt(t) {
+      const file = fileFor(root, t);
+      try {
+        const rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<CacheRecord>;
+        return (
+          typeof rec.fetchedAt === 'number' &&
+          Number.isInteger(rec.fetchedAt) &&
+          Number.isFinite(rec.fetchedAt)
+        )
+          ? rec.fetchedAt
+          : null;
       } catch {
         return null;
       }

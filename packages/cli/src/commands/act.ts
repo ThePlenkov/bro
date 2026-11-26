@@ -20,6 +20,7 @@ import {
   fetchPrActState,
   prStateCache,
   resolveLedger,
+  staleStatus,
 } from '@broject/act';
 import {
   CommandError,
@@ -76,15 +77,17 @@ async function cmdStatus(argv: string[]): Promise<void> {
     resolveLedger: resolveLedger(process.cwd()),
   });
   const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
+  const cache = prStateCache(process.cwd());
+  const stale = staleStatus(process.cwd(), t, state, cache);
 
   if (!gate.ok) {
     process.exitCode = 1;
   }
   if (json) {
-    console.log(JSON.stringify({ pr: state, exit_gate: gate }, null, 2));
+    console.log(JSON.stringify({ pr: state, exit_gate: gate, stale }, null, 2));
     return;
   }
-  printStatus(state, gate);
+  printStatus(state, gate, stale);
 }
 
 async function cmdThreads(argv: string[]): Promise<void> {

@@ -9,6 +9,7 @@
     "pr": {
       "$ref": "#/$defs/PrActState"
     },
+    "stale": { "type": "boolean" },
     "exit_gate": {
       "$ref": "#/$defs/ExitGate"
     }

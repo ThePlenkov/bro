@@ -7,7 +7,7 @@
 import { listWatches, type ExitGate, type GateWaitResult, type PrActState } from '@broject/act';
 import type { PrTarget, ReviewFacade, VetoReview } from '@broject/core';
 
-export function printStatus(state: PrActState, gate: ExitGate): void {
+export function printStatus(state: PrActState, gate: ExitGate, stale = false): void {
   // clickable by convention (AGENTS.md): user-facing PR refs are links —
   // state.url is the PR's own html_url, so this is also GHE-safe
   console.log(`pr=[#${state.pr}](${state.url}) ${state.headRef}`);
@@ -29,6 +29,9 @@ export function printStatus(state: PrActState, gate: ExitGate): void {
         : ` review_decision=${state.reviewDecision}`)
   );
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`);
+  if (stale) {
+    console.log('status=STALE');
+  }
   // the veto axis detail — which standing CHANGES_REQUESTED reviews are
   // stale (dismissible) vs live; absent when the probe didn't run or
   // the host can't enumerate (the blocker text covers that case)
