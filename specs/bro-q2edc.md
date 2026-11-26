@@ -117,7 +117,8 @@ Keeps everything that is _not_ rendering: argument parsing, the
 the LED verdict, and the release envelope. It hands the store to the
 Solid tree and lets the reconciler own the renderables.
 
-### `packages/acp/session/src/view/theme.ts`,
+### `packages/acp/session/src/view/theme.ts`
+
 `packages/acp/session/src/view/lines.ts`, and
 `packages/acp/session/src/view/state.ts` — the look and the fold
 
