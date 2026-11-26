@@ -3,17 +3,18 @@
  *  answers show/ready/list/dep, a tmpdir git repo holds the registry and
  *  linked worktrees, a `registerConnector`'d reviews host fakes the
  *  forge. No plugin registry, no `process.exit`, no spawned `bro`. */
-import { describe, test } from 'node:test';
+
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { describe, test } from 'node:test';
 import {
+  type ReviewFacade,
   registerConnector,
   testGitEnv,
   unregisterConnector,
-  type ReviewFacade,
 } from '@broject/core';
 import { rigFocus, rigNext } from './next.ts';
 
@@ -128,6 +129,49 @@ const bead = (id: string, over: Record<string, unknown> = {}): Record<string, un
 });
 
 describe('rigNext — the verdict ladder', () => {
+  test('dead act-wait markers are the re-entry verdict before bead work', () => {
+    const f = fixture();
+    try {
+      const bro = join(f.dir, '.git', 'bro', 'watches');
+      mkdirSync(bro, { recursive: true });
+      writeFileSync(
+        join(bro, '7-4242-nonce.json'),
+        JSON.stringify({
+          pr: 7,
+          link: '[#7](https://github.com/o/r/pull/7)',
+          pid: 4242,
+          merge: false,
+          startedAt: Date.now(),
+          timeoutMin: 10,
+        })
+      );
+      assert.deepEqual(rigNext(f.dir), {
+        verdict: 'step',
+        detail: 'dead act-wait marker for PR #7 — act rearm',
+      });
+    } finally {
+      f.restore();
+    }
+  });
+
+  test('an armed supervisor without a live lock is a re-entry verdict', () => {
+    const f = fixture();
+    try {
+      const bro = join(f.dir, '.git', 'bro');
+      mkdirSync(bro, { recursive: true });
+      writeFileSync(
+        join(bro, 'drive.json'),
+        JSON.stringify({ everySec: 60, armedAt: new Date().toISOString() })
+      );
+      assert.deepEqual(rigNext(f.dir), {
+        verdict: 'step',
+        detail: 'armed drive marker is dead — rearm',
+      });
+    } finally {
+      f.restore();
+    }
+  });
+
   test('empty store reports done; an unknown id reports blocked', () => {
     const f = fixture();
     try {
