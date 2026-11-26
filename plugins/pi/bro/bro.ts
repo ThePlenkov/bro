@@ -446,7 +446,8 @@ function displayWidth(text) {
 	for (const char of text) {
 		const code = char.codePointAt(0) ?? 0;
 		if (code >= 768 && code <= 879 || code >= 6832 && code <= 6911 || code >= 7616 && code <= 7679 || code >= 8400 && code <= 8447 || code >= 65056 && code <= 65071) continue;
-		width += code >= 4352 && code <= 4447 || code >= 9001 && code <= 9002 || code >= 11904 && code <= 42191 || code >= 44032 && code <= 55203 || code >= 63744 && code <= 64255 || code >= 65040 && code <= 65049 || code >= 65072 && code <= 65135 || code >= 65280 && code <= 65376 || code >= 65504 && code <= 65510 || code >= 126976 && code <= 129791 ? 2 : 1;
+		if (code >= 8203 && code <= 8205 || code >= 65024 && code <= 65039) continue;
+		width += code >= 4352 && code <= 4447 || code >= 9001 && code <= 9002 || code >= 11904 && code <= 42191 || code >= 44032 && code <= 55203 || code >= 63744 && code <= 64255 || code >= 65040 && code <= 65049 || code >= 65072 && code <= 65135 || code >= 65280 && code <= 65376 || code >= 65504 && code <= 65510 || code >= 126976 && code <= 129791 || code >= 131072 && code <= 196605 || code >= 196608 && code <= 262141 ? 2 : 1;
 	}
 	return width;
 }
