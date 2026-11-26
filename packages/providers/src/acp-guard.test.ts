@@ -198,6 +198,18 @@ describe('acp dead-loop guard (bro-b961a)', () => {
     assert.equal(guard.churn(t('conv-1')), 1);
   });
 
+  test('a peer completion frees its OWN charge after the peer window rolls', async () => {
+    const guard = new AcpDeadLoopGuard({ maxAbandoned: 4, windowMs: 20 });
+    const stale = guard.open(t('conv-old', 'conductor:dv'));
+    await new Promise<void>(resolve => setTimeout(resolve, 30));
+    guard.open(t('conv-new', 'conductor:dv'));
+    assert.equal(guard.peerChurnCount(t('peer', 'conductor:dv')), 1);
+    // The old session was written off with its old peer window. Its
+    // completion must not decrement the newer session's peer charge.
+    stale.resolve();
+    assert.equal(guard.peerChurnCount(t('peer', 'conductor:dv')), 1);
+  });
+
   test('the prune keeps a live cooldown — a tripped scope stays refused past its window', async () => {
     const guard = new AcpDeadLoopGuard({ maxOpens: 1, windowMs: 20, cooldownMs: 60_000 });
     guard.open(t('conv-tripped'));
