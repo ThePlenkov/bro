@@ -5,8 +5,12 @@
  *  must pass through: normalize, then prove the target stays under
  *  `base`; a `..` escape never reaches an fs call. */
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -55,9 +59,34 @@ export const ioReadDir = (path: string): Dirent[] => readdirSync(path, { withFil
 
 export const ioWrite = (path: string, content: string, opts?: { exclusive?: boolean }): void => {
   mkdirSync(dirname(path), { recursive: true });
-  // `wx` makes the no-overwrite check atomic — an existsSync pre-check
-  // leaves a window where another writer lands first.
-  writeFileSync(path, content, opts?.exclusive === true ? { flag: 'wx' } : {});
+  // `mkdirSync({ recursive: true })` has no no-follow mode. Re-check the
+  // complete parent after it returns so a vanished or replaced parent fails
+  // before the write. `resolveIn` supplies the containment check; this is
+  // intentionally only a mitigation because Node has no openat(2), so an
+  // ancestor can still be swapped after this check and before openSync.
+  realpathSync(dirname(path));
+
+  // O_NOFOLLOW protects the final component from being redirected between
+  // the check above and the open. `O_EXCL` additionally makes create
+  // operations atomic; unlike an existsSync pre-check it has no overwrite
+  // race. The descriptor keeps the write on the object that was opened.
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const flags =
+    constants.O_WRONLY |
+    constants.O_CREAT |
+    (opts?.exclusive === true ? constants.O_EXCL : constants.O_TRUNC) |
+    noFollow;
+  const fd = openSync(path, flags);
+  try {
+    // Keep the descriptor use explicit: reject an unusual non-regular target
+    // even if a platform does not provide O_NOFOLLOW.
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`write target is not a regular file: ${path}`);
+    }
+    writeFileSync(fd, content);
+  } finally {
+    closeSync(fd);
+  }
 };
 
 export const ioRemove = (path: string, recursive = false): void => {
