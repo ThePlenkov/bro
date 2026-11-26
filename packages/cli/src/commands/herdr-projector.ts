@@ -17,12 +17,15 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import {
+  type DiscoveredSession,
   gitCommonDir,
   gitTry,
   type ProviderEntry,
   readAgentRegistry,
+  sessionPlanes,
   stateCommonDir,
 } from '@broject/core';
+import '@broject/devin';
 import {
   type ActEntry,
   type AgentRow,
@@ -37,9 +40,10 @@ import {
   type TreeInput,
 } from '@broject/herdr-kit';
 import { loopSection } from '@broject/loop';
-import { loadBroConfig } from '../plugins.ts';
-import { collectLoopRuns } from './loop-state.ts';
 import { detailMatches, hooksDirOf, liveWorkEntries, registryEntryState } from '@broject/rig';
+import { loadBroConfig } from '../plugins.ts';
+import { listForeignOpencodeSessions } from '../session-planes/opencode.ts';
+import { collectLoopRuns } from './loop-state.ts';
 import { readBeads } from './status.ts';
 import { parseWorktreePorcelain, worktreeClaim } from './work.ts';
 
@@ -152,6 +156,7 @@ interface Planes {
   /** `providers` section — resolves a registry entry's `provider` to
    *  the agent binary name its command spawns. */
   providers: Record<string, ProviderEntry>;
+  sessions: DiscoveredSession[];
 }
 
 /** The registry read, split honest: a corrupt/unreadable agents.json
@@ -190,6 +195,19 @@ function tryRegistry(ctx: Pick<PassCtx, 'root'>): {
 
 function readPlanes(ctx: PassCtx): Planes {
   const hooks = hooksDirOf(ctx.root);
+  const config = loadBroConfig(ctx.root);
+  const agentConfig = config.agents as Record<string, Record<string, unknown>> | undefined;
+  const sessions = sessionPlanes()
+    .flatMap(plane => {
+      if (plane.listLive === undefined) return [];
+      const bag = agentConfig?.[plane.kind] ?? {};
+      try {
+        return plane.listLive(bag);
+      } catch {
+        return [];
+      }
+    })
+    .concat(listForeignOpencodeSessions());
   return {
     agentsHome: ctx.common === null ? null : join(ctx.common, 'bro', 'agents'),
     eventsHome: ctx.state === null ? null : join(ctx.state, 'bro', 'agents'),
@@ -200,8 +218,24 @@ function readPlanes(ctx: PassCtx): Planes {
     beads: readBeads(ctx.root).inProgress,
     details: hooks === null ? [] : liveWorkEntries(hooks, ['.work'], ctx.now),
     stall: stallMin(ctx),
-    providers: loadBroConfig(ctx.root).providers ?? {},
+    providers: config.providers ?? {},
+    sessions,
   };
+}
+
+/** Foreign session rows are deliberately ephemeral. They are not inserted
+ * into agents.json: the host plane is the owner of their truth, and the
+ * projector only binds them to the matching worktree for this document. */
+function sessionRows(t: HerdrWorktree, p: Planes, now: number): AgentRow[] {
+  return p.sessions
+    .filter(s => s.cwd === t.path && s.agentId === undefined)
+    .map(s => ({
+      key: `session:${s.pid}`,
+      live: true,
+      silentMs: null,
+      session: { id: s.name ?? `pid:${s.pid}` },
+      at: now,
+    }));
 }
 
 /** Registry entries on one worktree, pre-classified — the pid/handle
@@ -271,7 +305,7 @@ function treeInput(t: HerdrWorktree, p: Planes, ctx: PassCtx): TreeInput {
         silentMs: r.silentMs,
         at: parseTs(r.startedAt),
       })),
-    agents: agentRows(t, p, ctx),
+    agents: [...agentRows(t, p, ctx), ...sessionRows(t, p, ctx.now)],
     beads: p.beads,
     act: p.act,
     now: ctx.now,

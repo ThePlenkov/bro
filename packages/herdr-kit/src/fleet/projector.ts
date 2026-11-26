@@ -625,6 +625,7 @@ function stateOf(j: PaneJob, path: string, led: PaneLed): FleetPaneState {
       log: j.proj.log,
       lane: j.proj.acp === true ? ('acp' as const) : undefined,
       events: j.proj.events,
+      session: j.proj.session,
     }),
     led,
     ts: j.now,

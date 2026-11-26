@@ -68,6 +68,8 @@ export interface FleetPaneState {
    *  bookended by turn start/stop, written by the worker's pumpTurn.
    *  Present only on the acp lane when the owner carries a badge. */
   events?: string;
+  /** Native session bind, including foreign sessions with no registry row. */
+  session?: { id: string; events?: string };
   led: PaneLed;
   /** Wall-clock ms the projector classified at — staleness display. */
   ts: number;
@@ -160,6 +162,15 @@ export function parseFleetState(raw: string): FleetPaneState | undefined {
   if (s === undefined || !SHAPE_OK.every(g => g(s))) return undefined;
   for (const k of OPTIONAL_STR) {
     if (s[k] !== undefined && !isStr(s[k])) delete s[k];
+  }
+  if (
+    s.session !== undefined &&
+    (typeof s.session !== 'object' ||
+      s.session === null ||
+      typeof s.session.id !== 'string' ||
+      (s.session.events !== undefined && typeof s.session.events !== 'string'))
+  ) {
+    delete s.session;
   }
   return s as FleetPaneState;
 }

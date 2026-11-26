@@ -22,13 +22,14 @@ import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import {
+  type DiscoveredSession,
+  type ExternalActivity,
+  type ExternalActivityPlane,
+  type ExternalProbeCtx,
   ownedEnviron,
   pidAlive,
   registerExternalPlane,
   SpawnError,
-  type ExternalActivity,
-  type ExternalActivityPlane,
-  type ExternalProbeCtx,
 } from '@broject/core';
 
 /** `~/.local/share/opencode` under the spawner's env — XDG_DATA_HOME
@@ -186,6 +187,34 @@ export function foreignOpencodePids(
     }
   }
   return pids;
+}
+
+/** Foreign opencode sessions as worktree-bindable rows. The external guard
+ * historically needed only pids; the projector also needs the process cwd
+ * and native session id to put a pane on the right workspace. */
+export function listForeignOpencodeSessions(procDir = '/proc'): DiscoveredSession[] {
+  return foreignOpencodePids(procDir).flatMap(entry => {
+    const dir = join(procDir, String(entry.pid));
+    let cwd: string | undefined;
+    let sessionId: string | undefined;
+    try {
+      cwd = readlinkSync(join(dir, 'cwd'));
+      const argv = readFileSync(join(dir, 'cmdline'), 'utf8').split('\0');
+      const at = argv.indexOf('--session');
+      sessionId = at >= 0 ? argv[at + 1] : undefined;
+    } catch {
+      // The process raced away; the next projector pass will retry.
+    }
+    return cwd === undefined
+      ? []
+      : [
+          {
+            pid: entry.pid,
+            cwd,
+            ...(sessionId !== undefined ? { name: sessionId } : {}),
+          },
+        ];
+  });
 }
 
 /** The freshest mtime across the host's opencode state — the shared

@@ -19,6 +19,7 @@ import {
   parseFleetState,
   pruneFleetStatus,
   readFleetState,
+  STATUS_IDENTITY,
   writeFleetState,
 } from '@broject/herdr-kit';
 import {
@@ -28,9 +29,9 @@ import {
   labelFor,
   paneLed,
   prFor,
-  prToken,
   projectFleet,
   projectTree,
+  prToken,
   silentBucketMin,
   statusPaneLive,
   statusString,
@@ -39,7 +40,6 @@ import {
   workerState,
   workerToken,
 } from './herdr-projector.ts';
-import { STATUS_IDENTITY } from '@broject/herdr-kit';
 
 const H = 3_600_000;
 const M = 60_000;
@@ -68,6 +68,7 @@ const agent = (
     log: string;
     acp: boolean;
     events: string;
+    session: { id: string; events?: string };
   }>
 ) => ({
   key: o.key ?? 'mol-1',
@@ -81,6 +82,7 @@ const agent = (
   ...(o.log !== undefined ? { log: o.log } : {}),
   ...(o.acp === true ? { acp: true } : {}),
   ...(o.events !== undefined ? { events: o.events } : {}),
+  ...(o.session !== undefined ? { session: o.session } : {}),
   at: o.at ?? NOW,
 });
 
@@ -440,6 +442,23 @@ describe('the session owner — who the `bro: session` pane attaches (bro-nwl5g)
     assert.equal(projection.acpSessionId, undefined);
     assert.equal(projection.provider, undefined);
     assert.equal(projection.log, undefined);
+  });
+
+  test('a foreign session bind projects without a registry agent', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [
+          agent({
+            key: 'session:42',
+            live: true,
+            silentMs: M,
+            session: { id: 'foreign-session-42' },
+          }),
+        ],
+      })
+    );
+    assert.deepEqual(projection.session, { id: 'foreign-session-42' });
+    assert.equal(projection.state, 'working');
   });
 
   test('an acp carrier lends the lane verdict + the events archive (spec bro-l8wqu)', () => {
