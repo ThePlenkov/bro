@@ -2132,31 +2132,35 @@ export async function ensureServe(
 }
 
 async function cmdEnsure(argv: string[]): Promise<void> {
-  if (hasHelpFlag(argv)) usage(0);
-  const pos = positionals(argv, new Set(['--port']));
-  if (pos.length > 0) usage();
-  for (const a of flagZone(argv)) {
-    if (a.startsWith('--') && a.split('=')[0] !== '--port') {
-      console.error(`error: unknown option ${a}`);
-      usage();
-    }
-  }
-  const portRaw = flag(argv, '--port');
-  if (portRaw === undefined) {
-    console.error('error: ensure needs --port <n> — the client base url is a fixed port');
-    usage();
-  }
-  const port = Number(portRaw);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    console.error(`error: --port needs an integer 1–65535, got "${portRaw}"`);
-    throw new CommandError('', EXIT.usage);
-  }
+  const port = parseEnsurePort(argv);
   try {
     console.log(await ensureServe(process.cwd(), port));
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
     throw new CommandError('', EXIT.error);
   }
+}
+
+function parseEnsurePort(argv: string[]): number {
+  if (hasHelpFlag(argv)) usage(0);
+  if (positionals(argv, new Set(['--port'])).length > 0) usage();
+  for (const a of flagZone(argv)) {
+    if (a.startsWith('--') && a.split('=')[0] !== '--port') {
+      console.error(`error: unknown option ${a}`);
+      usage();
+    }
+  }
+  const raw = flag(argv, '--port');
+  if (raw === undefined) {
+    console.error('error: ensure needs --port <n> — the client base url is a fixed port');
+    usage();
+  }
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    console.error(`error: --port needs an integer 1–65535, got "${raw}"`);
+    throw new CommandError('', EXIT.usage);
+  }
+  return port;
 }
 
 // --- watchdog ---------------------------------------------------------------
@@ -2399,10 +2403,22 @@ interface ServeContext {
 
 function prepareServe(argv: string[]): ServeContext {
   const port = parseServePort(argv);
-  const anchor = mainWorktreeRoot(process.cwd());
-  if (anchor !== null && anchor !== process.cwd()) {
-    process.chdir(anchor);
+  const callerDir = process.cwd();
+  const anchor = mainWorktreeRoot(callerDir);
+  return inServeRoot(callerDir, anchor, () => prepareServeAt(port));
+}
+
+function inServeRoot<T>(callerDir: string, anchor: string | null, fn: () => T): T {
+  if (anchor !== null && anchor !== callerDir) process.chdir(anchor);
+  try {
+    return fn();
+  } catch (error) {
+    if (process.cwd() !== callerDir) process.chdir(callerDir);
+    throw error;
   }
+}
+
+function prepareServeAt(port: number): ServeContext {
   const dir = process.cwd();
   const statePath = serveStatePath(dir);
   if (statePath === null) {

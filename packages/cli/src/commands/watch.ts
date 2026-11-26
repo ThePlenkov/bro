@@ -1212,13 +1212,7 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   if (dispatchWatchPrelude(argv)) {
     return;
   }
-  let args: ReturnType<typeof watchArgs>;
-  try {
-    args = watchArgs(argv);
-  } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    throw new CommandError('', EXIT.usage);
-  }
+  const args = parseWatchArgs(argv);
   const { json, notify, everySec, forSec } = args;
   const dir = process.cwd();
 
@@ -1262,6 +1256,15 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     return;
   }
   await runWatchPulse(dir, everySec, forSec, tick, expired);
+}
+
+function parseWatchArgs(argv: string[]): ReturnType<typeof watchArgs> {
+  try {
+    return watchArgs(argv);
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    throw new CommandError('', EXIT.usage);
+  }
 }
 
 /** The session pulse (bro-killn): orchestrator-only, one per repo via

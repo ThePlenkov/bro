@@ -107,6 +107,7 @@ function bindPeer(dir: string, b: { alias: string; rig: string; remote: string; 
       cfg.mesh = { ...mesh, peers }
     })
   } catch (e) {
+    if (e instanceof CommandError) throw e;
     console.error(`error: ${e instanceof Error ? e.message : e}`)
     throw new CommandError("", EXIT.usage);
   }
@@ -149,6 +150,7 @@ function cmdPeersRemove(dir: string, args: string[]): void {
       cfg.mesh = { ...mesh, peers }
     })
   } catch (e) {
+    if (e instanceof CommandError) throw e;
     console.error(`error: ${e instanceof Error ? e.message : e}`)
     throw new CommandError("", EXIT.usage);
   }
