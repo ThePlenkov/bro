@@ -65,11 +65,11 @@ describe('PR ownership marking — drive + act merge (bro-c650l)', () => {
     })
   })
 
-  test('drive stamps bro-managed on an orphaned supervised PR before merging it', () => {
+  test('drive stamps bro-managed before merging, then sweeps the transient label', () => {
     const f = hostFixture('bro-own-e2e-')
     inside(f.main, f.root, () => {
       const { row } = driveOnce(f)
-      assert.deepEqual(row.labels, ['bro-managed'])
+      assert.deepEqual(row.labels ?? [], [])
       assert.equal(row.body, '<!-- bro: {"managed":true,"mode":"drive","run":"work/fx-a"} -->')
     })
   })

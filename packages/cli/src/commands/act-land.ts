@@ -30,6 +30,8 @@ import {
   gitTry,
   type MergeQueueFacade,
   mergeQueueHost,
+  PR_MANAGED_LABEL,
+  PR_REVIEW_LABEL,
   type PrTarget,
   prOwnership,
   type ReviewFacade,
@@ -71,6 +73,31 @@ export function dropActState(t?: PrTarget): void {
   }
 }
 
+/** Remove bro's transient PR ownership/provenance markers once the PR has
+ * landed. Debt labels deliberately stay: debt:clean/collected are the
+ * processed marker used by the post-merge debt collector. */
+export function sweepMergedPrLabels(rev: ReviewFacade, t: PrTarget): void {
+  const transient = new Set([PR_MANAGED_LABEL, PR_REVIEW_LABEL, 'bro:bead']);
+  try {
+    for (const label of rev.labels(t)) {
+      if (!transient.has(label)) continue;
+      try {
+        rev.removeLabel(t, label);
+      } catch (err) {
+        console.error(
+          `act: could not remove ${label} from ${rev.prLink(t.repo, t.pr)} — ` +
+            `${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      `act: could not read labels for ${rev.prLink(t.repo, t.pr)} after merge — ` +
+        `${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
 /** mergePr + the landed-head handoff — a merge queue accepts a PR
  *  without landing it, so only a MERGED state returns the head.
  *  An external queue (connectors.mergeQueue) owns the merge when
@@ -100,6 +127,7 @@ export function landPr(
         expectedHeadSha: head.sha,
       });
       if (r === 'merged') {
+        sweepMergedPrLabels(rev, t);
         console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`);
         emitLifecycle(process.cwd(), {
           kind: 'merge',
@@ -133,6 +161,7 @@ export function landPr(
       admin: opts.admin,
     });
     if (after === 'MERGED') {
+      sweepMergedPrLabels(rev, t);
       console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`);
       emitLifecycle(process.cwd(), {
         kind: 'merge',
