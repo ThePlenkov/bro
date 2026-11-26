@@ -59,6 +59,10 @@ export function initRepo(
   seed?.(main);
   git(['add', '-A'], main);
   git(['commit', '-qm', 'init', '--allow-empty'], main);
+  // Reaper safety checks compare unpublished branches with origin/main.
+  // Fixture repos have no remote fetch, so provide the equivalent
+  // remote-tracking ref locally.
+  git(['update-ref', 'refs/remotes/origin/main', 'HEAD'], main);
   return { root, main };
 }
 
@@ -1447,6 +1451,7 @@ peekLoop('worker-start')
 // authoritative when present; the flat prOpened flag feeds the legacy
 // single-PR probes
 const markPrOpened = (s) => {
+  const headSha = sh('git', ['rev-parse', 'HEAD']).trim()
   if (s.prs) {
     s.prs[branch] = {
       ...(s.prs[branch] ?? {}),
@@ -1454,10 +1459,12 @@ const markPrOpened = (s) => {
       state: 'OPEN',
       headRef: branch,
       baseRef: 'main',
+      headSha,
     }
   }
   s.prOpened = true
   s.openPrHead = branch
+  s.headSha = headSha
 }
 // a per-bead wall-clock delay — the fairness test's long worker: the
 // detached spawn means the loop must service other members while this

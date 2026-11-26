@@ -1313,11 +1313,13 @@ async function finalizeMerge(
   alreadyMerged = false
 ): Promise<'landed' | 'parked'> {
   ctx.stage = `merge pr=${pr}`;
+  let mergedHead: string | undefined;
   try {
     if (!alreadyMerged) {
       await ctx.deps.mergePr(pr);
     }
     const meta = ctx.deps.rev.prMeta({ repo: ctx.repo, pr });
+    mergedHead = meta.headSha;
     if (meta.state !== 'MERGED') {
       // a CLOSED PR settled without merging — its sessions are done; an
       // OPEN park keeps the session alive for the next round
@@ -1423,28 +1425,16 @@ async function finalizeMerge(
       if (trees2 !== null) {
         const stillCheckedOut = trees2.some(t => t.branch === item.branch);
         if (!stillCheckedOut) {
-          const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
-          if (br.code !== 0) {
-            ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
-            ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
-          }
+          deleteLocalBranch(ctx, item.branch, mergedHead);
         } else {
           ctx.tails.push(`branch ${item.branch} not deleted — checked out in a worktree`);
           ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
         }
       } else {
-        const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
-        if (br.code !== 0) {
-          ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
-          ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
-        }
+        deleteLocalBranch(ctx, item.branch, mergedHead);
       }
     } catch {
-      const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
-      if (br.code !== 0) {
-        ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
-        ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
-      }
+      deleteLocalBranch(ctx, item.branch, mergedHead);
     }
     // delete remote branch on merge/close (spec bro-jis0c)
     deleteRemoteBranch(ctx, item.branch, '');
@@ -1468,6 +1458,42 @@ function deleteRemoteBranch(ctx: LoopCtx, branch: string, why: string): void {
     `remote branch ${branch} not deleted${why === '' ? '' : ` ${why}`} — ${del.err.trim()}`
   );
   ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
+}
+
+/** Local branch deletion is destructive even when the worktree is gone.
+ *  Merged cleanup may prove the tip is contained by the merged PR head;
+ *  every other reap path must prove the branch has no tree diff from the
+ *  current origin/main. Missing evidence keeps the branch. */
+function branchDeletionAllowed(root: string, branch: string, mergedHead?: string): boolean {
+  const tip = gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}`]);
+  if (tip.code !== 0) {
+    return false;
+  }
+  const tipSha = tip.out.trim();
+  if (mergedHead !== undefined) {
+    const contained = gitTry(['-C', root, 'merge-base', '--is-ancestor', tipSha, mergedHead]);
+    if (contained.code === 0) {
+      return true;
+    }
+  }
+  const base = gitTry(['-C', root, 'rev-parse', '--verify', 'origin/main']);
+  if (base.code !== 0) {
+    return false;
+  }
+  return gitTry(['-C', root, 'diff', '--quiet', base.out.trim(), tipSha]).code === 0;
+}
+
+function deleteLocalBranch(ctx: LoopCtx, branch: string, mergedHead?: string): void {
+  if (!branchDeletionAllowed(ctx.root, branch, mergedHead)) {
+    ctx.tails.push(`branch ${branch} not deleted — unpublished commits`);
+    ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
+    return;
+  }
+  const br = gitTry(['-C', ctx.root, 'branch', '-D', branch]);
+  if (br.code !== 0) {
+    ctx.tails.push(`branch ${branch} not deleted — ${br.err.trim()}`);
+    ctx.deps.error(`loop: ${ctx.tails.at(-1)}`);
+  }
 }
 
 /** The member ids a `loop/` PR's provenance trailer stamps — `bead:
@@ -2152,7 +2178,7 @@ async function serviceGate(ctx: LoopCtx, m: LoopMember): Promise<ServiceVerdict>
         if (rooted.length === 0 && !sessionLive && st.code === 0 && st.out.trim() === '') {
           gitTry(['-C', m.item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
           gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', m.item.worktreeDir]);
-          gitTry(['-C', ctx.root, 'branch', '-D', m.item.branch]);
+          deleteLocalBranch(ctx, m.item.branch);
         } else if (rooted.length === 0 && !sessionLive) {
           ctx.tails.push(
             `worktree ${m.item.worktreeDir} kept on PR close — has uncommitted changes or status unreadable; branch ${m.item.branch} kept with it`
@@ -3120,24 +3146,15 @@ async function reconcileFleet(ctx: LoopCtx): Promise<void> {
             if (trees2 !== null) {
               const stillCheckedOut = trees2.some(t => t.branch === row.headRef);
               if (!stillCheckedOut) {
-                const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
-                if (br.code !== 0) {
-                  ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
-                }
+                deleteLocalBranch(ctx, row.headRef);
               } else {
                 ctx.tails?.push(`branch ${row.headRef} not deleted — checked out in a worktree`);
               }
             } else {
-              const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
-              if (br.code !== 0) {
-                ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
-              }
+              deleteLocalBranch(ctx, row.headRef);
             }
           } catch {
-            const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
-            if (br.code !== 0) {
-              ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
-            }
+            deleteLocalBranch(ctx, row.headRef);
           }
         } catch {
           /* best effort */

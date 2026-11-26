@@ -1308,6 +1308,18 @@ export function deleteMergedLocalBranch(headRef: string, headSha: string): void 
   }
 }
 
+/** A non-merged cleanup path may delete a branch only when its final tree is
+ * identical to origin/main.  This is deliberately fail-closed: a missing
+ * base or branch tip is not evidence that unpublished work is disposable. */
+export function branchHasEmptyDiff(root: string, branch: string): boolean {
+  const base = gitTry(['-C', root, 'rev-parse', '--verify', 'origin/main']);
+  const tip = gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}`]);
+  if (base.code !== 0 || tip.code !== 0) {
+    return false;
+  }
+  return gitTry(['-C', root, 'diff', '--quiet', base.out.trim(), tip.out.trim()]).code === 0;
+}
+
 // --- litter sweep ---------------------------------------------------------------
 //
 // Litter worktrees are disposable by design: the bead's status is the
@@ -1951,13 +1963,15 @@ function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence):
     return;
   }
   if (pr.mergedSha === undefined) {
+    if (!branchHasEmptyDiff(opts.root, c.branch)) {
+      rep.kept.push(`${c.branch} (unpublished commits)`);
+      return;
+    }
     const del = gitTry(['-C', opts.root, 'branch', '-d', c.branch]);
     if (del.code === 0) {
       rep.branches.push(c.branch);
     } else {
-      rep.kept.push(
-        `${c.branch} (${/not fully merged/i.test(del.err) ? 'unlanded commits' : 'branch delete refused'})`
-      );
+      rep.kept.push(`${c.branch} (unpublished commits)`);
     }
     return;
   }

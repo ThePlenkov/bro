@@ -628,9 +628,7 @@ async function runLitterSweepChild(ctx: Ctx, entry: string): Promise<void> {
     const done = (warn?: string): void => {
       for (const line of out.split('\n')) {
         const t = line.trim();
-        // kept lines are the sweep's noise floor — same policy as
-        // sayLitterSweep: relay actions, warnings, and the tally only
-        if (t !== '' && !t.startsWith('kept ')) {
+        if (t !== '') {
           say(ctx, `drive litter: ${t}`);
         }
       }
@@ -724,6 +722,9 @@ function sayLitterSweep(ctx: Ctx, rep: LitterReap): void {
   }
   for (const b of rep.branches) {
     say(ctx, `drive litter: deleted branch ${b}`);
+  }
+  for (const k of rep.kept) {
+    say(ctx, `drive litter: kept ${k}`);
   }
   for (const e of rep.errors) {
     say(ctx, `warning: litter sweep — ${e}`);
