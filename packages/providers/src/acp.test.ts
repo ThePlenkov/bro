@@ -1,13 +1,12 @@
-import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agent } from '@agentclientprotocol/sdk';
+import { describe, test } from 'node:test';
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk';
-import { RequestError } from '@agentclientprotocol/sdk';
-import { JudgeUnavailable } from '@broject/core';
+import { agent, RequestError } from '@agentclientprotocol/sdk';
 import type { JudgeQuestion, ProviderEntry } from '@broject/core';
+import { JudgeUnavailable } from '@broject/core';
 import {
   acpChildEnv,
   acpClient,
@@ -18,8 +17,8 @@ import {
   isSystemoneFamily,
   shellWords,
 } from './acp.ts';
-import { providerClient } from './registry.ts';
 import { otelJournal } from './otel.ts';
+import { providerClient } from './registry.ts';
 import { fakeAcpAgent } from './testkit.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
@@ -661,6 +660,54 @@ await agent({ name: 'fake' })
 });
 
 describe('acpOpen teardown — the pool abort seam', () => {
+  test('closing a spawned peer kills descendants in its process group', async () => {
+    const marker = join(tmpdir(), `bro-acp-descendant-${process.pid}`);
+    const previous = process.env.BRO_TEST_DESCENDANT;
+    const ctl = new AbortController();
+    const entry: AcpEntry = {
+      type: 'acp',
+      command:
+        `node -e "const {spawn}=require('node:child_process');const fs=require('node:fs');` +
+        `const c=spawn('sleep',['30']);fs.writeFileSync(process.env.BRO_TEST_DESCENDANT,` +
+        `String(c.pid));setTimeout(()=>{},30000)"`,
+    };
+    process.env.BRO_TEST_DESCENDANT = marker;
+    let descendantPid: number | undefined;
+    const descendantGone = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    try {
+      const pending = acpOpen('conductor:group', entry, { acp: { signal: ctl.signal } }, deadline());
+      const until = Date.now() + 5_000;
+      while (!existsSync(marker) && Date.now() < until) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.ok(existsSync(marker), 'the peer spawned its descendant');
+      const descendant = Number(readFileSync(marker, 'utf8'));
+      descendantPid = descendant;
+      assert.ok(Number.isInteger(descendant) && descendant > 0, 'the marker contains a pid');
+      ctl.abort();
+      await assert.rejects(pending);
+      const goneBy = Date.now() + 5_000;
+      while (!descendantGone(descendant) && Date.now() < goneBy) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(descendantGone(descendant), true, 'the peer descendant survived close');
+    } finally {
+      if (previous === undefined) delete process.env.BRO_TEST_DESCENDANT;
+      else process.env.BRO_TEST_DESCENDANT = previous;
+      if (descendantPid !== undefined && !descendantGone(descendantPid)) {
+        process.kill(descendantPid, 'SIGKILL');
+      }
+      if (existsSync(marker)) unlinkSync(marker);
+    }
+  });
+
   test('an abort cancels a pending handshake — no wait for the deadline', async () => {
     const ctl = new AbortController();
     // an agent whose initialize never answers — the open settles only
