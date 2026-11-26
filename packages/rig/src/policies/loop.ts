@@ -3545,15 +3545,17 @@ function stampCeilingReservation(file: string, branch: string): void {
   }
 }
 
-function releaseCeilingFile(file: string | null): void {
+function releaseCeilingFile(file: string | null, say: (message: string) => void): void {
   if (file === null) {
     return;
   }
   if (file.startsWith('remote:')) {
     try {
       releaseRemoteCeiling({ handle: file });
-    } catch {
-      /* remote release failed; the lease will expire during the next sweep */
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      /* The lease expires during the next sweep, but keep the operational failure visible. */
+      say(`loop: remote ceiling release failed for ${file}: ${detail}`);
     }
     return;
   }
@@ -3573,7 +3575,7 @@ function releaseMemberReservation(ctx: LoopCtx, member: LoopMember): void {
     return;
   }
   ctx.q.ceilingRes.delete(member.item.branch);
-  releaseCeilingFile(file);
+  releaseCeilingFile(file, ctx.deps.say);
 }
 
 /** The push half of a tick — true when a bead was claimed (drained or
@@ -3720,7 +3722,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, ctx.q.diskProbeWarned), ctx.cfg);
   if (breach !== undefined) {
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     return holdForDisk(ctx, breach);
   }
   if (ctx.q.diskHeld) {
@@ -3737,11 +3739,11 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // a wedged task store surfaces HERE — `bd ready`/`bd update --claim`
     // rethrow by design ("a bd outage must surface", next.ts) — as a
     // held push, never a dead supervisor (bro-cu3q8)
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     return holdForInfra(ctx, 'claim', err);
   }
   if (clump === undefined) {
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     ctx.q.drained = true;
     return false;
   }
@@ -3758,7 +3760,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // a throw past pushItem's own settle arms still owes the claims a
     // release — the same settle its worktree/prompt arms run — then the
     // clump un-sees so the held retry re-picks it (bro-cu3q8)
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     const msg = err instanceof Error ? err.message : String(err);
     const ours = ctx.deps.agents === undefined ? clump : clump.slice(1);
     for (const b of openBeads(ctx, ours)) {
@@ -3775,7 +3777,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // clump is un-seen, and pushes hold (the wall's reset when one was
     // reported) so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     unseeClump(ctx, clump, out.untilMs);
     return false;
   }
@@ -3783,7 +3785,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     // the spawn's own backend wedged — claimStep's store refused on an
     // outage, not a race. The same hold the claim boundary runs:
     // un-see, hold an interval, retry (spec bro-cu3q8)
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
     unseeClump(ctx, clump);
     return holdForInfra(ctx, 'claim', out.why);
   }
@@ -3797,7 +3799,7 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
     }
   } else {
     // parked/failed — no PR will ever list for this admission
-    releaseCeilingFile(ceilingRes);
+    releaseCeilingFile(ceilingRes, ctx.deps.say);
   }
   await recordClaimOutcome(ctx, ids, out);
   return true;

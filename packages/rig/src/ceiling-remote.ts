@@ -20,13 +20,13 @@ interface GitRequest {
 }
 
 function git(request: GitRequest): GitResult {
-  // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
   const r = spawnSync('git', ['-C', request.root, ...request.args], {
+    // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
     input: request.input,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
-  });
+  }); // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -45,7 +45,9 @@ function remoteSha(request: RemoteRefRequest): string | undefined {
 function isEntry(value: unknown): value is RemoteCeilingEntry {
   if (typeof value !== 'object' || value === null) return false;
   const entry = value as Partial<RemoteCeilingEntry>;
-  return typeof entry.id === 'string' && typeof entry.pid === 'number' && typeof entry.ts === 'number';
+  return (
+    typeof entry.id === 'string' && typeof entry.pid === 'number' && typeof entry.ts === 'number'
+  );
 }
 
 interface LedgerReadRequest extends RemoteRefRequest {
@@ -99,9 +101,8 @@ function commitLedger(request: LedgerCommitRequest): string {
     GIT_COMMITTER_NAME: 'bro',
     GIT_COMMITTER_EMAIL: 'bro@localhost',
   };
-  // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
   const commit = spawnSync(
-    'git',
+    'git', // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
     [
       '-C',
       request.root,
@@ -111,7 +112,7 @@ function commitLedger(request: LedgerCommitRequest): string {
       '-m',
       'bro: ceiling reservation',
     ],
-    { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+    { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true } // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
   );
   if (commit.status !== 0) throw new Error('ceiling ledger commit failed');
   return commit.stdout.trim();
@@ -194,11 +195,11 @@ function updateRemoteLedger(request: LedgerUpdateRequest): boolean {
       git({
         root,
         args: [
-        'push',
-        '--quiet',
-        `--force-with-lease=${CEILING_REMOTE_REF}:${before}`,
-        'origin',
-        `${commit}:${CEILING_REMOTE_REF}`,
+          'push',
+          '--quiet',
+          `--force-with-lease=${CEILING_REMOTE_REF}:${before}`,
+          'origin',
+          `${commit}:${CEILING_REMOTE_REF}`,
         ],
       }).status === 0
     )
@@ -225,7 +226,6 @@ export interface RemoteCeilingStamp extends RemoteCeilingHandle {
 export function stampRemoteCeiling(request: RemoteCeilingStamp): boolean {
   return updateRemoteLedger({
     handle: request.handle,
-    update: (entries, id) =>
-      entries.map(e => (e.id === id ? { ...e, branch: request.branch } : e)),
+    update: (entries, id) => entries.map(e => (e.id === id ? { ...e, branch: request.branch } : e)),
   });
 }
