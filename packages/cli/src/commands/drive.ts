@@ -75,6 +75,7 @@ import { basename, join } from 'node:path';
 import {
   awaitFileLock,
   busSocketPath,
+  busStatus,
   busSubscribe,
   checkBeads,
   type ClaimFacade,
@@ -164,6 +165,50 @@ export interface DriveArgs {
   merge: boolean;
   json: boolean;
   connector?: string;
+}
+
+interface BusRecoveryDeps {
+  status: typeof busStatus;
+  spawn: (
+    command: string,
+    args: string[],
+    options: {
+      cwd: string;
+      detached: true;
+      stdio: 'ignore';
+      env: NodeJS.ProcessEnv;
+    }
+  ) => { unref: () => void };
+  entry: string | null;
+}
+
+/** `/run/user` is tmpfs, so a reboot removes the broker socket while the
+ * daemon survives. Recreate the broker from the next drive tick. */
+export async function ensureBusBroker(
+  dir: string,
+  overrides: Partial<BusRecoveryDeps> = {}
+): Promise<boolean> {
+  const socket = busSocketPath(dir);
+  if (socket === null) {
+    return false;
+  }
+  const deps: BusRecoveryDeps = {
+    status: busStatus,
+    spawn,
+    entry: SELF_ENTRY,
+    ...overrides,
+  };
+  if ((await deps.status(socket, { timeoutMs: 1_000 })).running || deps.entry === null) {
+    return false;
+  }
+  const child = deps.spawn(process.execPath, [deps.entry, 'bus', 'serve'], {
+    cwd: dir,
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  });
+  child.unref();
+  return true;
 }
 
 interface EveryToken {
@@ -1141,6 +1186,9 @@ function driveDeps(ctx: Ctx): DriveDeps {
     projectorTick: () => herdrProjectorTick(ctx),
     armProjectorFeed: () => armProjectorEvents(ctx),
     pipelineWake: () => pipelineWakePass(ctx.mainRoot),
+    busTick: async () => {
+      await ensureBusBroker(ctx.mainRoot);
+    },
   };
 }
 

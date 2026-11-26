@@ -21,6 +21,7 @@ import {
   candidateBranches,
   detailMatches,
   driveArgs,
+  ensureBusBroker,
   ensureFixerWorktree,
   fixerAttemptSpent,
   fixerBeadFor,
@@ -81,6 +82,40 @@ describe('driveArgs', () => {
     }
     // the floor fleet already enforces — below it is a busy loop
     assert.equal(driveArgs(['--every', '0.1']).everySec, 0.1);
+  });
+});
+
+describe('ensureBusBroker', () => {
+  test('does not spawn when the broker is healthy', async () => {
+    const { main } = initRepo('bro-drive-bus-healthy-');
+    let spawned = false;
+    const recovered = await ensureBusBroker(main, {
+      status: async socket => ({ running: true, socketPath: socket }),
+      spawn: () => {
+        spawned = true;
+        return { unref: () => {} };
+      },
+      entry: '/cli/index.js',
+    });
+    assert.equal(recovered, false);
+    assert.equal(spawned, false);
+  });
+
+  test('respawns the broker when its runtime socket is gone', async () => {
+    const { main } = initRepo('bro-drive-bus-recover-');
+    let args: string[] | undefined;
+    let unref = false;
+    const recovered = await ensureBusBroker(main, {
+      status: async socket => ({ running: false, socketPath: socket, reason: 'missing' }),
+      spawn: (_command, childArgs) => {
+        args = childArgs;
+        return { unref: () => (unref = true) };
+      },
+      entry: '/cli/index.js',
+    });
+    assert.equal(recovered, true);
+    assert.deepEqual(args, ['/cli/index.js', 'bus', 'serve']);
+    assert.equal(unref, true);
   });
 });
 

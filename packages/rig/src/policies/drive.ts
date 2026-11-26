@@ -207,6 +207,9 @@ export interface DriveDeps {
   /** The pipeline run-waker pass — journaled runs resume when their
    *  awaited input may have settled. */
   pipelineWake: () => Promise<DriveWakeReport>;
+  /** Probe and revive the local event broker after a reboot removes its
+   * runtime socket. */
+  busTick: () => Promise<void>;
 }
 
 /** The policy's own state — config plus the per-pass `DrivePass` the
@@ -1977,6 +1980,11 @@ async function parkAlert(
 
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function pass(ctx: DriveCtx): Promise<void> {
+  try {
+    await ctx.deps.busTick();
+  } catch (err) {
+    ctx.deps.say(`warning: bus recovery failed — ${errText(err)}`);
+  }
   await ctx.deps.laneUsage();
   ctx.deps.lanePause();
   // the litter sweep (bro-7dgu3) — provably-done trees ride the

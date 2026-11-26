@@ -584,6 +584,7 @@ function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}
       w.pipeline += 1;
       return { locked: false, runs: [] };
     },
+    busTick: async () => {},
     ...depOver,
   };
   const ctx: DriveCtx = {
