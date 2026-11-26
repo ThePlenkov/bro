@@ -20,13 +20,14 @@ interface GitRequest {
 }
 
 function git(request: GitRequest): GitResult {
+  // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
   const r = spawnSync('git', ['-C', request.root, ...request.args], {
     input: request.input,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
 interface RemoteRefRequest {
@@ -98,6 +99,7 @@ function commitLedger(request: LedgerCommitRequest): string {
     GIT_COMMITTER_NAME: 'bro',
     GIT_COMMITTER_EMAIL: 'bro@localhost',
   };
+  // NOSONAR S4036: resolve the operator's git installation through PATH; hard-coding a platform path would break supported environments.
   const commit = spawnSync(
     'git',
     [
@@ -112,7 +114,7 @@ function commitLedger(request: LedgerCommitRequest): string {
     { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
   );
   if (commit.status !== 0) throw new Error('ceiling ledger commit failed');
-  return (commit.stdout ?? '').trim();
+  return commit.stdout.trim();
 }
 
 function ledgerLease(before: string | undefined): string {
