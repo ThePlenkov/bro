@@ -17,45 +17,75 @@ export function installOmpSupervision(
   api: Pick<OmpApi, 'sendMessage'>,
   intervalMs = DEFAULT_POLL_MS
 ): () => void {
-  const host: SupervisionHost = {
-    async supervise<T>(spec: SupervisionSpec<T>): Promise<T> {
-      if (spec.native === undefined) {
-        throw new Error('omp supervision requires a native poll');
-      }
-      const native = spec.native;
-      return new Promise<T>((resolve, reject) => {
-        let settled = false;
-        let inFlight = false;
-        const finish = (fn: () => void): void => {
-          if (settled) return;
-          settled = true;
-          clearInterval(timer);
-          fn();
-        };
-        const poll = async (): Promise<void> => {
-          if (settled || inFlight) return;
-          inFlight = true;
-          try {
-            const value = await native();
-            const message = spec.message?.(value) ?? `${spec.name} settled`;
-            api.sendMessage(
-              { customType: 'bro-supervision', content: message, display: false, details: value },
-              { deliverAs: 'steer', triggerTurn: true }
-            );
-            finish(() => resolve(value));
-          } catch (error) {
-            finish(() => reject(error));
-          } finally {
-            inFlight = false;
-          }
-        };
-        const timer = setInterval(() => void poll(), Math.max(1, intervalMs));
-        timer.unref();
-        void poll().catch(() => undefined);
-      });
-    },
-  };
+  const host: SupervisionHost = new OmpSupervisionHost(api, intervalMs);
   return registerSupervisionHost('omp', host);
+}
+
+class OmpSupervisionHost implements SupervisionHost {
+  constructor(
+    private readonly api: Pick<OmpApi, 'sendMessage'>,
+    private readonly intervalMs: number
+  ) {}
+
+  supervise<T>(spec: SupervisionSpec<T>): Promise<T> {
+    const native = spec.native;
+    if (native === undefined) {
+      throw new Error('omp supervision requires a native poll');
+    }
+    return new Promise<T>((resolve, reject) => {
+      const poller = new OmpPoller(this.api, spec, native, resolve, reject);
+      poller.start(this.intervalMs);
+    });
+  }
+}
+
+class OmpPoller<T> {
+  private settled = false;
+  private inFlight = false;
+  private timer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(
+    private readonly api: Pick<OmpApi, 'sendMessage'>,
+    private readonly spec: SupervisionSpec<T>,
+    private readonly native: () => Promise<T>,
+    private readonly resolve: (value: T) => void,
+    private readonly reject: (reason?: unknown) => void
+  ) {}
+
+  start(intervalMs: number): void {
+    this.timer = setInterval(() => void this.poll(), Math.max(1, intervalMs));
+    this.timer.unref();
+    void this.poll();
+  }
+
+  private async poll(): Promise<void> {
+    if (this.settled || this.inFlight) return;
+    this.inFlight = true;
+    try {
+      const value = await this.native();
+      this.sendResult(value);
+      this.finish(() => this.resolve(value));
+    } catch (error) {
+      this.finish(() => this.reject(error));
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private sendResult(value: T): void {
+    const message = this.spec.message?.(value) ?? `${this.spec.name} settled`;
+    this.api.sendMessage(
+      { customType: 'bro-supervision', content: message, display: false, details: value },
+      { deliverAs: 'steer', triggerTurn: true }
+    );
+  }
+
+  private finish(callback: () => void): void {
+    if (this.settled) return;
+    this.settled = true;
+    if (this.timer !== undefined) clearInterval(this.timer);
+    callback();
+  }
 }
 
 export const OMP_SUPERVISION_HOST = 'omp';

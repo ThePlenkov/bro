@@ -2435,6 +2435,11 @@ function modelBase(model) {
 	const inner = open >= 0 && raw.endsWith("]") ? raw.slice(open + 1, -1) : void 0;
 	return inner !== void 0 && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw;
 }
+function isSystemoneVersion(value) {
+	if (value === "latest") return true;
+	const segments = value.split(".");
+	return segments.length > 0 && segments.every((segment) => segment.length > 0 && [...segment].every((char) => char >= "0" && char <= "9"));
+}
 /** A systemone-family model id — `typesafe/jev-<version|latest>`,
 *  possibly router-prefixed (`kilo/orcarouter/typesafe/jev-1.13`), or a
 *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
@@ -2445,7 +2450,15 @@ function modelBase(model) {
 *  context suffix is the same model under an opt-in — it strips before
 *  the test. Lives in core because api-entry normalization consumes it
 *  at parse time, before any provider binding exists. */
-const isSystemoneFamily = (model) => model !== void 0 && /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(modelBase(model));
+function isSystemoneFamily(model) {
+	if (model === void 0) return false;
+	const segments = modelBase(model).split("/");
+	const leaf = segments.at(-1);
+	const isBareModel = segments.length === 1 && leaf?.startsWith("jev-");
+	const isNamespacedModel = segments.length >= 2 && segments.at(-2) === "typesafe" && leaf?.startsWith("jev-");
+	const candidate = (isBareModel || isNamespacedModel) && leaf !== void 0 ? leaf.slice(4) : void 0;
+	return candidate !== void 0 && isSystemoneVersion(candidate);
+}
 const PROVIDER_REGISTRY = {
 	api: {
 		call: "auto",
@@ -6033,6 +6046,14 @@ function gitStacks(dir) {
 }
 
 //#endregion
+//#region packages/core/src/claims.ts
+/** Default lease length — long enough that an interactive session's
+*  hook events renew it long before expiry, short enough that a silently
+*  dead holder frees the resource within a day. `ttlMs: 0` claims never
+*  expire by time (holder liveness still applies). */
+const CLAIM_DEFAULT_TTL_MS = 1440 * 60 * 1e3;
+
+//#endregion
 //#region packages/core/src/hook-spool.ts
 /**
 * Hook spool — the Tier-0 wire format `hooks/run.sh` appends to
@@ -7077,14 +7098,6 @@ function ledgerFacade(opts = {}) {
 }
 
 //#endregion
-//#region packages/core/src/claims.ts
-/** Default lease length — long enough that an interactive session's
-*  hook events renew it long before expiry, short enough that a silently
-*  dead holder frees the resource within a day. `ttlMs: 0` claims never
-*  expire by time (holder liveness still applies). */
-const CLAIM_DEFAULT_TTL_MS = 1440 * 60 * 1e3;
-
-//#endregion
 //#region packages/core/src/claims-store.ts
 /** A pid-less claim whose TTL expired dies only when its session has
 *  been silent this long — the same freshness horizon the `.work`
@@ -7236,9 +7249,7 @@ function claimsFacade(opts = {}) {
 	/** Liveness context — one sessions scan per call; the claims table
 	*  is small (per-session resource leases) so a full scan is honest. */
 	const liveCtx = async (s) => {
-		const stored = await s.sessions({});
-		const sessions = /* @__PURE__ */ new Map();
-		for (const row of stored) sessions.set(sessKey(row.host, row.sid), row);
+		const sessions = new Map((await s.sessions({})).map((row) => [sessKey(row.host, row.sid), row]));
 		return {
 			now: now(),
 			bootTimeMs: bootTimeMs(),
@@ -7259,7 +7270,7 @@ function claimsFacade(opts = {}) {
 	/** `task:*` delegation — the bd claim is the source of truth. The
 	*  facade verifies/assigns through the tasks store; it never writes
 	*  a claims-table row for these URIs. */
-	const taskClaim = async (resource, session, o) => {
+	const taskClaim = async ({ resource, session, options: o }) => {
 		const id = resource.slice(5).trim();
 		if (id === "") throw new Error(`malformed task claim resource: ${JSON.stringify(resource)}`);
 		const s = await store();
@@ -7281,7 +7292,7 @@ function claimsFacade(opts = {}) {
 		};
 		return remoteTaskClaim(ts, resource, id, actor);
 	};
-	const taskRelease = async (resource, session, o) => {
+	const taskRelease = async ({ resource, session, options: o }) => {
 		const id = resource.slice(5).trim();
 		if (id === "") return;
 		const s = await store();
@@ -7297,7 +7308,11 @@ function claimsFacade(opts = {}) {
 		async claim(resource, session, o = {}) {
 			const uri = resource.trim();
 			if (uri === "" || session.host === "" || session.sid === "") throw new Error("claim needs a non-empty resource URI and session key");
-			if (uri.startsWith(TASK_PREFIX)) return taskClaim(uri, session, o);
+			if (uri.startsWith(TASK_PREFIX)) return taskClaim({
+				resource: uri,
+				session,
+				options: o
+			});
 			const s = await store();
 			fresh(s);
 			const ctx = await liveCtx(s);
@@ -7337,7 +7352,11 @@ function claimsFacade(opts = {}) {
 			const uri = resource.trim();
 			if (uri === "") return;
 			if (uri.startsWith(TASK_PREFIX)) {
-				await taskRelease(uri, session, o);
+				await taskRelease({
+					resource: uri,
+					session,
+					options: o
+				});
 				return;
 			}
 			const s = await store();
@@ -7811,41 +7830,69 @@ const DEFAULT_POLL_MS = 5e3;
 * receives the verdict on its next scheduling point.
 */
 function installOmpSupervision(api, intervalMs = DEFAULT_POLL_MS) {
-	return registerSupervisionHost("omp", { async supervise(spec) {
-		if (spec.native === void 0) throw new Error("omp supervision requires a native poll");
-		const native = spec.native;
-		return new Promise((resolve$1, reject) => {
-			let settled = false;
-			const finish = (fn) => {
-				if (settled) return;
-				settled = true;
-				clearInterval(timer);
-				fn();
-			};
-			const poll = async () => {
-				try {
-					const value = await native();
-					const message = spec.message?.(value) ?? `${spec.name} settled`;
-					api.sendMessage({
-						customType: "bro-supervision",
-						content: message,
-						display: false,
-						details: value
-					}, {
-						deliverAs: "steer",
-						triggerTurn: true
-					});
-					finish(() => resolve$1(value));
-				} catch (error) {
-					finish(() => reject(error));
-				}
-			};
-			const timer = setInterval(() => void poll(), Math.max(1, intervalMs));
-			timer.unref();
-			poll().catch(() => void 0);
-		});
-	} });
+	return registerSupervisionHost("omp", new OmpSupervisionHost(api, intervalMs));
 }
+var OmpSupervisionHost = class {
+	constructor(api, intervalMs) {
+		this.api = api;
+		this.intervalMs = intervalMs;
+	}
+	supervise(spec) {
+		const native = spec.native;
+		if (native === void 0) throw new Error("omp supervision requires a native poll");
+		return new Promise((resolve$1, reject) => {
+			new OmpPoller(this.api, spec, native, resolve$1, reject).start(this.intervalMs);
+		});
+	}
+};
+var OmpPoller = class {
+	settled = false;
+	inFlight = false;
+	timer;
+	constructor(api, spec, native, resolve$1, reject) {
+		this.api = api;
+		this.spec = spec;
+		this.native = native;
+		this.resolve = resolve$1;
+		this.reject = reject;
+	}
+	start(intervalMs) {
+		this.timer = setInterval(() => void this.poll(), Math.max(1, intervalMs));
+		this.timer.unref();
+		this.poll();
+	}
+	async poll() {
+		if (this.settled || this.inFlight) return;
+		this.inFlight = true;
+		try {
+			const value = await this.native();
+			this.sendResult(value);
+			this.finish(() => this.resolve(value));
+		} catch (error) {
+			this.finish(() => this.reject(error));
+		} finally {
+			this.inFlight = false;
+		}
+	}
+	sendResult(value) {
+		const message = this.spec.message?.(value) ?? `${this.spec.name} settled`;
+		this.api.sendMessage({
+			customType: "bro-supervision",
+			content: message,
+			display: false,
+			details: value
+		}, {
+			deliverAs: "steer",
+			triggerTurn: true
+		});
+	}
+	finish(callback) {
+		if (this.settled) return;
+		this.settled = true;
+		if (this.timer !== void 0) clearInterval(this.timer);
+		callback();
+	}
+};
 const OMP_SUPERVISION_HOST = "omp";
 
 //#endregion
