@@ -1123,13 +1123,10 @@ export function findPrForReattach(
 ): number | null | 'lookup-error' {
   try {
     const open = rev.prsForBranch(branch);
-    if (open.length > 0) {
-      return open[0]!;
-    }
     // A parked member may have landed after its open-PR-only lookup. Keep
     // the member record attached to the settled PR so the next pass closes
     // the bead instead of re-running the work order.
-    return rev.prsForBranch(branch, 'all')[0] ?? null;
+    return open[0] ?? rev.prsForBranch(branch, 'all')[0] ?? null;
   } catch {
     return 'lookup-error';
   }
