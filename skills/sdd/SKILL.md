@@ -8,9 +8,11 @@ description: "Use when the repo enables spec-driven development (`sdd` section i
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-Spec-driven development: a claimed bead gets a written spec **before**
-code. bro carries the rule, so prompts don't have to — the `sdd`
-connector's hook probes inject the policy into session-start and
+Spec-driven development: a change bead links to the product spec it
+changes **before** code. A product spec describes the enduring product;
+it is not a bead-sized change record and it does not disappear when a
+bead closes. bro carries the rule, so prompts don't have to — the
+`sdd` connector's hook probes inject the policy into session-start and
 prompt-submit context, and in `gate` mode the stop gate blocks once
 while a session's own claim lacks a spec.
 
@@ -26,7 +28,9 @@ The spec tree holds every durable project document, in two classes:
   `<KEY-N>-<slug>.spec.md`, with other `.md` files inside as _parts_,
   not specs. Lifecycle `draft → active → deprecated → removed`;
   bead closure never archives a spec — `removed` is a product
-  decision with provenance in git.
+  decision with provenance in git. One product spec can outlive and be
+  changed by many beads; use `aliases` when consolidating legacy
+  bead-keyed references.
 - **Policy specs** — fixed-path docs (`AGENTS.md`, `REVIEW.md`,
   `CONTRIBUTING.md`) that describe how to think and work here. They
   keep their conventional paths (clients read `AGENTS.md` at the
@@ -50,30 +54,34 @@ The spec tree holds every durable project document, in two classes:
   the product specs it routes to; a policy doc naming no core specs
   is incomplete.
 
-A bead may also carry a `spec:` link to any document — the declared
-link outranks discovered files, and `check` counts the declaration
-itself (resolution is `drift`'s audit). Exempt: `issue_type: chore`
-or `molecule` and beads labeled `trivial` or `debt` — SDD measures
-design mass, not bookkeeping.
+A bead carries a `spec:` link to the product spec (or a part) it
+changes. The declared link outranks discovered files, and `check`
+counts the declaration itself; resolution and conformance are the
+audit's job. A spec may retain legacy bead IDs as aliases, but specs
+do not name beads as their reverse index — the task store supplies
+that lookup. Exempt: `issue_type: chore` or `molecule` and beads
+labeled `trivial` or `debt` — SDD measures design mass, not
+bookkeeping.
 
 ## Requirements and anchors
 
 Product specs list requirements as `## Requirements` items with stable
-anchors `R<n>`; beads and other specs cite them as `KEY-N#R<n>` — the
-link between the spec tree and the bead graph. Cross-references are
-one-directional: beads cite specs, specs never name beads (beads are
-swept; specs persist). The reverse lookup — which beads cite a spec —
-is derived from the task store, never stored in the spec.
+anchors `R<n>`; beads and other specs cite them as `KEY-N#R<n>`. Product
+spec frontmatter declares `owns: [pathspecs]`: every source path must
+have exactly one owning spec (tests, generated files, and vendored
+paths are classified explicitly). Until `owns` metadata is available,
+review the spec's legacy `Owns`/`scope` section, and treat missing
+coverage as incomplete rather than covered.
 
 ## Commands
 
-| Command                | What it does                                                                                                                                                                     |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able                                                   |
-| `bro spec drift [id…]` | Freshness over spec'd **closed** beads (`--all` scans every spec'd bead): `STALE` / `fresh` / `no-scope` / `unverifiable`, spec-vs-scope commit recency. Exit 1 on any STALE     |
-| `bro spec new <id>`    | Scaffold a spec for the bead — target model renders the `brotocol/spec@N` template with an allocated KEY-N id; `--parent <id>` links the tree                                    |
-| `bro spec tree`        | The spec hierarchy — roots, children, MISSING for claimed beads with none                                                                                                        |
-| `bro spec init`        | Bootstrap SDD: detects `.specify/`/`openspec/` and writes `connectors.specs` + `sdd.mode: remind`; on a bare repo scaffolds a native `specs/` root. `--tool` overrides detection |
+| Command                | What it does                                                                                                                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able                                                              |
+| `bro spec drift [id…]` | Compatibility audit for spec/code conformance (`--all` scans all linked work): `conformant` / `spec-ahead` / `code-ahead`, plus explicit unknown inputs; commit timestamps are not evidence |
+| `bro spec new <id>`    | Scaffold a product spec for a change bead — target model renders the `brotocol/spec@N` template with an allocated KEY-N id; `--parent <id>` links the tree                                  |
+| `bro spec tree`        | The spec hierarchy — roots, children, MISSING for claimed beads with none                                                                                                                   |
+| `bro spec init`        | Bootstrap SDD: detects `.specify/`/`openspec/` and writes `connectors.specs` + `sdd.mode: remind`; on a bare repo scaffolds a native `specs/` root. `--tool` overrides detection            |
 
 Engine status: `check`/`drift`/`tree`/`init` run today over the native
 connector (`*.spec.md` + dir specs included); KEY-N allocation in
@@ -114,16 +122,21 @@ beads are never your blocker.
 
 ## Policy
 
-- **Spec first, then code.** Claim → spec (product `*.spec.md` for the
-  change; policy docs only when the work changes how the repo thinks)
-  → implement. The spec lands in the same PR.
+- **Spec first, then code.** Claim → link the product `*.spec.md` (or
+  part) that owns the change; edit it when the product contract changes
+  → implement. Policy docs only are appropriate when the work changes
+  how the repo thinks. A new bead-keyed spec is not a substitute for
+  updating the owning product spec.
 - Small enough to not need design mass? Label the bead `trivial`
   instead of writing an empty spec file — a stub defeats the audit.
 - `bro spec check` is the self-audit; wire it into CI the same way
   `bro review act status` gates PRs.
-- `bro spec drift` audits **shipped** specs — a spec the code moved
-  past is debt to reschedule, not a gate. `unverifiable`/`no-scope`
-  rows report coverage gaps and never fail the run.
+- `bro spec drift` is a conformance audit, not a commit-recency check.
+  `conformant` requires evidence; `spec-ahead` is allowed only with an
+  open linked change bead, while `code-ahead` is always a defect. If
+  both directions occur, report both and decide which side is wrong.
+  Missing or unavailable ownership/evidence is explicit unknown, never
+  a passing result.
 - Policy docs change rarely and deliberately: editing `AGENTS.md` /
   `REVIEW.md` / `CONTRIBUTING.md` rules is a spec-level act — the
   `bro:sdd` region and the rules it binds are reviewed like any spec.

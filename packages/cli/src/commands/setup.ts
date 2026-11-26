@@ -877,7 +877,7 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
 function materializeConfiguredDevinSubagents(): void {
   const configuredAgents = loadBroConfig().agents as Record<string, unknown> | undefined;
   const devin = configuredAgents?.devin;
-  if (devin === undefined || devin === null || typeof devin !== 'object') return;
+  if (!isRecord(devin)) return;
 
   const config = devin as { subagent_model?: unknown; profiles?: unknown; subagents?: unknown };
   const configuredProfiles = config.profiles ?? config.subagents;
@@ -898,4 +898,8 @@ function materializeConfiguredDevinSubagents(): void {
   if (written.length > 0) {
     console.error(`bro setup: materialized ${written.length} Devin subagent file(s)`);
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Object.prototype.toString.call(value) === '[object Object]';
 }
