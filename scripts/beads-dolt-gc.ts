@@ -65,25 +65,39 @@ export function acquireLock(beads: string): () => void {
   const path = join(beads, lockName)
   try {
     mkdirSync(path)
-    writeFileSync(join(path, 'pid'), `${process.pid}\n`)
+    writeFileSync(join(path, 'pid'), `${process.pid}\n`) // NOSONAR -- path is the realpathed operator-selected beads store plus a fixed lock filename.
   } catch {
-    let owner = 'unknown'
-    try {
-      owner = readFileSync(join(path, 'pid'), 'utf8').trim() || owner
-    } catch { /* stale or partially-created lock */ }
-    if (/^\d+$/.test(owner)) {
-      try {
-        process.kill(Number(owner), 0)
-        throw new Error(`maintenance lock is held by pid ${owner}: ${path}`)
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith('maintenance lock')) throw error
-      }
-    }
-    rmSync(path, { recursive: true, force: true })
-    mkdirSync(path)
-    writeFileSync(join(path, 'pid'), `${process.pid}\n`)
+    recoverLock(path)
   }
   return () => rmSync(path, { recursive: true, force: true })
+}
+
+function recoverLock(path: string): void {
+  const owner = lockOwner(path)
+  if (owner !== undefined && processIsAlive(owner)) {
+    throw new Error(`maintenance lock is held by pid ${owner}: ${path}`)
+  }
+  rmSync(path, { recursive: true, force: true })
+  mkdirSync(path)
+  writeFileSync(join(path, 'pid'), `${process.pid}\n`) // NOSONAR -- path is the realpathed operator-selected beads store plus a fixed lock filename.
+}
+
+function lockOwner(path: string): number | undefined {
+  try {
+    const value = readFileSync(join(path, 'pid'), 'utf8') // NOSONAR -- path is the realpathed operator-selected beads store plus a fixed lock filename.
+    return /^\d+$/.test(value.trim()) ? Number(value.trim()) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function runCommand(command: MaintenanceCommand): void {
