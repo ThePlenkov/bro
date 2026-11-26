@@ -27,21 +27,21 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import {
-  facade,
-  gitTry,
-  loadConfig,
-  sessionMode,
-  sessionProject,
   type ClaimConflictPolicy,
   type ClaimFacade,
   type ClaimRow,
   type Connector,
   type ConnectorCtx,
   type EventsFacade,
+  facade,
+  gitTry,
   type LedgerFacade,
+  loadConfig,
   type Mode,
   type PreToolVerdict,
   type SessionKey,
+  sessionMode,
+  sessionProject,
 } from '@broject/core';
 // sendSessionMessage is imported lazily inside noteRefusedClaim:
 // session-msg → sessions → plugins → connectors closes a cycle back onto
@@ -136,33 +136,32 @@ function globTokens(glob: string): GlobTok[] {
   return t;
 }
 
+function globClosure(tokens: GlobTok[], seed: Iterable<number>): Set<number> {
+  const out = new Set<number>();
+  const stack = [...seed];
+  while (stack.length > 0) {
+    const i = stack.pop()!;
+    if (out.has(i)) continue;
+    out.add(i);
+    const tok = tokens[i];
+    if (tok?.k === 'skip') {
+      stack.push(i + 1, tok.skipTo);
+    } else if (tok?.k === 'seg' || tok?.k === 'any') {
+      stack.push(i + 1);
+    }
+  }
+  return out;
+}
+
+function globTokenMatches(tok: GlobTok, c: string): boolean {
+  if (tok.k === 'lit') return tok.c === c;
+  return tok.k === 'one' || tok.k === 'seg' ? c !== '/' : tok.k === 'any';
+}
+
 function globMatch(glob: string, path: string): boolean {
   const t = globTokens(glob);
   const n = t.length;
-  // ε-closure: skip tokens fan out to {i+1, skipTo}, star tokens add
-  // i+1 (their zero-width match); lit/one have no epsilon edges.
-  const closure = (seed: Iterable<number>): Set<number> => {
-    const out = new Set<number>();
-    const stack = [...seed];
-    while (stack.length > 0) {
-      const i = stack.pop()!;
-      if (out.has(i)) {
-        continue;
-      }
-      out.add(i);
-      if (i >= n) {
-        continue;
-      }
-      const tok = t[i]!;
-      if (tok.k === 'skip') {
-        stack.push(i + 1, tok.skipTo);
-      } else if (tok.k === 'seg' || tok.k === 'any') {
-        stack.push(i + 1);
-      }
-    }
-    return out;
-  };
-  let cur = closure([0]);
+  let cur = globClosure(t, [0]);
   for (const ch of path) {
     const next = new Set<number>();
     for (const i of cur) {
@@ -170,13 +169,7 @@ function globMatch(glob: string, path: string): boolean {
         continue;
       }
       const tok = t[i]!;
-      const hit =
-        tok.k === 'lit'
-          ? tok.c === ch
-          : tok.k === 'one' || tok.k === 'seg'
-            ? ch !== '/'
-            : tok.k === 'any';
-      if (hit) {
+      if (globTokenMatches(tok, ch)) {
         // a star that consumed keeps its state — the closure re-adds
         // i+1, so "match some then continue" and "match zero" coexist
         next.add(tok.k === 'seg' || tok.k === 'any' ? i : i + 1);
@@ -185,7 +178,7 @@ function globMatch(glob: string, path: string): boolean {
     if (next.size === 0) {
       return false;
     }
-    cur = closure(next);
+    cur = globClosure(t, next);
   }
   return cur.has(n);
 }
@@ -331,6 +324,41 @@ interface TouchedClaim {
   rows: ClaimRow[];
 }
 
+interface TouchContext {
+  cwdReal: string;
+  pathReals: string[];
+  paths: string[];
+  project: string | null;
+  branch: () => string | undefined;
+}
+
+function rowTouchesClaim(row: ClaimRow, ctx: ConnectorCtx, touch: TouchContext): boolean {
+  const uri = row.resource;
+  if (uri.startsWith(WORKTREE_PREFIX)) {
+    const claimed = normPath(uri.slice(WORKTREE_PREFIX.length), touch.cwdReal);
+    return (
+      insideOrEqual(touch.cwdReal, claimed) ||
+      touch.pathReals.some(path => insideOrEqual(path, claimed))
+    );
+  }
+  if (uri.startsWith(PATH_PREFIX)) {
+    if (!projectCompatible(row, touch.project)) return false;
+    const glob = uri.slice(PATH_PREFIX.length);
+    return touch.paths.some(
+      path =>
+        matchClaimPath(path, glob) ||
+        matchClaimPath(relative(touch.cwdReal, normPath(path, touch.cwdReal)), glob) ||
+        matchClaimPath(relative(ctx.dir, normPath(path, touch.cwdReal)), glob)
+    );
+  }
+  if (uri.startsWith(BRANCH_PREFIX)) {
+    if (!projectCompatible(row, touch.project)) return false;
+    const branch = touch.branch();
+    return branch !== undefined && uri === `${BRANCH_PREFIX}${branch}`;
+  }
+  return false;
+}
+
 /** Group live claim rows by the URIs this tool call touches. */
 function touchedClaims(
   rows: ClaimRow[],
@@ -353,45 +381,16 @@ function touchedClaims(
     }
     return branch;
   };
+  const touch: TouchContext = {
+    cwdReal,
+    pathReals,
+    paths,
+    project,
+    branch: branchOnce,
+  };
   for (const row of rows) {
     const uri = row.resource;
-    let touched = false;
-    if (uri.startsWith(WORKTREE_PREFIX)) {
-      // worktree claims are path-absolute — project-agnostic. The claim
-      // asserts the whole tree below it: the session's cwd inside it
-      // conflicts, and so does a tool-carried path landing inside it.
-      const claimed = normPath(uri.slice(WORKTREE_PREFIX.length), cwdReal);
-      touched = insideOrEqual(cwdReal, claimed) || pathReals.some(p => insideOrEqual(p, claimed));
-    } else if (uri.startsWith(PATH_PREFIX)) {
-      if (!projectCompatible(row, project)) {
-        continue;
-      }
-      const glob = uri.slice(PATH_PREFIX.length);
-      // three frames: raw, cwd-relative, repo-relative (claimants write
-      // globs in either anchor). A tool path outside the anchor resolves
-      // to `../…`, which no in-tree glob matches — claims cannot reach
-      // outside their own tree, exactly as intended. The repo frame
-      // resolves the tool path against the tool's own cwd first —
-      // `file_path: ../src/a.ts` from <repo>/sub means <repo>/src/a.ts.
-      touched = paths.some(
-        p =>
-          matchClaimPath(p, glob) ||
-          matchClaimPath(relative(cwdReal, normPath(p, cwdReal)), glob) ||
-          matchClaimPath(relative(ctx.dir, normPath(p, cwdReal)), glob)
-      );
-    } else if (uri.startsWith(BRANCH_PREFIX)) {
-      if (!projectCompatible(row, project)) {
-        continue;
-      }
-      const b = branchOnce();
-      touched = b !== undefined && uri === `${BRANCH_PREFIX}${b}`;
-    } else {
-      // task:* (the tasks store's), pr:*, role:* — no tool-call mapping
-      continue;
-    }
-    if (!touched) {
-      continue;
-    }
+    if (!rowTouchesClaim(row, ctx, touch)) continue;
     const g = groups.get(uri);
     if (g === undefined) {
       groups.set(uri, [row]);
