@@ -24,7 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   type BroConfig,
@@ -293,7 +293,7 @@ export function writeConfig(opts: {
 /** Install files under root; returns installed count. Warns on drift. */
 export function installFiles(root: string, files: Record<string, string>, what: string): number {
   if (refuseSymlinkedSkills(root, what)) {
-    return 0;
+    return -1;
   }
   return Object.entries(files).reduce(
     (installed, [rel, content]) => installed + installFile(root, rel, content, what),
@@ -307,9 +307,10 @@ function refuseSymlinkedSkills(root: string, what: string): boolean {
   // link into the repo-owned source tree (and can overwrite SKILL.md).
   // Refuse the whole materialisation rather than trying to unlink or
   // repoint a link that another command owns.
-  if (root === join('.agents', 'skills')) {
-    const skillsRoot = join(process.cwd(), root);
-    const linked = linkedSkillEntries(skillsRoot);
+  const skillsRoot = join('.agents', 'skills');
+  if (resolve(process.cwd(), root) === resolve(process.cwd(), skillsRoot)) {
+    const absoluteSkillsRoot = join(process.cwd(), skillsRoot);
+    const linked = linkedSkillEntries(absoluteSkillsRoot);
     if (linked.length > 0) {
       console.error(
         `  refusing to materialise ${what}s through symlinked .agents/skills ` +
@@ -329,19 +330,22 @@ function linkedSkillEntries(skillsRoot: string): string[] {
     if (!statSync(skillsRoot).isDirectory()) {
       return [];
     }
-    return readdirSync(skillsRoot).filter(name => isSymlink(join(skillsRoot, name)));
+    return findSymlinks(skillsRoot);
   } catch {
     // An absent skills root is safe: mkdirSync below will create it.
     return [];
   }
 }
 
-function isSymlink(path: string): boolean {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
+function findSymlinks(root: string, relative = ''): string[] {
+  return readdirSync(join(root, relative), { withFileTypes: true }).flatMap(entry => {
+    const entryRelative = join(relative, entry.name);
+    const entryPath = join(root, entryRelative);
+    if (lstatSync(entryPath).isSymbolicLink()) {
+      return [entryRelative];
+    }
+    return entry.isDirectory() ? findSymlinks(root, entryRelative) : [];
+  });
 }
 
 function installFile(root: string, rel: string, content: string, what: string): number {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, test } from 'node:test';
 import { CONFIG_SCHEMA_URL } from '@broject/core';
 import { installFiles, readPackTree, resolvePackDir, writeConfig } from './setup.ts';
@@ -86,11 +86,29 @@ describe('installFiles', () => {
         { 'demo/SKILL.md': '# setup must not overwrite\n' },
         'skill'
       );
-      assert.equal(installed, 0);
+      assert.equal(installed, -1);
       assert.equal(
         readFileSync(join(main, 'skills/demo/SKILL.md'), 'utf8'),
         '# source stays intact\n'
       );
+    });
+
+    test('normalizes the skills root and detects nested symlinks', () => {
+      const { root, main } = initRepo('bro-setup-nested-skills-link-', dir => {
+        mkdirSync(join(dir, '.agents/skills/demo'), { recursive: true });
+        writeFileSync(join(dir, 'outside.md'), '# source stays intact\n');
+        symlinkSync('../../../outside.md', join(dir, '.agents/skills/demo/link.md'));
+      });
+
+      inside(main, root, () => {
+        const installed = installFiles(
+          `${resolve(main, '.agents', 'skills')}/`,
+          { 'demo/link.md': '# setup must not overwrite\n' },
+          'skill'
+        );
+        assert.equal(installed, -1);
+        assert.equal(readFileSync(join(main, 'outside.md'), 'utf8'), '# source stays intact\n');
+      });
     });
   });
 });
