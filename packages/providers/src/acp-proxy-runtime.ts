@@ -71,7 +71,9 @@ export async function acpProxy(
   downstream: Stream,
   opts: AcpProxyOptions = {}
 ): Promise<number> {
-  const log = opts.log ?? ((line: string) => console.error(line));
+  const log = opts.log ?? ((line: string) => {
+    console.error(line);
+  });
   const sessions = new Map<string, ProxySession>();
   const pending = new Map<JsonRpcId, PendingRequest>();
   /** a2c requests in flight — the second pending table (spec
@@ -539,7 +541,10 @@ export async function acpProxy(
       // upstream and nothing crosses; undefined falls through. A local
       // turn never claims the first-prompt slot, never feeds the gate —
       // it produces no downstream response to hold.
-      const overlay = opts.agent?.prompt;
+      const overlay =
+        opts.agent === undefined
+          ? undefined
+          : (Reflect.get(opts.agent, 'prompt') as AcpAgentOverlay['prompt']);
       if (overlay !== undefined) {
         const outcome = await runOverlay({ overlay, id, own, sessionId, ses, params });
         if (outcome.kind === 'failed') {
@@ -1826,7 +1831,9 @@ export async function acpProxy(
       flushed = await Promise.race([
         closed,
         new Promise<boolean>(r => {
-          const grace = setTimeout(() => r(false), CLOSE_GRACE_MS);
+          const grace = setTimeout(() => {
+            r(false);
+          }, CLOSE_GRACE_MS);
           grace.unref();
         }),
       ]);

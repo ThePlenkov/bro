@@ -100,7 +100,9 @@ class PumpMachine {
       return Promise.resolve(undefined);
     }
     return new Promise<T | undefined>(resolve => {
-      const wake = (): void => resolve(undefined);
+      const wake = (): void => {
+        resolve(undefined);
+      };
       this.wakes.add(wake);
       void p.then(
         v => {
