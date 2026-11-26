@@ -44,7 +44,9 @@ bro sync --pull             # materializes refs/bro/data into the worktree, then
 git fetch origin 'loop/*:loop/*' 'work/*:work/*' 'stack/*:stack/*'
                             # in-flight work as LOCAL refs — `bro drive`
                             # enumerates open PRs from local branches, and a
-                            # clone's are remote-tracking only until fetched
+                            # clone's are remote-tracking only until fetched;
+                            # fetching does not recreate the old worktrees
+git worktree add ../<repo>-<slug> work/<slug>  # repeat for trees you need
 bro drive install           # (0.3.0) re-arms the merge path and brings the supervisor up —
                             # the want-marker is machine-local, so a clone starts with none
 ```
