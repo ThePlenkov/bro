@@ -44,6 +44,14 @@ const shell = (command: string): CreateTerminalRequest =>
     : create('sh', ['-c', command]);
 const node = (script: string, outputByteLimit?: number): CreateTerminalRequest =>
   create(process.execPath, ['-e', script], outputByteLimit);
+const nodeWithEnv = (
+  script: string,
+  env: string,
+  outputByteLimit?: number
+): CreateTerminalRequest => ({
+  ...node(script, outputByteLimit),
+  env: [{ name: 'BRO_TEST_PID_FILE', value: env }],
+});
 
 /** Poll until the child reports the backgrounded grandchild's pid. */
 const pollPidFile = async (file: string): Promise<number> => {
@@ -349,8 +357,9 @@ describe('AcpTerminals', () => {
       try {
         const { terminalId } = await t.create(
           ctx(
-            node(
-              `const { spawn } = require('node:child_process'); const fs = require('node:fs'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' }); fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid)); setTimeout(() => {}, 60_000)`
+            nodeWithEnv(
+              `const { spawn } = require('node:child_process'); const fs = require('node:fs'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' }); fs.writeFileSync(process.env.BRO_TEST_PID_FILE, String(child.pid)); setTimeout(() => {}, 60_000)`,
+              pidFile
             )
           )
         );
@@ -383,8 +392,9 @@ describe('AcpTerminals', () => {
       try {
         const { terminalId } = await t.create(
           ctx(
-            node(
-              `const { spawn } = require('node:child_process'); const fs = require('node:fs'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' }); fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid)); process.exit(0)`
+            nodeWithEnv(
+              `const { spawn } = require('node:child_process'); const fs = require('node:fs'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' }); fs.writeFileSync(process.env.BRO_TEST_PID_FILE, String(child.pid)); process.exit(0)`,
+              pidFile
             )
           )
         );
