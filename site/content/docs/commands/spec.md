@@ -5,28 +5,32 @@ description: Spec coverage, freshness, hierarchy, and connectors for claimed wor
 ---
 
 `bro spec` is the spec-driven development facade. With `sdd.mode`
-enabled it pushes a claimed bead toward a written spec — `remind` is
-advisory (a session-start policy plus a prompt-submit nudge), `gate`
-also blocks the stop once under the `task` aspect. The spec rides the
-feature branch and stays with the implementation.
+enabled it pushes a claimed change toward its product spec — `remind`
+is advisory (a session-start policy plus a prompt-submit nudge), `gate`
+also blocks the stop once under the `task` aspect. Product specs
+describe the enduring product, ride the feature branch when their
+contract changes, and persist after the linked bead closes.
 
 ## What counts as a spec
 
-With the native connector, a non-empty `<sdd.dir>/<bead-id>.md` or
-`<bead-id>.spec.md` counts — `*.spec.md` is the spec marker and counts
-wherever it sits, `bro spec new` scaffolds it. A directory spec counts
-when `<sdd.dir>/<bead-id>/<bead-id>.spec.md` is non-empty (`spec.md`
-and `README.md` remain accepted legacy indexes); nested specs and
-index-bearing subdirectories form its tree, while plain `.md` files in
-an unindexed directory are content, not specs. A `spec:` link in the
-bead description is an external spec.
+With the native connector, a non-empty product spec counts. The
+preferred layout is `<sdd.dir>/<KEY-N>-<slug>.md` or
+`<KEY-N>-<slug>/spec.md`; `*.spec.md` remains the spec marker for
+compatible trees and `bro spec new` scaffolds a node. A directory spec
+counts when its index is non-empty (`spec.md` and `README.md` remain
+accepted legacy indexes); nested specs and index-bearing
+subdirectories form its tree, while plain `.md` files in an unindexed
+directory are content, not specs. A `spec:` link in the bead description
+identifies the product spec or part that owns the change. Legacy
+bead-keyed files may be resolved during migration, but are not the
+product identity.
 
 When a bead has both a `spec:` link and a discovered spec file, the
-declared link wins: `check` reports `link` and `drift` audits the linked
-file. The bead's own statement outranks convention-based discovery.
-Coverage reads the working tree, so an uncommitted spec file already
-counts for `check`; `drift` freshness still needs the spec's commit on
-the ref.
+declared link wins: `check` reports `link` and the audit resolves that
+product spec. The bead's own statement outranks convention-based
+discovery. Coverage reads the working tree, so an uncommitted spec file
+already counts for `check`; conformance is about behavior and ownership,
+not whether a later commit has a newer timestamp.
 
 Chores, molecule ship-beads, and beads labeled `trivial` or `debt` are
 exempt. SDD measures design mass, not bookkeeping, and a harvested
@@ -37,14 +41,33 @@ review finding already carries evidence.
 | Command                             | What it does                                                                                                      |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `bro spec check [id…]`              | Audit coverage for claimed work; `--all` includes open beads and exits non-zero for `MISSING`                     |
-| `bro spec drift [id…]`              | Audit freshness of spec'd beads; `--all` scans all, `--json` emits rows, and `--ref` overrides the comparison ref |
+| `bro spec drift [id…]`              | Audit spec/code conformance; `--all` scans all, `--json` emits rows, and `--ref` overrides the comparison ref     |
 | `bro spec new <id> [--parent <id>]` | Scaffold a spec from the bead title without overwriting                                                           |
 | `bro spec tree`                     | Show roots, children, and missing specs                                                                           |
 | `bro spec init [--tool <name>]`     | Detect or bootstrap an SDD tool and write the connector/mode configuration                                        |
 
-`check` covers claimed work by default. `drift` compares landed code
-scope with the spec and reports `STALE`, `fresh`, `no-scope`, or
-`unverifiable`; only stale rows fail that audit.
+`check` covers claimed work by default. The conformance audit compares
+the behavior of owned code with the product contract and reports
+`conformant`, `spec-ahead`, or `code-ahead`, with missing or unavailable
+evidence explicit as unknown. `spec-ahead` is permitted only when an
+open linked change bead covers the missing behavior; `code-ahead` is
+always a defect. Timestamps, a spec-only touch, or unrelated prose
+edits are not conformance evidence.
+
+## Ownership and conformance
+
+Product spec frontmatter uses `owns: [pathspecs]`. Every source path has
+exactly one owning product spec; tests, generated output, and vendored
+paths are classified explicitly. A behavior change in owned code must
+change that spec (or its relevant part) in the same diff. A reviewed
+`spec unchanged: <reason>` statement is valid only for a refactor or
+other no-behavior fix. Until `owns` metadata is available, use the
+spec's legacy `Owns`/`scope` section and report incomplete coverage
+instead of treating missing ownership as proof of conformance.
+
+Specs persist through bead closure. Removal is a product lifecycle
+decision (`removed`) with provenance in git; closing a change does not
+archive its product spec.
 
 ## Connectors
 
