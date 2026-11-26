@@ -302,8 +302,16 @@ async function verdictFor(
 export async function verifyMergeClose(
   claim: MergeClaim,
   probe: (target: MergeTarget) => Promise<MergeProbe>,
-  identity: MergeRefIdentity = defaultIdentity()
+  identityOrHost: MergeRefIdentity | string = defaultIdentity()
 ): Promise<MergeVerdict> {
+  const identity =
+    typeof identityOrHost === 'string'
+      ? {
+          host: identityOrHost,
+          sameHost: (left: string, right: string): boolean => left === right,
+          sameRepo: (left: string, right: string): boolean => left === right,
+        }
+      : identityOrHost;
   const { target, message } = mergeClaimTarget(claim, identity);
   if (target === undefined) {
     return { ok: false, message: message ?? 'the merge claim names no PR' };
