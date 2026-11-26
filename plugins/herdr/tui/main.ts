@@ -369,9 +369,9 @@ function createFeed(getImpl: () => PaneImpl): Feed {
   };
 
   const arm = (t: SessionTarget): void => {
-    if (t.events === undefined) return;
     const path = t.events;
     cur = { key: targetKey(t), eventsPath: path, offset: 0 };
+    if (path === undefined) return;
     // A window of pure `update` rows attaches to items born outside
     // it — an update storm for one tool call can fill the whole tail
     // and drain zero items. Widen 64KB → 4MB → whole file until a
@@ -517,11 +517,12 @@ export async function runTui(argv: string[]): Promise<void> {
         // A feed and its implementation are one session binding. Keeping
         // either across an attach move leaks the previous agent's model.
         impl = await pickImpl(implArg(argv));
-        impl.setContext?.({ worktree: bind.worktree, agent: bind.agent });
-        pane.writer.reset({ worktree: bind.worktree, agent: bind.agent }, impl.fold === 'folded');
+        const agent = sessionAgentOf(target);
+        impl.setContext?.({ worktree: bind.worktree, agent });
+        pane.writer.reset({ worktree: bind.worktree, agent }, impl.fold === 'folded');
         if (target !== undefined) feed.arm(target);
       }
-      report(target, feed.key !== undefined);
+      report(target, feed.key !== undefined && target?.events !== undefined);
     } finally {
       refreshing = false;
     }
@@ -533,7 +534,7 @@ export async function runTui(argv: string[]): Promise<void> {
   }
 
   try {
-    watch(dirname(statePath), () => void refresh());
+    watch(dirname(statePath), () => void refresh().catch(console.error));
   } catch {
     // the poll alone still rides
   }
@@ -541,7 +542,7 @@ export async function runTui(argv: string[]): Promise<void> {
   await refresh();
   setInterval(() => {
     feed.pump();
-    void refresh();
+    void refresh().catch(console.error);
   }, POLL_MS);
   // the tree commit — opencode's delta-buffer cadence
   setInterval(() => pane.writer.apply(impl.drain()), FLUSH_MS);
