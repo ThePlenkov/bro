@@ -30,5 +30,5 @@ test('remote ceiling CAS admits only one of two clones', () => {
   assert.notEqual(first, null);
   assert.equal(second, 'remote-held');
   assert.equal(typeof first, 'string');
-  assert.equal(releaseRemoteCeiling(first as string), true);
+  assert.equal(releaseRemoteCeiling({ handle: first as string }), true);
 });

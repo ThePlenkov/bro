@@ -3532,7 +3532,7 @@ function reserveCeilingSlot(
 
 function stampCeilingReservation(file: string, branch: string): void {
   if (file.startsWith('remote:')) {
-    stampRemoteCeiling(file, branch);
+    stampRemoteCeiling({ handle: file, branch });
     return;
   }
   try {
@@ -3549,7 +3549,7 @@ function releaseCeilingFile(file: string | null): void {
     return;
   }
   if (file.startsWith('remote:')) {
-    releaseRemoteCeiling(file);
+    releaseRemoteCeiling({ handle: file });
     return;
   }
   try {

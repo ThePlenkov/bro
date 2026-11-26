@@ -12,9 +12,15 @@ export interface RemoteCeilingEntry {
 
 type GitResult = { status: number | null; stdout: string; stderr: string };
 
-function git(root: string, args: string[], input?: string): GitResult {
-  const r = spawnSync('git', ['-C', root, ...args], {
-    input,
+interface GitRequest {
+  root: string;
+  args: string[];
+  input?: string;
+}
+
+function git(request: GitRequest): GitResult {
+  const r = spawnSync('git', ['-C', request.root, ...request.args], {
+    input: request.input,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
@@ -22,8 +28,13 @@ function git(root: string, args: string[], input?: string): GitResult {
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-function remoteSha(root: string, remote: string): string | undefined {
-  const r = git(root, ['ls-remote', remote, CEILING_REMOTE_REF]);
+interface RemoteRefRequest {
+  root: string;
+  remote: string;
+}
+
+function remoteSha(request: RemoteRefRequest): string | undefined {
+  const r = git({ ...request, args: ['ls-remote', request.remote, CEILING_REMOTE_REF] });
   if (r.status !== 0) return undefined;
   const sha = r.stdout.trim().split(/\s+/)[0];
   return sha || undefined;
@@ -35,26 +46,45 @@ function isEntry(value: unknown): value is RemoteCeilingEntry {
   return typeof entry.id === 'string' && typeof entry.pid === 'number' && typeof entry.ts === 'number';
 }
 
-function readEntries(root: string, remote: string, sha: string | undefined): RemoteCeilingEntry[] {
-  if (sha === undefined) return [];
-  const fetched = git(root, [
-    'fetch',
-    '--quiet',
-    remote,
-    `${CEILING_REMOTE_REF}:${CEILING_REMOTE_REF}`,
-  ]);
+interface LedgerReadRequest extends RemoteRefRequest {
+  sha: string | undefined;
+}
+
+function readEntries(request: LedgerReadRequest): RemoteCeilingEntry[] {
+  if (request.sha === undefined) return [];
+  const fetched = git({
+    root: request.root,
+    args: ['fetch', '--quiet', request.remote, `${CEILING_REMOTE_REF}:${CEILING_REMOTE_REF}`],
+  });
   if (fetched.status !== 0) throw new Error('ceiling remote fetch failed');
-  const r = git(root, ['show', `${sha}:reservations.json`]);
+  const r = git({
+    root: request.root,
+    args: ['show', `${request.sha}:reservations.json`],
+  });
   if (r.status !== 0) throw new Error('ceiling remote ledger is corrupt');
   const parsed: unknown = JSON.parse(r.stdout);
   if (!Array.isArray(parsed)) throw new Error('ceiling remote ledger is corrupt');
   return parsed.filter(isEntry);
 }
 
-function commitLedger(root: string, entries: RemoteCeilingEntry[], parent?: string): string {
-  const blob = git(root, ['hash-object', '-w', '--stdin'], JSON.stringify(entries));
+interface LedgerCommitRequest {
+  root: string;
+  entries: RemoteCeilingEntry[];
+  parent?: string;
+}
+
+function commitLedger(request: LedgerCommitRequest): string {
+  const blob = git({
+    root: request.root,
+    args: ['hash-object', '-w', '--stdin'],
+    input: JSON.stringify(request.entries),
+  });
   if (blob.status !== 0) throw new Error('ceiling ledger blob failed');
-  const tree = git(root, ['mktree'], `100644 blob ${blob.stdout.trim()}\treservations.json\n`);
+  const tree = git({
+    root: request.root,
+    args: ['mktree'],
+    input: `100644 blob ${blob.stdout.trim()}\treservations.json\n`,
+  });
   if (tree.status !== 0) throw new Error('ceiling ledger tree failed');
   const env = {
     ...process.env,
@@ -67,10 +97,10 @@ function commitLedger(root: string, entries: RemoteCeilingEntry[], parent?: stri
     'git',
     [
       '-C',
-      root,
+      request.root,
       'commit-tree',
       tree.stdout.trim(),
-      ...(parent ? ['-p', parent] : []),
+      ...(request.parent ? ['-p', request.parent] : []),
       '-m',
       'bro: ceiling reservation',
     ],
@@ -97,11 +127,12 @@ export function reserveRemoteCeiling(options: RemoteCeilingOptions): string | nu
   const { root, max, open, now, pid, branch, activeBranches = new Set<string>() } = options;
   const remote = 'origin';
   for (let attempt = 0; attempt < 3; attempt++) {
-    const before = remoteSha(root, remote);
-    if (before === undefined && git(root, ['remote', 'get-url', remote]).status !== 0) return null;
+    const before = remoteSha({ root, remote });
+    if (before === undefined && git({ root, args: ['remote', 'get-url', remote] }).status !== 0)
+      return null;
     let entries: RemoteCeilingEntry[];
     try {
-      entries = readEntries(root, remote, before).filter(
+      entries = readEntries({ root, remote, sha: before }).filter(
         e => now - e.ts < ENTRY_TTL_MS && (e.branch === undefined || !activeBranches.has(e.branch))
       );
     } catch {
@@ -109,9 +140,16 @@ export function reserveRemoteCeiling(options: RemoteCeilingOptions): string | nu
     }
     if (open + entries.length >= max) return 'remote-held';
     const id = `${pid}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-    const commit = commitLedger(root, [...entries, { id, pid, branch, ts: now }], before);
+    const commit = commitLedger({
+      root,
+      entries: [...entries, { id, pid, branch, ts: now }],
+      parent: before,
+    });
     const lease = `--force-with-lease=${CEILING_REMOTE_REF}:${before ?? ''}`;
-    const pushed = git(root, ['push', '--quiet', lease, remote, `${commit}:${CEILING_REMOTE_REF}`]);
+    const pushed = git({
+      root,
+      args: ['push', '--quiet', lease, remote, `${commit}:${CEILING_REMOTE_REF}`],
+    });
     if (pushed.status === 0) return `remote:${root}:${id}`;
   }
   // A reachable remote that kept changing is still a held slot. Falling
@@ -122,40 +160,61 @@ export function reserveRemoteCeiling(options: RemoteCeilingOptions): string | nu
 
 type LedgerUpdate = (entries: RemoteCeilingEntry[], id: string) => RemoteCeilingEntry[];
 
-function updateRemoteLedger(handle: string, update: LedgerUpdate): boolean {
-  const match = /^remote:(.*):([^:]+)$/.exec(handle);
+interface LedgerUpdateRequest {
+  handle: string;
+  update: LedgerUpdate;
+}
+
+function updateRemoteLedger(request: LedgerUpdateRequest): boolean {
+  const match = /^remote:(.*):([^:]+)$/.exec(request.handle);
   if (!match) return false;
   const [, root, id] = match;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const before = remoteSha(root, 'origin');
+    const before = remoteSha({ root, remote: 'origin' });
     if (before === undefined) return false;
     let entries: RemoteCeilingEntry[];
     try {
-      entries = update(readEntries(root, 'origin', before), id);
+      entries = request.update(readEntries({ root, remote: 'origin', sha: before }), id);
     } catch {
       return false;
     }
-    const commit = commitLedger(root, entries, before);
+    const commit = commitLedger({ root, entries, parent: before });
     if (
-      git(root, [
+      git({
+        root,
+        args: [
         'push',
         '--quiet',
         `--force-with-lease=${CEILING_REMOTE_REF}:${before}`,
         'origin',
         `${commit}:${CEILING_REMOTE_REF}`,
-      ]).status === 0
+        ],
+      }).status === 0
     )
       return true;
   }
   return false;
 }
 
-export function releaseRemoteCeiling(handle: string): boolean {
-  return updateRemoteLedger(handle, (entries, id) => entries.filter(e => e.id !== id));
+export interface RemoteCeilingHandle {
+  handle: string;
 }
 
-export function stampRemoteCeiling(handle: string, branch: string): boolean {
-  return updateRemoteLedger(handle, (entries, id) =>
-    entries.map(e => (e.id === id ? { ...e, branch } : e))
-  );
+export function releaseRemoteCeiling(request: RemoteCeilingHandle): boolean {
+  return updateRemoteLedger({
+    handle: request.handle,
+    update: (entries, id) => entries.filter(e => e.id !== id),
+  });
+}
+
+export interface RemoteCeilingStamp extends RemoteCeilingHandle {
+  branch: string;
+}
+
+export function stampRemoteCeiling(request: RemoteCeilingStamp): boolean {
+  return updateRemoteLedger({
+    handle: request.handle,
+    update: (entries, id) =>
+      entries.map(e => (e.id === id ? { ...e, branch: request.branch } : e)),
+  });
 }
