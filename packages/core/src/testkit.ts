@@ -45,6 +45,17 @@ export function testGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
  * another alert.
  */
 function runTestGit(args: string[], opts: ExecFileSyncOptions = {}): string {
+  if (
+    args.some(
+      arg =>
+        arg === '--upload-pack' ||
+        arg.startsWith('--upload-pack=') ||
+        arg === '--receive-pack' ||
+        arg.startsWith('--receive-pack=')
+    )
+  ) {
+    throw new Error('testGit does not permit custom git transport commands');
+  }
   return execFileSync(
     'git', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
     args,
