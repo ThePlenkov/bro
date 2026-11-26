@@ -53,7 +53,7 @@ export function modelBase(model: string): string {
  *  at parse time, before any provider binding exists. */
 export const isSystemoneFamily = (model: string | undefined): boolean =>
   model !== undefined &&
-  /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(
+  /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$)/.test(
     modelBase(model)
   );
 

@@ -106,6 +106,7 @@ describe('isSystemoneFamily', () => {
     // suffixed product id, not the jev-1.13 pin
     assert.equal(isSystemoneFamily('typesafe/jev-1.13-router'), false);
     assert.equal(isSystemoneFamily('jev-2-router'), false);
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13/router'), false);
     assert.equal(isSystemoneFamily('qwen3-coder'), false);
     assert.equal(isSystemoneFamily('other/jev-1'), false);
     assert.equal(isSystemoneFamily(undefined), false);
@@ -268,6 +269,21 @@ describe('acp call surface — typed mode', () => {
     const fake = fakeAcpAgent({
       configOptions: [MODEL_OPTION],
       failPrompt: 'auth-gateway-504',
+    });
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
+      JudgeUnavailable
+    );
+  });
+
+  test('an auth-worded backend outage stays JudgeUnavailable — text is not auth_required', async () => {
+    const fake = fakeAcpAgent({
+      configOptions: [MODEL_OPTION],
+      failPrompt: 'auth-message',
     });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
