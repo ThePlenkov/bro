@@ -691,6 +691,7 @@ describe('acpOpen teardown — the pool abort seam', () => {
       const descendant = Number(readFileSync(marker, 'utf8'));
       descendantPid = descendant;
       assert.ok(Number.isInteger(descendant) && descendant > 0, 'the marker contains a pid');
+      assert.equal(descendantGone(descendant), false, 'descendant should be alive before close');
       ctl.abort();
       await assert.rejects(pending);
       const goneBy = Date.now() + 5_000;
