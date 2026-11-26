@@ -89,6 +89,19 @@ test('the store surface migrates and then reports up to date', t => {
   assert.match(second.stdout, /up to date/);
 });
 
+test('the store stats surface initializes a fresh ledger', t => {
+  if (!existsSync(CLI)) return t.skip();
+  const db = join(scratch, 'fresh-stats.db');
+  const out = run(['store', 'stats', '--path', db, '--json']);
+  assert.equal(out.code, 0);
+  assert.deepEqual(JSON.parse(out.stdout), {
+    path: db,
+    usage: 0,
+    limits: 0,
+    sessions: 0,
+  });
+});
+
 test('the store surface reports where the ledger lives', t => {
   if (!existsSync(CLI)) return t.skip();
   const out = run(['store', 'path']);

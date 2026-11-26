@@ -48,6 +48,11 @@ async function migrate(path: string, json: boolean): Promise<void> {
 async function stats(path: string, json: boolean): Promise<void> {
   const handle = openOrFail(path);
   try {
+    // Stats is a read surface, but a brand-new router has no tables yet.
+    // Bring the ledger to the current schema just as `health` does so an
+    // empty store is reported accurately rather than as a swallowed query
+    // failure from each missing table.
+    migrateStore(handle.db);
     const counts = await storeStats(handle.db);
     if (json) {
       console.log(JSON.stringify({ path, ...counts }, null, 2));
