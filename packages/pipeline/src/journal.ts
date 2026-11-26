@@ -72,6 +72,9 @@ export interface JournalRow {
    *  resume can't silently swap who may sign the accept gate (a
    *  different `opts.customer` than the journaled one fails closed) */
   customer?: string;
+  /** machine cap supplied at creation; unlike formula limits this survives
+   *  a wake and is restored into RunOptions.maxInFlight */
+  max_in_flight?: number;
   /** content-hash of the formula this run interprets */
   formula_sha: string;
   ts: string;
@@ -117,6 +120,17 @@ export function pipelineJournalPath(loc: JournalLocator): string | null {
   }
   const dir = pipelineDir(loc);
   return dir === null ? null : join(dir, `${loc.runId}.journal.jsonl`);
+}
+
+/** Per-run starter lease. A starter holds this while its async invocation is
+ * live; the waker treats a live holder as ineligible, while a dead holder is
+ * crash residue and remains recoverable. */
+export function pipelineStarterLockPath(loc: JournalLocator): string | null {
+  if (!RUN_ID_RE.test(loc.runId)) {
+    throw new Error(`pipeline starter lock: unsafe run id ${JSON.stringify(loc.runId)}`);
+  }
+  const dir = pipelineDir(loc);
+  return dir === null ? null : join(dir, `${loc.runId}.starter.lock`);
 }
 
 /** The durable journal for a run under `loc.dir`'s git common dir —
@@ -228,7 +242,13 @@ function isJournalRow(v: unknown): v is JournalRow {
   // formula_sha must be PRESENT (a missing field would crash the
   // drift check's .slice) but may be the empty string (runs started
   // without a sha stamp '').
-  return ints && strings && typeof v.formula_sha === 'string';
+  const cap = v.max_in_flight;
+  return (
+    ints &&
+    strings &&
+    typeof v.formula_sha === 'string' &&
+    (cap === undefined || (Number.isInteger(cap) && (cap as number) >= 0))
+  );
 }
 
 /** The whole journal file, malformed lines dropped — a torn last line

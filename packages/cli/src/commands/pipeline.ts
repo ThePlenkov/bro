@@ -790,6 +790,7 @@ async function wakeDeps(dir: string, b: WakeBindings): Promise<WakeDeps> {
           engines: enginesFor(hit.file, hit.loaded.sha),
           dir,
           formulaSha: hit.loaded.sha,
+          ...(view.maxInFlight !== undefined ? { maxInFlight: view.maxInFlight } : {}),
         },
       };
     },

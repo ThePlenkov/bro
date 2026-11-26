@@ -34,6 +34,7 @@ import {
   type MaybePromise,
   type ProviderWall,
   readAgentRegistry,
+  lockHolderPid,
 } from '@broject/core';
 import {
   customerChannelPath,
@@ -49,6 +50,7 @@ import {
   type PipelineJournal,
   pipelineDir,
   RUN_ID_RE,
+  pipelineStarterLockPath,
 } from './journal.ts';
 import {
   flowTail,
@@ -75,6 +77,8 @@ export interface PipelineRunView {
   formulaSha: string;
   /** the run's recorded customer identity (first journaled stamp) */
   customer?: string;
+  /** machine cap journaled when this run was created */
+  maxInFlight?: number;
   /** the last seq-collapsed record — decides the anchor */
   tail: JournalRow;
   /** this item's seq-collapsed records */
@@ -241,6 +245,7 @@ export function scanPipelineRuns(
         journal,
         formulaSha: tail.formula_sha,
         customer: records.find(r => typeof r.customer === 'string')?.customer,
+        maxInFlight: records.find(r => Number.isInteger(r.max_in_flight))?.max_in_flight,
         tail,
         records,
       });
@@ -368,6 +373,16 @@ const fire = (inputs: Record<string, unknown>): Decision => ({
   inputs,
   evaluated: true,
 });
+
+const livePid = (pid: number | null): boolean => {
+  if (pid === null) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** Per-pass shared probe values — walls/registry/occupancy are read
  *  once and reused across every candidate (a pass over N parked runs
@@ -772,6 +787,10 @@ async function wakeOne(
   resume: typeof resumePipeline
 ): Promise<WakeRunReport> {
   const b = base(view);
+  const starterLock = pipelineStarterLockPath({ dir: deps.dir, runId: view.runId });
+  if (starterLock !== null && livePid(lockHolderPid(starterLock))) {
+    return { ...b, action: 'waiting', detail: 'starter invocation still live' };
+  }
   let resolved: ResolvedRun | undefined;
   try {
     resolved = await deps.resolve(view);
@@ -838,7 +857,11 @@ async function wakeOne(
     // waker owns both (fresh fileJournal on the path, runId from the
     // filename); everything else passes through verbatim
     const journal = fileJournal(view.journalPath);
-    await resume(resolved.formula, view.item, journal, resolved.opts);
+    const opts =
+      view.maxInFlight !== undefined && resolved.opts.maxInFlight === undefined
+        ? { ...resolved.opts, maxInFlight: view.maxInFlight }
+        : resolved.opts;
+    await resume(resolved.formula, view.item, journal, opts);
     tryWriteWakeMark(d, view.runId, view.item, { sig, at: new Date().toISOString() });
     return { ...b, action: 'woken' };
   } catch (e) {
