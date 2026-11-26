@@ -289,6 +289,13 @@ Developing bro itself: see CONTRIBUTING.md.
   (default 480s); `spawn.externalBlock: false` is the explicit opt-out.
   The session-quota lanes and provider walls refuse independently —
   the exclusion is a second guard, not a replacement (spec bro-eqi2d).
+- **Quota-paced serial subagents** — a heavy fixer round gets one PR per
+  spawn. Before dispatching, put the ordered work queue in a durable bead;
+  never rely on the prompt or chat history to resume it. A rate-limit or
+  ProviderWall freezes further spawns until the recorded reset plus a safety
+  margin, and `bro fleet can-spawn <provider>` is the cheap pre-flight
+  check. Fixer workers read status and threads for every assigned PR first,
+  then fix in ascending estimated cost, stopping with a near-budget marker.
 - **Foreign findings become requests, never patches** — work that
   belongs to another repo is posted to that rig's inbox, never
   edited in place: `bro request <repo> <title> --for <bead>` drops

@@ -15,6 +15,7 @@ import {
 import {
   agentCell,
   collectAgents,
+  canSpawnFor,
   fleetArgs,
   fleetRows,
   liveFrame,
@@ -27,6 +28,59 @@ import {
 import { registerAgentConnector } from '../agent-connectors.ts';
 import { initRepo } from './testrepo.ts';
 import type { WorktreeInfo } from './work.ts';
+
+describe('fleet can-spawn pre-flight', () => {
+  test('reports an active wall and its reset horizon', () => {
+    const result = canSpawnFor(
+      'kilo',
+      [{ provider: 'kilo', cause: 'rate_limited', until: '2026-01-01T01:00:00Z' }],
+      Date.parse('2026-01-01T00:30:00Z')
+    );
+    assert.deepEqual(result, {
+      provider: 'kilo',
+      canSpawn: false,
+      wall: 'rate_limited',
+      resetAt: '2026-01-01T01:00:00Z',
+    });
+  });
+
+  test('allows a lane after its reset and ignores other providers', () => {
+    assert.deepEqual(
+      canSpawnFor(
+        'kilo',
+        [
+          { provider: 'kilo', cause: 'rate_limited', until: '2026-01-01T01:00:00Z' },
+          { provider: 'other', cause: 'quota' },
+        ],
+        Date.parse('2026-01-01T02:00:00Z')
+      ),
+      {
+        provider: 'kilo',
+        canSpawn: true,
+        wall: 'rate_limited',
+        resetAt: '2026-01-01T01:00:00Z',
+      }
+    );
+  });
+
+  test('blocks when any matching wall has no reset horizon', () => {
+    assert.deepEqual(
+      canSpawnFor(
+        'kilo',
+        [
+          { provider: 'kilo', cause: 'rate_limited', until: '2026-01-01T01:00:00Z' },
+          { provider: 'kilo', cause: 'quota' },
+        ],
+        Date.parse('2026-01-01T02:00:00Z')
+      ),
+      {
+        provider: 'kilo',
+        canSpawn: false,
+        wall: 'quota',
+      }
+    );
+  });
+});
 
 const step = (state: ConvoyStep['state']): ConvoyStep => ({
   id: 'bro-x',

@@ -28,6 +28,7 @@ export {
   buildWorkPrompt,
   expandAgentCmd,
   LEARN_RETRO_CLOSEOUT,
+  SPAWN_QUOTA_POLICY,
 } from './prompt.ts';
 export { memberAction } from './schedule.ts';
 export type {

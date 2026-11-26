@@ -38,7 +38,7 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { flag, positionals } from './args.ts';
-import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
+import { LEARN_RETRO_CLOSEOUT, SPAWN_QUOTA_POLICY } from '@broject/loop';
 import { spawnStepAgent, type StepSpawnRequest } from './agents.ts';
 import { registryEntryState } from './drive.ts';
 import { mainWorktree } from './work.ts';
@@ -96,6 +96,8 @@ export function runnerPrompt(molId: string, repo: string): string {
     "a spec, read it from specs/ first. Run the molecule to 'state: complete' — do NOT",
     'stop at gates you can settle yourself; a real human gate means exit cleanly and',
     'let the runner report the mol gated.',
+    '',
+    SPAWN_QUOTA_POLICY,
     '',
     LEARN_RETRO_CLOSEOUT,
   ].join('\n');
