@@ -328,7 +328,7 @@ function mergeHydrationText(priorCarry: string, text: string): string {
   return text === '' ? priorCarry : `${priorCarry}\n\n${text}`;
 }
 
-function canReuseCommand(resolved: Promise<Command | null>, failedAt: number | undefined): boolean {
+function canReuseCommand(failedAt: number | undefined): boolean {
   return failedAt === undefined || Date.now() - failedAt < RESOLVE_RETRY_MS;
 }
 
@@ -416,9 +416,7 @@ export function createBroDriver<Ctx>(
   let resolvedFailedAt: number | undefined;
   const resolve = deps.resolve ?? resolveCommand;
   const command = (): Promise<Command | null> => {
-    if (resolved === undefined) {
-      // resolve below
-    } else if (canReuseCommand(resolved, resolvedFailedAt)) {
+    if (resolved !== undefined && canReuseCommand(resolvedFailedAt)) {
       return resolved;
     }
     resolvedFailedAt = undefined;

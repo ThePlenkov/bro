@@ -539,7 +539,7 @@ function mergeHydrationText(priorCarry, text) {
 	if (priorCarry === "") return text;
 	return text === "" ? priorCarry : `${priorCarry}\n\n${text}`;
 }
-function canReuseCommand(resolved, failedAt) {
+function canReuseCommand(failedAt) {
 	return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
 }
 function canConsumeHydration(pending, sessionId, hydrated) {
@@ -600,7 +600,7 @@ function createBroDriver(host, api, deps = {}) {
 	let resolvedFailedAt;
 	const resolve = deps.resolve ?? resolveCommand;
 	const command = () => {
-		if (resolved === void 0) {} else if (canReuseCommand(resolved, resolvedFailedAt)) return resolved;
+		if (resolved !== void 0 && canReuseCommand(resolvedFailedAt)) return resolved;
 		resolvedFailedAt = void 0;
 		resolved = resolve({ npxPin: host.npxPin }).then((cmd) => {
 			if (cmd === null) resolvedFailedAt = Date.now();
