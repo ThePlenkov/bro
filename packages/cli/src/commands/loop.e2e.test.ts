@@ -383,7 +383,7 @@ describe('bro loop e2e', () => {
       assert.deepEqual(host.labels, ['bro-managed']);
       assert.equal(
         host.prBody,
-        '<!-- bro: {"managed":true,"bead":"fx-a","mode":"loop","run":"loop/fx-a"} -->'
+        '<!-- bro: {"managed":true,"bead":"fx-a","mode":"loop","run":"loop/fx-a","autoMergeArmed":false} -->'
       );
       // the marker IS the merge-mode contract — a stamped PR lands
       // without the act-merge human-owned warning
