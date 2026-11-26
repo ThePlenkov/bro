@@ -74,7 +74,7 @@ describe('prStateCache', () => {
     const file = join(dir, '.git', 'bro', 'act-state', 'o%2Fr-7.json')
     writeFileSync(file, JSON.stringify({ fetchedAt: Date.now() + 0.5, state: stateFor(7) }))
     assert.equal(cache.read(target), null)
-    assert.equal(cache.fetchedAt(target), null)
+    assert.equal(cache.fetchedAt?.(target) ?? null, null)
   })
 
   test('a corrupt file reads as a miss, never a throw', () => {
