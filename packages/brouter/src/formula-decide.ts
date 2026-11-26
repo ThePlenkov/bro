@@ -766,6 +766,7 @@ async function pickByFormula(input: {
       description:
         c.route.description ?? `chain: ${c.route.chain.map(e => e.provider).join(' → ')}`,
     }));
+    let traceEmitted = false;
     // T3 — the escalate judge rides routePick; it answers only when T2's
     // pick sits in lowConfidence (bro-0ykhg.2)
     const escalate = await escalateJudgeFor(dir, router, input.escalate);
@@ -781,6 +782,7 @@ async function pickByFormula(input: {
           mode: formulaMode(router),
           ...(escalate === undefined ? {} : { escalate }),
           onTrace: pickTrace => {
+            traceEmitted = true;
             const contenders = set.candidates.map(c => c.route.name);
             const t2After = pickTrace.t2Pick === undefined ? contenders : [pickTrace.t2Pick];
             stages.push(
@@ -821,20 +823,22 @@ async function pickByFormula(input: {
         );
       }
     }
-    stages.push(
-      stageRecord({
-        stage: 'T2',
-        before: cascade.candidates.map(c => c.route.name),
-        after: set.candidates.map(c => c.route.name),
-        latencyMs: Date.now() - t2Start,
-        ...{
-          note:
-            named === undefined
-              ? 'the judge named no confident candidate'
-              : `the judge picked ${named}`,
-        },
-      })
-    );
+    if (!traceEmitted) {
+      stages.push(
+        stageRecord({
+          stage: 'T2',
+          before: cascade.candidates.map(c => c.route.name),
+          after: named === undefined ? set.candidates.map(c => c.route.name) : [named],
+          latencyMs: Date.now() - t2Start,
+          ...{
+            note:
+              named === undefined
+                ? 'the judge named no confident candidate'
+                : `the judge picked ${named}`,
+          },
+        })
+      );
+    }
     // memoize the stage answer — a pick formula's T2 output IS the
     // pick name; the CAS write rejects it if an invalidation landed
     // while the judge was thinking
