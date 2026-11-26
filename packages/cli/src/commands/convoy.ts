@@ -119,8 +119,9 @@ function isMergeStep(mol: Molecule, step: ConvoyStep): boolean {
   try {
     declared = formulaSteps(mol.root.title);
   } catch {
-    // the formula is gone — the poured type was the only signal left
-    return false;
+    // Classification is unavailable: fail closed rather than let a
+    // flattened merge step close as a plain task without a verdict.
+    return true;
   }
   return declared.some(s => s.issue_type === MERGE_STEP_TYPE && titleMatches(s.title, step.title));
 }
