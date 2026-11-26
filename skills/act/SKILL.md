@@ -124,12 +124,18 @@ default store, so standard installs already have it).
   the set is complete; a newly discovered sibling site belongs to the same
   round rather than a follow-up push.
 - **Exhaust findings locally before pushing.** A push that flies blind on
+- **Run SAST locally before polling remote checks.** Before the first remote
+  status poll, and before every fix-round push, run `npm run check:sast
+  -- origin/main` (or pass the merge-base ref). This diff-scoped sweep runs
+  type-aware ESLint security rules, non-null assertions, markdownlint, and
+  jscpd over changed files. Fix findings and verify the sweep is clean before
+  asking `bro review act status` or `bro review act wait` to poll GitHub;
+  remote annotations are a trailing signal, not the verifier.
   what remote engines will say is the wave generator — each push
   re-triggers reviewers whose next annotations were already computable.
   Before any fix-round push, run the local engine parity sweep over every
-  file in the diff (the transient eslint-plugin-security +
-  no-non-null-assertion setup, plus tsc; see the check-sast bead for the
-  repo command), not just the flagged files. Zero local findings is the
+  file in the diff (see `npm run check:sast`), not just the flagged files.
+  Zero local findings is the
   bar for "this round is done"; remote annotations landing afterward are
   either genuinely new or stale-DB reposts, and the sweep is how you tell
   which.
