@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   const eslintOk = await lintTypeScript(typeScript);
   const markdownOk = runCli('markdownlint-cli2', markdown, []);
   const duplicationOk = runCli('jscpd', duplicable, ['--silent', '--reporters', 'console']);
-  if (!eslintOk || !markdownOk || !duplicationOk) process.exitCode = 1;
+  process.exitCode = Number(![eslintOk, markdownOk, duplicationOk].every(Boolean));
 }
 
 await main();
