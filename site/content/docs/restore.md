@@ -1,7 +1,7 @@
 ---
 
 title: Restoring a rig on a fresh machine
-description: A rig's durable state lives on git refs and branches — clone, bro sync --pull, bd sync through a dolt remote, bro drive install re-supervises open PRs.
+description: A rig's durable state lives on git refs and branches — clone, bro sync --pull, bd sync through a dolt remote, bro drive install re-supervises open PRs; the machine-local agent registry must be rebuilt.
 ---
 
 _Everything below runs on npm `latest` (**0.3.0**) as written. These
@@ -27,6 +27,12 @@ state ride `refs/bro/data`.
 | Beads store — issues, claims, drill frames, molecules                                                                                                                                                                                                                                                                                       | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync`                                      |
 | Operator config — providers, agent templates, global skills                                                                                                                                                                                                                                                                                 | outside the repo (`~/.config/bro`, `~/.agents`)            | the operator's own backup — restore this first |
 | Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, act watch markers (`<git-common>/bro/watches/`), agent logs, the agent registry (`<git-common>/bro/agents.json`), git worktree registrations, loop run records (`<git-common>/bro/loop/`), stack edges (`<git-common>/bro/stack/`) | nowhere                                                    | restarted below                                |
+
+The agent registry is deliberately machine-local: it lives under the git
+common directory, not in `refs/dolt/data` or another synced ref. A fresh clone
+therefore starts with no registry entries; `bro agents status` cannot report
+workers from the lost machine, and `bro agents up` must create new entries
+before a worker can be respawned.
 
 ## Sequence
 
