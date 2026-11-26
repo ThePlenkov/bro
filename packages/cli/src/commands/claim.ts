@@ -237,7 +237,7 @@ function expandBareResource(a: string, dir: string): string {
     path: () => missingBareValue('path', 'glob'),
   };
   const resolver = Object.getOwnPropertyDescriptor(direct, a)?.value;
-  if (resolver !== undefined) {
+  if (typeof resolver === 'function') {
     return resolver();
   }
   throw new CommandError(
@@ -338,7 +338,7 @@ export function expandResourceWords(words: string[], dir: string): string {
     path: () => pathResourceUri(value),
   };
   const resolver = Object.getOwnPropertyDescriptor(shorthand, head)?.value;
-  if (resolver !== undefined) {
+  if (typeof resolver === 'function') {
     return resolver();
   }
   if (words.length > 1) {
