@@ -8,20 +8,24 @@ parent: project
 
 A bro session must never fix another project's code. Findings that
 belong to a foreign repo become **requests** posted to that rig's
-inbox. On LOCAL and WAIT the requester's own bead blocks on a
-cross-repo dep until the answer lands; on REMOTE it blocks on nothing —
-no checkout means no dep — and the thread itself is the wait. This area
-owns bro's concrete phases on top of the vendor-neutral wire contract
-(specs/mesh) — the bro-5nnj epic.
+inbox. On LOCAL the requester's own bead records an
+`external:<rig>:<id>` dep marker; bd 1.3.1 stores that edge but does
+not resolve it, so `bro mesh wait` is the point-check (and WAIT's
+dedicated watcher is the bounded alternative). On REMOTE it records no
+external dep — no checkout means no dep — and the thread itself is the
+wait. This area owns bro's concrete phases on top of the vendor-neutral
+wire contract (specs/mesh) — the bro-5nnj epic.
 
 ## Phases
 
 - **LOCAL** — `bro request <repo-or-alias> <title>` resolves a
   same-machine checkout, drops a mesh/1 request envelope into the
   target rig's inbox store (the mesh sovereignty rule's `local`
-  carve-out — a shared filesystem trust domain), and `bd dep add
-  <bead> external:<rig>:<id>` wires the waiter; `bro mesh wait` is
-  the point-check. Spec: specs/cross-repo/bro-oam4.md.
+  carve-out — a shared filesystem trust domain), and records the
+  `bd dep add <bead> external:<rig>:<id>` edge as a marker; the
+  target's closed `provides:<id>` issue is the release condition, while
+  `bro mesh wait` is the point-check. Spec:
+  specs/cross-repo/bro-oam4.md.
 - **WAIT** — dedicated `bro wait external:<ref>` watcher (act wait
   pattern: a bounded poll up to `--timeout`, never a between-turn point
   check — that stays `bro mesh wait`) over foreign bead state: read the
