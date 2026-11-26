@@ -454,6 +454,29 @@ interface World {
   reviewedShas: string[];
 }
 
+function reviewDeps(w: World): ReviewFacade {
+  return {
+    prLink: (_repo: string, pr: number) => `[#${pr}](https://github.com/o/r/pull/${pr})`,
+    prMeta: (_t: unknown) => {
+      w.prMetaCalls += 1;
+      const next = w.metaQueue.length > 1 ? w.metaQueue.shift() : w.metaQueue[0];
+      if (next instanceof Error) throw next;
+      return next;
+    },
+    reviewThreads: () => w.threads,
+    checks: () => w.checks,
+    reviewedShas: () => w.reviewedShas,
+    prsForBranch: (branch: string) => w.prsByBranch[branch] ?? [],
+    labels: () => w.labels,
+    createLabel: () => {},
+    addLabel: () => {},
+    removeLabel: () => {},
+    prBody: () => '',
+    updatePrBody: () => {},
+    checkAnnotations: () => [],
+  } as unknown as ReviewFacade;
+}
+
 function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}): World {
   const root = mkdtempSync(join(tmpdir(), 'bro-drive-policy-'));
   const said: string[] = [];
@@ -499,28 +522,7 @@ function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}
     labels: ['bro-managed'],
     reviewedShas: [],
   };
-  const rev = {
-    prLink: (_repo: string, pr: number) => `[#${pr}](https://github.com/o/r/pull/${pr})`,
-    prMeta: (_t: unknown) => {
-      w.prMetaCalls += 1;
-      const next = w.metaQueue.length > 1 ? w.metaQueue.shift() : w.metaQueue[0];
-      if (next instanceof Error) {
-        throw next;
-      }
-      return next;
-    },
-    reviewThreads: () => w.threads,
-    checks: () => w.checks,
-    reviewedShas: () => w.reviewedShas,
-    prsForBranch: (branch: string) => w.prsByBranch[branch] ?? [],
-    labels: () => w.labels,
-    createLabel: () => {},
-    addLabel: () => {},
-    removeLabel: () => {},
-    prBody: () => '',
-    updatePrBody: () => {},
-    checkAnnotations: () => [],
-  } as unknown as ReviewFacade;
+  const rev = reviewDeps(w);
   const store = {
     list: () => rows,
     get: (id: string) => rows.find(r => r.id === id),

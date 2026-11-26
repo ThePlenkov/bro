@@ -66,18 +66,8 @@ interface World {
   full: boolean;
 }
 
-function world(over: Partial<World> = {}): World {
-  const w: World = {
-    spawns: [],
-    sleeps: [],
-    nexts: new Map(),
-    states: new Map(),
-    entries: new Map(),
-    full: false,
-    ...over,
-    deps: undefined as unknown as RunDeps,
-  };
-  w.deps = {
+function worldDeps(w: World): RunDeps {
+  return {
     loadMol: id => {
       if (!w.nexts.has(id)) throw new Error(`molecule ${id} not found`);
       return mol(id);
@@ -105,6 +95,20 @@ function world(over: Partial<World> = {}): World {
     now: () => 1_000_000,
     say: () => {},
   };
+}
+
+function world(over: Partial<World> = {}): World {
+  const w: World = {
+    spawns: [],
+    sleeps: [],
+    nexts: new Map(),
+    states: new Map(),
+    entries: new Map(),
+    full: false,
+    ...over,
+    deps: undefined as unknown as RunDeps,
+  };
+  w.deps = worldDeps(w);
   return w;
 }
 
