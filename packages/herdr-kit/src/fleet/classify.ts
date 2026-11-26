@@ -55,6 +55,9 @@ export interface TreeProjection {
   /** The session-owning agent's `.events.jsonl` archive — the pane's
    *  live cross-process stream (spec bro-l8wqu). */
   events?: string;
+  /** Native session identity projected for every discoverable session,
+   *  including sessions that never entered agents.json. */
+  session?: { id: string; events?: string };
 }
 
 // --- pure classification -------------------------------------------------------
@@ -377,6 +380,9 @@ export interface AgentRow {
   /** The worker's `.events.jsonl` archive path — present only on an
    *  acp row carrying an agentId (the turn plane's archive file). */
   events?: string;
+  /** Native session identity; unlike acpSessionId this is also valid for
+   *  foreign sessions discovered from a host session plane. */
+  session?: { id: string; events?: string };
   /** Recency key — the entry's spawnedAt. */
   at: number;
 }
@@ -476,7 +482,10 @@ export function definedFields<T extends object>(
  *  carries them (acp collapses to `true`, never `false`). */
 function sessionFields(
   s: AgentRow | undefined
-): Pick<TreeProjection, 'acpSessionId' | 'provider' | 'model' | 'log' | 'acp' | 'events'> {
+): Pick<
+  TreeProjection,
+  'acpSessionId' | 'provider' | 'model' | 'log' | 'acp' | 'events' | 'session'
+> {
   if (s === undefined) return {};
   return definedFields({
     acpSessionId: s.acpSessionId,
@@ -485,12 +494,13 @@ function sessionFields(
     log: s.log,
     acp: s.acp === true ? true : undefined,
     events: s.events,
+    session: s.session,
   });
 }
 
 /** A carrier is a row holding an acpSessionId or a log. */
 const carriesSession = (a: AgentRow): boolean =>
-  a.acpSessionId !== undefined || a.log !== undefined;
+  a.acpSessionId !== undefined || a.log !== undefined || a.session !== undefined;
 
 /** Live wins over dead; inside a liveness class the newest carrier
  *  wins — the freshest worker on the tree is the session worth
