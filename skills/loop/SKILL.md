@@ -237,6 +237,11 @@ guards are independent, both must hold.
   install` are the daemon's loop legs — `bro fleet daemon run --loop`
   owns the cadence and `bro/drive.json`'s sibling `loop.json` carries
   the want; a raw `--every` run is an unrecorded owner.
+- **Install has one arm contract across planes.** `bro flow loop
+  install` arms `loop.json`, brings the daemon's loop owner up now, and
+  leaves checkpoint rearm enabled. `watch install`, `pulse`'s implicit
+  arm, and `drive install` use the same want-marker + owner-up-now
+  shape; their command names are policy aliases only.
 
 ## Done means verified-clean, not exited
 

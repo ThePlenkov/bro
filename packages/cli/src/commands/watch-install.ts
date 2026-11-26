@@ -5,12 +5,12 @@
  * already survives reboots; only the cadence needed a home, and the
  * orchestrator session is it (spec: specs/bro-killn.md).
  *
- *   bro watch install [--every N] [--print]   arm the pulse for this repo
+ *   bro watch install [--every N] [--print]   install the pulse arm (want + owner)
  *   bro watch uninstall                       disarm + strip any legacy entry
  *
- * `install` writes `<git-common>/bro/pulse.json` — the want-marker the
- * session-start hook rearms from when no live `bro watch --every` holds
- * `bro/pulse.lock`. Both verbs still strip legacy `bro-watch-<h8>`
+ * `install` writes `<git-common>/bro/pulse.json` — the want-marker and
+ * owner-up contract the session-start hook rearms from when no live
+ * `bro watch --every` holds `bro/pulse.lock`. Both verbs still strip legacy `bro-watch-<h8>`
  * systemd units and managed crontab lines: timers already installed on
  * machines must not double-tick beside the pulse. `--print` emits the
  * marker payload and the rearm command without touching anything.
