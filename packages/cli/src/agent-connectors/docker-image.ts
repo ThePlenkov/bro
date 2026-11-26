@@ -83,7 +83,7 @@ export function buildDevcontainerImage(
   const dcDir = dirname(dcPath);
   const context = resolveBuildContext(dcDir, dc);
   const buildArgs = resolveBuildArgs(dc);
-  const tag = devcontainerTag(dcPath, dockerfile);
+  const tag = devcontainerTag({ dcPath, dockerfile });
   const b = dockerRun({
     args: ['build', '-t', tag, '-f', dockerfile, ...buildArgs, context],
     timeoutMs: 600_000,
@@ -105,7 +105,12 @@ function resolveBuildArgs(dc: Devcontainer): string[] {
   return Object.entries(args).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`]);
 }
 
-function devcontainerTag(dcPath: string, dockerfile: string): string {
+interface DockerTagContext {
+  dcPath: string;
+  dockerfile: string;
+}
+
+function devcontainerTag({ dcPath, dockerfile }: DockerTagContext): string {
   return `bro-dev-${createHash('sha256')
     .update(readFileSync(dcPath, 'utf8'))
     .update('\n')
