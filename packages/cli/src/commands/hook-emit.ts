@@ -17,6 +17,7 @@ import {
   appendHookSpoolRows,
   normalizeHookPayload,
   resolveHookSpoolPath,
+  type SessionPlane,
   sessionPlanes,
   type SpoolOutcome,
   type SpoolRow,
@@ -41,26 +42,17 @@ const NOOP_EMIT: HookEmit = {
  *  | screen | ssh | interactive, env-only. The adapter's spawn env is
  *  the host's own env, so the answer matches what run.sh would have
  *  written for a session in the same terminal. */
+const launcherChecks: ReadonlyArray<readonly [string, (env: NodeJS.ProcessEnv) => boolean]> = [
+  ['agent', env => env.BRO_AGENT_ID !== undefined && env.BRO_AGENT_ID !== ''],
+  ['herdr', env => env.HERDR_ENV === '1' || env.HERDR_PANE_ID !== undefined],
+  ['tmux', env => env.TMUX !== undefined],
+  ['zellij', env => env.ZELLIJ !== undefined],
+  ['screen', env => env.STY !== undefined],
+  ['ssh', env => env.SSH_CONNECTION !== undefined || env.SSH_TTY !== undefined],
+];
+
 function spoolLauncher(env: NodeJS.ProcessEnv): string {
-  if (env.BRO_AGENT_ID !== undefined && env.BRO_AGENT_ID !== '') {
-    return 'agent';
-  }
-  if (env.HERDR_ENV === '1' || env.HERDR_PANE_ID !== undefined) {
-    return 'herdr';
-  }
-  if (env.TMUX !== undefined) {
-    return 'tmux';
-  }
-  if (env.ZELLIJ !== undefined) {
-    return 'zellij';
-  }
-  if (env.STY !== undefined) {
-    return 'screen';
-  }
-  if (env.SSH_CONNECTION !== undefined || env.SSH_TTY !== undefined) {
-    return 'ssh';
-  }
-  return 'interactive';
+  return launcherChecks.find(([, matches]) => matches(env))?.[0] ?? 'interactive';
 }
 
 const emptyUndef = (v: string | undefined): string | undefined =>
@@ -71,6 +63,35 @@ const emptyUndef = (v: string | undefined): string | undefined =>
  *  (a test, a future multi-event caller) still mint distinct pairs, and
  *  the ledger's id-keyed dedup can never merge them. */
 let emitSeq = 0;
+
+type EmitBase = Omit<SpoolRow, 'ts' | 'phase' | 'rc' | 'outcome'>;
+
+function buildEmitBase(
+  context: {
+    plane: SessionPlane;
+    norm: ReturnType<typeof normalizeHookPayload>;
+    event: string;
+    sessionId: string;
+    env: NodeJS.ProcessEnv;
+    t0: number;
+  }
+): EmitBase {
+  const { plane, norm, event, sessionId, env, t0 } = context;
+  return {
+    version: 2,
+    id: `${process.pid}-${t0}-${emitSeq++}`,
+    host: plane.kind,
+    sid: norm.sid ?? (sessionId === '' ? undefined : sessionId),
+    event,
+    pid: process.pid,
+    ppid: process.ppid,
+    agent: emptyUndef(env.BRO_AGENT_ID),
+    adapter: emptyUndef(env.BRO_HOOK_ADAPTER),
+    pluginRoot: emptyUndef(env.BRO_HOOK_PROOT),
+    launcher: spoolLauncher(env),
+    cwd: process.cwd(),
+  };
+}
 
 /** Open a launch when this `bro hooks` invocation is an in-process
  *  adapter's direct call — i.e. a registered plane's `detectHook`
@@ -104,20 +125,7 @@ export function adapterEmitBegin(
     // canonical input.session_id is the fallback — every adapter sends it
     const norm = plane.normalizeHook?.(raw) ?? normalizeHookPayload(raw);
     const t0 = Math.floor(Date.now() / 1000);
-    const base = {
-      version: 2 as const,
-      id: `${process.pid}-${t0}-${emitSeq++}`,
-      host: plane.kind,
-      sid: norm.sid ?? (sessionId === '' ? undefined : sessionId),
-      event,
-      pid: process.pid,
-      ppid: process.ppid,
-      agent: emptyUndef(env.BRO_AGENT_ID),
-      adapter: emptyUndef(env.BRO_HOOK_ADAPTER),
-      pluginRoot: emptyUndef(env.BRO_HOOK_PROOT),
-      launcher: spoolLauncher(env),
-      cwd: process.cwd(),
-    };
+    const base = buildEmitBase({ plane, norm, event, sessionId, env, t0 });
     appendHookSpoolRows([{ ...base, ts: t0, phase: 'start' }], env);
     let outcome: SpoolOutcome = 'ok';
     let ended = false;

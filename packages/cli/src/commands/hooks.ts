@@ -3378,6 +3378,116 @@ async function rotateSpoolBounded(): Promise<void> {
   rotateHookSpool();
 }
 
+type HookEventContext = {
+  event: string;
+  raw: unknown;
+  input: HookInput;
+  root: string;
+  emit: ReturnType<typeof adapterEmitBegin>;
+};
+
+type SpanState = {
+  evSpan: any;
+  evSpanEnded: boolean;
+  evSpanError: { attrs?: Record<string, unknown>; status?: 'error' | 'ok' } | undefined;
+};
+
+function armHookDeadline(
+  event: string,
+  input: HookInput,
+  t0: number,
+  emit: ReturnType<typeof adapterEmitBegin>
+): ReturnType<typeof nodeSetTimeout> {
+  return nodeSetTimeout(() => {
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+    if (!permissionAnswerEmitted) {
+      answerCursorPermission(event, input);
+    }
+    flushPerf(sessionId, event, t0, true);
+    emit.end('watchdog');
+    process.stdout.write('', () => process.exit(0));
+  }, hookDeadlineMs());
+}
+
+function startHookSpan(event: string, input: HookInput, spanState: SpanState): void {
+  void lazyOtelSpan()
+    .then((otelSpan: any) => {
+      try {
+        const span = otelSpan('hook.event', {
+          'hook.event': event,
+          'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+        });
+        if (spanState.evSpanEnded) {
+          try {
+            span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
+          } catch {
+            // ignore
+          }
+          return;
+        }
+        spanState.evSpan = span;
+      } catch {
+        spanState.evSpan = undefined;
+      }
+    })
+    .catch(() => {});
+}
+
+async function dispatchHookEvent(context: HookEventContext): Promise<void> {
+  const { event, raw, input, root, emit } = context;
+  // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
+  // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
+  // gate for a human session that isn't there, so every event is pure
+  // deadline cost. Only session-lifecycle events skip; the git-hook and
+  // operator paths above stay live — installed shims (provenance, the
+  // shared-ref guard) are a different contract the flag must not weaken.
+  if (process.env.BRO_HOOKS === '0') {
+    answerCursorPermission(event, input);
+    emit.mark('fastpath');
+    return;
+  }
+  if (!broEnabled(root) || !enterHookProject(root)) {
+    answerCursorPermission(event, input);
+    emit.mark('fastpath');
+    return;
+  }
+  // session mode — file > `modes.default` > `observe`, resolved once
+  // per event before any probe runs (specs/bro-izpyk.2.md). Every
+  // collector below reads it through hookCtx/ctx.mode; `observe`
+  // sessions get the passive path, mode-active sessions the gated
+  // pipeline + Tier-1 snapshots.
+  resolveHookSessionMode(root, typeof input.session_id === 'string' ? input.session_id : '', raw);
+  perfBuf = [];
+  const t0 = Date.now();
+  const deadlineTimer = armHookDeadline(event, input, t0, emit);
+  deadlineTimer.unref();
+  const spanState: SpanState = {
+    evSpan: undefined as any,
+    evSpanEnded: false,
+    evSpanError: undefined,
+  };
+  startHookSpan(event, input, spanState);
+  const ok = await dispatchWithSpan(event, raw, input, spanState);
+  clearTimeout(deadlineTimer);
+  if (!ok) {
+    emit.mark('error');
+  }
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+  flushPerf(sessionId, event, t0);
+  emitHook(event, input, {
+    sessionId,
+    client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+    durationMs: Date.now() - t0,
+    ok,
+    error: ok ? undefined : 'dispatch threw',
+    dir: root,
+  });
+  // A probe that raced past its budget leaves its bd/gh child running —
+  // unref the stragglers so the hook exits with the answer it sent,
+  // not when the last subprocess closes.
+  unrefPendingChildren();
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
@@ -3424,95 +3534,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     typeof input.session_id === 'string' ? input.session_id : ''
   );
   try {
-    // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
-    // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
-    // gate for a human session that isn't there, so every event is pure
-    // deadline cost. Only session-lifecycle events skip; the git-hook and
-    // operator paths above stay live — installed shims (provenance, the
-    // shared-ref guard) are a different contract the flag must not weaken.
-    if (process.env.BRO_HOOKS === '0') {
-      answerCursorPermission(event, input);
-      emit.mark('fastpath');
-      return;
-    }
-    if (!broEnabled(root) || !enterHookProject(root)) {
-      answerCursorPermission(event, input);
-      emit.mark('fastpath');
-      return;
-    }
-    // session mode — file > `modes.default` > `observe`, resolved once
-    // per event before any probe runs (specs/bro-izpyk.2.md). Every
-    // collector below reads it through hookCtx/ctx.mode; `observe`
-    // sessions get the passive path, mode-active sessions the gated
-    // pipeline + Tier-1 snapshots.
-    resolveHookSessionMode(root, typeof input.session_id === 'string' ? input.session_id : '', raw);
-    perfBuf = [];
-    const t0 = Date.now();
-    const deadlineTimer = nodeSetTimeout(() => {
-      const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-      // the answer goes out before the journal flush — silence on a
-      // permission event is a deny, and a stalled flushPerf must not take
-      // the answer down with it (emit is already synchronous)
-      if (!permissionAnswerEmitted) {
-        answerCursorPermission(event, input);
-      }
-      flushPerf(sessionId, event, t0, true);
-      // the deadline is the adapter path's watchdog — journal the kill
-      // like run.sh's expired run before the exit
-      emit.end('watchdog');
-      // drain barrier — a bare exit can cut a still-queued write; the
-      // run.sh watchdog backstops a pipe that never drains
-      process.stdout.write('', () => process.exit(0));
-    }, hookDeadlineMs());
-    deadlineTimer.unref();
-    const spanState = {
-      evSpan: undefined as any,
-      evSpanEnded: false,
-      evSpanError: undefined as
-        | { attrs?: Record<string, unknown>; status?: 'error' | 'ok' }
-        | undefined,
-    };
-    void lazyOtelSpan()
-      .then((otelSpan: any) => {
-        try {
-          const span = otelSpan('hook.event', {
-            'hook.event': event,
-            'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
-          });
-          if (spanState.evSpanEnded) {
-            try {
-              span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
-            } catch {
-              // ignore
-            }
-            return;
-          }
-          spanState.evSpan = span;
-        } catch {
-          spanState.evSpan = undefined;
-        }
-      })
-      // a failed dynamic import is fail-open — no span, no unhandled rejection
-      .catch(() => {});
-    const ok = await dispatchWithSpan(event, raw, input, spanState);
-    clearTimeout(deadlineTimer);
-    if (!ok) {
-      emit.mark('error');
-    }
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-    flushPerf(sessionId, event, t0);
-    emitHook(event, input, {
-      sessionId,
-      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
-      durationMs: Date.now() - t0,
-      ok,
-      error: ok ? undefined : 'dispatch threw',
-      dir: root,
-    });
-    // A probe that raced past its budget leaves its bd/gh child running —
-    // unref the stragglers so the hook exits with the answer it sent,
-    // not when the last subprocess closes.
-    unrefPendingChildren();
+    await dispatchHookEvent({ event, raw, input, root, emit });
   } finally {
     // every exit pairs its start — first-write-wins keeps the early
     // outcomes (fastpath/error/watchdog) over this default
