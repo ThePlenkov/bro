@@ -129,40 +129,52 @@ export function probesHold(probes: readonly FileProbe[]): boolean {
  *  symbols, cycles, undefined-in-object, non-finite numbers, sparse
  *  arrays) must not be written: the read side would silently see
  *  different values than the live scan. */
-export function isJsonData(v: unknown, depth = 0): boolean {
+function isJsonPrimitive(v: unknown): boolean {
   if (v === null || typeof v === 'boolean' || typeof v === 'string') {
     return true;
   }
-  // NaN and ±Infinity serialize as null — only finite numbers round-trip
-  if (typeof v === 'number') {
-    return Number.isFinite(v);
+  // NaN and ±Infinity serialize as null — only finite numbers round-trip.
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function isJsonArray(v: readonly unknown[], depth: number): boolean {
+  // Neither check alone suffices: every() skips holes, and a hole
+  // plus an extra prop nets the right key count — while
+  // JSON.stringify writes the hole as null and drops the prop. The
+  // key count must equal length (no non-index own enumerable keys
+  // riding along) AND every index must be present (`i in v` — a
+  // hole reads absent).
+  if (Object.keys(v).length !== v.length) {
+    return false;
+  }
+  for (let i = 0; i < v.length; i++) {
+    if (!(i in v) || !isJsonData(v[i], depth + 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isJsonObject(v: object, depth: number): boolean {
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) {
+    return false;
+  }
+  return Object.values(v as Record<string, unknown>).every(item => isJsonData(item, depth + 1));
+}
+
+export function isJsonData(v: unknown, depth = 0): boolean {
+  if (isJsonPrimitive(v)) {
+    return true;
   }
   if (depth > 32) {
     return false;
   }
   if (Array.isArray(v)) {
-    // Neither check alone suffices: every() skips holes, and a hole
-    // plus an extra prop nets the right key count — while
-    // JSON.stringify writes the hole as null and drops the prop. The
-    // key count must equal length (no non-index own enumerable keys
-    // riding along) AND every index must be present (`i in v` — a
-    // hole reads absent).
-    if (Object.keys(v).length !== v.length) {
-      return false;
-    }
-    for (let i = 0; i < v.length; i++) {
-      if (!(i in v) || !isJsonData(v[i], depth + 1)) {
-        return false;
-      }
-    }
-    return true;
+    return isJsonArray(v, depth);
   }
-  if (typeof v === 'object') {
-    const proto = Object.getPrototypeOf(v);
-    if (proto !== Object.prototype && proto !== null) {
-      return false;
-    }
-    return Object.values(v as Record<string, unknown>).every(item => isJsonData(item, depth + 1));
+  if (typeof v === 'object' && v !== null) {
+    return isJsonObject(v, depth);
   }
   return false;
 }
