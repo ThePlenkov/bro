@@ -487,7 +487,11 @@ async function askOrReplayFormula(args: {
     );
     if (t3Used) {
       stages.push(
-        stageRecord('T3', contenders, contenders, 0, {
+        stageRecord({
+          stage: 'T3',
+          before: contenders,
+          after: contenders,
+          latencyMs: 0,
           note: 'cache hit — the escalate answer was replayed',
         })
       );
@@ -780,7 +784,11 @@ async function pickByFormula(input: {
             const contenders = set.candidates.map(c => c.route.name);
             const t2After = pickTrace.t2Pick === undefined ? contenders : [pickTrace.t2Pick];
             stages.push(
-              stageRecord('T2', contenders, t2After, pickTrace.t2LatencyMs, {
+              stageRecord({
+                stage: 'T2',
+                before: contenders,
+                after: t2After,
+                latencyMs: pickTrace.t2LatencyMs,
                 note:
                   pickTrace.t2Pick === undefined
                     ? 'the judge named no confident candidate'
@@ -790,7 +798,11 @@ async function pickByFormula(input: {
             if (pickTrace.t3Attempted) {
               const t3After = pickTrace.finalPick === undefined ? t2After : [pickTrace.finalPick];
               stages.push(
-                stageRecord('T3', t2After, t3After, pickTrace.t3LatencyMs, {
+                stageRecord({
+                  stage: 'T3',
+                  before: t2After,
+                  after: t3After,
+                  latencyMs: pickTrace.t3LatencyMs,
                   ...(pickTrace.t3Merged && pickTrace.finalPick !== undefined
                     ? { decided: pickTrace.finalPick }
                     : {}),
