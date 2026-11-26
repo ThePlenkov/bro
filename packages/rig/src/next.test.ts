@@ -62,59 +62,83 @@ const git = (dir: string, args: string[]): void => {
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
 };
 
+function createGitFixture(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  git(dir, ['init', '-b', 'main']);
+  git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'init']);
+  return dir;
+}
+
+interface FakeBdSetup {
+  fakeDir: string;
+  files: Record<'ready' | 'deps' | 'queue' | 'drill', string>;
+  restore: () => void;
+}
+
+function setupFakeBd(): FakeBdSetup {
+  const fakeDir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+  writeFileSync(join(fakeDir, 'bd'), FAKE_BD);
+  chmodSync(join(fakeDir, 'bd'), 0o755);
+  const files = {
+    ready: join(fakeDir, 'ready.json'),
+    deps: join(fakeDir, 'deps.json'),
+    queue: join(fakeDir, 'queue.json'),
+    drill: join(fakeDir, 'drill.json'),
+  };
+  for (const file of Object.values(files)) {
+    writeFileSync(file, '[]');
+  }
+  const previous: Record<string, string | undefined> = {};
+  const setEnv = (key: string, value: string | undefined): void => {
+    if (!(key in previous)) {
+      previous[key] = process.env[key];
+    }
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  };
+  setEnv('PATH', `${fakeDir}:${process.env.PATH}`);
+  setEnv('FAKE_BD_DIR', fakeDir);
+  setEnv('FAKE_BD_READY', files.ready);
+  setEnv('FAKE_BD_DEPS', files.deps);
+  setEnv('FAKE_BD_QUEUE', files.queue);
+  setEnv('FAKE_BD_DRILL', files.drill);
+  setEnv('BEADS_ACTOR', 'tester');
+  setEnv('BEADS_DIR', undefined);
+  setEnv('BD_ACTOR', undefined);
+  return {
+    fakeDir,
+    files,
+    restore: () => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    },
+  };
+}
+
 /** A real git repo + a scripted `bd` on PATH. The store, the registry
  *  dir, and the worktree plane are all real reads — only the backend
  *  binaries are canned. */
 function fixture(prefix = 'bro-rig-'): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  git(dir, ['init', '-b', 'main']);
-  git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'init']);
-  const fakeDir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
-  writeFileSync(join(fakeDir, 'bd'), FAKE_BD);
-  chmodSync(join(fakeDir, 'bd'), 0o755);
-  const readyFile = join(fakeDir, 'ready.json');
-  const depsFile = join(fakeDir, 'deps.json');
-  const queueFile = join(fakeDir, 'queue.json');
-  const drillFile = join(fakeDir, 'drill.json');
-  writeFileSync(readyFile, '[]');
-  writeFileSync(depsFile, '[]');
-  writeFileSync(queueFile, '[]');
-  writeFileSync(drillFile, '[]');
-  const prev: Record<string, string | undefined> = {};
-  const set = (k: string, v: string | undefined): void => {
-    if (!(k in prev)) prev[k] = process.env[k];
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  };
-  set('PATH', `${fakeDir}:${process.env.PATH}`);
-  set('FAKE_BD_DIR', fakeDir);
-  set('FAKE_BD_READY', readyFile);
-  set('FAKE_BD_DEPS', depsFile);
-  set('FAKE_BD_QUEUE', queueFile);
-  set('FAKE_BD_DRILL', drillFile);
-  set('BEADS_ACTOR', 'tester');
-  // an inherited pin would route a real bd somewhere else — the fake
-  // ignores env, but the store's own probes read it
-  set('BEADS_DIR', undefined);
-  set('BD_ACTOR', undefined);
+  const dir = createGitFixture(prefix);
+  const fake = setupFakeBd();
   return {
     dir,
-    row: (id, row) => writeFileSync(join(fakeDir, `show-${id}.json`), JSON.stringify([row])),
-    ready: rows => writeFileSync(readyFile, JSON.stringify(rows)),
-    deps: rows => writeFileSync(depsFile, JSON.stringify(rows)),
+    row: (id, row) => writeFileSync(join(fake.fakeDir, `show-${id}.json`), JSON.stringify([row])),
+    ready: rows => writeFileSync(fake.files.ready, JSON.stringify(rows)),
+    deps: rows => writeFileSync(fake.files.deps, JSON.stringify(rows)),
     listed: (rows, label = 'queue') =>
-      writeFileSync(label === 'queue' ? queueFile : drillFile, JSON.stringify(rows)),
+      writeFileSync(label === 'queue' ? fake.files.queue : fake.files.drill, JSON.stringify(rows)),
     agents: entries => {
       const bro = join(dir, '.git', 'bro');
       mkdirSync(bro, { recursive: true });
       writeFileSync(join(bro, 'agents.json'), JSON.stringify(entries));
     },
-    restore: () => {
-      for (const [k, v] of Object.entries(prev)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    },
+    restore: fake.restore,
   };
 }
 
