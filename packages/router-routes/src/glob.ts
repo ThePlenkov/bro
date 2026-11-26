@@ -74,17 +74,12 @@ function segmentMatch(pattern: string, text: string): boolean {
   const p = [...pattern];
   const t = [...text];
   const s: SegmentScan = { pi: 0, ti: 0, starP: -1, starT: 0 };
-  // a dead mismatch fails immediately — it must NOT fall through to
-  // the trailing-star skip, which would read a spent pattern as a match
-  while (s.ti < t.length) {
-    if (!scanStep(p, t, s)) {
-      return false;
-    }
+  // A dead mismatch leaves text unconsumed. Once the text is consumed,
+  // only trailing stars can still complete the pattern.
+  while (s.ti < t.length && scanStep(p, t, s)) {
+    // scanStep advances the state or reports an unbacktrackable mismatch.
   }
-  while (p.at(s.pi) === '*') {
-    s.pi += 1;
-  }
-  return s.pi >= p.length;
+  return s.ti === t.length && p.slice(s.pi).every(char => char === '*');
 }
 
 /** Compile one glob into segments — leading/trailing slashes and
@@ -158,16 +153,14 @@ export function matchGlob(pattern: string, path: string): boolean {
  *  fold would otherwise strip the leading `\` and silently match
  *  `foo`-shaped globs (bro-0ykhg.2 review). */
 export function isRepoRelativePath(path: string): boolean {
-  // the first character decides every rooted form: '' (the empty
-  // path — includes('') is true), '/', '~', and ANY leading '\' —
-  // root-relative or UNC — all reject in one clause
-  if ('/~\\'.includes(path.charAt(0))) {
-    return false;
-  }
-  // a drive prefix — 'C:…' with or without a separator — is never
-  // repo-relative either
-  if (/^[A-Za-z]:/.test(path)) {
-    return false;
-  }
-  return !path.split(/[\\/]/).includes('..');
+  const invalidPath = [
+    // Empty, rooted, home-relative, and Windows root-relative paths.
+    path.length === 0,
+    '/~\\'.includes(path.charAt(0)),
+    // A drive prefix is absolute in both `C:/repo` and `C:repo` forms.
+    /^[A-Za-z]:/.test(path),
+    // Parent segments can escape the repository regardless of separator.
+    path.split(/[\\/]/).includes('..'),
+  ];
+  return !invalidPath.some(Boolean);
 }
