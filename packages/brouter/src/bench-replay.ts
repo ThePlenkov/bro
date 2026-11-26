@@ -27,7 +27,7 @@
  *   outcome, so recall can never retrieve its test label.
  */
 import { performance } from 'node:perf_hooks';
-import type { DecideResult, JudgeFacade, ProviderEntry } from '@broject/core';
+import type { JudgeFacade, ProviderEntry } from '@broject/core';
 import { loadConfig } from '@broject/core';
 import {
   chainedJudge,
@@ -460,6 +460,53 @@ function modelContender(deps: {
   };
   let streak = 0;
   let aborted: string | undefined;
+  const modelState = (input: ContenderInput): Record<string, string> =>
+    input.decision.rubric === undefined
+      ? { task: input.decision.taskText }
+      : { task: input.decision.taskText, rubric: input.decision.rubric };
+  const modelPick = (
+    result: Awaited<ReturnType<JudgeFacade['decide']>>,
+    options: Array<{ name: string; description: string }>
+  ): string | null => {
+    const answer = result.answers['route'];
+    const confident =
+      answer?.type === 'choice' &&
+      !result.lowConfidence.includes('route') &&
+      options.some(option => option.name === answer.choice);
+    return confident && answer?.type === 'choice' ? answer.choice : null;
+  };
+  const invoke = async (
+    input: ContenderInput,
+    state: {
+      judge: JudgeFacade;
+      started: number;
+      options: Array<{ name: string; description: string }>;
+    }
+  ): Promise<ContenderAnswer> => {
+    try {
+      runBudget.remaining -= 1;
+      const result = await state.judge.decide(modelState(input), routePickQuestions(state.options));
+      streak = 0;
+      return {
+        status: 'answered',
+        pick: modelPick(result, state.options),
+        latencyMs: performance.now() - state.started,
+        ...(result.usage?.costUsd === undefined ? {} : { costUsd: result.usage.costUsd }),
+      };
+    } catch (err) {
+      streak += 1;
+      const error = err instanceof Error ? err.message : String(err);
+      if (streak >= MODEL_ABORT_STREAK) {
+        aborted = `${streak} consecutive decide() failures — last: ${error}`;
+      }
+      return {
+        status: 'failed',
+        error,
+        callMade: true,
+        latencyMs: performance.now() - state.started,
+      };
+    }
+  };
   const contender: BenchContender = {
     id,
     kind: 'model',
@@ -481,49 +528,22 @@ function modelContender(deps: {
       }
       const { decision } = input;
       const options = decision.candidates.map(c => ({ name: c.name, description: c.description }));
-      const questions = routePickQuestions(options);
-      const state =
-        decision.rubric === undefined
-          ? { task: decision.taskText }
-          : { task: decision.taskText, rubric: decision.rubric };
       const started = performance.now();
-      let res: DecideResult;
-      let bound = false;
       try {
         const judge = await bind();
-        bound = true;
-        runBudget.remaining -= 1; // the invocation is the spend — count it before it lands
-        res = await judge.decide(state, questions);
+        return await invoke(input, { judge, started, options });
       } catch (err) {
-        streak += 1;
         const error = err instanceof Error ? err.message : String(err);
         // a BIND failure is the contender's own defect — it rides
         // bindError so the metrics row reports 'failed', not 0%. A
         // decide() failure is per-call: the failed count carries it
         // and a later success still lands the contender's verdict
-        if (!bound) contender.bindError ??= error;
-        if (streak >= MODEL_ABORT_STREAK) {
-          aborted = `${streak} consecutive decide() failures — last: ${error}`;
-        }
+        contender.bindError ??= error;
         return {
           status: 'failed',
           error,
-          ...(bound ? { callMade: true, latencyMs: performance.now() - started } : {}),
         };
       }
-      streak = 0;
-      const latencyMs = performance.now() - started;
-      const answer = res.answers['route'];
-      const confident =
-        answer?.type === 'choice' &&
-        !res.lowConfidence.includes('route') &&
-        options.some(o => o.name === answer.choice);
-      return {
-        status: 'answered',
-        pick: confident && answer?.type === 'choice' ? answer.choice : null,
-        latencyMs,
-        ...(res.usage?.costUsd === undefined ? {} : { costUsd: res.usage.costUsd }),
-      };
     },
   };
   return contender;
@@ -696,6 +716,80 @@ const percentile = (sorted: number[], p: number): number =>
     ? 0
     : sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!;
 
+type TallyState = {
+  latencies: number[];
+  labelled: number;
+  agreed: number;
+  madeCalls: number;
+  costKnown: boolean;
+};
+
+type TallyInput = {
+  metrics: ContenderMetrics;
+  state: TallyState;
+  contender: BenchContender;
+  decision: ReplayDecision;
+  answer: ContenderAnswer;
+};
+
+function tallyFailed(input: TallyInput): void {
+  const { metrics, state, contender, answer } = input;
+  metrics.failed += 1;
+  if (contender.kind === 'model') {
+    if (answer.status === 'failed' && answer.callMade === true) {
+      metrics.cost.unknownCalls += 1;
+      state.costKnown = false;
+    }
+  }
+  if (answer.status === 'failed' && answer.latencyMs !== undefined) {
+    state.latencies.push(answer.latencyMs);
+  }
+}
+
+function tallyAnswered(input: TallyInput): void {
+  const { metrics, state, contender, answer } = input;
+  if (answer.status !== 'answered') return;
+  metrics.answered += 1;
+  if (answer.pick === null) {
+    metrics.abstained += 1;
+  } else {
+    metrics.picks[answer.pick] = (metrics.picks[answer.pick] ?? 0) + 1;
+  }
+  state.latencies.push(answer.latencyMs);
+  state.madeCalls += 1;
+  if (contender.kind !== 'model') return;
+  if (answer.costUsd === undefined) {
+    metrics.cost.unknownCalls += 1;
+    state.costKnown = false;
+  } else {
+    metrics.cost.knownCalls += 1;
+    metrics.cost.totalUsd += answer.costUsd;
+  }
+}
+
+function tallyAgreement(input: TallyInput): void {
+  const { state, decision, answer } = input;
+  if (answer.status !== 'answered') return;
+  if (decision.outcomeClass !== 'success') return;
+  if (decision.observedRoute === null) return;
+  state.labelled += 1;
+  if (answer.pick === decision.observedRoute) state.agreed += 1;
+}
+
+function tallyAnswer(input: TallyInput): void {
+  const { metrics, state, contender, decision, answer } = input;
+  if (answer.status === 'skipped') {
+    metrics.skipped += 1;
+    return;
+  }
+  if (answer.status === 'failed') {
+    tallyFailed(input);
+    return;
+  }
+  tallyAnswered(input);
+  tallyAgreement(input);
+}
+
 /** Fold one contender's answers into its metrics row. */
 function tallyContender(
   contender: BenchContender,
@@ -718,62 +812,15 @@ function tallyContender(
     costUsdPer1k: 'unknown',
     picks: ownBag<number>(),
   };
-  const latencies: number[] = [];
-  let labelled = 0;
-  let agreed = 0;
-  let madeCalls = 0;
-  let costKnown = true;
+  const state: TallyState = {
+    latencies: [],
+    labelled: 0,
+    agreed: 0,
+    madeCalls: 0,
+    costKnown: true,
+  };
   for (const { decision, answer } of rows) {
-    if (answer.status === 'skipped') {
-      metrics.skipped += 1;
-      continue;
-    }
-    if (answer.status === 'failed') {
-      metrics.failed += 1;
-      if (contender.kind === 'model' && answer.callMade === true) {
-        // a request that may have been sent carries unreported spend —
-        // the cost metric stays 'unknown' rather than a lowball
-        metrics.cost.unknownCalls += 1;
-        costKnown = false;
-      }
-      if ('latencyMs' in answer && typeof answer.latencyMs === 'number') {
-        latencies.push(answer.latencyMs);
-      }
-      continue;
-    }
-    metrics.answered += 1;
-    if (answer.pick === null) {
-      metrics.abstained += 1;
-    } else {
-      metrics.picks[answer.pick] = (metrics.picks[answer.pick] ?? 0) + 1;
-    }
-    latencies.push(answer.latencyMs);
-    madeCalls += 1;
-    // cost accounting is a MODEL concern — a code stage makes no call
-    // and reports no spend; its per-1k is zero by construction
-    if (contender.kind === 'model') {
-      if (answer.costUsd === undefined) {
-        metrics.cost.unknownCalls += 1;
-        costKnown = false;
-      } else {
-        metrics.cost.knownCalls += 1;
-        metrics.cost.totalUsd += answer.costUsd;
-      }
-    }
-    // historical agreement — verified-success outcomes only, and only
-    // when the decision actually executed a route to compare against
-    if (
-      decision.outcomeClass === 'success' &&
-      decision.observedRoute !== null &&
-      answer.pick !== null
-    ) {
-      labelled += 1;
-      if (answer.pick === decision.observedRoute) agreed += 1;
-    } else if (decision.outcomeClass === 'success' && decision.observedRoute !== null) {
-      // an abstained contender WAS asked — it counts in the labelled
-      // denominator as a miss, never as a skip
-      labelled += 1;
-    }
+    tallyAnswer({ metrics, state, contender, decision, answer });
   }
   if (metrics.status === 'ok' && metrics.answered === 0 && metrics.failed > 0) {
     // every call failed — the contender produced no verdict at all;
@@ -781,11 +828,11 @@ function tallyContender(
     metrics.status = 'failed';
     metrics.error ??= 'every decide() call failed';
   }
-  if (labelled > 0) {
-    metrics.agreement = { labelled, agreed };
+  if (state.labelled > 0) {
+    metrics.agreement = { labelled: state.labelled, agreed: state.agreed };
   }
-  if (latencies.length > 0) {
-    const sorted = [...latencies].sort((a, b) => a - b);
+  if (state.latencies.length > 0) {
+    const sorted = [...state.latencies].sort((a, b) => a - b);
     metrics.latencyMs = {
       n: sorted.length,
       p50: percentile(sorted, 0.5),
@@ -801,9 +848,9 @@ function tallyContender(
   const evaluated = metrics.answered + metrics.skipped + metrics.failed;
   if (contender.kind === 'builtin') {
     metrics.costUsdPer1k = 0;
-  } else if (evaluated > 0 && madeCalls > 0 && costKnown) {
+  } else if (evaluated > 0 && state.madeCalls > 0 && state.costKnown) {
     metrics.costUsdPer1k = (metrics.cost.totalUsd / evaluated) * 1000;
-  } else if (evaluated > 0 && madeCalls === 0 && costKnown) {
+  } else if (evaluated > 0 && state.madeCalls === 0 && state.costKnown) {
     // every evaluated decision skipped or failed before reaching the
     // provider — nothing was spent
     metrics.costUsdPer1k = 0;
@@ -864,6 +911,47 @@ function defaultJudges(provider: string | undefined): string[] {
   return provider === undefined ? [...BUILTIN_CONTENDERS] : [...BUILTIN_CONTENDERS, provider];
 }
 
+type JournalScan = {
+  decisions: ReplayDecision[];
+  skipped: Record<string, number>;
+  contexts: Set<string>;
+  outcomeClasses: Record<OutcomeClass, number>;
+  outcomeResults: Record<string, number>;
+};
+
+async function scanReplayJournal(db: RouterDb, rows: DecisionRow[]): Promise<JournalScan> {
+  const decisions: ReplayDecision[] = [];
+  const skipped: Record<string, number> = ownBag();
+  const contexts = new Set<string>();
+  for (const row of rows) {
+    contexts.add(row.contextId);
+    const parsed = parseReplayDecision(row);
+    if ('reason' in parsed) {
+      skipped[parsed.reason] = (skipped[parsed.reason] ?? 0) + 1;
+      continue;
+    }
+    const outcome = await getOutcome(db, parsed.decisionId);
+    parsed.outcomeClass = classifyOutcome(outcome, parsed.predicate);
+    parsed.outcomeResult = outcome?.verified === 1 ? outcome.result : undefined;
+    decisions.push(parsed);
+  }
+  const outcomeClasses: Record<OutcomeClass, number> = {
+    success: 0,
+    failure: 0,
+    unlabelled: 0,
+    unverified: 0,
+    none: 0,
+  };
+  const outcomeResults: Record<string, number> = ownBag();
+  for (const decision of decisions) {
+    outcomeClasses[decision.outcomeClass] += 1;
+    if (decision.outcomeResult !== undefined) {
+      outcomeResults[decision.outcomeResult] = (outcomeResults[decision.outcomeResult] ?? 0) + 1;
+    }
+  }
+  return { decisions, skipped, contexts, outcomeClasses, outcomeResults };
+}
+
 /** Run the replay — scan the journal, classify outcomes, ask every
  *  contender, fold the metrics. Pure over its inputs: same journal +
  *  same contenders → same report (the clock is the only wall). */
@@ -898,40 +986,8 @@ export async function runBenchReplay(opts: BenchReplayOptions): Promise<BenchRep
     // parse + classify every row first — the skip ledger and the
     // outcome classes are journal facts, computed once for all
     // contenders so denominators stay comparable
-    const decisions: ReplayDecision[] = [];
-    const skipped: Record<string, number> = ownBag();
-    const contexts = new Set<string>();
-    for (const row of rows) {
-      // every journaled row's context counts toward the window —
-      // replayable or skipped alike
-      contexts.add(row.contextId);
-      const parsed = parseReplayDecision(row);
-      if ('reason' in parsed) {
-        skipped[parsed.reason] = (skipped[parsed.reason] ?? 0) + 1;
-        continue;
-      }
-      const outcome = await getOutcome(db, parsed.decisionId);
-      parsed.outcomeClass = classifyOutcome(outcome, parsed.predicate);
-      // the results histogram counts VERIFIED verdicts only — a pending
-      // (unverified) report is not a terminal outcome yet
-      parsed.outcomeResult = outcome?.verified === 1 ? outcome.result : undefined;
-      decisions.push(parsed);
-    }
-
-    const outcomeClasses: Record<OutcomeClass, number> = {
-      success: 0,
-      failure: 0,
-      unlabelled: 0,
-      unverified: 0,
-      none: 0,
-    };
-    const outcomeResults: Record<string, number> = ownBag();
-    for (const d of decisions) {
-      outcomeClasses[d.outcomeClass] += 1;
-      if (d.outcomeResult !== undefined) {
-        outcomeResults[d.outcomeResult] = (outcomeResults[d.outcomeResult] ?? 0) + 1;
-      }
-    }
+    const scan = await scanReplayJournal(db, rows);
+    const { decisions, skipped, contexts, outcomeClasses, outcomeResults } = scan;
 
     // contenders + the invoke gate — the gate is a property of the
     // DECISION (candidate count + pending needs), identical for every
