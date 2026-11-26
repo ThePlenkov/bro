@@ -30,7 +30,13 @@ import type {
 
 type HerdrResult = { result?: Record<string, unknown> };
 
-function herdrCall(args: string[], cwd?: string): Record<string, unknown> {
+interface HerdrCallInput {
+  args: string[];
+  cwd?: string;
+}
+
+function herdrCall(input: HerdrCallInput): Record<string, unknown> {
+  const { args, cwd } = input;
   const bin = process.env.HERDR_BIN_PATH ?? 'herdr';
   const result = spawnSync(bin, args, {
     cwd,
@@ -113,8 +119,8 @@ interface HerdrOpenInput {
 
 function openHerdrAgent(input: HerdrOpenInput): void {
   const { spec, main, parentWorkspace, kind } = input;
-  const opened = herdrCall(
-    [
+  const opened = herdrCall({
+    args: [
       'worktree',
       'open',
       ...(parentWorkspace === undefined
@@ -124,13 +130,16 @@ function openHerdrAgent(input: HerdrOpenInput): void {
       resolve(spec.repoRoot),
       '--no-focus',
     ],
-    spec.repoRoot
-  );
+    cwd: spec.repoRoot,
+  });
   const ws = workspaceId(opened);
-  const pane = paneId(herdrCall(['pane', 'list', '--workspace', ws], spec.repoRoot));
+  const pane = paneId(herdrCall({ args: ['pane', 'list', '--workspace', ws], cwd: spec.repoRoot }));
   const name = workId({ value: spec.molStep });
-  herdrCall(['agent', 'start', name, '--kind', kind, '--pane', pane], spec.repoRoot);
-  herdrCall(['agent', 'prompt', name, spec.prompt], spec.repoRoot);
+  herdrCall({
+    args: ['agent', 'start', name, '--kind', kind, '--pane', pane],
+    cwd: spec.repoRoot,
+  });
+  herdrCall({ args: ['agent', 'prompt', name, spec.prompt], cwd: spec.repoRoot });
 }
 
 interface HerdrCommitInput {
@@ -224,11 +233,8 @@ export function makeHerdrConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
     async stop(id: string) {
       const hit = find(id);
       if (hit === undefined) return;
-      try {
-        herdrCall(['agent', 'stop', workId({ value: hit[0] })], dir);
-      } finally {
-        markStoppedEntry({ dir, molStep: hit[0], entry: hit[1], id, stillLive: () => false });
-      }
+      herdrCall({ args: ['agent', 'stop', workId({ value: hit[0] })], cwd: dir });
+      markStoppedEntry({ dir, molStep: hit[0], entry: hit[1], id, stillLive: () => false });
     },
 
     capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
