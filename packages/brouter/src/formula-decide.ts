@@ -830,12 +830,10 @@ async function pickByFormula(input: {
           before: cascade.candidates.map(c => c.route.name),
           after: named === undefined ? set.candidates.map(c => c.route.name) : [named],
           latencyMs: Date.now() - t2Start,
-          ...{
-            note:
-              named === undefined
-                ? 'the judge named no confident candidate'
-                : `the judge picked ${named}`,
-          },
+          note:
+            named === undefined
+              ? 'the judge named no confident candidate'
+              : `the judge picked ${named}`,
         })
       );
     }
