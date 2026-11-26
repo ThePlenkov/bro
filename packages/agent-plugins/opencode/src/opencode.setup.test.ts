@@ -549,6 +549,32 @@ describe('event stream', () => {
     assert.deepEqual(prompts, [{ sessionID: 'ses_1', text: 'dirty worktree' }]);
   });
 
+  test('a second block is logged, never re-prompted', async () => {
+    respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty worktree' }) });
+    const { emit, prompts } = await makeSetup();
+    const lines = await captureBroErr(async l => {
+      const cleanTurn = (): void => {
+        emit('message.updated', {
+          info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
+        });
+      };
+
+      cleanTurn();
+      emit('session.idle', { sessionID: 'ses_1' });
+      await waitFor(() => prompts.length === 1);
+      cleanTurn();
+      emit('session.idle', { sessionID: 'ses_1' });
+      await waitFor(() => l.some(line => /already gated/.test(line)));
+    });
+
+    assert.equal(prompts.length, 1);
+    assert.ok(
+      lines.some(line =>
+        line.includes('[bro] info: stop gate: already gated — not re-prompting (dirty worktree)')
+      )
+    );
+  });
+
   test('the gated set persists through ctx.storage and survives teardown', async () => {
     respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty' }) });
     const { emit, storage, prompts, teardown } = await makeSetup();
