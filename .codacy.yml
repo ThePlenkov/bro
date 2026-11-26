@@ -1,3 +1,9 @@
+# Codacy's security-node implementation crashes when this rule visits an
+# async try/finally that has no catch (its handler is null). Disable the
+# pattern globally so one matching file cannot discard every ESLint result.
+patterns:
+  - -ESLint8_security-node_detect-unhandled-async-errors
+
 # Codacy scans shipped code. Test suites boot loopback listeners and
 # POST to them — every new fetch() trips the SSRF pattern ("user-
 # controlled URL to HTTP client") even though the host is a literal
