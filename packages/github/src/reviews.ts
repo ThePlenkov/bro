@@ -1897,68 +1897,70 @@ function graphql(query: string, vars: Record<string, string>): void {
   }
 }
 
-function githubReaction(
-  target: PrTarget | string,
+const REACTION_ALIASES: Record<ReactionKind, string> = {
+  '+1': 'THUMBS_UP',
+  thumbs_up: 'THUMBS_UP',
+  '-1': 'THUMBS_DOWN',
+  thumbs_down: 'THUMBS_DOWN',
+  eyes: 'EYES',
+};
+
+function reactionTarget(target: PrTarget | string): string {
+  if (typeof target === 'string') return target;
+  const { owner, name } = parts(target.repo);
+  const result = ghJson<{ data?: { repository?: { pullRequest?: { id?: string } } } }>([
+    'api',
+    'graphql',
+    '-f',
+    'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}',
+    '-f',
+    `o=${owner}`,
+    '-f',
+    `r=${name}`,
+    '-F',
+    `n=${target.pr}`,
+  ]);
+  const id = result.data?.repository?.pullRequest?.id;
+  if (!id) throw new Error(`pull request #${target.pr} not found`);
+  return id;
+}
+
+function removeGithubReaction(
+  content: string,
   reaction: ReactionKind,
-  remove = false
+  kind: string
 ): ReactionResult {
-  const aliases: Record<string, string> = {
-    '+1': 'THUMBS_UP',
-    thumbs_up: 'THUMBS_UP',
-    '-1': 'THUMBS_DOWN',
-    thumbs_down: 'THUMBS_DOWN',
-    eyes: 'EYES',
-  };
-  const content =
-    typeof target === 'string'
-      ? target
-      : (() => {
-          const { owner, name } = parts(target.repo);
-          const result = ghJson<{ data?: { repository?: { pullRequest?: { id?: string } } } }>([
-            'api',
-            'graphql',
-            '-f',
-            'query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}',
-            '-f',
-            `o=${owner}`,
-            '-f',
-            `r=${name}`,
-            '-F',
-            `n=${target.pr}`,
-          ]);
-          const id = result.data?.repository?.pullRequest?.id;
-          if (!id) throw new Error(`pull request #${target.pr} not found`);
-          return id;
-        })();
-  const kind = aliases[reaction];
-  if (!kind) throw new Error(`unsupported GitHub reaction "${reaction}"`);
-  if (remove) {
-    const found = ghJson<{
-      data?: {
-        node?: {
-          reactionGroups?: Array<{
-            content: string;
-            viewerHasReacted: boolean;
-            reactions?: { nodes?: Array<{ id: string }> };
-          }>;
-        };
+  const found = ghJson<{
+    data?: {
+      node?: {
+        reactionGroups?: Array<{
+          content: string;
+          viewerHasReacted: boolean;
+          reactions?: { nodes?: Array<{ id: string }> };
+        }>;
       };
-    }>([
-      'api',
-      'graphql',
-      '-f',
-      'query=query($id:ID!){node(id:$id){... on Reactable{reactionGroups{content viewerHasReacted reactions(first:1){nodes{id}}}}}}',
-      '-f',
-      `id=${content}`,
-    ]);
-    const group = found.data?.node?.reactionGroups?.find(
-      item => item.content === kind && item.viewerHasReacted
-    );
-    const id = group?.reactions?.nodes?.[0]?.id;
-    if (!id) return { artifact: content, reaction, removed: true, counts: {} };
-    graphql('mutation($id:ID!){removeReaction(input:{reactionId:$id}){reaction{id}}}', { id });
-    return { artifact: content, reaction, removed: true, counts: {} };
-  }
+    };
+  }>([
+    'api',
+    'graphql',
+    '-f',
+    'query=query($id:ID!){node(id:$id){... on Reactable{reactionGroups{content viewerHasReacted reactions(first:1){nodes{id}}}}}}',
+    '-f',
+    `id=${content}`,
+  ]);
+  const group = found.data?.node?.reactionGroups?.find(
+    item => item.content === kind && item.viewerHasReacted
+  );
+  const id = group?.reactions?.nodes?.[0]?.id;
+  if (!id) return { artifact: content, reaction, removed: true, counts: {} };
+  graphql(
+    'mutation($id:ID!,$content:ReactionContent!){removeReaction(input:{subjectId:$id,content:$content}){reaction{id}}}',
+    { id, content: kind }
+  );
+  return { artifact: content, reaction, removed: true, counts: {} };
+}
+
+function addGithubReaction(content: string, reaction: ReactionKind, kind: string): ReactionResult {
   const result = ghJson<{
     data?: { addReaction?: { reaction?: { content?: string } } };
     errors?: unknown;
@@ -1976,6 +1978,18 @@ function githubReaction(
     throw new Error(`GitHub reaction failed: ${JSON.stringify(result.errors ?? result)}`);
   }
   return { artifact: content, reaction, removed: false, counts: {} };
+}
+
+function githubReaction(
+  target: PrTarget | string,
+  reaction: ReactionKind,
+  remove = false
+): ReactionResult {
+  const content = reactionTarget(target);
+  const kind = REACTION_ALIASES[reaction];
+  return remove
+    ? removeGithubReaction(content, reaction, kind)
+    : addGithubReaction(content, reaction, kind);
 }
 
 /** The ReviewFacade bound to a dir — `gh repo view`/`gh pr view` run
