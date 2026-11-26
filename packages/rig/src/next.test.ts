@@ -89,7 +89,7 @@ function setupFakeBd(): FakeBdSetup {
     writeFileSync(file, '[]');
   }
   const previous: Record<string, string | undefined> = {};
-  const setEnv = (key: string, value: string | undefined): void => {
+  const setEnv = ({ key, value }: { key: string; value: string | undefined }): void => {
     if (!(key in previous)) {
       previous[key] = process.env[key];
     }
@@ -99,15 +99,15 @@ function setupFakeBd(): FakeBdSetup {
       process.env[key] = value;
     }
   };
-  setEnv('PATH', `${fakeDir}:${process.env.PATH}`);
-  setEnv('FAKE_BD_DIR', fakeDir);
-  setEnv('FAKE_BD_READY', files.ready);
-  setEnv('FAKE_BD_DEPS', files.deps);
-  setEnv('FAKE_BD_QUEUE', files.queue);
-  setEnv('FAKE_BD_DRILL', files.drill);
-  setEnv('BEADS_ACTOR', 'tester');
-  setEnv('BEADS_DIR', undefined);
-  setEnv('BD_ACTOR', undefined);
+  setEnv({ key: 'PATH', value: `${fakeDir}:${process.env.PATH}` });
+  setEnv({ key: 'FAKE_BD_DIR', value: fakeDir });
+  setEnv({ key: 'FAKE_BD_READY', value: files.ready });
+  setEnv({ key: 'FAKE_BD_DEPS', value: files.deps });
+  setEnv({ key: 'FAKE_BD_QUEUE', value: files.queue });
+  setEnv({ key: 'FAKE_BD_DRILL', value: files.drill });
+  setEnv({ key: 'BEADS_ACTOR', value: 'tester' });
+  setEnv({ key: 'BEADS_DIR', value: undefined });
+  setEnv({ key: 'BD_ACTOR', value: undefined });
   return {
     fakeDir,
     files,
