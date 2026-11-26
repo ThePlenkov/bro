@@ -62,26 +62,48 @@ interface FixerAttempt {
   current: string;
 }
 
+function stringsOf(xs: unknown): string[] {
+  return Array.isArray(xs) ? xs.filter((c): c is string => typeof c === 'string') : [];
+}
+
+function currentAttempt(
+  entry: AgentRegistryEntry,
+  attempt: Partial<FixerAttempt> & { classes?: unknown }
+): FixerAttempt | undefined {
+  if (typeof attempt.head !== 'string') {
+    return undefined;
+  }
+  if (Array.isArray(attempt.spent) && typeof attempt.current === 'string') {
+    return { head: attempt.head, spent: stringsOf(attempt.spent), current: attempt.current };
+  }
+  return previousAttempt(entry, attempt.head, attempt.classes);
+}
+
+function previousAttempt(
+  entry: AgentRegistryEntry,
+  head: string,
+  classes: unknown
+): FixerAttempt | undefined {
+  if (!Array.isArray(classes)) {
+    return undefined;
+  }
+  return {
+    head,
+    spent: entry.cause === 'ok' ? stringsOf(classes) : [],
+    current: '',
+  };
+}
+
 function fixerAttemptOf(entry: AgentRegistryEntry | undefined): FixerAttempt | undefined {
   const v = entry?.fixerAttempt;
   if (typeof v !== 'object' || v === null) {
     return undefined;
   }
-  const a = v as Partial<FixerAttempt> & { classes?: unknown };
-  const strings = (xs: unknown): string[] =>
-    Array.isArray(xs) ? xs.filter((c): c is string => typeof c === 'string') : [];
-  if (typeof a.head !== 'string') {
+  if (entry === undefined) {
     return undefined;
   }
-  if (Array.isArray(a.spent) && typeof a.current === 'string') {
-    return { head: a.head, spent: strings(a.spent), current: a.current };
-  }
-  // pre-split shape {head, classes} — every class shared the entry's
-  // one cause; its best reading is 'all spent iff the cause was ok'
-  if (Array.isArray(a.classes)) {
-    return { head: a.head, spent: entry?.cause === 'ok' ? strings(a.classes) : [], current: '' };
-  }
-  return undefined;
+  const a = v as Partial<FixerAttempt> & { classes?: unknown };
+  return currentAttempt(entry, a);
 }
 
 /** The dedup verdict: this (head, class) already ran a fixer that
@@ -115,15 +137,19 @@ export function fixerAttemptSpent(
  *  `cause` — the run that just finished promotes its `current` class
  *  into `spent` iff that cause was 'ok'; a crashed class stays
  *  respawn-able, which is the whole point of tracking per class. */
-export function recordFixerAttempt(
-  dir: string,
-  molStep: string,
+export interface RecordFixerAttemptOptions {
+  dir: string;
+  molStep: string;
+  prevEntry: AgentRegistryEntry | undefined;
+  head: string;
+  cls: string;
+}
+
+function promotedSpent(
+  prev: FixerAttempt | undefined,
   prevEntry: AgentRegistryEntry | undefined,
-  head: string,
-  cls: string
-): void {
-  const prev = fixerAttemptOf(prevEntry);
-  const sameHead = prev?.head === head && prevEntry?.stopped !== true;
+  sameHead: boolean
+): string[] {
   const spent = sameHead ? [...(prev?.spent ?? [])] : [];
   if (
     sameHead &&
@@ -134,5 +160,18 @@ export function recordFixerAttempt(
   ) {
     spent.push(prev.current);
   }
+  return spent;
+}
+
+export function recordFixerAttempt({
+  dir,
+  molStep,
+  prevEntry,
+  head,
+  cls,
+}: RecordFixerAttemptOptions): void {
+  const prev = fixerAttemptOf(prevEntry);
+  const sameHead = prev?.head === head && prevEntry?.stopped !== true;
+  const spent = promotedSpent(prev, prevEntry, sameHead);
   patchAgentRegistry(dir, molStep, { fixerAttempt: { head, spent, current: cls } });
 }

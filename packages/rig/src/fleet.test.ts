@@ -457,15 +457,15 @@ describe('occupied / greenOccupancy — claims rung (bro-izpyk.10)', () => {
       const ensured = ensureFixerWorktree(main, 'work/pr11');
       assert.ok(ensured.path !== undefined);
       // no marker on disk — the ledger claim alone is the owner proof
-      const occ = retireOrphanedWorktree(
-        main,
-        11,
-        ensured.path!,
-        'work/pr11',
-        undefined,
-        [],
-        [claimRow({ resource: `worktree:${ensured.path}` })]
-      );
+      const occ = retireOrphanedWorktree({
+        dir: main,
+        pr: 11,
+        wt: ensured.path!,
+        branch: 'work/pr11',
+        fixerBeadId: undefined,
+        known: [],
+        claims: [claimRow({ resource: `worktree:${ensured.path}` })],
+      });
       assert.match(occ ?? '', /claims worktree:/);
       assert.ok(existsSync(ensured.path!));
     } finally {
@@ -501,18 +501,56 @@ describe('ensureFixerWorktree / retireOrphanedWorktree — tmpdir repo', () => {
         pid: process.pid,
         worktree: first.path,
       });
-      const occ = retireOrphanedWorktree(main, 9, first.path!, 'work/pr9', undefined, []);
+      const occ = retireOrphanedWorktree({
+        dir: main,
+        pr: 9,
+        wt: first.path!,
+        branch: 'work/pr9',
+        fixerBeadId: undefined,
+        known: [],
+      });
       assert.match(occ ?? '', /agent w1 live/);
       assert.ok(existsSync(first.path!));
       // the owner exits — the same tree is now orphaned residue. A live
       // pid reads 'running' before 'stopped' is consulted, so the exit
       // must move the pid too (a real `agents down` kills the process)
       patchAgentRegistry(main, 'bead-1', { stopped: true, pid: DEAD_PID });
-      const gone = retireOrphanedWorktree(main, 9, first.path!, 'work/pr9', undefined, []);
+      const gone = retireOrphanedWorktree({
+        dir: main,
+        pr: 9,
+        wt: first.path!,
+        branch: 'work/pr9',
+        fixerBeadId: undefined,
+        known: [],
+      });
       assert.equal(gone, undefined);
       assert.equal(existsSync(first.path!), false);
-      const again = retireOrphanedWorktree(main, 9, first.path!, 'work/pr9', undefined, []);
+      const again = retireOrphanedWorktree({
+        dir: main,
+        pr: 9,
+        wt: first.path!,
+        branch: 'work/pr9',
+        fixerBeadId: undefined,
+        known: [],
+      });
       assert.equal(again, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('tries the namespaced path when adding the first candidate fails', () => {
+    const { root, main } = initRepo('rig-fixwt-fallback-');
+    try {
+      git(['checkout', '-qb', 'work/pr-fallback'], main);
+      git(['checkout', '-q', 'main'], main);
+      const namespaced = join(root, 'main--work-pr-fallback');
+      git(['worktree', 'add', '-q', namespaced, 'work/pr-fallback'], main);
+
+      const ensured = ensureFixerWorktree(main, 'work/pr-fallback');
+
+      assert.equal(ensured.path, namespaced);
+      assert.equal(ensured.created, undefined);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -528,7 +566,14 @@ describe('ensureFixerWorktree / retireOrphanedWorktree — tmpdir repo', () => {
       const gd = worktreeGitDir(ensured.path!)!;
       mkdirSync(join(gd, 'bro'), { recursive: true });
       writeFileSync(join(gd, 'bro', 'work'), `${Date.now()}\nsession-claim\n`);
-      const occ = retireOrphanedWorktree(main, 10, ensured.path!, 'work/pr10', undefined, []);
+      const occ = retireOrphanedWorktree({
+        dir: main,
+        pr: 10,
+        wt: ensured.path!,
+        branch: 'work/pr10',
+        fixerBeadId: undefined,
+        known: [],
+      });
       assert.match(occ ?? '', /claimed by session-claim/);
       assert.ok(existsSync(ensured.path!));
     } finally {
@@ -578,7 +623,13 @@ describe('fixer bead plane', () => {
         spawnedAt: new Date().toISOString(),
       });
       const prev = readAgentRegistry(main)['bead-f'];
-      recordFixerAttempt(main, 'bead-f', prev, 'head1', 'rebase');
+      recordFixerAttempt({
+        dir: main,
+        molStep: 'bead-f',
+        prevEntry: prev,
+        head: 'head1',
+        cls: 'rebase',
+      });
       let entry = readAgentRegistry(main)['bead-f'];
       assert.deepEqual(entry?.fixerAttempt, { head: 'head1', spent: [], current: 'rebase' });
       // the run exits ok → next spawn on same head promotes 'rebase' to spent
@@ -586,7 +637,13 @@ describe('fixer bead plane', () => {
       assert.equal(fixerAttemptSpent(entry, 'head1', 'rebase'), true);
       // a different head resets the record
       assert.equal(fixerAttemptSpent(entry, 'head2', 'rebase'), false);
-      recordFixerAttempt(main, 'bead-f', entry, 'head2', 'ci');
+      recordFixerAttempt({
+        dir: main,
+        molStep: 'bead-f',
+        prevEntry: entry,
+        head: 'head2',
+        cls: 'ci',
+      });
       const next = readAgentRegistry(main)['bead-f'];
       assert.deepEqual(next?.fixerAttempt, { head: 'head2', spent: [], current: 'ci' });
       // stopped lifts the dedup — the operator's manual clear

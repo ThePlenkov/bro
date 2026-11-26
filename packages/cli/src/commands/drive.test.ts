@@ -1329,13 +1329,13 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
       // (an agentId-less write reads back as torn and drops)
       patchAgentRegistry(main, 'fx-1', { agentId: 'native-x', backend: 'native' });
       // ci exited ok → the sast spawn promotes 'ci' into spent
-      recordFixerAttempt(
-        main,
-        'fx-1',
-        entry({ cause: 'ok', fixerAttempt: { head: 'h', spent: [], current: 'ci' } }),
-        'h',
-        'sast'
-      );
+      recordFixerAttempt({
+        dir: main,
+        molStep: 'fx-1',
+        prevEntry: entry({ cause: 'ok', fixerAttempt: { head: 'h', spent: [], current: 'ci' } }),
+        head: 'h',
+        cls: 'sast',
+      });
       let att = readAgentRegistry(main)['fx-1']?.fixerAttempt as {
         head: string;
         spent: string[];
@@ -1343,17 +1343,26 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
       };
       assert.deepEqual(att, { head: 'h', spent: ['ci'], current: 'sast' });
       // sast crashed → the ci replay must NOT promote sast
-      recordFixerAttempt(
-        main,
-        'fx-1',
-        entry({ cause: 'crash', fixerAttempt: { head: 'h', spent: ['ci'], current: 'sast' } }),
-        'h',
-        'ci'
-      );
+      recordFixerAttempt({
+        dir: main,
+        molStep: 'fx-1',
+        prevEntry: entry({
+          cause: 'crash',
+          fixerAttempt: { head: 'h', spent: ['ci'], current: 'sast' },
+        }),
+        head: 'h',
+        cls: 'ci',
+      });
       att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att;
       assert.deepEqual(att, { head: 'h', spent: ['ci'], current: 'ci' });
       // a moved head resets the record
-      recordFixerAttempt(main, 'fx-1', entry({ cause: 'ok', fixerAttempt: att }), 'h2', 'sast');
+      recordFixerAttempt({
+        dir: main,
+        molStep: 'fx-1',
+        prevEntry: entry({ cause: 'ok', fixerAttempt: att }),
+        head: 'h2',
+        cls: 'sast',
+      });
       att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att;
       assert.deepEqual(att, { head: 'h2', spent: [], current: 'sast' });
     });
