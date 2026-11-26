@@ -7,6 +7,7 @@ import {
   bodyMeta,
   gh,
   ghAsync,
+  ghHost,
   ghJson,
   ghJsonAsync,
   ghTry,
@@ -17,6 +18,7 @@ import {
   stripMeta,
   withMeta,
 } from '@broject/core';
+import { githubRefIdentity } from '@broject/core';
 import type {
   ApprovalProbeOpts,
   ApprovalVerdict,
@@ -1897,6 +1899,7 @@ function graphql(query: string, vars: Record<string, string>): void {
  *  there so repo/PR detection follows the facade's repo, not cwd. */
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
   return {
+    refIdentity: { ...githubRefIdentity, host: ghHost() },
     resolveRepo: (positional: string[] = []) => resolveRepo(positional, dir),
     resolveRepoAsync: (positional: string[] = []) => resolveRepoAsync(positional, dir),
     prLink,

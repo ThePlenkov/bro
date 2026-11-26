@@ -24,7 +24,12 @@ describe('prRefs', () => {
       [{ pr: 42, repo: 'group/subproject', host: 'gitlab.example', kind: 'gitlab' }]
     );
   });
-
+  test('GitHub deep links still name the pull request', () => {
+    assert.deepEqual(
+      prRefs('see [#958](https://github.com/ThePlenkov/bro/pull/958/files#diff-abc)'),
+      [{ pr: 958, repo: 'ThePlenkov/bro', host: 'github.com' }]
+    );
+  });
   test('the link form is one reference — its own #N is not a second hit', () => {
     const refs = prRefs('see [#958](https://github.com/o/r/pull/958)');
     assert.equal(refs.length, 1);

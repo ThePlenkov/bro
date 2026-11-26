@@ -251,6 +251,13 @@ export interface MergeQueueFacade {
 }
 
 export interface ReviewFacade {
+  /** Identity rules for references parsed from free text. Hosts may have
+   *  case-insensitive URLs (GitHub) or case-sensitive project paths. */
+  refIdentity?: {
+    host: string;
+    sameHost(left: string, right: string): boolean;
+    sameRepo(left: string, right: string): boolean;
+  };
   /** 'owner/repo' — from positional args or the bound dir's remote. */
   resolveRepo(positional?: string[]): string;
   /** Async twin — probe paths must not serialize behind a sync `gh`. */

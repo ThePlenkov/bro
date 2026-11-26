@@ -41,6 +41,12 @@ export interface MergeTarget {
   kind?: 'gitlab';
 }
 
+export interface MergeRefIdentity {
+  host: string;
+  sameHost(left: string, right: string): boolean;
+  sameRepo(left: string, right: string): boolean;
+}
+
 /** A merge step's claim: what the agent said, and what came before. */
 export interface MergeClaim {
   /** the agent's own sentence (the `--result` text). */
@@ -126,18 +132,26 @@ function targetOf(
 /** Fold a second reference into the first — the link's repository and
  *  host survive a bare reference, and two repositories (or two hosts)
  *  for one PR number are a conflict the verifier cannot settle. */
-function mergeRefs(known: MergeTarget, ref: PrRef): { target: MergeTarget; conflict: boolean } {
+function mergeRefs(
+  known: MergeTarget,
+  ref: PrRef,
+  identity: MergeRefIdentity
+): { target: MergeTarget; conflict: boolean } {
   const repo = known.repo ?? ref.repo;
   const host = known.host ?? ref.host;
   const kind = known.kind ?? ref.kind;
   const conflict =
-    (known.repo !== undefined && ref.repo !== undefined && known.repo !== ref.repo) ||
-    (known.host !== undefined && ref.host !== undefined && known.host !== ref.host);
+    (known.repo !== undefined &&
+      ref.repo !== undefined &&
+      !identity.sameRepo(known.repo, ref.repo)) ||
+    (known.host !== undefined &&
+      ref.host !== undefined &&
+      !identity.sameHost(known.host, ref.host));
   return { target: targetOf(known.pr, repo, host, kind), conflict };
 }
 
 /** The PRs a set of references names. */
-function collectTargets(refs: PrRef[]): Collected {
+function collectTargets(refs: PrRef[], identity: MergeRefIdentity): Collected {
   const byNumber = new Map<number, MergeTarget>();
   const conflicts = new Set<number>();
   for (const ref of refs) {
@@ -146,7 +160,7 @@ function collectTargets(refs: PrRef[]): Collected {
       byNumber.set(ref.pr, targetOf(ref.pr, ref.repo, ref.host, ref.kind));
       continue;
     }
-    const merged = mergeRefs(known, ref);
+    const merged = mergeRefs(known, ref, identity);
     byNumber.set(ref.pr, merged.target);
     if (merged.conflict) conflicts.add(ref.pr);
   }
@@ -160,8 +174,12 @@ function numbered(prs: number[]): string {
 
 /** The one PR a set of references names — and the ambiguity verdict
  *  when they name more than one. */
-function pickTarget(refs: PrRef[], source: string): { target?: MergeTarget; message?: string } {
-  const collected = collectTargets(refs);
+function pickTarget(
+  refs: PrRef[],
+  source: string,
+  identity: MergeRefIdentity
+): { target?: MergeTarget; message?: string } {
+  const collected = collectTargets(refs, identity);
   if (collected.conflicts.length > 0) {
     return {
       message: `the ${source} names ${numbered(collected.conflicts)} in two repositories — the verifier cannot pick one; name the merged PR`,
@@ -182,11 +200,14 @@ function pickTarget(refs: PrRef[], source: string): { target?: MergeTarget; mess
  *  The explicit `--pr` wins. Otherwise the result's own references, then
  *  the upstream handoff's. Two different PRs in one source is ambiguity
  *  — the verifier must not pick one for the agent. */
-export function mergeClaimTarget(claim: MergeClaim): { target?: MergeTarget; message?: string } {
+export function mergeClaimTarget(
+  claim: MergeClaim,
+  identity: MergeRefIdentity = defaultIdentity()
+): { target?: MergeTarget; message?: string } {
   const explicit = explicitTarget(claim.pr);
   if (explicit !== undefined) return explicit;
   for (const source of claimSources(claim)) {
-    const picked = pickTarget(source.refs, source.name);
+    const picked = pickTarget(source.refs, source.name, identity);
     if (picked.target !== undefined) return picked;
     if (picked.message !== undefined) return picked;
   }
@@ -232,10 +253,10 @@ export function mergeCloseReason(
 
 /** The host the connector reads — a claim that names another host names
  *  another PR, and this host cannot vouch for it. */
-function hostMismatch(target: MergeTarget, connectorHost: string): string | undefined {
+function hostMismatch(target: MergeTarget, identity: MergeRefIdentity): string | undefined {
   if (target.host === undefined) return undefined;
-  if (target.host === connectorHost) return undefined;
-  return `the claim names PR #${target.pr} on ${target.host}, but this connector reads ${connectorHost}`;
+  if (identity.sameHost(target.host, identity.host)) return undefined;
+  return `the claim names PR #${target.pr} on ${target.host}, but this connector reads ${identity.host}`;
 }
 
 /** The host's answer — the probe's own words when it failed. */
@@ -281,13 +302,21 @@ async function verdictFor(
 export async function verifyMergeClose(
   claim: MergeClaim,
   probe: (target: MergeTarget) => Promise<MergeProbe>,
-  connectorHost: string = ghHost()
+  identity: MergeRefIdentity = defaultIdentity()
 ): Promise<MergeVerdict> {
-  const { target, message } = mergeClaimTarget(claim);
+  const { target, message } = mergeClaimTarget(claim, identity);
   if (target === undefined) {
     return { ok: false, message: message ?? 'the merge claim names no PR' };
   }
-  const mismatch = hostMismatch(target, connectorHost);
+  const mismatch = hostMismatch(target, identity);
   if (mismatch !== undefined) return { ok: false, message: mismatch };
   return verdictFor(target, claim, probe);
+}
+
+function defaultIdentity(): MergeRefIdentity {
+  return {
+    host: ghHost(),
+    sameHost: (left, right) => left === right,
+    sameRepo: (left, right) => left === right,
+  };
 }

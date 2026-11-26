@@ -210,6 +210,12 @@ export function ghHost(): string {
   return host;
 }
 
+/** GitHub treats hosts and repository names case-insensitively. */
+export const githubRefIdentity = {
+  sameHost: (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase(),
+  sameRepo: (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase(),
+};
+
 /** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every
  *  user-facing PR reference must use; bare `#N` is just text. TSV/data rows
  *  keep the bare number — they are parsed, not read. The host defaults to
@@ -378,7 +384,12 @@ function urlParts(url: string): { host: string; path: string } | null {
   if (scheme !== 'http' && scheme !== 'https') return null;
   const hostEnd = u.indexOf('/', schemeEnd + 3);
   if (hostEnd < 0 || hostEnd === schemeEnd + 3) return null;
-  return { host: u.slice(schemeEnd + 3, hostEnd), path: u.slice(hostEnd + 1) };
+  const rawPath = u.slice(hostEnd + 1);
+  const query = rawPath.search(/[?#]/);
+  return {
+    host: u.slice(schemeEnd + 3, hostEnd),
+    path: query < 0 ? rawPath : rawPath.slice(0, query),
+  };
 }
 
 /** Is this a path segment — not empty, no whitespace? */
@@ -396,7 +407,7 @@ function isDigits(s: string): boolean {
  *  reading it as a PR would verify the wrong one. */
 function pullPath(path: string): { owner: string; repo: string; num: string } | null {
   const segments = path.split('/');
-  if (segments.length !== 4) return null;
+  if (segments.length < 4) return null;
   const [owner, repo, kind, num] = segments;
   if (kind !== 'pull') return null;
   if (!isPathSegment(owner) || !isPathSegment(repo)) return null;
