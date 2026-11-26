@@ -343,7 +343,7 @@ function statusVerdict(row: TaskRow, ctx: VerdictCtx, deferAt: number): RigNext 
 function deferVerdict(row: TaskRow, ctx: VerdictCtx): RigNext | undefined {
   const deferUntil = (row as { defer_until?: unknown }).defer_until;
   const deferAt = typeof deferUntil === 'string' ? Date.parse(deferUntil) : NaN;
-  if (deferAt > Date.now()) {
+  if (row.status === 'deferred' && deferAt > Date.now()) {
     return { verdict: 'blocked', id: ctx.id, detail: `deferred until ${deferUntil}` };
   }
   return statusVerdict(row, ctx, deferAt);
@@ -399,13 +399,13 @@ function workVerdict(
   if (row.status === 'in_progress') {
     return claimVerdict(ctx, row, entry);
   }
-  const parked = deferVerdict(row, ctx);
-  if (parked !== undefined) {
-    return parked;
-  }
   const dependency = dependencyVerdict(ctx);
   if (dependency !== undefined) {
     return dependency;
+  }
+  const parked = deferVerdict(row, ctx);
+  if (parked !== undefined) {
+    return parked;
   }
   if (row.labels?.includes('gt:slot')) {
     return { verdict: 'blocked', id: ctx.id, detail: 'coordination slot' };

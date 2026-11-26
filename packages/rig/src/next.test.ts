@@ -301,6 +301,47 @@ describe('rigNext — the verdict ladder', () => {
     }
   });
 
+  test('dependency verdict wins over a future deferral', () => {
+    const f = fixture();
+    try {
+      f.row(
+        'g-1',
+        bead('g-1', {
+          defer_until: new Date(Date.now() + 60_000).toISOString(),
+        })
+      );
+      f.deps([{ ...bead('x-1'), dependency_type: 'blocks' }]);
+      assert.deepEqual(rigNext(f.dir, 'g-1'), {
+        verdict: 'blocked',
+        id: 'g-1',
+        detail: 'dep-gated by x-1',
+      });
+    } finally {
+      f.restore();
+    }
+  });
+
+  test('a future deferral only parks deferred rows', () => {
+    const f = fixture();
+    try {
+      const deferUntil = new Date(Date.now() + 60_000).toISOString();
+      f.row('o-1', bead('o-1', { defer_until: deferUntil }));
+      f.row('d-1', bead('d-1', { status: 'deferred', defer_until: deferUntil }));
+      assert.deepEqual(rigNext(f.dir, 'o-1'), {
+        verdict: 'step',
+        id: 'o-1',
+        detail: undefined,
+      });
+      assert.deepEqual(rigNext(f.dir, 'd-1'), {
+        verdict: 'blocked',
+        id: 'd-1',
+        detail: `deferred until ${deferUntil}`,
+      });
+    } finally {
+      f.restore();
+    }
+  });
+
   test('open + ready is step; a queued row reports its rank', () => {
     const f = fixture();
     try {
