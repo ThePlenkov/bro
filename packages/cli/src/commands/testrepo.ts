@@ -1451,6 +1451,7 @@ peekLoop('worker-start')
 // authoritative when present; the flat prOpened flag feeds the legacy
 // single-PR probes
 const markPrOpened = (s) => {
+  const headSha = sh('git', ['rev-parse', 'HEAD']).trim()
   if (s.prs) {
     s.prs[branch] = {
       ...(s.prs[branch] ?? {}),
@@ -1458,10 +1459,12 @@ const markPrOpened = (s) => {
       state: 'OPEN',
       headRef: branch,
       baseRef: 'main',
+      headSha,
     }
   }
   s.prOpened = true
   s.openPrHead = branch
+  s.headSha = headSha
 }
 // a per-bead wall-clock delay — the fairness test's long worker: the
 // detached spawn means the loop must service other members while this
