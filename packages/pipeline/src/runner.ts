@@ -21,7 +21,7 @@
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { type MaybePromise, mintRunId } from '@broject/core';
+import { holdFileLock, type MaybePromise, mintRunId } from '@broject/core';
 import {
   entryStage,
   type GateOn,
@@ -40,6 +40,7 @@ import {
   type PipelineJournal,
   pendingRecord,
   pipelineDir,
+  pipelineStarterLockPath,
 } from './journal.ts';
 
 /** The side-effect word a stage's intent carries — derived from its
@@ -353,6 +354,7 @@ interface Run {
   /** effective pipeline cap — min(formula limits.in_flight, machine
    *  budget); stage caps narrow it further, never widen it */
   inFlight: number;
+  maxInFlight?: number;
   customer?: string;
   ctx: PipelineContext;
   seq: number;
@@ -642,6 +644,7 @@ function initRun(
     fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS, 0),
     fixVerdicts: fixVerdictsFor(opts),
     inFlight: inFlightFor(formula, opts),
+    ...(opts.maxInFlight !== undefined ? { maxInFlight: opts.maxInFlight } : {}),
     customer: opts.customer,
     // null-prototype: engine payloads flat-merge onto ctx, and a
     // hostile `__proto__` key must land as inert data, never a setter
@@ -682,6 +685,7 @@ function rowFor(run: Run, to: NextStep, intent: string): JournalRow {
   if (to.fixRound !== undefined) row.fix_round = to.fixRound;
   if (to.notes !== undefined) row.notes = to.notes;
   if (run.customer !== undefined) row.customer = run.customer;
+  if (run.maxInFlight !== undefined) row.max_in_flight = run.maxInFlight;
   return row;
 }
 
@@ -1299,23 +1303,31 @@ function bindCustomer(run: Run, records: JournalRow[]): RunResult | undefined {
 /** The shared entry: reconstruct journal state, then drive — fresh at
  *  the entry stage, or from wherever the journal last settled. */
 async function begin(run: Run): Promise<RunResult> {
-  const guard = foreignItemGuard(run);
-  if (guard !== undefined) {
-    return guard;
+  const lock =
+    run.dir === undefined ? null : pipelineStarterLockPath({ dir: run.dir, runId: run.runId });
+  const release =
+    lock === null ? undefined : holdFileLock(lock, { waitMs: 0, label: 'pipeline starter' });
+  try {
+    const guard = foreignItemGuard(run);
+    if (guard !== undefined) {
+      return guard;
+    }
+    const records = recordsOf(run);
+    const customerPark = bindCustomer(run, records);
+    if (customerPark !== undefined) {
+      return customerPark;
+    }
+    run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);
+    replayCtx(run, records);
+    const last = records.at(-1);
+    if (last === undefined) {
+      return drive(run, { stage: entryStage(run.formula).name, attempt: 1 });
+    }
+    const step = await resumeStep(run, last, pendingRecord(records));
+    return 'halt' in step ? step.halt : drive(run, step.go);
+  } finally {
+    release?.();
   }
-  const records = recordsOf(run);
-  const customerPark = bindCustomer(run, records);
-  if (customerPark !== undefined) {
-    return customerPark;
-  }
-  run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);
-  replayCtx(run, records);
-  const last = records.at(-1);
-  if (last === undefined) {
-    return drive(run, { stage: entryStage(run.formula).name, attempt: 1 });
-  }
-  const step = await resumeStep(run, last, pendingRecord(records));
-  return 'halt' in step ? step.halt : drive(run, step.go);
 }
 
 /** Run an item through the formula from the top — or continue the

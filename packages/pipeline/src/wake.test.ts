@@ -10,11 +10,16 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { testRepoInit } from '@broject/core';
+import { holdFileLock, testRepoInit } from '@broject/core';
 import { parse } from 'smol-toml';
 import { appendCustomerRecord, customerChannelPath, fileVerdictStore } from './customer.ts';
 import { parsePipelineFormula } from './formula.ts';
-import { appendJournalRow, type JournalRow, pipelineDir } from './journal.ts';
+import {
+  appendJournalRow,
+  type JournalRow,
+  pipelineDir,
+  pipelineStarterLockPath,
+} from './journal.ts';
 import {
   type EngineFn,
   type EngineMap,
@@ -517,6 +522,53 @@ describe('wakePipeline — provider walls + capacity', () => {
 });
 
 describe('wakePipeline — durability', () => {
+  test('a live starter lease suppresses wake, but a dead lease remains recoverable', async () => {
+    const { dir, d } = repo();
+    acceptPending(d);
+    const lock = pipelineStarterLockPath({ dir, runId: 'R1' });
+    assert.ok(lock);
+    const release = holdFileLock(lock, { waitMs: 0, label: 'test starter' });
+    try {
+      const live = await wakePipeline({ dir, resolve: resolver(dir, tailEngines()) });
+      assert.equal(live.runs[0]?.action, 'waiting');
+      assert.match(live.runs[0]?.detail ?? '', /starter invocation still live/);
+    } finally {
+      release();
+    }
+    const resumed: number[] = [];
+    const recovered = await wakePipeline({
+      dir,
+      resolve: resolver(dir, tailEngines()),
+      resume: async () => {
+        resumed.push(1);
+        return {} as RunResult;
+      },
+    });
+    assert.equal(recovered.runs[0]?.action, 'woken');
+    assert.equal(resumed.length, 1);
+  });
+
+  test('the journaled machine cap is restored before a wake resume', async () => {
+    const { dir, d } = repo();
+    writeRun(d, 'R1', ITEM, [
+      { stage: 'verify', intent: 'verify', verdict: 'verified', extra: { max_in_flight: 2 } },
+    ]);
+    let seen: number | undefined;
+    const report = await wakePipeline({
+      dir,
+      resolve: async () => ({
+        formula: FORMULA,
+        opts: { engines: tailEngines(), dir, formulaSha: SHA },
+      }),
+      resume: async (_formula, _item, _journal, opts) => {
+        seen = opts.maxInFlight;
+        return {} as RunResult;
+      },
+    });
+    assert.equal(report.runs[0]?.action, 'woken');
+    assert.equal(seen, 2);
+  });
+
   test('a failed resume retries next pass (the failed mark bypasses the sig gate)', async () => {
     const { dir, d } = repo();
     // the firing anchor: intake questions parked, answer already given

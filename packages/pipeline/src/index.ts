@@ -59,6 +59,7 @@ export {
   pendingRecord,
   pipelineDir,
   pipelineJournalPath,
+  pipelineStarterLockPath,
   readJournalFile,
 } from './journal.ts';
 export type {
