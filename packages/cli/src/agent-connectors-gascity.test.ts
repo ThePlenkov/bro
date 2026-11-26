@@ -236,10 +236,11 @@ const SPEC = (main: string, beadsDir: string, molStep: string) => ({
 });
 
 describe('gascity connector', () => {
-  test('registry order: native first, gascity before docker', () => {
+  test('registry order: native first, herdr and gascity before docker', () => {
     assert.deepEqual(agentConnectorNames(), [
       'native',
       'tmux',
+      'herdr',
       'gascity',
       'docker',
       'copilot',
