@@ -1948,9 +1948,9 @@ function removeGithubReaction(
     '-f',
     `id=${content}`,
   ]);
-  const group = found.data?.node?.reactionGroups?.find(
-    item => item.content === kind && item.viewerHasReacted
-  );
+  const group = found.data?.node?.reactionGroups
+    ?.filter(item => item.content === kind)
+    .find(item => item.viewerHasReacted);
   const id = group?.reactions?.nodes?.[0]?.id;
   if (!id) return { artifact: content, reaction, removed: true, counts: {} };
   graphql(

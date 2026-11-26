@@ -14,7 +14,12 @@ function target(rev: ReturnType<typeof reviewHost>, raw: string): PrTarget | str
 
 function parseArgs(argv: string[]): { rawTarget: string; kind: ReactionKind } {
   const [rawTarget, rawKind] = argv.filter(arg => !arg.startsWith('--'));
-  if (!rawTarget || !rawKind || !KINDS.has(rawKind as ReactionKind)) {
+  if (!rawTarget || !rawKind) {
+    throw new Error(
+      'Usage: bro react <target> <+1|-1|thumbs_up|thumbs_down|eyes> [--remove] [--json]'
+    );
+  }
+  if (!KINDS.has(rawKind as ReactionKind)) {
     throw new Error(
       'Usage: bro react <target> <+1|-1|thumbs_up|thumbs_down|eyes> [--remove] [--json]'
     );
