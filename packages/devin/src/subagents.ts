@@ -19,6 +19,25 @@ export interface DevinMaterializeOptions {
   home?: string;
 }
 
+interface FileContent {
+  path: string;
+  content: string;
+}
+
+interface ProfileEntry {
+  name: string;
+  profile: DevinSubagentProfile;
+}
+
+interface ConfigFile {
+  path: string;
+}
+
+interface DefaultModel {
+  path: string;
+  model: string;
+}
+
 function profileText(profile: DevinSubagentProfile): string {
   const tools =
     profile.tools === undefined
@@ -27,33 +46,56 @@ function profileText(profile: DevinSubagentProfile): string {
   return `---\nmodel: ${profile.model}\n${tools}---\n${profile.prompt ?? ''}\n`;
 }
 
-function writeAtomic(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, content, 'utf8');
-  renameSync(temporary, path);
+function writeAtomic(file: FileContent): void {
+  mkdirSync(dirname(file.path), { recursive: true });
+  const temporary = `${file.path}.${process.pid}.tmp`;
+  writeFileSync(temporary, file.content, 'utf8');
+  renameSync(temporary, file.path);
 }
 
-function mergeDefaultModel(path: string, model: string): void {
-  let existing: Record<string, unknown> = {};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Object.prototype.toString.call(value) === '[object Object]';
+}
+
+function existingAgent(existing: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(existing.agent) ? existing.agent : {};
+}
+
+function readConfig(file: ConfigFile): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      existing = parsed as Record<string, unknown>;
-    }
+    const parsed: unknown = JSON.parse(readFileSync(file.path, 'utf8'));
+    if (!isRecord(parsed)) return {};
+    return parsed;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw new Error(`cannot merge Devin config ${path}: ${(error as Error).message}`);
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {};
     }
+    throw new Error(`cannot merge Devin config ${file.path}: ${(error as Error).message}`);
   }
-  const agent =
-    typeof existing.agent === 'object' && existing.agent !== null && !Array.isArray(existing.agent)
-      ? (existing.agent as Record<string, unknown>)
-      : {};
-  writeAtomic(
-    path,
-    `${JSON.stringify({ ...existing, agent: { ...agent, subagent_model: model } }, null, 2)}\n`
-  );
+}
+
+function mergeDefaultModel(file: DefaultModel): void {
+  const existing = readConfig(file);
+  writeAtomic({
+    path: file.path,
+    content: `${JSON.stringify(
+      { ...existing, agent: { ...existingAgent(existing), subagent_model: file.model } },
+      null,
+      2
+    )}\n`,
+  });
+}
+
+function validProfile(entry: ProfileEntry): boolean {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) return false;
+  if (typeof entry.profile.model !== 'string') return false;
+  return entry.profile.model.trim() !== '';
+}
+
+function defaultModel(config: DevinSubagentConfig): string | undefined {
+  if (typeof config.subagent_model !== 'string') return undefined;
+  if (config.subagent_model.trim() === '') return undefined;
+  return config.subagent_model;
 }
 
 /** Write the Devin CLI files described by bro's `agents.devin` settings.
@@ -65,20 +107,17 @@ export function materializeDevinSubagents(options: DevinMaterializeOptions): str
   const written: string[] = [];
   const profiles = config.profiles ?? config.subagents ?? {};
   for (const [name, profile] of Object.entries(profiles)) {
-    if (
-      !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name) ||
-      typeof profile.model !== 'string' ||
-      profile.model.trim() === ''
-    ) {
+    if (!validProfile({ name, profile })) {
       throw new Error(`invalid Devin subagent profile: ${name}`);
     }
     const path = join(home, '.config', 'devin', 'agents', `${name}.md`);
-    writeAtomic(path, profileText(profile));
+    writeAtomic({ path, content: profileText(profile) });
     written.push(path);
   }
-  if (typeof config.subagent_model === 'string' && config.subagent_model.trim() !== '') {
+  const model = defaultModel(config);
+  if (model !== undefined) {
     const path = join(home, '.config', 'devin', 'config.json');
-    mergeDefaultModel(path, config.subagent_model);
+    mergeDefaultModel({ path, model });
     written.push(path);
   }
   return written;
