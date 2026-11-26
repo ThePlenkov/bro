@@ -43,7 +43,7 @@ case "$1 $2" in
       if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
       else echo '{"state":"MERGED","title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"abc123"}}'; fi ;;
   "pr list") echo '[{"number":9,"mergedAt":"2026-01-02T00:00:00Z","updatedAt":null,"author":{"login":"dev"},"labels":[],"headRefName":"x","headRefOid":"s1"}]' ;;
-  "pr merge") if [ -n "$FAKE_GH_PR_MERGE_ERR" ]; then echo "$FAKE_GH_PR_MERGE_ERR" >&2; exit 1; fi
+  "pr merge") case "$*" in *--auto*) ;; *) if [ -n "$FAKE_GH_PR_MERGE_ERR" ]; then echo "$FAKE_GH_PR_MERGE_ERR" >&2; exit 1; fi ;; esac
       echo 'Merging pull request' ;;
   "api graphql") case "$@" in
       *"mergeQueue(branch:"*) if [ "$FAKE_GH_QUEUE" = "1" ]; then echo '{"data":{"repository":{"mergeQueue":{"id":7}}}}';
@@ -705,6 +705,21 @@ describe('githubReview', { skip: WIN32 }, () => {
       );
       assert.doesNotMatch(readFileSync(log, 'utf8'), /merge-async/);
     });
+  });
+
+  test('a branch-policy refusal retries through host auto-merge', () => {
+    withFakeGh(
+      { FAKE_GH_PR_MERGE_ERR: 'base branch policy prohibits the merge — add --auto' },
+      log => {
+        assert.equal(
+          githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
+          'MERGED'
+        );
+        const calls = readFileSync(log, 'utf8');
+        assert.match(calls, /pr merge 42 --squash --repo acme\/widgets --match-head-commit abc123/);
+        assert.match(calls, /pr merge 42 --squash --auto --repo acme\/widgets/);
+      }
+    );
   });
 
   test('mergeAsync resolves a 409 by polling the uuid the rejection carries', () => {
