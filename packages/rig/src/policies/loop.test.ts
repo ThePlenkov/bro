@@ -136,6 +136,35 @@ interface World {
   root: string;
 }
 
+const inertLoopDeps: Pick<
+  LoopDeps,
+  | 'mergePr'
+  | 'disableAutoMerge'
+  | 'settleSessions'
+  | 'reportOutcome'
+  | 'syncStackLines'
+  | 'stackSlotFor'
+  | 'stackLockPath'
+  | 'recordStackEdge'
+  | 'defaultBranch'
+  | 'worktrees'
+  | 'openFleetPrs'
+  | 'finishAudit'
+> = {
+  mergePr: async () => {},
+  disableAutoMerge: () => {},
+  settleSessions: () => {},
+  reportOutcome: async () => {},
+  syncStackLines: () => [],
+  stackSlotFor: () => undefined,
+  stackLockPath: () => null,
+  recordStackEdge: () => {},
+  defaultBranch: () => 'main',
+  worktrees: () => null,
+  openFleetPrs: () => [],
+  finishAudit: () => {},
+};
+
 function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): World {
   const root = mkdtempSync(join(tmpdir(), 'bro-loop-policy-'));
   const said: string[] = [];
@@ -182,18 +211,7 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
     admitTemplate: () => ({ reservation: undefined, crossKind: [] }),
     providerWall: () => undefined,
     bootstrap: () => ({ status: 0, signal: null }),
-    mergePr: async () => {},
-    disableAutoMerge: () => {},
-    settleSessions: () => {},
-    reportOutcome: async () => {},
-    syncStackLines: () => [],
-    stackSlotFor: () => undefined,
-    stackLockPath: () => null,
-    recordStackEdge: () => {},
-    defaultBranch: () => 'main',
-    worktrees: () => null,
-    openFleetPrs: () => [],
-    finishAudit: () => {},
+    ...inertLoopDeps,
   };
   const ctx: LoopCtx = {
     deps,
