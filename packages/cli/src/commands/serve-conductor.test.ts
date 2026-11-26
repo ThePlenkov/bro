@@ -3589,6 +3589,35 @@ describe('the provider lane cap (spec bro-x601l)', () => {
       second();
     }));
 
+  test('a multi-start plane claims every session in the locked and fallback paths', () =>
+    withXdg(async () => {
+      const prior = sessionPlanes();
+      registerSessionPlane({
+        kind: 'dv',
+        detectsCli: cli => cli === 'dv',
+        countLive: () => 0,
+        startsSessions: cmd => (commandCliName(cmd) === 'dv' ? 2 : 0),
+      });
+      try {
+        const cfg: ConductorConfig = {
+          ...CFG,
+          agents: { dv: { maxSessions: 2 } },
+        };
+        const release = await admitLaneCap(cfg, 'req-1');
+        assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 2);
+        await assert.rejects(admitLaneCap(cfg, 'req-2'), /dv session quota reached/);
+        release();
+
+        const fallbackRelease = admitLaneCapUnlocked(cfg, 'req-3');
+        assert.equal(countSessionReservations(sessionReservationsDir('dv', cfg.agents)), 2);
+        assert.throws(() => admitLaneCapUnlocked(cfg, 'req-4'), /dv session quota reached/);
+        fallbackRelease();
+      } finally {
+        clearSessionPlanes();
+        for (const plane of prior) registerSessionPlane(plane);
+      }
+    }));
+
   test('the contention fallback sees the same claims — locked and unlocked share one budget', () =>
     withXdg(async () => {
       const cfg: ConductorConfig = { ...CFG, providerCaps: { 'dv-acp': 1 } };
