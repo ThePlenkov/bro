@@ -37,6 +37,8 @@ export interface MergeTarget {
   repo?: string;
   /** the host the link named — absent for the bare form. */
   host?: string;
+  /** GitLab's merge-request URL shape, when the reference carried one. */
+  kind?: 'gitlab';
 }
 
 /** A merge step's claim: what the agent said, and what came before. */
@@ -108,10 +110,16 @@ function claimSources(claim: MergeClaim): RefSource[] {
 
 /** A target that carries only what is known — no empty repository, no
  *  empty host. */
-function targetOf(pr: number, repo: string | undefined, host: string | undefined): MergeTarget {
+function targetOf(
+  pr: number,
+  repo: string | undefined,
+  host: string | undefined,
+  kind?: 'gitlab'
+): MergeTarget {
   const target: MergeTarget = { pr };
   if (repo !== undefined) target.repo = repo;
   if (host !== undefined) target.host = host;
+  if (kind !== undefined) target.kind = kind;
   return target;
 }
 
@@ -121,10 +129,11 @@ function targetOf(pr: number, repo: string | undefined, host: string | undefined
 function mergeRefs(known: MergeTarget, ref: PrRef): { target: MergeTarget; conflict: boolean } {
   const repo = known.repo ?? ref.repo;
   const host = known.host ?? ref.host;
+  const kind = known.kind ?? ref.kind;
   const conflict =
     (known.repo !== undefined && ref.repo !== undefined && known.repo !== ref.repo) ||
     (known.host !== undefined && ref.host !== undefined && known.host !== ref.host);
-  return { target: targetOf(known.pr, repo, host), conflict };
+  return { target: targetOf(known.pr, repo, host, kind), conflict };
 }
 
 /** The PRs a set of references names. */
@@ -134,7 +143,7 @@ function collectTargets(refs: PrRef[]): Collected {
   for (const ref of refs) {
     const known = byNumber.get(ref.pr);
     if (known === undefined) {
-      byNumber.set(ref.pr, targetOf(ref.pr, ref.repo, ref.host));
+      byNumber.set(ref.pr, targetOf(ref.pr, ref.repo, ref.host, ref.kind));
       continue;
     }
     const merged = mergeRefs(known, ref);
@@ -193,6 +202,9 @@ export function mergeClaimTarget(claim: MergeClaim): { target?: MergeTarget; mes
  *  PR. */
 function prRefText(target: MergeTarget): string {
   if (target.repo === undefined) return `PR #${target.pr}`;
+  if (target.kind === 'gitlab') {
+    return `[#${target.pr}](https://${target.host ?? 'gitlab.com'}/${target.repo}/-/merge_requests/${target.pr})`;
+  }
   return prLink(target.repo, target.pr, target.host);
 }
 
@@ -220,10 +232,10 @@ export function mergeCloseReason(
 
 /** The host the connector reads — a claim that names another host names
  *  another PR, and this host cannot vouch for it. */
-function hostMismatch(target: MergeTarget): string | undefined {
+function hostMismatch(target: MergeTarget, connectorHost: string): string | undefined {
   if (target.host === undefined) return undefined;
-  if (target.host === ghHost()) return undefined;
-  return `the claim names PR #${target.pr} on ${target.host}, but this connector reads ${ghHost()}`;
+  if (target.host === connectorHost) return undefined;
+  return `the claim names PR #${target.pr} on ${target.host}, but this connector reads ${connectorHost}`;
 }
 
 /** The host's answer — the probe's own words when it failed. */
@@ -268,13 +280,14 @@ async function verdictFor(
  *  unverifiable is never verified. */
 export async function verifyMergeClose(
   claim: MergeClaim,
-  probe: (target: MergeTarget) => Promise<MergeProbe>
+  probe: (target: MergeTarget) => Promise<MergeProbe>,
+  connectorHost: string = ghHost()
 ): Promise<MergeVerdict> {
   const { target, message } = mergeClaimTarget(claim);
   if (target === undefined) {
     return { ok: false, message: message ?? 'the merge claim names no PR' };
   }
-  const mismatch = hostMismatch(target);
+  const mismatch = hostMismatch(target, connectorHost);
   if (mismatch !== undefined) return { ok: false, message: mismatch };
   return verdictFor(target, claim, probe);
 }

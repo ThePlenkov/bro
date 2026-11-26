@@ -286,6 +286,8 @@ export interface PrRef {
   /** the host the link named — `github.com`, or the GHES host. The
    *  bare form names no host. */
   host?: string;
+  /** The vendor URL shape, when the link was a merge request. */
+  kind?: 'gitlab';
 }
 
 /** A markdown link found in free text — where it sits, and the URL it
@@ -402,8 +404,21 @@ function pullPath(path: string): { owner: string; repo: string; num: string } | 
   return { owner, repo, num };
 }
 
+/** The `owner/repo/-/merge_requests/N` path GitLab uses for MRs. */
+function mergeRequestPath(path: string): { repo: string; num: string } | null {
+  const segments = path.split('/');
+  const marker = segments.length - 3;
+  if (marker < 1 || segments[marker] !== '-' || segments[marker + 1] !== 'merge_requests') {
+    return null;
+  }
+  const repo = segments.slice(0, marker).join('/');
+  const num = segments[marker + 2];
+  if (!isPathSegment(repo) || num === undefined || !isDigits(num)) return null;
+  return { repo, num };
+}
+
 /** The PR a link names — `https://host/owner/repo/pull/N`. */
-function pullRef(url: string): { pr: number; repo: string; host: string } | null {
+function pullRef(url: string): { pr: number; repo: string; host: string; kind?: 'gitlab' } | null {
   const parts = urlParts(url);
   if (parts === null) return null;
   const path = pullPath(parts.path);
@@ -413,14 +428,31 @@ function pullRef(url: string): { pr: number; repo: string; host: string } | null
   return { pr, repo: `${path.owner}/${path.repo}`, host: parts.host };
 }
 
+function mergeRequestRef(
+  url: string
+): { pr: number; repo: string; host: string; kind: 'gitlab' } | null {
+  const parts = urlParts(url);
+  if (parts === null) return null;
+  const path = mergeRequestPath(parts.path);
+  if (path === null) return null;
+  const pr = Number(path.num);
+  if (!Number.isInteger(pr) || pr <= 0) return null;
+  return { pr, repo: path.repo, host: parts.host, kind: 'gitlab' };
+}
+
 /** The PRs the markdown links name — the link's own `#N` label is not a
  *  second reference. */
 function linkRefs(links: MarkdownLink[]): PrRef[] {
   const out: PrRef[] = [];
   for (const link of links) {
-    const ref = pullRef(link.url);
+    const ref = pullRef(link.url) ?? mergeRequestRef(link.url);
     if (ref === null) continue;
-    out.push({ pr: ref.pr, repo: ref.repo, host: ref.host });
+    out.push({
+      pr: ref.pr,
+      repo: ref.repo,
+      host: ref.host,
+      ...(ref.kind ? { kind: ref.kind } : {}),
+    });
   }
   return out;
 }

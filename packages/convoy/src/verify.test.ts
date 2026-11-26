@@ -92,6 +92,18 @@ describe('mergeClaimTarget', () => {
     assert.equal(target?.host, 'ghe.example.com');
   });
 
+  test('a GitLab merge request link names the MR target', () => {
+    const { target } = mergeClaimTarget({
+      result: 'merged [!42](https://gitlab.example/group/subproject/-/merge_requests/42)',
+    });
+    assert.deepEqual(target, {
+      pr: 42,
+      repo: 'group/subproject',
+      host: 'gitlab.example',
+      kind: 'gitlab',
+    });
+  });
+
   test('one PR number in two repositories is ambiguous, not a guess', () => {
     const { target, message } = mergeClaimTarget({
       result:
@@ -154,6 +166,28 @@ describe('verifyMergeClose', () => {
       return { state: 'MERGED' };
     });
     assert.deepEqual(seen, [{ pr: 958 }]);
+  });
+
+  test('a GitLab MR is verified through the selected connector seam', async () => {
+    const seen: MergeTarget[] = [];
+    const verdict = await verifyMergeClose(
+      { result: '[!42](https://gitlab.example/group/subproject/-/merge_requests/42)' },
+      async target => {
+        seen.push(target);
+        return { state: 'MERGED', mergeSha: 'abc12345' };
+      },
+      'gitlab.example'
+    );
+    assert.equal(verdict.ok, true);
+    assert.deepEqual(seen, [
+      { pr: 42, repo: 'group/subproject', host: 'gitlab.example', kind: 'gitlab' },
+    ]);
+    if (verdict.ok) {
+      assert.match(
+        verdict.reason,
+        /https:\/\/gitlab\.example\/group\/subproject\/-\/merge_requests\/42/
+      );
+    }
   });
 });
 
