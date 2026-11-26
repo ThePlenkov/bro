@@ -38,20 +38,30 @@ export type InvokeMode = 'always' | 'ambiguous' | 'never';
 
 /** One stage's record — the contenders it saw, the contenders it left,
  *  the wall-clock it cost. */
-export function stageRecord(
-  stage: CascadeStageName,
-  before: readonly string[],
-  after: readonly string[],
-  latencyMs: number,
-  extra?: { decided?: string; note?: string }
-): CascadeStage {
+export interface StageRecordOptions {
+  stage: CascadeStageName;
+  before: readonly string[];
+  after: readonly string[];
+  latencyMs: number;
+  decided?: string;
+  note?: string;
+}
+
+export function stageRecord({
+  stage,
+  before,
+  after,
+  latencyMs,
+  decided,
+  note,
+}: StageRecordOptions): CascadeStage {
   return {
     stage,
     before: [...before],
     after: [...after],
     latencyMs,
-    ...(extra?.decided === undefined ? {} : { decided: extra.decided }),
-    ...(extra?.note === undefined ? {} : { note: extra.note }),
+    ...(decided === undefined ? {} : { decided }),
+    ...(note === undefined ? {} : { note }),
   };
 }
 
@@ -96,16 +106,16 @@ function t1Result(opts: {
     ...(decided === undefined ? {} : { decided }),
     order: opts.order,
     ...(opts.cluster === undefined ? {} : { cluster: opts.cluster }),
-    stage: stageRecord(
-      'T1',
-      opts.contenders,
-      decided === undefined ? opts.order : [decided],
-      opts.latencyMs,
-      {
+    stage: stageRecord({
+      stage: 'T1',
+      before: opts.contenders,
+      after: decided === undefined ? opts.order : [decided],
+      latencyMs: opts.latencyMs,
+      ...{
         ...(decided === undefined ? {} : { decided }),
         note: opts.stageNote ?? opts.note,
-      }
-    ),
+      },
+    }),
     note: opts.note,
   };
 }
@@ -152,6 +162,20 @@ async function fetchRecallRows(opts: RunT1Opts): Promise<RecallOutcomeRow[] | un
   );
 }
 
+function decideRecall(rows: RecallOutcomeRow[], opts: RunT1Opts, latencyMs: number): T1Result {
+  const eligible = recallVotingWindow(rows, opts.contenders, opts.tuning.k, opts.predicate);
+  const { votes, order } = recallVotes(eligible, opts.contenders, opts.predicate);
+  const verdict = recallDecision(votes, opts.tuning, opts.contenders);
+  return t1Result({
+    contenders: opts.contenders,
+    order,
+    ...(verdict.decided === undefined ? {} : { decided: verdict.decided }),
+    ...(eligible.length === 0 ? {} : { cluster: recallClusterHash(eligible) }),
+    note: verdict.note,
+    latencyMs,
+  });
+}
+
 /** Run T1 — fetch the scoped recall rows (or take the test seam's),
  *  label them by the success predicate, intersect with the contenders,
  *  and decide-or-reorder. Never throws: broken recall passes through
@@ -169,26 +193,7 @@ export async function runT1(opts: RunT1Opts): Promise<T1Result> {
       latencyMs,
     });
   }
-  // only the top-k ELIGIBLE rows vote — the wider fetch exists so the
-  // scope filters (context/table/formula/verified) can narrow it, and
-  // unlabelled or dead-route rows never occupy a voting slot either
-  // (bro-0ykhg.2 review). Agreement and reorder must read the SAME
-  // top-k the tuning names; lower-ranked rows would dilute the vote.
-  const eligible = recallVotingWindow(rows, opts.contenders, opts.tuning.k, opts.predicate);
-  const { votes, order } = recallVotes(eligible, opts.contenders, opts.predicate);
-  const verdict = recallDecision(votes, opts.tuning, opts.contenders);
-  return t1Result({
-    contenders: opts.contenders,
-    order,
-    ...(verdict.decided === undefined ? {} : { decided: verdict.decided }),
-    // the cluster is the EVIDENCE's identity — the same eligible rows
-    // hash the same for any task that retrieved them, so 'recall'-mode
-    // cache entries are shared across similar tasks; a new verified
-    // outcome entering the window changes the hash and misses the memo
-    ...(eligible.length === 0 ? {} : { cluster: recallClusterHash(eligible) }),
-    note: verdict.note,
-    latencyMs,
-  });
+  return decideRecall(rows, opts, latencyMs);
 }
 
 /** The recall cluster — canonical JSON over the eligible rows'

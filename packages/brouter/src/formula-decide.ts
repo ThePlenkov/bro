@@ -33,6 +33,22 @@ import type {
   JudgeQuestion,
   Verdict,
 } from '@broject/core';
+import type {
+  CascadeDecider,
+  CascadeStage,
+  CascadeTrace,
+  FeatureValue,
+  Formula,
+  FormulaAnswerTrace,
+  FormulaTrace,
+  OutcomeStatsSource,
+  PendingRoute,
+  RouteCacheInfo,
+  RouteCandidate,
+  RouteDecision,
+  RouteTable,
+  RouteTask,
+} from '@broject/router-routes';
 import {
   applyFormulaFilters,
   candidates,
@@ -45,34 +61,18 @@ import {
   resolveRoute,
   scoreCandidates,
 } from '@broject/router-routes';
-import type {
-  CascadeDecider,
-  CascadeStage,
-  CascadeTrace,
-  FeatureValue,
-  Formula,
-  FormulaAnswerTrace,
-  FormulaTrace,
-  OutcomeStatsSource,
-  PendingRoute,
-  RouteCandidate,
-  RouteCacheInfo,
-  RouteDecision,
-  RouteTable,
-  RouteTask,
-} from '@broject/router-routes';
 import type { RecallOutcomeRow, SuccessPredicate } from '@broject/router-store';
+import { type InvokeMode, runT1, shouldInvokeT2, stageRecord } from './cascade.ts';
 import {
+  type CacheConfig,
+  type CachePlan,
+  type CacheValue,
   cacheInfo,
   formatCacheAge,
   planCacheConsult,
   storeCacheValue,
-  type CacheConfig,
-  type CachePlan,
-  type CacheValue,
 } from './decision-cache.ts';
 import { decisionJudge } from './decision-model.ts';
-import { runT1, shouldInvokeT2, stageRecord, type InvokeMode } from './cascade.ts';
 import { recallTuning } from './recall.ts';
 
 /** The verdict for a formula-decided task — the same shape the table's
@@ -296,11 +296,17 @@ async function cascadePrefix(input: {
   const contenderNames = t0.set.candidates.map(c => c.route.name);
   const allNames = [...contenderNames, ...t0.pending.map(p => p.route.name)];
   stages.push(
-    stageRecord('T0', allNames, contenderNames, Date.now() - t0Start, {
-      note:
-        t0.pending.length === 0
-          ? `${contenderNames.length} candidate(s) survived rules + health`
-          : `${contenderNames.length} candidate(s), ${t0.pending.length} pending on formula answers`,
+    stageRecord({
+      stage: 'T0',
+      before: allNames,
+      after: contenderNames,
+      latencyMs: Date.now() - t0Start,
+      ...{
+        note:
+          t0.pending.length === 0
+            ? `${contenderNames.length} candidate(s) survived rules + health`
+            : `${contenderNames.length} candidate(s), ${t0.pending.length} pending on formula answers`,
+      },
     })
   );
 
@@ -469,13 +475,23 @@ async function askOrReplayFormula(args: {
     cache = cacheInfo(plan, true);
     const contenders = cascade.candidates.map(c => c.route.name);
     stages.push(
-      stageRecord('T2', contenders, contenders, consultMs, {
-        note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
+      stageRecord({
+        stage: t3Used ? 'T3' : 'T2',
+        before: cascade.candidates.map(c => c.route.name),
+        after: [],
+        latencyMs: consultMs,
+        ...{
+          note: `cache hit — the judge's answers replayed (${formatCacheAge(hit.ageMs)} old)`,
+        },
       })
     );
     if (t3Used) {
       stages.push(
-        stageRecord('T3', contenders, contenders, 0, {
+        stageRecord({
+          stage: 'T3',
+          before: contenders,
+          after: contenders,
+          latencyMs: 0,
           note: 'cache hit — the escalate answer was replayed',
         })
       );
@@ -505,22 +521,20 @@ async function askOrReplayFormula(args: {
     }
     const contenders = cascade.candidates.map(c => c.route.name);
     stages.push(
-      stageRecord('T2', contenders, contenders, Date.now() - t2Start, {
-        note:
-          asked === null
-            ? 'the judge did not answer — inputs stay unresolved'
-            : 'the judge answered the formula questions',
-      })
-    );
-    if (t3Attempted) {
-      stages.push(
-        stageRecord('T3', contenders, contenders, 0, {
+      stageRecord({
+        stage: t3Used ? 'T3' : 'T2',
+        before: cascade.candidates.map(c => c.route.name),
+        after: [],
+        latencyMs: Date.now() - t2Start,
+        ...{
           note: t3Used
             ? 'T2 low-confidence — the escalate provider re-answered'
-            : 'the escalate provider changed nothing — T2 stands',
-        })
-      );
-    }
+            : asked === null
+              ? 'the judge did not answer — inputs stay unresolved'
+              : 'the judge answered the formula questions',
+        },
+      })
+    );
     // memoize the stage answers — a judge that did not answer leaves
     // nothing worth replaying (transient failures are never cached);
     // the CAS write rejects it if an invalidation landed mid-T2
@@ -530,14 +544,20 @@ async function askOrReplayFormula(args: {
     }
   } else {
     stages.push(
-      stageRecord('T2', [], [], 0, {
-        note:
-          cascade.gateReason +
-          (judge === undefined
-            ? ' — no decision model configured'
-            : mode === 'off'
-              ? ' — the decision model is off'
-              : ''),
+      stageRecord({
+        stage: 'T2',
+        before: [],
+        after: [],
+        latencyMs: 0,
+        ...{
+          note:
+            cascade.gateReason +
+            (judge === undefined
+              ? ' — no decision model configured'
+              : mode === 'off'
+                ? ' — the decision model is off'
+                : ''),
+        },
       })
     );
   }
@@ -647,7 +667,15 @@ async function pickByFormula(input: {
   const t1Settled = cascade.t1Decided !== undefined && !pendingNeeds;
   const t2CanOverride = invoke === 'always' && formulaMode(router) === 'enforce';
   if (t1Settled && !t2CanOverride) {
-    stages.push(stageRecord('T2', [], [], 0, { note: 'skipped — outcome recall already decided' }));
+    stages.push(
+      stageRecord({
+        stage: 'T2',
+        before: [],
+        after: [],
+        latencyMs: 0,
+        ...{ note: 'skipped — outcome recall already decided' },
+      })
+    );
     const decision = resolveRoute(table, task, snapshot, () => cascade.t1Decided, {
       set: { candidates: cascade.candidates, rejected: cascade.rejected },
       picked: 'recall',
@@ -667,8 +695,14 @@ async function pickByFormula(input: {
   };
   if (!mayAsk) {
     stages.push(
-      stageRecord('T2', [], [], 0, {
-        note: `${cascade.gateReason}${formulaMode(router) === 'off' ? ' — the decision model is off' : ''}`,
+      stageRecord({
+        stage: 'T2',
+        before: [],
+        after: [],
+        latencyMs: 0,
+        ...{
+          note: `${cascade.gateReason}${formulaMode(router) === 'off' ? ' — the decision model is off' : ''}`,
+        },
       })
     );
     const decision = resolveRoute(table, task, snapshot, undefined, {
@@ -714,15 +748,15 @@ async function pickByFormula(input: {
     named = hit.pick ?? undefined;
     cache = cacheInfo(plan, true);
     stages.push(
-      stageRecord(
-        'T2',
-        cascade.candidates.map(c => c.route.name),
-        named !== undefined ? [named] : cascade.candidates.map(c => c.route.name),
-        consultMs,
-        {
+      stageRecord({
+        stage: 'T2',
+        before: cascade.candidates.map(c => c.route.name),
+        after: named !== undefined ? [named] : cascade.candidates.map(c => c.route.name),
+        latencyMs: consultMs,
+        ...{
           note: `cache hit — the judge's pick replayed (${formatCacheAge(hit.ageMs)} old)`,
-        }
-      )
+        },
+      })
     );
   } else {
     const t2Start = Date.now();
@@ -732,6 +766,7 @@ async function pickByFormula(input: {
       description:
         c.route.description ?? `chain: ${c.route.chain.map(e => e.provider).join(' → ')}`,
     }));
+    let traceEmitted = false;
     // T3 — the escalate judge rides routePick; it answers only when T2's
     // pick sits in lowConfidence (bro-0ykhg.2)
     const escalate = await escalateJudgeFor(dir, router, input.escalate);
@@ -747,10 +782,15 @@ async function pickByFormula(input: {
           mode: formulaMode(router),
           ...(escalate === undefined ? {} : { escalate }),
           onTrace: pickTrace => {
+            traceEmitted = true;
             const contenders = set.candidates.map(c => c.route.name);
             const t2After = pickTrace.t2Pick === undefined ? contenders : [pickTrace.t2Pick];
             stages.push(
-              stageRecord('T2', contenders, t2After, pickTrace.t2LatencyMs, {
+              stageRecord({
+                stage: 'T2',
+                before: contenders,
+                after: t2After,
+                latencyMs: pickTrace.t2LatencyMs,
                 note:
                   pickTrace.t2Pick === undefined
                     ? 'the judge named no confident candidate'
@@ -760,7 +800,11 @@ async function pickByFormula(input: {
             if (pickTrace.t3Attempted) {
               const t3After = pickTrace.finalPick === undefined ? t2After : [pickTrace.finalPick];
               stages.push(
-                stageRecord('T3', t2After, t3After, pickTrace.t3LatencyMs, {
+                stageRecord({
+                  stage: 'T3',
+                  before: t2After,
+                  after: t3After,
+                  latencyMs: pickTrace.t3LatencyMs,
                   ...(pickTrace.t3Merged && pickTrace.finalPick !== undefined
                     ? { decided: pickTrace.finalPick }
                     : {}),
@@ -779,20 +823,18 @@ async function pickByFormula(input: {
         );
       }
     }
-    if (stages.at(-1)?.stage !== 'T2' && stages.at(-1)?.stage !== 'T3') {
+    if (!traceEmitted) {
       stages.push(
-        stageRecord(
-          'T2',
-          set.candidates.map(c => c.route.name),
-          named === undefined ? set.candidates.map(c => c.route.name) : [named],
-          Date.now() - t2Start,
-          {
-            note:
-              named === undefined
-                ? 'the judge named no confident candidate'
-                : `the judge picked ${named}`,
-          }
-        )
+        stageRecord({
+          stage: 'T2',
+          before: cascade.candidates.map(c => c.route.name),
+          after: named === undefined ? set.candidates.map(c => c.route.name) : [named],
+          latencyMs: Date.now() - t2Start,
+          note:
+            named === undefined
+              ? 'the judge named no confident candidate'
+              : `the judge picked ${named}`,
+        })
       );
     }
     // memoize the stage answer — a pick formula's T2 output IS the
@@ -987,7 +1029,15 @@ async function decideByQuestions(
   const t2CanOverride = invoke === 'always' && judge !== undefined && mode === 'enforce';
   if (t1Settled && !t2CanOverride) {
     decidedBy = 'recall';
-    stages.push(stageRecord('T2', [], [], 0, { note: 'skipped — outcome recall already decided' }));
+    stages.push(
+      stageRecord({
+        stage: 'T2',
+        before: [],
+        after: [],
+        latencyMs: 0,
+        ...{ note: 'skipped — outcome recall already decided' },
+      })
+    );
     const set = {
       candidates: cascade.candidates,
       rejected: unresolvedRejects(cascade.pending, cascade.rejected),
@@ -1196,8 +1246,14 @@ export async function decideByFormula(input: FormulaDecisionInput): Promise<Form
       });
       const stages = [...cascade.stages];
       stages.push(
-        stageRecord('T2', [], [], 0, {
-          note: 'no decision model configured — the judge is never called',
+        stageRecord({
+          stage: 'T2',
+          before: [],
+          after: [],
+          latencyMs: 0,
+          ...{
+            note: 'no decision model configured — the judge is never called',
+          },
         })
       );
       // no judge exists on this path — invoke=always has nothing to ask,

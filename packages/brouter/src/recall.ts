@@ -48,6 +48,10 @@ export interface RecallTuning {
  *  floor: recall must prove agreement, not merely suggest it. */
 export const DEFAULT_RECALL: RecallTuning = { k: 5, minAgreement: 0.6, minRows: 3 };
 
+function finiteOr(value: unknown, fallback: number, valid: (value: number) => boolean): number {
+  return typeof value === 'number' && Number.isFinite(value) && valid(value) ? value : fallback;
+}
+
 /** Resolve the tuning — absent fields take the defaults; nonsense
  *  values clamp rather than disable (k≥1, agreement∈(0,1], rows≥1). */
 export function recallTuning(raw?: {
@@ -55,19 +59,17 @@ export function recallTuning(raw?: {
   minAgreement?: number;
   minRows?: number;
 }): RecallTuning {
-  const k = raw?.k;
-  const minAgreement = raw?.minAgreement;
-  const minRows = raw?.minRows;
+  const k = finiteOr(raw?.k, DEFAULT_RECALL.k, value => Number.isInteger(value) && value >= 1);
+  const minAgreement = finiteOr(raw?.minAgreement, DEFAULT_RECALL.minAgreement, value => value > 0);
+  const minRows = finiteOr(
+    raw?.minRows,
+    DEFAULT_RECALL.minRows,
+    value => Number.isInteger(value) && value >= 1
+  );
   return {
-    k: typeof k === 'number' && Number.isFinite(k) && k >= 1 ? Math.floor(k) : DEFAULT_RECALL.k,
-    minAgreement:
-      typeof minAgreement === 'number' && Number.isFinite(minAgreement) && minAgreement > 0
-        ? Math.min(1, minAgreement)
-        : DEFAULT_RECALL.minAgreement,
-    minRows:
-      typeof minRows === 'number' && Number.isFinite(minRows) && minRows >= 1
-        ? Math.floor(minRows)
-        : DEFAULT_RECALL.minRows,
+    k,
+    minAgreement: Math.min(1, minAgreement),
+    minRows,
   };
 }
 
@@ -221,20 +223,10 @@ export function recallDecision(
 ): { decided?: string; note: string } {
   // the winner: most successes among contenders; ties break by fewer
   // failures, then contender order
-  let best: RouteVotes | undefined;
-  for (const name of contenders) {
-    const v = votes.get(name);
-    if (v === undefined || v.successes === 0) {
-      continue;
-    }
-    if (
-      best === undefined ||
-      v.successes > best.successes ||
-      (v.successes === best.successes && v.failures < best.failures)
-    ) {
-      best = v;
-    }
-  }
+  const best = contenders
+    .map(name => votes.get(name))
+    .filter((vote): vote is RouteVotes => vote !== undefined && vote.successes > 0)
+    .sort((a, b) => b.successes - a.successes || a.failures - b.failures)[0];
   if (best === undefined) {
     return { note: 'no verified successes recalled' };
   }
