@@ -125,6 +125,21 @@ Developing bro itself: see CONTRIBUTING.md.
   NOSONAR sticks; rendered untrusted text → mark the node
   "never dangerouslySetInnerHTML" — the comment is the guard the next
   refactor reads.
+
+  Merge-cycle prevention checklist (recurring review findings): validate
+  configuration at every ingress, not only in a sibling loader — schema
+  bounds must match parser predicates, and cross-field invariants such as
+  `burst >= spawnCost` must be rejected or made explicit before constructing
+  a gate. Keep quota/session accounting transactional: reserve every open
+  path, and refund already-charged resources when a later admission step
+  fails. Tests for queueing, concurrency, and caps must synchronize on a
+  state transition or held prompt, never a wall-clock sleep. Treat protocol
+  mounts as part of the API contract: validate the mount before proxying and
+  emit the documented response shape for each dialect. Distinguish expected
+  bad input from unexpected translator/runtime failures, preserving an
+  operator-visible error signal. For replication, capture the exact object
+  (commit/ref) before pushing, report best-effort mirror failures, and never
+  publish a value reread after a concurrent writer can change it.
 - **Loop with retro** — when a gate or check fails, iterate until it is
   green and learn from each failure: after every red round, name the
   concrete finding (which rule, which function), the shape that caused
