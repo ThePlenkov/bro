@@ -1925,11 +1925,7 @@ function reactionTarget(target: PrTarget | string): string {
   return id;
 }
 
-function removeGithubReaction(
-  content: string,
-  reaction: ReactionKind,
-  kind: string
-): ReactionResult {
+function viewerReactionId(content: string, kind: string): string | undefined {
   const found = ghJson<{
     data?: {
       node?: {
@@ -1951,7 +1947,15 @@ function removeGithubReaction(
   const group = found.data?.node?.reactionGroups
     ?.filter(item => item.content === kind)
     .find(item => item.viewerHasReacted);
-  const id = group?.reactions?.nodes?.[0]?.id;
+  return group?.reactions?.nodes?.[0]?.id;
+}
+
+function removeGithubReaction(
+  content: string,
+  reaction: ReactionKind,
+  kind: string
+): ReactionResult {
+  const id = viewerReactionId(content, kind);
   if (!id) return { artifact: content, reaction, removed: true, counts: {} };
   graphql(
     'mutation($id:ID!,$content:ReactionContent!){removeReaction(input:{subjectId:$id,content:$content}){reaction{id}}}',
