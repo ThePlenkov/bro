@@ -695,6 +695,12 @@ function litterSweepTick(ctx: Ctx, sessionClaims?: ClaimRow[]): LitterReap {
       // a foreground pass — the default bound reaps in-pass.
       nxKillWaitMs: ctx.everySec === undefined ? undefined : 0,
       sessionClaims,
+      // Fleet cleanup is intentionally more conservative than the
+      // operator-facing loop litter command: observe once, then reap on a
+      // later pass, retaining the branch as the recovery point.
+      graceMs: 5 * 60 * 1000,
+      keepBranches: true,
+      backupNonEmptyDiff: true,
     });
   } finally {
     console.log = log;
