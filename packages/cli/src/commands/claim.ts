@@ -39,9 +39,9 @@ import {
   sessionIdFromEnv,
   sessionProject,
 } from '@broject/core';
+import { agentOwner } from '@broject/rig';
 import { hookHostOf } from '../hook-host.ts';
 import { flag, positionals } from './args.ts';
-import { agentOwner } from '@broject/rig';
 import {
   claimGlobWithinBounds,
   MAX_CLAIM_GLOB_LENGTH,

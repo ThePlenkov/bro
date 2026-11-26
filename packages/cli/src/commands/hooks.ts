@@ -112,6 +112,7 @@ import {
   type ProbeResult,
   type ProbeTiming,
 } from '@broject/core';
+import { hookHostOf } from '../hook-host.ts';
 import {
   agentOwner,
   CHECKOUT_DETAIL_PREFIX,
@@ -188,7 +189,6 @@ interface HookInput {
   stop_hook_active?: unknown;
   session_id?: unknown;
 }
-import { hookHostOf } from '../hook-host.ts';
 
 /** A repo opts in to bro hooks with any bro.config.* file or a .beads/
  *  dir — the local layer counts too (spec: specs/bro-9vmx.md). Shared
