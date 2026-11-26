@@ -46,7 +46,7 @@ git fetch origin 'loop/*:loop/*' 'work/*:work/*' 'stack/*:stack/*'
                             # enumerates open PRs from local branches, and a
                             # clone's are remote-tracking only until fetched;
                             # fetching does not recreate the old worktrees
-git worktree add ../<repo>-<slug> work/<slug>  # repeat for trees you need
+git worktree add ../<repo>--<slug> work/<slug>  # repeat for trees you need
 bro drive install           # (0.3.0) re-arms the merge path and brings the supervisor up —
                             # the want-marker is machine-local, so a clone starts with none
 ```
