@@ -376,6 +376,19 @@ export function emptyBoard(): BroBoard {
   };
 }
 
+function addBoardMetadata(board: BroBoard, value: Record<string, unknown>): void {
+  if (typeof value.dir === 'string') board.dir = value.dir;
+  if (typeof value.branch === 'string') board.branch = value.branch;
+  const watch = asObj(value.watch);
+  if (watch !== null) {
+    board.watch = { ageMs: asInt(watch.ageMs) ?? 0, attention: asInt(watch.attention) ?? 0 };
+  }
+  const act = asObj(value.act);
+  if (act !== null && typeof act.pr === 'number' && typeof act.url === 'string') {
+    board.act = { pr: act.pr, url: act.url };
+  }
+}
+
 /** Parse `bro status --json` output into the board. Unparseable output
  *  yields the EMPTY board — never a throw, never a partial lie. */
 export function parseBoard(out: string): BroBoard {
@@ -392,8 +405,6 @@ export function parseBoard(out: string): BroBoard {
   const beads = asObj(o.beads) ?? {};
   const fleet = asObj(o.fleet) ?? {};
   const loop = asObj(o.loop) ?? {};
-  const watch = asObj(o.watch);
-  const act = asObj(o.act);
   const board: BroBoard = {
     dirty: asInt(o.dirty) ?? 0,
     inWork: parseBeads(beads.inProgress),
@@ -405,14 +416,7 @@ export function parseBoard(out: string): BroBoard {
     worktrees: parseWorktrees(o.worktrees),
     attention: asInt(o.attention) ?? 0,
   };
-  if (typeof o.dir === 'string') board.dir = o.dir;
-  if (typeof o.branch === 'string') board.branch = o.branch;
-  if (watch !== null) {
-    board.watch = { ageMs: asInt(watch.ageMs) ?? 0, attention: asInt(watch.attention) ?? 0 };
-  }
-  if (act !== null && typeof act.pr === 'number' && typeof act.url === 'string') {
-    board.act = { pr: act.pr, url: act.url };
-  }
+  addBoardMetadata(board, o);
   return board;
 }
 

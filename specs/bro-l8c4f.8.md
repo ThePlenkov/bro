@@ -7,7 +7,7 @@ scope:
   - packages/cli/src/commands/hooks.e2e.test.ts
   - packages/cli/src/adapter/pi-conformance.test.ts
   - packages/cli/package.json
-  - plugins/claude/bro/hooks/hooks.json
+  - integrations/claude/hooks/hooks.json
   - site/content/docs/integrations.md
   - site/content/docs/index.mdx
 ---
@@ -135,7 +135,7 @@ Claude's pair records true/false, Devin records its boolean.
   hosts: {
     claude: {
       surface: 'manifest',             // hooks.json + run.sh
-      plugin: 'plugins/claude/bro',
+      plugin: 'integrations/claude',
       events: {
         'session-start':  { native: 'SessionStart', effects: ['context'] },
         'post-tool':      { native: 'PostToolUse', match: 'Bash',
@@ -216,7 +216,7 @@ e2e harness), not a stubbed policy — the claim is about wire fidelity.
 ### pi type conformance (dev-time only)
 
 `@earendil-works/pi-coding-agent@1.4.0` is a **devDependency** of
-`@broject/bro` — the shipped bundle (`plugins/pi/bro/bro.ts` via
+`@broject/bro` — the shipped bundle (`integrations/pi/bro.ts` via
 tsdown) never imports it; `adapter/pi.ts` keeps its structural local
 types. A conformance test file asserts, at typecheck time, that every
 event name `pi.ts` registers exists in the real `ExtensionAPI.on`

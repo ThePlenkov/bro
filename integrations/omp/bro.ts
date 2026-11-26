@@ -276,10 +276,13 @@ function parseControl(out) {
 		if (text === "") continue;
 		try {
 			const parsed = JSON.parse(text);
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+			if (isControlObject(parsed)) return parsed;
 		} catch {}
 	}
 	return null;
+}
+function isControlObject(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 /**
 * The context half of a control object: bro's "here is what you should
@@ -532,6 +535,25 @@ function sharedBinding(host) {
 		hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin })
 	};
 }
+function mergeHydrationText(priorCarry, text) {
+	if (priorCarry === "") return text;
+	return text === "" ? priorCarry : `${priorCarry}\n\n${text}`;
+}
+function canReuseCommand(failedAt) {
+	return failedAt === void 0 || Date.now() - failedAt < RESOLVE_RETRY_MS;
+}
+function canConsumeHydration(pending, sessionId, hydrated) {
+	return pending !== void 0 && pending.sessionId === sessionId && hydrated !== sessionId;
+}
+function trackHydration(options) {
+	const { raw, started, isCurrent, onFailure, clear } = options;
+	raw.then((control) => {
+		if (control === null && isCurrent()) onFailure();
+	}).catch(() => {});
+	started.then((text) => {
+		if (isCurrent() && text === "") clear();
+	}).catch(() => {});
+}
 /**
 * Wire bro into a host. `api` is the host's own extension API — the
 * driver passes it through so the client can register commands and
@@ -578,7 +600,7 @@ function createBroDriver(host, api, deps = {}) {
 	let resolvedFailedAt;
 	const resolve = deps.resolve ?? resolveCommand;
 	const command = () => {
-		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)) return resolved;
+		if (resolved !== void 0 && canReuseCommand(resolvedFailedAt)) return resolved;
 		resolvedFailedAt = void 0;
 		resolved = resolve({ npxPin: host.npxPin }).then((cmd) => {
 			if (cmd === null) resolvedFailedAt = Date.now();
@@ -648,7 +670,7 @@ function createBroDriver(host, api, deps = {}) {
 		const priorCarry = event === "post-compaction" && carry?.sessionId === sessionId ? carry.text : "";
 		carry = void 0;
 		const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
-		const started = raw.then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
+		const started = raw.then(contextOf).then((text) => mergeHydrationText(priorCarry, text));
 		hydration = {
 			sessionId,
 			promise: started
@@ -656,12 +678,17 @@ function createBroDriver(host, api, deps = {}) {
 		if (event === "session-start" || hydrated === sessionId) hydrated = void 0;
 		if (event === "session-start") hydrationRetried = void 0;
 		hydrationFailed = void 0;
-		raw.then((control) => {
-			if (control === null && hydration?.promise === started) hydrationFailed = sessionId;
-		}).catch(() => {});
-		started.then((text) => {
-			if (hydration?.promise === started && text === "") hydration = void 0;
-		}).catch(() => {});
+		trackHydration({
+			raw,
+			started,
+			isCurrent: () => hydration?.promise === started,
+			onFailure: () => {
+				hydrationFailed = sessionId;
+			},
+			clear: () => {
+				hydration = void 0;
+			}
+		});
 	};
 	/** The session's context text, consumed from the cached probe. An
 	*  empty answer is not the session's verdict: the claim is released
@@ -669,7 +696,8 @@ function createBroDriver(host, api, deps = {}) {
 	*  picks the answer up, this turn never waits on it). */
 	const consumeHydration = async (sessionId, cwd) => {
 		const pending = hydration;
-		if (pending === void 0 || pending.sessionId !== sessionId || hydrated === sessionId) return "";
+		if (pending === void 0) return "";
+		if (!canConsumeHydration(pending, sessionId, hydrated)) return "";
 		hydrated = sessionId;
 		const text = (await pending.promise).trim();
 		if (text !== "") return text;
@@ -852,7 +880,8 @@ function createBroDriver(host, api, deps = {}) {
 			properties: {},
 			additionalProperties: false
 		},
-		async execute(_id, _params, _signal, _onUpdate, ctx) {
+		async execute(...toolArgs) {
+			const ctx = toolArgs[4];
 			const result = await run(["status", "--json"], host.cwd(ctx));
 			return {
 				content: [{
@@ -904,6 +933,15 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		});
 		return promise;
 	}
+	return wireBroProcess({
+		child,
+		promise,
+		resolve,
+		timeoutMs
+	});
+}
+function wireBroProcess(options) {
+	const { child, promise, resolve, timeoutMs } = options;
 	let out = "";
 	let err = "";
 	let settled = false;
@@ -914,10 +952,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		resolve(result);
 	};
 	const timer = setTimeout(() => {
-		try {
-			if (child.pid !== void 0 && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-			else child.kill("SIGKILL");
-		} catch {}
+		killChild(child);
 		settle({
 			code: 1,
 			stdout: out,
@@ -927,10 +962,10 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 	child.stdout?.setEncoding("utf8");
 	child.stderr?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
-		if (out.length < 1 << 20) out += chunk;
+		out = appendOutput(out, chunk);
 	});
 	child.stderr?.on("data", (chunk) => {
-		if (err.length < 1 << 20) err += chunk;
+		err = appendOutput(err, chunk);
 	});
 	child.on("error", () => settle({
 		code: 127,
@@ -943,6 +978,18 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		stderr: err
 	}));
 	return promise;
+}
+function appendOutput(current, chunk) {
+	return current.length < 1 << 20 ? current + chunk : current;
+}
+function killChild(child) {
+	try {
+		if (child.pid !== void 0 && process.platform !== "win32") {
+			process.kill(-child.pid, "SIGKILL");
+			return;
+		}
+		child.kill("SIGKILL");
+	} catch {}
 }
 
 //#endregion
@@ -1135,7 +1182,7 @@ function broExtension(pi) {
 /**
 * Adapter ownership sentinel — `bro plugins install|uninstall` refuses a
 * foreign file holding this slot; the marker survives generation into
-* plugins/omp/bro/bro.ts.
+* integrations/omp/bro.ts.
 */
 const adapter = {
 	id: "bro",

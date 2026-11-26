@@ -16,8 +16,8 @@ describe('claude plugin', () => {
       readFileSync(join(ROOT, '.claude-plugin/plugin.json'), 'utf8')
     ) as { name?: string; hooks?: string }
     assert.equal(manifest.name, 'bro')
-    assert.equal(manifest.hooks, './plugins/claude/bro/hooks/hooks.json')
-    const hooks = readFileSync(join(ROOT, 'plugins/claude/bro/hooks/hooks.json'), 'utf8')
+    assert.equal(manifest.hooks, './integrations/claude/hooks/hooks.json')
+    const hooks = readFileSync(join(ROOT, 'integrations/claude/hooks/hooks.json'), 'utf8')
     assert.match(hooks, /\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/run\.sh/)
     assert.doesNotMatch(hooks, /npx|DEVIN_PLUGIN_ROOT/)
     assert.equal(existsSync(join(ROOT, 'hooks/hooks.json')), false)

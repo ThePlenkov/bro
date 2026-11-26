@@ -15,7 +15,7 @@ the `bro_status` tool — without holding bro policy in the adapter.
 
 `packages/cli/src/pi.ts` — self-contained (node builtins only;
 the standalone copy can hold no relative import), generated verbatim
-to `plugins/pi/bro/bro.ts` by `npm run gen:plugins`. Structural pi
+to `integrations/pi/bro.ts` by `npm run gen:plugins`. Structural pi
 API types are declared locally, never imported — same convention as
 opencode.ts.
 
@@ -45,4 +45,4 @@ opencode.ts.
 - [x] board widget + status crumb from `bro status --json`
 - [x] `/bro` command + `bro_status` tool
 - [x] `adapter = {id:"bro",kind:"pi-extension"}` sentinel
-- [x] gen-plugins `plugins/pi/bro/` adapter (bro.ts + README)
+- [x] gen-plugins `integrations/pi/` adapter (bro.ts + README)

@@ -863,7 +863,7 @@ function broExtension(pi) {
 /**
  * Adapter ownership sentinel — `bro plugins install|uninstall` refuses a
  * foreign file holding this slot; the marker survives generation into
- * plugins/pi/bro/bro.ts.
+ * integrations/pi/bro.ts.
  */
 const adapter = {
   id: 'bro',

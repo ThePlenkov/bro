@@ -120,6 +120,6 @@ export default function broExtension(pi: OmpApi): void {
 /**
  * Adapter ownership sentinel — `bro plugins install|uninstall` refuses a
  * foreign file holding this slot; the marker survives generation into
- * plugins/omp/bro/bro.ts.
+ * integrations/omp/bro.ts.
  */
 export const adapter = { id: 'bro', kind: 'omp-extension' } as const; // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point

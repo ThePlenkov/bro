@@ -112,9 +112,8 @@ const CURSOR_PLUGIN_RUN_SH = resolve(
   '..',
   '..',
   '..',
-  'plugins',
+  'integrations',
   'cursor',
-  'bro',
   'hooks',
   'run.sh'
 );
@@ -124,9 +123,8 @@ const CURSOR_HOOKS_JSON = resolve(
   '..',
   '..',
   '..',
-  'plugins',
+  'integrations',
   'cursor',
-  'bro',
   'hooks',
   'hooks.json'
 );
@@ -136,9 +134,8 @@ const DEVIN_PLUGIN_RUN_SH = resolve(
   '..',
   '..',
   '..',
-  'plugins',
+  'integrations',
   'devin',
-  'bro',
   'hooks',
   'run.sh'
 );

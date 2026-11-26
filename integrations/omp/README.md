@@ -42,11 +42,11 @@ reimplement them — it supplies the state they cannot have. See
 ## Install
 
 ```sh
-omp plugin install ./plugins/omp/bro     # from a checkout
+omp plugin install ./integrations/omp     # from a checkout
 omp plugin install bro@bro               # from the marketplace
 ```
 
-Or load it ad hoc: `omp --extension ./plugins/omp/bro/bro.ts`.
+Or load it ad hoc: `omp --extension ./integrations/omp/bro.ts`.
 
 The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's `packages/cli/dist/index.js` found walking up), then `bro`

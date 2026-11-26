@@ -132,7 +132,7 @@ describe('isBroAdapter', () => {
   });
 
   test('recognizes the pi extension sentinel', () => {
-    // the shipped adapter is the generated bundle (plugins/pi/bro/bro.ts);
+    // the shipped adapter is the generated bundle (integrations/pi/bro.ts);
     // the source binding carries the same sentinel
     const src = join(repoRoot, 'packages/agent-plugins/pi/src/pi.ts');
     assert.ok(isBroAdapter(readFileSync(src, 'utf8')));
@@ -628,7 +628,7 @@ describe('manifest client probes', () => {
         .map(r => r.state),
       ['absent']
     );
-    // the documented local install — plugins/cursor/bro → plugins/local/bro
+    // the documented local install — integrations/cursor → plugins/local/bro
     const target = tmpDir('bro-clients-cursor-src-');
     writeCursorManifest(target, { name: 'bro', version: cliVersion });
     mkdirSync(join(home, 'plugins', 'local'), { recursive: true });

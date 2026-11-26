@@ -394,7 +394,7 @@ export function parseControl(out: string): HookControl | null {
     }
     try {
       const parsed = JSON.parse(text) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (isControlObject(parsed)) {
         return parsed as HookControl;
       }
     } catch {
@@ -402,6 +402,10 @@ export function parseControl(out: string): HookControl | null {
     }
   }
   return null;
+}
+
+function isControlObject(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**

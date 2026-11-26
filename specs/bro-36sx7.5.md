@@ -9,7 +9,7 @@
 ## Problem
 
 Devin can wire bro's lifecycle hooks twice: the installed `bro`
-plugin registers every event from `plugins/devin/bro/hooks.json`,
+plugin registers every event from `integrations/devin/hooks.json`,
 and a project-local `.devin/hooks.v1.json` registers the same events
 against `$DEVIN_PROJECT_DIR/hooks/run.sh`. This repo carries both.
 Before this bead's defer landed (#708) every Devin event ran two

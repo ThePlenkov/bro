@@ -281,7 +281,7 @@ function context(event: string, text: string): void {
   emit({ hookSpecificOutput: { hookEventName: event, additionalContext: text } });
 }
 
-const CODEX_INSTRUCTIONS = 'plugins/codex/bro/INSTRUCTIONS.md';
+const CODEX_INSTRUCTIONS = 'integrations/codex/INSTRUCTIONS.md';
 
 /** Codex session steer. The plugin file is the source; a missing root
  *  or an unreadable file stays silent so the hook cannot fail closed. */

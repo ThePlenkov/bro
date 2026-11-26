@@ -18,7 +18,7 @@ and the drift must be visible, not silent.
 
 - **Install**: `/plugin marketplace add ThePlenkov/bro` →
   `/plugin install bro@bro`.
-- **Surface**: `plugins/claude/bro/hooks/hooks.json` only. Claude sets
+- **Surface**: `integrations/claude/hooks/hooks.json` only. Claude sets
   `CLAUDE_PLUGIN_ROOT`; the shared `hooks/run.sh` resolves the bro binary
   and carries the fail-open contract. No INSTRUCTIONS.md, no extension
   code, no per-client skill copies.

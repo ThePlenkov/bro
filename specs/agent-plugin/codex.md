@@ -17,7 +17,7 @@ duplicating skills text, or hook events silently missing.
 - **Install**: `codex plugin marketplace add ThePlenkov/bro` →
   `codex plugin add bro@bro`. Cache root:
   `~/.local/share/agent-config/codex/plugins/cache/bro/bro/<version>`.
-- **Surface**: `plugins/codex/bro/hooks/hooks.json` +
+- **Surface**: `integrations/codex/hooks/hooks.json` +
   `hooks/run.sh` (the shared chain) + `INSTRUCTIONS.md` — Codex-only
   session instructions injected from the plugin (the
   feature/codex-instructions lineage). `INSTRUCTIONS.md` carries only

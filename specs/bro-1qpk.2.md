@@ -61,7 +61,7 @@ accepts.
 ### `bro plugins` — kilo row in CLIENTS
 
 - **artifact** (first hit): `<pkg>/src/kilo.ts` (checkout) →
-  `<pkg>/dist/kilo.js` (tarball) → `<git-root>/plugins/kilo/bro/bro.ts`
+  `<pkg>/dist/kilo.js` (tarball) → `<git-root>/integrations/kilo/bro.ts`
 - **targets**:
   - global: `$XDG_CONFIG_HOME/kilo/bro/bro.ts` (default
     `~/.config/kilo/bro/bro.ts`) — deliberately NOT `plugin/` or
@@ -105,7 +105,7 @@ Wiring into the shared mutation path:
   match AND the entry is registered; a matching-but-unregistered file
   reports `stale` (re-running `install` fixes it).
 
-### gen-plugins — `plugins/kilo/bro/`
+### gen-plugins — `integrations/kilo/`
 
 New `ADAPTERS` entry emitting `bro.ts` (copy of
 `packages/cli/src/kilo.ts`) + generated `README.md`; `ADAPTER_OPTS`
@@ -135,7 +135,7 @@ appears automatically.
 - [ ] `packages/cli/src/commands/plugins.ts`: `kilo` CLIENTS row +
       `registration` hook (kilo.json read/dedupe/write, file:/// entry)
       wired into install/uninstall/stateAt
-- [ ] `scripts/gen-plugins.ts`: `plugins/kilo/bro` adapter
+- [ ] `scripts/gen-plugins.ts`: `integrations/kilo` adapter
       (bro.ts copy + README, skills/runSh opt-out)
 - [ ] `packages/cli/src/commands/plugins.test.ts`: kilo cases —
       artifact ladder, local/global install, kilo.json register +

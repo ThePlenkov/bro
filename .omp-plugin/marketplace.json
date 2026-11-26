@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "bro",
-      "source": "./plugins/omp/bro",
+      "source": "./integrations/omp",
       "description": "Agent's sidekick for omp — the project board, the lifecycle mechanics, and the mode bridges: bro's durable state handed to omp's native Plan, Goal, Vibe, Prewalk and Advisor.",
       "version": "0.3.0",
       "license": "MIT",

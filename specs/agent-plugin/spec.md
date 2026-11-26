@@ -6,7 +6,7 @@ parent: project
 
 ## Problem
 
-bro ships one plugin per client — `plugins/<client>/bro` for claude,
+bro ships one plugin per client — `integrations/<client>` for claude,
 codex, cursor, devin, kilo, omp, opencode, pi. Each grew ad hoc: whatever
 that client's marketplace or loader could carry, wired by hand. Nothing
 normative says what "the bro plugin is installed" must deliver, so
@@ -109,7 +109,7 @@ Two decoupled planes:
 | Claude Code | `hooks.json` + shared `run.sh` | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` | [claude](claude.md) |
 | Codex | `hooks.json` + `INSTRUCTIONS.md` + `run.sh` | `codex plugin marketplace add ThePlenkov/bro` → `codex plugin add bro@bro` | [codex](codex.md) |
 | opencode | `index.ts` / `rpc.ts` / `tui.tsx` extension | `"plugin": ["@broject/bro"]` or `bro clients install opencode` | [opencode](opencode.md) |
-| Cursor | hooks in Cursor's schema (`additional_context`, one `followup_message` on stop) | `/add-plugin https://github.com/ThePlenkov/bro`, or symlink `plugins/cursor/bro` to `~/.cursor/plugins/local/bro` | — |
+| Cursor | hooks in Cursor's schema (`additional_context`, one `followup_message` on stop) | `/add-plugin https://github.com/ThePlenkov/bro`, or symlink `integrations/cursor` to `~/.cursor/plugins/local/bro` | — |
 | Devin | plugin via `devin plugins install ThePlenkov/bro` | marketplace | — |
 | kilo / pi / omp | generated from the shared core | `bro clients install <client>` / `omp plugin install bro@bro` | — |
 

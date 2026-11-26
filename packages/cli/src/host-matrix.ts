@@ -147,8 +147,8 @@ export const HOOK_MATRIX: {
   hosts: {
     claude: {
       surface: 'manifest',
-      plugin: 'plugins/claude/bro',
-      manifest: 'plugins/claude/bro/hooks/hooks.json',
+      plugin: 'integrations/claude',
+      manifest: 'integrations/claude/hooks/hooks.json',
       events: {
         'session-start': { native: ['SessionStart'], effects: ['context'] },
         'pre-compact': { native: ['PreCompact'], effects: ['context'] },
@@ -175,8 +175,8 @@ export const HOOK_MATRIX: {
 
     codex: {
       surface: 'manifest',
-      plugin: 'plugins/codex/bro',
-      manifest: 'plugins/codex/bro/hooks/hooks.json',
+      plugin: 'integrations/codex',
+      manifest: 'integrations/codex/hooks/hooks.json',
       events: {
         'session-start': {
           native: ['SessionStart'],
@@ -211,8 +211,8 @@ export const HOOK_MATRIX: {
 
     devin: {
       surface: 'manifest',
-      plugin: 'plugins/devin/bro',
-      manifest: 'plugins/devin/bro/hooks.json',
+      plugin: 'integrations/devin',
+      manifest: 'integrations/devin/hooks.json',
       events: {
         'session-start': { native: ['SessionStart'], effects: ['context'] },
         'post-compaction': { native: ['PostCompaction'], effects: ['context'] },
@@ -232,13 +232,13 @@ export const HOOK_MATRIX: {
       },
       stopRefusal: 'block',
       background: 'sync',
-      upstream: { doc: 'plugins/devin/bro/README.md', checked: '2026-10-24' },
+      upstream: { doc: 'integrations/devin/README.md', checked: '2026-10-24' },
     },
 
     cursor: {
       surface: 'generated',
-      plugin: 'plugins/cursor/bro',
-      manifest: 'plugins/cursor/bro/hooks/hooks.json',
+      plugin: 'integrations/cursor',
+      manifest: 'integrations/cursor/hooks/hooks.json',
       events: {
         'session-start': { native: ['sessionStart'], effects: ['context'] },
         'pre-compact': { native: ['preCompact'], effects: ['context'] },
@@ -264,7 +264,7 @@ export const HOOK_MATRIX: {
 
     opencode: {
       surface: 'plugin',
-      plugin: 'plugins/opencode/bro',
+      plugin: 'integrations/opencode',
       events: {
         // opencode v2 only — the v1 surfaces (chat.system.transform,
         // chat.message, session.compacting, permission.ask) are gone
@@ -303,7 +303,7 @@ export const HOOK_MATRIX: {
 
     kilo: {
       surface: 'plugin',
-      plugin: 'plugins/kilo/bro',
+      plugin: 'integrations/kilo',
       events: {
         'session-start': {
           native: ['experimental.chat.system.transform'],
@@ -327,7 +327,7 @@ export const HOOK_MATRIX: {
 
     pi: {
       surface: 'extension',
-      plugin: 'plugins/pi/bro',
+      plugin: 'integrations/pi',
       events: {
         'session-start': { native: ['session_start'], effects: ['context', 'notify'] },
         'pre-compact': { native: ['session_before_compact'], effects: ['context'] },
@@ -355,7 +355,7 @@ export const HOOK_MATRIX: {
 
     omp: {
       surface: 'extension',
-      plugin: 'plugins/omp/bro',
+      plugin: 'integrations/omp',
       events: {
         'session-start': { native: ['session_start'], effects: ['context', 'notify'] },
         'pre-compact': { native: ['session_before_compact'], effects: ['context'] },
@@ -371,7 +371,7 @@ export const HOOK_MATRIX: {
         'pre-tool': {
           native: ['tool_call'],
           effects: ['block'],
-          via: 'plugins/omp/bro/hooks/pre/permission.ts',
+          via: 'integrations/omp/hooks/pre/permission.ts',
         },
         // permission is intentionally unimplemented — the guard hook
         // covers force-push only, never the host's approval plane

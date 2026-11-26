@@ -50,10 +50,10 @@ against this bro — `stale` when an update is pending), and
 command. Devin installs from the repo's plugin manifests too; see
 [Getting started](/docs).
 
-The `omp` client has a second, richer form: `plugins/omp/bro` is a
+The `omp` client has a second, richer form: `integrations/omp` is a
 full omp plugin package — the adapter plus bro's skills, a pre-tool
 guard hook, and `WATCHDOG.md` (the advisor's review priorities).
-Install it with `omp plugin install ./plugins/omp/bro`. Its mode
+Install it with `omp plugin install ./integrations/omp`. Its mode
 bridges hand omp's native Plan, Goal, Vibe, Prewalk and Advisor the
 durable state they lack — claims, specs, the judge, the review-debt
 ledger — without reimplementing any of them. See

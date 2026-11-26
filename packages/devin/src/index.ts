@@ -7,7 +7,7 @@
  * counts requests. bro's core stays vendor-blind (REVIEW.md) and asks
  * this package through the plane registry.
  *
- * NOT to be confused with the bro **devin plugin** (`plugins/devin/bro`)
+ * NOT to be confused with the bro **devin plugin** (`integrations/devin`)
  * — the client adapter that carries bro's skills and hooks into the
  * devin CLI. That one inherits this facade; it does not contain it.
  */
