@@ -566,12 +566,14 @@ describe('runSessionView --once', () => {
     );
     const text = f.stdout();
     assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
+    await waitForCall(
+      f.log,
+      c => c[1] === 'report-agent' && c[c.indexOf('--state') + 1] === 'idle'
+    );
     const calls = callsOf(f.log);
     // the highest-sequence report is the verdict — detached herdr
-    // helper processes can append their records out of order. The first fires before the
-    // archive drains and would read 'idle' even on an empty journal;
-    // the floor is 'unknown' (no registry entry), so the archive's
-    // own verdict (turn stopped → idle) is what rides on top
+    // helper processes can append their records out of order. Wait for
+    // the archive's terminal verdict before inspecting the detached log.
     const report = latestReport(calls);
     assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
     const meta = calls.find(c => c.includes('--display-agent'));
