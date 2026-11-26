@@ -1535,6 +1535,11 @@ async function classSpawn(
  *  cognitive-complexity cap. */
 async function blockedVerdict(ctx: DriveCtx, b: BlockedWork): Promise<PrVerdict> {
   const { pr, link, state, gate, occ, worktree, fixer } = b;
+  // The act gate owns the reviewed-head counter. Once it has crossed the
+  // effective cap, an unresolved thread is debt work, not another inline
+  // fixer round. Check this before occupancy or spawn handling so a stale
+  // fixer bead cannot bypass the policy.
+  const capHit = state.maxRounds > 0 && state.fixRounds > state.maxRounds;
   if (gate.reopened_threads > 0) {
     // A reopened thread was resolved and then commented on again — the
     // earlier resolution was wrong. A fixer would re-resolve it and
@@ -1547,6 +1552,9 @@ async function blockedVerdict(ctx: DriveCtx, b: BlockedWork): Promise<PrVerdict>
     };
   }
   if (gate.open_threads > 0) {
+    if (capHit) {
+      return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') };
+    }
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ };
     }
@@ -1559,7 +1567,6 @@ async function blockedVerdict(ctx: DriveCtx, b: BlockedWork): Promise<PrVerdict>
   // 'blocked', not another rebase round. The same cap bounds the
   // ci/sast rounds below: every fixer push that gets reviewed spends
   // from it.
-  const capHit = state.maxRounds > 0 && state.fixRounds > state.maxRounds;
   if (state.mergeable === 'CONFLICTING') {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ };

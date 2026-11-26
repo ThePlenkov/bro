@@ -451,6 +451,7 @@ interface World {
   threads: ReviewThread[];
   checks: CheckInfo[];
   labels: string[];
+  reviewedShas: string[];
 }
 
 function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}): World {
@@ -496,6 +497,7 @@ function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}
     threads: [],
     checks: [],
     labels: ['bro-managed'],
+    reviewedShas: [],
   };
   const rev = {
     prLink: (_repo: string, pr: number) => `[#${pr}](https://github.com/o/r/pull/${pr})`,
@@ -509,7 +511,7 @@ function world(ctxOver: Partial<DriveCtx> = {}, depOver: Partial<DriveDeps> = {}
     },
     reviewThreads: () => w.threads,
     checks: () => w.checks,
-    reviewedShas: () => [],
+    reviewedShas: () => w.reviewedShas,
     prsForBranch: (branch: string) => w.prsByBranch[branch] ?? [],
     labels: () => w.labels,
     createLabel: () => {},
@@ -656,6 +658,24 @@ describe('drivePolicy.onGate — the gate verdict', () => {
     const v = await drivePolicy.onGate(w.ctx, 7);
     assert.equal(v.verdict, 'human-threads');
     assert.match(v.detail ?? '', /1 unresolved review thread\(s\).*bro act 7/);
+    assert.equal(w.spawned.length, 0);
+  });
+
+  test('act round cap defers managed open threads without spawning a fixer', async () => {
+    const w = world();
+    w.labels = ['bro-managed'];
+    w.threads = [
+      {
+        id: 'thread-1',
+        resolved: false,
+        comment: { body: 'please fix', path: 'src/a.ts', line: 1 },
+      } as ReviewThread,
+    ];
+    w.reviewedShas = ['a', 'b', 'c', 'd', 'e'];
+    const v = await drivePolicy.onGate(w.ctx, 7);
+    assert.equal(v.verdict, 'blocked');
+    assert.match(v.detail ?? '', /fix-round cap hit \(4>3\)/);
+    assert.match(v.detail ?? '', /do not fix inline/);
     assert.equal(w.spawned.length, 0);
   });
 
