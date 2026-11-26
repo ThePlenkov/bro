@@ -17,11 +17,14 @@ CLI-maintained (source + ref + computedHash is the pin);
 
 ## Commands
 
-| Command             | What it does                                                                                                                                                                           |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bro skills sync`   | `skills add` per github/URL source, a bro-managed symlink per `local:` dir, `experimental_install` for lock gaps, then verifies the lock — exit 1 on a failed source or reported drift |
-| `bro skills list`   | declared ↔ locked ↔ installed reconcile, read-only — `ok` / `linked` / `missing` / `drifted` / `pending` / `extra` (locked or on disk but undeclared) / `error`                        |
-| `bro skills --json` | either command's rows as JSON                                                                                                                                                          |
+| Command                      | What it does                                                                                                                                                                           |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro skills sync`            | `skills add` per github/URL source, a bro-managed symlink per `local:` dir, `experimental_install` for lock gaps, then verifies the lock — exit 1 on a failed source or reported drift |
+| `bro skills list`            | declared ↔ locked ↔ installed reconcile, read-only — `ok` / `linked` / `missing` / `drifted` / `pending` / `extra` (locked or on disk but undeclared) / `error`                        |
+| `bro skills add <source>`    | add a github/URL source to the project `.agents/skills/` vendor tree and update `skills-lock.json`                                                                                     |
+| `bro skills update <source>` | update every locked skill owned by the source                                                                                                                                          |
+| `bro skills remove <source>` | remove every locked skill owned by the source                                                                                                                                          |
+| `bro skills --json`          | either command's rows as JSON                                                                                                                                                          |
 
 ## Source grammar
 
