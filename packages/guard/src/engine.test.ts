@@ -397,6 +397,28 @@ describe('runGuards', () => {
     assert.match(v.clauses.find((c) => c.clause === 'judge')!.detail!, /vetoed — noul 0\.2 < 0\.5/)
   })
 
+  test('a throwing journal does not discard other eligible guard lines', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    const first: Guard = { ...GUARD, name: 'first', when: { ...GUARD.when, judge: { question: 'fire?' } } }
+    const second: Guard = { ...GUARD, name: 'second', say: 'second guard' }
+    const run = await runGuards(
+      opts(dir, {
+        defs: [first, second],
+        judge: () => ({
+          facade: noulFacade(0.9),
+          confidence: 0.6,
+          maxDecisions: 5,
+          journal: () => { throw new Error('ENOSPC') },
+        }),
+      })
+    )
+    assert.deepEqual(run.lines, [
+      `bro guard first: ${GUARD.say}`,
+      'bro guard second: second guard',
+    ])
+  })
+
   test('judge allow fires; abstains on throw and low confidence', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')
