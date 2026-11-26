@@ -92,6 +92,8 @@ export interface RunDeps {
   onStopped?: (r: MolResult) => Promise<void>;
   /** Fires the moment a mol settles 'failed' (attempts exhausted). */
   onFailed?: (r: MolResult) => Promise<void>;
+  /** Fires when a molecule reaches complete, after its terminal verdict. */
+  onDone?: (r: MolResult) => Promise<void>;
 }
 
 /** The policy's world — the injected deps plus the run knobs, and the
@@ -315,6 +317,8 @@ export const convoyPolicy: ConvoyPolicy = {
       const r = await convoyPolicy.run(ctx, item); // NOSONAR — a convoy runs its mols in order, never fanned out
       if (r.verdict === 'gated') {
         await ctx.deps.onGated?.(r); // NOSONAR — serial by contract
+      } else if (r.verdict === 'done') {
+        await ctx.deps.onDone?.(r); // NOSONAR — serial by contract
       } else if (r.verdict === 'parked') {
         await ctx.deps.onParked?.(r);
       } else if (r.verdict === 'stopped') {

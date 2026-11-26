@@ -135,6 +135,7 @@ import {
 import { type AcpSeam, type FetchFn, otelHeader, otelSpan } from '@broject/providers';
 import { loadBroConfig } from '../plugins.ts';
 import { runActCommand } from './act.ts';
+import { captureLessons } from '@broject/learn';
 import { flag, positionals } from './args.ts';
 import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
@@ -1489,6 +1490,18 @@ async function endAudit(
     // reap before the report — a landed bead's leftover tree is not a
     // tail; the audit describes what survived the sweep
     const reap = sweepLoopLitter(ctx, parkedClaims, sessionClaims);
+    try {
+      const captured = captureLessons({
+        sources: ['drill', 'retro', 'act'],
+        dir: ctx.root,
+      });
+      say(ctx, `loop: captured ${captured.plan.write.length + captured.plan.merge.length} lessons`);
+    } catch (err) {
+      say(
+        ctx,
+        `  warning: learn capture failed — ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
     const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]

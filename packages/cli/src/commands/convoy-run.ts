@@ -43,6 +43,7 @@ import { spawnStepAgent, type StepSpawnRequest } from './agents.ts';
 import { registryEntryState } from './drive.ts';
 import { mainWorktree } from './work.ts';
 import { dirname, join } from 'node:path';
+import { captureLessons } from '@broject/learn';
 
 // --- args ------------------------------------------------------------------------
 
@@ -240,6 +241,20 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
     now: () => Date.now(),
     say,
     onGated: r => publishGate(dir, r.mol, r.detail ?? ''),
+    onDone: async r => {
+      try {
+        const captured = captureLessons({ mol: r.mol, dir });
+        say(
+          `run ${r.mol}: captured ${captured.plan.write.length + captured.plan.merge.length} lessons`
+        );
+      } catch (err) {
+        say(
+          `warning: learn capture failed for ${r.mol} — ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    },
     onParked: r => publishParked(dir, r.mol, r.detail ?? ''),
     onStopped: r => publishStopped(dir, r.mol, r.detail ?? ''),
     onFailed: r => publishFailed(dir, r.mol, r.detail ?? ''),
