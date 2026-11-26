@@ -190,6 +190,22 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
       .split('\n')
       .map(l => JSON.parse(l) as string[]);
 
+  const waitForCalls = async (
+    log: string,
+    ready: (calls: string[][]) => boolean = () => true
+  ): Promise<string[][]> => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        const calls = callsOf(log);
+        if (ready(calls)) return calls;
+      } catch {
+        // The detached advisory child has not written its first report yet.
+      }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return callsOf(log);
+  };
+
   /** Env bound for one call — the command reads it per invocation. */
   function withEnv<T>(env: Record<string, string>, fn: () => T): T {
     const saved: Record<string, string | undefined> = {};
@@ -227,7 +243,12 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
       () => runStatusView([worktree, '--once'])
     );
 
-    const calls = callsOf(log);
+    const calls = await waitForCalls(
+      log,
+      calls =>
+        calls.some(c => c[1] === 'report-agent') &&
+        calls.some(c => c[1] === 'report-metadata' && c.includes('--display-agent'))
+    );
     const report = calls.find(c => c[1] === 'report-agent');
     assert.ok(report !== undefined);
     assert.equal(report[2], 'w1:p9');
@@ -257,7 +278,9 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
       () => runStatusView([worktree, '--once'])
     );
 
-    const report = callsOf(log).find(c => c[1] === 'report-agent');
+    const report = (
+      await waitForCalls(log, calls => calls.some(c => c[1] === 'report-agent'))
+    ).find(c => c[1] === 'report-agent');
     assert.equal(report?.[report.indexOf('--state') + 1], 'unknown');
   });
 

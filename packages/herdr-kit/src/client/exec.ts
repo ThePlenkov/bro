@@ -15,7 +15,22 @@ export const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
  *  are the real delivery. */
 export function call(args: string[]): void {
   try {
-    spawnSync(herdrBin(), args, { timeout: HERDR_TIMEOUT_MS, stdio: 'ignore' });
+    const child = spawn(herdrBin(), args, {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    });
+    child.on('error', () => {
+      // every report is advisory — a dead socket retires to the watch loop
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+    }, HERDR_TIMEOUT_MS);
+    timer.unref();
+    child.on('close', () => {
+      clearTimeout(timer);
+    });
+    child.unref();
   } catch {
     // every report is advisory — a dead socket retires to the watch loop
   }

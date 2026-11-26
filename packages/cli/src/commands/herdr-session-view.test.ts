@@ -3,13 +3,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
-import { fleetStatusPath, type FleetPaneState, writeFleetState } from '@broject/herdr-kit';
 import {
+  type FleetPaneState,
+  fleetStatusPath,
   SESSION_PANE_AGENT,
   sessionAgentOf,
   sessionMetaArgs,
   sessionReleaseArgs,
   sessionReportArgs,
+  writeFleetState,
 } from '@broject/herdr-kit';
 import { resolveTarget, runSessionView, targetKey, viewVerdict } from './herdr-session-view.ts';
 
@@ -324,6 +326,23 @@ const callsOf = (log: string): string[][] =>
     .split('\n')
     .map(l => JSON.parse(l) as string[]);
 
+const waitForCall = async (
+  log: string,
+  predicate: (call: string[]) => boolean
+): Promise<string[]> => {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      const call = callsOf(log).find(predicate);
+      if (call) return call;
+    } catch {
+      // The detached advisory child has not created or finished the log yet.
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return callsOf(log).find(predicate) ?? [];
+};
+
 /** A fixture: temp worktree + fake herdr + a captured render stream
  *  (the `out` seam — patching process.stdout would eat the TAP
  *  reporter's own output mid-run). */
@@ -573,7 +592,7 @@ describe('runSessionView --once', () => {
     const f = fixture();
     await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
     f.stdout();
-    const report = callsOf(f.log).find(c => c[1] === 'report-agent');
+    const report = await waitForCall(f.log, c => c[1] === 'report-agent');
     assert.equal(report?.[report.indexOf('--state') + 1], 'unknown');
   });
 
