@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '../../..')
-const HOOKS = join(ROOT, 'integrations/codex/hooks/hooks.json')
+const HOOKS = join(ROOT, 'plugins/codex/bro/hooks/hooks.json')
 
 describe('codex plugin adapter', () => {
   test('hooks/hooks.json wires Codex lifecycle events to bro hooks', () => {
@@ -47,7 +47,7 @@ describe('codex plugin adapter', () => {
   })
 
   test('Codex instructions route native commands and stay out of the skill tree', () => {
-    const text = readFileSync(join(ROOT, 'integrations/codex/INSTRUCTIONS.md'), 'utf8')
+    const text = readFileSync(join(ROOT, 'plugins/codex/bro/INSTRUCTIONS.md'), 'utf8')
     assert.match(text, /\/goal/)
     assert.match(text, /\/plan/)
     assert.match(text, /\/ps/)
@@ -56,14 +56,14 @@ describe('codex plugin adapter', () => {
   })
 
   test('Codex loads the Agent Plugin skills tree, not a host copy', () => {
-    const adapterSkills = join(ROOT, 'integrations/codex/skills')
-    assert.equal(existsSync(adapterSkills), false, 'integrations/codex must not carry skills')
+    const adapterSkills = join(ROOT, 'plugins/codex/bro/skills')
+    assert.equal(existsSync(adapterSkills), false, 'plugins/codex/bro must not carry skills')
     const skills = join(ROOT, 'skills')
     const manifest = JSON.parse(
       readFileSync(join(ROOT, '.codex-plugin/plugin.json'), 'utf8')
     ) as { skills?: string; hooks?: string }
     assert.equal(manifest.skills, './skills/')
-    assert.equal(manifest.hooks, './integrations/codex/hooks/hooks.json')
+    assert.equal(manifest.hooks, './plugins/codex/bro/hooks/hooks.json')
     const market = JSON.parse(
       readFileSync(join(ROOT, '.agents/plugins/marketplace.json'), 'utf8')
     ) as { plugins?: { source?: string }[] }

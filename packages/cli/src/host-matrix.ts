@@ -175,8 +175,8 @@ export const HOOK_MATRIX: {
 
     codex: {
       surface: 'manifest',
-      plugin: 'integrations/codex',
-      manifest: 'integrations/codex/hooks/hooks.json',
+      plugin: 'plugins/codex/bro',
+      manifest: 'plugins/codex/bro/hooks/hooks.json',
       events: {
         'session-start': {
           native: ['SessionStart'],
