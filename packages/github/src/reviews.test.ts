@@ -717,7 +717,10 @@ describe('githubReview', { skip: WIN32 }, () => {
         );
         const calls = readFileSync(log, 'utf8');
         assert.match(calls, /pr merge 42 --squash --repo acme\/widgets --match-head-commit abc123/);
-        assert.match(calls, /pr merge 42 --squash --auto --repo acme\/widgets/);
+        assert.match(
+          calls,
+          /pr merge 42 --squash --repo acme\/widgets --match-head-commit abc123 --auto/
+        );
       }
     );
   });

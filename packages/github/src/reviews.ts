@@ -2222,9 +2222,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         const msg = err instanceof Error ? err.message : String(err);
         if (/base branch policy prohibits the merge|add --auto/i.test(msg)) {
           console.error(`merge: sync merge refused — ${msg.trim()} — retrying with --auto`);
-          console.log(
-            gh(['pr', 'merge', String(t.pr), `--${opts.method}`, '--auto', '--repo', t.repo])
-          );
+          console.log(gh([...args, '--auto']));
           return postMergeState(t);
         }
         if (!/asynchronous merge|merge queue/i.test(msg)) {
