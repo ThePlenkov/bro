@@ -281,7 +281,11 @@ async function dispatchSettle(ctx: ConvoyCtx, result: MolResult): Promise<void> 
   };
   const hook = Object.getOwnPropertyDescriptor(hooks, result.verdict)?.value;
   if (typeof hook === 'function') {
-    await hook(result); // NOSONAR — serial by contract
+    try {
+      await hook(result); // NOSONAR — serial by contract
+    } catch (err) {
+      ctx.deps.say(`run: ${result.verdict} hook failed for ${result.mol}: ${errText(err)}`);
+    }
   }
 }
 
@@ -295,7 +299,7 @@ async function parkQueue(ctx: ConvoyCtx, result: MolResult, results: MolResult[]
       attempts: 0,
       detail: `queue stopped — ${why}`,
     };
-    await ctx.deps.onParked?.(parked); // NOSONAR — serial by contract
+    await dispatchSettle(ctx, parked);
     results.push(parked);
   }
 }
@@ -349,7 +353,17 @@ export const convoyPolicy: ConvoyPolicy = {
       if (item === undefined) {
         break;
       }
-      const r = await convoyPolicy.run(ctx, item); // NOSONAR — a convoy runs its mols in order, never fanned out
+      let r: MolResult;
+      try {
+        r = await convoyPolicy.run(ctx, item); // NOSONAR — a convoy runs its mols in order, never fanned out
+      } catch (err) {
+        r = {
+          mol: item.mol,
+          verdict: 'error',
+          attempts: item.attempts,
+          detail: `convoyPolicy.run error: ${errText(err)}`,
+        };
+      }
       await dispatchSettle(ctx, r);
       results.push(r);
       if (r.queueStop === true) {
