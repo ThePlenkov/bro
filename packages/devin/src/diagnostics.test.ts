@@ -7,6 +7,43 @@ import { diagnoseDevinRateLimit, inspectDevinAccount } from './diagnostics.ts';
 
 const temp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix));
 
+async function createRateLimitFixture(root: string): Promise<{
+  proc: string;
+  locks: string;
+  storePath: string;
+  journal: string;
+}> {
+  const proc = join(root, 'proc');
+  const locks = join(root, 'locks');
+  const data = join(root, 'data', 'devin', 'cli');
+  mkdirSync(join(proc, '201', 'fd'), { recursive: true });
+  mkdirSync(data, { recursive: true });
+  mkdirSync(locks, { recursive: true });
+  writeFileSync(join(proc, '201', 'cmdline'), 'devin\0-r\0');
+  writeFileSync(join(proc, '201', 'environ'), 'PATH=/bin\0');
+  writeFileSync(join(locks, 'last-lock.lock'), '201');
+  const { DatabaseSync } = await import('node:sqlite');
+  const storePath = join(data, 'sessions.db');
+  const db = new DatabaseSync(storePath);
+  db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT)');
+  db.exec(
+    'CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT)'
+  );
+  db.exec("INSERT INTO sessions VALUES ('s1', 'swe-2-max')");
+  db.prepare('INSERT INTO message_nodes VALUES (?, ?, ?)').run(
+    9,
+    's1',
+    JSON.stringify({ content: 'Reached free model rate limit. reset in 20 minutes' })
+  );
+  db.close();
+  const journal = join(root, 'serve-turns.jsonl');
+  writeFileSync(
+    journal,
+    '{"event":"conductor.turn"}\n{"event":"acp.spawn"}\n{"event":"conductor.deadloop"}\n{"event":"http.429"}\n'
+  );
+  return { proc, locks, storePath, journal };
+}
+
 describe('Devin account diagnostics', () => {
   test('counts unmanaged interactive and ACP consumers separately from bro workers', () => {
     const proc = temp('bro-diag-proc-');
@@ -43,40 +80,14 @@ describe('Devin account diagnostics', () => {
 describe('Devin rate-limit reconstruction', () => {
   test('joins the latest rate-limit message with live consumers and serve activity', async () => {
     const root = temp('bro-diag-store-');
-    const proc = join(root, 'proc');
-    const locks = join(root, 'locks');
-    const data = join(root, 'data', 'devin', 'cli');
-    mkdirSync(join(proc, '201', 'fd'), { recursive: true });
-    mkdirSync(data, { recursive: true });
-    mkdirSync(locks, { recursive: true });
-    writeFileSync(join(proc, '201', 'cmdline'), 'devin\0-r\0');
-    writeFileSync(join(proc, '201', 'environ'), 'PATH=/bin\0');
-    writeFileSync(join(locks, 'last-lock.lock'), '201');
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(join(data, 'sessions.db'));
-    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT)');
-    db.exec(
-      'CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT)'
-    );
-    db.exec("INSERT INTO sessions VALUES ('s1', 'swe-2-max')");
-    db.prepare('INSERT INTO message_nodes VALUES (?, ?, ?)').run(
-      9,
-      's1',
-      JSON.stringify({ content: 'Reached free model rate limit. reset in 20 minutes' })
-    );
-    db.close();
-    const journal = join(root, 'serve-turns.jsonl');
-    writeFileSync(
-      journal,
-      '{"event":"conductor.turn"}\n{"event":"acp.spawn"}\n{"event":"conductor.deadloop"}\n{"event":"http.429"}\n'
-    );
+    const fixture = await createRateLimitFixture(root);
     try {
       const result = await diagnoseDevinRateLimit({
         env: { HOME: root, XDG_DATA_HOME: join(root, 'data') },
-        procDir: proc,
-        locksDir: locks,
-        storePath: join(data, 'sessions.db'),
-        serveTurnsPath: journal,
+        procDir: fixture.proc,
+        locksDir: fixture.locks,
+        storePath: fixture.storePath,
+        serveTurnsPath: fixture.journal,
         limit: 20,
       });
       assert.equal(result.ok, true);

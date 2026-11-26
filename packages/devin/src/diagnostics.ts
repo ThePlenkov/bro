@@ -58,7 +58,8 @@ export interface DevinDiagnosticOptions {
   limit?: number;
 }
 
-const field = (row: Record<string, unknown>, name: string): unknown => row[name];
+const field = (row: Record<string, unknown>, name: string): unknown =>
+  Object.getOwnPropertyDescriptor(row, name)?.value;
 
 function processCommand(procDir: string, pid: number): string | undefined {
   try {
@@ -189,7 +190,9 @@ async function rateLimitHits(
       let parsed: unknown = row;
       if (typeof message === 'string') {
         try {
-          parsed = { ...row, ...(JSON.parse(message) as Record<string, unknown>) };
+          const parsedMessage = JSON.parse(message) as Record<string, unknown>;
+          const { chat_message: _chatMessage, ...rowWithoutMessage } = row;
+          parsed = { ...rowWithoutMessage, ...parsedMessage };
         } catch {
           /* keep row */
         }
