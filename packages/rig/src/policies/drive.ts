@@ -945,7 +945,16 @@ async function spawnRebaseFixer(
     ctx.deps.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'conflict-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase');
+  const lane = await fixerLane(
+    ctx,
+    pr,
+    link,
+    state.headRef,
+    worktree,
+    fixer,
+    meta.headSha,
+    'rebase'
+  );
   if ('verdict' in lane) {
     return lane;
   }
@@ -1080,7 +1089,7 @@ async function freshOpen(
  *  a live session owns is never refreshed. The verdict is 'occupied',
  *  never 'no-worktree' — the worktree exists, it belongs to someone
  *  else. */
-function fixerLane(
+async function fixerLane(
   ctx: DriveCtx,
   pr: number,
   link: string,
@@ -1089,7 +1098,7 @@ function fixerLane(
   fixer: TaskRow | undefined,
   headSha: string,
   cls: string
-): { wt: string; created?: boolean } | PrVerdict {
+): Promise<{ wt: string; created?: boolean } | PrVerdict> {
   const spent = fixerSpent(ctx, pr, headSha, fixer, cls);
   if (spent !== undefined) {
     return spent;
@@ -1097,11 +1106,15 @@ function fixerLane(
   if (worktree !== undefined) {
     return { wt: worktree };
   }
+  // The pass snapshot predates the awaited probes in this lane. Refresh the
+  // ledger before ensureFixerWorktree so a claim that arrived during those
+  // probes vetoes branch checkout/creation.
+  const claims = await claimsRefresh(ctx);
   const ensured = ensureFixerWorktree(ctx.mainRoot, branch, {
     // same in-lock snapshot rule as spawnFixer — the guard runs under the
     // occupancy locks, so freshOccupancy must be sampled there, not before
     guard: dir => {
-      const fresh = freshOccupancy(ctx.mainRoot, ctx.work.agents, ctx.work.claims);
+      const fresh = freshOccupancy(ctx.mainRoot, ctx.work.agents, claims);
       return occupied({
         agents: fresh.agents,
         fixerBead: fixer?.id,
@@ -1334,7 +1347,7 @@ async function spawnCiFixer(
     ctx.deps.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'ci-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci');
+  const lane = await fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci');
   if ('verdict' in lane) {
     return lane;
   }
@@ -1397,7 +1410,7 @@ async function spawnSastFixer(
     ctx.deps.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'sast-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast');
+  const lane = await fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast');
   if ('verdict' in lane) {
     return lane;
   }
