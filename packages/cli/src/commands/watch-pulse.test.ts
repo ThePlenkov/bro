@@ -84,6 +84,17 @@ describe('marker', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  test('arm rejects cadences outside the shared interval bounds', () => {
+    const { root, main } = initRepo('bro-pulse-arm-bounds-')
+    try {
+      assert.throws(() => armPulse(main, 0.05), /pulse cadence needs/)
+      assert.throws(() => armPulse(main, Number.POSITIVE_INFINITY), /pulse cadence needs/)
+      assert.equal(readPulseMarker(main), null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('pulseLive', () => {
