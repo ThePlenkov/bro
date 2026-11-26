@@ -1244,18 +1244,33 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     }
   };
 
-  const expired = () => {
+  const windowEnd = () => {
+    const event = {
+      ts: new Date().toISOString(),
+      event: 'window-end' as const,
+    };
     console.log(
       json
-        ? JSON.stringify({ ts: new Date().toISOString(), event: 'expired' })
-        : 'watch: --for expired'
+        ? JSON.stringify(event)
+        : 'watch: window-end'
     );
+    if (notify) {
+      try {
+        emitMailbox(dir, `watch: window-end (${event.ts})`);
+      } catch (err) {
+        console.error(
+          `warning: window-end mailbox drop failed — ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
   };
   if (everySec === undefined) {
     await tick();
     return;
   }
-  await runWatchPulse(dir, everySec, forSec, tick, expired);
+  await runWatchPulse(dir, everySec, forSec, tick, windowEnd);
 }
 
 function parseWatchArgs(argv: string[]): ReturnType<typeof watchArgs> {
@@ -1270,7 +1285,7 @@ function parseWatchArgs(argv: string[]): ReturnType<typeof watchArgs> {
 /** The session pulse (bro-killn): orchestrator-only, one per repo via
  *  `bro/pulse.lock`, bounded by --for measured from entry so a standby
  *  behind the incumbent spends the same budget as ticking. */
-async function runWatchPulse(
+export async function runWatchPulse(
   dir: string,
   everySec: number,
   forSec: number | undefined,

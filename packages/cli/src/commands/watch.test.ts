@@ -12,6 +12,7 @@ import {
   emitMailbox,
   openPrTargets,
   renderSnapshot,
+  runWatchPulse,
   snapshotKey,
   watchArgs,
   type WatchMol,
@@ -89,6 +90,31 @@ describe('watchArgs', () => {
     // over 2^31-1 ms setTimeout clamps to ~1ms — a busy tick, not a cadence
     assert.throws(() => watchArgs(['--every', '3000000000']), /--every/);
     assert.equal(watchArgs(['--every', '2147483']).everySec, 2147483);
+  });
+});
+
+describe('watch pulse deadline', () => {
+  test('--for ends the pulse at its deadline and invokes the window-end hook', async () => {
+    const { root, main } = initRepo('bro-watch-deadline-');
+    let ticks = 0;
+    let ends = 0;
+    try {
+      await runWatchPulse(
+        main,
+        0.1,
+        0.2,
+        async () => {
+          ticks += 1;
+        },
+        () => {
+          ends += 1;
+        }
+      );
+      assert.ok(ticks >= 1);
+      assert.equal(ends, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
