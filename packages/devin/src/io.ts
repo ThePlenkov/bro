@@ -5,7 +5,12 @@ function withinRoot(root: string, path: string): string {
   const resolvedRoot = resolve(root);
   const resolvedPath = resolve(path);
   const remainder = relative(resolvedRoot, resolvedPath);
-  if (remainder === '..' || remainder.startsWith(`..${sep}`) || isAbsolute(remainder)) {
+  const escapesRoot = [
+    remainder === '..',
+    remainder.startsWith(`..${sep}`),
+    isAbsolute(remainder),
+  ].some(Boolean);
+  if (escapesRoot) {
     throw new Error(`path is outside the configured root: ${path}`);
   }
   return resolvedPath;
