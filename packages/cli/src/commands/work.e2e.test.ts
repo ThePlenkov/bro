@@ -194,6 +194,30 @@ describe('bro work e2e — enter base-ahead warning (bro-9cxhp)', () => {
   });
 });
 
+describe('bro work e2e — enter uses the remote default base (bro-k0kzv)', () => {
+  test('a foreign current branch does not become the new worktree base', () => {
+    const { root, main } = workFixture();
+    inside(main, root, () => {
+      git(['init', '--bare', '-q', join(root, 'origin.git')], main);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      git(['push', '-q', '-u', 'origin', 'main'], main);
+      writeFileSync(join(main, 'foreign.txt'), 'foreign');
+      git(['add', 'foreign.txt'], main);
+      git(['commit', '-q', '-m', 'foreign WIP'], main);
+      git(['branch', 'foreign-wip'], main);
+      git(['checkout', '-q', 'foreign-wip'], main);
+
+      const r = runCli(['work', 'enter', 'fix-origin-base'], { cwd: main });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /using origin\/main \(the default branch\)/);
+      const wt = worktreeOf(root, 'fix-origin-base');
+      const originMain = git(['rev-parse', 'origin/main'], main).trim();
+      assert.equal(git(['merge-base', 'origin/main', 'work/fix-origin-base'], wt).trim(), originMain);
+      assert.equal(git(['rev-parse', 'work/fix-origin-base~1'], wt).trim(), originMain);
+    });
+  });
+});
+
 describe('bro work e2e — leave', () => {
   /** Fixture with a linked worktree already entered. */
   const entered = (root: string, main: string, slug = 'fix-x'): string => {
