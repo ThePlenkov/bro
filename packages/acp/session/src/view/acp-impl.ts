@@ -775,6 +775,10 @@ export class AcpImpl implements PaneImpl {
    *  posture — the permission clock's start. Rows that keep the
    *  ask open (tool updates, chunks) must not move it. */
   private actionTs: string | undefined;
+  /** Order positions at which a turn begins. Turn starts do not create
+   *  items, so drain applies these boundaries before folding the next
+   *  turn's items. */
+  private readonly turnBoundaries: number[] = [];
   private lastStopError = false;
   /** leader sid → the `origin|error` keys its storm already rowed —
    *  N identical failures print ONE `── turn failed ──` and stay
@@ -833,6 +837,10 @@ export class AcpImpl implements PaneImpl {
     }
     if (row.kind === 'turn') {
       if (row.phase === 'start') {
+        // turn_started is lifecycle-only in the model and creates no item.
+        // Keep its order boundary so drain can reset before the next turn's
+        // items, even when several turns arrive before one drain.
+        this.turnBoundaries.push(this.session.order.length);
         this.judgeNow = isJudgeTurn(undefined, row.by);
         this.curBy = headBy(row.by);
         this.curShortBy = shortBy(row.by);
@@ -1105,7 +1113,12 @@ export class AcpImpl implements PaneImpl {
         dirty.add(leader);
       }
     }
-    for (const sid of this.session.order) {
+    for (let i = 0; i < this.session.order.length; i++) {
+      while ((this.turnBoundaries[0] ?? Number.MAX_SAFE_INTEGER) <= i) {
+        this.turnBoundaries.shift();
+        this.lastActivity = undefined;
+      }
+      const sid = this.session.order[i];
       const item = items.get(sid);
       if (item === undefined) continue;
       // an error marker inside a storm keeps its own row — the tally
@@ -1213,7 +1226,7 @@ export class AcpImpl implements PaneImpl {
             }
           }
         }
-        if (members !== undefined && next.kind === 'tool') {
+        if (next.kind === 'tool') {
           this.lastActivity = { id, arg: next.arg ?? '' };
         }
         continue;
@@ -1221,7 +1234,7 @@ export class AcpImpl implements PaneImpl {
       if (id === undefined) continue;
       const next = this.projectNext(sid, item, id, { members, stormSids });
       if (next === undefined) continue;
-      if (members !== undefined && next.kind === 'tool') {
+      if (next.kind === 'tool') {
         this.lastActivity = { id, arg: next.arg ?? '' };
       }
       if (next.kind === 'tool') {
@@ -1412,6 +1425,7 @@ export class AcpImpl implements PaneImpl {
   private dumpRow(d: DumpRun, sid: string, item: TheirItem, id: number): void {
     const line = this.dumpRowLine(d, sid, item);
     if (line !== '') {
+      if (ACTIVITY.has(item.kind)) d.lastRun = d.out.length;
       d.out.push(line);
       this.dumpToolBody(d, sid, item, id);
       return;
