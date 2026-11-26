@@ -58,8 +58,22 @@ interface GoalUpdatedEvent {
  *  the bracket characters themselves are blanked so a title cannot
  *  close its own boundary, and the text is wrapped in corner brackets
  *  as explicit untrusted-data delimiters. */
+function isBoundaryControl(codePoint: number): boolean {
+  return (
+    (codePoint >= 0 && codePoint <= 0x1f) ||
+    codePoint === 0x7f ||
+    codePoint === 0x2028 ||
+    codePoint === 0x2029
+  );
+}
+
 export const untrusted = (s: string): string =>
-  `\u300c${s.replace(/[\u0000-\u001f\u007f\u2028\u2029\u300c\u300d]/g, ' ').trim()}\u300d`;
+  `\u300c${Array.from(s, char => {
+    const codePoint = char.codePointAt(0) ?? 0;
+    return isBoundaryControl(codePoint) || char === '\u300c' || char === '\u300d' ? ' ' : char;
+  })
+    .join('')
+    .trim()}\u300d`;
 
 /** The standing note every bridge message carries — once per message,
  *  next to the first interpolated title. */
@@ -115,10 +129,7 @@ function significantWords(text: string): Set<string> {
  *  sharing no significant word with the objective is a divergence the
  *  bridge must name, not bless — goal and bead otherwise drift apart
  *  silently. */
-function goalScopeContext(
-  board: ReturnType<ModeBridgeSource['board']>,
-  objective: string
-): string {
+function goalScopeContext(board: ReturnType<ModeBridgeSource['board']>, objective: string): string {
   const drill = board?.drill?.frame;
   const scope = drill
     ? `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ? untrusted(drill.title) : '(untitled)'}. `
@@ -184,7 +195,7 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
       return undefined;
     }
     const named = claims.map(beadName).join(', ');
-    return inject(
+    inject(
       pi,
       `${UNTRUSTED_NOTE}bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.`
     );
@@ -209,7 +220,7 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
     if (board === null) {
       return undefined;
     }
-    return inject(pi, `${UNTRUSTED_NOTE}${goalScopeContext(board, objective)}`);
+    inject(pi, `${UNTRUSTED_NOTE}${goalScopeContext(board, objective)}`);
   });
 
   /**

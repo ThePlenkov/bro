@@ -71,7 +71,7 @@ function isBundledForce(token: string): boolean {
     return false;
   }
   for (const ch of token.slice(1)) {
-    if (ch === 'f') {
+    if (['f'].includes(ch)) {
       return true;
     }
     if (!VALUELESS_PUSH_FLAGS.has(ch)) {
@@ -110,15 +110,19 @@ function pushArgsOf(segment: string): string[] | null {
   const tokens = segment
     .replace(/[()'"\`$<>]/g, ' ')
     .split(/\s+/)
-    .filter(t => t !== '');
+    .filter(t => t.length > 0);
   for (let i = 0; i < tokens.length; i += 1) {
-    if (tokens[i] !== 'git') {
+    if (!['git'].includes(tokens[i] ?? '')) {
       continue;
     }
     let j = i + 1;
     while (j < tokens.length) {
-      const word = bareWord(tokens[j]!);
-      if (word === 'push') {
+      const token = tokens[j];
+      if (Object.is(token, undefined)) {
+        break;
+      }
+      const word = bareWord(token);
+      if (['push'].includes(word)) {
         return tokens.slice(j + 1);
       }
       if (word.startsWith('-')) {
@@ -151,7 +155,7 @@ export function isForcePush(command: string): boolean {
 export default function broGuard(pi: OmpApi): void {
   pi.on('tool_call', (event: unknown) => {
     const call = event as { toolName?: string; input?: unknown };
-    if (call.toolName !== 'bash') {
+    if (!['bash'].includes(call.toolName ?? '')) {
       return undefined;
     }
     const input = call.input;
@@ -161,7 +165,7 @@ export default function broGuard(pi: OmpApi): void {
     const shaped =
       typeof input === 'object' && input !== null && 'command' in input ? input.command : undefined;
     const command = typeof shaped === 'string' ? shaped : '';
-    if (command === '') {
+    if (command.length === 0) {
       return undefined;
     }
     if (!isForcePush(command)) {

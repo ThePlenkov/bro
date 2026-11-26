@@ -25,5 +25,5 @@
     "self-correction",
     "agent-workflow"
   ],
-  "hooks": "./integrations/claude/hooks/hooks.json"
+  "hooks": "./plugins/claude/bro/hooks/hooks.json"
 }

@@ -32,7 +32,7 @@ const at = process.argv.indexOf('hooks')
 const event = at >= 0 ? (process.argv[at + 1] ?? '') : process.argv.slice(2).join(' ')
 let payload = {}
 try { payload = JSON.parse(readFileSync(0, 'utf8')) } catch {}
-if (process.env.BRO_STUB_LOG && at >= 0) {
+if (process.env.BRO_STUB_LOG && at >= 0 && process.argv[at + 1]) {
   appendFileSync(process.env.BRO_STUB_LOG, JSON.stringify({ event, payload, cwd: process.cwd() }) + '\\n')
 }
 const map = process.env.BRO_STUB_MAP ? JSON.parse(process.env.BRO_STUB_MAP) : {}
@@ -484,7 +484,7 @@ describe('transforms', () => {
       'worktree_status',
     ]);
     for (const t of toolsAdded) {
-      assert.deepEqual(t.options, { namespace: 'bro' });
+      assert.deepEqual(t.options, { namespace: 'bro', codemode: false });
       assert.equal(typeof t.execute, 'function');
     }
   });
@@ -539,49 +539,31 @@ describe('transforms', () => {
 
 describe('event stream', () => {
   test('a clean turn followed by a blocked stop re-prompts once', async () => {
+    // opencode ≥2.x never emits session.idle/message.updated — the bus
+    // carries session.execution.* (verified live on 2.2.7, opencode#55358)
     respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty worktree' }) });
     const { emit, prompts } = await makeSetup();
-    emit('message.updated', {
-      info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-    });
-    emit('session.idle', { sessionID: 'ses_1' });
+    emit('session.execution.started', { sessionID: 'ses_1' });
+    emit('session.execution.succeeded', { sessionID: 'ses_1' });
     await waitFor(() => prompts.length === 1);
     assert.deepEqual(prompts, [{ sessionID: 'ses_1', text: 'dirty worktree' }]);
   });
 
-  test('a second block is logged, never re-prompted', async () => {
+  test('v2 failed/interrupted executions never gate', async () => {
     respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty worktree' }) });
     const { emit, prompts } = await makeSetup();
-    const lines = await captureBroErr(async l => {
-      const cleanTurn = (): void => {
-        emit('message.updated', {
-          info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-        });
-      };
-
-      cleanTurn();
-      emit('session.idle', { sessionID: 'ses_1' });
-      await waitFor(() => prompts.length === 1);
-      cleanTurn();
-      emit('session.idle', { sessionID: 'ses_1' });
-      await waitFor(() => l.some(line => /already gated/.test(line)));
-    });
-
-    assert.equal(prompts.length, 1);
-    assert.ok(
-      lines.some(line =>
-        line.includes('[bro] info: stop gate: already gated — not re-prompting (dirty worktree)')
-      )
-    );
+    emit('session.execution.started', { sessionID: 'ses_f' });
+    emit('session.execution.failed', { sessionID: 'ses_f' });
+    emit('session.execution.interrupted', { sessionID: 'ses_f' });
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(prompts.length, 0);
   });
 
   test('the gated set persists through ctx.storage and survives teardown', async () => {
     respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty' }) });
     const { emit, storage, prompts, teardown } = await makeSetup();
-    emit('message.updated', {
-      info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-    });
-    emit('session.idle', { sessionID: 'ses_1' });
+    emit('session.execution.started', { sessionID: 'ses_1' });
+    emit('session.execution.succeeded', { sessionID: 'ses_1' });
     await waitFor(() => prompts.length === 1);
     await waitFor(
       () => (storage.get('stop-gated') as string[] | undefined)?.includes('ses_1') === true
@@ -602,24 +584,19 @@ describe('event stream', () => {
     // the persisted snapshot is still in flight — a delete for a stored id
     // must win over the merge, or the gate resurrects onto the session
     // reusing it and its first block is swallowed as a repeat
-    emit('session.deleted', { info: { id: 'ses_1' } });
+    emit('session.deleted', { sessionID: 'ses_1' });
     // anchor for the ordering: the stream dispatches FIFO, so a prompt
     // earned by ses_2 proves the delete has already run
-    emit('message.updated', {
-      info: { role: 'assistant', sessionID: 'ses_2', time: { completed: 2 } },
-    });
-    emit('session.idle', { sessionID: 'ses_2' });
+    emit('session.execution.started', { sessionID: 'ses_2' });
+    emit('session.execution.succeeded', { sessionID: 'ses_2' });
     await waitFor(() => prompts.length === 1);
 
     releaseLoad();
     // the merge is a microtask chain — a macrotask hop drains it
     await new Promise(r => setTimeout(r, 0));
 
-    emit('session.created', { sessionID: 'ses_1' });
-    emit('message.updated', {
-      info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-    });
-    emit('session.idle', { sessionID: 'ses_1' });
+    emit('session.execution.started', { sessionID: 'ses_1' });
+    emit('session.execution.succeeded', { sessionID: 'ses_1' });
     await waitFor(() => prompts.length === 2);
     await teardown();
     assert.equal(prompts[1]?.sessionID, 'ses_1');
@@ -649,20 +626,15 @@ describe('event stream', () => {
     respond({});
     process.env.BRO_STUB_STATUS_MAP = '{"stop":2}';
     const { emit } = await makeSetup();
-    const cleanTurn = (): void => {
-      emit('message.updated', {
-        info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-      });
-    };
+    // v2: session.execution.succeeded is the clean turn AND the idle
+    // moment — opencode ≥2.x never emits message.updated/session.idle
     const lines = await captureBroErr(async l => {
-      cleanTurn();
-      emit('session.idle', { sessionID: 'ses_1' });
+      emit('session.execution.succeeded', { sessionID: 'ses_1' });
       await waitFor(() => l.some(line => /stop gate did not run/.test(line)));
       // a second idle inside the interval must not repeat the warning —
       // loud once, never a spammer. The debug line is the settle signal:
       // probeFailed writes it before checking the warn window.
-      cleanTurn();
-      emit('session.idle', { sessionID: 'ses_1' });
+      emit('session.execution.succeeded', { sessionID: 'ses_1' });
       await waitFor(() => l.filter(line => /probe failed/.test(line)).length >= 2);
     });
     const warns = lines.filter(l => l.includes('[bro] warn:'));
@@ -674,10 +646,7 @@ describe('event stream', () => {
     respond({ stop: 'loading beads...\ngarbage\n' });
     const { emit } = await makeSetup();
     const lines = await captureBroErr(async l => {
-      emit('message.updated', {
-        info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
-      });
-      emit('session.idle', { sessionID: 'ses_1' });
+      emit('session.execution.succeeded', { sessionID: 'ses_1' });
       await waitFor(() => l.some(line => /no control object/.test(line)));
     });
     assert.equal(lines.filter(l => l.includes('[bro] warn:')).length, 1);
@@ -687,10 +656,7 @@ describe('event stream', () => {
     respond({});
     const second = await makeSetup();
     const silent = await captureBroErr(async l => {
-      second.emit('message.updated', {
-        info: { role: 'assistant', sessionID: 'ses_2', time: { completed: 2 } },
-      });
-      second.emit('session.idle', { sessionID: 'ses_2' });
+      second.emit('session.execution.succeeded', { sessionID: 'ses_2' });
       await waitFor(() => l.some(line => /probe returned null for event=stop/.test(line)));
     });
     assert.equal(silent.filter(l => l.includes('[bro] warn:')).length, 0);
@@ -769,11 +735,8 @@ describe('fail-open', () => {
       },
     });
     events.push(
-      {
-        type: 'message.updated',
-        properties: { info: { role: 'assistant', sessionID: 's', time: { completed: 1 } } },
-      },
-      { type: 'session.idle', properties: { sessionID: 's' } }
+      { type: 'session.execution.started', properties: { sessionID: 's' } },
+      { type: 'session.execution.succeeded', properties: { sessionID: 's' } }
     );
     await waitFor(() => prompts.length === 1);
     await teardown();

@@ -60,46 +60,64 @@ const LINEAGE_EVENTS = [
 /** Assert the surfaces every adapter registers, and the lifecycle
  *  events the lineage shares. The stop gate is the host's own — it is
  *  the one event whose name differs, so it is asserted separately. */
-function assertLineageSurfaces(events: string[], commands: string[], tools: string[]): void {
+function assertLineageSurfaces(
+  events: string[],
+  commands: string[],
+  tools: string[],
+  expectedCommands: string[]
+): void {
   for (const event of LINEAGE_EVENTS) {
     assert.ok(events.includes(event), `the adapter does not register ${event}`);
   }
-  assert.deepEqual(commands, ['bro']);
+  assert.deepEqual(commands, expectedCommands);
   assert.deepEqual(tools, ['bro_status']);
 }
 
-test('the pi adapter loads, registers its surfaces, and speaks pi events', async () => {
-  const mod = await loadAdapter('integrations/pi/bro.ts');
+async function assertLineageAdapter(opts: {
+  bundle: string;
+  commands: string[];
+  present: string[];
+  absent: string[];
+  adapter: { id: string; kind: string };
+}): Promise<void> {
+  const mod = await loadAdapter(opts.bundle);
   const { pi, events, commands, tools } = hostStub();
   mod.default(pi);
 
-  assertLineageSurfaces(events, commands, tools);
+  assertLineageSurfaces(events, commands, tools, opts.commands);
+  for (const e of opts.present) {
+    assert.ok(events.includes(e), `the adapter does not register ${e}`);
+  }
+  for (const e of opts.absent) {
+    assert.ok(!events.includes(e), `foreign vocabulary leaked: ${e}`);
+  }
+  assert.deepEqual(mod.adapter, opts.adapter);
+}
 
-  // pi's lifecycle vocabulary — the settle gate is pi's own
-  assert.ok(events.includes('agent_before_settle'));
-  // omp's vocabulary must NOT leak into pi's adapter
-  assert.ok(!events.includes('session_stop'));
+test('the pi adapter loads, registers its surfaces, and speaks pi events', () =>
+  assertLineageAdapter({
+    bundle: 'plugins/pi/bro/bro.ts',
+    commands: ['bro', 'act', 'wtf', 'retro', 'learn', 'drill', 'judge', 'loop', 'goal'],
+    // pi's lifecycle vocabulary — the settle gate is pi's own
+    present: ['agent_before_settle'],
+    // omp's vocabulary must NOT leak into pi's adapter
+    absent: ['session_stop'],
+    adapter: { id: 'bro', kind: 'pi-extension' },
+  }));
 
-  assert.deepEqual(mod.adapter, { id: 'bro', kind: 'pi-extension' });
-});
-
-test('the omp adapter loads, registers its surfaces, and speaks omp events', async () => {
-  const mod = await loadAdapter('integrations/omp/bro.ts');
-  const { pi, events, commands, tools } = hostStub();
-  mod.default(pi);
-
-  assertLineageSurfaces(events, commands, tools);
-
-  // omp's own vocabulary — the native stop gate is session_stop
-  assert.ok(events.includes('session_stop'));
-  // pi's settle gate is pi's own — it must not leak into omp's adapter
-  assert.ok(!events.includes('agent_before_settle'));
-
-  assert.deepEqual(mod.adapter, { id: 'bro', kind: 'omp-extension' });
-});
+test('the omp adapter loads, registers its surfaces, and speaks omp events', () =>
+  assertLineageAdapter({
+    bundle: 'plugins/omp/bro/bro.ts',
+    commands: ['bro', 'act', 'wtf', 'retro', 'learn', 'drill', 'judge', 'bro:loop', 'bro:goal'],
+    // omp's own vocabulary — the native stop gate is session_stop
+    present: ['session_stop'],
+    // pi's settle gate is pi's own — it must not leak into omp's adapter
+    absent: ['agent_before_settle'],
+    adapter: { id: 'bro', kind: 'omp-extension' },
+  }));
 
 test('the omp adapter registers the mode bridges on omp events', async () => {
-  const mod = await loadAdapter('integrations/omp/bro.ts');
+  const mod = await loadAdapter('plugins/omp/bro/bro.ts');
   const { pi, events } = hostStub();
   mod.default(pi);
 
@@ -111,7 +129,7 @@ test('the omp adapter registers the mode bridges on omp events', async () => {
 });
 
 test('the omp guard hook blocks a force push and nothing else', async () => {
-  const mod = await loadAdapter('integrations/omp/hooks/pre/permission.ts');
+  const mod = await loadAdapter('plugins/omp/bro/hooks/pre/permission.ts');
   const handlers = new Map<string, (event: unknown) => unknown>();
   const pi = {
     on: (name: string, handler: (event: unknown) => unknown) => handlers.set(name, handler),
@@ -164,7 +182,7 @@ test('the shipped adapters carry the ownership sentinel', async () => {
   // holds the slot — the sentinel is how bro recognizes its own, and
   // the bundler re-emits it as a banner (rolldown drops module
   // leading comments).
-  for (const rel of ['integrations/pi/bro.ts', 'integrations/omp/bro.ts']) {
+  for (const rel of ['plugins/pi/bro/bro.ts', 'plugins/omp/bro/bro.ts']) {
     const text = readFileSync(join(repoRoot, rel), 'utf8');
     assert.ok(text.includes('bro-adapter'), `${rel} lost the bro-adapter sentinel`);
   }
@@ -173,7 +191,7 @@ test('the shipped adapters carry the ownership sentinel', async () => {
 test('the shipped adapters resolve no sibling module', async () => {
   // a host loads the file with no node_modules — a relative import
   // would fail at load time, silently, in the host's session
-  for (const rel of ['integrations/pi/bro.ts', 'integrations/omp/bro.ts']) {
+  for (const rel of ['plugins/pi/bro/bro.ts', 'plugins/omp/bro/bro.ts']) {
     const text = readFileSync(join(repoRoot, rel), 'utf8');
     const relative = [...text.matchAll(/from\s+['"](\.[^'"]*)['"]/g)].map(m => m[1] ?? '');
     assert.deepEqual(relative, [], `${rel} imports a sibling module: ${relative.join(', ')}`);

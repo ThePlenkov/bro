@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" session-start || true",
+        "timeout": 45
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" pre-compact || true",
+        "timeout": 20
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" prompt-submit || true",
+        "timeout": 45
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true",
+        "timeout": 10,
+        "matcher": "^Shell$"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true",
+        "timeout": 10,
+        "matcher": "^Shell$"
+      }
+    ],
+    "stop": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" stop || true",
+        "timeout": 25,
+        "loop_limit": 1
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" permission || printf '%s\\n' '{\"permission\":\"ask\"}'",
+        "timeout": 10,
+        "matcher": "^\\s*(bro|bd)(\\s|$)|^\\s*npx\\s+(-y\\s+)?@broject/bro(@[\\w.:-]+)?(\\s|$)"
+      }
+    ]
+  }
+}

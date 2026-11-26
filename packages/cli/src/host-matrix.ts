@@ -175,8 +175,8 @@ export const HOOK_MATRIX: {
 
     codex: {
       surface: 'manifest',
-      plugin: 'integrations/codex',
-      manifest: 'integrations/codex/hooks/hooks.json',
+      plugin: 'plugins/codex/bro',
+      manifest: 'plugins/codex/bro/hooks/hooks.json',
       events: {
         'session-start': {
           native: ['SessionStart'],
@@ -344,7 +344,9 @@ export const HOOK_MATRIX: {
         // tool_call is deliberately unwired: it can only block, and bro's
         // pre-tool lane is input-override — a block-only slot would lie
       },
-      nativeOnly: ['turn_end', 'session_shutdown', 'agent_settled', 'input'],
+      // no 'input' — the driver probes prompt-submit at before_agent_start
+      // (which carries the prompt) instead of caching it at input time
+      nativeOnly: ['turn_end', 'session_shutdown', 'agent_settled'],
       stopRefusal: 'reprompt',
       background: 'async',
       upstream: {

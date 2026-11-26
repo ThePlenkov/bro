@@ -142,6 +142,7 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
+import { deadLoopPostTool, deadLoopPreTool } from './deadloop.ts';
 import { adapterEmitBegin } from './hook-emit.ts';
 import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
 import { drainHookSpool } from '@broject/core';
@@ -281,7 +282,7 @@ function context(event: string, text: string): void {
   emit({ hookSpecificOutput: { hookEventName: event, additionalContext: text } });
 }
 
-const CODEX_INSTRUCTIONS = 'integrations/codex/INSTRUCTIONS.md';
+const CODEX_INSTRUCTIONS = 'plugins/codex/bro/INSTRUCTIONS.md';
 
 /** Codex session steer. The plugin file is the source; a missing root
  *  or an unreadable file stays silent so the hook cannot fail closed. */
@@ -2576,6 +2577,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // journal before the probes run — a lesson triggered on this exact
   // tool landing must see its own trace line in the same event
   journalTrace(input, sessionId);
+  lines.push(...deadLoopPostTool({ dir: process.cwd(), sessionId }, input));
   // OTLP auto-flush — opt-in only, throttled, detached; a dead
   // collector can lose spans, never stall the hook (spec:
   // specs/telemetry/bro-huy5o.11.md)
@@ -2825,17 +2827,15 @@ function emitPreToolDeny(reason: string): void {
  *  applies them over the original tool_input. No verdicts → silence →
  *  the call runs untouched (fail-open, like every hook). */
 async function emitPreTool(input: HookInput): Promise<void> {
+  if (hookMode === 'observe') {
+    return;
+  }
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
-  // the waste-guard runs before connector verdicts — a deterministic
-  // duplicate/unchanged-verify veto costs no model call (spec
-  // bro-rw8z3); fail-open inside, so a state-dir failure never stalls.
-  // pre-tool only checks — the marker commit lands at post-tool, so a
-  // call vetoed here or below can never shadow its own retry
-  const wasteBlock = wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput });
-  if (wasteBlock !== undefined) {
-    emitPreToolDeny(wasteBlock);
+  const earlyBlock = preToolEarlyBlock(sessionId, input, tool, toolInput);
+  if (earlyBlock !== null) {
+    emitPreToolDeny(earlyBlock);
     return;
   }
   const verdicts = await preToolVerdicts(
@@ -2848,6 +2848,23 @@ async function emitPreTool(input: HookInput): Promise<void> {
     emitPreToolDeny(block);
     return;
   }
+  emitPreToolAdvisories(input, verdicts);
+}
+
+function preToolEarlyBlock(
+  sessionId: string,
+  input: HookInput,
+  tool: string,
+  toolInput: Record<string, unknown>
+): string | null {
+  const deadLoopBlock = deadLoopPreTool({ dir: process.cwd(), sessionId }, input);
+  if (deadLoopBlock !== null) return deadLoopBlock;
+  // The waste guard runs before connector verdicts: a deterministic
+  // duplicate veto costs no model call and fails open on state errors.
+  return wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput }) ?? null;
+}
+
+function emitPreToolAdvisories(input: HookInput, verdicts: PreToolVerdict[]): void {
   const merged: Record<string, unknown> = {};
   for (const v of verdicts) {
     if (v.input !== undefined) {

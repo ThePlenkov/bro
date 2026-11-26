@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readdirSync, statSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createTestSandbox } from './test-sandbox.ts';
+import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 
@@ -30,7 +29,7 @@ function walk(dir: string, pattern: string): string[] {
   const wantE2e = pattern.includes('.e2e');
   for (const entry of entries) {
     const full = join(dir, entry);
-    let stat: ReturnType<typeof statSync>;
+    let stat;
     try {
       stat = statSync(full);
     } catch {
@@ -50,36 +49,19 @@ const pattern = process.argv[2] || 'src/**/*.test.ts';
 if (pattern.includes('.e2e')) {
   const pkgDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = join(pkgDir, '..', '..');
-  let build: ReturnType<typeof spawnSync>;
-  try {
-    build = spawnSync(process.execPath, [require.resolve('nx'), 'run', '@broject/bro:build'], {
-      stdio: 'inherit',
-      cwd: repoRoot,
-    });
-  } catch {
-    build = {
-      status: 1,
-      pid: 0,
-      output: [],
-      stdout: null,
-      stderr: null,
-      signal: null,
-    } as ReturnType<typeof spawnSync>;
-  }
-  if (build.status !== 0) {
-    // Fallback: try building from package dir if nx not available in expected form.
-    // No positional entry — tsdown.config.ts owns the entry list (index,
-    // plugin, config-schema, hooks); passing src/index.ts here would override
-    // it and emit a single-entry dist missing dist/hooks.js (bro-36sx7.7).
-    let build2: ReturnType<typeof spawnSync>;
+  // Under `nx run-many`, dependsOn already built dist — an eager rebuild
+  // here wipes dist/ while sibling e2e consumers race it. Build only when
+  // the entry point is actually missing (direct `npm run test:e2e`).
+  const needsBuild = !existsSync(join(pkgDir, '..', 'dist', 'index.js'));
+  if (needsBuild) {
+    let build: ReturnType<typeof spawnSync>;
     try {
-      const tsdownEntry = join(dirname(require.resolve('tsdown/package.json')), 'dist', 'run.mjs');
-      build2 = spawnSync(process.execPath, [tsdownEntry], {
+      build = spawnSync(process.execPath, [require.resolve('nx'), 'run', '@broject/bro:build'], {
         stdio: 'inherit',
-        cwd: join(pkgDir, '..'),
+        cwd: repoRoot,
       });
     } catch {
-      build2 = {
+      build = {
         status: 1,
         pid: 0,
         output: [],
@@ -88,8 +70,35 @@ if (pattern.includes('.e2e')) {
         signal: null,
       } as ReturnType<typeof spawnSync>;
     }
-    if (build2.status !== 0 && build.status !== null) {
-      // continue anyway; tests will fail clearly if dist missing
+    if (build.status !== 0) {
+      // Fallback: try building from package dir if nx not available in expected form.
+      // No positional entry — tsdown.config.ts owns the entry list (index,
+      // plugin, config-schema, hooks); passing src/index.ts here would override
+      // it and emit a single-entry dist missing dist/hooks.js (bro-36sx7.7).
+      let build2: ReturnType<typeof spawnSync>;
+      try {
+        const tsdownEntry = join(
+          dirname(require.resolve('tsdown/package.json')),
+          'dist',
+          'run.mjs'
+        );
+        build2 = spawnSync(process.execPath, [tsdownEntry], {
+          stdio: 'inherit',
+          cwd: join(pkgDir, '..'),
+        });
+      } catch {
+        build2 = {
+          status: 1,
+          pid: 0,
+          output: [],
+          stdout: null,
+          stderr: null,
+          signal: null,
+        } as ReturnType<typeof spawnSync>;
+      }
+      if (build2.status !== 0 && build.status !== null) {
+        // continue anyway; tests will fail clearly if dist missing
+      }
     }
   }
 }
@@ -101,13 +110,7 @@ if (files.length === 0 && pattern.includes('.e2e')) {
   process.exit(1);
 }
 
-const sandbox = createTestSandbox();
-try {
-  const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...files], {
-    stdio: 'inherit',
-    env: sandbox.env,
-  });
-  process.exitCode = result.status ?? 1;
-} finally {
-  sandbox.cleanup();
-}
+const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...files], {
+  stdio: 'inherit',
+});
+process.exit(result.status ?? 1);

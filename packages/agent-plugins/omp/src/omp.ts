@@ -49,17 +49,23 @@
  */
 import {
   BOARD_KEY,
+  type BroHostBinding,
   createBroDriver,
   sharedBinding,
-  type BroHostBinding,
 } from '@broject/adapter-core/host';
-import { installModeBridges, type BoardSnapshot } from './omp-modes.ts';
 import type { OmpApi, OmpContext } from './omp-api.ts';
 import { installOmpSupervision, OMP_SUPERVISION_HOST } from './omp-supervision.ts';
+import { installModeBridges } from './omp-modes.ts';
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.3.0';
+const JSON_FLAG = '--json';
+const PREWALK_KIND = 'prewalk';
+const FLEET_COMMAND = 'fleet';
+const STATUS_COMMAND = 'status';
+const DEBT_COMMAND = 'debt';
+const NEXT_COMMAND = 'next';
 
 /**
  * The omp binding: the host's own shape, nothing else. Every
@@ -73,6 +79,12 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
     ...sharedBinding<OmpContext>({
       kind: 'omp',
       npxPin: NPX_PIN,
+      // omp owns `/goal` (goal mode lifecycle) and `/loop` (count/
+      // duration/--while/--until iteration) natively — verified against
+      // the 18.x binary's usage strings. The bro aliases for those two
+      // register as `bro:goal`/`bro:loop`; the rest of the family gets
+      // bare names (no native `/act|wtf|retro|learn|drill|judge` found).
+      nativeCommands: ['goal', 'loop'],
       stop: 'session_stop',
       on(event, handler) {
         pi.on(event, handler);
@@ -97,26 +109,104 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
   };
 }
 
+/** JSON-schema → zod for the parameter shapes the shared driver
+ *  declares. Unknown/unsupported nodes degrade to `z.any()` — a loose
+ *  schema still validates, a wrong guess would reject real params. */
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function schemaToZod(schema: unknown, z: NonNullable<OmpApi['zod']>): unknown {
+  if (!isPlainRecord(schema)) {
+    return z.any();
+  }
+  // already a schema-builder product (safeParse is zod's tell)
+  if (typeof (schema as { safeParse?: unknown }).safeParse === 'function') {
+    return schema;
+  }
+  if (Array.isArray(schema.enum) && schema.enum.every(v => typeof v === 'string')) {
+    return z.enum(schema.enum as string[]);
+  }
+  return zodForType(schema, z);
+}
+
+function zodForType(s: Record<string, unknown>, z: NonNullable<OmpApi['zod']>): unknown {
+  switch (s.type) {
+    case 'string':
+      return z.string();
+    case 'number':
+    case 'integer':
+      return z.number();
+    case 'boolean':
+      return z.boolean();
+    case 'array':
+      return z.array(schemaToZod(s.items, z));
+    case 'object':
+      return zodObject(s, z);
+    default:
+      return z.any();
+  }
+}
+
+function zodObject(s: Record<string, unknown>, z: NonNullable<OmpApi['zod']>): unknown {
+  const props = isPlainRecord(s.properties) ? s.properties : {};
+  const required = new Set(Array.isArray(s.required) ? (s.required as string[]) : []);
+  const shape: Record<string, unknown> = {};
+  for (const [key, sub] of Object.entries(props)) {
+    const built = schemaToZod(sub, z) as { optional?: () => unknown };
+    shape[key] = required.has(key) ? built : (built?.optional?.() ?? built);
+  }
+  return z.object(shape);
+}
+
+/** omp's registerTool wants a schema-builder product for `parameters`
+ *  (zod/arktype/typebox — raw JSON schema is dropped silently, which is
+ *  how bro_status went missing from the model's tool list) and reads
+ *  omp-native `loadMode`/`approval` policy fields the shared hints
+ *  carry. Everything else passes through verbatim. */
+function adaptApiForOmp(pi: OmpApi): OmpApi {
+  const z = pi.zod;
+  if (z === undefined) {
+    return pi;
+  }
+  // Proxy, not spread: the api's methods live on the prototype — a
+  // shallow copy would drop them, and unbound calls would lose `this`.
+  return new Proxy(pi, {
+    get(target, prop, receiver) {
+      if (prop === 'registerTool') {
+        return (tool: Parameters<OmpApi['registerTool']>[0]) =>
+          target.registerTool({ ...tool, parameters: schemaToZod(tool.parameters, z) });
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 /** The extension entry point — omp calls this with its API. */
 export default function broExtension(pi: OmpApi): void {
   // Child bro commands inherit this capability marker. The facade still
   // falls back safely when a shell is launched outside this extension.
   process.env.BRO_SUPERVISION_HOST = OMP_SUPERVISION_HOST;
   installOmpSupervision(pi);
-  const driver = createBroDriver(binding(pi), pi);
+  const api = adaptApiForOmp(pi);
+  const driver = createBroDriver(binding(api), api);
 
   /** The mode bridges — bro's durable state handed to omp's native Plan,
    *  Goal and Vibe modes. See omp-modes.ts for why bro adds state
    *  rather than a second implementation of each mode. */
   installModeBridges(pi, {
-    board: () => driver.board as BoardSnapshot | null,
+    board: () => driver.board,
     async modeContext(kind, cwd) {
-      const args = kind === 'prewalk' ? ['fleet', 'status', '--json'] : ['debt', 'next', '--json'];
+      const args =
+        kind === PREWALK_KIND
+          ? [FLEET_COMMAND, STATUS_COMMAND, JSON_FLAG]
+          : [DEBT_COMMAND, NEXT_COMMAND, JSON_FLAG];
       const result = await driver.run(args, cwd);
       if (result.code !== 0 || result.stdout.trim() === '') {
         return null;
       }
-      const label = kind === 'prewalk' ? 'provider routing' : 'review debt';
+      const label = kind === PREWALK_KIND ? 'provider routing' : 'review debt';
       return `bro ${label} (read-only):\n${result.stdout.trim()}`;
     },
   });
