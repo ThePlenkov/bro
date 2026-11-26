@@ -458,8 +458,8 @@ describe('bro work e2e — prune --loop', () => {
 
   test('closed bead + commits never landed → tree reaps, branch keeps', () => {
     // the closed-bead verdict retires the scratch dir but git's own
-    // merged check refuses the branch — 'closed' is a verdict, not a
-    // landing proof; unlanded commits keep their ref
+    // origin/main diff check refuses the branch — 'closed' is a verdict,
+    // not a landing proof; unpublished commits keep their ref
     const { root, main } = workFixture();
     const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-u', status: 'closed' }]);
     inside(main, root, () => {
@@ -467,7 +467,7 @@ describe('bro work e2e — prune --loop', () => {
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /reaped .*main--fx-u \[loop\/fx-u\]/);
-      assert.match(r.stdout, /kept loop\/fx-u \(unlanded commits\)/);
+      assert.match(r.stdout, /kept loop\/fx-u \(unpublished commits\)/);
       assert.equal(existsSync(wt), false);
       assert.equal(
         git(['branch', '--list', 'loop/fx-u', '--format=%(refname:short)'], main).trim(),
@@ -1231,6 +1231,23 @@ describe('bro work e2e — daemon tick litter sweep (bro-7dgu3)', () => {
       assert.match(r.stdout, /drive litter: deleted branch loop\/fx-tick/);
       assert.equal(existsSync(wt), false);
       assert.equal(git(['branch', '--list', 'loop/fx-tick'], f.main).trim(), '');
+    });
+  });
+
+  test('a drive pass keeps unpublished commits after reaping their tree', () => {
+    const f = hostFixture('bro-drivelitter-e2e-');
+    writeBeads(f.db, [{ ...FAKE_BEAD, id: 'fx-unpublished', status: 'closed' }]);
+    inside(f.main, f.root, () => {
+      const wt = litter(f.root, f.main, 'fx-unpublished', true);
+      const r = f.run(['drive', '--once']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /drive litter: reaped .*main--fx-unpublished/);
+      assert.match(r.stdout, /drive litter: kept loop\/fx-unpublished \(unpublished commits\)/);
+      assert.equal(existsSync(wt), false);
+      assert.equal(
+        git(['branch', '--list', 'loop/fx-unpublished', '--format=%(refname:short)'], f.main).trim(),
+        'loop/fx-unpublished'
+      );
     });
   });
 
