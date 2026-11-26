@@ -96,19 +96,18 @@ type ProviderEntry =
 Rules:
 
 - **No defaults, no hardcoding.** The empty/absent `providers` section
-  is a valid config — consumers fall back to today's behavior
-  (judge's legacy config, fleet's `agents.<backend>.command` →
-  `loop.agent`). Absence never *selects* a provider — the fallback is
-  the existing connector-resolution path, which keeps its own explicit
-  defaults; once `providers` exists, every consumer reference must
-  resolve to an entry. A provider name that resolves to no entry is a
-  startup error naming the missing key, never a silent fallthrough to
-  a vendor the user didn't pick. Scope note: the no-selection rule
-  governs the `providers` layer. The legacy judge path it defers to
-  still carries its pre-provider default (`connectors.judge` unset →
-  `systemone`) — that default is the status-quo this spec preserves,
-  and tightening it is a separate migration, not a silent part of this
-  one.
+  is a valid compatibility config — consumers use today's legacy paths
+  (the judge's connector resolution, or fleet's
+  `agents.<backend>.command` → `loop.agent`). In that compatibility
+  path, the judge's existing resolver still has its documented default
+  (`connectors.judge` unset → `systemone`); this is a legacy connector
+  default, not selection of a `providers.<name>` entry. The provider
+  layer itself never selects a provider implicitly: once `providers` is
+  in use, every consumer reference must resolve to an entry. A provider
+  name that resolves to no entry is a startup error naming the missing
+  key, never a silent fallthrough to a vendor the user didn't pick.
+  Removing the legacy connector default is a separate migration and is
+  not part of this spec.
 - **`type` is validated against known kinds**; an unknown type drops
   the entry with a warning (same policy as `connectors` section
   normalization). A dropped entry is indistinguishable from an absent
@@ -175,10 +174,11 @@ An Agent Client Protocol endpoint — a CLI that serves ACP over stdio
   sub-modes, distinguished by the session's model: (a) the model IS a
   systemone-family model (`typesafe/jev-*`) — the prompt carries the
   typed contract and the reply content is validated against it: a
-  verifying payload earns the typed grade as *content-validated*,
-  never wire-native — an unparseable one fails open and is never
-  counted as typed. The model id selects the contract to check, not
-  a response schema (an ACP prompt result is content), and
+  verifying payload earns a *content-validated* typed result, never
+  native System One fidelity — an unparseable one fails open and is
+  never counted as typed. The `typesafe/jev-*` model id selects the
+  contract to check; it is not an ACP response schema (an ACP prompt
+  result is content), and
   `decidedBy` (`provider:<name>`) keeps the route on its own stats
   record, distinct from `systemone`-wire answers; (b) a general
   LLM — prompt-and-parse, flagged uncalibrated so `judge stats`
@@ -244,16 +244,22 @@ questions) → DecideResult`. What the provider changes is *who answers*:
 - `judge.model`, when set, overrides the entry's `model` for decisions
   only — pinning for calibration stays a per-consumer concern.
 
-**Compatibility** — `judge.baseUrl`/`judge.model`/`judge.apiKeyEnv`
-synthesize an anonymous single-model `api` entry on the `systemone`
-wire; `judge.llm` synthesizes one on `openai-compat`;
-`connectors.judge: 'systemone'|'llm-judge'` resolve to those. A legacy
-`judge.fallback` naming a connector resolves the same synthesized
-entry, so an unmodified escalation config keeps working —
-`judge.fallback` only *must* name a provider when `judge.provider` is
-already set. A deprecation line prints once per command. Provider
-*entries* get no such grace — `type: 'systemone'` or `type:
-'openai-compat'` in `providers` is a hard config error with the
+**Compatibility** — legacy judge fields synthesize anonymous entries
+under stable aliases:
+
+| Legacy field | Synthesized alias | Wire |
+| ------------ | ----------------- | ---- |
+| `judge.baseUrl` / `judge.model` / `judge.apiKeyEnv` | `systemone` | `systemone` |
+| `judge.llm` | `llm-judge` | `openai-compat` |
+
+`connectors.judge: 'systemone'|'llm-judge'` and a legacy
+`judge.fallback` naming either alias resolve to those synthesized
+entries. `judge.fallback` is a reference to the fallback entry, not a
+third entry to synthesize; this explicit mapping preserves unmodified
+legacy escalation configs. It only *must* name a provider when
+`judge.provider` is already set. A deprecation line prints once per
+command. Provider *entries* get no such grace — `type: 'systemone'` or
+`type: 'openai-compat'` in `providers` is a hard config error with the
 migration hint; the entry shape changed semantics (host + model
 allowlist), so silent parsing would hide a real misconfiguration. New
 configs only ever write `providers` + `judge.provider`/`judge.model`.
