@@ -438,7 +438,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
     const raw = u as unknown as Record<string, unknown>;
     const number = (key: string): number | undefined => {
       const value = raw[key];
-      return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+      return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
     };
     const cost = raw['cost'];
     const amount =
