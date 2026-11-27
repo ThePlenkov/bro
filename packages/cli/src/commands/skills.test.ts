@@ -1,4 +1,3 @@
-import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   lstatSync,
@@ -10,6 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { describe, test } from 'node:test';
 import { skillFolderHash } from '@broject/core';
 import {
   collectRows,
@@ -17,12 +17,13 @@ import {
   localSkillName,
   parseSkillSource,
   resolveSkillsBin,
-  runSync,
   runSkillMutation,
+  runSync,
   type SkillsConfig,
   type SpawnRunner,
 } from './skills.ts';
 import { skillsSection } from './skills-config.ts';
+import { resolveMarketplace } from './skills-spawn.ts';
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'bro-skills-'));
 
@@ -106,6 +107,15 @@ describe('parseSkillSource', () => {
     const s = parseSkillSource('github:o/r');
     assert.deepEqual(s, { kind: 'github', repo: 'o/r', raw: 'github:o/r' });
   });
+  test('marketplace selects an entry explicitly', () => {
+    assert.deepEqual(parseSkillSource('marketplace:ThePlenkov/skills#foundation'), {
+      kind: 'marketplace',
+      repo: 'ThePlenkov/skills',
+      entry: 'foundation',
+      raw: 'marketplace:ThePlenkov/skills#foundation',
+    });
+    assert.equal(parseSkillSource('marketplace:ThePlenkov/skills').kind, 'invalid');
+  });
   test('bare owner/repo is the github shorthand', () => {
     assert.deepEqual(parseSkillSource('o/r'), { kind: 'github', repo: 'o/r', raw: 'o/r' });
   });
@@ -144,6 +154,28 @@ describe('parseSkillSource', () => {
     const s = parseSkillSource(42);
     assert.equal(s.kind, 'invalid');
     assert.equal(parseSkillSource({ repo: 'o/r' }).kind, 'invalid');
+  });
+});
+
+describe('marketplace resolution', () => {
+  test('reads either marketplace shape at the pinned repository SHA', () => {
+    const calls: string[] = [];
+    const source = parseSkillSource('marketplace:o/r#foundation');
+    assert.equal(source.kind, 'marketplace');
+    const resolved = resolveMarketplace(source, 'a'.repeat(40), (repo, ref, path) => {
+      calls.push(`${repo}@${ref}:${path}`);
+      return path.startsWith('.claude')
+        ? { plugins: [{ name: 'foundation', source: './skills/foundation' }] }
+        : null;
+    });
+    assert.deepEqual(resolved, {
+      kind: 'github',
+      repo: 'o/r',
+      path: 'skills/foundation',
+      skill: 'foundation',
+      raw: 'marketplace:o/r#foundation',
+    });
+    assert.deepEqual(calls, [`o/r@${'a'.repeat(40)}:.claude-plugin/marketplace.json`]);
   });
 });
 

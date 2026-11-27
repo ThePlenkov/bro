@@ -28,39 +28,41 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  type Stats,
   unlinkSync,
   writeFileSync,
-  type Stats,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   checkSkillLock,
+  type ExitCode,
   hasHelpFlag,
+  type LockedSkill,
   printUsage,
   readSkillLock,
-  type ExitCode,
-  type LockedSkill,
   type SkillDrift,
 } from '@broject/core';
+import { loadBroConfig } from '../plugins.ts';
 import { flag } from './args.ts';
-import { skillsSection, type SkillsConfig } from './skills-config.ts';
+import { type SkillsConfig, skillsSection } from './skills-config.ts';
+import { ensureLocalLink, localSkillName, skillsDirOf } from './skills-links.ts';
 import { lockNamesFor, parseSkillSource, type SkillSource } from './skills-sources.ts';
 import {
+  type BinProbe,
   commandOnPath,
   pinnedAddArgs,
-  resolveSkillsBin,
   resolveGithubRef,
+  resolveMarketplace,
+  resolveSkillsBin,
+  type SkillsBin,
+  type SpawnRunner,
   spawnDetail,
   spawnFailed,
   spawnSkills,
-  type BinProbe,
-  type SkillsBin,
-  type SpawnRunner,
 } from './skills-spawn.ts';
-import { ensureLocalLink, localSkillName, skillsDirOf } from './skills-links.ts';
-import { loadBroConfig } from '../plugins.ts';
 
-export { skillsSection, type SkillsConfig } from './skills-config.ts';
+export { type SkillsConfig, skillsSection } from './skills-config.ts';
+export { ensureLocalLink, type LocalLink, localSkillName } from './skills-links.ts';
 export { parseSkillSource, type SkillSource } from './skills-sources.ts';
 export {
   commandOnPath,
@@ -68,7 +70,6 @@ export {
   type SkillsBin,
   type SpawnRunner,
 } from './skills-spawn.ts';
-export { ensureLocalLink, localSkillName, type LocalLink } from './skills-links.ts';
 
 // --- reconcile -----------------------------------------------------------------
 
@@ -334,6 +335,25 @@ function syncDeclared(src: SkillSource, ctx: SyncCtx): SyncStep {
         : { detail: link.name }),
     };
   }
+  if (src.kind === 'marketplace') {
+    const ref = ctx.resolveRef(src.repo);
+    if (ref === null) {
+      return {
+        label: src.raw,
+        state: 'error',
+        detail: `could not resolve ${src.repo} default branch HEAD`,
+      };
+    }
+    const resolved = resolveMarketplace(src, ref);
+    if (resolved === null) {
+      return {
+        label: src.raw,
+        state: 'error',
+        detail: `no marketplace entry ${src.entry} at ${ref}`,
+      };
+    }
+    return syncRemote(resolved, ctx);
+  }
   return syncRemote(src, ctx);
 }
 
@@ -479,7 +499,8 @@ Options:
   --help         this text
 
 Config (bro.config.json "skills"):
-  install  source strings — github:<owner>/<repo>[/<path>],
+  install  source strings — marketplace:<owner>/<repo>#<entry>,
+           github:<owner>/<repo>[/<path>],
            <owner>/<repo>, https://…, or local:<relpath>
   agents   'skills add -a' link targets (default: universal —
            the .agents/skills plane only)
@@ -577,6 +598,29 @@ interface SkillMutation {
   resolveRef?: (repo: string) => string | null;
 }
 
+const PIN_TARGET_KINDS = new Set<SkillSource['kind']>(['github', 'marketplace']);
+
+function pinRepo(source: SkillSource): string | null {
+  if (PIN_TARGET_KINDS.has(source.kind) && 'repo' in source) {
+    return source.repo;
+  }
+  return null;
+}
+
+function resolveMutationSource(
+  source: SkillSource,
+  ref: string | null | undefined
+): (SkillSource & { kind: 'github' | 'url' }) | null {
+  if (source.kind === 'marketplace') {
+    if (ref === undefined || ref === null) return null;
+    return resolveMarketplace(source, ref);
+  }
+  if (source.kind === 'github' || source.kind === 'url') {
+    return source;
+  }
+  return null;
+}
+
 /** Resolve the names covered by a source.  The lock is authoritative for
  * update/remove because the upstream CLI's update/remove commands take skill
  * names, while bro's public API takes the original source. */
@@ -584,6 +628,9 @@ function mutationNames(source: SkillSource, root: string): string[] {
   const locked = readSkillLock(root);
   if (source.kind === 'github' || source.kind === 'url') {
     return lockNamesFor(source, locked);
+  }
+  if (source.kind === 'marketplace') {
+    return [];
   }
   return source.kind === 'invalid' ? [] : [localSkillName(root, source.path)];
 }
@@ -609,14 +656,20 @@ export function runSkillMutation(input: SkillMutation): {
   const names = mutationNames(source, input.root);
   const resolveRef =
     input.resolveRef ?? (input.spawn === undefined ? resolveGithubRef : () => 'test');
-  const wantsPin = input.command === 'add' && source.kind === 'github';
-  const ref = wantsPin ? resolveRef(source.repo) : undefined;
-  if (input.command === 'add' && source.kind === 'github' && ref === null) {
-    return { ok: false, args: [], detail: `could not resolve ${source.repo} default branch HEAD` };
+  const repo = pinRepo(source);
+  const wantsPin = input.command === 'add' && repo !== null;
+  const ref = wantsPin && repo !== null ? resolveRef(repo) : undefined;
+  if (wantsPin && ref === null) {
+    return { ok: false, args: [], detail: `could not resolve ${repo} default branch HEAD` };
+  }
+  const resolved = resolveMutationSource(source, ref);
+  if (resolved === null) {
+    const entry = source.kind === 'marketplace' ? ` entry ${source.entry}` : '';
+    return { ok: false, args: [], detail: `no marketplace${entry} at ${ref}` };
   }
   const args =
     input.command === 'add'
-      ? pinnedAddArgs(source, input.cfg.agents, ref ?? undefined)
+      ? pinnedAddArgs(resolved, input.cfg.agents, ref ?? undefined)
       : [input.command, ...names, '-y'];
   if (input.command !== 'add' && names.length === 0) {
     return {
@@ -629,8 +682,8 @@ export function runSkillMutation(input: SkillMutation): {
   if (spawnFailed(proc)) {
     return { ok: false, args, detail: spawnDetail(proc) };
   }
-  if (source.kind === 'github' && ref !== undefined && ref !== null) {
-    recordLockRef(input.root, source.repo, ref);
+  if (repo !== null && ref !== undefined && ref !== null) {
+    recordLockRef(input.root, repo, ref);
   }
   return { ok: true, args };
 }
