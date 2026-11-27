@@ -869,6 +869,21 @@ const laneLabel = (lane: LoopLane): string =>
  *  bead unreclaimed for the whole run). */
 const HEARTBEAT_MIN_MS = 2_000;
 
+/** The e2e land path supplies a long floor so its assertion measures the
+ *  clean-run contract, rather than whether a loaded host crossed the
+ *  production liveness deadline. This is intentionally an e2e-only seam:
+ *  production runs always use HEARTBEAT_MIN_MS. */
+function heartbeatMinMs(): number {
+  if (
+    process.env.E2E_SCENARIO === undefined ||
+    process.env.E2E_LOOP_HEARTBEAT_MIN_MS === undefined
+  ) {
+    return HEARTBEAT_MIN_MS;
+  }
+  const configured = Number(process.env.E2E_LOOP_HEARTBEAT_MIN_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : HEARTBEAT_MIN_MS;
+}
+
 /** The worker stage — a spawned member's FIRST gate, before its PR
  *  gate is even meaningful (spec bro-zpa93). It polls the agents
  *  registry, never the review host: 'running'/'spawned' keeps the
@@ -1621,7 +1636,7 @@ async function guardedRun(ctx: Ctx, release: () => void = () => {}): Promise<voi
     () => {
       console.error(`loop: alive — ${ctx.stage}${ctx.bead ? ` on ${ctx.bead}` : ''}`);
     },
-    Math.max(ctx.intervalS * 1000, HEARTBEAT_MIN_MS)
+    Math.max(ctx.intervalS * 1000, heartbeatMinMs())
   );
   const auditDeath = (why: string): void => {
     try {
