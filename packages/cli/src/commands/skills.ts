@@ -598,6 +598,29 @@ interface SkillMutation {
   resolveRef?: (repo: string) => string | null;
 }
 
+const PIN_TARGET_KINDS = new Set<SkillSource['kind']>(['github', 'marketplace']);
+
+function pinRepo(source: SkillSource): string | null {
+  if (PIN_TARGET_KINDS.has(source.kind) && 'repo' in source) {
+    return source.repo;
+  }
+  return null;
+}
+
+function resolveMutationSource(
+  source: SkillSource,
+  ref: string | null | undefined
+): (SkillSource & { kind: 'github' | 'url' }) | null {
+  if (source.kind === 'marketplace') {
+    if (ref === undefined || ref === null) return null;
+    return resolveMarketplace(source, ref);
+  }
+  if (source.kind === 'github' || source.kind === 'url') {
+    return source;
+  }
+  return null;
+}
+
 /** Resolve the names covered by a source.  The lock is authoritative for
  * update/remove because the upstream CLI's update/remove commands take skill
  * names, while bro's public API takes the original source. */
@@ -633,22 +656,13 @@ export function runSkillMutation(input: SkillMutation): {
   const names = mutationNames(source, input.root);
   const resolveRef =
     input.resolveRef ?? (input.spawn === undefined ? resolveGithubRef : () => 'test');
-  const wantsPin =
-    input.command === 'add' && (source.kind === 'github' || source.kind === 'marketplace');
-  const ref = wantsPin ? resolveRef(source.repo) : undefined;
-  if (
-    input.command === 'add' &&
-    (source.kind === 'github' || source.kind === 'marketplace') &&
-    ref === null
-  ) {
-    return { ok: false, args: [], detail: `could not resolve ${source.repo} default branch HEAD` };
+  const repo = pinRepo(source);
+  const wantsPin = input.command === 'add' && repo !== null;
+  const ref = wantsPin && repo !== null ? resolveRef(repo) : undefined;
+  if (wantsPin && ref === null) {
+    return { ok: false, args: [], detail: `could not resolve ${repo} default branch HEAD` };
   }
-  const resolved =
-    source.kind === 'marketplace'
-      ? ref === undefined || ref === null
-        ? null
-        : resolveMarketplace(source, ref)
-      : source;
+  const resolved = resolveMutationSource(source, ref);
   if (resolved === null) {
     const entry = source.kind === 'marketplace' ? ` entry ${source.entry}` : '';
     return { ok: false, args: [], detail: `no marketplace${entry} at ${ref}` };
@@ -668,12 +682,8 @@ export function runSkillMutation(input: SkillMutation): {
   if (spawnFailed(proc)) {
     return { ok: false, args, detail: spawnDetail(proc) };
   }
-  if (
-    (source.kind === 'github' || source.kind === 'marketplace') &&
-    ref !== undefined &&
-    ref !== null
-  ) {
-    recordLockRef(input.root, source.repo, ref);
+  if (repo !== null && ref !== undefined && ref !== null) {
+    recordLockRef(input.root, repo, ref);
   }
   return { ok: true, args };
 }

@@ -3,6 +3,7 @@
  * running it (POSIX direct, Windows through ComSpec with quoted argv).
  */
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { gitBin } from '@broject/core';
 import {
@@ -23,6 +24,31 @@ export interface SkillsBin {
  *  execute whatever the registry serves that day); skills.bin or a
  *  PATH install overrides it. */
 const SKILLS_PKG = 'skills@1.7.4';
+
+let resolvedCurlBin: string | undefined;
+
+/** Resolve curl once so the network probe cannot execute a PATH-selected binary.
+ * Unlike optional skills binaries, curl is required for marketplace resolution. */
+export function curlBin(): string {
+  if (resolvedCurlBin !== undefined) {
+    return resolvedCurlBin;
+  }
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  for (const dir of (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')) {
+    if (dir === '') continue;
+    for (const ext of exts) {
+      const candidate = `${dir}/curl${ext}`;
+      try {
+        accessSync(candidate, constants.X_OK);
+        resolvedCurlBin = candidate;
+        return candidate;
+      } catch {
+        // not here — keep walking PATH
+      }
+    }
+  }
+  throw new Error('curl executable not found on PATH');
+}
 
 export type SpawnRunner = (
   bin: SkillsBin,
@@ -163,7 +189,7 @@ export type ReadMarketplace = (
  * command); callers can inject this seam in unit tests. */
 export const readMarketplace: ReadMarketplace = (repo, ref, manifestPath) => {
   const url = `https://raw.githubusercontent.com/${repo}/${ref}/${manifestPath}`;
-  const proc = spawnSync('curl', ['--fail', '--silent', '--show-error', '--location', url], {
+  const proc = spawnSync(curlBin(), ['--fail', '--silent', '--show-error', '--location', url], {
     encoding: 'utf8',
     timeout: 30_000,
     maxBuffer: 4 * 1024 * 1024,

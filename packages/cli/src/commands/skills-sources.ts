@@ -228,7 +228,16 @@ export function resolveMarketplaceEntry(
     if (typeof plugin !== 'object' || plugin === null) continue;
     const p = plugin as { name?: unknown; source?: unknown; skills?: unknown };
     if (p.name !== entry || typeof p.source !== 'string') continue;
-    const source = p.source.replace(/^\.\/+/, '').replace(/\/+$/, '');
+    let source = p.source;
+    while (source.startsWith('./')) {
+      source = source.slice(2);
+      while (source.startsWith('/')) {
+        source = source.slice(1);
+      }
+    }
+    while (source.endsWith('/')) {
+      source = source.slice(0, -1);
+    }
     const skills = Array.isArray(p.skills)
       ? p.skills.filter((s): s is string => typeof s === 'string')
       : [];
