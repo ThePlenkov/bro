@@ -43,10 +43,11 @@
     "fleet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxConcurrent", "agents"],
+      "required": ["maxConcurrent", "agents", "budget"],
       "properties": {
         "maxConcurrent": { "type": "integer", "description": "0 = uncapped." },
-        "agents": { "type": "array", "items": { "$ref": "#/$defs/StatusAgent" } }
+        "agents": { "type": "array", "items": { "$ref": "#/$defs/StatusAgent" } },
+        "budget": { "$ref": "#/$defs/FleetUsageBudget" }
       }
     },
     "loop": {
@@ -186,6 +187,54 @@
         "worktree": { "type": "string" },
         "provider": { "type": "string" },
         "model": { "type": "string" }
+      }
+    },
+    "FleetUsageBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "day", "window"],
+      "properties": {
+        "basis": { "const": "agent-events" },
+        "day": { "$ref": "#/$defs/FleetUsageWindow" },
+        "window": { "$ref": "#/$defs/FleetUsageWindow" }
+      }
+    },
+    "FleetUsageWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "rows", "unknownCostRows", "groups"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "rows": { "type": "integer" },
+        "unknownCostRows": { "type": "integer" },
+        "groups": { "type": "array", "items": { "$ref": "#/$defs/FleetUsageGroup" } }
+      }
+    },
+    "FleetUsageGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "from", "to", "rows", "unknownCost"],
+      "properties": {
+        "agent": { "type": "string" },
+        "bead": { "type": "string" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "rows": { "type": "integer" },
+        "inputTokens": { "type": "number" },
+        "outputTokens": { "type": "number" },
+        "costUsd": { "type": "number" },
+        "unknownCost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "reason"],
+          "properties": {
+            "count": { "type": "integer" },
+            "reason": { "type": "string" }
+          }
+        }
       }
     },
     "LoopRunView": {
