@@ -312,7 +312,7 @@ describe('bro acp — runSlash', () => {
       t => texts.push(t)
     );
     assert.ok(
-      texts.some(t => t.includes('killed by SIGKILL')),
+      texts.join('').includes('killed by SIGKILL'),
       texts.join()
     );
   });
@@ -324,13 +324,25 @@ describe('bro acp — runSlash', () => {
     const run = runSlash(
       // traps SIGTERM and parks — without escalation 'close' would
       // wait the whole 60s timeout and jam the writeQ behind it
-      [process.execPath, '-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1e9)'],
+      [
+        process.execPath,
+        '-e',
+        'process.on("SIGTERM",()=>{});process.stdout.write("READY\\n");setInterval(()=>{},1e9)',
+      ],
       process.cwd(),
       60_000,
       ctrl.signal,
       t => texts.push(t)
     );
-    setTimeout(() => ctrl.abort(), 100);
+    const deadline = Date.now() + 10_000;
+    while (!texts.join('').includes('READY')) {
+      if (Date.now() >= deadline) {
+        ctrl.abort();
+        throw new Error(`SIGTERM test child never reached the ready barrier: ${texts.join()}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    ctrl.abort();
     await run;
     const elapsed = Date.now() - t0;
     assert.ok(
@@ -338,7 +350,7 @@ describe('bro acp — runSlash', () => {
       `a SIGTERM-ignoring child held the turn ${elapsed}ms — no escalation`
     );
     assert.ok(
-      texts.some(t => t.includes('killed by SIGKILL')),
+      texts.join('').includes('killed by SIGKILL'),
       texts.join()
     );
   });

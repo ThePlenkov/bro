@@ -749,7 +749,7 @@ describe('countDevinWorkers', () => {
         }
         if (
           cmdline.split('\0')[0]?.endsWith('devin') === true &&
-          env.includes('BRO_AGENT_ID=native-test')
+          env.split('\0').includes('BRO_AGENT_ID=native-test')
         ) {
           break;
         }
@@ -889,9 +889,9 @@ describe('listDevinSessions', () => {
       for (;;) {
         try {
           if (
-            readFileSync(join('/proc', String(child.pid), 'environ'), 'utf8').includes(
-              'BRO_AGENT_ID=native-xyz'
-            )
+            readFileSync(`/proc/${child.pid}/cmdline`, 'utf8').split('\0')[0]?.endsWith('devin') ===
+              true &&
+            readFileSync(`/proc/${child.pid}/environ`, 'utf8').split('\0').includes('BRO_AGENT_ID=native-xyz')
           ) {
             break;
           }
