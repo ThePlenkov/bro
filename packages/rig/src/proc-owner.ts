@@ -703,6 +703,7 @@ export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[]
   if (process.platform === 'darwin') {
     return agentProcessesInDarwin(root, procDir);
   }
+  process.emitWarning(`unsupported on ${process.platform}: agent process attribution`);
   return [];
 }
 

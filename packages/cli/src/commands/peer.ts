@@ -255,6 +255,11 @@ export function peerInfo(sock: Socket): PeerInfo | undefined {
     seedPeerLookup(sock);
     return undefined;
   }
+  // Keep the advisory peer seam fail-open, but make the capability loss
+  // visible to callers running on an unsupported operating system.
+  if (process.platform !== 'linux') {
+    process.emitWarning(`unsupported on ${process.platform}: peer attribution`);
+  }
   const resolved = resolvePeer(sock);
   PEER_CACHE.set(sock, resolved);
   return resolved;

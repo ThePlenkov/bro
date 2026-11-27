@@ -269,6 +269,7 @@ function readProcArgv(pid: number): string[] | undefined {
       return undefined;
     }
   }
+  process.emitWarning(`unsupported on ${process.platform}: refguard process attribution`);
   return undefined;
 }
 

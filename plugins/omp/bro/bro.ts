@@ -1006,6 +1006,128 @@ function killTree(child) {
 }
 
 //#endregion
+//#region packages/core/src/proc.ts
+/** one `ps -p <pid> -o <fields>` row, trimmed — undefined when ps
+*  fails or prints nothing. env pins TZ/LC so lstart spellings stay
+*  environment-independent. */
+function psStatRow(pid, fields, env) {
+	try {
+		return execFileSync("ps", [
+			"-p",
+			String(pid),
+			"-o",
+			fields
+		], {
+			encoding: "utf8",
+			timeout: 1e3,
+			env
+		}).trim().split("\n").filter(Boolean)[0]?.trim();
+	} catch {
+		return;
+	}
+}
+/** a `ps` stat row → {state, start} — whitespace-split so no
+*  backtracking regex ever sees the freeform lstart tail; `hasPid`
+*  skips a leading pid column when the spelling emitted one. Null
+*  when either field is absent. */
+function statRowToProc(line, hasPid) {
+	const tokens = line.split(/\s+/);
+	const off = hasPid && /^\d+$/.test(tokens[0] ?? "") ? 1 : 0;
+	const stateTok = tokens[off] ?? "";
+	const start = tokens.slice(off + 1).join(" ").trim();
+	if (stateTok === "" || start === "") return null;
+	return {
+		state: stateTok[0] ?? "",
+		start
+	};
+}
+/** The process's /proc identity — state byte (field 3: 'Z' marks an
+*  unreaped zombie) and starttime (field 22). Post-comm fields split
+*  from index 0 = field 3. Null where /proc is absent or unreadable. */
+function procStat(pid) {
+	if (process.platform === "linux") try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+		return {
+			state: rest[0] ?? "",
+			start: rest[19] ?? ""
+		};
+	} catch {
+		return null;
+	}
+	if (process.platform === "darwin" || process.platform === "freebsd" || process.platform === "openbsd") {
+		const env = {
+			...process.env,
+			TZ: "UTC",
+			LC_ALL: "C",
+			LC_TIME: "C"
+		};
+		const first = psStatRow(pid, "state=,lstart=", env);
+		if (first === void 0) return null;
+		const parsed = statRowToProc(first, false);
+		if (parsed !== null) return parsed;
+		const second = psStatRow(pid, "pid=,state=,lstart=", env);
+		const retried = second === void 0 ? null : statRowToProc(second, true);
+		if (retried !== null) return retried;
+		return {
+			state: psStatRow(pid, "state=", env)?.[0] ?? first[0] ?? "",
+			start: ""
+		};
+	}
+	return null;
+}
+/** pid alive = kill(pid, 0) doesn't throw, or throws EPERM (a live
+*  process owned by another uid — not ours to verify, still alive).
+*  Two exceptions where a surviving answer still means dead:
+*
+*  - an unreaped zombie ('Z' state) — kill succeeds, nobody is there;
+*  - pid reuse — when the caller recorded pidStart, a live pid with a
+*    different starttime is a different process.
+*
+*  Unverifiable identity (no /proc, unreadable stat) stays fail-open:
+*  alive, never a false stale report. A non-positive or non-integer
+*  pid is dead input, not unverifiable: kill(0) and kill(-pid) answer
+*  for process groups, so the signal cannot attest that pid. */
+function pidAlive(pid, pidStart$1) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+	} catch (e) {
+		if (e.code !== "EPERM") return false;
+	}
+	const st = procStat(pid);
+	if (st?.state === "Z") return false;
+	if (pidStart$1 === void 0) return true;
+	if (st === null || st.start === "") return true;
+	if (st.start === pidStart$1) return true;
+	if (pidStart$1.trim().split(/\s+/).length >= 2) {
+		const startOnly = pidStart$1.trim().replace(/^\S+\s+/, "");
+		if (startOnly === st.start || st.start === startOnly) return true;
+	}
+	return false;
+}
+/** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
+*  pair is the owning process's identity (start disambiguates reuse).
+*  A pid without a start can't disambiguate, so it reads as ownerless:
+*  a reuse-blind owner would suppress the mtime fallback while still
+*  trusting a recycled pid — the worst of both planes. */
+function markerOwner(firstLine$1) {
+	const s = (firstLine$1 ?? "").trim();
+	const firstSpace = s.search(/\s/);
+	if (firstSpace === -1) return null;
+	const rest = s.slice(firstSpace + 1).trimStart();
+	const secondSpace = rest.search(/\s/);
+	if (secondSpace === -1) return null;
+	const pidStr = rest.slice(0, secondSpace).trim();
+	const start = rest.slice(secondSpace + 1).trim();
+	const pid = Number(pidStr);
+	return Number.isInteger(pid) && pid > 0 && start !== "" ? {
+		pid,
+		start
+	} : null;
+}
+
+//#endregion
 //#region packages/core/src/live-procs.ts
 const live = /* @__PURE__ */ new Set();
 /** Register a spawned child for later unref — deregisters itself on
@@ -2657,128 +2779,6 @@ function keySourceErr(picked) {
 	if (typeof picked.apiKeyEnv === "string" && !isEnvName(picked.apiKeyEnv)) return "apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value";
 	if (typeof picked.apiKeyCommand === "string" && /sk-[A-Za-z0-9]|ts_(?:live|test)_|Bearer\s/i.test(picked.apiKeyCommand)) return "apiKeyCommand must RUN a secret lookup — it may not contain a key value";
 	return null;
-}
-
-//#endregion
-//#region packages/core/src/proc.ts
-/** one `ps -p <pid> -o <fields>` row, trimmed — undefined when ps
-*  fails or prints nothing. env pins TZ/LC so lstart spellings stay
-*  environment-independent. */
-function psStatRow(pid, fields, env) {
-	try {
-		return execFileSync("ps", [
-			"-p",
-			String(pid),
-			"-o",
-			fields
-		], {
-			encoding: "utf8",
-			timeout: 1e3,
-			env
-		}).trim().split("\n").filter(Boolean)[0]?.trim();
-	} catch {
-		return;
-	}
-}
-/** a `ps` stat row → {state, start} — whitespace-split so no
-*  backtracking regex ever sees the freeform lstart tail; `hasPid`
-*  skips a leading pid column when the spelling emitted one. Null
-*  when either field is absent. */
-function statRowToProc(line, hasPid) {
-	const tokens = line.split(/\s+/);
-	const off = hasPid && /^\d+$/.test(tokens[0] ?? "") ? 1 : 0;
-	const stateTok = tokens[off] ?? "";
-	const start = tokens.slice(off + 1).join(" ").trim();
-	if (stateTok === "" || start === "") return null;
-	return {
-		state: stateTok[0] ?? "",
-		start
-	};
-}
-/** The process's /proc identity — state byte (field 3: 'Z' marks an
-*  unreaped zombie) and starttime (field 22). Post-comm fields split
-*  from index 0 = field 3. Null where /proc is absent or unreadable. */
-function procStat(pid) {
-	if (process.platform === "linux") try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-		return {
-			state: rest[0] ?? "",
-			start: rest[19] ?? ""
-		};
-	} catch {
-		return null;
-	}
-	if (process.platform === "darwin" || process.platform === "freebsd" || process.platform === "openbsd") {
-		const env = {
-			...process.env,
-			TZ: "UTC",
-			LC_ALL: "C",
-			LC_TIME: "C"
-		};
-		const first = psStatRow(pid, "state=,lstart=", env);
-		if (first === void 0) return null;
-		const parsed = statRowToProc(first, false);
-		if (parsed !== null) return parsed;
-		const second = psStatRow(pid, "pid=,state=,lstart=", env);
-		const retried = second === void 0 ? null : statRowToProc(second, true);
-		if (retried !== null) return retried;
-		return {
-			state: psStatRow(pid, "state=", env)?.[0] ?? first[0] ?? "",
-			start: ""
-		};
-	}
-	return null;
-}
-/** pid alive = kill(pid, 0) doesn't throw, or throws EPERM (a live
-*  process owned by another uid — not ours to verify, still alive).
-*  Two exceptions where a surviving answer still means dead:
-*
-*  - an unreaped zombie ('Z' state) — kill succeeds, nobody is there;
-*  - pid reuse — when the caller recorded pidStart, a live pid with a
-*    different starttime is a different process.
-*
-*  Unverifiable identity (no /proc, unreadable stat) stays fail-open:
-*  alive, never a false stale report. A non-positive or non-integer
-*  pid is dead input, not unverifiable: kill(0) and kill(-pid) answer
-*  for process groups, so the signal cannot attest that pid. */
-function pidAlive(pid, pidStart$1) {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-	} catch (e) {
-		if (e.code !== "EPERM") return false;
-	}
-	const st = procStat(pid);
-	if (st?.state === "Z") return false;
-	if (pidStart$1 === void 0) return true;
-	if (st === null || st.start === "") return true;
-	if (st.start === pidStart$1) return true;
-	if (pidStart$1.trim().split(/\s+/).length >= 2) {
-		const startOnly = pidStart$1.trim().replace(/^\S+\s+/, "");
-		if (startOnly === st.start || st.start === startOnly) return true;
-	}
-	return false;
-}
-/** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
-*  pair is the owning process's identity (start disambiguates reuse).
-*  A pid without a start can't disambiguate, so it reads as ownerless:
-*  a reuse-blind owner would suppress the mtime fallback while still
-*  trusting a recycled pid — the worst of both planes. */
-function markerOwner(firstLine$1) {
-	const s = (firstLine$1 ?? "").trim();
-	const firstSpace = s.search(/\s/);
-	if (firstSpace === -1) return null;
-	const rest = s.slice(firstSpace + 1).trimStart();
-	const secondSpace = rest.search(/\s/);
-	if (secondSpace === -1) return null;
-	const pidStr = rest.slice(0, secondSpace).trim();
-	const start = rest.slice(secondSpace + 1).trim();
-	const pid = Number(pidStr);
-	return Number.isInteger(pid) && pid > 0 && start !== "" ? {
-		pid,
-		start
-	} : null;
 }
 
 //#endregion
