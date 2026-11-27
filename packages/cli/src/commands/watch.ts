@@ -1119,7 +1119,9 @@ function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
   let orphanNote = '';
   try {
     const o = sweepOrphanProcs('bd', repoRoot);
-    if (o.signaled.length > 0 || o.failed.length > 0) {
+    if (o.degraded !== undefined) {
+      orphanNote = `bd-orphan sweep degraded — ${o.degraded}`;
+    } else if (o.signaled.length > 0 || o.failed.length > 0) {
       const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : '';
       orphanNote = `bd-orphans: signaled ${o.signaled.length}${failed}`;
     }

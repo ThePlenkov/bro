@@ -417,6 +417,10 @@ export interface OrphanSweepReport {
   signaled: { pid: number; cwd: string }[];
   /** pids that matched but the injected signal never reached. */
   failed: number[];
+  /** the platform cannot be swept at all — surfaced, never silently
+   *  empty: an unsupported box sweeping zero orphans is a true fact,
+   *  hiding the sentinel would read as one. */
+  degraded?: string;
 }
 
 /** SIGTERM `comm` processes reparented to init whose cwd sits under
@@ -431,7 +435,7 @@ export function sweepOrphanProcs(
     procDir?: string;
     kill?: (pid: number) => void;
     now?: number;
-    rows?: ProcRow[];
+    rows?: ProcRow[] | UnsupportedPlatform;
   } = {}
 ): OrphanSweepReport {
   const read = opts.rows ?? readProcRows(opts.procDir);
@@ -440,6 +444,9 @@ export function sweepOrphanProcs(
   const byPid = new Map(rows.map(r => [r.pid, r]));
   const kill = opts.kill ?? ((pid: number) => process.kill(pid, 'SIGTERM'));
   const report: OrphanSweepReport = { scanned: rows.length, signaled: [], failed: [] };
+  if (!Array.isArray(read)) {
+    report.degraded = read.message;
+  }
   for (const pid of pids) {
     try {
       kill(pid);
