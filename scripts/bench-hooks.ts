@@ -46,7 +46,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOOK_DISPATCH_ERR } from '../packages/cli/src/commands/hook-signal.ts';
 import { e2eEnv, initRepo, installFakeBd } from '../packages/cli/src/commands/testrepo.ts';
@@ -669,7 +669,10 @@ function enforce(
       continue;
     }
     const [, event] = key.split(':');
-    const v = budgetVerdict({ key, cap }, rows.get(key), rows.get(`noop:${event}`));
+    // a noop row IS the floor reference — pairing it with itself makes
+    // delta always 0 and latency unenforceable; enforce it absolute
+    const twin = key.startsWith('noop:') ? undefined : rows.get(`noop:${event}`);
+    const v = budgetVerdict({ key, cap }, rows.get(key), twin);
     say(v.line);
     failed = failed || v.failed;
   }
@@ -697,6 +700,6 @@ function main(): void {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main();
 }
