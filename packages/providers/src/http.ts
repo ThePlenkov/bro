@@ -74,18 +74,38 @@ export const objOr = (v: unknown): Record<string, unknown> =>
 export function mapUsage(
   body: Record<string, unknown>,
   tokensKey: 'input_tokens' | 'prompt_tokens'
-): DecideResult['usage'] {
-  const raw = objOr(body.usage)
-  const usage: { inputTokens?: number; costUsd?: number } = {}
+): (NonNullable<DecideResult['usage']> & { outputTokens?: number }) | undefined {
+  const rawValue = body.usage
+  if (
+    rawValue !== undefined &&
+    (typeof rawValue !== 'object' || rawValue === null || Array.isArray(rawValue))
+  ) {
+    throw new Error('provider returned malformed usage')
+  }
+  const raw = objOr(rawValue)
+  const usage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {}
   const tokens = raw[tokensKey]
   // a token count is a nonnegative integer — a fractional or negative
   // wire value is drift, not usage
+  if (tokens !== undefined && (!Number.isSafeInteger(tokens) || (tokens as number) < 0)) {
+    throw new Error('provider returned malformed token usage')
+  }
   if (Number.isSafeInteger(tokens) && (tokens as number) >= 0) {
     usage.inputTokens = tokens as number
   }
   const cost = raw.cost_usd
+  if (cost !== undefined && (!isNum(cost) || cost < 0)) {
+    throw new Error('provider returned malformed cost usage')
+  }
   if (isNum(cost) && cost >= 0) {
     usage.costUsd = cost
+  }
+  const output = raw.output_tokens
+  if (output !== undefined && (!Number.isSafeInteger(output) || (output as number) < 0)) {
+    throw new Error('provider returned malformed output token usage')
+  }
+  if (Number.isSafeInteger(output) && (output as number) >= 0) {
+    usage.outputTokens = output as number
   }
   return Object.keys(usage).length > 0 ? usage : undefined
 }

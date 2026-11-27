@@ -15,7 +15,7 @@
  * var's NAME — an all-caps pasted key would echo the secret).
  */
 import { isEnvName, JudgeUnavailable } from '@broject/core';
-import type { DecideResult, ProviderEntry } from '@broject/core';
+import { recordSpend, type DecideResult, type ProviderEntry } from '@broject/core';
 import {
   apiVersionedBase,
   mapUsage,
@@ -58,6 +58,8 @@ export interface ProviderWireOpts {
   /** The config FIELD path error messages name — never the env var's
    *  name, which could BE the pasted secret. */
   keyField?: string;
+  /** Fleet identity for recording provider-reported usage. */
+  provider?: string;
   /** acp-kind session seam (spec bro-ribc.1 §acp) — `peer` replaces the
    *  spawned `command` with an in-process AgentApp (tests), `cwd` is
    *  the session's working directory (default: process.cwd()). */
@@ -167,11 +169,24 @@ export function systemoneCall(
     // we ignore, an asked-but-absent one is "no verdict" (the chain
     // marks it low), an asked-but-malformed one fails open
     const answers = mapTypedAnswers(body.answers, questions, by, 'systemone');
+    const usage = mapUsage(body, 'input_tokens');
+    const bead = process.env.BRO_BEAD_ID;
+    if (usage !== undefined && bead !== undefined && bead !== '') {
+      recordSpend({
+        ts: new Date().toISOString(),
+        bead,
+        provider: opts.provider ?? by.replace(/^provider:/, ''),
+        model: typeof body.model === 'string' ? body.model : model,
+        ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+        ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+        ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+      });
+    }
     return {
       answers,
       model: typeof body.model === 'string' ? body.model : model,
       latencyMs: Date.now() - started,
-      usage: mapUsage(body, 'input_tokens'),
+      usage,
       // the chain owns thresholding — a raw backend reports none
       lowConfidence: [],
     };

@@ -9,7 +9,7 @@
  * owns protocol knowledge only: endpoint, auth env, model, retry
  * contract.
  */
-import { isEnvName, JudgeUnavailable } from '@broject/core';
+import { isEnvName, JudgeUnavailable, recordSpend } from '@broject/core';
 import {
   apiVersionedBase,
   mapUsage,
@@ -120,10 +120,23 @@ export function openaiCompatChat(
       throwForStatus(res);
     }
     const body = objOr(res.body);
+    const usage = mapUsage(body, 'prompt_tokens');
+    const bead = process.env.BRO_BEAD_ID;
+    if (usage !== undefined && bead !== undefined && bead !== '') {
+      recordSpend({
+        ts: new Date().toISOString(),
+        bead,
+        provider: opts.provider ?? 'openai-compat',
+        model: typeof body.model === 'string' ? body.model : model,
+        ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+        ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+        ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+      });
+    }
     return {
       content: replyContent(body),
       model: typeof body.model === 'string' ? body.model : model,
-      usage: mapUsage(body, 'prompt_tokens'),
+      usage,
     };
   };
 }
