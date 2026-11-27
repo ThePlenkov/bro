@@ -335,7 +335,7 @@ describe('bro acp — runSlash', () => {
       t => texts.push(t)
     );
     const deadline = Date.now() + 10_000;
-    while (!texts.some(t => t.includes('READY'))) {
+    while (!texts.join('').includes('READY')) {
       if (Date.now() >= deadline) {
         ctrl.abort();
         throw new Error(`SIGTERM test child never reached the ready barrier: ${texts.join()}`);

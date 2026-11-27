@@ -1464,7 +1464,10 @@ const awaitRegistryRunRecord = () => {
       ).trim()
       const p = path.join(common, 'bro', 'loop', 'fx-a.json')
       const r = JSON.parse(fs.readFileSync(p, 'utf8'))
-      if (typeof r.log === 'string' && r.log.includes(path.join('bro', 'agents'))) return
+      if (typeof r.log === 'string') {
+        const segs = r.log.split(/[\\/]/)
+        if (segs.length >= 3 && segs[segs.length - 3] === 'bro' && segs[segs.length - 2] === 'agents') return
+      }
     } catch {}
     if (Date.now() >= deadline) throw new Error('registry run record did not receive its agent log')
     pause(25)
