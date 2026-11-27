@@ -19,6 +19,8 @@ function fakeGh(responses: Record<string, unknown>): void {
     file,
     `#!/bin/sh
 key="$2"
+if [ "$key" = "--paginate" ]; then key="$4"; fi
+key=$(printf '%s' "$key" | cut -d '?' -f 1)
 case "$key" in
 ${Object.keys(responses)
   .map(
@@ -40,13 +42,19 @@ describe('act annotations', () => {
   test('prints the failing check and its annotation rows in the collected document', () => {
     fakeGh({
       'repos/acme/widgets/pulls/7': { head: { sha: 'abc123' } },
-      'repos/acme/widgets/commits/abc123/check-runs': {
-        check_runs: [
-          { name: 'SonarCloud', conclusion: 'failure', annotations_url: 'annotations/1' },
-        ],
-      },
+      'repos/acme/widgets/commits/abc123/check-runs': [
+        {
+          check_runs: [
+            {
+              name: 'SonarCloud',
+              conclusion: 'failure',
+              output: { annotations_url: 'annotations/1' },
+            },
+          ],
+        },
+      ],
       'annotations/1': [
-        { annotation_level: 'failure', path: 'src/main.ts', start_line: 12, title: 'Fix this' },
+        [{ annotation_level: 'failure', path: 'src/main.ts', start_line: 12, title: 'Fix this' }],
       ],
     });
     assert.deepEqual(collectAnnotations(target), {
@@ -64,10 +72,14 @@ describe('act annotations', () => {
   test('clean check runs produce an empty checks list', () => {
     fakeGh({
       'repos/acme/widgets/pulls/7': { head: { sha: 'abc123' } },
-      'repos/acme/widgets/commits/abc123/check-runs': {
-        check_runs: [{ name: 'CI', conclusion: 'success', annotations_url: 'annotations/1' }],
-      },
-      'annotations/1': [],
+      'repos/acme/widgets/commits/abc123/check-runs': [
+        {
+          check_runs: [
+            { name: 'CI', conclusion: 'success', output: { annotations_url: 'annotations/1' } },
+          ],
+        },
+      ],
+      'annotations/1': [[]],
     });
     assert.deepEqual(collectAnnotations(target).checks, []);
   });
@@ -75,7 +87,7 @@ describe('act annotations', () => {
   test('--json document conforms to the frozen schema', () => {
     fakeGh({
       'repos/acme/widgets/pulls/7': { head: { sha: 'abc123' } },
-      'repos/acme/widgets/commits/abc123/check-runs': { check_runs: [] },
+      'repos/acme/widgets/commits/abc123/check-runs': [{ check_runs: [] }],
     });
     const schema = JSON.parse(
       readFileSync(

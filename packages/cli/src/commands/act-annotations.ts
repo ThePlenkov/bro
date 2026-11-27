@@ -22,18 +22,30 @@ export interface ActAnnotations {
 interface CheckRun {
   name?: unknown;
   conclusion?: unknown;
-  annotations_url?: unknown;
+  output?: { annotations_url?: unknown };
 }
 
 function api(repo: string, path: string): unknown {
-  const result = ghTry(['api', `repos/${repo}/${path}`]);
+  return apiWithArgs([`repos/${repo}/${path}`], path);
+}
+
+function paginatedApi(repo: string, path: string): unknown[] {
+  const result = apiWithArgs(['--paginate', '--slurp', `repos/${repo}/${path}?per_page=100`], path);
+  if (!Array.isArray(result)) {
+    throw new CommandError(`gh api returned invalid paginated JSON for ${path}`, EXIT.error);
+  }
+  return result;
+}
+
+function apiWithArgs(args: string[], path: string): unknown {
+  const result = ghTry(['api', ...args]);
   if (result.code !== 0) {
-    throw new CommandError(`gh api failed: ${result.err}`, EXIT.failure);
+    throw new CommandError(`gh api failed: ${result.err}`, EXIT.error);
   }
   try {
     return JSON.parse(result.out) as unknown;
   } catch {
-    throw new CommandError(`gh api returned invalid JSON for ${path}`, EXIT.failure);
+    throw new CommandError(`gh api returned invalid JSON for ${path}`, EXIT.error);
   }
 }
 
@@ -60,39 +72,48 @@ function checksFrom(value: unknown): CheckRun[] {
     : [];
 }
 
-export function collectAnnotations(target: PrTarget): ActAnnotations {
-  const pull = api(target.repo, `pulls/${target.pr}`);
-  const headSha =
-    pull !== null &&
-    typeof pull === 'object' &&
-    typeof (pull as { head?: { sha?: unknown } }).head?.sha === 'string'
-      ? (pull as { head: { sha: string } }).head.sha
-      : '';
-  if (headSha === '')
-    throw new CommandError('PR response did not contain a head sha', EXIT.failure);
+function headShaFrom(value: unknown): string {
+  if (value === null || typeof value !== 'object') return '';
+  const head = (value as { head?: unknown }).head;
+  if (head === null || typeof head !== 'object') return '';
+  const sha = (head as { sha?: unknown }).sha;
+  return typeof sha === 'string' ? sha : '';
+}
 
-  const runs = checksFrom(api(target.repo, `commits/${headSha}/check-runs`));
-  const checks: CheckAnnotations[] = [];
-  for (const run of runs) {
-    const url = typeof run.annotations_url === 'string' ? run.annotations_url : null;
-    const rows = url === null ? [] : annotationsFromUrl(url);
-    if (rows.length > 0 || run.conclusion === 'failure') {
-      checks.push({ name: stringField(run.name, '(unnamed check)'), annotations: rows });
-    }
-  }
+function paginatedCheckRuns(pages: unknown[]): CheckRun[] {
+  return pages.flatMap(page => checksFrom(page));
+}
+
+function checkAnnotations(run: CheckRun): CheckAnnotations | null {
+  const url =
+    run.output !== undefined && typeof run.output.annotations_url === 'string'
+      ? run.output.annotations_url
+      : null;
+  const rows = url === null ? [] : annotationsFromUrl(url);
+  if (rows.length === 0 && run.conclusion !== 'failure') return null;
+  return { name: stringField(run.name, '(unnamed check)'), annotations: rows };
+}
+
+export function collectAnnotations(target: PrTarget): ActAnnotations {
+  const headSha = headShaFrom(api(target.repo, `pulls/${target.pr}`));
+  if (headSha === '')
+    throw new CommandError('PR response did not contain a head sha', EXIT.error);
+
+  const runs = paginatedCheckRuns(
+    paginatedApi(target.repo, `commits/${headSha}/check-runs`)
+  );
+  const checks = runs
+    .map(checkAnnotations)
+    .filter((check): check is CheckAnnotations => check !== null);
   return { pr: target.pr, head_sha: headSha, checks };
 }
 
 function annotationsFromUrl(url: string): CheckAnnotation[] {
-  const result = ghTry(['api', url]);
-  if (result.code !== 0) throw new CommandError(`gh api failed: ${result.err}`, EXIT.failure);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.out) as unknown;
-  } catch {
-    throw new CommandError('gh api returned invalid annotation JSON', EXIT.failure);
+  const pages = apiWithArgs(['--paginate', '--slurp', `${url}?per_page=100`], url);
+  if (!Array.isArray(pages)) {
+    throw new CommandError(`gh api returned invalid paginated JSON for ${url}`, EXIT.error);
   }
-  return Array.isArray(parsed) ? parsed.map(annotation) : [];
+  return pages.flatMap(page => (Array.isArray(page) ? page.map(annotation) : []));
 }
 
 export async function cmdAnnotations(argv: string[]): Promise<void> {
