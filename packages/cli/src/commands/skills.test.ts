@@ -14,6 +14,7 @@ import { skillFolderHash } from '@broject/core';
 import {
   collectRows,
   ensureLocalLink,
+  expandSkillSources,
   localSkillName,
   parseSkillSource,
   resolveSkillsBin,
@@ -154,6 +155,48 @@ describe('parseSkillSource', () => {
     const s = parseSkillSource(42);
     assert.equal(s.kind, 'invalid');
     assert.equal(parseSkillSource({ repo: 'o/r' }).kind, 'invalid');
+  });
+});
+
+describe('expandSkillSources', () => {
+  test('expands nested categories, ignores mixed files, and sorts deterministically', () => {
+    const root = tmp();
+    mkdirSync(join(root, 'skills', 'z'), { recursive: true });
+    mkdirSync(join(root, 'skills', 'nested', 'a'), { recursive: true });
+    mkdirSync(join(root, 'skills', 'nested', 'b'), { recursive: true });
+    writeFileSync(join(root, 'skills', 'README.md'), 'not a skill');
+    makeSkill(join(root, 'skills', 'z'), 'z');
+    makeSkill(join(root, 'skills', 'nested', 'b'), 'b');
+    makeSkill(join(root, 'skills', 'nested', 'a'), 'a');
+    const first = expandSkillSources(root, ['local:skills']);
+    const second = expandSkillSources(root, ['local:skills']);
+    assert.deepEqual(first, second);
+    assert.deepEqual(
+      first.map(source => {
+        if (source.kind === 'local') return source.path;
+        if (source.kind === 'invalid') return source.reason;
+        return source.raw;
+      }),
+      ['skills/nested/a', 'skills/nested/b', 'skills/z']
+    );
+  });
+
+  test('reports an empty or missing collection as an invalid source', () => {
+    const root = tmp();
+    mkdirSync(join(root, 'empty'));
+    const empty = expandSkillSources(root, ['local:empty'])[0];
+    assert.equal(empty.kind, 'invalid');
+    assert.match(empty.reason, /no directory/);
+    const missing = expandSkillSources(root, ['local:missing'])[0];
+    assert.equal(missing.kind, 'invalid');
+  });
+
+  test('keeps a direct skill directory as one local entry', () => {
+    const root = tmp();
+    makeSkill(join(root, 'skills', 'one'), 'one');
+    assert.deepEqual(expandSkillSources(root, ['local:skills/one']), [
+      { kind: 'local', path: 'skills/one', raw: 'local:skills/one' },
+    ]);
   });
 });
 
