@@ -31,13 +31,13 @@ const PAYLOAD = {
 
 describe('collectFields', () => {
   test('dotted paths to scalar leaves; objects and misses skip', () => {
-    const { fields, skipped } = collectFields(PAYLOAD, [
+    const { fields, skipped } = collectFields({ payload: PAYLOAD, collect: [
       'tool_name',
       'tool_input.command',
       'tool_response.success',
       'tool_input', // object leaf — skipped
       'tool_response.missing',
-    ])
+    ] })
     assert.deepEqual(fields, {
       tool_name: 'exec',
       'tool_input.command': 'git push origin main',
@@ -47,25 +47,25 @@ describe('collectFields', () => {
   })
 
   test('non-object payloads collect nothing', () => {
-    assert.deepEqual(collectFields('junk', ['a']), { fields: {}, skipped: ['a'] })
-    assert.deepEqual(collectFields(undefined, ['a']), { fields: {}, skipped: ['a'] })
+    assert.deepEqual(collectFields({ payload: 'junk', collect: ['a'] }), { fields: {}, skipped: ['a'] })
+    assert.deepEqual(collectFields({ payload: undefined, collect: ['a'] }), { fields: {}, skipped: ['a'] })
   })
 
   test('prototype segments are not traversed — __proto__ paths skip', () => {
-    const { fields, skipped } = collectFields(PAYLOAD, [
+    const { fields, skipped } = collectFields({ payload: PAYLOAD, collect: [
       '__proto__',
       'constructor',
       'tool_input.__proto__.polluted',
       'hasOwnProperty',
-    ])
+    ] })
     assert.deepEqual(fields, {})
     assert.equal(skipped.length, 4)
     // a literal __proto__ key in the payload is own data — the
     // descriptor walk reads it as data, never through the chain; a
     // scalar leaf under it still collects under its literal dotted key
     const own = JSON.parse('{"__proto__": {"x": 1}, "a": "b"}')
-    assert.deepEqual(collectFields(own, ['a']).fields, { a: 'b' })
-    assert.deepEqual(collectFields(own, ['__proto__.x']).fields, {
+    assert.deepEqual(collectFields({ payload: own, collect: ['a'] }).fields, { a: 'b' })
+    assert.deepEqual(collectFields({ payload: own, collect: ['__proto__.x'] }).fields, {
       '__proto__.x': 1,
     })
   })
@@ -73,12 +73,12 @@ describe('collectFields', () => {
 
 describe('hookRecord', () => {
   test('meta-only record when collect is empty', () => {
-    const { record, skipped } = hookRecord('post-tool', PAYLOAD, {
+    const { record, skipped } = hookRecord({ name: 'post-tool', payload: PAYLOAD, meta: {
       sessionId: 'sess-1',
       client: 'cursor',
       durationMs: 7,
       ok: true,
-    }, { enabled: true, sample: 1, collect: [] })
+    }, policy: { enabled: true, sample: 1, collect: [] } })
     assert.equal(record.event, 'hook.post-tool')
     assert.equal(record.session, 'sess-1')
     assert.equal(record.client, 'cursor')
@@ -89,9 +89,9 @@ describe('hookRecord', () => {
   })
 
   test('collect allowlist fills payload, error marks the record', () => {
-    const { record } = hookRecord('stop', PAYLOAD, { ok: false, error: 'gate' }, {
+    const { record } = hookRecord({ name: 'stop', payload: PAYLOAD, meta: { ok: false, error: 'gate' }, policy: {
       enabled: true, sample: 1, collect: ['tool_name'],
-    })
+    } })
     assert.equal(record.ok, false)
     assert.equal(record.error, 'gate')
     assert.deepEqual(record.payload, { tool_name: 'exec' })
@@ -109,7 +109,7 @@ describe('emitHook — file sink', () => {
       join(dir, 'bro.config.json'),
       JSON.stringify({ otel: { enabled: false, exporter: { type: 'file', path: 'sink.jsonl' } } })
     )
-    emitHook('session-start', PAYLOAD, { sessionId: 's', dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { sessionId: 's', dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
@@ -120,9 +120,9 @@ describe('emitHook — file sink', () => {
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'out/sink.jsonl' } } })
     )
     const sink = join(dir, 'out', 'sink.jsonl')
-    emitHook('session-start', PAYLOAD, { sessionId: 's', dir, durationMs: 3 })
-    emitHook('prompt-submit', PAYLOAD, { sessionId: 's', dir })
-    emitHook('post-tool', PAYLOAD, { sessionId: 's', dir, durationMs: 9 })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { sessionId: 's', dir, durationMs: 3 } })
+    emitHook({ name: 'prompt-submit', payload: PAYLOAD, meta: { sessionId: 's', dir } })
+    emitHook({ name: 'post-tool', payload: PAYLOAD, meta: { sessionId: 's', dir, durationMs: 9 } })
     const events = rowsOf(sink).map((r) => r.event)
     assert.deepEqual(events, ['hook.session-start', 'hook.prompt-submit', 'hook.post-tool'])
     const rows = rowsOf(sink)
@@ -143,7 +143,7 @@ describe('emitHook — file sink', () => {
         },
       })
     )
-    emitHook('post-tool', PAYLOAD, { dir })
+    emitHook({ name: 'post-tool', payload: PAYLOAD, meta: { dir } })
     const row = rowsOf(join(dir, 'sink.jsonl'))[0]
     assert.deepEqual(row?.payload, { tool_name: 'exec', 'tool_response.success': true })
   })
@@ -160,9 +160,9 @@ describe('emitHook — file sink', () => {
         },
       })
     )
-    emitHook('session-start', PAYLOAD, { dir })
-    emitHook('prompt-submit', PAYLOAD, { dir })
-    emitHook('post-tool', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
+    emitHook({ name: 'prompt-submit', payload: PAYLOAD, meta: { dir } })
+    emitHook({ name: 'post-tool', payload: PAYLOAD, meta: { dir } })
     assert.deepEqual(rowsOf(join(dir, 'sink.jsonl')).map((r) => r.event), [
       'hook.session-start',
       'hook.post-tool',
@@ -181,7 +181,7 @@ describe('emitHook — file sink', () => {
         },
       })
     )
-    for (let i = 0; i < 10; i++) emitHook('session-start', PAYLOAD, { dir })
+    for (let i = 0; i < 10; i++) emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
@@ -194,7 +194,7 @@ describe('emitHook — file sink', () => {
     const prev = process.env.BRO_TELEMETRY
     process.env.BRO_TELEMETRY = '0'
     try {
-      emitHook('session-start', PAYLOAD, { dir })
+      emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     } finally {
       if (prev === undefined) delete process.env.BRO_TELEMETRY
       else process.env.BRO_TELEMETRY = prev
@@ -208,7 +208,7 @@ describe('emitHook — file sink', () => {
       join(dir, 'bro.config.json'),
       JSON.stringify({ otel: { enabled: true } })
     )
-    emitHook('session-start', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     const def = join(dir, '.git', 'bro', 'otel', 'hooks.jsonl')
     assert.equal(existsSync(def), true, `expected sink at ${def}`)
     assert.equal(rowsOf(def)[0]?.event, 'hook.session-start')
@@ -229,7 +229,7 @@ describe('emitHook — stdout sink', () => {
     console.error = (m: unknown) => errs.push(String(m))
     process.stdout.write = ((c: unknown) => { outs.push(String(c)); return true }) as typeof process.stdout.write
     try {
-      emitHook('post-tool', PAYLOAD, { dir, durationMs: 2 })
+      emitHook({ name: 'post-tool', payload: PAYLOAD, meta: { dir, durationMs: 2 } })
     } finally {
       console.error = oe
       process.stdout.write = oo
@@ -319,7 +319,7 @@ describe('emitHook — otlp sink', () => {
       })
     )
     try {
-      emitHook('session-start', PAYLOAD, { sessionId: 's', dir, durationMs: 5 })
+      emitHook({ name: 'session-start', payload: PAYLOAD, meta: { sessionId: 's', dir, durationMs: 5 } })
       // the detached poster is a separate node process — wait for the hit
       const deadline = Date.now() + 10_000
       while (got.body === undefined && Date.now() < deadline) {
@@ -357,7 +357,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
     )
     commit(dir, 'bro.config.json')
-    emitHook('session-start', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
@@ -378,7 +378,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
       join(dir, 'bro.config.local.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'mine.jsonl' } } })
     )
-    emitHook('session-start', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     // the committed sink path never sees a byte
     assert.equal(existsSync(join(dir, 'evil.jsonl')), false)
     const row = readSinkRows(join(dir, 'mine.jsonl'))[0]
@@ -398,7 +398,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
       join(dir, 'bro.config.local.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
     )
-    emitHook('session-start', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
@@ -413,8 +413,8 @@ describe('emitHook — provenance (committed config cannot decide where records 
       join(dir, 'bro.config.local.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
     )
-    emitHook('session-start', PAYLOAD, { dir })
-    emitHook('prompt-submit', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
+    emitHook({ name: 'prompt-submit', payload: PAYLOAD, meta: { dir } })
     assert.deepEqual(
       readSinkRows(join(dir, 'sink.jsonl')).map((r) => r.event),
       ['hook.session-start']
@@ -430,7 +430,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
     )
     commit(dir, 'bro.config.local.json')
-    emitHook('session-start', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
@@ -440,7 +440,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
       join(dir, 'bro.config.local.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
     )
-    emitHook('session-start', PAYLOAD, { dir })
+    emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 })
@@ -448,7 +448,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
 describe('otelSinkPath / readSinkRows', () => {
   test('configured path resolves against dir', () => {
     const cfg = otelSection({ exporter: { type: 'file', path: 'var/t.jsonl' } })
-    assert.equal(otelSinkPath(cfg, '/repo'), '/repo/var/t.jsonl')
+    assert.equal(otelSinkPath({ cfg, dir: '/repo' }), '/repo/var/t.jsonl')
   })
 
   test('readSinkRows skips torn lines and missing files', () => {

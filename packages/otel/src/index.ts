@@ -12,7 +12,15 @@ export {
   otelSinkPath,
   readSinkRows,
 } from './facade.ts'
-export type { HookMeta, OtelHookRecord, ResolvedOtelConfig } from './facade.ts'
+export type {
+  CollectFieldsOptions,
+  EmitHookOptions,
+  HookMeta,
+  HookRecordOptions,
+  OtelHookRecord,
+  OtelSinkPathOptions,
+  ResolvedOtelConfig,
+} from './facade.ts'
 export {
   hookEventName,
   otelSection,
