@@ -222,8 +222,10 @@ describe('bro loop e2e', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }]);
     inside(f.main, f.root, () => {
       // the default 0.1s test tick lands the run inside the heartbeat
-      // floor — the liveness guard staying quiet still proves a clean
-      // run (the heartbeat's floor, not its interval, is what bounds it)
+      // floor. Keep the liveness deadline out of this clean-run assertion:
+      // the test proves no heartbeat noise, not that a loaded host finishes
+      // before the production 2s wall-clock floor.
+      f.env.E2E_LOOP_HEARTBEAT_MIN_MS = '60000';
       const r = f.run();
       assert.match(r.stdout, /loop: fx-a landed/);
       assert.match(r.stdout, /1 landed, 0 closed, 0 parked, 0 failed/);
