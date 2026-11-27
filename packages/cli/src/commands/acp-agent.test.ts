@@ -312,7 +312,7 @@ describe('bro acp — runSlash', () => {
       t => texts.push(t)
     );
     assert.ok(
-      texts.some(t => t.includes('killed by SIGKILL')),
+      texts.join('').includes('killed by SIGKILL'),
       texts.join()
     );
   });
@@ -327,7 +327,7 @@ describe('bro acp — runSlash', () => {
       [
         process.execPath,
         '-e',
-        'process.stdout.write("READY\\n");process.on("SIGTERM",()=>{});setInterval(()=>{},1e9)',
+        'process.on("SIGTERM",()=>{});process.stdout.write("READY\\n");setInterval(()=>{},1e9)',
       ],
       process.cwd(),
       60_000,
@@ -350,7 +350,7 @@ describe('bro acp — runSlash', () => {
       `a SIGTERM-ignoring child held the turn ${elapsed}ms — no escalation`
     );
     assert.ok(
-      texts.some(t => t.includes('killed by SIGKILL')),
+      texts.join('').includes('killed by SIGKILL'),
       texts.join()
     );
   });
