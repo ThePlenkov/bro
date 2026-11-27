@@ -351,6 +351,10 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
     common: string | null;
     state: string | null;
     now: number;
+    /** Worktrees armed by other herdr sessions. Fleet-status is shared by
+     *  the repo, so a session-scoped worktree list cannot be the prune
+     *  authority on its own. */
+    armedWorktrees?: readonly string[];
     /** write-pass wall-clock budget — defaults to WRITE_PASS_BUDGET_MS;
      *  injectable so a test doesn't pay real stall time. */
     writeBudgetMs?: number;
@@ -382,7 +386,7 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
   // state files live under the state root the pane resolves identically
   // (stateCommonDir(worktree) ?? worktree) — prune has the same base
   const statusBase = ctx.state ?? ctx.root;
-  const keep = keepPaths(statusBase, trees.worktrees);
+  const keep = keepPaths(statusBase, trees.worktrees, ctx.armedWorktrees);
   if (targets.length === 0) {
     pruneFleetStatus(statusBase, keep);
     return { reachable: true, workspaces: 0, writes: 0, files: 0, leds: 0 };
@@ -407,12 +411,17 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
  *  workspace keeps its file even when the ledger read was blind —
  *  wiping on a transient miss would blank every status pane until
  *  the next good pass. */
-function keepPaths(statusBase: string, trees: HerdrWorktree[]): Set<string> {
-  return new Set(
-    trees
+function keepPaths(
+  statusBase: string,
+  trees: HerdrWorktree[],
+  armedWorktrees: readonly string[] = []
+): Set<string> {
+  return new Set([
+    ...trees
       .filter(t => t.open_workspace_id !== undefined && existsSync(t.path))
-      .map(t => fleetStatusPath(statusBase, t.path))
-  );
+      .map(t => fleetStatusPath(statusBase, t.path)),
+    ...armedWorktrees.filter(existsSync).map(t => fleetStatusPath(statusBase, t)),
+  ]);
 }
 
 /** The bounded write loop over the target set. Bounded because every
