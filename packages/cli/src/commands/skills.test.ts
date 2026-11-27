@@ -218,7 +218,7 @@ describe('skill mutations', () => {
       bin: { file: 'skills', args: [] },
     });
     assert.equal(result.ok, true);
-    assert.deepEqual(calls, [['add', 'o/r', '-a', 'universal', '-y']]);
+    assert.deepEqual(calls, [['add', 'o/r@test', '-a', 'universal', '-y']]);
   });
 
   test('update and remove resolve a repository source through the lock', () => {
@@ -394,7 +394,7 @@ describe('runSync', () => {
     const { spawn, calls } = fakeSpawn({ materialize: true });
     const out = runSync(root, cfg(['github:o/r/skills/s1', 'local:skills/lx']), spawn);
     assert.equal(out.failed, false);
-    assert.deepEqual(calls, [['add', 'o/r', '-s', 's1', '-a', 'universal', '-y']]);
+    assert.deepEqual(calls, [['add', 'o/r@test', '-s', 's1', '-a', 'universal', '-y']]);
     const steps = new Map(out.steps.map(s => [s.state, s.label]));
     assert.equal(steps.get('ok') !== undefined, true);
     assert.equal(lstatSync(join(root, '.agents', 'skills', 'lx')).isSymbolicLink(), true);
@@ -417,7 +417,7 @@ describe('runSync', () => {
     const { spawn, calls } = fakeSpawn();
     runSync(root, cfg(['github:o/r']), spawn);
     assert.deepEqual(calls, [
-      ['add', 'o/r', '-a', 'universal', '-y'],
+      ['add', 'o/r@test', '-a', 'universal', '-y'],
       ['experimental_install', '-y'],
     ]);
   });
@@ -444,6 +444,6 @@ describe('runSync', () => {
     const root = tmp();
     const { spawn, calls } = fakeSpawn();
     runSync(root, cfg(['o/r'], { agents: ['devin', 'claude-code'] }), spawn);
-    assert.deepEqual(calls[0], ['add', 'o/r', '-a', 'devin', '-a', 'claude-code', '-y']);
+    assert.deepEqual(calls[0], ['add', 'o/r@test', '-a', 'devin', '-a', 'claude-code', '-y']);
   });
 });

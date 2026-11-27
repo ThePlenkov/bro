@@ -3,6 +3,7 @@
  * running it (POSIX direct, Windows through ComSpec with quoted argv).
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { gitBin } from '@broject/core';
 import { isAbsolute, resolve, sep } from 'node:path';
 import type { SkillSource } from './skills-sources.ts';
 
@@ -109,6 +110,42 @@ export function addArgs(src: SkillSource & { kind: 'github' | 'url' }, agents: s
   }
   args.push('-y');
   return args;
+}
+
+/** Resolve a GitHub repository's default branch tip before handing it to the
+ * skills CLI.  The CLI then clones the immutable revision rather than a
+ * moving branch.  `git ls-remote` is deliberately used here: it is the same
+ * credential-aware protocol as the existing clone, and never places a token
+ * in argv. */
+export function resolveGithubRef(repo: string): string | null {
+  // gitBin() — the absolute resolved binary, never a PATH lookup:
+  // SonarCloud S4036 (PATH must only contain fixed unwriteable dirs),
+  // same seam as the otel trust fixes (#1212).
+  const proc = spawnSync(
+    gitBin(),
+    ['ls-remote', '--symref', `https://github.com/${repo}.git`, 'HEAD'],
+    { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 }
+  );
+  if (proc.error !== undefined || proc.status !== 0) {
+    return null;
+  }
+  const sha = (proc.stdout ?? '')
+    .split(/\r?\n/)
+    .flatMap(line => line.split(/\s+/))
+    .find(value => value !== undefined && /^[0-9a-f]{40}$/i.test(value));
+  return sha?.toLowerCase() ?? null;
+}
+
+/** Add the resolved revision without changing the caller's source shape. */
+export function pinnedAddArgs(
+  src: SkillSource & { kind: 'github' | 'url' },
+  agents: string[],
+  ref?: string
+): string[] {
+  if (src.kind !== 'github' || ref === undefined) {
+    return addArgs(src, agents);
+  }
+  return addArgs({ ...src, repo: `${src.repo}@${ref}` }, agents);
 }
 
 /** The skills CLI's own verdict for a spawn — the process ran and
