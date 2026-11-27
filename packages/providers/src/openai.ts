@@ -98,15 +98,21 @@ function recordUsage(
 ): void {
   const bead = process.env.BRO_BEAD_ID;
   if (usage === undefined || bead === undefined || bead === '') return;
-  recordSpend({
-    ts: new Date().toISOString(),
-    bead,
-    provider,
-    model,
-    ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
-    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
-    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
-  });
+  // telemetry never fails the call — a ledger write/validation error
+  // must not kill a valid provider response
+  try {
+    recordSpend({
+      ts: new Date().toISOString(),
+      bead,
+      provider,
+      model,
+      ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+      ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+      ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    });
+  } catch {
+    // ledger unavailable or row rejected — spend recording is advisory
+  }
 }
 
 /** The raw prose call surface for an `openai-compat` entry — prompt
