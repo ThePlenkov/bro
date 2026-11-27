@@ -369,14 +369,18 @@ function resolveOne(
     // reason (skills/act/SKILL.md) — the documented defer reply names
     // its bead ("deferred to <id>"), which is the one defer signal a
     // bare resolve can see
-    // falsy comment is the silent resolve ('fixed'); a present comment
-    // is a defer or a reject — no ternary nesting (S3358).
-    let verdict: 'fixed' | 'deferred' | 'rejected' = 'fixed';
-    if (comment) {
-      verdict = isDeferComment(comment) ? 'deferred' : 'rejected';
-    }
-    disposition(id, verdict);
+    disposition(id, verdictOfComment(comment));
   }
+}
+
+/** The verdict a resolve-with-comment records: a silent resolve is the
+ *  fix verdict; a present comment is a defer or a reject. Pure helper —
+ *  extraction keeps the resolve branch flat (no mutable verdict bump). */
+function verdictOfComment(comment: string | undefined): 'fixed' | 'deferred' | 'rejected' {
+  if (!comment) {
+    return 'fixed';
+  }
+  return isDeferComment(comment) ? 'deferred' : 'rejected';
 }
 
 /** Both reply and resolve record the same defer marker. Keep the accepted
