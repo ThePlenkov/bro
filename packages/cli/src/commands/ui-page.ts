@@ -92,6 +92,13 @@ function renderBudget(budget) {
     var window = budget[name];
     var section = el('section');
     section.appendChild(el('h3', name === 'day' ? 'UTC day' : 'rolling-24h'));
+    if (!window || typeof window !== 'object') {
+      // the API's window is absent or malformed — an honest unknown,
+      // never a render crash that takes the rest of the panel with it
+      section.appendChild(el('p', 'unknown — the status read carries no ' + name + ' window', 'bad'));
+      host.appendChild(section);
+      return;
+    }
     section.appendChild(el('p', budgetMetric(window.from) + ' → ' + budgetMetric(window.to) +
       ' · ' + budgetMetric(window.rows) + ' usage rows · ' +
       budgetMetric(window.unknownCostRows) + ' unknown costs', 'muted'));
