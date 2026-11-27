@@ -7,10 +7,10 @@
  * paths never call this, so ordinary `await`ed spawns still pin the
  * process exactly like before.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import type { Socket } from 'node:net';
+import { unsupportedPlatform, type UnsupportedPlatform } from './proc.ts';
 import { lsofCwdRows } from './proc-cwd.ts';
 
 const live = new Set<ChildProcess>();
@@ -160,14 +160,14 @@ export function pickOrphanProcs(
 /** Read the rows pickOrphanProcs needs out of /proc — linux reads the
  *  fs, darwin shells out to ps/lsof; anything else returns []. Races
  *  are the norm: a pid vanishing mid-scan just drops out. */
-export function readProcRows(procDir = '/proc'): ProcRow[] {
+export function readProcRows(procDir = '/proc'): ProcRow[] | UnsupportedPlatform {
   if (process.platform === 'linux') {
     return readProcRowsLinux(procDir);
   }
   if (process.platform === 'darwin') {
     return readProcRowsDarwin();
   }
-  return [];
+  return unsupportedPlatform();
 }
 
 function readProcRowsLinux(procDir: string): ProcRow[] {
@@ -417,6 +417,10 @@ export interface OrphanSweepReport {
   signaled: { pid: number; cwd: string }[];
   /** pids that matched but the injected signal never reached. */
   failed: number[];
+  /** the platform cannot be swept at all — surfaced, never silently
+   *  empty: an unsupported box sweeping zero orphans is a true fact,
+   *  hiding the sentinel would read as one. */
+  degraded?: string;
 }
 
 /** SIGTERM `comm` processes reparented to init whose cwd sits under
@@ -431,14 +435,18 @@ export function sweepOrphanProcs(
     procDir?: string;
     kill?: (pid: number) => void;
     now?: number;
-    rows?: ProcRow[];
+    rows?: ProcRow[] | UnsupportedPlatform;
   } = {}
 ): OrphanSweepReport {
-  const rows = opts.rows ?? readProcRows(opts.procDir);
+  const read = opts.rows ?? readProcRows(opts.procDir);
+  const rows = Array.isArray(read) ? read : [];
   const pids = pickOrphanProcs(rows, comm, repoRoot, opts.now);
   const byPid = new Map(rows.map(r => [r.pid, r]));
   const kill = opts.kill ?? ((pid: number) => process.kill(pid, 'SIGTERM'));
   const report: OrphanSweepReport = { scanned: rows.length, signaled: [], failed: [] };
+  if (!Array.isArray(read)) {
+    report.degraded = read.message;
+  }
   for (const pid of pids) {
     try {
       kill(pid);

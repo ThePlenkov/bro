@@ -830,12 +830,15 @@ export {
   markerOwner,
   pidAlive,
   procStat,
+  procStatPlatform,
   psEwwEnvTokens,
   psRegroupPaths,
   psTokenize,
   scanProc,
+  unsupportedPlatform,
+  isUnsupportedPlatform,
 } from './proc.ts';
-export type { ProcEntry } from './proc.ts';
+export type { ProcEntry, UnsupportedPlatform } from './proc.ts';
 export { lsofCwdRows } from './proc-cwd.ts';
 export { checkPlanVersion, planKind, PLAN_ENVELOPE_KEYS, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';

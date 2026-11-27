@@ -337,6 +337,10 @@ export function spawnDaemon(
  *  is spared: the sweep errs toward missing a standby, never toward
  *  killing a stranger. */
 function supervisionProcs(dir: string, kind?: 'drive' | 'loop'): number[] {
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    process.emitWarning(`unsupported on ${process.platform}: daemon process sweep`);
+    return [];
+  }
   const common = gitCommonDir(dir);
   if (common === null) {
     return [];

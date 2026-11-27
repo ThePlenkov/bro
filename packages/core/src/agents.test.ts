@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -171,7 +172,13 @@ const withStore = (rows: Record<string, unknown>[], fn: (store: string) => void)
 describe('agentRegistryPath', () => {
   test('resolves to <git-common-dir>/bro/agents.json', () => {
     withRepo(dir => {
-      assert.equal(agentRegistryPath(dir), join(dir, '.git', 'bro', 'agents.json'));
+      // macOS exposes the system temp directory through /tmp, while git
+      // resolves the common dir. Compare the paths they name, not their
+      // lexical spelling.
+      assert.equal(
+        agentRegistryPath(dir),
+        join(realpathSync(dir), '.git', 'bro', 'agents.json')
+      );
     });
   });
 

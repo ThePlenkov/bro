@@ -4,8 +4,34 @@
  * alone lies twice: it answers for zombies (nobody polling) and can't
  * tell a reused pid from the process that recorded it.
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+
+/** A process probe that cannot run on this operating system.  This is
+ * deliberately a value (rather than an exception): callers use process
+ * inspection as an advisory safety check and must fail open, while still
+ * being able to explain why no evidence was returned. */
+export interface UnsupportedPlatform {
+  readonly kind: 'unsupported-platform';
+  readonly platform: NodeJS.Platform;
+  readonly message: string;
+}
+
+export function unsupportedPlatform(): UnsupportedPlatform {
+  return {
+    kind: 'unsupported-platform',
+    platform: process.platform,
+    message: `unsupported on ${process.platform}`,
+  };
+}
+
+export function isUnsupportedPlatform(value: unknown): value is UnsupportedPlatform {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { kind?: unknown }).kind === 'unsupported-platform'
+  );
+}
 
 /** one `ps -p <pid> -o <fields>` row, trimmed — undefined when ps
  *  fails or prints nothing. env pins TZ/LC so lstart spellings stay
@@ -87,6 +113,14 @@ export function procStat(pid: number): { state: string; start: string } | null {
     return { state, start: '' };
   }
   return null;
+}
+
+/** Capability result for callers that need to distinguish an absent process
+ * from an operating system with no process-inspection adapter. */
+export function procStatPlatform(): 'linux' | 'darwin' | UnsupportedPlatform {
+  if (process.platform === 'linux') return 'linux';
+  if (process.platform === 'darwin') return 'darwin';
+  return unsupportedPlatform();
 }
 
 /** pid alive = kill(pid, 0) doesn't throw, or throws EPERM (a live

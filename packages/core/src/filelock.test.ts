@@ -649,7 +649,9 @@ describe('filelock', () => {
         // re-publishes, and the conditional rmdir must refuse
         unlinkSync(join(lock, `h-${process.pid}`));
         const entry = join(lock, `h-${process.pid}`);
-        for (let i = 0; i < 50 && !existsSync(entry); i++) {
+        // The heartbeat is timer-driven. Allow several seconds for a
+        // loaded macOS runner rather than assuming 50 scheduler turns.
+        for (let i = 0; i < 250 && !existsSync(entry); i++) {
           await new Promise(r => setTimeout(r, 20));
         }
         assert.equal(existsSync(entry), true, 'heartbeat never re-published');

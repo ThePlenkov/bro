@@ -3312,6 +3312,16 @@ export function runDoctorChecks(
   opts: { strict?: boolean; network?: boolean } = {}
 ): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()];
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    checks.push(
+      check(
+        'process-probes',
+        'warn',
+        `unsupported on ${process.platform}`,
+        'process attribution and liveness checks are unavailable'
+      )
+    );
+  }
 
   const git = probeBin('git');
   checks.push(

@@ -20,7 +20,9 @@ jobs:
           check-latest: true
           cache: npm
 
-      - run: npm ci --no-audit --no-fund
+      # Dependencies are built by the jobs below; do not execute arbitrary
+      # lifecycle scripts while installing untrusted package contents.
+      - run: npm ci --no-audit --no-fund --ignore-scripts
 
       - name: Check generated files are fresh
         run: npm run check:plugins
@@ -49,6 +51,25 @@ jobs:
         run: |
           npx nx run-many -t typecheck test --exclude='skills-*,plugins-*-skills-*,.devin-*'
           npm run test:scripts
+
+  # Process probes have a separate Darwin implementation (ps/lsof). Keep
+  # this leg deliberately narrow: the Linux-only e2e fleet and the rest of
+  # the workspace do not need to run twice just to exercise core + CLI.
+  macos-unit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "lts/*"
+          check-latest: true
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Core + CLI typecheck and unit tests
+        run: npx nx run-many -t typecheck test --projects=@broject/core,@broject/bro
 
   # the 4.8m e2e suite is the tail of the critical path — it needs only
   # cli's dep-tree builds (dependsOn pulls them; Nx Cloud serves the rest)

@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpDir } from './testtmp.ts';
 import { DATA_REF, dataRefCommit, dataRefPull, dataRefPush, dataRefRoot } from './dataref.ts';
@@ -177,6 +177,8 @@ describe('dataRefRoot', () => {
 
   test('root inside a worktree', () => {
     const root = makeRepo();
-    assert.equal(dataRefRoot(root), root);
+    // mkdtempSync may return /tmp/... while git reports macOS's resolved
+    // /private/tmp/... spelling.
+    assert.equal(realpathSync(dataRefRoot(root)!), realpathSync(root));
   });
 });

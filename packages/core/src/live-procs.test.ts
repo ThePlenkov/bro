@@ -110,4 +110,19 @@ describe('sweepOrphanProcs', () => {
     assert.deepEqual(r.signaled, [])
     assert.deepEqual(r.failed, [7])
   })
+
+  test('an unsupported platform surfaces as degraded, never a silent empty sweep', () => {
+    let killed = 0
+    const r = sweepOrphanProcs('bd', '/repo', {
+      rows: { kind: 'unsupported-platform', platform: 'freebsd', message: 'unsupported on freebsd' },
+      now: NOW,
+      kill: () => {
+        killed++
+      },
+    })
+    assert.equal(r.degraded, 'unsupported on freebsd')
+    assert.equal(r.scanned, 0)
+    assert.deepEqual(r.signaled, [])
+    assert.equal(killed, 0)
+  })
 })

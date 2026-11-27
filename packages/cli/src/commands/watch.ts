@@ -1110,22 +1110,32 @@ export function watchArgs(argv: string[]): {
  *  attention line. Housekeeping must never kill the heartbeat: a
  *  throwing janitor surfaces as an attention line, not a dead watch
  *  (bro-f6zp — a silent janitor is indistinguishable from a broken one). */
+/** The orphan-sweep half of the tick as one note string — extraction
+ *  keeps tickJanitor under the complexity bar; every failure mode is a
+ *  loud note, never a silent skip. */
+function orphanSweepNote(repoRoot: string): string {
+  try {
+    const o = sweepOrphanProcs('bd', repoRoot);
+    if (o.degraded !== undefined) {
+      return `bd-orphan sweep degraded — ${o.degraded}`;
+    }
+    if (o.signaled.length === 0 && o.failed.length === 0) {
+      return '';
+    }
+    const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : '';
+    return `bd-orphans: signaled ${o.signaled.length}${failed}`;
+  } catch (err) {
+    return `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
   // Orphaned bd procs ride the same tick: a supervisor dying mid-call
   // leaves them holding the embedded noms LOCK forever (bro-8845g).
   // Scope by repo root — a watch launched from a subdirectory would
   // never see the root's orphans otherwise.
   const repoRoot = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']).out.trim() || dir;
-  let orphanNote = '';
-  try {
-    const o = sweepOrphanProcs('bd', repoRoot);
-    if (o.signaled.length > 0 || o.failed.length > 0) {
-      const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : '';
-      orphanNote = `bd-orphans: signaled ${o.signaled.length}${failed}`;
-    }
-  } catch (err) {
-    orphanNote = `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`;
-  }
+  const orphanNote = orphanSweepNote(repoRoot);
   try {
     const j = runJanitor(dir);
     const note = j !== null && janitorDidWork(j) ? janitorLine(j) : '';
