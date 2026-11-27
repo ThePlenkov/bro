@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/act-annotations.schema.json",
+  "title": "bro act annotations --json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pr", "head_sha", "checks"],
+  "properties": {
+    "pr": { "type": "integer", "minimum": 1 },
+    "head_sha": { "type": "string", "minLength": 1 },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "annotations"],
+        "properties": {
+          "name": { "type": "string" },
+          "annotations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["level", "path", "line", "title"],
+              "properties": {
+                "level": { "type": "string" },
+                "path": { "type": "string" },
+                "line": { "type": ["integer", "null"], "minimum": 1 },
+                "title": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
