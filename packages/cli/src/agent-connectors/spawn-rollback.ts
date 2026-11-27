@@ -84,7 +84,10 @@ export function rollbackSpawnClaim(beadsDir: string, molStep: string, run: Spawn
       now: probeStep(beadsDir, molStep),
       beadsDir,
     };
-    const rebind = run.claimed && run.previousAssignee !== undefined;
+    // A blank previousAssignee is no assignee — bd writes '--assignee ''`
+    // when the actor resolves empty, and treating it as a rebind target
+    // would restore the empty string and strand the step in_progress.
+    const rebind = run.claimed && run.previousAssignee !== undefined && run.previousAssignee !== '';
     if (rebind) {
       restoreRebindAssignee(ctx, run);
     } else if (run.claimed) {

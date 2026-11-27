@@ -2579,6 +2579,26 @@ describe('spawn claim rollback', () => {
     }
   });
 
+  test('a blank previousAssignee takes the fresh-claim branch, not the rebind restore', () => {
+    const f = fixture([{ id: 'fx-1', status: 'in_progress' }]);
+    try {
+      // bd writes '--assignee ''` when the actor resolves empty — the
+      // rollback must treat that as NO previous assignee and reopen,
+      // never restore the empty string and strand the step in_progress.
+      rebindStep(f.beadsDir, 'fx-1', 'tester');
+      rollbackSpawnClaim(f.beadsDir, 'fx-1', {
+        claimed: true,
+        actor: 'tester',
+        previousAssignee: '',
+        claimAs: undefined,
+      });
+      assert.equal(f.dbRows()[0]!.status, 'open');
+      assert.equal(f.dbRows()[0]!.assignee, '');
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('does not reopen a claim taken by another spawn', () => {
     const f = fixture([{ id: 'fx-1', status: 'in_progress' }]);
     try {
