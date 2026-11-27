@@ -2629,14 +2629,18 @@ async function emitPostTool(input: HookInput): Promise<void> {
     }),
   ]);
   lines.push(...postLines, ...guards);
-  if (lines.length > 0) {
-    // Claude validates hookEventName against the triggering event — a
-    // PostToolUseFailure trigger needs its own name back, not
-    // 'PostToolUse'. Hosts without the field get the default.
-    const eventName =
-      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
-    context(eventName, lines.join('\n'));
-  }
+  emitPostToolLines(input, lines);
+}
+
+/** The gathered post-tool lines land as one context emission — Claude
+ *  validates hookEventName against the triggering event, so a
+ *  PostToolUseFailure trigger needs its own name back, not
+ *  'PostToolUse'. Hosts without the field get the default. */
+function emitPostToolLines(input: HookInput, lines: string[]): void {
+  if (lines.length === 0) return;
+  const eventName =
+    typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
+  context(eventName, lines.join('\n'));
 }
 
 /** The exit gate as a hook: every connector contributes GateContributions;
