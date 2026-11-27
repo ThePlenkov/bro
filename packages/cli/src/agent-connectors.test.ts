@@ -44,6 +44,7 @@ import {
   procStat,
   readAgentRegistry,
   readLifecycle,
+  rebindStep,
   type ResolvedClass,
   SESSION_SLOT_TTL_MS,
   SpawnError,
@@ -87,6 +88,7 @@ import {
   unregisterAgentConnector,
   worktreeTelemetryDims,
 } from './agent-connectors.ts';
+import { rollbackSpawnClaim } from './agent-connectors/spawn-rollback.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
 
 // the guard reads REAL host state — clear the registered external planes
@@ -2551,6 +2553,46 @@ describe('native worker tmpdir pin (bro-v96mp)', () => {
       const want = join(f.main, '.git', 'bro-tmp', a.id);
       assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `${want}|${want}|${want}`);
       await c.stop(a.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+});
+
+describe('spawn claim rollback', () => {
+  test('reopens an unassigned claim after a failed rebind', () => {
+    const f = fixture([{ id: 'fx-1', status: 'in_progress' }]);
+    try {
+      // This is the guard/rebind state: the step was already in progress,
+      // but carried no assignee before this spawn took ownership.
+      rebindStep(f.beadsDir, 'fx-1', 'tester');
+      rollbackSpawnClaim(f.beadsDir, 'fx-1', {
+        claimed: true,
+        actor: 'tester',
+        previousAssignee: undefined,
+        claimAs: undefined,
+      });
+      assert.equal(f.dbRows()[0]!.status, 'open');
+      assert.equal(f.dbRows()[0]!.assignee, '');
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('does not reopen a claim taken by another spawn', () => {
+    const f = fixture([{ id: 'fx-1', status: 'in_progress' }]);
+    try {
+      rebindStep(f.beadsDir, 'fx-1', 'tester');
+      // A successor wins the claim before the failed spawn rolls back.
+      rebindStep(f.beadsDir, 'fx-1', 'other-spawn');
+      rollbackSpawnClaim(f.beadsDir, 'fx-1', {
+        claimed: true,
+        actor: 'tester',
+        previousAssignee: undefined,
+        claimAs: undefined,
+      });
+      assert.equal(f.dbRows()[0]!.status, 'in_progress');
+      assert.equal(f.dbRows()[0]!.assignee, 'other-spawn');
     } finally {
       cleanup(f);
     }

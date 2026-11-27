@@ -63,7 +63,7 @@ function restoreRebindAssignee(ctx: ClaimRollbackCtx, run: SpawnClaimRun): void 
  *  in_progress under a name the dead run owned). */
 function reopenFreshClaim(ctx: ClaimRollbackCtx, run: SpawnClaimRun): void {
   const ours =
-    ctx.now?.assignee === bdActor(ctx.beadsDir) ||
+    ctx.now?.assignee === (run.actor ?? bdActor(ctx.beadsDir)) ||
     (run.claimAs !== undefined && ctx.now?.assignee === run.claimAs);
   if (ctx.now?.status === 'in_progress' && ours) {
     ctx.store.reopen(ctx.molStep);
@@ -87,6 +87,11 @@ export function rollbackSpawnClaim(beadsDir: string, molStep: string, run: Spawn
     const rebind = run.claimed && run.previousAssignee !== undefined;
     if (rebind) {
       restoreRebindAssignee(ctx, run);
+    } else if (run.claimed) {
+      // A claimed step with no previous assignee was rebound from an
+      // unassigned in-progress claim. Reopen it only while the claim still
+      // carries this spawn's assignee; a successor may have taken it.
+      reopenFreshClaim(ctx, run);
     } else if (!run.claimed) {
       reopenFreshClaim(ctx, run);
     }
