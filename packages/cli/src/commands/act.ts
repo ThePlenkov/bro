@@ -32,11 +32,20 @@ import {
   type PrTarget,
   type ReviewFacade,
   type ReviewThread,
+  type TaskStore,
   reviewHost,
 } from '@broject/core';
 import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@broject/judge';
 import { loadBroConfig } from '../plugins.ts';
-import { commentArg, resolvePr, resolvePrLenient, threadArg, usage } from './act-args.ts';
+import {
+  commentArg,
+  resolvePr,
+  resolvePrLenient,
+  threadArg,
+  usage,
+  VALUE_FLAGS,
+} from './act-args.ts';
+import { flag } from './args.ts';
 import { cmdDismiss } from './act-dismiss.ts';
 import { claimStore, cmdMerge, dropActState } from './act-land.ts';
 import { printStatus } from './act-report.ts';
@@ -362,9 +371,111 @@ function resolveOne(
     // bare resolve can see
     disposition(
       id,
-      comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed'
+      comment ? (/deferred (?:to|->) \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed'
     );
   }
+}
+
+/** Persist the debt bead before resolving any selected host thread. */
+export async function deferThreads(
+  rev: ReviewFacade,
+  store: TaskStore,
+  ids: string[],
+  opts: { bead?: string; newBead?: string; pr?: number }
+): Promise<void> {
+  if ((opts.bead === undefined) === (opts.newBead === undefined)) {
+    throw new CommandError('error: exactly one of --bead or --new-bead is required', EXIT.usage);
+  }
+  if (ids.length === 0) {
+    throw new CommandError('error: at least one thread id is required', EXIT.usage);
+  }
+  const target =
+    opts.pr === undefined ? resolvePr(rev, []) : { repo: rev.resolveRepo([]), pr: opts.pr };
+  const threads = await rev.reviewThreads(target);
+  const byId = new Map(threads.map(thread => [thread.id, thread]));
+  const selected: ReviewThread[] = [];
+  for (const id of ids) {
+    const thread = byId.get(id);
+    if (thread === undefined) {
+      throw new CommandError(`error: thread not found: ${id}`, EXIT.usage);
+    }
+    if (thread.resolved) {
+      throw new CommandError(`error: thread already resolved: ${id}`, EXIT.usage);
+    }
+    selected.push(thread);
+  }
+  const first = selected[0];
+  if (first === undefined) {
+    throw new CommandError('error: at least one thread id is required', EXIT.usage);
+  }
+  const detail = (thread: ReviewThread): string =>
+    `PRRT ${thread.id}: ${thread.comment?.body?.trim() || '(no comment body)'}`;
+  let bead = opts.bead;
+  if (bead !== undefined) {
+    if (store.get(bead) === undefined) {
+      throw new CommandError(`error: bead not found: ${bead}`, EXIT.usage);
+    }
+  } else {
+    const title = opts.newBead;
+    if (title === undefined) {
+      throw new CommandError('error: --new-bead requires a title', EXIT.usage);
+    }
+    bead = store.create({
+      title,
+      labels: ['debt'],
+      description: detail(first),
+      externalRef: first.id,
+    }).id;
+  }
+  for (const thread of selected) {
+    if (thread !== selected[0] || opts.bead !== undefined) {
+      store.note(bead, detail(thread));
+    }
+  }
+  for (const thread of selected) {
+    resolveOne(rev, [], { id: thread.id, comment: `deferred -> ${bead}`, unresolve: false });
+    console.error(`act: deferred ${thread.id} -> ${bead}`);
+  }
+  dropActState();
+}
+
+function deferArgIds(argv: string[]): string[] {
+  const ids: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    if (VALUE_FLAGS.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (!arg.startsWith('-')) {
+      ids.push(
+        ...arg
+          .split(',')
+          .map(id => id.trim())
+          .filter(Boolean)
+      );
+    }
+  }
+  return ids;
+}
+
+async function cmdDefer(argv: string[]): Promise<void> {
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const bead = flag(argv, '--bead');
+  const newBead = flag(argv, '--new-bead');
+  const prRaw = flag(argv, '--pr');
+  const parsedPr = prRaw === undefined ? undefined : Number(prRaw);
+  const invalidPr = typeof parsedPr !== 'number' || !Number.isInteger(parsedPr) || parsedPr <= 0;
+  if (prRaw !== undefined && invalidPr) {
+    throw new CommandError(`error: invalid PR number "${prRaw}"`, EXIT.usage);
+  }
+  await deferThreads(rev, claimStore(process.cwd()), deferArgIds(argv), {
+    bead,
+    newBead,
+    pr: parsedPr,
+  });
 }
 
 /** Batch shape mirrors reply --file: one <thread_id> or
@@ -458,6 +569,7 @@ const COMMANDS = new Map<string, (argv: string[]) => void | Promise<void>>([
   ['rearm', cmdRearm],
   ['threads', cmdThreads],
   ['resolve', cmdResolve],
+  ['defer', cmdDefer],
   ['reply', cmdReply],
   ['dismiss', cmdDismiss],
 ]);
