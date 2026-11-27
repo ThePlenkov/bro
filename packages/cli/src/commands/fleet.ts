@@ -48,6 +48,7 @@ import {
   type AgentConnectorEnv,
   type BudgetSnapshot,
 } from '../agent-connectors.ts';
+import { spendSummary, type SpendSummary } from '@broject/core';
 import { occupancyLine, type FleetOccupancy } from './agents.ts';
 import { flag } from './args.ts';
 import { runFleetHostsCommand } from './fleet-hosts.ts';
@@ -349,6 +350,7 @@ export interface FleetPayload {
   /** The local-estimate budget picture (specs/bro-7xgk.3.md) — one
    *  registry walk, the same walk occupancy derives from. */
   budget: BudgetSnapshot;
+  spend?: SpendSummary;
   /** Provider walls derived from the registry's classified deaths
    *  (spec bro-1x7p) — a walled provider renders here, never silently. */
   walls: ProviderWall[];
@@ -405,6 +407,7 @@ export async function collectFleet(
     prErrors,
     occupancy: { occupied: budget.live, maxConcurrent: budget.maxConcurrent },
     budget,
+    spend: spendSummary(),
     walls,
     wallsError,
   };
@@ -639,13 +642,23 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return;
   }
 
-  const { rows, degraded, conflicts, prErrors, occupancy, budget, walls, wallsError } =
+  const { rows, degraded, conflicts, prErrors, occupancy, budget, spend, walls, wallsError } =
     await collectFleet(dir, prefer);
 
   if (args.json) {
     console.log(
       JSON.stringify(
-        { rows, degraded, conflicts, prErrors, occupancy, budget, walls, wallsError },
+        {
+          rows,
+          degraded,
+          conflicts,
+          prErrors,
+          occupancy,
+          budget,
+          spend: spend ?? spendSummary(),
+          walls,
+          wallsError,
+        },
         null,
         2
       )

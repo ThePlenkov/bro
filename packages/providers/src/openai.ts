@@ -9,7 +9,7 @@
  * owns protocol knowledge only: endpoint, auth env, model, retry
  * contract.
  */
-import { isEnvName, JudgeUnavailable } from '@broject/core';
+import { isEnvName, JudgeUnavailable, recordSpend } from '@broject/core';
 import {
   apiVersionedBase,
   mapUsage,
@@ -91,6 +91,30 @@ function replyContent(body: unknown): string {
   return content;
 }
 
+function recordUsage(
+  usage: ProviderChatResult['usage'],
+  model: string,
+  provider: string
+): void {
+  const bead = process.env.BRO_BEAD_ID;
+  if (usage === undefined || bead === undefined || bead === '') return;
+  // telemetry never fails the call — a ledger write/validation error
+  // must not kill a valid provider response
+  try {
+    recordSpend({
+      ts: new Date().toISOString(),
+      bead,
+      provider,
+      model,
+      ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+      ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+      ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    });
+  } catch {
+    // ledger unavailable or row rejected — spend recording is advisory
+  }
+}
+
 /** The raw prose call surface for an `openai-compat` entry — prompt
  *  in, content+model+usage out, over the shared deadline. */
 export function openaiCompatChat(
@@ -120,10 +144,13 @@ export function openaiCompatChat(
       throwForStatus(res);
     }
     const body = objOr(res.body);
+    const usage = mapUsage(body, 'prompt_tokens');
+    const responseModel = typeof body.model === 'string' ? body.model : model;
+    recordUsage(usage, responseModel, opts.provider ?? 'openai-compat');
     return {
       content: replyContent(body),
-      model: typeof body.model === 'string' ? body.model : model,
-      usage: mapUsage(body, 'prompt_tokens'),
+      model: responseModel,
+      usage,
     };
   };
 }

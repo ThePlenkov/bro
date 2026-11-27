@@ -175,6 +175,8 @@ export {
   wallLedgerPath,
 } from './wall-ledger.ts';
 export type { WallLedgerOptions, WallObservation } from './wall-ledger.ts';
+export { recordSpend, spendLedgerPath, spendSummary } from './spend-ledger.ts';
+export type { SpendRow, SpendSummary } from './spend-ledger.ts';
 export type {
   ChainEntry,
   ChainWalk,

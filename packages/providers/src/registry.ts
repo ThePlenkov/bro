@@ -113,8 +113,15 @@ export function providerClient(
       // each wire binding owns its own versioned mount — the host's
       // baseUrl flows through unchanged
       return wire === 'systemone'
-        ? { call: systemoneCall(`provider:${name}`, target, { ...opts, model, keyField }) }
-        : { chat: openaiCompatChat(target, { ...opts, model, keyField }) };
+        ? {
+            call: systemoneCall(`provider:${name}`, target, {
+              ...opts,
+              model,
+              keyField,
+              provider: name,
+            }),
+          }
+        : { chat: openaiCompatChat(target, { ...opts, model, keyField, provider: name }) };
     }
     case 'acp':
       // 'auto' grade — the binding picks call vs chat on the resolved
