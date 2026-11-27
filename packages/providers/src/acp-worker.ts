@@ -683,7 +683,10 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         by,
         sessSpan.ctx,
         spec.cwd,
-        drainTimeoutMs
+        drainTimeoutMs,
+        undefined,
+        spec.provider,
+        reportedModel
       ).finally(flush);
       log(`turn stopped — ${r.stopReason}`);
       endSess({ 'acp.session_id': session.sessionId });

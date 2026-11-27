@@ -528,7 +528,11 @@ async function acpOp(
       undefined,
       by,
       undefined,
-      opts.acp?.cwd
+      opts.acp?.cwd,
+      undefined,
+      undefined,
+      opts.provider,
+      model
     );
     if (r.stopReason !== 'end_turn') {
       throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`);
@@ -714,7 +718,10 @@ export async function acpConverse(
         by,
         sessSpan.ctx,
         opts.acp?.cwd,
-        3_000
+        3_000,
+        undefined,
+        opts.provider,
+        model
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
@@ -905,7 +912,9 @@ export async function pumpTurn(
   // the silence bound — a direct caller that omits it gets the default
   // five minutes, so a turn that never reports cannot hang forever. An
   // explicit 0 still disables the watchdog.
-  stallMs = 300_000
+  stallMs = 300_000,
+  provider?: string,
+  model?: string
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   // an already-cancelled caller never gets a turn — the prompt send
   // below would start billable agent work the later abort race can only
@@ -914,7 +923,7 @@ export async function pumpTurn(
     throw new JudgeUnavailable(`${by}: caller aborted the turn`);
   }
   const traced = tracedUpdates(onUpdate, parent);
-  const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
+  const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId, provider, model });
   plane.start(promptText(prompt));
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
@@ -1465,7 +1474,9 @@ export async function acpPooledTurn(
         sessSpan.ctx,
         opts.acp?.cwd,
         3_000,
-        turn.stallMs
+        turn.stallMs,
+        opts.provider,
+        model
       );
       // the turn answered — the session's own charge settles (spec
       // bro-b961a); a failed turn leaves it counted as abandoned
@@ -1682,7 +1693,9 @@ export async function acpSessionRetain(
             t.parent,
             undefined,
             undefined,
-            t.stallMs ?? turn.stallMs
+            t.stallMs ?? turn.stallMs,
+            opts.provider,
+            effective
           );
           // the session opened once — its own charge settles on the
           // first turn that answers. resolve() is idempotent: a later

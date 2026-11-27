@@ -34,4 +34,14 @@ export interface ArchiveRow {
   /** `kind: 'permission'` — the answer's option kind (allow_once,
    *  reject_once, …) — the label the card prints. */
   optionKind?: string;
+  /** `kind: 'usage'` — provider-reported accounting attached to the
+   *  per-agent event journal. Missing values mean the provider was silent,
+   *  never an estimate. */
+  provider?: string;
+  model?: string;
+  tokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  usage?: unknown;
 }
