@@ -2513,7 +2513,7 @@ async function armingLinesForOutcome(
   cmd: string,
   sessionId: string,
   dir: string = process.cwd()
-): string[] {
+): Promise<string[]> {
   const lines: string[] = [];
   if (outcome !== false) {
     lines.push(...armPostTool(cmd, sessionId, dir));
