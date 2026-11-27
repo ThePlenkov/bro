@@ -12,6 +12,7 @@ import type { PaneLed } from '@broject/acp-session';
 import { stateCommonDir } from '@broject/core';
 import {
   call,
+  callOk,
   metaArgs as kitMetaArgs,
   releaseArgs as kitReleaseArgs,
   reportArgs as kitReportArgs,
@@ -66,7 +67,8 @@ export function linkifyPr(text: string, prUrl: string | undefined): string {
   // http(s) only — a crafted `file:`/`javascript:`/custom-scheme cache
   // entry would open a local handler on click
   if (!/^https?:\/\//i.test(url)) return text;
-  return text.replace(/#\d+/, m => `\u001b]8;;${url}\u0007${m}\u001b]8;;\u0007`);
+  const n = /\/pull\/(\d+)(?:[/?#]|$)/i.exec(url)?.[1];
+  return n === undefined ? text : text.replace(/#\d+/, `[#${n}](${url})`);
 }
 
 const LED_ICON: Record<PaneLed['state'], string> = {
@@ -165,14 +167,18 @@ function viewContext(argv: string[]): ViewCtx | undefined {
 /** One deduped re-read — parses, reports, redraws only on real moves. */
 function makeRefresh(ctx: ViewCtx): () => void {
   let lastRaw: string | undefined | null = null;
+  let retry = false;
   const apply = (s: FleetPaneState | undefined): void => {
     const seq = nextSeq();
-    call(statusReportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
-    for (const a of statusMetaArgs(ctx.pane, s, seq)) call(a);
+    let ok = callOk(statusReportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
+    for (const a of statusMetaArgs(ctx.pane, s, seq)) ok = callOk(a) && ok;
+    retry = !ok;
     process.stdout.write(renderView(s, ctx.worktree));
   };
   return () => {
-    lastRaw = applyRaw(readRaw(ctx.statePath), lastRaw, apply);
+    const raw = readRaw(ctx.statePath);
+    if (raw === lastRaw && !retry) return;
+    lastRaw = applyRaw(raw, lastRaw === raw && retry ? undefined : lastRaw, apply);
   };
 }
 

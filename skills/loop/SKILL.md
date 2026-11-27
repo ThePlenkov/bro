@@ -95,7 +95,7 @@ explanation goes to stderr so the run log on stdout stays clean.
 provider) is the escape hatch:
 
 ```json
-{ "loop": { "agent": "opencode --prompt-file {promptFile} -p" } }
+{ "loop": { "agent": "opencode run --file {promptFile} \"Complete the work order in the attached file.\"" } }
 ```
 
 `{promptFile}` is replaced with the work-order file bro writes into the
