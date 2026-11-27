@@ -27,6 +27,7 @@ import {
   configValue,
   ctxJson,
   herdrTry,
+  herdrOk,
   notify,
   PLUGIN_ROOT,
   paneIdle,
@@ -42,6 +43,7 @@ const repo = repoDir(ctx);
 // socket API delivers flat *_id/*_cwd keys — read both, env last
 const cwd =
   ctx.worktree?.checkout_path ??
+  ctx.pane?.cwd ??
   ctx.focused_pane?.cwd ??
   ctx.focused_pane_cwd ??
   ctx.workspace_cwd ??
@@ -65,7 +67,6 @@ if (target === undefined) {
 // set by pane rename below).
 const LABEL = 'acp: ';
 const stale = wsPanes.filter(p => p.label?.startsWith(LABEL));
-for (const p of stale) herdrTry(['pane', 'close', p.pane_id]);
 
 // selected text → --cmd/--prompt/--permit; bare text is the prompt
 let cmd = configValue('acp_cmd', 'devin acp');
@@ -80,6 +81,14 @@ if (sel !== '') {
       const v = words[++i];
       if (v === undefined) {
         console.error(`acp:watch — ${w} needs a value in the selected text`);
+        process.exit(1);
+      }
+      if (w === '--cmd' && v.startsWith('-')) {
+        console.error('acp:watch — --cmd value must not look like a flag');
+        process.exit(1);
+      }
+      if ((w === '--cmd' || w === '--prompt') && v === '') {
+        console.error(`acp:watch — ${w} value must not be empty`);
         process.exit(1);
       }
       if (w === '--cmd') cmd = v;
@@ -106,8 +115,13 @@ if (pane === undefined) {
   console.error(`acp:watch — pane split failed under ${target}`);
   process.exit(1);
 }
+const paneId = pane;
 
-herdrTry(['pane', 'rename', pane, `${LABEL}${basename(cmd)}`]);
+if (!herdrOk(['pane', 'rename', paneId, `${LABEL}${basename(cmd)}`])) {
+  console.error(`acp:watch — pane rename failed on ${paneId}`);
+  herdrTry(['pane', 'close', paneId]);
+  process.exit(1);
+}
 // the prompt rides the pane process's env, not argv — `ps` shows argv
 // to every local user; /proc/*/environ is owner-only. `--cmd`/`--cwd`
 // are non-secret and stay visible in the echoed command line.
@@ -121,9 +135,10 @@ const args = [
   '--cwd',
   shq(cwd),
 ];
-if (herdrTry(['pane', 'run', pane, args.join(' ')]) === undefined) {
-  console.error(`acp:watch — pane run failed on ${pane}`);
+if (!herdrOk(['pane', 'run', paneId, args.join(' ')])) {
+  console.error(`acp:watch — pane run failed on ${paneId}`);
   process.exit(1);
 }
-notify('acp watch', `${cmd} → ${pane}`);
-console.log(`acp-watch → ${pane} (${cmd})`);
+for (const p of stale) herdrTry(['pane', 'close', p.pane_id]);
+notify('acp watch', `${cmd} → ${paneId}`);
+console.log(`acp-watch → ${paneId} (${cmd})`);

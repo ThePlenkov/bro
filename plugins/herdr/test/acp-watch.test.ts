@@ -32,6 +32,8 @@ describe('parseArgs', () => {
   test('unknown arg and missing value fail loud', () => {
     assert.throws(() => parseArgs(['--bogus']));
     assert.throws(() => parseArgs(['--cmd']));
+    assert.throws(() => parseArgs(['--cmd', '']));
+    assert.throws(() => parseArgs(['--prompt', '']));
   });
 
   test('--permit validates against auto|reads|none, env overrides', () => {
