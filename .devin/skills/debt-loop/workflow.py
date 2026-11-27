@@ -105,7 +105,11 @@ LAND_SCHEMA = {
 
 def open_rows_in(path):
     rows = []
-    with open(path) as fh:
+    base_real = os.path.realpath(HARVEST_DIR)
+    target_real = os.path.realpath(path)
+    if os.path.commonpath([base_real, target_real]) != base_real:
+        raise Exception("Invalid file path")
+    with open(target_real) as fh:
         for line in fh:
             line = line.strip()
             if not line:
