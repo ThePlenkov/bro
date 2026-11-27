@@ -51,8 +51,16 @@ different session.
 
 ### Budget
 
-`--enforce` compares each budgeted row's p50 to the committed budget
-(the defaults below live in the script; `--budget <file>` overrides):
+`--enforce` compares each budgeted row's p50 to the measured `noop:<event>`
+twin from the same run plus a hook-work margin. The margin is derived
+from the existing absolute budget as `max(0, budget - 10 ms)`: 10 ms is
+the quiet-runner noop floor recorded by the original baseline. Thus the
+old absolute budgets remain the source of the allowance, but the machine
+floor is measured rather than charged again. A budgeted row with no noop
+twin falls back to its absolute budget. Errors still fail independently
+of latency.
+
+The defaults below live in the script; `--budget <file>` overrides:
 
 | row                   | p50 ≤  |
 |-----------------------|--------|
@@ -61,13 +69,13 @@ different session.
 | runsh session-start   | 600 ms |
 | runsh stop            | 600 ms |
 
-These are the bead's stated budgets, on the lanes where they are
-meaningful today: the no-op lane is already ~10 ms (a shell test —
-spec bro-ddksm), and live session-start/stop sit inside 600 ms on
-ubuntu-latest. Live post-tool/prompt-submit are recorded but not yet
-gated — bro-arm83's fast-path and bro-9wv18's probe caching are the
-work that brings them under budget; they add their rows' budgets when
-they land (the "tightened by E2/E3" half of the bead's design).
+These are the existing absolute reference budgets; enforcement now
+subtracts each run's noop twin before applying their derived margins.
+Live session-start/stop sit inside 600 ms on ubuntu-latest. Live
+post-tool/prompt-submit are recorded but not yet gated — bro-arm83's
+fast-path and bro-9wv18's probe caching are the work that brings them
+under budget; they add their rows' budgets when they land (the
+"tightened by E2/E3" half of the bead's design).
 
 ### CI
 
@@ -97,6 +105,6 @@ a separate job would re-pay `npm ci` + nx):
 
 - `node scripts/bench-hooks.ts` locally prints p50/p95 rows for every
   event × lane; `--enforce` exits 0 here and on CI.
-- `--budget <file>` with a 1 ms cap fails the step — the gate is real,
-  not decorative.
+- `--budget <file>` with a 1 ms cap and no measured noop twin fails the
+  step — the absolute fallback keeps the gate real, not decorative.
 - The CI artifact `hooks-latency.json` carries the numbers.

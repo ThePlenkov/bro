@@ -37,18 +37,19 @@
  *   node scripts/bench-hooks.ts --runs 50 --warmup 3
  *   node scripts/bench-hooks.ts --budget budgets.json --enforce
  *
- * --enforce compares each budgeted row's p50 against the committed
- * budget below AND fails when any measured row has errors — a broken
- * hook is a failure whether or not it carries a latency budget. Rows
- * without a budget are recorded, not gated on latency (children of
- * bro-5tpx0 add theirs when they land).
+ * --enforce compares each budgeted row's p50 against its measured noop
+ * twin plus a margin derived from the committed absolute budget below.
+ * This keeps the process-spawn floor out of the ratchet. Rows without a
+ * noop twin fall back to the absolute budget, and any measured row with
+ * errors fails — a broken hook is a failure whether or not it carries a
+ * latency budget.
  */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { e2eEnv, initRepo, installFakeBd } from '../packages/cli/src/commands/testrepo.ts';
 import { HOOK_DISPATCH_ERR } from '../packages/cli/src/commands/hook-signal.ts';
+import { e2eEnv, initRepo, installFakeBd } from '../packages/cli/src/commands/testrepo.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI_DIST = join(ROOT, 'packages', 'cli', 'dist', 'index.js');
@@ -109,6 +110,13 @@ const BUDGET_P50_MS: Record<string, number> = {
   'dist:session-start': 500,
   'dist:stop': 450,
 };
+
+/** The existing budgets were set with a quiet-runner noop floor of about
+ * 10 ms in mind (the baseline recorded by bro-qbnre). Keep that baseline
+ * explicit: a budget below the floor gets a zero additional allowance,
+ * while larger budgets contribute only their excess over the floor as
+ * hook-work margin. The actual floor is still measured per row/run. */
+const TYPICAL_NOOP_FLOOR_MS = 10;
 
 const LANES = ['runsh', 'dist', 'noop', 'fast'] as const;
 type Lane = (typeof LANES)[number];
@@ -506,7 +514,8 @@ function runBench(opts: Options): Map<string, Row> {
   const fixtures: Partial<Record<FixtureKind, Fixture>> = {};
   for (const lane of opts.lanes) {
     const kind: FixtureKind = lane === 'fast' ? 'fast' : 'armed';
-    const fx = (fixtures[kind] ??= buildFixture(kind));
+    const fx = fixtures[kind] ?? buildFixture(kind);
+    fixtures[kind] = fx;
     const laneEnv = lane === 'noop' ? { ...fx.env, BRO_HOOKS: '0' } : fx.env;
     const laneFx = { cwd: fx.cwd, env: laneEnv };
     for (const { event, payload } of laneEvents(lane)) {
@@ -584,19 +593,35 @@ function writeReport(rows: Map<string, Row>, budget: Record<string, number>, opt
 }
 
 /** One budget line's verdict — pure data so `enforce` only prints. */
-interface Verdict {
+export interface Verdict {
   line: string;
   failed: boolean;
 }
 
-function budgetVerdict(b: { key: string; cap: number }, r: Row | undefined): Verdict {
+export interface BudgetRow {
+  p50: number;
+  errors: number;
+}
+
+export function budgetVerdict(
+  b: { key: string; cap: number },
+  r: BudgetRow | undefined,
+  noopTwin: BudgetRow | undefined
+): Verdict {
   if (r === undefined) {
     return { line: `budget ${b.key}: no row measured`, failed: true };
   }
-  const ok = r.p50 <= b.cap && r.errors === 0;
+  const margin = Math.max(0, b.cap - TYPICAL_NOOP_FLOOR_MS);
+  const floorRelative = noopTwin !== undefined;
+  const delta = floorRelative ? r.p50 - noopTwin.p50 : undefined;
+  const latencyOver = floorRelative ? delta > margin : r.p50 > b.cap;
+  const ok = !latencyOver && r.errors === 0;
   const tag = ok ? 'ok' : 'OVER';
+  const relative = floorRelative
+    ? ` floor=${noopTwin.p50}ms delta=${delta}ms margin=${margin}ms`
+    : ' floor=missing (absolute fallback)';
   return {
-    line: `${tag.padEnd(4)} ${b.key} p50=${r.p50}ms budget=${b.cap}ms errors=${r.errors}`,
+    line: `${tag.padEnd(4)} ${b.key} p50=${r.p50}ms budget=${b.cap}ms${relative} errors=${r.errors}`,
     failed: !ok,
   };
 }
@@ -643,7 +668,11 @@ function enforce(
       say(`skip ${key} — lane not in --lanes`);
       continue;
     }
-    const v = budgetVerdict({ key, cap }, rows.get(key));
+    const [, event] = key.split(':');
+    // a noop row IS the floor reference — pairing it with itself makes
+    // delta always 0 and latency unenforceable; enforce it absolute
+    const twin = key.startsWith('noop:') ? undefined : rows.get(`noop:${event}`);
+    const v = budgetVerdict({ key, cap }, rows.get(key), twin);
     say(v.line);
     failed = failed || v.failed;
   }
@@ -671,4 +700,6 @@ function main(): void {
   }
 }
 
-main();
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
