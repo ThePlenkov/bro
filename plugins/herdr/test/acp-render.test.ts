@@ -15,6 +15,9 @@ const upd = (sessionUpdate: string, rest: Record<string, unknown> = {}): Session
   ...rest,
 });
 
+const tool = (title: string, rest: Record<string, unknown> = {}): SessionUpdateLike =>
+  upd('tool_call', { toolCallId: 't1', title, ...rest });
+
 describe('AcpRenderer — chunk styling', () => {
   test('thought chunks render dimmed, coalesced into one line', () => {
     const { lines, out } = sink();
@@ -96,8 +99,7 @@ describe('AcpRenderer — tool calls', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(
-      upd('tool_call', {
-        toolCallId: 't1',
+      tool('Bash', {
         title: 'Bash',
         kind: 'execute',
         rawInput: { command: 'ls -la /tmp', timeout: 5000 },
@@ -121,8 +123,7 @@ describe('AcpRenderer — tool calls', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(
-      upd('tool_call', {
-        toolCallId: 't1',
+      tool('Grep', {
         title: 'Grep',
         kind: 'search',
         rawInput: { pattern: 'TODO', path: '/src' },
@@ -135,8 +136,7 @@ describe('AcpRenderer — tool calls', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(
-      upd('tool_call', {
-        toolCallId: 't1',
+      tool('Bash', {
         title: 'Bash',
         kind: 'execute',
         rawInput: { command: 'y'.repeat(300) },
@@ -218,9 +218,7 @@ describe('AcpRenderer — permission policy', () => {
   test('an allow option without an id is cancelled, never answered with empty id', () => {
     const { out } = sink();
     const r = new AcpRenderer(out, { color: false });
-    const res = r.permission(
-      permReq('edit', [{ name: 'Allow once', kind: 'allow_once' }])
-    );
+    const res = r.permission(permReq('edit', [{ name: 'Allow once', kind: 'allow_once' }]));
     assert.deepEqual(res, { outcome: 'cancelled' });
   });
 });
@@ -280,8 +278,7 @@ describe('AcpRenderer — tool output cards (spec bro-l8wqu)', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(
-      upd('tool_call', {
-        toolCallId: 't1',
+      tool('Read', {
         title: 'Read',
         status: 'completed',
         content: [{ type: 'content', content: { type: 'text', text: 'data' } }],
@@ -294,8 +291,7 @@ describe('AcpRenderer — tool output cards (spec bro-l8wqu)', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(
-      upd('tool_call', {
-        toolCallId: 't1',
+      tool('Edit', {
         title: 'Bash',
         status: 'completed',
         content: [
@@ -332,8 +328,7 @@ describe('AcpRenderer — tool output cards (spec bro-l8wqu)', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out);
     r.update(
-      upd('tool_call', {
-        toolCallId: 't1',
+      tool('Bash', {
         title: 'Edit',
         status: 'completed',
         content: [{ type: 'diff', path: '/f.ts', oldText: 'old1\nold2', newText: 'new1' }],
