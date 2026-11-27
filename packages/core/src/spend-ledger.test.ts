@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -42,6 +42,35 @@ test('spend ledger rejects malformed rows instead of recording zero', () => {
         ),
       /invalid provider usage row/
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('spend ledger skips malformed lines and fractional token counts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'bro-spend-'));
+  const path = join(root, 'spend.jsonl');
+  try {
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ ts: new Date().toISOString(), bead: 'good', provider: 'one', inputTokens: 2 }),
+        '{not json}',
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          bead: 'fractional',
+          provider: 'one',
+          inputTokens: 1.5,
+        }),
+      ].join('\n') + '\n'
+    );
+    assert.deepEqual(spendSummary(path), {
+      basis: 'provider-reported',
+      rows: 1,
+      unknownCostRows: 1,
+      byBead: [{ bead: 'good', rows: 1 }],
+      byProvider: [{ provider: 'one', rows: 1 }],
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

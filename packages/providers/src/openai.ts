@@ -91,6 +91,24 @@ function replyContent(body: unknown): string {
   return content;
 }
 
+function recordUsage(
+  usage: ProviderChatResult['usage'],
+  model: string,
+  provider: string
+): void {
+  const bead = process.env.BRO_BEAD_ID;
+  if (usage === undefined || bead === undefined || bead === '') return;
+  recordSpend({
+    ts: new Date().toISOString(),
+    bead,
+    provider,
+    model,
+    ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+  });
+}
+
 /** The raw prose call surface for an `openai-compat` entry — prompt
  *  in, content+model+usage out, over the shared deadline. */
 export function openaiCompatChat(
@@ -121,21 +139,11 @@ export function openaiCompatChat(
     }
     const body = objOr(res.body);
     const usage = mapUsage(body, 'prompt_tokens');
-    const bead = process.env.BRO_BEAD_ID;
-    if (usage !== undefined && bead !== undefined && bead !== '') {
-      recordSpend({
-        ts: new Date().toISOString(),
-        bead,
-        provider: opts.provider ?? 'openai-compat',
-        model: typeof body.model === 'string' ? body.model : model,
-        ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
-        ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
-        ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
-      });
-    }
+    const responseModel = typeof body.model === 'string' ? body.model : model;
+    recordUsage(usage, responseModel, opts.provider ?? 'openai-compat');
     return {
       content: replyContent(body),
-      model: typeof body.model === 'string' ? body.model : model,
+      model: responseModel,
       usage,
     };
   };

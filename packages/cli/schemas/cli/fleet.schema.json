@@ -5,7 +5,7 @@
   "description": "The mols × steps × agents × worktrees × PRs board — mirrors FleetPayload in packages/cli/src/commands/fleet.ts.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["rows", "degraded", "conflicts", "prErrors", "occupancy", "budget", "walls"],
+  "required": ["rows", "degraded", "conflicts", "prErrors", "occupancy", "budget", "spend", "walls"],
   "properties": {
     "rows": {
       "type": "array",
@@ -105,6 +105,7 @@
       "type": "array",
       "items": { "$ref": "#/$defs/ProviderWall" }
     },
+    "spend": { "$ref": "#/$defs/SpendSummary" },
     "wallsError": {
       "type": "string",
       "description": "The wall derivation itself threw — additive data failed, never the rows."
@@ -144,6 +145,39 @@
         "cause": { "enum": ["rate_limited", "quota"] },
         "until": { "type": "string" },
         "bound": { "type": "boolean" }
+      }
+    },
+    "SpendSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "rows", "unknownCostRows", "byBead", "byProvider"],
+      "properties": {
+        "basis": { "const": "provider-reported" },
+        "rows": { "type": "integer" },
+        "unknownCostRows": { "type": "integer" },
+        "totalCostUsd": { "type": "number" },
+        "byBead": { "type": "array", "items": { "$ref": "#/$defs/SpendGroupBead" } },
+        "byProvider": { "type": "array", "items": { "$ref": "#/$defs/SpendGroupProvider" } }
+      }
+    },
+    "SpendGroupBead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bead", "rows"],
+      "properties": {
+        "bead": { "type": "string" },
+        "costUsd": { "type": "number" },
+        "rows": { "type": "integer" }
+      }
+    },
+    "SpendGroupProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "rows"],
+      "properties": {
+        "provider": { "type": "string" },
+        "costUsd": { "type": "number" },
+        "rows": { "type": "integer" }
       }
     }
   }

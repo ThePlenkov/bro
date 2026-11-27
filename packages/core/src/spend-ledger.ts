@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { withFileLock } from './filelock.ts';
@@ -32,31 +41,77 @@ function validNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+function validInteger(value: unknown): value is number {
+  return validNumber(value) && Number.isInteger(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value !== '';
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function optionalNumber(value: unknown, validator: (value: unknown) => boolean): boolean {
+  return value === undefined || validator(value);
+}
+
 function validRow(value: unknown): value is SpendRow {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (!isRecord(value)) return false;
   const row = value as Record<string, unknown>;
-  return (
-    typeof row.ts === 'string' &&
-    Number.isFinite(Date.parse(row.ts)) &&
-    typeof row.bead === 'string' &&
-    row.bead !== '' &&
-    typeof row.provider === 'string' &&
-    row.provider !== '' &&
-    (row.model === undefined || typeof row.model === 'string') &&
-    (row.costUsd === undefined || validNumber(row.costUsd)) &&
-    (row.inputTokens === undefined || validNumber(row.inputTokens)) &&
-    (row.outputTokens === undefined || validNumber(row.outputTokens))
-  );
+  return [
+    typeof row.ts === 'string' && Number.isFinite(Date.parse(row.ts)),
+    nonEmptyString(row.bead),
+    nonEmptyString(row.provider),
+    optionalString(row.model),
+    optionalNumber(row.costUsd, validNumber),
+    optionalNumber(row.inputTokens, validInteger),
+    optionalNumber(row.outputTokens, validInteger),
+  ].every(Boolean);
+}
+
+function parseRow(line: string): SpendRow | undefined {
+  try {
+    const value: unknown = JSON.parse(line);
+    return validRow(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read only the tail needed for the bounded ledger. Writes therefore do
+ * not become slower as old rows accumulate. */
+function tailLines(path: string): string[] {
+  const fd = openSync(path, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const chunks: Buffer[] = [];
+    let offset = size;
+    let newlineCount = 0;
+    while (offset > 0 && newlineCount <= MAX_ROWS) {
+      const length = Math.min(64 * 1024, offset);
+      offset -= length;
+      const chunk = Buffer.alloc(length);
+      readSync(fd, chunk, 0, length, offset);
+      chunks.unshift(chunk);
+      newlineCount += chunk.toString('utf8').split('\n').length - 1;
+    }
+    return Buffer.concat(chunks).toString('utf8').split('\n').filter(Boolean).slice(-MAX_ROWS);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function readRows(path: string): SpendRow[] {
   try {
-    return readFileSync(path, 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map(line => JSON.parse(line) as unknown)
-      .filter((row): row is SpendRow => validRow(row))
-      .slice(-MAX_ROWS);
+    return tailLines(path)
+      .map(parseRow)
+      .filter((row): row is SpendRow => row !== undefined);
   } catch {
     return [];
   }
