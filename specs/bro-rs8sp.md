@@ -210,10 +210,12 @@ contract as slash commands.
   chunk. Text deltas must not pay a hook probe.
 - Telemetry: `acp.proxy.session` / `acp.proxy.turn` spans under the
   existing `otelSpan` tree; updates reuse `agentTurnPlane` (bus topic +
-  `.events.jsonl`) keyed by the upstream session id. `BRO_AGENT_ID` is
-  worker-registry bookkeeping, not a precondition for archiving — an
-  unbadged proxy run (a human's `bro acp proxy`) journals under a
-  proxy-scoped plane dir rather than skipping the archive.
+  `.events.jsonl`) keyed by the upstream session id. The default
+  `agents` plane archives only badged runs: an unbadged turn has no
+  identity with which to scope an agent plane, so it is bus-only. The
+  proxy explicitly selects the `proxy` plane, which keys the archive by
+  upstream session id and lets an unbadged human `bro acp proxy` run
+  journal under its proxy-scoped plane dir.
 - Per-turn overhead is measured and documented in bro-bhyo1's
   acceptance, not asserted here.
 
