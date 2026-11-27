@@ -7,6 +7,7 @@ import type { LockedSkill } from '@broject/core';
 
 export type SkillSource =
   | { kind: 'github'; repo: string; path?: string; skill?: string; raw: string }
+  | { kind: 'marketplace'; repo: string; entry: string; raw: string }
   | { kind: 'url'; url: string; raw: string }
   | { kind: 'local'; path: string; raw: string }
   | { kind: 'invalid'; raw: string; reason: string };
@@ -65,6 +66,25 @@ function parseGithubSource(raw: string, spec: string): SkillSource | null {
   return { kind: 'github', repo, path, skill: basename(path), raw };
 }
 
+/** A marketplace is an explicit catalog selection.  The fragment is the
+ * plugin/skill name, not a git ref: the resolver pins the repository first
+ * and then reads either supported marketplace manifest at that SHA. */
+function parseMarketplaceSource(raw: string, spec: string): SkillSource | null {
+  if (!spec.startsWith('marketplace:')) return null;
+  const [repo, entry, ...extra] = spec.slice('marketplace:'.length).split('#');
+  if (
+    entry === undefined ||
+    entry === '' ||
+    extra.length > 0 ||
+    repo === undefined ||
+    !GH_REPO.test(repo) ||
+    dotSeg(repo)
+  ) {
+    return { kind: 'invalid', raw, reason: 'marketplace: needs <owner>/<repo>#<entry>' };
+  }
+  return { kind: 'marketplace', repo, entry, raw };
+}
+
 function parseUrlSource(raw: string, spec: string): SkillSource | null {
   if (spec.startsWith('http://')) {
     return { kind: 'invalid', raw, reason: 'plaintext http:// is not a source — use https://' };
@@ -84,7 +104,13 @@ function parseBareRepo(raw: string, spec: string): SkillSource | null {
 
 /** The grammar, in precedence order — first parser to claim the spec
  *  wins. A parser returns `null` only when the spec is not its shape. */
-const SOURCE_PARSERS = [parseLocalSource, parseGithubSource, parseUrlSource, parseBareRepo];
+const SOURCE_PARSERS = [
+  parseLocalSource,
+  parseMarketplaceSource,
+  parseGithubSource,
+  parseUrlSource,
+  parseBareRepo,
+];
 
 /** One `skills.install` entry → a typed source. Anything outside the
  *  grammar is `invalid` — reported by the command, never skipped. */
@@ -107,7 +133,7 @@ export function parseSkillSource(raw: unknown): SkillSource {
     kind: 'invalid',
     raw,
     reason:
-      'expected github:<owner>/<repo>[/<path>], <owner>/<repo>, an https:// URL, or local:<path>',
+      'expected marketplace:<owner>/<repo>#<entry>, github:<owner>/<repo>[/<path>], <owner>/<repo>, an https:// URL, or local:<path>',
   };
 }
 
@@ -184,4 +210,30 @@ export function lockNamesFor(src: SkillSource, locked: Map<string, LockedSkill>)
     return urlLockNames(src.url, locked);
   }
   return [];
+}
+
+export interface MarketplaceManifest {
+  plugins?: unknown;
+}
+
+/** Extract the repository-relative skill path from the real Claude/Codex
+ * marketplace shapes.  Claude uses `source`; the Codex mirror additionally
+ * catalogs skills under a plugin's `skills` array. */
+export function resolveMarketplaceEntry(
+  manifest: MarketplaceManifest,
+  entry: string
+): { path: string; skill: string } | null {
+  if (!Array.isArray(manifest.plugins)) return null;
+  for (const plugin of manifest.plugins) {
+    if (typeof plugin !== 'object' || plugin === null) continue;
+    const p = plugin as { name?: unknown; source?: unknown; skills?: unknown };
+    if (p.name !== entry || typeof p.source !== 'string') continue;
+    const source = p.source.replace(/^\.\/+/, '').replace(/\/+$/, '');
+    const skills = Array.isArray(p.skills)
+      ? p.skills.filter((s): s is string => typeof s === 'string')
+      : [];
+    const skillPath = skills.find(s => s === entry || s.endsWith(`/${entry}`)) ?? source;
+    return { path: skillPath, skill: entry };
+  }
+  return null;
 }

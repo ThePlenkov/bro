@@ -2,10 +2,14 @@
  * `bro skills` spawn plane — resolving the skills CLI binary and
  * running it (POSIX direct, Windows through ComSpec with quoted argv).
  */
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { gitBin } from '@broject/core';
+import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import { isAbsolute, resolve, sep } from 'node:path';
-import type { SkillSource } from './skills-sources.ts';
+import { gitBin } from '@broject/core';
+import {
+  type MarketplaceManifest,
+  resolveMarketplaceEntry,
+  type SkillSource,
+} from './skills-sources.ts';
 
 /** A spawn target — `[file, ...prefixArgs]`: a resolved `skills` bin
  *  runs directly; the default is `npx -y skills@<pin>`. */
@@ -146,6 +150,55 @@ export function pinnedAddArgs(
     return addArgs(src, agents);
   }
   return addArgs({ ...src, repo: `${src.repo}@${ref}` }, agents);
+}
+
+export type ReadMarketplace = (
+  repo: string,
+  ref: string,
+  manifestPath: string
+) => MarketplaceManifest | null;
+
+/** Read a pinned manifest without cloning or modifying the upstream checkout.
+ * curl is invoked with fixed argv (the URL is one argument, never a shell
+ * command); callers can inject this seam in unit tests. */
+export const readMarketplace: ReadMarketplace = (repo, ref, manifestPath) => {
+  const url = `https://raw.githubusercontent.com/${repo}/${ref}/${manifestPath}`;
+  const proc = spawnSync('curl', ['--fail', '--silent', '--show-error', '--location', url], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  if (proc.error !== undefined || proc.status !== 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(proc.stdout ?? '');
+    return typeof parsed === 'object' && parsed !== null ? (parsed as MarketplaceManifest) : null;
+  } catch {
+    return null;
+  }
+};
+
+export function resolveMarketplace(
+  src: SkillSource & { kind: 'marketplace' },
+  ref: string,
+  read: ReadMarketplace = readMarketplace
+): (SkillSource & { kind: 'github' }) | null {
+  for (const manifestPath of [
+    '.claude-plugin/marketplace.json',
+    '.agents/plugins/marketplace.json',
+  ]) {
+    const manifest = read(src.repo, ref, manifestPath);
+    const selected = manifest === null ? null : resolveMarketplaceEntry(manifest, src.entry);
+    if (selected !== null) {
+      return {
+        kind: 'github',
+        repo: src.repo,
+        path: selected.path,
+        skill: selected.skill,
+        raw: src.raw,
+      };
+    }
+  }
+  return null;
 }
 
 /** The skills CLI's own verdict for a spawn — the process ran and
