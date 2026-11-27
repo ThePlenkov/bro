@@ -25,8 +25,8 @@
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { ClaimRow, EventInput } from '@broject/core';
 import { gitCommonDir } from '@broject/core';
-import type { EventInput } from '@broject/core';
 import { liveWorkEntries } from '@broject/rig';
 
 /** The drive's own head memory — one file per PR under
@@ -97,6 +97,45 @@ export function sessionArmedPrs(hooksDir: string, pr: number): string[] {
     }
   }
   return [...out];
+}
+
+/** Session ids whose registered worktree currently contains a PR head.
+ *
+ * The review host only tells drive that a remote ref moved; it does not
+ * carry the writer's session. The session ledger's worktree claim is the
+ * existing registration that lets us attribute the move without inventing
+ * another provenance store. A missing claim, or a head that is not checked
+ * out by that claimed worktree, deliberately proves nothing.
+ */
+export function sessionsWithOwnPush(opts: {
+  sessions: readonly string[];
+  head: string;
+  claims: readonly ClaimRow[];
+  worktrees: readonly { path: string; head: string }[];
+}): Set<string> {
+  const sessionIds = new Set(opts.sessions);
+  const claimedPaths = new Map<string, Set<string>>();
+  for (const claim of opts.claims) {
+    if (!sessionIds.has(claim.sid) || !claim.resource.startsWith('worktree:')) {
+      continue;
+    }
+    const path = claim.resource.slice('worktree:'.length);
+    const paths = claimedPaths.get(claim.sid) ?? new Set<string>();
+    paths.add(path);
+    claimedPaths.set(claim.sid, paths);
+  }
+  const own = new Set<string>();
+  for (const worktree of opts.worktrees) {
+    if (worktree.head !== opts.head) {
+      continue;
+    }
+    for (const [session, paths] of claimedPaths) {
+      if (paths.has(worktree.path)) {
+        own.add(session);
+      }
+    }
+  }
+  return own;
 }
 
 /** The event a moved head publishes to the session that armed the PR.

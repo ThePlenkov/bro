@@ -124,6 +124,7 @@ import {
   foreignPushEvent,
   readHeadMemory,
   sessionArmedPrs,
+  sessionsWithOwnPush,
   writeHeadMemory,
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
@@ -480,6 +481,30 @@ async function publishDriveAlert(
 /** The foreign-push signal — a PR a live session armed moved under it
  *  (spec bro-cqjd0). The bus REPORTS the move; it does not coordinate:
  *  nothing is blocked, no branch is protected, the session decides. */
+/** Resolve which of the armed sessions pushed this head themselves —
+ *  a session whose own worktree carried the commit never hears a
+ *  foreign alarm for it. */
+async function resolveOwnPushSessions(
+  ctx: Ctx,
+  sessions: string[],
+  head: string
+): Promise<Set<string>> {
+  if (ctx.claims === undefined || sessions.length === 0) {
+    return new Set<string>();
+  }
+  const claims = await ctx.claims
+    .list(ctx.project === undefined ? {} : { project: ctx.project })
+    .catch(() => []);
+  const listed = gitTry(['-C', ctx.mainRoot, 'worktree', 'list', '--porcelain']);
+  const worktrees = listed.code === 0 ? parseWorktreePorcelain(listed.out) : [];
+  return sessionsWithOwnPush({
+    sessions,
+    head,
+    claims,
+    worktrees,
+  });
+}
+
 async function signalForeignPush(
   ctx: Ctx,
   pr: number,
@@ -499,7 +524,12 @@ async function signalForeignPush(
   if (hooks === null) {
     return;
   }
-  for (const session of sessionArmedPrs(hooks, pr)) {
+  const sessions = sessionArmedPrs(hooks, pr);
+  const ownSessions = await resolveOwnPushSessions(ctx, sessions, head);
+  for (const session of sessions) {
+    if (ownSessions.has(session)) {
+      continue;
+    }
     try {
       await facade(
         'events',
