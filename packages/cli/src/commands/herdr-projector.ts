@@ -15,7 +15,7 @@
  * — assembled into the `Planes` the tick injects into the kit.
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
   type DiscoveredSession,
   gitCommonDir,
@@ -223,6 +223,19 @@ function readPlanes(ctx: PassCtx): Planes {
   };
 }
 
+/** Resolve the cross-session arm signal used by fleet-status pruning.
+ *  `.work` markers are repo-shared, unlike herdr's session-scoped
+ *  `worktree list`; only absolute checkout details can identify a row
+ *  without guessing from a basename. */
+function armedWorktrees(ctx: PassCtx): string[] {
+  const hooks = hooksDirOf(ctx.root);
+  if (hooks === null) return [];
+  return liveWorkEntries(hooks, ['.work'], ctx.now)
+    .map(e => (e.detail.startsWith('checkout:') ? e.detail.slice('checkout:'.length) : e.detail))
+    .filter(isAbsolute)
+    .map(path => resolve(path));
+}
+
 /** Foreign session rows are deliberately ephemeral. They are not inserted
  * into agents.json: the host plane is the owner of their truth, and the
  * projector only binds them to the matching worktree for this document. */
@@ -334,7 +347,7 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
       degraded: 'registry read',
     };
   }
-  return runFleetPass(ctx, {
+  return runFleetPass({ ...ctx, armedWorktrees: armedWorktrees(ctx) }, {
     planes: () => readPlanes(ctx),
     input: (t, planes) => treeInput(t, planes, ctx),
   });

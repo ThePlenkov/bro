@@ -1196,6 +1196,32 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.equal(readFleetState(path), undefined);
   });
 
+  test('pruning one session keeps another session armed worktree and drops an orphan', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-shared-'));
+    execFileSync('git', ['init', '-q', root]);
+    const foreign = join(root, 'preview-tree');
+    const orphan = join(root, 'orphan-tree');
+    mkdirSync(foreign);
+    mkdirSync(orphan);
+    const hooks = join(root, '.git', 'bro', 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, 'preview.work'), `session preview\ncheckout:${foreign}\n`);
+    const dir = stateDirOf();
+    const statusBase = join(root, '.git');
+    const f = statusFixture(root, 'w-prod');
+    const scope = createHash('sha1').update(statusBase).digest('hex').slice(0, 12);
+    writeFileSync(join(dir, `state-${scope}.json`), JSON.stringify(f.state));
+    assert.equal(fleetPass(root, dir, f).r.files, 1);
+    const current = readFileSync(fleetStatusPath(statusBase, root), 'utf8');
+    writeFileSync(fleetStatusPath(statusBase, foreign), current);
+    writeFileSync(fleetStatusPath(statusBase, orphan), current);
+
+    fleetPass(root, dir, f);
+
+    assert.ok(readFleetState(fleetStatusPath(statusBase, foreign)) !== undefined);
+    assert.equal(readFleetState(fleetStatusPath(statusBase, orphan)), undefined);
+  });
+
   test('the seq is monotonic per source — a clock regress cannot emit a stale one', () => {
     const root = armedRoot();
     const dir = stateDirOf();
