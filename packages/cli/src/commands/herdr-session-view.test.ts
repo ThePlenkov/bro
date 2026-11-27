@@ -415,6 +415,26 @@ describe('runSessionView --once', () => {
     assert.equal(report?.[report.indexOf('--state') + 1], 'working');
   });
 
+  test('an unreadable log reports degradation and resumes at EOF', async () => {
+    const f = fixture();
+    const logPath = join(f.worktree, 'late-agent.log');
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(statePath, doc({ worktree: f.worktree, log: logPath }));
+    const run = withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    writeFileSync(logPath, 'old head\n');
+    // Wake the pane after the file becomes readable. The first readable
+    // probe must establish EOF, rather than replaying the old head.
+    writeFleetState(statePath, doc({ worktree: f.worktree, log: logPath }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    writeFileSync(logPath, 'old head\nnew tail\n');
+    writeFleetState(statePath, doc({ worktree: f.worktree, log: logPath }));
+    await run;
+    assert.match(f.stdout(), /unreadable/);
+    assert.doesNotMatch(f.stdout(), /old head/);
+  });
+
   test('an acp provider state spawns the command and replays the load', async () => {
     const f = fixture();
     const agent = f.write('fake-agent.cjs', FAKE_AGENT);
