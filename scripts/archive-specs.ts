@@ -16,7 +16,6 @@ export interface SpecCandidate {
 }
 
 const KNOWN_STATUSES = new Set<string>(['closed', 'open']);
-const SKIP_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'coverage', '.nx', 'archive']);
 const BEAD_SPEC = /^bro-[\w.-]+\.md$/;
 const WORDS = /[A-Za-z0-9_.-]+/g;
 
@@ -88,9 +87,7 @@ class Repository {
     return entries.flatMap(entry => {
       const path = join(dir, entry.name);
       if (entry.isSymbolicLink()) return [];
-      if (entry.isDirectory()) {
-        return SKIP_DIRECTORIES.has(entry.name) ? [] : this.filesIn(path);
-      }
+      if (entry.isDirectory()) return this.filesIn(path);
       return entry.isFile() ? [path] : [];
     });
   }
@@ -123,23 +120,45 @@ class Repository {
     }
   }
 
-  private referencedIn(
-    file: string,
-    ids: Set<string>,
-    selfPath: (word: string) => string | undefined
-  ): string[] {
+  private referrerFiles(): string[] {
+    const roots = [
+      join(this.root, 'docs'),
+      join(this.root, 'site', 'content'),
+    ];
+    const files = roots.flatMap(root => this.filesIn(root));
+    const specs = join(this.root, 'specs');
+    try {
+      files.push(
+        ...fs
+          .readdirSync(specs, { withFileTypes: true })
+          .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+          .map(entry => join(specs, entry.name))
+      );
+    } catch {
+      // A repository without specs has no spec referrers.
+    }
+    for (const name of ['README.md', 'AGENTS.md']) {
+      const path = join(this.root, name);
+      if (fs.existsSync(path)) files.push(path);
+    }
+    return files;
+  }
+
+  private referencedIn(file: string, ids: Set<string>, candidate: string): string[] {
     const relativePath = relative(this.root, file);
     if (relativePath.startsWith(`specs${sep}archive${sep}`)) return [];
     const words = this.read(file)?.match(WORDS) ?? [];
-    return words.filter(word => ids.has(word) && selfPath(word) !== relativePath);
+    return words
+      .map(word => word.endsWith('.md') ? word.slice(0, -3) : word)
+      .filter(word => ids.has(word) && relativePath !== candidate);
   }
 
   references(candidates: string[]): Set<string> {
     const ids = new Set(candidates.map(path => basename(path, '.md')));
-    const candidateById = new Map(candidates.map(path => [basename(path, '.md'), path]));
     const referenced = new Set<string>();
-    for (const file of this.filesIn(this.root)) {
-      for (const word of this.referencedIn(file, ids, w => candidateById.get(w))) {
+    for (const file of this.referrerFiles()) {
+      const relativePath = relative(this.root, file);
+      for (const word of this.referencedIn(file, ids, relativePath)) {
         referenced.add(word);
       }
     }
