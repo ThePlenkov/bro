@@ -16,7 +16,7 @@ import type {
   Verdict,
 } from '@broject/core'
 import { appendRow, commentKey, readJournal } from './journal.ts'
-import { inferOutcome, replayMergedThreads } from './replay.ts'
+import { deferRefsFromExternalRef, inferOutcome, replayMergedThreads } from './replay.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -200,6 +200,11 @@ describe('inferOutcome', () => {
     const t = thread('T1')
     assert.equal(inferOutcome(t, ctx()), undefined)
   })
+})
+
+test('batch defer external refs expand to every thread, with scalar compatibility', () => {
+  assert.deepEqual(deferRefsFromExternalRef('["T1","T2"]'), ['T1', 'T2'])
+  assert.deepEqual(deferRefsFromExternalRef('T1'), ['T1'])
 })
 
 describe('replayMergedThreads', () => {

@@ -48,5 +48,5 @@ export type { RouteOption, RoutePickTrace } from './route-pick.ts';
 export { MATRIX_KIND, matrixQuestions, routeMatrix } from './matrix.ts';
 export { computeStats, formatStats } from './stats.ts';
 export type { JudgeStats, StatsOpts } from './stats.ts';
-export { inferOutcome, replayMergedThreads } from './replay.ts';
+export { deferRefsFromExternalRef, inferOutcome, replayMergedThreads } from './replay.ts';
 export type { InferenceCtx, ReplayOpts, ReplayResult } from './replay.ts';

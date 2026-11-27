@@ -222,6 +222,21 @@ async function probeThreads(opts: ReplayOpts, targets: PrKey[]): Promise<ThreadM
  *  no defer beads by definition — the set is empty, not an error; a
  *  real store failure warns and degrades (the defer signal is one of
  *  three, and dispositions usually cover act-driven defers). */
+export function deferRefsFromExternalRef(ref: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(ref);
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((id): id is string => typeof id === 'string' && id !== '')
+    ) {
+      return parsed;
+    }
+  } catch {
+    // Legacy scalar external_ref.
+  }
+  return [ref];
+}
+
 function loadDeferRefs(dir: string): Set<string> {
   const out = new Set<string>();
   try {
@@ -231,7 +246,9 @@ function loadDeferRefs(dir: string): Set<string> {
       limit: 0,
     })) {
       if (typeof row.external_ref === 'string' && row.external_ref !== '') {
-        out.add(row.external_ref);
+        // Batch act defer stores the complete thread set as a JSON array.
+        // Keep accepting the historical scalar form for plan/single defers.
+        for (const id of deferRefsFromExternalRef(row.external_ref)) out.add(id);
       }
     }
   } catch (err) {
