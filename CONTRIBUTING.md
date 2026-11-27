@@ -257,3 +257,384 @@ The seams:
 
 All emit `warning: <what> is deprecated — <advice>`. One line, on
 stderr, and the old path keeps working — that's the whole contract.
+
+## AGENTS.md detailed conventions and operations
+
+`AGENTS.md` is intentionally a short consumer contract. The detailed conventions and operations below remain available to contributors working on bro itself; this section preserves the implementation and operational notes that do not need to be loaded by every consuming agent.
+
+The original hook and command contract is retained here for contributors who
+need the full operational context:
+
+- `bro review act status` is the PR review gate; `threads` lists unresolved
+  threads, and `resolve`/`reply` mutate them.
+- `bro review debt collect` sweeps review debt on merged PRs; `debt next`
+  picks the top open finding.
+- `bro work drill down`/`up` creates scoped descent frames; close an open
+  frame with `--result` before stopping.
+- `bro self learn probe <question>` checks existing lessons before
+  investigating; `self learn capture` distills finished artifacts.
+- Plugin hooks rehydrate state at session start/post-compaction and stop once
+  for a touched drill frame, unresolved review threads, dirty worktree, or
+  open bead claim. Ambient repo state is context, not a block; connectors
+  report stop-gate state while hooks own arming.
+- Session-start context nudges when another live session is active in the
+  same repository, including across linked worktrees; this is detection only.
+
+## Pull request conventions
+
+- **PR size** — keep each PR to roughly 100 files or fewer. Larger units
+  ship as a `gh-stack` PR stack of independently green layers.
+- **Static-analysis-shaped seams** — every SAST finding class gets a
+  structural home before a config waiver: fs calls funnel through a
+  guarded `io` module (paths resolve inside a root or are
+  operator-named), computed object keys go through
+  `Object.entries`/`fromEntries`/`getOwnPropertyDescriptor` (never
+  `obj[key]` on outside data), configured patterns match through
+  dedicated matchers (never `new RegExp` on non-literals). If a linter
+  still misfires, the exclusion lives in `.codacy.yml` /
+  `.markdownlint.json` next to a written justification — pattern-wide,
+  never a per-line suppression.
+- **Green on first write** — CodeScene and SonarCloud grade every new
+  file in the delta; write code that passes them the first time, not
+  code that needs a refactor PR after the gates complain. Concretely:
+  cognitive complexity stays ≤15 per function — pick data-driven
+  structure over branching (a table or handler map instead of an
+  if-else chain, a config array rendered generically instead of six
+  near-identical JSX blocks, a predicate list instead of nested
+  guards). When a gate does flag new code, redesign the shape — do not
+  split a long function into five trivial ones to game the metric;
+  that is worse code, not better code.
+  Shapes the gates keep flagging (learned the hard way — write the
+  right side first): a function carrying >4 positional args → take one
+  context object; a discriminator `if/else` or `switch` → a handler map
+  keyed by the tag; a loop with conditionals inside → `filter`/`map`/
+  `flatMap` pipelines, or a table that drives the loop; JSX whose
+  render depends on the owner's state → one component per state branch;
+  N near-identical JSX blocks → one config array rendered generically;
+  index-as-key → a content-derived key; nested template literals →
+  hoist the inner one to a named const; `A && B || C` in shell → a real
+  `if/then/else` (it is NOT if-then-else); a legit argv/env path that a
+  scanner flags → per-line `// NOSONAR` with the reason (the repo's
+  convention — file-level exclusions are not honored); a test on a real
+  spawned process → poll for the exec'd identity before asserting
+  (`spawn` resolves at fork; `/proc` reads the parent's env first);
+  a computed key used to call a function (`SORTS[k](a,b)`, `MAP[t](x)`)
+  → `Object.getOwnPropertyDescriptor(map, k)?.value?.(...)` — the
+  dynamic-call SAST rule fires on plain `obj[k](...)`, and the
+  descriptor read also neutralizes prototype keys like `__proto__`
+  (call it with the map as receiver and treat a missing or
+  non-callable value as a failed dispatch — `undefined` is not a
+  result);
+  interactive viewport state (zoom/pan/drag) → a `useViewport` hook +
+  a render-only `*Svg`/`*Canvas` component, not all inside the parent.
+
+  Reviewer bots flag a second class — semantics, not shape. Learned
+  the same way, same contract (write the right side first): enum-like
+  facets (status/type/priority) → derive the universe from the data,
+  a hard-coded list silently hides legal values; a fallible fetch →
+  throw or degrade with an explicit flag, `res.ok ? data : []` makes
+  an outage look like an empty queue (and cache fallback belongs to
+  the caller, or cached data reads as live); a list endpoint →
+  paginate, `per_page=100` is a cap not a promise; a caller-supplied
+  path → never `rm -rf` it on failure, fall back to a scratch dir;
+  a publish push to a shared ref → retry by re-parenting onto the
+  latest tip; `fetch` ≠ `pull` (fetch updates remote refs, pull
+  advances the working set — pick the verb that reaches the read
+  path); plumbing commits → export a git identity first; a
+  caller-supplied repo ref → normalize URL/ssh/slug before use; a
+  workflow that runs `.ts` directly → pin `setup-node` (the runner
+  default is older than unflagged type stripping); an exported
+  snapshot → write it AFTER the replication it mirrors, not before;
+  an external numeric field → `Number.isInteger` + a defined
+  fallback, bare `Number()` leaks NaN; a file that must ride an
+  `ls-files -i` artifact sync → it must be gitignored or it never
+  ships; a direction-bearing relation (blocks/parent) → verify the
+  dep semantics against real data before encoding `a.blocks = [b]`;
+  a render-scoped `Date.now()` (or any per-render value) feeding a
+  `useMemo` dep → freeze it per mount (`useState(() => Date.now())`)
+  only when the value is meant to stay mount-stable — an unstable dep
+  recomputes the memo every render; inputs derived from changing
+  props/state keep their real deps, and a value that must age wants
+  a recompute at that cadence, not a mount freeze; a React `key`
+  from display text → a semantic slot id (label keys collide across
+  slots, index keys trip S6479); one `git push` carrying refs of
+  different criticality → separate pushes, a rejected best-effort
+  mirror must never re-enter the critical ref's retry loop; a
+  `// NOSONAR` comment → it must sit on the exact line the scanner
+  attributes (the call's first line), and formatters reflow comments
+  — keep the flagged construct on one ≤width line so a trailing
+  NOSONAR sticks; rendered untrusted text → mark the node
+  "never dangerouslySetInnerHTML" — the comment is the guard the next
+  refactor reads.
+
+  Merge-cycle prevention checklist (recurring review findings): validate
+  configuration at every ingress, not only in a sibling loader — schema
+  bounds must match parser predicates, and cross-field invariants such as
+  `burst >= spawnCost` must be rejected or made explicit before constructing
+  a gate. Keep quota/session accounting transactional: reserve every open
+  path, and refund already-charged resources when a later admission step
+  fails. Tests for queueing, concurrency, and caps must synchronize on a
+  state transition or held prompt, never a wall-clock sleep. Treat protocol
+  mounts as part of the API contract: validate the mount before proxying and
+  emit the documented response shape for each dialect. Distinguish expected
+  bad input from unexpected translator/runtime failures, preserving an
+  operator-visible error signal. For replication, capture the exact object
+  (commit/ref) before pushing, report best-effort mirror failures, and never
+  publish a value reread after a concurrent writer can change it.
+  Batch-2 additions: parse CLI arguments only in their flag zone (everything
+  after `--` is positional), and reject an explicitly supplied empty or
+  malformed value rather than treating it as a missing flag. Validate nullable
+  or external rows before reducing them, and assert the full response contract
+  (not only a zero exit status) when probing a subprocess or connector.
+  Preserve identity across state transitions: correlation fallbacks must be
+  stable for the whole request, cache keys and reset metadata must use the
+  same canonical identity, and capped/orphan events must not inflate counters.
+  Every async/process/resource path needs a visible terminal cleanup (close
+  descriptors, release reservations, kill timed-out children, and handle
+  rejected background promises); network fetches need a bounded timeout. Never
+  turn an upstream failure into an empty successful result or retry a
+  non-retryable error; retain the original operator-visible cause.
+- **Loop with retro** — when a gate or check fails, iterate until it is
+  green and learn from each failure: after every red round, name the
+  concrete finding (which rule, which function), the shape that caused
+  it, and the pattern that would have avoided it, then carry that
+  pattern into the next write. A failure that teaches nothing produces
+  the same failure again next PR — the retro is what makes the loop
+  converge instead of bouncing between flags. Review threads follow
+  the same loop: a fixed finding resolves silently, a rejected one
+  gets a one-line rationale in the thread, and a finding class the
+  lists above don't name yet becomes a new entry there — not just a
+  fix here. And never iterate by pushing and waiting for the App's
+  verdict: `npm run check:codescene` runs the same `cs delta` locally
+  and lists every finding in one pass — fix them all, then push once.
+- **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
+  (unflagged type stripping); scripts and sources are always `.ts`,
+  invoked directly (`node scripts/x.ts`).
+- **Plugin-shaped growth** — each capability ships as a CLI subcommand +
+  skill + config section. bro is a plugin system on top of beads (and more):
+  agents orchestrate by pushing work into shared, schema-validated plans
+  and workflows rather than re-deriving mechanics in prompts.
+- **Provider-agnostic core** — bro is a general agent framework; every
+  agent kind is an interchangeable provider plugin. Naming a provider
+  in a comment, doc, or config example is fine; what must never sit in
+  shared paths is provider-specific LOGIC — branching on a kind, a
+  kind's CLI flags/session semantics, its cloud API, its rate-limit
+  shape. Those live in the provider package (`@broject/devin`, …);
+  core calls the generic seam. Env constants (`DEVIN_SESSION_ID`, …)
+  and kind-namespaced config keys (`agents.<kind>.*`) are integration
+  facts, not violations. The cleanup epic is bro-751ah.
+- **One portable package** — the product is an
+  [Agent Plugin](https://agent-plugins.org/) whose skills are
+  [Agent Skills](https://agentskills.io/): root `plugin.json` plus
+  `skills/<name>/SKILL.md`. Those two specs are the contract for every
+  agent. Claude, Codex, Cursor, Devin, and the rest get only the extra
+  files that client needs on top — a hook event map, a client manifest.
+  They do not get a `skills/` tree, a symlink to one, or a second
+  portable manifest. A client that cannot see `skills/` until the
+  plugin root is the repo root is installed from the repo root.
+- **Config has three layers** — `~/.config/bro/config.{ts,json}` is the
+  global operator file (providers, judge, fleet, agent spawn templates),
+  `bro.config.{ts,json}` is committed project policy (act, sdd, guard,
+  debt, stack), `bro.config.local.{ts,json}` is the gitignored
+  machine-local override. They merge local > project > global; keep
+  operator settings out of the committed file — `bro doctor` warns on
+  misplaced sections.
+- **Unified plans** — commands that take structured input (act, plan,
+  backlog, retro, drill, …) accept a plan payload validated against a
+  per-command plan schema; CLI flags alone are not the contract. Every
+  plan kind ships its authoring schema at
+  `packages/cli/schemas/plans/<kind>.schema.json` — `bro plan describe
+  <kind>` prints it (the embedded example as a TOML template), and a
+  plan file may pin it via `"$schema"`.
+- **Verify like CI** — before claiming "tests pass", run the exact
+  command CI runs (`npm test` → `tsx --test`), not a hand-picked
+  runner; harness differences are real bugs' favorite hiding place.
+  Local green ≠ PR green — after every push, `bro review act status` +
+  `bro review act threads` are the only verdict.
+- **Resolve conflicts by hunk, never by side** — `git checkout
+  --ours/--theirs` reverts the other side's concurrent changes in the
+  whole file, and the reverted work is invisible in your diff. (`rebase
+  -X` is narrower — it picks a side only inside conflicting hunks and
+  still merges nonconflicting changes; it is fine when the intent is
+  exactly that.) Resolve the hunks, then audit the resolved file
+  against the current target tip: `git diff <target-tip> -- <file>`
+  must show only your hunks — a removed line the PR never touched is
+  dropped concurrent work.
+- **Hand-edited config is JSONC, not JSON** — files users edit
+  (nx.json, tsconfig, `.vscode/*.json`) may carry comments and custom
+  formatting. Parse with `jsonc-parser` (declared as a direct
+  dependency of the package importing it — never rely on transitive
+  hoisting), throw on collected errors, write via
+  `modify`/`applyEdits` — a `JSON.parse`+`stringify` round-trip
+  destroys comments and formatting. Exception: `package.json` and
+  other manifest/lock files are strict JSON — comments there break npm
+  and repo tooling; use plain `JSON.parse` and never add comments.
+- **Merged options, never raw** — once `const merged = {...DEFAULTS,
+  ...options}` exists, every read of an effective value below it goes
+  to `merged`; a raw `options.x` reads `undefined` where callers
+  relied on the default. Reading raw `options` stays legal only when
+  caller intent itself is the question — `x in options`, presence
+  checks that distinguish "explicitly passed" from "defaulted".
+- **Infra failures don't block** — the gate rule: project-caused
+  failures (code, config, real findings) block; infrastructure failures
+  (quota, outage, runner flakes) never do. A _failed_ AI-reviewer check
+  is pure infra — its findings arrive as threads, which block on their
+  own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
+  bro.config.json so a stuck pending state doesn't block either —
+  currently `"github-advanced-security"`, `"kilo"`, `"sonarcloud"`,
+  `"codescene"`, `"codacy"` (rate limits / structural deltas / stale
+  analysis snapshots; advisory, may still
+  be read — `check:docs` fails if this quote rots; naming a static
+  scanner overrides its must-fix default: findings still read,
+  verdicts don't gate).
+  The
+  ignore is conditional: a failing ignored check is dropped quietly
+  only after `consecutiveFailures` failing heads in a row _with_
+  thread activity inside `threadWindowDays` — a failing check with no
+  recent thread output surfaces as an alert (advisory, never a
+  blocker), because a reviewer producing nothing is down, not flaky.
+- **PR refs are links** — any user-facing reply or bro output line that
+  names a PR renders it as `[#N](https://github.com/<owner>/<repo>/pull/N)`,
+  never bare `#N`. `prLink()` in `@broject/core` formats it; TSV/data rows
+  keep the bare number (parsed, not read).
+- **Never leave uncommitted changes** — every unit of work lands on a
+  branch, is committed, pushed, and opened as a PR. The draft flag
+  mirrors the merge target: draft iff a human merges (`merge=human`);
+  the convoy default (`merge=auto`) opens a ready PR — the act gate is
+  the merge mechanism. A dirty tree at session end is lost work.
+- **Auto-merge is armed at PR creation** — `gh pr merge --auto
+  --squash` right after `gh pr create`, every PR: it lands the merge
+  once GitHub's required checks pass. What auto-merge does NOT see:
+  unresolved review threads — the act gate owns that loop
+  (`bro review act` drives fixes/resolves per thread until the gate
+  is green). `bro review act wait <PR> --merge --cleanup --bead <id>
+  --detach` is the watcher of record: default `--timeout 45` minutes,
+  it does NOT re-arm itself — `bro review act rearm` resurrects a dead
+  watcher only (a timed-out one has already dropped its marker; arm a
+  fresh `act wait`). Auto-merge and the watcher are complementary:
+  whichever sees green first merges. When the watcher merges it runs
+  the post-merge cleanup itself; when GitHub auto-merge wins, cleanup
+  is NOT guaranteed — branch deletion and bead closure fall to
+  `bro review drive` or the operator.
+- **Never delete the working directory of a live session** — a session's
+  cwd is pinned by its harness: removing that directory (or the worktree
+  that holds it) does not error, it kills the session — the next shell
+  call comes back `Working directory does not exist` and the agent is
+  done until the path is recreated by hand. So cleanup of a merged
+  worktree is never the session's own job: another session (or the
+  operator) removes it, and automated cleanup (`act wait --cleanup`, the
+  drive/loop reapers) must skip any worktree a live session's cwd sits
+  in — "it is only cleanup" is exactly how a session deletes itself. To
+  leave a finished tree, detach in place (`git checkout --detach`) and
+  leave the directory alone; re-adding a path that still exists fails
+  with `already exists`, so a path is re-added only after it has been
+  removed, from another directory. Before any `rm`/`mv`/`rmdir`/trash/
+  worktree-removal, check the target against `pwd` and the session's
+  worktree — if they intersect, the command is wrong, not the session.
+  The rule is in the global agent file too, so it reaches every client
+  on the box.
+- **One executor per unit of work** — an interactive session (opencode,
+  claude, a terminal) owns what it plans and executes it _there_; bro is
+  the bus — the claim, the ledger, the mailbox, the supervision — plus a
+  batch lane that takes only work nobody owns. The occupancy plane skips
+  a worktree a live session armed (`green-occupied — session armed work
+  on <slug>`), so bro's fixers never land where a session is working.
+  Two writers on one tree is the conflict this rule exists to prevent:
+  the lanes race for the same branch, the same PR, and a review bot's
+  auto-fix push rewrites a branch mid-edit. Plan it in opencode → run it
+  in opencode; plan it in bro → let bro run it. Never both. The provider
+  budget is shared too — the batch lane spends the account's allowance,
+  so it takes only what the operator's own sessions do not need
+  (`agents.<kind>.maxBatchWorkers`; spec bro-9h86l).
+- **No spawning beside a foreign agent** — `prepareSpawn` refuses
+  `external agent active` on every spawn path (loop, drive fixers,
+  `bro fleet agents up`, convoy, all backends) while an agent this rig
+  does not own is actively working on the host. External-activity
+  planes (`external-planes.ts` in core) answer per ecosystem: devin
+  session locks minus `BRO_AGENT_ID`/`BRO_HOOKS=0`-badged sessions,
+  opencode `/proc` procs, copilot remote tasks minus this registry's
+  taskIds, live foreign-owned `.work`/`.task` markers. A session is
+  active while its proven stamps sit inside `spawn.externalIdleSec`
+  (default 480s); `spawn.externalBlock: false` is the explicit opt-out.
+  The session-quota lanes and provider walls refuse independently —
+  the exclusion is a second guard, not a replacement (spec bro-eqi2d).
+- **Quota-paced serial subagents** — a heavy fixer round gets one PR per
+  spawn. Before dispatching, put the ordered work queue in a durable bead;
+  never rely on the prompt or chat history to resume it. A rate-limit or
+  ProviderWall freezes further spawns until the recorded reset plus a safety
+  margin, and `bro fleet can-spawn <provider>` is the cheap pre-flight
+  check. Fixer workers read status and threads for every assigned PR first,
+  then fix in ascending estimated cost, stopping with a near-budget marker.
+- **Foreign findings become requests, never patches** — work that
+  belongs to another repo is posted to that rig's inbox, never
+  edited in place: `bro mesh request <repo> <title> --for <bead>` drops
+  the request bead and pins an `external:<rig>:<id>` edge on mine —
+  a marker, not a gate; `bro mesh wait <id>` point-checks the
+  answer between turns. Do not use `bro wait` for a point check:
+  `bro wait external:<rig>:<id>` is the bounded watcher when the
+  wait must block — armed like `act wait`, never a foreground idle.
+  The dep edge in bd is the truth that
+  frees the work; the watcher is a convenience, and its exit code
+  is the verdict (0 free · 1 unreadable · 2 unresolved ·
+  3 actionable · 4 timeout). A rig with no checkout is reached over
+  the remote planes (specs/cross-repo/bro-kim1e): a `github` peer
+  binding (github.com remote + `login`) delivers `bro mesh request` as a
+  prose issue + `request` record comment and reads replies back
+  through issue comments; a `wasteland` binding (`wl://`) posts a
+  wanted row onto the commons board. Both mirror a bead into the
+  requester's own store — never wire `external:` deps on these
+  planes (bd can't resolve a github issue or board row), and never
+  patch the foreign repo's code in place.
+- **Merged ≠ live for the daemon** — a merged change only protects the
+  fleet once the binary the supervisor exec'd is rebuilt AND the daemon
+  restarted (a running process never reloads dist): `npm run build` for
+  a dist-backed daemon, rebuild + reinstall for a published install,
+  then `bro fleet daemon down && bro fleet daemon up`. `bro doctor`'s
+  `daemon` row compares the running binary against the repo, so protections
+  live only after the CLI the daemon runs is rebuilt and the daemon restarted.
+
+## Convoy fan-out — detach + pins
+
+Running several molecules at once means spawning detached workers, never
+serializing them inside one session. The spawn path is the facade —
+`bro fleet agents`, `bro flow convoy run`, `bro review drive` — never a hand-rolled
+nohup: an unregistered worker has no claim, no `.exit` record, no
+`bro fleet agents status`/`down` reach, and it burns budget outside
+`fleet.maxConcurrent` and the exit-cause taxonomy.
+
+- **Spawn through the registry.** `bro fleet agents up <mol-step>` spawns one
+  step's worker — the native backend is a `sh -c` spawn in its own
+  process group, parent-unref'd (nohup-equivalent), wired through
+  connector resolution, the `agents.<backend>.command` template, and
+  the shared beads environment. A molecule **queue** is `bro flow convoy run
+  <mol>…` (or `--open`) — sequential runner agents on the mol roots,
+  crash/exit classification and the fleet cap included. Post-PR
+  supervision is `bro review drive` — orphaned threads get a fixer agent,
+  orphaned green PRs merge. Prompts and logs land in
+  `<git-common>/bro/agents/` — never argv (every local user reads `ps`),
+  never world-readable `/tmp`.
+- **Pin the handles at spawn.** pid, run id, log path, claimed step. The
+  registry writes them to `<git-common>/bro/agents.json` plus
+  `<git-common>/bro/agents/<agentId>.{prompt.md,log,stderr}` and the
+  attempt-scoped `<agentId>.<runId>.{handle,go,exit}` — the worker
+  publishes `handle` itself and holds on the launcher's `go` stamp, so
+  an unadmitted survivor can never double a respawn — `bro fleet agents
+  status`, `down`, and respawn all key off that entry.
+- **Monitor by point checks, never by waiting.** `bro fleet agents status`,
+  `bro fleet`, `bro review watch`, a fresh `bro flow convoy next` — between turns,
+  not in a blocking loop. A synchronous `get_output` or `sleep` wait on
+  detached work blocks the conversation and buys nothing (retro
+  bro-lmdj).
+- **Completion is detected, not awaited.** `bro fleet agents status` →
+  `exited`/`blocked`, then read the exit record — `<agentId>.<runId>.exit`
+  holds the code, the entry's `cause`/`resetAt` the why. `bro flow convoy
+  run` already supervises its own spawns to a verdict — hand a mol list
+  to it instead of babysitting. Never promise "I'll report when it
+  lands" from a foreground wait.
+
+## Cursor Cloud specific instructions
+
+- **Node on PATH:** the platform shim may expose Node <22.18. `scripts/cloud-agent-install.sh` installs Node ≥22.18 into `/usr/local/bin` but cannot change the calling shell's PATH — run `export PATH="/usr/local/bin:$PATH"` in your current shell before `node`, `npm`, or `bro`.
+- **Bootstrap:** `bash scripts/cloud-agent-install.sh` (same as `.cursor/environment.json` `install`) — `npm ci`, checksum-verified `bd` binary into `/usr/local/bin` when missing.
+- **Verify like CI:** `npm run build`, `npm run typecheck`, `npm test` (root `package.json`; matches `.github/workflows/ci.yml` plus `check:plugins` / `check:embedded`).
+- **Smoke the CLI:** after build, `./packages/cli/dist/index.js doctor` and `./packages/cli/dist/index.js debt status` (needs `gh` authenticated).
