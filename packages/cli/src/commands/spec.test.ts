@@ -403,28 +403,90 @@ describe('sddConnector', () => {
   // claims under a newer .task marker is foreign work (the executor
   // owns its spec), excluded from every probe at once
   test('a claim a newer live sibling marker also holds is delegated — never nudged', async () => {
-    await withRepo({ claims: ['b1'] }, async dir => {
-      // s1 claimed first (the fixture marker); the executor session's
-      // fresher claim wins the bead and its spec obligation
-      const hooks = join(dir, '.git', 'bro', 'hooks');
-      // the orchestrator's claim is the OLDER one — the markers may be
-      // written inside one millisecond, so age s1's back explicitly
-      const s1 = join(hooks, 's1.task');
-      const claimedAt = new Date(Date.now() - 60_000);
-      utimesSync(s1, claimedAt, claimedAt);
-      // the executor's claim reads strictly NEWER by birth — a coarse
-      // clock may stamp both inside one tick, so recreate s2 until its
-      // birth separates (mtime order is already older)
-      if (
-        !birthAfter(join(hooks, 's2.task'), '2026-01-01T00:00:00Z\nb1\n', statSync(s1).birthtimeMs)
-      )
-        return;
-      const h = probe(dir);
-      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
-      assert.deepEqual(await h.stopGate!(ctx(dir)), []);
-      const start = await h.sessionStart!(ctx(dir));
-      assert.equal(start.filter(l => l.includes('spec missing')).length, 0);
-    });
+    await withRepo(
+      {
+        claims: ['b1'],
+        // The marker is only an attempted claim. The serving store confirms
+        // that the sibling session actually owns the bead.
+        list: '[{"id":"b1","status":"in_progress","title":"thing","issue_type":"task","assignee":"s2"}]',
+      },
+      async dir => {
+        // s1 claimed first (the fixture marker); the executor session's
+        // fresher claim wins the bead and its spec obligation
+        const hooks = join(dir, '.git', 'bro', 'hooks');
+        // the orchestrator's claim is the OLDER one — the markers may be
+        // written inside one millisecond, so age s1's back explicitly
+        const s1 = join(hooks, 's1.task');
+        const claimedAt = new Date(Date.now() - 60_000);
+        utimesSync(s1, claimedAt, claimedAt);
+        // the executor's claim reads strictly NEWER by birth — a coarse
+        // clock may stamp both inside one tick, so recreate s2 until its
+        // birth separates (mtime order is already older)
+        if (
+          !birthAfter(
+            join(hooks, 's2.task'),
+            '2026-01-01T00:00:00Z\nb1\n',
+            statSync(s1).birthtimeMs
+          )
+        )
+          return;
+        const h = probe(dir);
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
+        assert.deepEqual(await h.stopGate!(ctx(dir)), []);
+        const start = await h.sessionStart!(ctx(dir));
+        assert.equal(start.filter(l => l.includes('spec missing')).length, 0);
+      }
+    );
+  });
+
+  test('a newer sibling marker whose claim was refused still nudges', async () => {
+    await withRepo(
+      {
+        claims: ['b1'],
+        list: '[{"id":"b1","status":"in_progress","title":"thing","issue_type":"task","assignee":"test-agent"}]',
+      },
+      async dir => {
+        const hooks = join(dir, '.git', 'bro', 'hooks');
+        const s1 = join(hooks, 's1.task');
+        const claimedAt = new Date(Date.now() - 60_000);
+        utimesSync(s1, claimedAt, claimedAt);
+        if (
+          !birthAfter(
+            join(hooks, 's2.task'),
+            '2026-01-01T00:00:00Z\nb1\n',
+            statSync(s1).birthtimeMs
+          )
+        )
+          return;
+        assert.match((await probe(dir).promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/);
+        assert.equal((await probe(dir).stopGate!(ctx(dir))).length, 1);
+      }
+    );
+  });
+
+  test('an unverified sibling claim is conservative and still nudges', async () => {
+    await withRepo(
+      {
+        claims: ['b1'],
+        // Missing assignee means the store cannot prove the sibling's claim.
+        list: '[{"id":"b1","status":"in_progress","title":"thing","issue_type":"task"}]',
+      },
+      async dir => {
+        const hooks = join(dir, '.git', 'bro', 'hooks');
+        const s1 = join(hooks, 's1.task');
+        const claimedAt = new Date(Date.now() - 60_000);
+        utimesSync(s1, claimedAt, claimedAt);
+        if (
+          !birthAfter(
+            join(hooks, 's2.task'),
+            '2026-01-01T00:00:00Z\nb1\n',
+            statSync(s1).birthtimeMs
+          )
+        )
+          return;
+        assert.match((await probe(dir).promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/);
+      }
+    );
   });
 
   test('an older sibling claim does not take the bead — ours still nudges', async () => {
@@ -495,24 +557,34 @@ describe('sddConnector', () => {
   });
 
   test('a re-arm of this session does not take back delegated work', async () => {
-    await withRepo({ claims: ['b1'] }, async dir => {
-      const hooks = join(dir, '.git', 'bro', 'hooks');
-      if (!birthStable(hooks)) return;
-      // the executor claimed after us — its birth strictly newer →
-      // b1 is delegated, nothing to nag
-      const s1 = join(hooks, 's1.task');
-      if (
-        !birthAfter(join(hooks, 's2.task'), '2026-01-01T00:00:00Z\nb1\n', statSync(s1).birthtimeMs)
-      )
-        return;
-      const h = probe(dir);
-      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
-      // we arm more work — the rewrite refreshes our marker's stamp +
-      // mtime; under mtime order b1 would flip back to ours and re-nag
-      writeFileSync(s1, `${Date.now()}\nb1\nb9\n`);
-      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
-      assert.deepEqual(await h.stopGate!(ctx(dir)), []);
-    });
+    await withRepo(
+      {
+        claims: ['b1'],
+        list: '[{"id":"b1","status":"in_progress","title":"thing","issue_type":"task","assignee":"s2"}]',
+      },
+      async dir => {
+        const hooks = join(dir, '.git', 'bro', 'hooks');
+        if (!birthStable(hooks)) return;
+        // the executor claimed after us — its birth strictly newer →
+        // b1 is delegated, nothing to nag
+        const s1 = join(hooks, 's1.task');
+        if (
+          !birthAfter(
+            join(hooks, 's2.task'),
+            '2026-01-01T00:00:00Z\nb1\n',
+            statSync(s1).birthtimeMs
+          )
+        )
+          return;
+        const h = probe(dir);
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
+        // we arm more work — the rewrite refreshes our marker's stamp +
+        // mtime; under mtime order b1 would flip back to ours and re-nag
+        writeFileSync(s1, `${Date.now()}\nb1\nb9\n`);
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), []);
+        assert.deepEqual(await h.stopGate!(ctx(dir)), []);
+      }
+    );
   });
 
   test('a gate block the session cannot see must not consume the nudge', async () => {

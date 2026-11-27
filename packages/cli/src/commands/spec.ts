@@ -238,11 +238,14 @@ function delegatedTaskClaims(
   hooks: string,
   mine: Set<string>,
   ctx: ConnectorCtx,
+  rows: TaskRow[],
+  actor: string,
   now: number = Date.now()
 ): Set<string> {
   const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
   const ownStamp = new Map<string, number>();
   const foreignStamp = new Map<string, number>();
+  const foreignOwners = new Map<string, Set<string>>();
   let files: string[];
   try {
     files = readdirSync(hooks);
@@ -262,12 +265,43 @@ function delegatedTaskClaims(
       foldMarkerStamps(ownStamp, marker.lines.slice(1), marker.stamp);
     } else if (side === 'foreign') {
       foldMarkerStamps(foreignStamp, marker.lines.slice(1), marker.stamp);
+      const owner = f.slice(0, -'.task'.length);
+      for (const id of marker.lines
+        .slice(1)
+        .map(line => line.trim())
+        .filter(Boolean)) {
+        const owners = foreignOwners.get(id) ?? new Set<string>();
+        owners.add(owner);
+        foreignOwners.set(id, owners);
+      }
     }
   }
   const out = new Set<string>();
+  // A marker records an attempted claim, not its outcome. The marker's
+  // session id is the only identity available for a sibling, so only rows
+  // whose assignee confirms that sibling are eligible for delegation. The
+  // actor probe must also succeed; if either side cannot be verified, leave
+  // the id with this session rather than turn an unavailable probe into a
+  // false ownership proof.
+  const verified = new Set(
+    rows
+      .filter(r => {
+        const owners = foreignOwners.get(r.id);
+        return (
+          actor !== '' &&
+          owners !== undefined &&
+          r.assignee !== undefined &&
+          r.assignee
+            .split(',')
+            .map(a => a.trim())
+            .some(a => owners.has(a))
+        );
+      })
+      .map(r => r.id)
+  );
   for (const id of mine) {
     const foreign = foreignStamp.get(id);
-    if (foreign !== undefined && foreign > (ownStamp.get(id) ?? 0)) {
+    if (verified.has(id) && foreign !== undefined && foreign > (ownStamp.get(id) ?? 0)) {
       out.add(id);
     }
   }
@@ -330,7 +364,8 @@ async function ownClaimsMissingSpec(ctx: ConnectorCtx): Promise<TaskRow[]> {
     const spec = specs(ctx.dir);
     // a bead ANOTHER live session claims under a newer marker is
     // delegated work — the executor owns its spec, not this session
-    const delegated = hooks === null ? new Set<string>() : delegatedTaskClaims(hooks, mine, ctx);
+    const delegated =
+      hooks === null ? new Set<string>() : delegatedTaskClaims(hooks, mine, ctx, rows, me);
     return rows.filter(
       r => isOwnClaim(r, mine, me) && !delegated.has(r.id) && specState(r, spec) === 'missing'
     );
