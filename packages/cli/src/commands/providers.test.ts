@@ -297,6 +297,17 @@ describe('bro providers add', () => {
     });
   });
 
+  test('add rejects prototype-chain keys as unknown flags', async () => {
+    const { root: dir, main } = initRepo('bro-prov-add-');
+    await insideAsync(main, dir, async () => {
+      // operator-controlled argv must never index the dispatch table by
+      // prototype: 'constructor' is not a real flag, it dies unknown.
+      const r = await capture(() => runProvidersCommand(['add', 'kilo', '--constructor']));
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /unknown flag/);
+    });
+  });
+
   test('add refuses to clobber without --force', async () => {
     const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {

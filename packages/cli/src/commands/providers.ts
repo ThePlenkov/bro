@@ -344,7 +344,10 @@ const ADD_ARG_HANDLERS: Record<string, AddArgHandler> = {
  *  consumed (a `--name <value>` pair consumes one extra token). */
 function applyAddArg(parsed: ParsedAdd, argv: string[], i: number): number {
   const a = argv[i]!;
-  const handler = ADD_ARG_HANDLERS[a];
+  // Object.hasOwn first — argv is operator-controlled input and a plain
+  // object lookup would answer for prototype keys ('constructor', …);
+  // the same guard seam as drill.ts / bus.ts dispatch tables.
+  const handler = Object.hasOwn(ADD_ARG_HANDLERS, a) ? ADD_ARG_HANDLERS[a] : undefined;
   if (handler !== undefined) {
     return handler(parsed, argv, i);
   }
