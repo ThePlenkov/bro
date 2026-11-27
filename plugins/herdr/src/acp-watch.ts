@@ -365,6 +365,10 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
   // --cmd is argv words, never a shell line: shellWords parses quotes
   // and escapes but performs no expansion, so the command cannot
   // re-parse into a different program (CodeQL: no env-derived shell).
+  // eslint-disable-next-line security/detect-child-process -- running the operator's own
+  // --cmd IS this watcher's job (a pane supervisor); shellWords keeps it argv-only
+  // with no shell re-parse, so the spawned program cannot differ from what the
+  // operator typed. Same seam class as the .codacy.yml exclude-path entries.
   const child: ChildProcess = spawn(cli.cmdArgv[0] as string, cli.cmdArgv.slice(1), {
     cwd: cli.cwd,
     // BRO_HOOKS=0 — a machine backend: bro hooks no-op in the child
