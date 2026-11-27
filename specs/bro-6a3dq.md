@@ -35,8 +35,9 @@ Scan `<git-common>/bro/hooks/*.task` once per probe:
 - Any other marker counts **foreign only when live** — `markerLive`:
   an owned marker lives while its owner pid does; an ownerless marker
   falls back to the 24h mtime window (`LIVE_CLAIM_MS`, the
-  armed-work nudge's horizon). A dead session's claim is residue and
-  must not mask the nudge.
+  armed-work nudge's horizon), rejecting mtimes more than the shared
+  60-second clock-skew tolerance in the future. A dead session's claim
+  is residue and must not mask the nudge.
 - For each bead id, track the newest **claim stamp** per side — the
   marker's file *birth* time where the fs reports it (`birthtimeMs`
   via statx), mtime otherwise. `armSession` rewrites a marker's stamp

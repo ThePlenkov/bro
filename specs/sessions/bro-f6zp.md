@@ -42,9 +42,10 @@ Reap rules (bead RULES, made concrete):
 3. **Session-scoped state needs an owner or an expiry.** A session's
    footprint is its hooks markers `<sid>.<aspect>` — registry-present
    while ANY marker could still arm a gate (`markerLive` on the marker
-   TTL: owner pid alive, or ownerless mtime inside `MARKER_TTL_MS` —
-   reaping uses the armed-state bar, not the 24h detection one, since
-   deleting a marker disarms a stop gate). A session with no present
+   TTL: owner pid alive, or ownerless mtime inside `MARKER_TTL_MS` and
+   the shared 60-second future-mtime tolerance — reaping uses the
+   armed-state bar, not the 24h detection one, since deleting a marker
+   disarms a stop gate). A session with no present
    marker is dead; its state reaps when its worktree is also gone — no
    `.work` marker detail line resolving to an existing absolute path
    (the conjunctive clause keeps a dead-owned marker whose checkout

@@ -825,6 +825,7 @@ export type { CommandErrorClassification } from './errors.ts';
 export {
   groupMemberAlive,
   handleOwner,
+  MARKER_CLOCK_SKEW_MS,
   markerLive,
   markerOwner,
   pidAlive,
