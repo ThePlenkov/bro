@@ -1301,6 +1301,11 @@
     },
     {
       "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Maintenance utility whose domain is paths — advisory ratio metrics (Primitive Obsession/String Heavy) are categorical and non-actionable here; the critical-rule safety net (Bumpy Road/Deep Nested/Low Cohesion/Brain) keeps bro's bar.",
+      "matching_content_path": "scripts/archive-specs.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "scripts/check-onboarding.ts"
     },
