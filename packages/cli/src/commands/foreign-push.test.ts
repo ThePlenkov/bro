@@ -8,6 +8,7 @@ import {
   foreignPushEvent,
   readHeadMemory,
   sessionArmedPrs,
+  sessionsWithOwnPush,
   writeHeadMemory,
 } from './foreign-push.ts'
 
@@ -96,6 +97,48 @@ describe('the armed sessions', () => {
 })
 
 describe('the foreign-push event', () => {
+  test('a head checked out by the armed session worktree is own', () => {
+    const own = sessionsWithOwnPush({
+      sessions: ['ses-a', 'ses-b'],
+      head: 'bbbb',
+      claims: [
+        {
+          resource: 'worktree:/repo/work/a',
+          host: 'host',
+          sid: 'ses-a',
+          project: 'project',
+          exclusive: true,
+          leaseUntil: null,
+          claimedAt: 1,
+        },
+        {
+          resource: 'worktree:/repo/work/b',
+          host: 'host',
+          sid: 'ses-b',
+          project: 'project',
+          exclusive: true,
+          leaseUntil: null,
+          claimedAt: 1,
+        },
+      ],
+      worktrees: [
+        { path: '/repo/work/a', head: 'bbbb' },
+        { path: '/repo/work/b', head: 'aaaa' },
+      ],
+    })
+    assert.deepEqual([...own], ['ses-a'])
+  })
+
+  test('an unregistered worktree does not make a push own', () => {
+    const own = sessionsWithOwnPush({
+      sessions: ['ses-a'],
+      head: 'bbbb',
+      claims: [],
+      worktrees: [{ path: '/repo/work/a', head: 'bbbb' }],
+    })
+    assert.deepEqual([...own], [])
+  })
+
   test('is addressed to the session and keyed per head', () => {
     const ev = foreignPushEvent({
       pr: 599,

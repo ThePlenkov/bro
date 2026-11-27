@@ -124,6 +124,7 @@ import {
   foreignPushEvent,
   readHeadMemory,
   sessionArmedPrs,
+  sessionsWithOwnPush,
   writeHeadMemory,
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
@@ -499,7 +500,25 @@ async function signalForeignPush(
   if (hooks === null) {
     return;
   }
-  for (const session of sessionArmedPrs(hooks, pr)) {
+  const sessions = sessionArmedPrs(hooks, pr);
+  let ownSessions = new Set<string>();
+  if (ctx.claims !== undefined && sessions.length > 0) {
+    const claims = await ctx.claims
+      .list(ctx.project === undefined ? {} : { project: ctx.project })
+      .catch(() => []);
+    const listed = gitTry(['-C', ctx.mainRoot, 'worktree', 'list', '--porcelain']);
+    const worktrees = listed.code === 0 ? parseWorktreePorcelain(listed.out) : [];
+    ownSessions = sessionsWithOwnPush({
+      sessions,
+      head,
+      claims,
+      worktrees,
+    });
+  }
+  for (const session of sessions) {
+    if (ownSessions.has(session)) {
+      continue;
+    }
     try {
       await facade(
         'events',
