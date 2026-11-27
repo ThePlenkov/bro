@@ -346,12 +346,32 @@ function pushMissingRequired(ctx: VCtx, value: Record<string, unknown>): void {
   }
 }
 
+/** Validate object keys independently of their values. This is the draft-07
+ *  `propertyNames` keyword; keeping it separate from `additionalProperties`
+ *  lets maps constrain names without changing the value schema. */
+function pushPropertyNameErrors(ctx: VCtx, value: Record<string, unknown>): void {
+  const schema = ctx.schema.propertyNames;
+  if (schema === undefined) {
+    return;
+  }
+  for (const k of Object.keys(value)) {
+    const path = `${ctx.path}.${safe(k)}`;
+    for (const error of validateSchemaValue(k, schema, path)) {
+      ctx.errors.push({
+        path: error.path,
+        message: `property name ${describe(k)} ${error.message}`,
+      });
+    }
+  }
+}
+
 function pushObjectErrors(ctx: VCtx, value: Record<string, unknown>): void {
   const { schema } = ctx;
   if (schema.minProperties !== undefined && Object.keys(value).length < schema.minProperties) {
     ctx.fail(`must have ≥${schema.minProperties} key(s)`);
   }
   pushMissingRequired(ctx, value);
+  pushPropertyNameErrors(ctx, value);
   for (const [k, v] of Object.entries(value)) {
     pushKeyErrors(ctx, k, v);
   }

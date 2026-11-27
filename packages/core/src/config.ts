@@ -76,6 +76,7 @@ export interface JsonSchema {
   required?: readonly string[];
   properties?: Record<string, JsonSchema>;
   patternProperties?: Record<string, JsonSchema>;
+  propertyNames?: JsonSchema | boolean;
   additionalProperties?: boolean | JsonSchema;
   items?: JsonSchema | readonly JsonSchema[];
   anyOf?: readonly JsonSchema[];
@@ -121,7 +122,7 @@ export const js: {
     properties: Record<string, JsonSchema>,
     opts?: { additional?: boolean | JsonSchema; required?: readonly string[] }
   ) => JsonSchema;
-  map: (values: JsonSchema) => JsonSchema;
+  map: (values: JsonSchema, opts?: { keys?: JsonSchema }) => JsonSchema;
   oneOf: (...variants: JsonSchema[]) => JsonSchema;
   anyOf: (...variants: JsonSchema[]) => JsonSchema;
 } = {
@@ -141,7 +142,11 @@ export const js: {
     additionalProperties: opts?.additional ?? false,
     ...(opts?.required === undefined ? {} : { required: [...opts.required] }),
   }),
-  map: values => ({ type: 'object', additionalProperties: values }),
+  map: (values, opts) => ({
+    type: 'object',
+    additionalProperties: values,
+    ...(opts?.keys === undefined ? {} : { propertyNames: opts.keys }),
+  }),
   oneOf: (...variants) => ({ oneOf: variants }),
   anyOf: (...variants) => ({ anyOf: variants }),
 };
@@ -543,7 +548,8 @@ const brouterRouteSchema = js.oneOf(
 
 brouterSection.jsonSchema = js.obj({
   models: js.map(
-    js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
+    js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 }),
+    { keys: js.str }
   ),
   routes: js.str,
   // the routing formula — the md file whose frontmatter is the machine

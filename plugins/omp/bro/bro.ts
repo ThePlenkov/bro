@@ -4104,9 +4104,10 @@ const js = {
 		additionalProperties: opts?.additional ?? false,
 		...opts?.required === void 0 ? {} : { required: [...opts.required] }
 	}),
-	map: (values) => ({
+	map: (values, opts) => ({
 		type: "object",
-		additionalProperties: values
+		additionalProperties: values,
+		...opts?.keys === void 0 ? {} : { propertyNames: opts.keys }
 	}),
 	oneOf: (...variants) => ({ oneOf: variants }),
 	anyOf: (...variants) => ({ anyOf: variants })
@@ -4370,7 +4371,7 @@ brouterSection.jsonSchema = js.obj({
 		type: "array",
 		items: brouterRouteSchema,
 		minItems: 1
-	})),
+	}), { keys: js.str }),
 	routes: js.str,
 	formula: js.str,
 	router: js.obj({

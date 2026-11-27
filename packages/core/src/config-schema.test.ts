@@ -113,6 +113,19 @@ describe('validateSchemaValue', () => {
     assert.ok(check(['a', 2], { type: 'array', items: { type: 'string' } })[0].path === 'k[1]');
     assert.ok(check('x'.repeat(5), { type: 'string', maxLength: 3 }).length > 0);
   });
+
+  test('propertyNames validates map keys without changing value validation', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      propertyNames: { type: 'string', minLength: 1, pattern: String.raw`\S` },
+      additionalProperties: { type: 'integer' },
+    };
+    assert.deepEqual(check({ valid: 1 }, schema), []);
+    const errors = check({ ' ': 1 }, schema);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]?.path, 'k. ');
+    assert.match(errors[0]?.message ?? '', /property name " "/);
+  });
 });
 
 describe('configDiagnostics', () => {
@@ -140,6 +153,19 @@ describe('configDiagnostics', () => {
       fleet: { maxConcurrent: 3, routing: { default: { chain: [{ provider: 'devin' }] } } },
     });
     assert.deepEqual(configDiagnostics(dir), []);
+  });
+
+  test('brouter model keys reject whitespace-only names', () => {
+    const bad = dirWith('bro.config.json', {
+      brouter: { models: { ' ': 'dv-acp' } },
+    });
+    const errors = configDiagnostics(bad);
+    assert.ok(errors.some(e => e.path === 'brouter.models. ' && /property name/.test(e.message)));
+
+    const good = dirWith('bro.config.json', {
+      brouter: { models: { 'swe-2-max': 'dv-acp' } },
+    });
+    assert.deepEqual(configDiagnostics(good), []);
   });
 
   test('acp mcpServers validate as stdio descriptors — malformed entries diagnose (spec bro-l8c4f.14)', () => {
