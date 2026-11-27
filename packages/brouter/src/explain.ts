@@ -296,7 +296,14 @@ export function modelFacts(pick: ModelPick): ExplainFact[] {
       label: 'model',
       value: pick.model,
       because: pin[pick.pinnedBy],
-      ...(pick.pinnedBy === 'the agent' ? { source: 'the agent' } : {}),
+      source:
+        pick.pinnedBy === 'the agent'
+          ? 'the agent'
+          : pick.pinnedBy === 'you'
+            ? 'the operator'
+            : pick.pinnedBy === 'the route'
+              ? 'the table'
+              : 'the provider entry',
     },
   ];
 }

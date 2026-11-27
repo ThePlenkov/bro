@@ -26,6 +26,13 @@ test('an unknown slice is an error naming the known ones', () => {
   );
 });
 
+test('an empty subset is rejected instead of silently becoming all slices', () => {
+  assert.throws(
+    () => parseExplainSlices(' , '),
+    /explain slice list is empty.*route, model, health, cost/s
+  );
+});
+
 test('the flag without a value is the whole story', () => {
   const asked = explainFlag(['--explain']);
   assert.equal(asked.enabled, true);
@@ -73,4 +80,38 @@ test('an unknown says unknown — never a zero', () => {
 test('a slice with no facts is absent — the renderer says nothing', () => {
   const explanation = withSlice({ slices: {} }, 'route', []);
   assert.equal(renderExplanation(explanation, ['route']), '');
+});
+
+test('the renderer refuses a fact without a reason or source', () => {
+  assert.throws(
+    () =>
+      renderExplanation(
+        {
+          slices: {
+            model: [{ label: 'model', value: 'swe-2-max', because: '', source: 'the table' }],
+          },
+        },
+        ['model']
+      ),
+    /has no reason/
+  );
+  assert.throws(
+    () =>
+      renderExplanation(
+        {
+          slices: {
+            model: [
+              {
+                label: 'model',
+                value: 'swe-2-max',
+                because: 'the route pins it',
+                source: '',
+              },
+            ],
+          },
+        },
+        ['model']
+      ),
+    /has no source/
+  );
 });
