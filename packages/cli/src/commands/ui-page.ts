@@ -255,7 +255,7 @@ function tick() {
     });
     // The fleet read is the status/budget contract; keep it separate from
     // the generic list panels so the UI can render unknowns honestly.
-    reads.push(fetch(INDEX + '/agents/fleet').then(function (res) {
+    reads.push(fetch('/api/v1/planes/agents/fleet').then(function (res) {
       if (!res.ok) throw new Error('budget');
       return res.json();
     }).then(function (fleet) { last.budget = fleet && fleet.budget; }));
