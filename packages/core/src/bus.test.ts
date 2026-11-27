@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -698,7 +698,16 @@ describe('broker startup', () => {
     // and bind instead of dying on EADDRINUSE.
     const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
     const socketPath = join(dir, 'bus.sock')
-    writeFileSync(socketPath, 'stale')
+    // A regular file produces platform-specific connect errors (Darwin
+    // reports ENOTSOCK), so use an actual stale Unix socket inode.
+    const oldServer = createServer()
+    await new Promise<void>((resolve, reject) => {
+      oldServer.once('error', reject)
+      oldServer.listen(socketPath, () => resolve())
+    })
+    await new Promise<void>((resolve, reject) => {
+      oldServer.close(err => (err ? reject(err) : resolve()))
+    })
     try {
       const broker = await startBusBrokerAt(socketPath, {
         now: () => Date.parse('2026-10-04T12:00:00.000Z'),

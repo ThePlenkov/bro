@@ -20,7 +20,9 @@ jobs:
           check-latest: true
           cache: npm
 
-      - run: npm ci --no-audit --no-fund
+      # Dependencies are built by the jobs below; do not execute arbitrary
+      # lifecycle scripts while installing untrusted package contents.
+      - run: npm ci --no-audit --no-fund --ignore-scripts
 
       - name: Check generated files are fresh
         run: npm run check:plugins
