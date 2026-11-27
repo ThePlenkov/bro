@@ -225,6 +225,82 @@ function foldMarkerStamps(stamps: Map<string, number>, lines: string[], stamp: n
   }
 }
 
+/** Store-confirmed sibling ownership, kept separate from marker scanning so
+ * the delegation proof cannot confuse a session handle with a backend actor. */
+function verifiedDelegatedIds(
+  rows: TaskRow[],
+  ownersById: Map<string, Set<string>>,
+  actor: string
+): Set<string> {
+  if (actor === '') {
+    return new Set();
+  }
+  return new Set(
+    rows
+      .filter(row => {
+        const owners = ownersById.get(row.id);
+        if (owners === undefined || row.assignee === undefined) {
+          return false;
+        }
+        return row.assignee
+          .split(',')
+          .map(assignee => assignee.trim())
+          .some(assignee => owners.has(assignee));
+      })
+      .map(row => row.id)
+  );
+}
+
+interface DelegatedMarkerStamps {
+  own: Map<string, number>;
+  foreign: Map<string, number>;
+  owners: Map<string, Set<string>>;
+}
+
+function scanDelegatedMarkers(
+  hooks: string,
+  safe: string,
+  owner: ConnectorCtx['owner'],
+  now: number
+): DelegatedMarkerStamps {
+  const result: DelegatedMarkerStamps = {
+    own: new Map(),
+    foreign: new Map(),
+    owners: new Map(),
+  };
+  let files: string[];
+  try {
+    files = readdirSync(hooks);
+  } catch {
+    return result;
+  }
+  for (const file of files) {
+    if (!file.endsWith('.task')) continue;
+    const marker = claimMarker(join(hooks, file));
+    if (marker === null) continue;
+    const side = claimMarkerSide(
+      file,
+      marker.lines[0] ?? '',
+      marker.mtime,
+      safe,
+      owner,
+      now
+    );
+    if (side === 'own') {
+      foldMarkerStamps(result.own, marker.lines.slice(1), marker.stamp);
+    } else if (side === 'foreign') {
+      foldMarkerStamps(result.foreign, marker.lines.slice(1), marker.stamp);
+      const session = file.slice(0, -'.task'.length);
+      for (const id of marker.lines.slice(1).map(line => line.trim()).filter(Boolean)) {
+        const sessions = result.owners.get(id) ?? new Set<string>();
+        sessions.add(session);
+        result.owners.set(id, sessions);
+      }
+    }
+  }
+  return result;
+}
+
 /** Ids this session's claims share with a NEWER live claim of another
  *  session — delegated work: the executor's fresher marker owns the
  *  bead and its spec, so the delegator's copy is foreign. The scan is
@@ -243,39 +319,7 @@ function delegatedTaskClaims(
   now: number = Date.now()
 ): Set<string> {
   const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
-  const ownStamp = new Map<string, number>();
-  const foreignStamp = new Map<string, number>();
-  const foreignOwners = new Map<string, Set<string>>();
-  let files: string[];
-  try {
-    files = readdirSync(hooks);
-  } catch {
-    return new Set();
-  }
-  for (const f of files) {
-    if (!f.endsWith('.task')) {
-      continue;
-    }
-    const marker = claimMarker(join(hooks, f));
-    if (marker === null) {
-      continue;
-    }
-    const side = claimMarkerSide(f, marker.lines[0] ?? '', marker.mtime, safe, ctx.owner, now);
-    if (side === 'own') {
-      foldMarkerStamps(ownStamp, marker.lines.slice(1), marker.stamp);
-    } else if (side === 'foreign') {
-      foldMarkerStamps(foreignStamp, marker.lines.slice(1), marker.stamp);
-      const owner = f.slice(0, -'.task'.length);
-      for (const id of marker.lines
-        .slice(1)
-        .map(line => line.trim())
-        .filter(Boolean)) {
-        const owners = foreignOwners.get(id) ?? new Set<string>();
-        owners.add(owner);
-        foreignOwners.set(id, owners);
-      }
-    }
-  }
+  const markers = scanDelegatedMarkers(hooks, safe, ctx.owner, now);
   const out = new Set<string>();
   // A marker records an attempted claim, not its outcome. The marker's
   // session id is the only identity available for a sibling, so only rows
@@ -283,25 +327,10 @@ function delegatedTaskClaims(
   // actor probe must also succeed; if either side cannot be verified, leave
   // the id with this session rather than turn an unavailable probe into a
   // false ownership proof.
-  const verified = new Set(
-    rows
-      .filter(r => {
-        const owners = foreignOwners.get(r.id);
-        return (
-          actor !== '' &&
-          owners !== undefined &&
-          r.assignee !== undefined &&
-          r.assignee
-            .split(',')
-            .map(a => a.trim())
-            .some(a => owners.has(a))
-        );
-      })
-      .map(r => r.id)
-  );
+  const verified = verifiedDelegatedIds(rows, markers.owners, actor);
   for (const id of mine) {
-    const foreign = foreignStamp.get(id);
-    if (verified.has(id) && foreign !== undefined && foreign > (ownStamp.get(id) ?? 0)) {
+    const foreign = markers.foreign.get(id);
+    if (verified.has(id) && foreign !== undefined && foreign > (markers.own.get(id) ?? 0)) {
       out.add(id);
     }
   }

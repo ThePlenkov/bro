@@ -351,7 +351,10 @@ describe('hooks e2e — sdd nudge scope + dedup (bro-6a3dq)', () => {
         id: 'fx-9',
         title: 'spec me',
         status: 'in_progress',
-        assignee: 'tester',
+        // The sibling claim is a real store claim too: the shared fake
+        // backend records both the orchestrator and executor identities.
+        // A marker alone is only an attempted claim and must not silence SDD.
+        assignee: 'tester,s2',
       },
       {
         ...FAKE_BEAD,
