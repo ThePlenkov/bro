@@ -211,7 +211,7 @@ describe('skill mutations', () => {
     const { spawn, calls } = fakeSpawn();
     const result = runSkillMutation({
       command: 'add',
-      source: 'o/r',
+      source: parseSkillSource('o/r'),
       root,
       cfg: cfg([]),
       spawn,
@@ -230,7 +230,7 @@ describe('skill mutations', () => {
     const { spawn, calls } = fakeSpawn();
     const update = runSkillMutation({
       command: 'update',
-      source: 'o/r',
+      source: parseSkillSource('o/r'),
       root,
       cfg: cfg([]),
       spawn,
@@ -238,7 +238,7 @@ describe('skill mutations', () => {
     });
     const remove = runSkillMutation({
       command: 'remove',
-      source: 'o/r',
+      source: parseSkillSource('o/r'),
       root,
       cfg: cfg([]),
       spawn,
@@ -255,7 +255,7 @@ describe('skill mutations', () => {
   test('update refuses a source absent from the lock', () => {
     const result = runSkillMutation({
       command: 'update',
-      source: 'o/r',
+      source: parseSkillSource('o/r'),
       root: tmp(),
       cfg: cfg([]),
       spawn: fakeSpawn().spawn,
@@ -370,7 +370,9 @@ describe('collectRows', () => {
   test('a local row reports linked vs missing vs present', () => {
     const root = tmp();
     makeSkill(join(root, 'skills', 'lx'), 'lx');
-    assert.equal(collectRows(root, cfg(['local:skills/lx'])).rows[0]!.state, 'missing');
+    const missing = collectRows(root, cfg(['local:skills/lx'])).rows[0]!;
+    assert.equal(missing.state, 'missing');
+    assert.equal(missing.source?.kind, 'local');
     ensureLocalLink(root, 'skills/lx');
     assert.equal(collectRows(root, cfg(['local:skills/lx'])).rows[0]!.state, 'linked');
     const root2 = tmp();

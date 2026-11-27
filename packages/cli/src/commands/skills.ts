@@ -72,7 +72,7 @@ export { ensureLocalLink, localSkillName, type LocalLink } from './skills-links.
 
 export interface SkillRow {
   name: string;
-  source: string;
+  source?: SkillSource;
   state: 'ok' | 'linked' | 'present' | 'missing' | 'drifted' | 'extra' | 'pending' | 'error';
   detail?: string;
 }
@@ -154,20 +154,20 @@ function localRow(root: string, src: SkillSource & { kind: 'local' }): SkillRow 
     lst = null;
   }
   if (lst === null) {
-    return { name, source: src.raw, state: 'missing' };
+    return { name, source: src, state: 'missing' };
   }
   if (!lst.isSymbolicLink()) {
     return {
       name,
-      source: src.raw,
+      source: src,
       state: 'present',
       detail: 'a real dir, not the expected symlink',
     };
   }
   if (resolve(skillsDirOf(root), readlinkSync(link)) !== want) {
-    return { name, source: src.raw, state: 'error', detail: 'link points elsewhere' };
+    return { name, source: src, state: 'error', detail: 'link points elsewhere' };
   }
-  return { name, source: src.raw, state: 'linked' };
+  return { name, source: src, state: 'linked' };
 }
 
 /** Rows for one github/URL source — pending while the lock records
@@ -179,19 +179,19 @@ function remoteRows(src: SkillSource, ctx: ReconcileCtx): SkillRow[] {
     return [
       {
         name,
-        source: src.raw,
+        source: src,
         state: 'pending',
         detail: 'declared — nothing locked yet (bro skills sync installs)',
       },
     ];
   }
-  return names.map(name => ({ name, source: src.raw, state: lockedState(ctx, name) }));
+  return names.map(name => ({ name, source: src, state: lockedState(ctx, name) }));
 }
 
 /** One declared source → its rows. */
 function rowsForSource(src: SkillSource, ctx: ReconcileCtx): SkillRow[] {
   if (src.kind === 'invalid') {
-    return [{ name: src.raw, source: '', state: 'error', detail: src.reason }];
+    return [{ name: src.raw, source: src, state: 'error', detail: src.reason }];
   }
   if (src.kind === 'local') {
     return [localRow(ctx.root, src)];
@@ -219,7 +219,7 @@ export function collectRows(
     const d = ctx.driftByName.get(name);
     rows.push({
       name,
-      source: locked.get(name)?.source ?? '',
+      source: parseSkillSource(locked.get(name)?.source ?? ''),
       state: 'extra',
       ...(d !== undefined ? { detail: d.kind } : {}),
     });
@@ -394,7 +394,7 @@ const ROW_ICON: Record<SkillRow['state'], string> = {
 
 function renderRows(rows: SkillRow[]): string[] {
   return rows.map(r => {
-    const src = r.source !== '' ? `  ${r.source}` : '';
+    const src = r.source !== undefined ? `  ${r.source.raw}` : '';
     const detail = r.detail !== undefined ? ` — ${r.detail}` : '';
     const state = r.state === 'extra' ? 'extra (undeclared)' : r.state;
     return `${ROW_ICON[r.state]} ${r.name}${src}  ${state}${detail}`;
@@ -407,6 +407,10 @@ function renderSteps(steps: SyncStep[]): string[] {
     const detail = s.detail !== undefined ? ` — ${s.detail}` : '';
     return `${icon[s.state]} ${s.label}${detail}`;
   });
+}
+
+function jsonRows(rows: SkillRow[]): Array<Omit<SkillRow, 'source'> & { source: string }> {
+  return rows.map(row => ({ ...row, source: row.source?.raw ?? '' }));
 }
 
 // --- command ------------------------------------------------------------------------
@@ -442,6 +446,28 @@ Config (bro.config.json "skills"):
 }
 
 const BOOL_FLAGS = new Set(['--json', '--help', '-h']);
+type SkillSub = 'sync' | 'list' | 'add' | 'update' | 'remove';
+const SKILL_SUBS = new Set<SkillSub>(['sync', 'list', 'add', 'update', 'remove']);
+
+function isSkillSub(value: string | undefined): value is SkillSub {
+  return value !== undefined && SKILL_SUBS.has(value as SkillSub);
+}
+
+function isMutationSub(sub: SkillSub): sub is 'add' | 'update' | 'remove' {
+  return sub === 'add' || sub === 'update' || sub === 'remove';
+}
+
+function mutationSource(sub: SkillSub, rest: string[]): string | undefined {
+  if (!isMutationSub(sub)) {
+    return undefined;
+  }
+  const source = rest.shift();
+  if (source === undefined || source.startsWith('-')) {
+    console.error(`error: ${sub} needs one <source> — see \`bro skills --help\``);
+    process.exit(2);
+  }
+  return source;
+}
 
 /** A flag spelled the way the command accepts it — `--root=<dir>` or a
  *  registered bool; `--root <dir>` consumes its value separately. */
@@ -477,22 +503,17 @@ function rejectStrays(rest: string[]): void {
 }
 
 function parseSkillsArgs(argv: string[]): {
-  sub: string;
+  sub: SkillSub;
   source?: string;
   root: string;
   json: boolean;
 } {
   const sub = argv[0];
-  if (sub !== 'sync' && sub !== 'list' && sub !== 'add' && sub !== 'update' && sub !== 'remove') {
+  if (!isSkillSub(sub)) {
     usage(2);
   }
-  const needsSource = sub === 'add' || sub === 'update' || sub === 'remove';
   const rest = argv.slice(1);
-  const source = needsSource ? rest.shift() : undefined;
-  if (needsSource && (source === undefined || source.startsWith('-'))) {
-    console.error(`error: ${sub} needs one <source> — see \`bro skills --help\``);
-    process.exit(2);
-  }
+  const source = mutationSource(sub, rest);
   rejectStrays(rest);
   return {
     sub,
@@ -504,7 +525,7 @@ function parseSkillsArgs(argv: string[]): {
 
 interface SkillMutation {
   command: 'add' | 'update' | 'remove';
-  source: string;
+  source: SkillSource;
   root: string;
   cfg: SkillsConfig;
   bin?: SkillsBin;
@@ -528,7 +549,7 @@ export function runSkillMutation(input: SkillMutation): {
   args: string[];
   detail?: string;
 } {
-  const source = parseSkillSource(input.source);
+  const source = input.source;
   if (source.kind === 'invalid' || source.kind === 'local') {
     return {
       ok: false,
@@ -548,7 +569,7 @@ export function runSkillMutation(input: SkillMutation): {
     return {
       ok: false,
       args,
-      detail: `no locked skills match ${input.source}`,
+      detail: `no locked skills match ${source.raw}`,
     };
   }
   const proc = spawn(bin, input.root, args);
@@ -562,7 +583,7 @@ function cmdMutation(
   cfg: SkillsConfig,
   json: boolean
 ): void {
-  const result = runSkillMutation({ command, source, root, cfg });
+  const result = runSkillMutation({ command, source: parseSkillSource(source), root, cfg });
   if (json) {
     console.log(JSON.stringify({ command: `skills ${command}`, data: result }));
   } else if (result.ok) {
@@ -579,7 +600,11 @@ function cmdSync(root: string, cfg: SkillsConfig, json: boolean): void {
     console.log(
       JSON.stringify({
         command: 'skills sync',
-        data: { steps, rows, drift: drift.map(d => ({ name: d.name, kind: d.kind })) },
+        data: {
+          steps,
+          rows: jsonRows(rows),
+          drift: drift.map(d => ({ name: d.name, kind: d.kind })),
+        },
       })
     );
   } else {
@@ -597,7 +622,7 @@ function cmdSync(root: string, cfg: SkillsConfig, json: boolean): void {
 function cmdList(root: string, cfg: SkillsConfig, json: boolean): void {
   const { rows } = collectRows(root, cfg);
   if (json) {
-    console.log(JSON.stringify({ command: 'skills list', data: { rows } }));
+    console.log(JSON.stringify({ command: 'skills list', data: { rows: jsonRows(rows) } }));
   } else {
     for (const line of renderRows(rows)) {
       console.log(line);
@@ -610,13 +635,20 @@ export function runSkillsCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  const { sub, source, root, json } = parseSkillsArgs(argv);
+  const parsed = parseSkillsArgs(argv);
+  const { sub, source, root, json } = parsed;
   const cfg = (loadBroConfig(root).skills ?? skillsSection(undefined)) as SkillsConfig;
-  if (sub === 'add' || sub === 'update' || sub === 'remove') {
-    cmdMutation(sub, source!, root, cfg, json);
-  } else if (sub === 'sync') {
-    cmdSync(root, cfg, json);
-  } else {
-    cmdList(root, cfg, json);
+  switch (sub) {
+    case 'add':
+    case 'update':
+    case 'remove':
+      cmdMutation(sub, source!, root, cfg, json);
+      return;
+    case 'sync':
+      cmdSync(root, cfg, json);
+      return;
+    case 'list':
+      cmdList(root, cfg, json);
+      return;
   }
 }
