@@ -511,7 +511,12 @@ const outranks = (a: AgentRow, best: AgentRow): boolean =>
 /** The session owner — the agent whose session the `bro: session` pane
  *  attaches (or whose log it tails). */
 function sessionOwner(agents: AgentRow[]): AgentRow | undefined {
-  const carriers = agents.filter(carriesSession);
+  // A live agent owns the pane identity. Never lend session fields from a
+  // dead carrier when the live row has no session of its own: that would
+  // label the old session as the new agent. Dead carriers are only eligible
+  // when no live agent remains.
+  const eligible = agents.some(a => a.live) ? agents.filter(a => a.live) : agents;
+  const carriers = eligible.filter(carriesSession);
   return carriers.reduce<AgentRow | undefined>(
     (best, a) => (best === undefined || outranks(a, best) ? a : best),
     undefined

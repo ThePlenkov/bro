@@ -403,6 +403,34 @@ describe('the session owner — who the `bro: session` pane attaches (bro-nwl5g)
     assert.equal(projection.provider, 'kilo');
   });
 
+  test('a live non-carrier never inherits session fields from a dead carrier', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [
+          agent({
+            key: 'dead-carrier',
+            terminal: 'exited',
+            acpSessionId: 'old-session',
+            provider: 'old-provider',
+            log: '/old.log',
+            at: NOW - H,
+          }),
+          agent({
+            key: 'live-agent',
+            live: true,
+            silentMs: M,
+            agent: 'new-agent',
+            at: NOW,
+          }),
+        ],
+      })
+    );
+    assert.equal(projection.agent, 'new-agent');
+    assert.equal(projection.acpSessionId, undefined);
+    assert.equal(projection.provider, undefined);
+    assert.equal(projection.log, undefined);
+  });
+
   test('inside one liveness class the newest carrier wins', () => {
     const { projection } = projectTree(
       tree({

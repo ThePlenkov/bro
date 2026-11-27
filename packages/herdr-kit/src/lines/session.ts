@@ -165,6 +165,17 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
    *  last read. Shared by the fs.watch handler and the refresh poll. */
   const pumpLog = (a: Attach, complete = false): void => {
     if (a.logPath === undefined) return;
+    // An unreadable log must not later be treated as a fresh stream: doing
+    // so would replay its entire head when permissions or the file return.
+    // Resume at the current EOF instead, while the degraded note remains
+    // visible to the operator.
+    if (a.logOffset === -1) {
+      try {
+        a.logOffset = statSync(a.logPath).size;
+      } catch {
+        return;
+      }
+    }
     const more = readTailPart(a.logPath, a.logOffset ?? 0, utf8End);
     if (more === undefined) return;
     if (more.end === 0) {
@@ -195,6 +206,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     a.logPath = path;
     const window = tailWindow(path);
     if (window === undefined) {
+      a.logOffset = -1;
       dim(`── log tail ${path} — unreadable ──`);
       return;
     }
