@@ -280,7 +280,7 @@ need the full operational context:
 - Session-start context nudges when another live session is active in the
   same repository, including across linked worktrees; this is detection only.
 
-## Conventions
+## Pull request conventions
 
 - **PR size** — keep each PR to roughly 100 files or fewer. Larger units
   ship as a `gh-stack` PR stack of independently green layers.
