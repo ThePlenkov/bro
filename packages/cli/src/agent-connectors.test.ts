@@ -2188,7 +2188,13 @@ function connectorContract(b: BackendCase): void {
   });
 }
 
-describe('native connector', () => {
+// Native connector tests assert Linux process-group and /proc liveness
+// semantics.  The darwin adapter exists for production use, but its
+// process-inspection parity is not established yet (bro-0204b); keep this
+// leg explicit rather than allowing every spawned worker to become "lost".
+const linuxNative = { skip: process.platform !== 'linux' };
+
+describe('native connector', linuxNative, () => {
   connectorContract({
     name: 'native',
     make: makeNativeConnector,
@@ -2207,7 +2213,7 @@ describe('native connector', () => {
  *  the fixture's own f.db, exactly where a real worker's `bd` writes
  *  would. Native-only: the contract suite runs per backend but only
  *  native exercises the local-store harvest end to end. */
-describe('exit learn/retro artifact check (bro-xkv42.2)', () => {
+describe('exit learn/retro artifact check (bro-xkv42.2)', linuxNative, () => {
   const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
   const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
   const learnMisses = (f: Fixture) =>
@@ -2341,7 +2347,7 @@ describe('exit learn/retro artifact check (bro-xkv42.2)', () => {
  *  the worker's own spawns as batch and charge the fleet budget
  *  (bro-9h86l). Native-only: the contract suite runs per backend, but
  *  only native can assert the spawned process's actual environ. */
-describe('native credential scope (bro-l8c4f.6)', () => {
+describe('native credential scope (bro-l8c4f.6)', linuxNative, () => {
   const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
   const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
 
@@ -2429,7 +2435,7 @@ describe('native credential scope (bro-l8c4f.6)', () => {
  *  caller env — and TRACEPARENT rides spec.env through strictEnv so
  *  the worker's spans join the parent's trace. Native-only: it is the
  *  backend that can assert the spawned process's actual environ. */
-describe('native telemetry identity pins (bro-xgejl.1)', () => {
+describe('native telemetry identity pins (bro-xgejl.1)', linuxNative, () => {
   const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
   const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
 
@@ -2505,7 +2511,7 @@ describe('native telemetry identity pins (bro-xgejl.1)', () => {
  *  worktree's own git dir, where `git worktree remove` owns it. Native
  *  only: it is the backend that can assert the spawned process's
  *  actual environ. */
-describe('native worker tmpdir pin (bro-v96mp)', () => {
+describe('native worker tmpdir pin (bro-v96mp)', linuxNative, () => {
   const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
   const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
   const payload =
@@ -2625,7 +2631,7 @@ describe('spawn claim rollback', () => {
  *  with no admission stamp. Every run mints a runId that scopes
  *  <agentId>.<runId>.{handle,go,exit}; the worker holds on the go stamp
  *  so an unadmitted survivor can never silently double a respawn. */
-describe('native spawn handshake (bro-l8c4f.5)', () => {
+describe('native spawn handshake (bro-l8c4f.5)', linuxNative, () => {
   const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
   const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
   const agentsDir = (f: Fixture) => join(f.main, '.git', 'bro', 'agents');
@@ -2900,7 +2906,7 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
  *  or `systemctl stop`) cannot reach it. systemd-run EXECS the payload
  *  in place — the recorded pid IS the worker: `handle == pid`, the
  *  liveness ladder and `down`'s group signal are all unchanged. */
-describe('native systemd scope (bro-ybo8z)', () => {
+describe('native systemd scope (bro-ybo8z)', linuxNative, () => {
   const scoped = systemdScopeProbe();
   const gate = { skip: scoped ? false : 'no systemd user manager on this host' };
   const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
