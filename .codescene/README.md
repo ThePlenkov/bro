@@ -57,15 +57,14 @@ it graduated from the floor to rung 2. The wave also shipped the ladder itself.
 **A rule_set behind the catch-all is a silent no-op.** Both json files are
 tried in order and the FIRST match wins — and both end with a `**/*`
 catch-all. A per-file entry appended after the wildcard never applies to
-anything, and nothing warns. Measured on `scripts/archive-specs.ts` (PR
-#1425): a correct Primitive Obsession / String Heavy calibration sat at
+anything, and nothing warns. Measured on `scripts/archive-specs.ts` in
+PR 1425: a correct Primitive Obsession / String Heavy calibration sat at
 index 16 behind the `**/*` at index 15 and the delta analysis kept firing
 both findings for three review rounds; moved before the wildcard, the same
 entry scored the file 10.0 with zero findings. Insert per-file entries
 BEFORE the catch-all in both files, and verify locally before pushing:
 `cs review <file> --output-format json` must show the score and finding
 list you expect — the CLI reads the same config the GitHub App does.
-
 
 **A partial threshold list is not a partial bar.** Omitting a threshold does
 not fall back to CodeScene's default — it falls back to a stricter one.
