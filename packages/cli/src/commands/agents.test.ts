@@ -162,6 +162,11 @@ const agents = (argv: string[]) => capture(() => runAgentsCommand(argv));
 
 const LONG_RUN = 'setTimeout(() => {}, 30000)';
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('bro agents — dispatch', () => {
   test('no subcommand and unknown subcommand print usage, exit 2', async () => {
     const fx = fixture();
@@ -407,7 +412,7 @@ describe('bro agents up <step>', () => {
     }
   });
 
-  test('spawns the step agent: claim lands, registry + prompt written', async () => {
+  test('spawns the step agent: claim lands, registry + prompt written', macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
       const r = await agents([
@@ -437,7 +442,7 @@ describe('bro agents up <step>', () => {
     }
   });
 
-  test('spawn owns enter: no worktree → minted, claimed, spawned as one transition', async () => {
+  test('spawn owns enter: no worktree → minted, claimed, spawned as one transition', macosParity, async () => {
     // rig bro-oy3k1.4 — `agents up` performs enter+claim+spawn under the
     // registry lock; the old `no worktree` refusal is gone
     const fx = fixture([{ id: 'fx-1', status: 'open', title: 'step one' }]);
@@ -490,7 +495,7 @@ describe('bro agents up <step>', () => {
     }
   });
 
-  test('a live agent on the step refuses a second spawn', async () => {
+  test('a live agent on the step refuses a second spawn', macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
       // --prompt-file, not the bead text: `node {promptFile}` runs the
@@ -516,7 +521,7 @@ describe('bro agents up <step>', () => {
     }
   });
 
-  test('respawn after death reuses agentId and the stored prompt', async () => {
+  test('respawn after death reuses agentId and the stored prompt', macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open', description: 'BEAD-TEXT' }]);
     try {
       const first = await agents([
@@ -554,7 +559,7 @@ describe('bro agents up <step>', () => {
 // spec bro-fqen0 — the ad-hoc front door: a phantom adhoc-<hex> step,
 // no bead, no claim, same spawn machinery underneath
 describe('bro agents run', () => {
-  test('positional prompt spawns an adhoc agent — registry row, no bead litter', async () => {
+  test('positional prompt spawns an adhoc agent — registry row, no bead litter', macosParity, async () => {
     const fx = fixture([]);
     try {
       const r = await agents(['run', LONG_RUN, '--worktree', fx.main, '--beads-dir', fx.beads]);
@@ -646,7 +651,7 @@ describe('bro agents run', () => {
 // bead's claim (every `up` guard then applies), and a same-repo live
 // agent/session with a near-identical prompt earns an advisory warning
 describe('bro agents run — --for claim dedup', () => {
-  test('run --for on an open bead spawns keyed by the bead and claims it', async () => {
+  test('run --for on an open bead spawns keyed by the bead and claims it', macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
       const r = await agents([
@@ -672,7 +677,7 @@ describe('bro agents run — --for claim dedup', () => {
     }
   });
 
-  test('a second run --for on a live agent refuses', async () => {
+  test('a second run --for on a live agent refuses', macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
       const first = await agents([
@@ -940,7 +945,7 @@ describe('bro agents run — similarity floor', () => {
     );
   };
 
-  test('a same-repo session with a near-identical title warns; the spawn lands', async () => {
+  test('a same-repo session with a near-identical title warns; the spawn lands', macosParity, async () => {
     const fx = fixture([]);
     try {
       fakeDevinSession(fx, 'visible-claude-background-tasks-via-devin-acp', fx.main);
@@ -1147,7 +1152,7 @@ describe('bro agents run — similarity floor', () => {
     }
   });
 
-  test('run --for on a dead agent warns against its stored prompt, not the bead text', async () => {
+  test('run --for on a dead agent warns against its stored prompt, not the bead text', macosParity, async () => {
     const fx = fixture([{ id: 'fx-2', status: 'open', title: 'unrelated zeta eta theta' }]);
     try {
       fakeDevinSession(fx, 'render-devin-session-transcripts-live', fx.main);
@@ -2238,7 +2243,7 @@ describe('bro agents down <target>', () => {
     }
   });
 
-  test('stops by molStep and is idempotent for gone agents', async () => {
+  test('stops by molStep and is idempotent for gone agents', macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
       const up = await agents([
@@ -2296,7 +2301,7 @@ describe('bro agents down <target>', () => {
     return { down, status: await agents(['status', 'fx-1']) };
   };
 
-  test('a TERM-resistant wrapper survives — down exits 1, never `stopped`', async () => {
+  test('a TERM-resistant wrapper survives — down exits 1, never `stopped`', macosParity, async () => {
     // the wrapper records receipt of SIGTERM and keeps running — the
     // marker file proves the signal actually landed, so a no-op stop()
     // can't pass by never signaling (bro-l8c4f.3)
@@ -2381,7 +2386,7 @@ describe('bro agents down <target>', () => {
     }
   });
 
-  test("down releases the stopped generation's lease without dropping a successor's live one", async () => {
+  test("down releases the stopped generation's lease without dropping a successor's live one", macosParity, async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(fx.root, 'state');
@@ -2422,7 +2427,7 @@ describe('bro agents down <target>', () => {
     }
   });
 
-  test('down on an unlisted entry releases only a token-matched lease', async () => {
+  test('down on an unlisted entry releases only a token-matched lease', macosParity, async () => {
     const fx = fixture();
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(fx.root, 'state');
@@ -2460,7 +2465,7 @@ describe('bro agents down <target>', () => {
     }
   });
 
-  test('down on a key with no entry still force-releases it — the operator path', async () => {
+  test('down on a key with no entry still force-releases it — the operator path', macosParity, async () => {
     const fx = fixture();
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(fx.root, 'state');

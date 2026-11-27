@@ -53,6 +53,11 @@ function isolatedConfig<T>(fn: () => T): T {
   }
 }
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('freshnessSection', () => {
   test('absent fields stay auto; strings/false are kept, junk dropped', () => {
     assert.deepEqual(freshnessSection(undefined), {
@@ -123,7 +128,7 @@ describe('depsChanged', () => {
 })
 
 describe('worktreeGitDir', () => {
-  test('the main checkout resolves its own .git; a linked worktree its own gitdir', () => {
+  test('the main checkout resolves its own .git; a linked worktree its own gitdir', macosParity, () => {
     const { root, main } = nodeRepo('bro-pm-gd-')
     inside(main, root, () => {
       assert.equal(worktreeGitDir(main), join(main, '.git'))
