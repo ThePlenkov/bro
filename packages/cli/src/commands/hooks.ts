@@ -127,26 +127,16 @@ import {
 } from './orchestrator-role.ts';
 import { emitHook } from '@broject/otel';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
-import { GUARD_PROBES } from '../guard-probes.ts';
 // .guard config resolves through core's loadConfig with the guard
 // package's own section schema — NOT loadBroConfig from ../plugins.ts,
 // whose import evaluates the whole PLUGINS registry on every hook event
 // (review #9, specs/bro-36sx7.7.md)
-import { sessionCapRefusalForHook } from './session-cap.ts';
-import { wasteGuardBlock, wasteGuardRecord } from './waste-guard.ts';
 import type { InstallResult } from './githooks.ts';
-import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
-import { maybeSpawnTraceFlush } from './trace.ts';
-import { maybeSpawnTraceStamp } from './trace-resolve.ts';
-import { maybeSpawnStackPublish } from './stack-publish.ts';
-import { emitRefGuard } from './refguard.ts';
+import { sessionCapRefusalForHook } from './session-cap.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
-import { deadLoopPostTool, deadLoopPreTool } from './deadloop.ts';
 import { adapterEmitBegin } from './hook-emit.ts';
-import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
 import { drainHookSpool } from '@broject/core';
-import { renderModeSnapshots } from './mode-snapshots.ts';
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -168,6 +158,16 @@ const lazyLearn = async () => import('@broject/learn');
 const lazyGithooks = async () => import('./githooks.ts');
 const lazyGoal = async () => import('./goal.ts');
 const lazyHeartbeat = async () => import('./watch-heartbeat.ts');
+const lazyGuardProbes = async () => import('../guard-probes.ts');
+const lazyWasteGuard = async () => import('./waste-guard.ts');
+const lazyPostMerge = async () => import('./postmerge.ts');
+const lazyTrace = async () => import('./trace.ts');
+const lazyTraceResolve = async () => import('./trace-resolve.ts');
+const lazyStackPublish = async () => import('./stack-publish.ts');
+const lazyRefguard = async () => import('./refguard.ts');
+const lazyDeadloop = async () => import('./deadloop.ts');
+const lazyHookSpool = async () => import('./hook-spool.ts');
+const lazyModeSnapshots = async () => import('./mode-snapshots.ts');
 
 interface HookInput {
   tool_name?: unknown;
@@ -1987,7 +1987,7 @@ async function guardLines(
       cfg,
       record: true,
       armed: () => readArmed(sessionId, dir),
-      probes: GUARD_PROBES,
+      probes: (await lazyGuardProbes()).GUARD_PROBES,
       // the veto seam — resolved lazily and only when a judge-clause
       // guard's deterministic clauses pass. mode:'off' abstains here;
       // mode:'shadow' decides + journals kind:'guard' verdicts
@@ -2508,12 +2508,12 @@ function execNudges(cmd: string): string[] {
   }
 }
 
-function armingLinesForOutcome(
+async function armingLinesForOutcome(
   outcome: unknown,
   cmd: string,
   sessionId: string,
   dir: string = process.cwd()
-): string[] {
+): Promise<string[]> {
   const lines: string[] = [];
   if (outcome !== false) {
     lines.push(...armPostTool(cmd, sessionId, dir));
@@ -2525,10 +2525,10 @@ function armingLinesForOutcome(
     // worker-env pins, so like every stamp it is a hint the resolver
     // verifies against the registry, not proof
     if (classifyExecCommand(cmd) === 'pr-create') {
-      maybeSpawnTraceStamp(process.cwd());
+      void lazyTraceResolve().then(m => m.maybeSpawnTraceStamp(process.cwd())).catch(() => {});
       // the PR IS a chain member — the chain registers itself with the
       // host, so nobody adds the PRs to the stack by hand (bro-awbgd)
-      maybeSpawnStackPublish(process.cwd());
+      void lazyStackPublish().then(m => m.maybeSpawnStackPublish(process.cwd())).catch(() => {});
     }
   }
   if (outcome === true) {
@@ -2563,7 +2563,8 @@ async function emitPostToolObserve(
 /** The waste-guard's post-tool marker commit, boxed so the payload
  *  field reads (`??`/ternary decision points) live here instead of
  *  growing emitPostTool's branch count. */
-function wasteRecordFor(input: HookInput, sessionId: string, outcome: unknown): void {
+async function wasteRecordFor(input: HookInput, sessionId: string, outcome: unknown): Promise<void> {
+  const { wasteGuardRecord } = await lazyWasteGuard();
   wasteGuardRecord(process.cwd(), sessionId, {
     tool: typeof input.tool_name === 'string' ? input.tool_name : '',
     input: (input.tool_input ?? {}) as Record<string, unknown>,
@@ -2577,11 +2578,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // journal before the probes run — a lesson triggered on this exact
   // tool landing must see its own trace line in the same event
   journalTrace(input, sessionId);
-  lines.push(...deadLoopPostTool({ dir: process.cwd(), sessionId }, input));
+  const deadloop = await lazyDeadloop();
+  lines.push(...deadloop.deadLoopPostTool({ dir: process.cwd(), sessionId }, input));
   // OTLP auto-flush — opt-in only, throttled, detached; a dead
   // collector can lose spans, never stall the hook (spec:
   // specs/telemetry/bro-huy5o.11.md)
-  maybeSpawnTraceFlush(process.cwd());
+  void lazyTrace().then(m => m.maybeSpawnTraceFlush(process.cwd())).catch(() => {});
   const outcome = input.tool_response?.success;
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
   // waste-guard markers commit at post-tool, not pre-tool — a call
@@ -2589,7 +2591,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // reaches this event, so a marker only stands for a call that
   // actually ran (spec bro-rw8z3). Passive state like the trace
   // journal, so it records in observe mode too.
-  wasteRecordFor(input, sessionId, outcome);
+  await wasteRecordFor(input, sessionId, outcome);
   // `bro mode <name>` binds to this session here — runs in EVERY mode,
   // observe included: it is the way OUT of observe (specs/bro-izpyk.2.md).
   // A proven-failed call binds nothing (the mode was never applied);
@@ -2612,7 +2614,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // failure. A host that cannot observe outcomes (Codex PostToolUse
   // fires on non-zero exits) over-approximates: a false arm costs one
   // probe that finds nothing, a missed arm loses the gate entirely.
-  lines.push(...armingLinesForOutcome(outcome, cmd, sessionId));
+  lines.push(...(await armingLinesForOutcome(outcome, cmd, sessionId)));
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
   // the same journaled tail — one parallel flight with the probes
@@ -2627,14 +2629,18 @@ async function emitPostTool(input: HookInput): Promise<void> {
     }),
   ]);
   lines.push(...postLines, ...guards);
-  if (lines.length > 0) {
-    // Claude validates hookEventName against the triggering event — a
-    // PostToolUseFailure trigger needs its own name back, not
-    // 'PostToolUse'. Hosts without the field get the default.
-    const eventName =
-      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
-    context(eventName, lines.join('\n'));
-  }
+  emitPostToolLines(input, lines);
+}
+
+/** The gathered post-tool lines land as one context emission — Claude
+ *  validates hookEventName against the triggering event, so a
+ *  PostToolUseFailure trigger needs its own name back, not
+ *  'PostToolUse'. Hosts without the field get the default. */
+function emitPostToolLines(input: HookInput, lines: string[]): void {
+  if (lines.length === 0) return;
+  const eventName =
+    typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse';
+  context(eventName, lines.join('\n'));
 }
 
 /** The exit gate as a hook: every connector contributes GateContributions;
@@ -2654,7 +2660,7 @@ async function emitStopGate(input: HookInput): Promise<void> {
   const eventName = typeof input.hook_event_name === 'string' ? input.hook_event_name : 'Stop';
   // session tail — the last post-tool lines only ship if a flush fires
   // here; a stop's spawn is the same detached, throttled respawn
-  maybeSpawnTraceFlush(process.cwd());
+  void lazyTrace().then(m => m.maybeSpawnTraceFlush(process.cwd())).catch(() => {});
   // observe is fully passive (specs/bro-izpyk.2.md): no goal reminder,
   // no stop gates, no guard sweep — the trace flush above still runs.
   if (hookMode === 'observe') {
@@ -2833,7 +2839,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
-  const earlyBlock = preToolEarlyBlock(sessionId, input, tool, toolInput);
+  const earlyBlock = await preToolEarlyBlock(sessionId, input, tool, toolInput);
   if (earlyBlock !== null) {
     emitPreToolDeny(earlyBlock);
     return;
@@ -2851,16 +2857,18 @@ async function emitPreTool(input: HookInput): Promise<void> {
   emitPreToolAdvisories(input, verdicts);
 }
 
-function preToolEarlyBlock(
+async function preToolEarlyBlock(
   sessionId: string,
   input: HookInput,
   tool: string,
   toolInput: Record<string, unknown>
-): string | null {
-  const deadLoopBlock = deadLoopPreTool({ dir: process.cwd(), sessionId }, input);
+): Promise<string | null> {
+  const deadloop = await lazyDeadloop();
+  const deadLoopBlock = deadloop.deadLoopPreTool({ dir: process.cwd(), sessionId }, input);
   if (deadLoopBlock !== null) return deadLoopBlock;
   // The waste guard runs before connector verdicts: a deterministic
   // duplicate veto costs no model call and fails open on state errors.
+  const { wasteGuardBlock } = await lazyWasteGuard();
   return wasteGuardBlock(process.cwd(), sessionId, { tool, input: toolInput }) ?? null;
 }
 
@@ -3002,25 +3010,23 @@ function runCommitHookCommand(event: 'install' | 'uninstall'): void {
     });
 }
 
-function runPrepareCommitMsg(argv: string[]): void {
-  void lazyGithooks()
-    .then(m => {
-      try {
-        m.emitCommitTrailers(argv.slice(1));
-      } catch {
-        // fail-open
-      }
-    })
-    .catch(() => {});
+async function runPrepareCommitMsg(argv: string[]): Promise<void> {
+  try {
+    const { emitCommitTrailers } = await lazyGithooks();
+    emitCommitTrailers(argv.slice(1));
+  } catch {
+    // fail-open
+  }
   emitHook({ name: 'prepare-commit-msg', payload: {}, meta: { dir: process.cwd() } });
 }
 
 /** The ref guard reads its update list from stdin — but only when a
  *  pipe actually fed it. A bare `bro hooks reference-transaction` on a
  *  terminal must not block on readFileSync(0). */
-function runRefGuard(argv: string[]): void {
+async function runRefGuard(argv: string[]): Promise<void> {
   try {
     const stdinText = process.stdin.isTTY ? '' : readFileSync(0, 'utf8');
+    const { emitRefGuard } = await lazyRefguard();
     emitRefGuard(argv.slice(1), stdinText);
   } catch {
     // fail-open — the guard must never wedge git
@@ -3215,9 +3221,10 @@ function runPerf(argv: string[]): void {
  *  pre-gate, no-stdin placement as the shim events: the dispatcher only
  *  schedules the refresh, the worker does it; both fail open and never
  *  block a merge (the catch covers a throw before the worker's own). */
-function runPostMergeEvent(event: string | undefined): boolean {
+async function runPostMergeEvent(event: string | undefined): Promise<boolean> {
   if (event === 'post-merge') {
     try {
+      const { emitPostMerge } = await lazyPostMerge();
       emitPostMerge(process.cwd());
     } catch {
       // fail-open
@@ -3227,6 +3234,7 @@ function runPostMergeEvent(event: string | undefined): boolean {
   }
   if (event === 'post-merge-run') {
     try {
+      const { runPostMergeRefresh } = await lazyPostMerge();
       runPostMergeRefresh(process.cwd());
     } catch {
       // fail-open
@@ -3271,16 +3279,16 @@ async function runPreGateCommand(event: string | undefined, argv: string[]): Pro
   // same no-stdin rule as the operator commands, and same pre-gate
   // placement
   if (event === 'prepare-commit-msg') {
-    runPrepareCommitMsg(argv);
+    await runPrepareCommitMsg(argv);
     return true;
   }
   // reference-transaction is a git-hook event too — argv for the phase
   // and ppid, stdin for the update list; same pre-gate placement
   if (event === 'reference-transaction') {
-    runRefGuard(argv);
+    await runRefGuard(argv);
     return true;
   }
-  if (runPostMergeEvent(event)) {
+  if (await runPostMergeEvent(event)) {
     return true;
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin
@@ -3299,7 +3307,8 @@ async function runPreGateCommand(event: string | undefined, argv: string[]): Pro
   // unwritable state dir degrades to ok:false, never a failed status.
   if (event === 'status') {
     await drainHookSpool().catch(() => {});
-    console.log(renderHookSpoolStatus(argv));
+    const spool = await lazyHookSpool();
+    console.log(spool.renderHookSpoolStatus(argv));
     return true;
   }
   // `snapshot-render` is the detached Tier-1 renderer hooks.js spawns
@@ -3325,6 +3334,7 @@ async function runSnapshotRender(argv: string[]): Promise<void> {
     return; // malformed spawn args — fail open, render nothing
   }
   try {
+    const { renderModeSnapshots } = await lazyModeSnapshots();
     await renderModeSnapshots(dir, modeRaw);
   } catch {
     // render is best-effort — a failed sweep just leaves the miss
@@ -3390,10 +3400,11 @@ async function dispatchWithSpan(
  *  drain into ledger.db before the drop (best-effort; only on the rare
  *  >1MB path so the hot path still pays nothing). */
 async function rotateSpoolBounded(): Promise<void> {
-  if (spoolRotationPending()) {
+  const spool = await lazyHookSpool();
+  if (spool.spoolRotationPending()) {
     await drainHookSpool().catch(() => {});
   }
-  rotateHookSpool();
+  spool.rotateHookSpool();
 }
 
 type HookEventContext = {

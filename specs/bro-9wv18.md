@@ -116,3 +116,17 @@ existing lazy-import design; this measurement slice makes no additional
 behavioral refactor. The direct import probe is a diagnostic, not a CI budget,
 because it does not execute from an opted-in fixture and has high host-level
 variance (the p95/max outliers show that clearly).
+
+## Slice 4 — lazy imports (bro-9wv18)
+
+The hook entry was rebuilt and the same fresh-process import probe was repeated
+after moving guard probes and event-specific hook helpers behind dynamic
+imports. The probe used 30 samples and no warmup:
+
+| case | min (ms) | p50 (ms) | p95 (ms) | max (ms) | errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| import `dist/hooks.js` after lazy-import changes | 181.1 | 194.4 | 273.1 | 281.8 | 0 |
+
+This is consistent with the prior 193.5 ms p50, while ensuring the
+guard/judge, waste/dead-loop, trace, git-hook, post-merge, spool, and snapshot
+modules are not evaluated on the common session-start/stop import path.
