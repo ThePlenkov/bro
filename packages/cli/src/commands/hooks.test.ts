@@ -71,9 +71,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
 }
 
 describe('hook journal and occupancy lock bounds', () => {
-  test('work arming writes through a live foreign occupancy lock', macosParity, {
-    skip: process.platform === 'win32',
-  }, async () => {
+  test('work arming writes through a live foreign occupancy lock', macosParity, async () => {
     const { root, main } = initRepo('bro-hooks-lock-');
     await insideAsync(main, root, async () => {
       const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
