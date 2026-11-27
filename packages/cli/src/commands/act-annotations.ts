@@ -22,7 +22,7 @@ export interface ActAnnotations {
 interface CheckRun {
   name?: unknown;
   conclusion?: unknown;
-  output?: { annotations_url?: unknown };
+  output?: { annotations_url?: unknown } | null;
 }
 
 function api(repo: string, path: string): unknown {
@@ -86,7 +86,7 @@ function paginatedCheckRuns(pages: unknown[]): CheckRun[] {
 
 function checkAnnotations(run: CheckRun): CheckAnnotations | null {
   const url =
-    run.output !== undefined && typeof run.output.annotations_url === 'string'
+    run.output != null && typeof run.output.annotations_url === 'string'
       ? run.output.annotations_url
       : null;
   const rows = url === null ? [] : annotationsFromUrl(url);
