@@ -299,6 +299,9 @@ describe('bro loop e2e', () => {
   test('the run record rides the registry worker — the check-in planes see it (bro-wg896)', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }]);
     inside(f.main, f.root, () => {
+      // The fake worker's end snapshot must follow the parent loop's
+      // registry re-stamp, not merely its own "opened PR" event.
+      f.env.E2E_LOOP_RECORD_BARRIER = '1';
       const r = f.run();
       assert.match(r.stdout, /loop: fx-a landed/);
       const peeks = (readHostState(f.hostState).loopPeeks ?? []) as Array<{

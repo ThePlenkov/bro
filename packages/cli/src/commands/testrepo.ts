@@ -1447,6 +1447,29 @@ const peekLoop = (at) => {
 // spawn resolves after the fork — the first peek may still see the
 // claim-custody stamp; the scenario-end peek reads the worker stamp
 peekLoop('worker-start')
+// Some tests inspect the worker-end snapshot specifically to prove that
+// custody has moved to the registry worker. The worker can finish its own
+// work before the parent receives the spawn event and re-stamps the record,
+// so make that inspection an event-driven barrier rather than a race with
+// the parent. Other fixture users leave this opt-in unset.
+const awaitRegistryRunRecord = () => {
+  if (process.env.E2E_LOOP_RECORD_BARRIER !== '1') return
+  const deadline = Date.now() + 10000
+  for (;;) {
+    try {
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { encoding: 'utf8' }
+      ).trim()
+      const p = path.join(common, 'bro', 'loop', 'fx-a.json')
+      const r = JSON.parse(fs.readFileSync(p, 'utf8'))
+      if (typeof r.log === 'string' && r.log.includes(path.join('bro', 'agents'))) return
+    } catch {}
+    if (Date.now() >= deadline) throw new Error('registry run record did not receive its agent log')
+    pause(25)
+  }
+}
 // register the "opened" PR — the per-branch map (seeded prs: {}) is
 // authoritative when present; the flat prOpened flag feeds the legacy
 // single-PR probes
@@ -1556,6 +1579,7 @@ switch (scenario) {
       markPrOpened(s)
     })
     log('opened pr')
+    awaitRegistryRunRecord()
     peekLoop('worker-done')
     break
   }

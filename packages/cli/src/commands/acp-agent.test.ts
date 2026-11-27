@@ -324,13 +324,25 @@ describe('bro acp — runSlash', () => {
     const run = runSlash(
       // traps SIGTERM and parks — without escalation 'close' would
       // wait the whole 60s timeout and jam the writeQ behind it
-      [process.execPath, '-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1e9)'],
+      [
+        process.execPath,
+        '-e',
+        'process.stdout.write("READY\\n");process.on("SIGTERM",()=>{});setInterval(()=>{},1e9)',
+      ],
       process.cwd(),
       60_000,
       ctrl.signal,
       t => texts.push(t)
     );
-    setTimeout(() => ctrl.abort(), 100);
+    const deadline = Date.now() + 10_000;
+    while (!texts.some(t => t.includes('READY'))) {
+      if (Date.now() >= deadline) {
+        ctrl.abort();
+        throw new Error(`SIGTERM test child never reached the ready barrier: ${texts.join()}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    ctrl.abort();
     await run;
     const elapsed = Date.now() - t0;
     assert.ok(
