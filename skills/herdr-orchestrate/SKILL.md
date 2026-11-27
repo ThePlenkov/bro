@@ -42,11 +42,15 @@ exactly the split this rule exists to fix.
 
 ## Spawn one worker
 
-1. Fresh base — always branch from current remote main:
-   `git -C "{{REPO_ROOT}}" fetch origin main`.
-   Do NOT `git pull` — the checkout may sit on a feature branch; you
-   only need the fetched ref.
-2. `herdr worktree create --cwd "{{REPO_ROOT}}" --branch "work/{{TASK_ID}}" --base origin/main --path "{{REPO_ROOT}}--{{TASK_ID}}" --label "{{TASK_ID}}"`
+1. Fresh base — always branch from the current remote default branch:
+   `git -C "{{REPO_ROOT}}" fetch origin`.
+   Resolve `{{BASE_REF}}` in this order: first use the symbolic
+   `refs/remotes/origin/HEAD` (normally `origin/main`), then
+   `origin/main`, then `origin/master`; verify each candidate with
+   `git rev-parse --verify` and fail loudly if none exists. Do NOT
+   `git pull` — the checkout may sit on a feature branch; you only need
+   the fetched ref.
+2. `herdr worktree create --cwd "{{REPO_ROOT}}" --branch "work/{{TASK_ID}}" --base "{{BASE_REF}}" --path "{{REPO_ROOT}}--{{TASK_ID}}" --label "{{TASK_ID}}"`
    → read `workspace_id` from `.result`. `--base` pins the source —
    without it the branch comes from the checkout's current HEAD.
    Every interpolated value MUST come from the validated set —
@@ -68,7 +72,10 @@ exactly the split this rule exists to fix.
 5. Write the brief to `{{REPO_ROOT}}--{{TASK_ID}}/{{TASK_ID}}-brief.md`
    with your own file-writing tool — the brief MUST state the GATE
    ({{DONE_CRITERIA}}), the worktree path, and "do not spawn
-   sub-agents". Arm the persistent objective BEFORE the task prompt —
+   sub-agents". This generated brief is orchestrator input, not worker
+   output: tell the worker not to stage or commit
+   `{{TASK_ID}}-brief.md` (or put the brief outside the worktree).
+   Arm the persistent objective BEFORE the task prompt —
    the worker's first message must carry the goal, or a mid-run
    compaction drops the thread. **The criteria text never enters
    argv** — it is free prose, and a quote or `$()` in it executes on
@@ -89,8 +96,28 @@ exactly the split this rule exists to fix.
    confirms the turn actually started (`agent_prompt_stalled` if it
    didn't). Submission is rejected with `agent_blocked` if the agent
    is already waiting for input — read it first instead of re-prompting.
-   If any step fails after the worktree exists, run the teardown below
-   before retrying — a half-spawned workspace poisons the retry.
+   If any step fails after the worktree exists, use the failed-startup
+   recovery path below before retrying — a half-spawned workspace
+   poisons the retry.
+
+## Failed-startup recovery
+
+If worktree creation, pane lookup, agent startup, goal arming, or the
+first prompt fails before the worker is running:
+
+1. Stop retrying and record the workspace, branch, and failure. Do not
+   reset, clean, stash, or overwrite the worktree; committed and
+   uncommitted worker work must remain recoverable.
+2. Check `git -C "{{REPO_ROOT}}--{{TASK_ID}}" status --short` and
+   `git -C "{{REPO_ROOT}}--{{TASK_ID}}" log --oneline "{{BASE_REF}}..HEAD"`
+   (and inspect the branch before any cleanup). Treat either output as
+   preserved work, not as permission to delete it.
+3. Only when the worktree is clean **and** the branch has no commits
+   beyond `{{BASE_REF}}` may you stop/close the failed workspace, remove
+   the worktree, and remove its local branch. Otherwise leave the
+   workspace and branch intact and report them for recovery in place.
+   The no-commit check is not evidence that startup succeeded and does
+   not waive the preservation rule.
 
 ## Wait — never poll blindly
 
@@ -117,11 +144,16 @@ exactly the split this rule exists to fix.
 
 ## Teardown (in order, only after the GATE passes)
 
-0. Confirm the worker is actually exited — `herdr agent list` shows no
-   live binding for the name. A stale `[dead·]` label is a marker, not
-   proof; never close a workspace whose worker is still live.
+0. Stop a completed worker through the supported release mechanism:
+   in a bro-managed repo use
+   `bro agents down {{TASK_ID}}-worker`; in herdr-only mode use the
+   installed `herdr agent` exit/release command. Then confirm the worker
+   is actually exited — `herdr agent list` shows no live binding for the
+   name. A stale `[dead·]` label is a marker, not proof; never close a
+   workspace whose worker is still live.
 1. `herdr workspace close <ws>` — kills panes and agents.
-2. Verify the agent is gone: `herdr agent list` — no entry for the name.
+2. Verify the agent is gone again: `herdr agent list` — no live entry
+   for the name.
 3. Verify the work is preserved — the GATE must prove it (merged PR,
    pushed commits). `git -C "{{REPO_ROOT}}" worktree remove "{{REPO_ROOT}}--{{TASK_ID}}"`.
 4. `git -C "{{REPO_ROOT}}" branch -D "work/{{TASK_ID}}"` — check the
