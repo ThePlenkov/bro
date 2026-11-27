@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pidAlive, procStat } from './proc.ts'
+import { MARKER_CLOCK_SKEW_MS, markerLive, pidAlive, procStat } from './proc.ts'
 
 const NOPROC = process.platform !== 'linux'
 
@@ -46,5 +46,22 @@ describe('procStat', { skip: NOPROC }, () => {
 
   test('an unreadable pid is null', () => {
     assert.equal(procStat(2000000000), null)
+  })
+})
+
+describe('markerLive', () => {
+  const now = 1_000_000
+
+  test('ownerless marker in the present and past window is live', () => {
+    assert.equal(markerLive(undefined, now, 60_000, now), true)
+    assert.equal(markerLive(undefined, now - 60_000, 60_000, now), true)
+  })
+
+  test('future-dated ownerless marker past clock-skew tolerance is not live', () => {
+    assert.equal(markerLive(undefined, now + MARKER_CLOCK_SKEW_MS + 1, 60_000, now), false)
+  })
+
+  test('future mtime at the clock-skew boundary remains live', () => {
+    assert.equal(markerLive(undefined, now + MARKER_CLOCK_SKEW_MS, 60_000, now), true)
   })
 })

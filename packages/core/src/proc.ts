@@ -379,7 +379,10 @@ export function markerOwner(firstLine: string | undefined): { pid: number; start
 /** Is this marker's owning session alive? A recorded owner decides by
  *  pid liveness alone — a dead session's marker is residue even when
  *  its mtime is fresh, and a live session's marker stays live past the
- *  freshness window. Ownerless markers fall back to the window. */
+ *  freshness window. Ownerless markers fall back to the window, but
+ *  future-dated mtimes beyond the clock-skew tolerance are not live. */
+export const MARKER_CLOCK_SKEW_MS = 60_000;
+
 export function markerLive(
   firstLine: string | undefined,
   mtimeMs: number,
@@ -387,5 +390,8 @@ export function markerLive(
   now: number = Date.now()
 ): boolean {
   const owner = markerOwner(firstLine);
-  return owner === null ? mtimeMs >= now - liveMs : pidAlive(owner.pid, owner.start || undefined);
+  if (owner !== null) {
+    return pidAlive(owner.pid, owner.start || undefined);
+  }
+  return mtimeMs >= now - liveMs && mtimeMs <= now + MARKER_CLOCK_SKEW_MS;
 }
