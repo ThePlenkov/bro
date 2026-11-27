@@ -29,6 +29,7 @@ import {
   readFileSync,
   readlinkSync,
   unlinkSync,
+  writeFileSync,
   type Stats,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -45,9 +46,10 @@ import { flag } from './args.ts';
 import { skillsSection, type SkillsConfig } from './skills-config.ts';
 import { lockNamesFor, parseSkillSource, type SkillSource } from './skills-sources.ts';
 import {
-  addArgs,
   commandOnPath,
+  pinnedAddArgs,
   resolveSkillsBin,
+  resolveGithubRef,
   spawnDetail,
   spawnFailed,
   spawnSkills,
@@ -240,6 +242,7 @@ interface SyncCtx {
   cfg: SkillsConfig;
   bin: SkillsBin;
   spawn: SpawnRunner;
+  resolveRef: (repo: string) => string | null;
 }
 
 /** A path-pinned github source whose skill the lock already records
@@ -263,10 +266,41 @@ function syncRemote(src: SkillSource & { kind: 'github' | 'url' }, ctx: SyncCtx)
   if (src.kind === 'github' && alreadyLocked(src, readSkillLock(ctx.root))) {
     return { label, state: 'skipped', detail: `${src.skill} already locked` };
   }
-  const proc = ctx.spawn(ctx.bin, ctx.root, addArgs(src, ctx.cfg.agents));
-  return spawnFailed(proc)
-    ? { label, state: 'error', detail: `skills add failed — ${spawnDetail(proc)}` }
-    : { label, state: 'ok' };
+  const ref = src.kind === 'github' ? ctx.resolveRef(src.repo) : undefined;
+  if (src.kind === 'github' && ref === null) {
+    return { label, state: 'error', detail: `could not resolve ${src.repo} default branch HEAD` };
+  }
+  const proc = ctx.spawn(ctx.bin, ctx.root, pinnedAddArgs(src, ctx.cfg.agents, ref ?? undefined));
+  if (spawnFailed(proc)) {
+    return { label, state: 'error', detail: `skills add failed — ${spawnDetail(proc)}` };
+  }
+  if (src.kind === 'github' && ref !== undefined && ref !== null) {
+    recordLockRef(ctx.root, src.repo, ref);
+  }
+  return { label, state: 'ok' };
+}
+
+/** The skills CLI records the source and content hash, but older releases do
+ * not retain the revision supplied in the source spec. Preserve the resolver
+ * result in bro's lock contract without changing any other lock fields. */
+function recordLockRef(root: string, repo: string, ref: string): void {
+  const lockPath = join(root, 'skills-lock.json');
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null) return;
+    const skills = (parsed as { skills?: unknown }).skills;
+    if (typeof skills !== 'object' || skills === null) return;
+    for (const value of Object.values(skills)) {
+      if (typeof value === 'object' && value !== null) {
+        const entry = value as { source?: unknown; ref?: unknown };
+        if (entry.source === repo) entry.ref = ref;
+      }
+    }
+    writeFileSync(lockPath, `${JSON.stringify(parsed, null, 2)}\n`);
+  } catch {
+    // The CLI's successful install remains useful; verification reports a
+    // missing/unpinned lock rather than claiming a pin we could not record.
+  }
 }
 
 /** `.agents/skills/` gaps vs the lock → one experimental_install. */
@@ -351,9 +385,18 @@ export function runSync(
   root: string,
   cfg: SkillsConfig,
   spawn: SpawnRunner = spawnSkills,
-  probe: BinProbe = commandOnPath
+  probe: BinProbe = commandOnPath,
+  resolveRef: (repo: string) => string | null = spawn === spawnSkills
+    ? resolveGithubRef
+    : () => 'test'
 ): { steps: SyncStep[]; rows: SkillRow[]; drift: SkillDrift[]; failed: boolean } {
-  const ctx: SyncCtx = { root, cfg, bin: resolveSkillsBin(root, cfg.bin, probe), spawn };
+  const ctx: SyncCtx = {
+    root,
+    cfg,
+    bin: resolveSkillsBin(root, cfg.bin, probe),
+    spawn,
+    resolveRef,
+  };
   const out = withSyncLock(root, () => {
     const steps = cfg.install.map(parseSkillSource).map(src => syncDeclared(src, ctx));
     // the lock is CLI-maintained — re-read after the adds (setup --lock's
@@ -531,6 +574,7 @@ interface SkillMutation {
   bin?: SkillsBin;
   spawn?: SpawnRunner;
   probe?: BinProbe;
+  resolveRef?: (repo: string) => string | null;
 }
 
 /** Resolve the names covered by a source.  The lock is authoritative for
@@ -563,8 +607,19 @@ export function runSkillMutation(input: SkillMutation): {
   const bin = input.bin ?? resolveSkillsBin(input.root, input.cfg.bin, input.probe);
   const spawn = input.spawn ?? spawnSkills;
   const names = mutationNames(source, input.root);
+  const ref =
+    input.command === 'add' && source.kind === 'github'
+      ? (input.resolveRef ?? (input.spawn === undefined ? resolveGithubRef : () => 'test'))(
+          source.repo
+        )
+      : undefined;
+  if (input.command === 'add' && source.kind === 'github' && ref === null) {
+    return { ok: false, args: [], detail: `could not resolve ${source.repo} default branch HEAD` };
+  }
   const args =
-    input.command === 'add' ? addArgs(source, input.cfg.agents) : [input.command, ...names, '-y'];
+    input.command === 'add'
+      ? pinnedAddArgs(source, input.cfg.agents, ref ?? undefined)
+      : [input.command, ...names, '-y'];
   if (input.command !== 'add' && names.length === 0) {
     return {
       ok: false,
@@ -573,7 +628,13 @@ export function runSkillMutation(input: SkillMutation): {
     };
   }
   const proc = spawn(bin, input.root, args);
-  return spawnFailed(proc) ? { ok: false, args, detail: spawnDetail(proc) } : { ok: true, args };
+  if (spawnFailed(proc)) {
+    return { ok: false, args, detail: spawnDetail(proc) };
+  }
+  if (source.kind === 'github' && ref !== undefined && ref !== null) {
+    recordLockRef(input.root, source.repo, ref);
+  }
+  return { ok: true, args };
 }
 
 function cmdMutation(
