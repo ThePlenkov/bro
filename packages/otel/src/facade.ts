@@ -43,6 +43,29 @@ export interface OtelHookRecord {
 
 type Scalar = string | number | boolean
 
+export interface CollectFieldsOptions {
+  payload: unknown
+  collect: string[]
+}
+
+export interface HookRecordOptions {
+  name: string
+  payload: unknown
+  meta: HookMeta
+  policy: OtelHookPolicy
+}
+
+export interface OtelSinkPathOptions {
+  cfg: OtelConfig
+  dir: string
+}
+
+export interface EmitHookOptions {
+  name: string
+  payload: unknown
+  meta?: HookMeta
+}
+
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -66,10 +89,10 @@ function dig(lookup: { payload: unknown; path: string }): { hit: boolean; v?: Sc
 
 /** Apply the collect allowlist — `fields` are the scalars that made it
  *  into the record, `skipped` the requested paths with no scalar leaf. */
-export function collectFields(
-  payload: unknown,
-  collect: string[]
-): { fields: Record<string, Scalar>; skipped: string[] } {
+export function collectFields({
+  payload,
+  collect,
+}: CollectFieldsOptions): { fields: Record<string, Scalar>; skipped: string[] } {
   const fields: Record<string, Scalar> = {}
   const skipped: string[] = []
   for (const path of collect) {
@@ -82,13 +105,13 @@ export function collectFields(
 
 /** Build the export record for one event — pure, exported so
  *  `bro otel test` can show exactly what a sink would receive. */
-export function hookRecord(
-  name: string,
-  payload: unknown,
-  meta: HookMeta,
-  policy: OtelHookPolicy
-): { record: OtelHookRecord; skipped: string[] } {
-  const { fields, skipped } = collectFields(payload, policy.collect)
+export function hookRecord({
+  name,
+  payload,
+  meta,
+  policy,
+}: HookRecordOptions): { record: OtelHookRecord; skipped: string[] } {
+  const { fields, skipped } = collectFields({ payload, collect: policy.collect })
   const record: OtelHookRecord = {
     ts: new Date().toISOString(),
     event: `hook.${name}`,
@@ -112,7 +135,7 @@ const SINK_KEEP_LINES = 2_000
 /** The file sink's default path — `<git-common>/bro/otel/hooks.jsonl`,
  *  sibling of the perf/trace journals; a non-git dir falls back to the
  *  user's state dir rather than dropping the event. */
-export function otelSinkPath(cfg: OtelConfig, dir: string): string {
+export function otelSinkPath({ cfg, dir }: OtelSinkPathOptions): string {
   if (cfg.exporter.path !== '') {
     return resolve(dir, cfg.exporter.path)
   }
@@ -161,7 +184,7 @@ function writeSink(job: { cfg: OtelConfig; record: OtelHookRecord; dir: string }
   const { cfg, record, dir } = job
   switch (cfg.exporter.type) {
     case 'file':
-      writeFileSink({ path: otelSinkPath(cfg, dir), record })
+      writeFileSink({ path: otelSinkPath({ cfg, dir }), record })
       return
     case 'otlp':
       // detached delivery — a dead collector cannot stall the hook's
@@ -337,7 +360,7 @@ function shouldEmit(cfg: OtelConfig, policy: OtelHookPolicy): boolean {
 /** Emit one hook event through the telemetry pipeline. Never throws,
  *  never awaits — a telemetry bug loses one row at worst. `enabled=false`
  *  short-circuits before any payload work. */
-export function emitHook(name: string, payload: unknown, meta: HookMeta = {}): void {
+export function emitHook({ name, payload, meta = {} }: EmitHookOptions): void {
   try {
     const dir = anchorDir(meta)
     const cfg = otelConfigFor(dir)
@@ -345,7 +368,7 @@ export function emitHook(name: string, payload: unknown, meta: HookMeta = {}): v
     if (!shouldEmit(cfg, policy)) {
       return
     }
-    writeSink({ cfg, record: hookRecord(name, payload, meta, policy).record, dir })
+    writeSink({ cfg, record: hookRecord({ name, payload, meta, policy }).record, dir })
   } catch {
     // drop-on-error — telemetry must never stall or fail the caller
   }

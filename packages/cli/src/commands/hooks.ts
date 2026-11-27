@@ -3012,7 +3012,7 @@ function runPrepareCommitMsg(argv: string[]): void {
       }
     })
     .catch(() => {});
-  emitHook('prepare-commit-msg', {}, { dir: process.cwd() });
+  emitHook({ name: 'prepare-commit-msg', payload: {}, meta: { dir: process.cwd() } });
 }
 
 /** The ref guard reads its update list from stdin — but only when a
@@ -3025,7 +3025,7 @@ function runRefGuard(argv: string[]): void {
   } catch {
     // fail-open — the guard must never wedge git
   }
-  emitHook('reference-transaction', {}, { dir: process.cwd() });
+  emitHook({ name: 'reference-transaction', payload: {}, meta: { dir: process.cwd() } });
 }
 
 /** bd/gh probes inherit cwd — run them in the project the hook fired for. */
@@ -3222,7 +3222,7 @@ function runPostMergeEvent(event: string | undefined): boolean {
     } catch {
       // fail-open
     }
-    emitHook('post-merge', {}, { dir: process.cwd() });
+    emitHook({ name: 'post-merge', payload: {}, meta: { dir: process.cwd() } });
     return true;
   }
   if (event === 'post-merge-run') {
@@ -3492,14 +3492,14 @@ async function dispatchHookEvent(context: HookEventContext): Promise<void> {
   }
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   flushPerf(sessionId, event, t0);
-  emitHook(event, input, {
+  emitHook({ name: event, payload: input, meta: {
     sessionId,
     client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
     durationMs: Date.now() - t0,
     ok,
     error: ok ? undefined : 'dispatch threw',
     dir: root,
-  });
+  } });
   // A probe that raced past its budget leaves its bd/gh child running —
   // unref the stragglers so the hook exits with the answer it sent,
   // not when the last subprocess closes.

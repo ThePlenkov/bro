@@ -170,7 +170,7 @@ interface StatusReport {
 function statusTarget(view: { cfg: ResolvedOtelConfig; dir: string }): string {
   const { cfg, dir } = view;
   if (cfg.exporter.type === 'file') {
-    return otelSinkPath(cfg, dir);
+    return otelSinkPath({ cfg, dir });
   }
   if (cfg.exporter.type === 'stdout') {
     return 'stderr';
@@ -272,17 +272,17 @@ function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean 
   const name = hookEventName(rawName);
   const cfg = otelConfig({ dir });
   const policy = resolveHookPolicy(cfg, name);
-  const { record, skipped } = hookRecord(
+  const { record, skipped } = hookRecord({
     name,
-    SYNTHETIC_PAYLOAD,
-    {
+    payload: SYNTHETIC_PAYLOAD,
+    meta: {
       sessionId: SYNTHETIC_PAYLOAD.session_id,
       client: 'test',
       durationMs: 0,
       ok: true,
     },
-    policy
-  );
+    policy,
+  });
   // payload keys present but outside the allowlist — what the policy
   // dropped. `collect` paths are dotted; compare on the top-level key.
   const collectedRoots = new Set(policy.collect.map(p => p.split('.')[0]));
