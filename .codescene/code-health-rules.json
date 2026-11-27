@@ -1317,7 +1317,7 @@
     },
     {
       "matching_content_path": "packages/cli/src/commands/herdr-status-view.ts",
-      "matching_content_path_doc": "The herdr CLI seam — pane ids, env names and argv strings ARE the domain here, so Primitive Obsession and String Heavy Function Arguments are disabled for this file only; every other rule keeps bro's bar.",
+      "matching_content_path_doc": "The herdr status view is a presentation seam: pane ids, labels, states, paths and argv strings are the rows it renders and the protocol it reports, so Primitive Obsession and String Heavy Function Arguments are disabled for this file only; every other rule keeps bro's bar.",
       "rules": [
         {
           "name": "Brain Method",
