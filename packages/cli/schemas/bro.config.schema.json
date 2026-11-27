@@ -1915,7 +1915,8 @@
             "type": "string",
             "minLength": 1,
             "pattern": "\\S"
-          }
+          },
+          "description": "Source strings. A local path may be a collection; recursively, directories directly containing SKILL.md expand to one install entry each. Expansion is sorted and an empty collection is invalid."
         },
         "agents": {
           "type": "array",

@@ -32,7 +32,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import {
   checkSkillLock,
   type ExitCode,
@@ -72,6 +72,55 @@ export {
 } from './skills-spawn.ts';
 
 // --- reconcile -----------------------------------------------------------------
+
+/** Expand a local source that names a skill collection. A skill is a directory
+ * directly containing SKILL.md; directories below a skill are never searched.
+ * Collection traversal is recursive so category directories can be nested.
+ * Sorted traversal makes the resulting install/link order reproducible. */
+export function expandSkillSources(root: string, entries: unknown[]): SkillSource[] {
+  return entries.flatMap(entry => {
+    const source = parseSkillSource(entry);
+    if (source.kind !== 'local') {
+      return [source];
+    }
+    return expandLocalSource(root, source);
+  });
+}
+
+function expandLocalSource(root: string, source: SkillSource & { kind: 'local' }): SkillSource[] {
+  const base = resolve(root, source.path);
+  const found: string[] = [];
+  const visit = (dir: string): void => {
+    if (existsSync(join(dir, 'SKILL.md'))) {
+      found.push(dir);
+      return;
+    }
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return;
+    }
+    for (const entry of entries
+      .filter(e => e.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      visit(join(dir, entry.name));
+    }
+  };
+  visit(base);
+  if (found.length === 0) {
+    return [
+      {
+        kind: 'invalid',
+        raw: source.raw,
+        reason: `local source ${source.path} contains no directory with a direct SKILL.md`,
+      },
+    ];
+  }
+  return found
+    .sort((a, b) => a.localeCompare(b))
+    .map(path => ({ kind: 'local', path: relative(root, path), raw: source.raw }));
+}
 
 export interface SkillRow {
   name: string;
@@ -216,7 +265,7 @@ export function collectRows(
     locked,
     driftByName: new Map(drift.map(d => [d.name, d])),
   };
-  const declared = cfg.install.map(parseSkillSource);
+  const declared = expandSkillSources(root, cfg.install);
   const rows = declared.flatMap(src => rowsForSource(src, ctx));
   for (const name of extraNames(root, declared, locked)) {
     const d = ctx.driftByName.get(name);
@@ -418,7 +467,7 @@ export function runSync(
     resolveRef,
   };
   const out = withSyncLock(root, () => {
-    const steps = cfg.install.map(parseSkillSource).map(src => syncDeclared(src, ctx));
+    const steps = expandSkillSources(root, cfg.install).map(src => syncDeclared(src, ctx));
     // the lock is CLI-maintained — re-read after the adds (setup --lock's
     // stale-lock lesson), then fill any .agents/skills gap it carries
     const restore = syncRestore(ctx);
@@ -489,7 +538,8 @@ Commands:
   update <source> update locked skills from an external source
   remove <source> remove all locked skills from an external source
   sync    install the skills.install sources — npx skills add per
-          github/URL source, a bro-managed symlink per local: dir,
+          github/URL source, a bro-managed symlink per local: dir or
+          per skill under a local collection,
           experimental_install for lock gaps, then verify the lock
   list    the declared ↔ locked ↔ installed reconcile, read-only
 
@@ -501,7 +551,10 @@ Options:
 Config (bro.config.json "skills"):
   install  source strings — marketplace:<owner>/<repo>#<entry>,
            github:<owner>/<repo>[/<path>],
-           <owner>/<repo>, https://…, or local:<relpath>
+           <owner>/<repo>, https://…, or local:<relpath>. A local path
+           may be a collection: recursively, each directory directly
+           containing SKILL.md becomes one install entry (sorted); a
+           collection with no such directories is an error.
   agents   'skills add -a' link targets (default: universal —
            the .agents/skills plane only)
   bin      explicit skills CLI (path or command)`,

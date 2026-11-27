@@ -72,7 +72,12 @@ export const skillsSection: ConfigSection<SkillsConfig> = raw => {
 };
 
 skillsSection.jsonSchema = js.obj({
-  install: js.strList,
+  install: {
+    type: 'array',
+    items: js.str,
+    description:
+      'Source strings. A local path may be a collection; recursively, directories directly containing SKILL.md expand to one install entry each. Expansion is sorted and an empty collection is invalid.',
+  },
   agents: js.strList,
   bin: js.str,
 });
