@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { collectFields, emitHook, hookRecord, otelSinkPath, readSinkRows, type OtelHookRecord } from './facade.ts'
@@ -19,6 +19,11 @@ function repo(): string {
   const dir = tmpDir('otel-facade-')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   return dir
+}
+
+function writeConfig(dir: string, otel: Record<string, unknown>, local = false): void {
+  const file = local ? 'bro.config.local.json' : 'bro.config.json'
+  writeFileSync(join(dir, file), JSON.stringify({ otel }))
 }
 
 const PAYLOAD = {
@@ -105,20 +110,14 @@ describe('emitHook — file sink', () => {
 
   test('enabled=false writes nothing — zero overhead contract', () => {
     const dir = tmpDir('otel-facade-')
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { enabled: false, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: false, exporter: { type: 'file', path: 'sink.jsonl' } })
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { sessionId: 's', dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
   test('enabled + default * policy → one meta-only row per event', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'out/sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'out/sink.jsonl' } })
     const sink = join(dir, 'out', 'sink.jsonl')
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { sessionId: 's', dir, durationMs: 3 } })
     emitHook({ name: 'prompt-submit', payload: PAYLOAD, meta: { sessionId: 's', dir } })
@@ -133,16 +132,11 @@ describe('emitHook — file sink', () => {
 
   test('collect allowlist exports only named fields', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({
-        otel: {
-          enabled: true,
-          exporter: { type: 'file', path: 'sink.jsonl' },
-          hooks: { 'post-tool': { collect: ['tool_name', 'tool_response.success'] } },
-        },
-      })
-    )
+    writeConfig(dir, {
+      enabled: true,
+      exporter: { type: 'file', path: 'sink.jsonl' },
+      hooks: { 'post-tool': { collect: ['tool_name', 'tool_response.success'] } },
+    })
     emitHook({ name: 'post-tool', payload: PAYLOAD, meta: { dir } })
     const row = rowsOf(join(dir, 'sink.jsonl'))[0]
     assert.deepEqual(row?.payload, { tool_name: 'exec', 'tool_response.success': true })
@@ -150,16 +144,11 @@ describe('emitHook — file sink', () => {
 
   test('hook:false drops the event, * policy still covers the rest', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({
-        otel: {
-          enabled: true,
-          exporter: { type: 'file', path: 'sink.jsonl' },
-          hooks: { '*': true, 'prompt-submit': false },
-        },
-      })
-    )
+    writeConfig(dir, {
+      enabled: true,
+      exporter: { type: 'file', path: 'sink.jsonl' },
+      hooks: { '*': true, 'prompt-submit': false },
+    })
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     emitHook({ name: 'prompt-submit', payload: PAYLOAD, meta: { dir } })
     emitHook({ name: 'post-tool', payload: PAYLOAD, meta: { dir } })
@@ -171,26 +160,18 @@ describe('emitHook — file sink', () => {
 
   test('sample 0 keeps nothing', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({
-        otel: {
-          enabled: true,
-          exporter: { type: 'file', path: 'sink.jsonl' },
-          hooks: { '*': { sample: 0 } },
-        },
-      })
-    )
+    writeConfig(dir, {
+      enabled: true,
+      exporter: { type: 'file', path: 'sink.jsonl' },
+      hooks: { '*': { sample: 0 } },
+    })
     for (let i = 0; i < 10; i++) emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
   test('BRO_TELEMETRY=0 kills emission outright', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } })
     const prev = process.env.BRO_TELEMETRY
     process.env.BRO_TELEMETRY = '0'
     try {
@@ -204,10 +185,7 @@ describe('emitHook — file sink', () => {
 
   test('default file path lands under <git-common>/bro/otel/', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { enabled: true } })
-    )
+    writeConfig(dir, { enabled: true })
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     const def = join(dir, '.git', 'bro', 'otel', 'hooks.jsonl')
     assert.equal(existsSync(def), true, `expected sink at ${def}`)
@@ -218,10 +196,7 @@ describe('emitHook — file sink', () => {
 describe('emitHook — stdout sink', () => {
   test('rows go to stderr, never stdout (hook protocol channel)', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'stdout' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'stdout' } })
     const errs: string[] = []
     const outs: string[] = []
     const oe = console.error
@@ -236,7 +211,9 @@ describe('emitHook — stdout sink', () => {
     }
     assert.equal(outs.length, 0)
     assert.equal(errs.length, 1)
-    assert.equal(JSON.parse(errs[0]!).event, 'hook.post-tool')
+    const [error] = errs
+    assert.ok(error)
+    assert.equal(JSON.parse(error).event, 'hook.post-tool')
   })
 })
 
@@ -305,19 +282,14 @@ describe('emitHook — otlp sink', () => {
   test('detached POST carries the OTLP log record to the configured endpoint', async () => {
     const { got, port, close } = await otlpCollector()
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({
-        otel: {
-          enabled: true,
-          exporter: {
-            type: 'otlp',
-            endpoint: `http://127.0.0.1:${port}`,
-            headers: { authorization: 'Bearer test-token' },
-          },
-        },
-      })
-    )
+    writeConfig(dir, {
+      enabled: true,
+      exporter: {
+        type: 'otlp',
+        endpoint: `http://127.0.0.1:${port}`,
+        headers: { authorization: 'Bearer test-token' },
+      },
+    })
     try {
       emitHook({ name: 'session-start', payload: PAYLOAD, meta: { sessionId: 's', dir, durationMs: 5 } })
       // the detached poster is a separate node process — wait for the hit
@@ -352,10 +324,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
 
   test('committed otel.enabled=true arms nothing', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } })
     commit(dir, 'bro.config.json')
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
@@ -363,21 +332,13 @@ describe('emitHook — provenance (committed config cannot decide where records 
 
   test('committed exporter/collect are ignored — local layer owns where records go', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({
-        otel: {
-          enabled: true,
-          exporter: { type: 'file', path: 'evil.jsonl' },
-          hooks: { '*': { collect: ['prompt', 'tool_input.command'] } },
-        },
-      })
-    )
+    writeConfig(dir, {
+      enabled: true,
+      exporter: { type: 'file', path: 'evil.jsonl' },
+      hooks: { '*': { collect: ['prompt', 'tool_input.command'] } },
+    })
     commit(dir, 'bro.config.json')
-    writeFileSync(
-      join(dir, 'bro.config.local.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'mine.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'mine.jsonl' } }, true)
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     // the committed sink path never sees a byte
     assert.equal(existsSync(join(dir, 'evil.jsonl')), false)
@@ -389,30 +350,18 @@ describe('emitHook — provenance (committed config cannot decide where records 
 
   test('committed layers may still narrow — hooks."*":false silences', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { hooks: { '*': false } } })
-    )
+    writeConfig(dir, { hooks: { '*': false } })
     commit(dir, 'bro.config.json')
-    writeFileSync(
-      join(dir, 'bro.config.local.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } }, true)
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 
   test('committed per-hook disable narrows; committed sample only lowers', () => {
     const dir = repo()
-    writeFileSync(
-      join(dir, 'bro.config.json'),
-      JSON.stringify({ otel: { hooks: { 'prompt-submit': false } } })
-    )
+    writeConfig(dir, { hooks: { 'prompt-submit': false } })
     commit(dir, 'bro.config.json')
-    writeFileSync(
-      join(dir, 'bro.config.local.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } }, true)
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     emitHook({ name: 'prompt-submit', payload: PAYLOAD, meta: { dir } })
     assert.deepEqual(
@@ -425,10 +374,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
     const dir = repo()
     // .gitignore is advisory — a repo can commit the "local" name; git's
     // index is the verdict, not the filename
-    writeFileSync(
-      join(dir, 'bro.config.local.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } }, true)
     commit(dir, 'bro.config.local.json')
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
@@ -436,10 +382,7 @@ describe('emitHook — provenance (committed config cannot decide where records 
 
   test('non-repository dir: every config file is unattributable', () => {
     const dir = tmpDir('otel-facade-')
-    writeFileSync(
-      join(dir, 'bro.config.local.json'),
-      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
-    )
+    writeConfig(dir, { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } }, true)
     emitHook({ name: 'session-start', payload: PAYLOAD, meta: { dir } })
     assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
