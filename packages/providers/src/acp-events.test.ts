@@ -169,6 +169,42 @@ describe('agentTurnPlane', () => {
     }
   });
 
+  test('usage archive rows carry known provider/model and only reported accounting', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'usage-agent';
+    const plane = agentTurnPlane({
+      cwd: dir,
+      by: 'acp provider kilo',
+      sessionId: 'usage-session',
+      provider: 'kilo',
+      model: 'swe-2',
+    });
+    plane.update({
+      sessionUpdate: 'usage_update',
+      inputTokens: 12,
+      outputTokens: 7,
+      cost: { amount: 0.004, currency: 'USD' },
+    } as unknown as SessionUpdate);
+    const row = readArchive(dir, 'usage-agent').find(r => r.kind === 'usage');
+    assert.deepEqual(
+      {
+        provider: row?.provider,
+        model: row?.model,
+        inputTokens: row?.inputTokens,
+        outputTokens: row?.outputTokens,
+        costUsd: row?.costUsd,
+      },
+      { provider: 'kilo', model: 'swe-2', inputTokens: 12, outputTokens: 7, costUsd: 0.004 }
+    );
+    process.env.BRO_AGENT_ID = 'unknown-agent';
+    const unknown = agentTurnPlane({ cwd: dir, by: 't', sessionId: 'unknown' });
+    unknown.update({ sessionUpdate: 'usage_update', used: 3 } as unknown as SessionUpdate);
+    const unknownRow = readArchive(dir, 'unknown-agent').find(r => r.kind === 'usage');
+    assert.equal(unknownRow?.tokens, 3);
+    assert.equal('inputTokens' in (unknownRow ?? {}), false);
+    assert.equal('costUsd' in (unknownRow ?? {}), false);
+  });
+
   // spec bro-l8c4f.4 — the archive carries raw prompts/replies: it must
   // land 0600 and repair a permissive pre-existing file on first write
   test('the archive is owner-only — created 0600, a legacy 0644 repaired', async t => {

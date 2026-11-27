@@ -73,6 +73,10 @@ export interface AgentTurnPlaneOpts {
    *  and writes `<common>/bro/proxy/` even unbadged — a human-run
    *  `bro acp proxy` carries no agent badge (specs/bro-bhyo1.md). */
   plane?: 'agents' | 'proxy';
+  /** Provider identity for usage rows, when the caller knows it. */
+  provider?: string;
+  /** Effective model selected for this turn, when known. */
+  model?: string;
 }
 
 /** The per-turn observer pumpTurn drives: update() per session/update,
@@ -429,6 +433,37 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
     }
   };
 
+  const recordUsage = (u: SessionUpdate): void => {
+    if (u.sessionUpdate !== 'usage_update') return;
+    const raw = u as unknown as Record<string, unknown>;
+    const number = (key: string): number | undefined => {
+      const value = raw[key];
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+    };
+    const cost = raw['cost'];
+    const amount =
+      typeof cost === 'object' && cost !== null
+        ? (cost as Record<string, unknown>)['amount']
+        : undefined;
+    const currency =
+      typeof cost === 'object' && cost !== null
+        ? (cost as Record<string, unknown>)['currency']
+        : undefined;
+    record({
+      ...stamp(),
+      kind: 'usage',
+      ...(opts.provider === undefined ? {} : { provider: opts.provider }),
+      ...(opts.model === undefined ? {} : { model: opts.model }),
+      ...(number('used') === undefined ? {} : { tokens: number('used') }),
+      ...(number('inputTokens') === undefined ? {} : { inputTokens: number('inputTokens') }),
+      ...(number('outputTokens') === undefined ? {} : { outputTokens: number('outputTokens') }),
+      ...(currency === 'USD' && typeof amount === 'number' && Number.isFinite(amount) && amount >= 0
+        ? { costUsd: amount }
+        : {}),
+      usage: raw,
+    });
+  };
+
   return {
     start(prompt?: string) {
       record({ ...stamp(), kind: 'turn', phase: 'start' });
@@ -449,6 +484,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       // the durable row is the full-fidelity record — every update,
       // chunks included, written BEFORE the bus sees the filtered view
       record({ ...stamp(), kind: 'update', update: u });
+      recordUsage(u);
       if (u.sessionUpdate !== 'usage_update') flushUsageIfDue();
       switch (u.sessionUpdate) {
         case 'tool_call':
