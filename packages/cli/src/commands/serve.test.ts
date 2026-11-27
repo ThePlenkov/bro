@@ -150,6 +150,13 @@ describe('serve — routes', () => {
     assert.match(html, /\/api\/v1\/planes/);
     // read-only: no write surface, verbs render as badges not buttons
     assert.doesNotMatch(html, /method="post"|<form/);
+    // the fleet status read gets a dedicated budget panel: both windows,
+    // per-dimension rows, and degraded/unknown values stay visible.
+    assert.match(html, /\/api\/v1\/planes\/agents\/fleet/);
+    assert.match(html, /provider usage budget/);
+    assert.match(html, /rolling-24h/);
+    assert.match(html, /unknown costs/);
+    assert.match(html, /degraded:/);
 
     const post = await route('POST', '/ui', '{}');
     assert.equal(post.status, 405);
