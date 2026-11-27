@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -705,7 +706,9 @@ describe('gitTryAsync', () => {
     try {
       const result = await gitTryAsync(['-C', dir, 'rev-parse', '--show-toplevel']);
       assert.equal(result.code, 0);
-      assert.equal(result.out.trim(), dir);
+      // macOS exposes the system temp directory through /tmp while git
+      // reports its resolved /private/tmp spelling.
+      assert.equal(result.out.trim(), realpathSync(dir));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -782,9 +785,9 @@ test('gitUpstreamBehindAsync reports a positive upstream drift', async () => {
 describe('mainWorktreeRoot', () => {
   test('the main checkout resolves to itself, a subdirectory too', () => {
     withRepo(dir => {
-      assert.equal(mainWorktreeRoot(dir), dir);
+      assert.equal(mainWorktreeRoot(dir), realpathSync(dir));
       mkdirSync(join(dir, 'deep', 'nest'), { recursive: true });
-      assert.equal(mainWorktreeRoot(join(dir, 'deep', 'nest')), dir);
+      assert.equal(mainWorktreeRoot(join(dir, 'deep', 'nest')), realpathSync(dir));
     });
   });
 
@@ -793,9 +796,9 @@ describe('mainWorktreeRoot', () => {
       const linked = mkdtempSync(join(tmpdir(), 'bro-git-linked-'));
       try {
         git(dir, ['worktree', 'add', '-q', linked, '-b', 'work/x']);
-        assert.equal(mainWorktreeRoot(linked), dir);
+        assert.equal(mainWorktreeRoot(linked), realpathSync(dir));
         mkdirSync(join(linked, 'sub'), { recursive: true });
-        assert.equal(mainWorktreeRoot(join(linked, 'sub')), dir);
+        assert.equal(mainWorktreeRoot(join(linked, 'sub')), realpathSync(dir));
       } finally {
         rmSync(linked, { recursive: true, force: true });
       }
@@ -816,7 +819,7 @@ describe('mainWorktreeRoot', () => {
       git(wt, ['config', 'user.email', 't@t']);
       git(wt, ['config', 'user.name', 't']);
       git(wt, ['commit', '-qm', 'init', '--allow-empty']);
-      assert.equal(mainWorktreeRoot(wt), wt);
+      assert.equal(mainWorktreeRoot(wt), realpathSync(wt));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -836,7 +839,7 @@ describe('mainWorktreeRoot', () => {
       git(wt, ['config', 'user.name', 't']);
       git(wt, ['commit', '-qm', 'init', '--allow-empty']);
       git(wt, ['worktree', 'add', '-q', linked, '-b', 'work/sep']);
-      assert.equal(mainWorktreeRoot(linked), wt);
+      assert.equal(mainWorktreeRoot(linked), realpathSync(wt));
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(linked, { recursive: true, force: true });
@@ -855,10 +858,10 @@ describe('mainWorktreeRoot', () => {
       git(wt, ['config', 'user.email', 't@t']);
       git(wt, ['config', 'user.name', 't']);
       git(wt, ['commit', '-qm', 'init', '--allow-empty']);
-      assert.equal(mainWorktreeRoot(wt), wt);
+      assert.equal(mainWorktreeRoot(wt), realpathSync(wt));
       const linked = join(root, 'wt', 'linked');
       git(wt, ['worktree', 'add', '-q', linked, '-b', 'work/dotgit']);
-      assert.equal(mainWorktreeRoot(linked), wt);
+      assert.equal(mainWorktreeRoot(linked), realpathSync(wt));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -893,7 +896,7 @@ describe('mainWorktreeRoot', () => {
 describe('gitWorktreeRoots', () => {
   test('a solo repo lists just its own root', () => {
     withRepo(dir => {
-      assert.deepEqual(gitWorktreeRoots(dir), [dir]);
+      assert.deepEqual(gitWorktreeRoots(dir), [realpathSync(dir)]);
     });
   });
 
@@ -902,9 +905,9 @@ describe('gitWorktreeRoots', () => {
       const linked = mkdtempSync(join(tmpdir(), 'bro-git-roots-'));
       try {
         git(dir, ['worktree', 'add', '-q', linked, '-b', 'work/roots']);
-        assert.deepEqual(gitWorktreeRoots(dir), [dir, linked]);
+        assert.deepEqual(gitWorktreeRoots(dir), [realpathSync(dir), realpathSync(linked)]);
         // from inside the linked checkout the set is the same
-        assert.deepEqual(gitWorktreeRoots(linked), [dir, linked]);
+        assert.deepEqual(gitWorktreeRoots(linked), [realpathSync(dir), realpathSync(linked)]);
       } finally {
         rmSync(linked, { recursive: true, force: true });
       }
@@ -918,8 +921,8 @@ describe('gitWorktreeRoots', () => {
       const bare = join(root, 'repo.git');
       makeBareRepo(root);
       git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare']);
-      assert.deepEqual(gitWorktreeRoots(bare), [linked]);
-      assert.deepEqual(gitWorktreeRoots(linked), [linked]);
+      assert.deepEqual(gitWorktreeRoots(bare), [realpathSync(linked)]);
+      assert.deepEqual(gitWorktreeRoots(linked), [realpathSync(linked)]);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(linked, { recursive: true, force: true });

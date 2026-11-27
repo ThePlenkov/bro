@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -74,7 +75,7 @@ const withXdg = <T>(fn: (xdg: string) => T): T => {
 describe('mailboxDir', () => {
   test('resolves to <git-common>/bro/notify inside a repo', () => {
     withRepo(dir => {
-      assert.equal(mailboxDir(dir), join(dir, '.git', 'bro', 'notify'));
+      assert.equal(mailboxDir(dir), join(realpathSync(dir), '.git', 'bro', 'notify'));
     });
   });
 
