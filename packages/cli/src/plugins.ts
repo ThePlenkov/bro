@@ -239,7 +239,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'act',
     group: 'review',
-    summary: 'Open-PR loop: status|threads|resolve|reply|merge|dismiss',
+    summary: 'Open-PR loop: status|annotations|threads|resolve|reply|merge|dismiss',
     run: runActCommand,
     skill: 'act',
     configKey: 'act',
@@ -256,6 +256,18 @@ export const PLUGINS: BroPlugin[] = [
             2: 'no open PR for the current branch',
           },
           json: 'schemas/cli/act-status.schema.json',
+        },
+        annotations: {
+          flags: {
+            '--json': 'emit check-run annotations as one JSON document',
+            '--pr <n>': 'the PR to inspect — default: the current branch',
+          },
+          exits: {
+            0: 'annotations listed (or none found)',
+            1: 'GitHub API failure',
+            2: 'no open PR for the current branch',
+          },
+          json: 'schemas/cli/act-annotations.schema.json',
         },
         dismiss: {
           flags: {

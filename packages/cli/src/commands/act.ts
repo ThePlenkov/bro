@@ -2,6 +2,7 @@
  * `bro act <sub>` — the open-PR review loop as mechanics, not prompts.
  *
  *   status [PR] [--json]   PR state + exit gate (open threads, CI, SAST)
+ *   annotations [PR] [--json] check-run annotations for the PR head
  *   merge [PR]             merge only when the exit gate is green
  *   threads [PR]           unresolved review threads, TSV
  *   resolve --thread ID [--comment TEXT] [--unresolve]
@@ -40,6 +41,7 @@ import { cmdDismiss } from './act-dismiss.ts';
 import { claimStore, cmdMerge, dropActState } from './act-land.ts';
 import { printStatus } from './act-report.ts';
 import { cmdRearm, cmdWait } from './act-wait.ts';
+import { cmdAnnotations } from './act-annotations.ts';
 
 export type { ResolvedTarget, ResolveMode } from './act-args.ts';
 export { mergeMethod, resolvePr } from './act-args.ts';
@@ -450,6 +452,7 @@ function cmdReply(argv: string[]): void {
 // object-injection scanners
 const COMMANDS = new Map<string, (argv: string[]) => void | Promise<void>>([
   ['status', cmdStatus],
+  ['annotations', cmdAnnotations],
   ['wait', cmdWait],
   ['merge', cmdMerge],
   ['rearm', cmdRearm],

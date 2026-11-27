@@ -20,6 +20,7 @@ export function usage(exitCode: ExitCode = 2): never {
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
+  annotations [PR] [--json]         check-run annotations for the PR head
   wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach] [--json]
                                     Poll the gate until it settles; --merge lands on green,
                                     --cleanup retires the worktree + local branch after it;

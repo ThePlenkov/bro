@@ -968,6 +968,13 @@ const PRODUCERS: Record<string, Producer> = {
     emit: emitActStatus,
     breakRequired: dropKey('exit_gate'),
   },
+  'schemas/cli/act-annotations.schema.json': {
+    // The annotation probe shells out to the user's authenticated gh. Keep
+    // this contract fixture hermetic; the command's integration tests cover
+    // the real API seam.
+    emit: async () => ({ pr: 7, head_sha: SHA, checks: [] }),
+    breakRequired: dropKey('head_sha'),
+  },
   'schemas/cli/agents-status.schema.json': {
     emit: emitAgentsStatus,
     breakRequired: dropKey('backends'),
