@@ -23,7 +23,7 @@
  * Style note for editors: the page is a template literal — client JS
  * must not contain backticks or `${` sequences.
  */
-import { createHash } from 'node:crypto'
+import { createHash } from 'node:crypto';
 
 const UI_STYLE = `
   :root { color-scheme: dark; }
@@ -48,7 +48,7 @@ const UI_STYLE = `
   .badge.ok { color: #3fb950; border-color: #238636; }
   .badge.no { color: #f85149; border-color: #da3633; }
   .meta { font-size: .8rem; margin: .1rem 0 .3rem; }
-`
+`;
 
 // String.raw — the script ships regex literals; raw keeps them written once
 const UI_SCRIPT = String.raw`
@@ -58,7 +58,7 @@ var STREAM = '/api/v1/events/stream';
 var timer;
 var inFlight = false;
 // last good frame — index plus a list body per plane name
-var last = { index: null, lists: {} };
+var last = { index: null, lists: {}, budget: null };
 var evtSource = null;
 
 function el(tag, text, cls) {
@@ -75,6 +75,56 @@ function cell(v) {
     return s.length > 80 ? s.slice(0, 79) + '…' : s;
   }
   return String(v);
+}
+
+function budgetMetric(v) {
+  return v === null || v === undefined ? 'unknown' : String(v);
+}
+
+function renderBudget(budget) {
+  var host = document.getElementById('budget');
+  host.replaceChildren();
+  if (!budget) {
+    host.appendChild(el('p', 'unavailable — budget read failed', 'bad'));
+    return;
+  }
+  ['day', 'window'].forEach(function (name) {
+    var window = budget[name];
+    var section = el('section');
+    section.appendChild(el('h3', name === 'day' ? 'UTC day' : 'rolling-24h'));
+    section.appendChild(el('p', budgetMetric(window.from) + ' → ' + budgetMetric(window.to) +
+      ' · ' + budgetMetric(window.rows) + ' usage rows · ' +
+      budgetMetric(window.unknownCostRows) + ' unknown costs', 'muted'));
+    var table = document.createElement('table');
+    var head = document.createElement('thead');
+    var hr = el('tr');
+    ['agent', 'bead', 'provider', 'model', 'input', 'output', 'cost USD', 'unknown'].forEach(function (name) {
+      hr.appendChild(el('th', name));
+    });
+    head.appendChild(hr);
+    table.appendChild(head);
+    var body = document.createElement('tbody');
+    var groups = window.groups || [];
+    if (groups.length === 0) {
+      body.appendChild(el('tr')).appendChild(el('td', 'no usage recorded', 'muted'));
+    } else {
+      groups.forEach(function (row) {
+        var tr = el('tr');
+        [row.agent, row.bead, row.provider, row.model, row.inputTokens,
+          row.outputTokens, row.costUsd, row.unknownCost && row.unknownCost.count].forEach(function (value) {
+          tr.appendChild(el('td', budgetMetric(value), value === undefined ? 'warn' : undefined));
+        });
+        body.appendChild(tr);
+      });
+    }
+    table.appendChild(body);
+    section.appendChild(table);
+    host.appendChild(section);
+  });
+  var degraded = budget.degraded || [];
+  if (degraded.length > 0) {
+    host.appendChild(el('p', 'degraded: ' + degraded.join(' · '), 'warn'));
+  }
 }
 
 // one panel per catalog entry — the index IS the layout
@@ -197,18 +247,26 @@ function tick() {
     var capable = ((index && index.planes) || []).filter(function (p) {
       return p && p.capabilities && p.capabilities.read === true;
     });
-    return Promise.allSettled(capable.map(function (p) {
+    var reads = capable.map(function (p) {
       return fetch(INDEX + '/' + encodeURIComponent(p.name) + '?limit=64').then(function (res) {
         if (!res.ok) throw new Error(p.name);
         return res.json();
       }).then(function (rows) { last.lists[p.name] = rows; });
-    }));
+    });
+    // The fleet read is the status/budget contract; keep it separate from
+    // the generic list panels so the UI can render unknowns honestly.
+    reads.push(fetch(INDEX + '/agents/fleet').then(function (res) {
+      if (!res.ok) throw new Error('budget');
+      return res.json();
+    }).then(function (fleet) { last.budget = fleet && fleet.budget; }));
+    return Promise.allSettled(reads);
   }).then(function (results) {
     var failed = [];
     (results || []).forEach(function (r) {
       if (r.status === 'rejected') failed.push(r.reason && r.reason.message ? r.reason.message : 'plane');
     });
     renderPanels(last.index, failed);
+    renderBudget(last.budget);
     document.getElementById('ts').textContent =
       'updated ' + new Date().toISOString() + ' · every ' + (POLL_MS / 1000) + 's' + (evtSource ? ' · live' : '');
     document.getElementById('err').textContent = failed.length === 0 ? '' : 'stale — ' + failed.join(' · ');
@@ -230,15 +288,15 @@ document.addEventListener('visibilitychange', function () {
 });
 
 tick();
-`
+`;
 
 function cspHash(s: string): string {
-  return createHash('sha256').update(s).digest('base64')
+  return createHash('sha256').update(s).digest('base64');
 }
 
 /** CSP for the /ui response — hash-pinned inline script/style,
  *  same-origin fetch only (EventSource rides connect-src 'self'). */
-export const UI_CSP = `default-src 'none'; script-src 'sha256-${cspHash(UI_SCRIPT)}'; style-src 'sha256-${cspHash(UI_STYLE)}'; connect-src 'self'`
+export const UI_CSP = `default-src 'none'; script-src 'sha256-${cspHash(UI_SCRIPT)}'; style-src 'sha256-${cspHash(UI_STYLE)}'; connect-src 'self'`;
 
 export const UI_PAGE = `<!doctype html>
 <html lang="en">
@@ -257,7 +315,10 @@ export const UI_PAGE = `<!doctype html>
 
 <div id="panels"><div class="muted">loading catalog…</div></div>
 
+<h2>provider usage budget</h2>
+<div id="budget"><p class="muted">loading budget…</p></div>
+
 <script>${UI_SCRIPT}</script>
 </body>
 </html>
-`
+`;
