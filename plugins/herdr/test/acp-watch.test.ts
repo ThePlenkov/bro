@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { AcpRenderer } from '../../../packages/acp/session/src/index.ts';
-import { parseArgs, run, runFixture, Wire } from '../src/acp-watch.ts';
+import {
+  acpWatchLanePath,
+  occupyAcpWatchLane,
+  parseArgs,
+  releaseAcpWatchLane,
+  run,
+  runFixture,
+  Wire,
+} from '../src/acp-watch.ts';
 import { shellWords } from '../src/lib.ts';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -82,6 +92,45 @@ describe('shellWords', () => {
     assert.throws(() => shellWords("a'b"), /unclosed/);
     assert.throws(() => shellWords('"x'), /unclosed/);
     assert.throws(() => shellWords('x\\'), /trailing backslash/);
+  });
+});
+
+describe('acp-watch cwd lanes', () => {
+  test('conflicts name a live owner and release removes only our marker', () => {
+    const state = mkdtempSync(join(tmpdir(), 'acp-watch-state-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'acp-watch-cwd-'));
+    try {
+      const first = occupyAcpWatchLane(cwd, state);
+      assert.throws(
+        () => occupyAcpWatchLane(cwd, state),
+        new RegExp(`pid ${process.pid}.*${first.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
+      );
+      releaseAcpWatchLane(first);
+      assert.throws(() => readFileSync(first.marker));
+    } finally {
+      rmSync(state, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('reclaims a dead marker and does not conflict across cwds', () => {
+    const state = mkdtempSync(join(tmpdir(), 'acp-watch-state-'));
+    const one = mkdtempSync(join(tmpdir(), 'acp-watch-cwd-'));
+    const two = mkdtempSync(join(tmpdir(), 'acp-watch-cwd-'));
+    try {
+      const dead = acpWatchLanePath(one, state);
+      writeFileSync(dead, JSON.stringify({ pid: 999_999_999, startTime: 'old', worktree: one }));
+      const reclaimed = occupyAcpWatchLane(one, state);
+      const distinct = occupyAcpWatchLane(two, state);
+      assert.equal(JSON.parse(readFileSync(reclaimed.marker, 'utf8')).pid, process.pid);
+      assert.notEqual(reclaimed.marker, distinct.marker);
+      releaseAcpWatchLane(reclaimed);
+      releaseAcpWatchLane(distinct);
+    } finally {
+      rmSync(state, { recursive: true, force: true });
+      rmSync(one, { recursive: true, force: true });
+      rmSync(two, { recursive: true, force: true });
+    }
   });
 });
 
