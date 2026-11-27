@@ -6,9 +6,9 @@
  * terminal. bro state is never written — pane mechanics only.
  */
 import {
-  boundPaneIds,
   BRO,
   BRO_LABELS,
+  boundPaneIds,
   type HerdrPane,
   herdrOk,
   herdrTry,
@@ -24,13 +24,33 @@ import {
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
 
 /** The tail's shell text — a subscribe retry loop, never a bare `die`:
- *  broker-down is routine, so each exit prints its banner and waits.
+ *  broker-down is routine, so failures update one in-place status line.
  *  `pane run` executes this as shell; every interpolation is shq'd. */
-function tailCommand(worktreePath: string): string {
-  const sub = `${shq(BRO)} bus subscribe --topic worker --topic worktree --topic notify --topic gate`;
+export function tailCommand(worktreePath: string, broker = BRO): string {
+  const sub = `${shq(broker)} bus subscribe --topic worker --topic worktree --topic notify --topic gate`;
   return (
-    `cd ${shq(worktreePath)} && while :; do ${sub}; ` +
-    `echo ${shq('── bus tail ended — retry in 5s ──')}; sleep 5; done`
+    `cd ${shq(worktreePath)} && ` +
+    `tmp=$(mktemp "\${TMPDIR:-/tmp}/bro-events.XXXXXX") && ` +
+    `trap 'rm -f "$tmp"' EXIT INT TERM; ` +
+    `down=0; count=0; last=''; ` +
+    `while :; do ${sub} 2>"$tmp"; rc=$?; ` +
+    `if [ "$rc" -eq 0 ]; then ` +
+    `if [ "$down" -eq 1 ]; then ` +
+    `printf '\\n── broker up — events resumed ──\\n'; ` +
+    `fi; down=0; count=0; last=''; ` +
+    `else ` +
+    `count=$((count + 1)); ` +
+    `if grep -q 'ENOENT' "$tmp"; then ` +
+    `msg='broker down — run bro bus serve'; ` +
+    `else ` +
+    `msg="broker error — $(tr '\\n\\r' '  ' <"$tmp" | sed 's/[[:space:]]\\+/ /g')"; ` +
+    `if [ "$msg" = 'broker error — ' ]; then msg="broker error — exit $rc"; fi; ` +
+    `fi; ` +
+    `if [ "$msg" != "$last" ]; then count=1; ` +
+    `printf '\\n── %s (retry %s) ──' "$msg" "$count"; ` +
+    `else printf '\\r\\033[K── %s (retry %s) ──' "$msg" "$count"; ` +
+    `fi; last="$msg"; down=1; ` +
+    `fi; sleep 5; done`
   );
 }
 
