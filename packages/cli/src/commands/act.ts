@@ -377,65 +377,90 @@ function resolveOne(
 }
 
 /** Persist the debt bead before resolving any selected host thread. */
-export async function deferThreads(
-  rev: ReviewFacade,
-  store: TaskStore,
-  ids: string[],
-  opts: { bead?: string; newBead?: string; pr?: number }
-): Promise<void> {
+type DeferOptions = { bead?: string; newBead?: string; pr?: number };
+
+function validateDeferRequest(ids: string[], opts: DeferOptions): void {
   if ((opts.bead === undefined) === (opts.newBead === undefined)) {
     throw new CommandError('error: exactly one of --bead or --new-bead is required', EXIT.usage);
   }
   if (ids.length === 0) {
     throw new CommandError('error: at least one thread id is required', EXIT.usage);
   }
-  const target =
-    opts.pr === undefined ? resolvePr(rev, []) : { repo: rev.resolveRepo([]), pr: opts.pr };
+}
+
+async function selectDeferThreads(
+  rev: ReviewFacade,
+  ids: string[],
+  pr: number | undefined
+): Promise<ReviewThread[]> {
+  const target = pr === undefined ? resolvePr(rev, []) : { repo: rev.resolveRepo([]), pr };
   const threads = await rev.reviewThreads(target);
   const byId = new Map(threads.map(thread => [thread.id, thread]));
-  const selected: ReviewThread[] = [];
-  for (const id of ids) {
+  return ids.map(id => {
     const thread = byId.get(id);
-    if (thread === undefined) {
-      throw new CommandError(`error: thread not found: ${id}`, EXIT.usage);
-    }
+    if (thread === undefined) throw new CommandError(`error: thread not found: ${id}`, EXIT.usage);
     if (thread.resolved) {
       throw new CommandError(`error: thread already resolved: ${id}`, EXIT.usage);
     }
-    selected.push(thread);
-  }
-  const first = selected[0];
-  if (first === undefined) {
-    throw new CommandError('error: at least one thread id is required', EXIT.usage);
-  }
-  const detail = (thread: ReviewThread): string =>
-    `PRRT ${thread.id}: ${thread.comment?.body?.trim() || '(no comment body)'}`;
-  let bead = opts.bead;
-  if (bead !== undefined) {
-    if (store.get(bead) === undefined) {
-      throw new CommandError(`error: bead not found: ${bead}`, EXIT.usage);
+    return thread;
+  });
+}
+
+function deferDetail(thread: ReviewThread): string {
+  return `PRRT ${thread.id}: ${thread.comment?.body?.trim() || '(no comment body)'}`;
+}
+
+function ensureDeferBead(store: TaskStore, first: ReviewThread, opts: DeferOptions): string {
+  if (opts.bead !== undefined) {
+    if (store.get(opts.bead) === undefined) {
+      throw new CommandError(`error: bead not found: ${opts.bead}`, EXIT.usage);
     }
-  } else {
-    const title = opts.newBead;
-    if (title === undefined) {
-      throw new CommandError('error: --new-bead requires a title', EXIT.usage);
-    }
-    bead = store.create({
-      title,
-      labels: ['debt'],
-      description: detail(first),
-      externalRef: first.id,
-    }).id;
+    return opts.bead;
   }
-  for (const thread of selected) {
-    if (thread !== selected[0] || opts.bead !== undefined) {
-      store.note(bead, detail(thread));
-    }
+  const title = opts.newBead;
+  if (title === undefined) {
+    throw new CommandError('error: --new-bead requires a title', EXIT.usage);
   }
-  for (const thread of selected) {
+  return store.create({
+    title,
+    labels: ['debt'],
+    description: deferDetail(first),
+    externalRef: first.id,
+  }).id;
+}
+
+function recordDeferNotes(
+  store: TaskStore,
+  bead: string,
+  threads: ReviewThread[],
+  existing: boolean
+): void {
+  for (const [index, thread] of threads.entries()) {
+    if (existing || index > 0) store.note(bead, deferDetail(thread));
+  }
+}
+
+function resolveDeferredThreads(rev: ReviewFacade, bead: string, threads: ReviewThread[]): void {
+  for (const thread of threads) {
     resolveOne(rev, [], { id: thread.id, comment: `deferred -> ${bead}`, unresolve: false });
     console.error(`act: deferred ${thread.id} -> ${bead}`);
   }
+}
+
+export async function deferThreads(
+  rev: ReviewFacade,
+  store: TaskStore,
+  ids: string[],
+  opts: DeferOptions
+): Promise<void> {
+  validateDeferRequest(ids, opts);
+  const selected = await selectDeferThreads(rev, ids, opts.pr);
+  const first = selected[0];
+  if (first === undefined)
+    throw new CommandError('error: at least one thread id is required', EXIT.usage);
+  const bead = ensureDeferBead(store, first, opts);
+  recordDeferNotes(store, bead, selected, opts.bead !== undefined);
+  resolveDeferredThreads(rev, bead, selected);
   dropActState();
 }
 
