@@ -12,9 +12,7 @@
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
-  type BroStatus,
   bro,
-  broStatus,
   ctxJson,
   herdr,
   notify,
@@ -52,9 +50,8 @@ function openExisting(path: string, label?: string): void {
   console.log(`${path} → ${ws}`);
 }
 
-function labelFor(path: string, slug: string, status: BroStatus): string {
-  const claim = status.worktrees.find(w => w.path === path)?.claim ?? slug;
-  return status.beads.inProgress.find(b => b.id === claim)?.title ?? claim;
+function labelFor(path: string): string {
+  return `⚙️ ${basename(path)}`;
 }
 
 if (/^[\w-][\w.-]*$/.test(sel)) {
@@ -75,7 +72,7 @@ if (/^[\w-][\w.-]*$/.test(sel)) {
   }
   // status read AFTER the enter — the claim/title it produced must be
   // in the snapshot or the label falls back to the bare bead id
-  openExisting(path, labelFor(path, sel, broStatus(repo)));
+  openExisting(path, labelFor(path));
 } else {
   const p = ctx.worktree?.checkout_path;
   if (p === undefined) {
@@ -84,5 +81,5 @@ if (/^[\w-][\w.-]*$/.test(sel)) {
     );
     process.exit(1);
   }
-  openExisting(p, labelFor(p, basename(p), broStatus(repo)));
+  openExisting(p, labelFor(p));
 }

@@ -32,7 +32,7 @@ see below), `{{PARALLEL_LIMIT}}` max concurrent workers.
 **Merge ownership:** the worker never merges. It drives the PR to
 gate-ready and reports the `act status` verdict; the ORCHESTRATOR
 owns the merge — point-check the gate, arm
-`bro review act wait <PR> --merge --cleanup --bead <id> --detach`
+`bro review act wait <PR> --merge --cleanup --bead <id> --timeout 150 --detach`
 from inside the worktree (`--cleanup` retires the checkout it runs
 in), and bounce new findings back to the worker instead of fixing
 them yourself. The orchestrator outlives worker turns and watcher

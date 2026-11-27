@@ -617,7 +617,13 @@ function backstopArgs(paneId: string, led: PaneLed, seq: number): string[] {
 function stateOf(j: PaneJob, path: string, led: PaneLed): FleetPaneState {
   const prev = readFleetState(path);
   const degraded = j.title === basename(j.ws.tree.path);
-  const title = degraded && prev?.title !== undefined && prev.title !== '' ? prev.title : j.title;
+  const title =
+    degraded &&
+    prev?.title !== undefined &&
+    prev.title !== '' &&
+    prev.slug === j.slug
+      ? prev.title
+      : j.title;
   return {
     v: 1,
     worktree: j.ws.tree.path,

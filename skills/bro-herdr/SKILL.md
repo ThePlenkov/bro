@@ -60,13 +60,13 @@ Valid report states: **`idle` · `working` · `blocked` · `unknown`**.
 There is no `done` — completion is asserted from the workspace/PR
 gate (rule 1), never claimed as an agent state.
 
-## 4. Metadata tokens are write-only — the label is the display
+## 4. Metadata tokens are write-only — the status pane is the display
 
 `report-metadata` tokens persist server-side but **the UI renders
 nothing**. Do not rely on them for human-visible status. The visible
-status surface is the **workspace label** — set status there (via the
-label mechanism), in addition to the metadata, when a human needs to
-see it. Metadata is for programmatic readers; the label is for people.
+status surface is the **status pane**. The workspace label is identity
+only, not a status channel. Metadata is for programmatic readers; the
+status pane is for people.
 
 ## 5. Teardown has one order — close, verify, worktree, branch, remote
 

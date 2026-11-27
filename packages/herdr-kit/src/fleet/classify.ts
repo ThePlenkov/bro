@@ -453,11 +453,13 @@ function treeSlug(i: TreeInput): string | undefined {
   );
 }
 
-/** The freshest agent names the pipeline driver — a live one wins, a
- *  dead one still identifies who ran the tree. */
+/** The least-silent live agent names the pipeline driver. Never use a
+ *  completed worker to describe currently live work. */
 function driverAgent(agents: AgentRow[]): string | undefined {
-  const named = agents.filter(a => a.agent !== undefined);
-  return (named.find(a => a.live) ?? named[0])?.agent;
+  const live = agents
+    .filter((a): a is AgentRow & { agent: string } => a.live && a.agent !== undefined)
+    .sort((a, b) => (a.silentMs ?? 0) - (b.silentMs ?? 0));
+  return live[0]?.agent;
 }
 
 /** The bead title behind the slug, else the worktree's basename. */
@@ -546,7 +548,19 @@ const meaningfulToken = (tok: string): string | undefined => {
 export function agentOfCommand(command: string | undefined): string | undefined {
   if (command === undefined) return undefined;
   const last = (command.split('|').pop() ?? '').trim();
-  for (const tok of last.split(/\s+/)) {
+  const tokens = last.split(/\s+/);
+  const consumesNext = new Set(['-u', '--unset', '-C', '--chdir']);
+  let skipNext = false;
+  for (const tok of tokens) {
+    if (skipNext) {
+      skipNext = false;
+      continue;
+    }
+    if (tok === 'env' || tok === 'npx' || tok === 'bunx' || tok === 'uvx') continue;
+    if (consumesNext.has(tok)) {
+      skipNext = true;
+      continue;
+    }
     const name = meaningfulToken(tok);
     if (name !== undefined) return name;
   }
