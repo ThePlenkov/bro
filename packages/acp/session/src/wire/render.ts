@@ -233,22 +233,32 @@ const ARG_MAX = 600;
  *  Block-sanitized so a multiline value keeps its line breaks for the
  *  card body; every header path takes firstLine() of it instead. */
 export function toolArg(u: ToolWire, kind: string | undefined): string | undefined {
-  if (typeof u.rawInput === 'string' && u.rawInput !== '')
-    return clip(safeBlock(u.rawInput), ARG_MAX);
-  if (typeof u.rawInput === 'object' && u.rawInput !== null) {
-    const raw = u.rawInput as Record<string, unknown>;
-    const keys = [
-      ...(kind !== undefined && Object.hasOwn(ARG_KEYS, kind) ? ARG_KEYS[kind] : []),
-      ...ARG_FALLBACK,
-    ];
-    for (const k of keys) {
-      const v = raw[k];
-      if (typeof v === 'string' && v !== '') return clip(safeBlock(v), ARG_MAX);
-    }
-  }
+  const raw = rawArg(u.rawInput, kind);
+  if (raw !== undefined) return raw;
   const loc = u.locations?.find(l => typeof l.path === 'string' && l.path !== '');
-  return loc !== undefined ? clip(safeBlock(loc.path as string), ARG_MAX) : undefined;
+  return loc === undefined ? undefined : clip(safeBlock(loc.path as string), ARG_MAX);
 }
+
+const rawArg = (input: unknown, kind: string | undefined): string | undefined => {
+  if (typeof input === 'string') return nonEmptyArg(input);
+  if (typeof input !== 'object' || input === null) return undefined;
+  return firstRawArg(input as Record<string, unknown>, kind);
+};
+
+const nonEmptyArg = (value: string): string | undefined =>
+  value === '' ? undefined : clip(safeBlock(value), ARG_MAX);
+
+const firstRawArg = (
+  raw: Record<string, unknown>,
+  kind: string | undefined
+): string | undefined => {
+  const preferred = kind !== undefined && Object.hasOwn(ARG_KEYS, kind) ? ARG_KEYS[kind] : [];
+  for (const key of [...preferred, ...ARG_FALLBACK]) {
+    const value = raw[key];
+    if (typeof value === 'string' && value !== '') return nonEmptyArg(value);
+  }
+  return undefined;
+};
 
 /** The arg's header form — its first non-empty line (a heredoc's
  *  opening line carries the meaning; a lone \n is not content). */
@@ -287,27 +297,28 @@ export function toolContent(item: unknown): ToolContent {
     newText?: unknown;
     terminalId?: unknown;
   };
-  switch (it.type) {
-    case 'content': {
-      const c = it.content;
-      if (c?.type === 'text' && typeof c.text === 'string') {
-        return { kind: 'text', text: safeBlock(c.text) };
-      }
-      return { kind: 'unknown', type: safe(typeof c?.type === 'string' ? c.type : '?') };
-    }
-    case 'diff':
-      return {
-        kind: 'diff',
-        path: safe(typeof it.path === 'string' ? it.path : '?'),
-        old: typeof it.oldText === 'string' ? safeBlock(it.oldText) : undefined,
-        cur: typeof it.newText === 'string' ? safeBlock(it.newText) : undefined,
-      };
-    case 'terminal':
-      return { kind: 'terminal', id: safe(String(it.terminalId ?? '?')) };
-    default:
-      return { kind: 'unknown', type: safe(typeof it.type === 'string' ? it.type : '?') };
-  }
+  if (it.type === 'content') return contentOf(it.content);
+  if (it.type === 'diff') return diffOf(it);
+  if (it.type === 'terminal') return { kind: 'terminal', id: safe(String(it.terminalId ?? '?')) };
+  return unknownContent(it.type);
 }
+
+const unknownContent = (type: unknown): ToolContent => ({
+  kind: 'unknown',
+  type: safe(typeof type === 'string' ? type : '?'),
+});
+
+const contentOf = (c: { type?: unknown; text?: unknown } | undefined): ToolContent =>
+  c?.type === 'text' && typeof c.text === 'string'
+    ? { kind: 'text', text: safeBlock(c.text) }
+    : unknownContent(c?.type);
+
+const diffOf = (it: { path?: unknown; oldText?: unknown; newText?: unknown }): ToolContent => ({
+  kind: 'diff',
+  path: safe(typeof it.path === 'string' ? it.path : '?'),
+  old: typeof it.oldText === 'string' ? safeBlock(it.oldText) : undefined,
+  cur: typeof it.newText === 'string' ? safeBlock(it.newText) : undefined,
+});
 
 export class AcpRenderer {
   private readonly out: (line: string) => void;
@@ -378,26 +389,25 @@ export class AcpRenderer {
     switch (c.kind) {
       case 'text':
         return this.capItem(c.text.split('\n').map(l => `│  ${clip(l)}`));
-      case 'diff': {
-        const head = `│  ${this.dim(`─ ${clip(c.path)}`)}`;
-        const body: string[] = [];
-        if (c.old !== undefined) {
-          for (const l of c.old.split('\n')) {
-            body.push(`│  ${this.paint(RED, `- ${clip(l)}`)}`);
-          }
-        }
-        if (c.cur !== undefined) {
-          for (const l of c.cur.split('\n')) {
-            body.push(`│  ${this.paint(GREEN, `+ ${clip(l)}`)}`);
-          }
-        }
-        return [head, ...this.capItem(body)];
-      }
+      case 'diff':
+        return this.diffLines(c);
       case 'terminal':
         return [`│  ${this.dim(`terminal output is not archived (terminal ${c.id})`)}`];
       case 'unknown':
         return [`│  ${this.dim(`[${c.type}]`)}`];
     }
+  }
+
+  private diffLines(c: Extract<ToolContent, { kind: 'diff' }>): string[] {
+    const lines = (text: string | undefined, code: string): string[] =>
+      text === undefined
+        ? []
+        : text
+            .split('\n')
+            .map(l => `│  ${this.paint(code, `${code === RED ? '- ' : '+ '}${clip(l)}`)}`);
+    const body = [...lines(c.old, RED), ...lines(c.cur, GREEN)];
+    const head = `│  ${this.dim(`─ ${clip(c.path)}`)}`;
+    return [head, ...this.capItem(body)];
   }
 
   /** The header line — glyph per status edge (⣿ live, ✓ green,

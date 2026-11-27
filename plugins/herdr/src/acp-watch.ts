@@ -193,9 +193,13 @@ export class Wire {
   /** One decoded wire line — shared by the live child and the fixture. */
   onMessage(msg: RpcMessage): void {
     const isResponse = msg.method === undefined;
-    if (isResponse) return this.onResponse(msg);
-    if (msg.id === null || msg.id === undefined) return this.onNotification(msg);
-    return this.onRequest(msg);
+    if (isResponse) {
+      this.onResponse(msg);
+    } else if (msg.id === null || msg.id === undefined) {
+      this.onNotification(msg);
+    } else {
+      this.onRequest(msg);
+    }
   }
 
   private onResponse(msg: RpcMessage): void {
@@ -316,6 +320,23 @@ function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   child.kill(signal);
 }
 
+const withDeadline = async <T>(promise: Promise<T>, method: string): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${method} handshake deadline exceeded`)),
+          HANDSHAKE_TIMEOUT_MS
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
+
 /** Child + wire + stderr tally — the plumbing half of a run. */
 function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): Pump {
   // --cmd is argv words, never a shell line: shellWords parses quotes
@@ -375,8 +396,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
       else stderrSuppressed++;
       stderrPartial = '';
     }
-    if (stderrSuppressed > 0)
-      out(dim(`‹stderr› ${stderrSuppressed} diagnostic lines`, cli.color));
+    if (stderrSuppressed > 0) out(dim(`‹stderr› ${stderrSuppressed} diagnostic lines`, cli.color));
     stderrSuppressed = 0;
   };
   createInterface({ input: child.stdout as NodeJS.ReadableStream }).on('line', l => wire.onLine(l));
@@ -397,29 +417,16 @@ async function handshake(
     killProcessTree(pump.child, 'SIGKILL');
     return undefined;
   };
-  const withDeadline = async <T>(promise: Promise<T>, method: string): Promise<T> => {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<T>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`${method} handshake deadline exceeded`)),
-            HANDSHAKE_TIMEOUT_MS
-          );
-        }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
-  };
-  const init = (await withDeadline(pump.wire
-    .request('initialize', {
-      protocolVersion: PROTOCOL_VERSION,
-      clientInfo: { name: 'bro-acp-watch', version: '0.1.0' },
-      clientCapabilities: { fs: { readTextFile: true, writeTextFile: false }, terminal: false },
-    })
-    .catch(err => err), 'initialize')) as { protocolVersion?: number } | Error;
+  const request = async <T>(method: string, params: unknown): Promise<T | Error> =>
+    (await withDeadline(
+      pump.wire.request(method, params).catch(err => err),
+      method
+    )) as T | Error;
+  const init = await request<{ protocolVersion?: number }>('initialize', {
+    protocolVersion: PROTOCOL_VERSION,
+    clientInfo: { name: 'bro-acp-watch', version: '0.1.0' },
+    clientCapabilities: { fs: { readTextFile: true, writeTextFile: false }, terminal: false },
+  });
   if (init instanceof Error) return die(`initialize — ${init.message}; ${pump.exit.detail}`);
   if (init.protocolVersion !== PROTOCOL_VERSION) {
     return die(
@@ -427,9 +434,10 @@ async function handshake(
     );
   }
   out(dim(`── acp watch: ${cli.cmd} (cwd ${cli.cwd}) ──`, cli.color));
-  const session = (await withDeadline(pump.wire
-    .request('session/new', { cwd: cli.cwd, mcpServers: [] })
-    .catch(err => err), 'session/new')) as { sessionId?: string } | Error;
+  const session = await request<{ sessionId?: string }>('session/new', {
+    cwd: cli.cwd,
+    mcpServers: [],
+  });
   if (session instanceof Error) return die(`session/new — ${session.message}; ${pump.exit.detail}`);
   const sessionId = session.sessionId ?? '?';
   out(dim(`── session ${sessionId} ──`, cli.color));
