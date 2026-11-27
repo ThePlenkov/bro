@@ -36,7 +36,8 @@ export interface ExplainFact {
    *  explanation */
   because: string;
   /** where the fact came from ("the table", "the ledger", "the agent") */
-  source?: string;
+  /** Every known value must name the authority that supplied it. */
+  source: string;
 }
 
 /** The explanation — the facts, grouped by slice. A slice with no facts is
@@ -51,13 +52,13 @@ export interface Explanation {
 export function unknownFact(input: {
   label: string;
   because: string;
-  source?: string;
+  source: string;
 }): ExplainFact {
   return {
     label: input.label,
     value: 'unknown',
     because: input.because,
-    ...(input.source === undefined ? {} : { source: input.source }),
+    source: input.source,
   };
 }
 
@@ -75,7 +76,7 @@ export function parseExplainSlices(spec: string): ExplainSlice[] {
     .map(s => s.trim().toLowerCase())
     .filter(s => s !== '');
   if (wanted.length === 0) {
-    return [...EXPLAIN_SLICES];
+    throw new Error(`explain slice list is empty — known: ${sliceNames()}`);
   }
   if (wanted.includes('all')) {
     return [...EXPLAIN_SLICES];
@@ -162,7 +163,13 @@ export function withSlice(
 
 /** One fact, rendered — the value, the reason, and where it came from. */
 function renderFact(fact: ExplainFact): string {
-  const source = fact.source === undefined ? '' : ` (${fact.source})`;
+  if (fact.because.trim() === '') {
+    throw new Error(`explain fact "${fact.label}" has no reason`);
+  }
+  if (fact.source.trim() === '') {
+    throw new Error(`explain fact "${fact.label}" has no source`);
+  }
+  const source = ` (${fact.source})`;
   return `  ${fact.label}: ${fact.value} — ${fact.because}${source}`;
 }
 
