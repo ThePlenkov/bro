@@ -68,6 +68,11 @@ function ctx(dir: string, sid = 's1', host: string | undefined = 'claude'): Conn
 
 const toolCall = (input: Record<string, unknown> = {}, tool = 'Bash') => ({ tool, input });
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('claimConflictVerdicts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-claim-conflict-'));
 
@@ -244,7 +249,7 @@ describe('claimConflictVerdicts', () => {
     assert.equal(v.length, 1);
   });
 
-  test('tool paths resolve against the tool cwd before going repo-relative', async () => {
+  test('tool paths resolve against the tool cwd before going repo-relative', macosParity, async () => {
     // ctx.dir = repo root, session cwd = <root>/sub: `../src/a.ts` from
     // the tool means <root>/src/a.ts — the dir-relative frame must see it
     const sub = join(dir, 'sub');

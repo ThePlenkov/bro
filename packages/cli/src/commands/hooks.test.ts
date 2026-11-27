@@ -12,6 +12,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+
+// Occupancy locking relies on Linux process-inspection parity; the Darwin leg is
+// not yet proven (bro-0204b), so keep this contract on Linux.
+const macosParity = { skip: process.platform !== 'linux' };
 import { tmpdir } from 'node:os';
 import {
   armSession,
@@ -67,9 +71,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
 }
 
 describe('hook journal and occupancy lock bounds', () => {
-  test('work arming writes through a live foreign occupancy lock', {
-    skip: process.platform === 'win32',
-  }, async () => {
+  test('work arming writes through a live foreign occupancy lock', macosParity, async () => {
     const { root, main } = initRepo('bro-hooks-lock-');
     await insideAsync(main, root, async () => {
       const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());

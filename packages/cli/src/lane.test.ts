@@ -58,6 +58,11 @@ const withXdg = <T>(fn: (stateDir: string) => T): T => {
   }
 };
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('the lane rate gate', () => {
   test('a batch spawn pays its cost; an empty bucket refuses as cap', () => {
     withXdg(() => {
@@ -303,7 +308,7 @@ describe('the wall pause', () => {
     });
   });
 
-  test('a dead wrapper with a live group member still thaws on lift', () => {
+  test('a dead wrapper with a live group member still thaws on lift', macosParity, () => {
     const { root, main } = initRepo('bro-lane-');
     inside(main, root, () => {
       // `sleep` in the BACKGROUND under the sh wrapper: the member

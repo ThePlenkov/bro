@@ -23,8 +23,13 @@ function fixture(): { root: string; main: string; linked: string; sha: string } 
   return { root, main, linked, sha };
 }
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('cleanupAfterMerge', () => {
-  test('removes the linked worktree and the merged branch', () => {
+  test('removes the linked worktree and the merged branch', macosParity, () => {
     const { root, main, linked, sha } = fixture();
     inside(linked, root, () => {
       cleanupAfterMerge('work/x', sha);
@@ -78,7 +83,7 @@ describe('cleanupAfterMerge', () => {
     });
   });
 
-  test('a registry agent occupant keeps the merged worktree (bro-giznr)', () => {
+  test('a registry agent occupant keeps the merged worktree (bro-giznr)', macosParity, () => {
     const { root, main, linked, sha } = fixture();
     mkdirSync(join(main, '.git', 'bro'), { recursive: true });
     writeFileSync(

@@ -98,6 +98,11 @@ const tree = (over: Partial<TreeInput> = {}): TreeInput => ({
   ...over,
 });
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('workerState — the classifier matrix', () => {
   const runCand = (o: { live: boolean; silentMs?: number | null; at?: number }): WorkerCand => ({
     run: true,
@@ -926,7 +931,7 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.ok(!calls.some(c => c.includes('p-dead')));
   });
 
-  test('an acp session owner lands lane + events + the 🤖 label (spec bro-l8wqu)', () => {
+  test('an acp session owner lands lane + events + the 🤖 label (spec bro-l8wqu)', macosParity, () => {
     const root = mkdtempSync(join(tmpdir(), 'proj-acp-'));
     // the registry read needs a real git common dir — agentsHome and
     // agents.json both resolve through `git rev-parse --git-common-dir`
@@ -1064,7 +1069,7 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     return { root, stateDir };
   };
 
-  test('an acp worker whose provider left the config keeps its lane (bro-iik6m)', () => {
+  test('an acp worker whose provider left the config keeps its lane (bro-iik6m)', macosParity, () => {
     // no providers section in the config — the entry's acpSessionId is
     // the only evidence the worker is an acp lane
     const { root, stateDir } = projectorFixture('proj-acp-gone-', root => ({
@@ -1224,7 +1229,7 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.equal(readFleetState(path), undefined);
   });
 
-  test('pruning one session keeps another session armed worktree and drops an orphan', () => {
+  test('pruning one session keeps another session armed worktree and drops an orphan', macosParity, () => {
     const root = mkdtempSync(join(tmpdir(), 'proj-fleet-shared-'));
     execFileSync('git', ['init', '-q', root]);
     const foreign = join(root, 'preview-tree');

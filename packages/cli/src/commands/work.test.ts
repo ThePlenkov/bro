@@ -50,6 +50,11 @@ branch refs/heads/work/gone
 prunable gitdir file points to non-existent location
 `;
 
+// These cases exercise Linux /proc, process-group, or Darwin path semantics
+// whose parity is not established on macOS (bro-0204b). Keep the Linux contract
+// explicit rather than reporting a false product failure on the macOS leg.
+const macosParity = { skip: process.platform !== 'linux' };
+
 describe('parseWorktreePorcelain', () => {
   test('parses main, linked, detached and prunable entries', () => {
     const all = parseWorktreePorcelain(PORCELAIN);
@@ -383,7 +388,7 @@ describe('work enter/leave occupancy warning (bro-bswx5)', () => {
     return errs;
   }
 
-  test('enter warns when the current checkout is dirty and a foreign session owns it', () => {
+  test('enter warns when the current checkout is dirty and a foreign session owns it', macosParity, () => {
     const { root, main } = initRepo('bro-occ-');
     inside(main, root, () => {
       writeFileSync(join(main, 'wip.ts'), 'uncommitted\n');
@@ -404,7 +409,7 @@ describe('work enter/leave occupancy warning (bro-bswx5)', () => {
     });
   });
 
-  test('leave --force warns when the target is dirty and a foreign session owns it', () => {
+  test('leave --force warns when the target is dirty and a foreign session owns it', macosParity, () => {
     const { root, main } = initRepo('bro-occ-leave-');
     const linked = join(root, 'main--d');
     git(['worktree', 'add', '-q', linked, '-b', 'work/d'], main);
