@@ -346,6 +346,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
     session: opts.sessionId,
     by: opts.by,
     key,
+    ...(cause === undefined ? {} : { bead: cause }),
   });
 
   const emitUsage = (): void => {

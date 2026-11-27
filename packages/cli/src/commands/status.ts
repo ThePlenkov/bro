@@ -20,25 +20,26 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { evaluateExitGate, fetchPrActState, prStateCache, resolveLedger } from '@broject/act';
+import type { AgentRegistryEntry, TaskRow, TaskStore } from '@broject/core';
 import {
   facade,
   gitTry,
   gitUpstreamBehind,
+  issueLink,
   pidAlive,
+  prLink,
   prOwnership,
   prOwnershipMark,
-  prLink,
-  issueLink,
   readAgentRegistry,
   reviewHost,
 } from '@broject/core';
-import type { AgentRegistryEntry, TaskRow, TaskStore } from '@broject/core';
 import { currentFrame } from '@broject/drill';
 import { loopSection } from '@broject/loop';
 import { loadBroConfig } from '../plugins.ts';
+import { type FleetUsageBudget, readFleetUsageBudget } from '../status-budget.ts';
 import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
-import { heartbeatAge, readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts';
+import { type HeartbeatSummary, heartbeatAge, readHeartbeat } from './watch-heartbeat.ts';
 import { parseWorktreePorcelain, stateOfWorktree, worktreeClaim } from './work.ts';
 
 export interface BeadRow {
@@ -108,7 +109,7 @@ interface BroStatus {
     /** Total ready count — usually larger than ready.length (capped). */
     readyTotal: number;
   };
-  fleet: { maxConcurrent: number; agents: StatusAgent[] };
+  fleet: { maxConcurrent: number; agents: StatusAgent[]; budget: FleetUsageBudget };
   /** In-flight `bro loop` workers — records under <git-common>/bro/loop/.
    *  stallMin is the advisory silence threshold, never a kill budget
    *  (bro-9lpn3). */
@@ -214,7 +215,7 @@ export function readBeads(dir: string): StatusBeads {
       const url = remote.out.trim();
       // Only derive a slug for GitHub remotes — a host like
       // notgithub.com must not be mistaken for github.com.
-      const hostMatch = url.match(/^(?:https?:\/\/|git@|ssh:\/\/git@)?([^\/:]+)[\/:]/);
+      const hostMatch = url.match(/^(?:https?:\/\/|git@|ssh:\/\/git@)?([^/:]+)[/:]/);
       const host = hostMatch !== null && hostMatch[1] !== undefined ? hostMatch[1] : '';
       if (host !== 'github.com') {
         return null;
@@ -389,6 +390,7 @@ function readFleet(dir: string): BroStatus['fleet'] {
   return {
     maxConcurrent: typeof max === 'number' ? max : 0,
     agents,
+    budget: readFleetUsageBudget(dir),
   };
 }
 
