@@ -130,3 +130,50 @@ imports. The probe used 30 samples and no warmup:
 This is consistent with the prior 193.5 ms p50, while ensuring the
 guard/judge, waste/dead-loop, trace, git-hook, post-merge, spool, and snapshot
 modules are not evaluated on the common session-start/stop import path.
+
+## Slice 5 — post-lazy measurement and budget decision (bro-9wv18)
+
+The workspace was rebuilt with `npm run build -- --skip-nx-cache`. The
+post-lazy import probe used the same fresh-process method as Slice 3: 30
+samples, no warmup, with a new Node process for every sample. The observed
+numbers were:
+
+| case | min (ms) | p50 (ms) | p95 (ms) | max (ms) | errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bare Node process | 35.9 | 76.2 | 172.6 | 179.5 | 0 |
+| import `dist/hooks.js` after lazy-import changes | 185.4 | 196.0 | 760.2 | 774.0 | 0 |
+| import overhead over this baseline | — | 119.8 | — | — | — |
+
+The import p50 is effectively unchanged from Slice 4's 194.4 ms (a 1.6 ms
+difference, within host variance); the lower apparent overhead is driven by
+this run's slower bare-Node baseline, not by a new startup improvement. The
+lazy-import change therefore removed the eager evaluation of event-specific
+modules, but does not produce a measurable additional p50 win in this
+diagnostic on this host. The p95/max outliers also reinforce that direct
+module-import timing is not a stable CI budget by itself.
+
+The actual hook bench was then run with 50 samples and 3 warmups per row,
+including all lanes, against the quiet local fixture:
+
+| row | min (ms) | p50 (ms) | p95 (ms) | max (ms) | errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| runsh:session-start | 195 | 210 | 302 | 312 | 0 |
+| runsh:stop | 201 | 212 | 480 | 690 | 0 |
+| dist:session-start | 187 | 197 | 216 | 266 | 0 |
+| dist:stop | 193 | 204 | 288 | 310 | 0 |
+| noop:session-start | 2 | 2 | 2 | 2 | 0 |
+| noop:stop | 2 | 2 | 2 | 2 | 0 |
+
+Both session lifecycle runsh rows are comfortably below the 300 ms E1 p50
+acceptance on the quiet machine. The earlier CI baseline recorded in Slice 4
+(runsh session-start 370 ms and stop 310 ms) is noisier but still supports a
+400 ms cap with floor-relative enforcement: with the typical 10 ms floor,
+that cap permits 390 ms of hook work. The measured noop floor in this run was
+2 ms, and all four lifecycle rows remained well inside the corresponding
+390 ms margin (`delta` 208, 210, 195, and 202 ms).
+
+Decision: tighten the lifecycle budgets to 400 ms for both `runsh` rows and
+both `dist` rows. This is materially tighter than the previous 600/600/500/450
+ms caps while retaining CI headroom above the historical CI p50s. The
+floor-relative arithmetic is unchanged; the cap remains an allowance for
+hook work above the measured noop twin, not an absolute process-startup cap.

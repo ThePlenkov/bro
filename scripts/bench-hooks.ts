@@ -105,10 +105,10 @@ const BUDGET_P50_MS: Record<string, number> = {
   'runsh:post-tool': 400,
   'runsh:prompt-submit': 400,
   'runsh:pre-tool': 300,
-  'runsh:session-start': 600,
-  'runsh:stop': 600,
-  'dist:session-start': 500,
-  'dist:stop': 450,
+  'runsh:session-start': 400,
+  'runsh:stop': 400,
+  'dist:session-start': 400,
+  'dist:stop': 400,
 };
 
 /** The existing budgets were set with a quiet-runner noop floor of about
