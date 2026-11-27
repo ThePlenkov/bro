@@ -54,6 +54,7 @@ check to an existing `check:` script/test if one covers generated files
   home; clients get only client-specific extras).
 - Work in this worktree (`bro--bro-bm07g`), branch `bro-bm07g`, PR per repo
   rules, and arm auto-merge per `loop.autoMerge` order:
-  `gh pr merge --auto --squash --delete-branch`.
+  `gh pr merge --auto --squash`. Head-branch deletion remains controlled by
+  the repository's delete-branch-on-merge setting.
 - `bro` on PATH is an older build — `BRO_CONFIG_FORCE=1` bypasses the
   `loop.autoMerge` unknown-key refusal until the binary is rebuilt.
