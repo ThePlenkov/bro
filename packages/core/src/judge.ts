@@ -74,7 +74,7 @@ export interface DecideResult {
   /** Resolved model version. */
   model: string
   latencyMs: number
-  usage?: { inputTokens?: number; costUsd?: number }
+  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number }
   /** Answer keys below the configured confidence threshold AND not
    *  escalated to a confident answer (no fallback, or fallback also
    *  unsure) — advisory consumers render these dimmed; nobody

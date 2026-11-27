@@ -537,7 +537,13 @@ async function acpOp(
     return {
       text: r.text,
       model,
-      usage: usage?.inputTokens === undefined ? undefined : { inputTokens: usage.inputTokens },
+      usage:
+        usage?.inputTokens === undefined && usage?.outputTokens === undefined
+          ? undefined
+          : {
+              ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+              ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+            },
     };
   } finally {
     session.dispose();
