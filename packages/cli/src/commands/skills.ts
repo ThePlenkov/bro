@@ -607,12 +607,10 @@ export function runSkillMutation(input: SkillMutation): {
   const bin = input.bin ?? resolveSkillsBin(input.root, input.cfg.bin, input.probe);
   const spawn = input.spawn ?? spawnSkills;
   const names = mutationNames(source, input.root);
-  const ref =
-    input.command === 'add' && source.kind === 'github'
-      ? (input.resolveRef ?? (input.spawn === undefined ? resolveGithubRef : () => 'test'))(
-          source.repo
-        )
-      : undefined;
+  const resolveRef =
+    input.resolveRef ?? (input.spawn === undefined ? resolveGithubRef : () => 'test');
+  const wantsPin = input.command === 'add' && source.kind === 'github';
+  const ref = wantsPin ? resolveRef(source.repo) : undefined;
   if (input.command === 'add' && source.kind === 'github' && ref === null) {
     return { ok: false, args: [], detail: `could not resolve ${source.repo} default branch HEAD` };
   }

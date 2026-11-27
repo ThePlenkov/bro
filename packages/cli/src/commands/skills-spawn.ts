@@ -3,6 +3,7 @@
  * running it (POSIX direct, Windows through ComSpec with quoted argv).
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { gitBin } from '@broject/core';
 import { isAbsolute, resolve, sep } from 'node:path';
 import type { SkillSource } from './skills-sources.ts';
 
@@ -117,8 +118,11 @@ export function addArgs(src: SkillSource & { kind: 'github' | 'url' }, agents: s
  * credential-aware protocol as the existing clone, and never places a token
  * in argv. */
 export function resolveGithubRef(repo: string): string | null {
+  // gitBin() — the absolute resolved binary, never a PATH lookup:
+  // SonarCloud S4036 (PATH must only contain fixed unwriteable dirs),
+  // same seam as the otel trust fixes (#1212).
   const proc = spawnSync(
-    'git',
+    gitBin(),
     ['ls-remote', '--symref', `https://github.com/${repo}.git`, 'HEAD'],
     { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 }
   );
