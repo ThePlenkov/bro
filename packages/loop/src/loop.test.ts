@@ -212,7 +212,9 @@ describe('prompts', () => {
 
   test('work prompt arms GitHub auto-merge when loop.autoMerge is set', () => {
     const p = buildWorkPrompt(bead, 'loop/bro-x1', undefined, undefined, 'beads', true);
-    assert.match(p, /gh pr merge --auto --squash --delete-branch/);
+    assert.match(p, /gh pr merge --auto --squash/);
+    assert.doesNotMatch(p, /gh pr merge --auto --squash --delete-branch/);
+    assert.match(p, /delete-branch-on-merge setting/);
     assert.doesNotMatch(p, /Do NOT merge/);
     // mergeRule() ends in a literal newline — the next bullet stays on
     // its own line (kilo review on #881 claimed a glued concat)
@@ -225,7 +227,8 @@ describe('prompts', () => {
       'beads',
       true
     );
-    assert.match(batch, /gh pr merge --auto --squash --delete-branch/);
+    assert.match(batch, /gh pr merge --auto --squash/);
+    assert.doesNotMatch(batch, /gh pr merge --auto --squash --delete-branch/);
     assert.doesNotMatch(batch, /Do NOT merge/);
     assert.match(batch, /on reviewers\.\n- Beads you cannot finish/);
   });

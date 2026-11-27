@@ -51,9 +51,11 @@ export interface LoopConfig {
   /** Max review-fix respawns per bead — defaults to act.maxRounds. */
   fixRounds: number;
   /** The worker's merge mode: true arms GitHub auto-merge on its PR
-   *  (`gh pr merge --auto --squash --delete-branch`) and the order ends
-   *  there — no orchestrator gate, no fix rounds; false keeps the
-   *  order's 'do not merge' rule (the supervisor drives the act gate).
+   *  (`gh pr merge --auto --squash`) and the order ends there — no
+   *  orchestrator gate, no fix rounds. GitHub deletes the head branch only
+   *  when the repository's delete-branch-on-merge setting enables it; false
+   *  keeps the order's 'do not merge' rule (the supervisor drives the act
+   *  gate).
    *  Withheld when `act.requireApproval` is set — a human sign-off
    *  must still gate the land. */
   autoMerge: boolean;
