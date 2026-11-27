@@ -43,6 +43,16 @@ describe('parseArgs', () => {
     assert.throws(() => parseArgs([], { ACP_WATCH_PERMIT: 'yolo' } as NodeJS.ProcessEnv));
   });
 
+  test('stall watchdog timeout is configurable and must be positive', () => {
+    assert.equal(parseArgs(['--stall-timeout-ms', '250']).stallTimeoutMs, 250);
+    assert.equal(
+      parseArgs([], { ACP_WATCH_STALL_TIMEOUT_MS: '375' } as NodeJS.ProcessEnv).stallTimeoutMs,
+      375
+    );
+    assert.throws(() => parseArgs(['--stall-timeout-ms', '0']));
+    assert.throws(() => parseArgs([], { ACP_WATCH_STALL_TIMEOUT_MS: 'nope' } as NodeJS.ProcessEnv));
+  });
+
   test('--cmd splits into argv words — never one shell string', () => {
     const cli = parseArgs(['--cmd', "kilo acp --flag 'a b'"]);
     assert.deepEqual(cli.cmdArgv, ['kilo', 'acp', '--flag', 'a b']);
@@ -174,6 +184,24 @@ describe('runFixture — recorded wire replay', () => {
 });
 
 describe('run — end-to-end against a fake ACP agent', () => {
+  test('a silent child is killed and reports a stall rather than succeeding', async () => {
+    const { lines, r } = plain();
+    const code = await run(
+      {
+        cmd: process.execPath,
+        cmdArgv: [process.execPath, '-e', 'setInterval(() => {}, 1000)'],
+        cwd: process.cwd(),
+        color: false,
+        permit: 'auto',
+        stallTimeoutMs: 25,
+      },
+      r,
+      () => {}
+    );
+    assert.equal(code, 1);
+    assert.ok(lines.some(l => l.includes('child stalled (no output for 25ms)')));
+  });
+
   test('handshake → prompt → updates → permission → end_turn → exit 0', async () => {
     const { lines, r } = plain();
     const code = await run(
@@ -184,6 +212,7 @@ describe('run — end-to-end against a fake ACP agent', () => {
         prompt: 'do it',
         color: false,
         permit: 'auto',
+        stallTimeoutMs: 1000,
       },
       r,
       () => {}
