@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { aggregateUsageRows, type UsageRow } from './status-budget.ts';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { aggregateUsageRows, readFleetUsageBudget, type UsageRow } from './status-budget.ts';
 
 const NOW = Date.parse('2026-02-03T12:00:00.000Z');
 
@@ -65,4 +68,37 @@ test('does not turn absent provider cost into zero', () => {
   assert.equal('costUsd' in group, false);
   assert.deepEqual(group.unknownCost, { count: 1, reason: 'provider did not report cost' });
   assert.equal(budget.day.unknownCostRows, 1);
+});
+
+test('unreadable agent events directory surfaces in degraded, not silent zero', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-budget-'));
+  // a FILE where the agents directory should be — readdirSync throws ENOTDIR,
+  // deterministic without depending on permission bits
+  mkdirSync(join(dir, 'bro'), { recursive: true });
+  writeFileSync(join(dir, 'bro', 'agents'), 'not a directory');
+  const prev = process.env.BRO_STATE_DIR;
+  process.env.BRO_STATE_DIR = dir;
+  try {
+    const budget = readFleetUsageBudget(process.cwd(), NOW);
+    assert.equal(budget.day.rows, 0);
+    assert.ok(budget.degraded !== undefined && budget.degraded.length > 0);
+    assert.match(budget.degraded[0] ?? '', /unreadable/);
+  } finally {
+    if (prev === undefined) delete process.env.BRO_STATE_DIR;
+    else process.env.BRO_STATE_DIR = prev;
+  }
+});
+
+test('absent state directory is the normal empty state — no degraded note', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-budget-empty-'));
+  const prev = process.env.BRO_STATE_DIR;
+  process.env.BRO_STATE_DIR = dir;
+  try {
+    const budget = readFleetUsageBudget(process.cwd(), NOW);
+    assert.equal(budget.day.rows, 0);
+    assert.equal(budget.degraded, undefined);
+  } finally {
+    if (prev === undefined) delete process.env.BRO_STATE_DIR;
+    else process.env.BRO_STATE_DIR = prev;
+  }
 });

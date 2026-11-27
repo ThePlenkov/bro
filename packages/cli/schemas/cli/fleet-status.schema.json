@@ -19,101 +19,217 @@
     "sync"
   ],
   "properties": {
-    "dir": { "type": "string" },
-    "branch": { "type": "string" },
-    "dirty": { "type": "integer", "description": "Dirty-path count from git status --porcelain — untracked incl." },
+    "dir": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "dirty": {
+      "type": "integer",
+      "description": "Dirty-path count from git status --porcelain — untracked incl."
+    },
     "worktrees": {
       "type": "array",
-      "items": { "$ref": "#/$defs/StatusWorktree" }
+      "items": {
+        "$ref": "#/$defs/StatusWorktree"
+      }
     },
     "beads": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["inProgress", "ready", "readyTotal"],
+      "required": [
+        "inProgress",
+        "ready",
+        "readyTotal"
+      ],
       "properties": {
-        "inProgress": { "type": "array", "items": { "$ref": "#/$defs/BeadRow" } },
+        "inProgress": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BeadRow"
+          }
+        },
         "ready": {
           "type": "array",
-          "items": { "$ref": "#/$defs/BeadRow" },
+          "items": {
+            "$ref": "#/$defs/BeadRow"
+          },
           "description": "First READY_CAP ready beads — the board shows the top, not all."
         },
-        "readyTotal": { "type": "integer" }
+        "readyTotal": {
+          "type": "integer"
+        }
       }
     },
     "fleet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxConcurrent", "agents", "budget"],
+      "required": [
+        "maxConcurrent",
+        "agents",
+        "budget"
+      ],
       "properties": {
-        "maxConcurrent": { "type": "integer", "description": "0 = uncapped." },
-        "agents": { "type": "array", "items": { "$ref": "#/$defs/StatusAgent" } },
-        "budget": { "$ref": "#/$defs/FleetUsageBudget" }
+        "maxConcurrent": {
+          "type": "integer",
+          "description": "0 = uncapped."
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusAgent"
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/FleetUsageBudget"
+        }
       }
     },
     "loop": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stallMin", "runs"],
+      "required": [
+        "stallMin",
+        "runs"
+      ],
       "properties": {
-        "stallMin": { "type": "number", "description": "Advisory silence threshold, never a kill budget." },
-        "runs": { "type": "array", "items": { "$ref": "#/$defs/LoopRunView" } }
+        "stallMin": {
+          "type": "number",
+          "description": "Advisory silence threshold, never a kill budget."
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LoopRunView"
+          }
+        }
       }
     },
     "drill": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["frame"],
+      "required": [
+        "frame"
+      ],
       "properties": {
         "frame": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
-          "required": ["id", "title", "depth"],
+          "required": [
+            "id",
+            "title",
+            "depth"
+          ],
           "properties": {
-            "id": { "type": "string" },
-            "title": { "type": "string" },
-            "depth": { "type": "integer" }
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "depth": {
+              "type": "integer"
+            }
           }
         }
       }
     },
     "watch": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
-      "required": ["ts", "ageMs", "attention"],
+      "required": [
+        "ts",
+        "ageMs",
+        "attention"
+      ],
       "properties": {
-        "ts": { "type": "string" },
-        "ageMs": { "type": "number" },
-        "futureMs": { "type": "number" },
-        "writerSkewed": { "type": "boolean" },
-        "attention": { "type": "integer", "description": "Size of the snapshot's attention list." }
+        "ts": {
+          "type": "string"
+        },
+        "ageMs": {
+          "type": "number"
+        },
+        "futureMs": {
+          "type": "number"
+        },
+        "writerSkewed": {
+          "type": "boolean"
+        },
+        "attention": {
+          "type": "integer",
+          "description": "Size of the snapshot's attention list."
+        }
       },
       "description": "The durable heartbeat file's summary — null = never had a heartbeat."
     },
     "build": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
-      "required": ["session", "via", "ts", "behind", "mine"],
+      "required": [
+        "session",
+        "via",
+        "ts",
+        "behind",
+        "mine"
+      ],
       "properties": {
-        "session": { "type": "string" },
-        "via": { "type": "string" },
-        "ts": { "type": "number" },
-        "behind": { "type": "boolean", "description": "stamp.head ≠ HEAD — the recorded write predates the checkout." },
-        "mine": { "type": ["boolean", "null"] }
+        "session": {
+          "type": "string"
+        },
+        "via": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "number"
+        },
+        "behind": {
+          "type": "boolean",
+          "description": "stamp.head ≠ HEAD — the recorded write predates the checkout."
+        },
+        "mine": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
       },
       "description": "Last stamped write to this worktree's shared outputs — null until a build/patch stamps one."
     },
     "sync": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
-      "required": ["behind", "upstream"],
+      "required": [
+        "behind",
+        "upstream"
+      ],
       "properties": {
-        "behind": { "type": "integer" },
-        "upstream": { "type": "string" }
+        "behind": {
+          "type": "integer"
+        },
+        "upstream": {
+          "type": "string"
+        }
       },
       "description": "Positive upstream drift — null when current or untracked."
     },
     "act": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
       "required": [
         "pr",
@@ -128,17 +244,46 @@
         "blockers"
       ],
       "properties": {
-        "pr": { "type": "integer" },
-        "url": { "type": "string" },
-        "gate": { "type": "string" },
-        "openThreads": { "type": "integer" },
-        "reopenedThreads": { "type": "integer" },
-        "ciPending": { "type": "integer" },
-        "ciFailing": { "type": "integer" },
-        "reviewersPending": { "type": "integer" },
-        "sastPending": { "type": "integer" },
-        "blockers": { "type": "array", "items": { "type": "string" } },
-        "ownership": { "enum": ["managed", "review", "human"] }
+        "pr": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        },
+        "gate": {
+          "type": "string"
+        },
+        "openThreads": {
+          "type": "integer"
+        },
+        "reopenedThreads": {
+          "type": "integer"
+        },
+        "ciPending": {
+          "type": "integer"
+        },
+        "ciFailing": {
+          "type": "integer"
+        },
+        "reviewersPending": {
+          "type": "integer"
+        },
+        "sastPending": {
+          "type": "integer"
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ownership": {
+          "enum": [
+            "managed",
+            "review",
+            "human"
+          ]
+        }
       },
       "description": "--deep only: the act gate for the current branch's open PR."
     }
@@ -147,92 +292,220 @@
     "BeadRow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "title"],
+      "required": [
+        "id",
+        "title"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "title": { "type": "string" },
-        "priority": { "type": "number" },
-        "issue_type": { "type": "string" },
-        "assignee": { "type": "string" },
-        "link": { "type": "string", "description": "Clickable PR/issue reference when the bead is linked to one." }
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "number"
+        },
+        "issue_type": {
+          "type": "string"
+        },
+        "assignee": {
+          "type": "string"
+        },
+        "link": {
+          "type": "string",
+          "description": "Clickable PR/issue reference when the bead is linked to one."
+        }
       }
     },
     "StatusWorktree": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "path"],
+      "required": [
+        "name",
+        "path"
+      ],
       "properties": {
-        "name": { "type": "string" },
-        "path": { "type": "string" },
-        "branch": { "type": "string" },
-        "state": { "type": "string" },
-        "claim": { "type": "string" },
-        "main": { "type": "boolean" },
-        "here": { "type": "boolean" }
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "claim": {
+          "type": "string"
+        },
+        "main": {
+          "type": "boolean"
+        },
+        "here": {
+          "type": "boolean"
+        }
       }
     },
     "StatusAgent": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "backend", "state"],
+      "required": [
+        "id",
+        "backend",
+        "state"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "agentId": { "type": "string" },
-        "backend": { "type": "string" },
-        "step": { "type": "string" },
-        "state": { "type": "string" },
-        "cause": { "type": "string" },
-        "pid": { "type": "integer" },
-        "log": { "type": "string" },
-        "worktree": { "type": "string" },
-        "provider": { "type": "string" },
-        "model": { "type": "string" }
+        "id": {
+          "type": "string"
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "step": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "log": {
+          "type": "string"
+        },
+        "worktree": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
       }
     },
     "FleetUsageBudget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["basis", "day", "window"],
+      "required": [
+        "basis",
+        "day",
+        "window"
+      ],
       "properties": {
-        "basis": { "const": "agent-events" },
-        "day": { "$ref": "#/$defs/FleetUsageWindow" },
-        "window": { "$ref": "#/$defs/FleetUsageWindow" }
+        "basis": {
+          "const": "agent-events"
+        },
+        "day": {
+          "$ref": "#/$defs/FleetUsageWindow"
+        },
+        "window": {
+          "$ref": "#/$defs/FleetUsageWindow"
+        },
+        "degraded": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Journal read problems surfaced loudly — present only when a state-dir or journal read failed for reasons other than normal absence."
+        }
       }
     },
     "FleetUsageWindow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["from", "to", "rows", "unknownCostRows", "groups"],
+      "required": [
+        "from",
+        "to",
+        "rows",
+        "unknownCostRows",
+        "groups"
+      ],
       "properties": {
-        "from": { "type": "string" },
-        "to": { "type": "string" },
-        "rows": { "type": "integer" },
-        "unknownCostRows": { "type": "integer" },
-        "groups": { "type": "array", "items": { "$ref": "#/$defs/FleetUsageGroup" } }
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "rows": {
+          "type": "integer"
+        },
+        "unknownCostRows": {
+          "type": "integer"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FleetUsageGroup"
+          }
+        }
       }
     },
     "FleetUsageGroup": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent", "from", "to", "rows", "unknownCost"],
+      "required": [
+        "agent",
+        "from",
+        "to",
+        "rows",
+        "unknownCost"
+      ],
       "properties": {
-        "agent": { "type": "string" },
-        "bead": { "type": "string" },
-        "provider": { "type": "string" },
-        "model": { "type": "string" },
-        "from": { "type": "string" },
-        "to": { "type": "string" },
-        "rows": { "type": "integer" },
-        "inputTokens": { "type": "number" },
-        "outputTokens": { "type": "number" },
-        "costUsd": { "type": "number" },
+        "agent": {
+          "type": "string"
+        },
+        "bead": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "rows": {
+          "type": "integer"
+        },
+        "inputTokens": {
+          "type": "number"
+        },
+        "outputTokens": {
+          "type": "number"
+        },
+        "costUsd": {
+          "type": "number"
+        },
         "unknownCost": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["count", "reason"],
+          "required": [
+            "count",
+            "reason"
+          ],
           "properties": {
-            "count": { "type": "integer" },
-            "reason": { "type": "string" }
+            "count": {
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            }
           }
         }
       }
@@ -240,17 +513,53 @@
     "LoopRunView": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["beadId", "slug", "pid", "state", "silentMs"],
+      "required": [
+        "beadId",
+        "slug",
+        "pid",
+        "state",
+        "silentMs"
+      ],
       "properties": {
-        "beadId": { "type": "string" },
-        "beadIds": { "type": "array", "items": { "type": "string" } },
-        "slug": { "type": "string" },
-        "pid": { "type": ["integer", "null"] },
-        "state": { "enum": ["running", "dead"] },
-        "startedAt": { "type": "string" },
-        "worktree": { "type": "string" },
-        "log": { "type": "string" },
-        "silentMs": { "type": ["number", "null"] }
+        "beadId": {
+          "type": "string"
+        },
+        "beadIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "slug": {
+          "type": "string"
+        },
+        "pid": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "running",
+            "dead"
+          ]
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "worktree": {
+          "type": "string"
+        },
+        "log": {
+          "type": "string"
+        },
+        "silentMs": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
       }
     }
   }

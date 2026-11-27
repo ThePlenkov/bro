@@ -29,6 +29,7 @@ export interface FleetUsageBudget {
   basis: 'agent-events';
   day: UsageBudgetWindow;
   window: UsageBudgetWindow;
+  degraded?: string[];
 }
 
 export interface UsageRow {
@@ -106,12 +107,19 @@ function journalPath(common: string, agent: string): string | undefined {
   }
 }
 
-function agentIds(common: string): string[] {
+function agentIds(common: string, degraded: string[]): string[] {
+  const dir = join(common, 'bro', 'agents');
   try {
-    return readdirSync(join(common, 'bro', 'agents'))
+    return readdirSync(dir)
       .filter(name => name.endsWith('.events.jsonl'))
       .map(name => name.slice(0, -'.events.jsonl'.length));
-  } catch {
+  } catch (e) {
+    // ENOENT is the normal empty state — no journals written yet. Anything
+    // else (EACCES, ENOTDIR, corrupt fs) is a project error and must be
+    // visible in the budget output, never silently zeroed.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      degraded.push(`agent events directory unreadable: ${(e as Error).message}`);
+    }
     return [];
   }
 }
@@ -130,21 +138,22 @@ function parseLines(agent: string, lines: string): UsageRow[] {
   return rows;
 }
 
-function readJournal(agent: string, file: string): UsageRow[] {
+function readJournal(agent: string, file: string, degraded: string[]): UsageRow[] {
   if (!existsSync(file)) return [];
   try {
     return parseLines(agent, readFileSync(file, 'utf8'));
-  } catch {
+  } catch (e) {
+    degraded.push(`journal for ${agent} unreadable: ${(e as Error).message}`);
     return [];
   }
 }
 
-function readRows(dir: string): UsageRow[] {
+function readRows(dir: string, degraded: string[]): UsageRow[] {
   const common = stateCommonDir(dir);
   if (common === null) return [];
-  return agentIds(common).flatMap(agent => {
+  return agentIds(common, degraded).flatMap(agent => {
     const file = journalPath(common, agent);
-    return file === undefined ? [] : readJournal(agent, file);
+    return file === undefined ? [] : readJournal(agent, file, degraded);
   });
 }
 
@@ -211,8 +220,11 @@ function windowFor(rows: UsageRow[], fromMs: number, toMs: number): UsageBudgetW
 }
 
 export function readFleetUsageBudget(dir: string, now = Date.now()): FleetUsageBudget {
-  const rows = readRows(dir);
-  return aggregateUsageRows(rows, now);
+  const degraded: string[] = [];
+  const rows = readRows(dir, degraded);
+  const budget = aggregateUsageRows(rows, now);
+  if (degraded.length > 0) budget.degraded = degraded;
+  return budget;
 }
 
 export function aggregateUsageRows(rows: UsageRow[], now = Date.now()): FleetUsageBudget {
