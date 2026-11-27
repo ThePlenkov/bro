@@ -30,6 +30,7 @@ import { shellWords } from './lib.ts';
 
 const PROTOCOL_VERSION = 1;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+const DEFAULT_STALL_TIMEOUT_MS = HANDSHAKE_TIMEOUT_MS;
 
 /** Loose wire shapes — the plugin carries no SDK dep; the renderer
  *  narrows what it needs. */
@@ -55,6 +56,7 @@ interface Cli {
   fixture?: string;
   color: boolean;
   permit: PermitMode;
+  stallTimeoutMs?: number;
 }
 
 /** Permission auto-answer modes — `auto` is the spec's fixed policy
@@ -71,6 +73,14 @@ const asPermit = (flag: string, v: string): PermitMode => {
   return v as PermitMode;
 };
 
+const asTimeout = (flag: string, v: string): number => {
+  const ms = Number(v);
+  if (!Number.isInteger(ms) || ms <= 0) {
+    throw new Error(`${flag} must be a positive integer number of milliseconds, got ${v}`);
+  }
+  return ms;
+};
+
 /** env transports — the pane command line would otherwise leak the
  *  prompt into `ps` argv (any local user reads it); env is
  *  owner-only. Env overrides flag state by spec. */
@@ -78,6 +88,9 @@ const finalizeCli = (cli: Cli, env: NodeJS.ProcessEnv): Cli => {
   cli.prompt ??= env.ACP_WATCH_PROMPT;
   if (env.ACP_WATCH_PERMIT !== undefined) {
     cli.permit = asPermit('ACP_WATCH_PERMIT', env.ACP_WATCH_PERMIT);
+  }
+  if (env.ACP_WATCH_STALL_TIMEOUT_MS !== undefined) {
+    cli.stallTimeoutMs = asTimeout('ACP_WATCH_STALL_TIMEOUT_MS', env.ACP_WATCH_STALL_TIMEOUT_MS);
   }
   cli.cmdArgv = shellWords(cli.cmd);
   if (cli.cmdArgv.length === 0) throw new Error('--cmd must name an executable');
@@ -92,13 +105,18 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     cwd: process.cwd(),
     color: env.NO_COLOR === undefined,
     permit: 'auto',
+    stallTimeoutMs: DEFAULT_STALL_TIMEOUT_MS,
   };
-  const VALUE_FLAGS: Record<string, 'cmd' | 'prompt' | 'cwd' | 'fixture' | 'permit'> = {
+  const VALUE_FLAGS: Record<
+    string,
+    'cmd' | 'prompt' | 'cwd' | 'fixture' | 'permit' | 'stallTimeoutMs'
+  > = {
     '--cmd': 'cmd',
     '--prompt': 'prompt',
     '--cwd': 'cwd',
     '--fixture': 'fixture',
     '--permit': 'permit',
+    '--stall-timeout-ms': 'stallTimeoutMs',
   };
   const TOGGLES = new Set(['--no-color', '--plain']);
   for (let i = 0; i < argv.length; i++) {
@@ -112,6 +130,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     const v = argv[++i];
     if (v === undefined) throw new Error(`${a} needs a value`);
     if (key === 'permit') cli.permit = asPermit('--permit', v);
+    else if (key === 'stallTimeoutMs') cli.stallTimeoutMs = asTimeout('--stall-timeout-ms', v);
     else cli[key] = v;
   }
   return finalizeCli(cli, env);
@@ -140,6 +159,8 @@ export class Wire {
   onTurnEnd: ((reason: string | undefined) => void) | undefined;
   /** Permission auto-answer mode — run() sets it from --permit/env. */
   permit: PermitMode = 'auto';
+  /** Called for every protocol message, including notifications. */
+  onActivity: (() => void) | undefined;
   /** prompt settled — resolve(value) with the stopReason. */
   private turnSettled: ((reason: string | undefined) => void) | undefined;
   private turnDone = false;
@@ -192,6 +213,7 @@ export class Wire {
 
   /** One decoded wire line — shared by the live child and the fixture. */
   onMessage(msg: RpcMessage): void {
+    this.onActivity?.();
     const isResponse = msg.method === undefined;
     if (isResponse) {
       this.onResponse(msg);
@@ -306,6 +328,7 @@ interface Pump {
   /** mutable — the exit handler writes, the teardown reads */
   exit: { done: boolean; detail: string };
   flushStderr: () => void;
+  clearStallWatchdog: () => void;
 }
 
 function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -342,6 +365,10 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
   // --cmd is argv words, never a shell line: shellWords parses quotes
   // and escapes but performs no expansion, so the command cannot
   // re-parse into a different program (CodeQL: no env-derived shell).
+  // eslint-disable-next-line security/detect-child-process -- running the operator's own
+  // --cmd IS this watcher's job (a pane supervisor); shellWords keeps it argv-only
+  // with no shell re-parse, so the spawned program cannot differ from what the
+  // operator typed. Same seam class as the .codacy.yml exclude-path entries.
   const child: ChildProcess = spawn(cli.cmdArgv[0] as string, cli.cmdArgv.slice(1), {
     cwd: cli.cwd,
     // BRO_HOOKS=0 — a machine backend: bro hooks no-op in the child
@@ -351,6 +378,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
     detached: process.platform !== 'win32',
   });
   const exit = { done: false, detail: 'transport closed' };
+  const stallTimeoutMs = cli.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   const wire = new Wire(msg => {
     try {
       child.stdin?.write(`${JSON.stringify(msg)}\n`);
@@ -358,6 +386,29 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
       /* transport already gone */
     }
   }, renderer);
+  let stallTimer: NodeJS.Timeout | undefined;
+  const clearStallWatchdog = (): void => {
+    if (stallTimer !== undefined) {
+      clearTimeout(stallTimer);
+      stallTimer = undefined;
+    }
+  };
+  const resetStallWatchdog = (): void => {
+    clearStallWatchdog();
+    if (stallTimeoutMs <= 0 || exit.done) return;
+    stallTimer = setTimeout(() => {
+      stallTimer = undefined;
+      if (exit.done) return;
+      exit.done = true;
+      exit.detail = `child stalled (no output for ${stallTimeoutMs}ms)`;
+      wire.kill(exit.detail);
+      killProcessTree(child, 'SIGKILL');
+    }, stallTimeoutMs);
+    // The child is the thing being supervised; this timer must not keep a
+    // watcher that is otherwise finished alive.
+    stallTimer.unref();
+  };
+  wire.onActivity = resetStallWatchdog;
   // stdin EPIPE arrives as a stream error, not a write() throw —
   // transport death is already handled on 'exit'
   child.stdin?.on('error', () => {});
@@ -365,6 +416,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
     if (!exit.done) {
       exit.done = true;
       exit.detail = `spawn failed: ${err.message}`;
+      clearStallWatchdog();
       wire.kill(exit.detail);
     }
   });
@@ -372,6 +424,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
     if (!exit.done) {
       exit.done = true;
       exit.detail = `child exited (code ${String(code)}, signal ${String(signal)})`;
+      clearStallWatchdog();
       wire.kill(exit.detail);
     }
   });
@@ -382,6 +435,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
   const stderrIsSignal = (l: string): boolean => /error|panic|warn|fatal/i.test(l);
   let stderrPartial = '';
   child.stderr?.on('data', (d: Buffer) => {
+    resetStallWatchdog();
     const lines = (stderrPartial + d.toString()).split('\n');
     stderrPartial = lines.pop() ?? '';
     for (const l of lines) {
@@ -399,8 +453,10 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
     if (stderrSuppressed > 0) out(dim(`‹stderr› ${stderrSuppressed} diagnostic lines`, cli.color));
     stderrSuppressed = 0;
   };
+  child.stdout?.on('data', resetStallWatchdog);
   createInterface({ input: child.stdout as NodeJS.ReadableStream }).on('line', l => wire.onLine(l));
-  return { wire, child, exit, flushStderr };
+  resetStallWatchdog();
+  return { wire, child, exit, flushStderr, clearStallWatchdog };
 }
 
 /** initialize → protocol check → session/new. Returns the session id,
@@ -412,6 +468,7 @@ async function handshake(
   out: (s: string) => void
 ): Promise<string | undefined> {
   const die = (why: string): undefined => {
+    pump.clearStallWatchdog();
     pump.flushStderr();
     renderer.closed(why);
     killProcessTree(pump.child, 'SIGKILL');
@@ -483,6 +540,7 @@ export async function run(
         /* transport already gone */
       }
     }
+    pump.clearStallWatchdog();
     flushStderr();
     renderer.closed(`watcher ${sig}`);
     killProcessTree(child, 'SIGKILL');
@@ -499,7 +557,7 @@ export async function run(
     await turnDone; // settles only on transport death
     flushStderr();
     renderer.closed(exit.detail);
-    return 0;
+    return exit.detail.startsWith('child stalled') ? 1 : 0;
   }
 
   // prompt answers carry the stop reason — the turn's own boundary.
@@ -509,6 +567,7 @@ export async function run(
     .request('session/prompt', { sessionId, prompt: [{ type: 'text', text: cli.prompt }] })
     .catch(() => {});
   const stopReason = await turnDone;
+  pump.clearStallWatchdog();
   // readonly v1: the turn's end is the session's end
   await reap(pump);
   flushStderr();

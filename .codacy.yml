@@ -193,3 +193,12 @@ exclude_paths:
   # sonar.exclusions=integrations/** — the sources carry the bar.
   - 'integrations/**'
   - 'plugins/*/bro/**'
+
+  # acp:watch IS a pane supervisor: spawning the operator's own --cmd is
+  # the tool's whole job. shellWords keeps the command argv-only with no
+  # shell re-parse, and the env pin strips bro hooks from the child tree,
+  # so security-node's eval-like/child-process finding has no actionable
+  # seam here — the same class as the contract.ts/foreign-push.ts entries
+  # above. An inline eslint-disable at the spawn line was tried first;
+  # codacy's security-node integration does not honor it.
+  - 'plugins/herdr/src/acp-watch.ts'
