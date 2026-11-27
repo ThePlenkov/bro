@@ -18,7 +18,10 @@
  *   node src/acp-watch.ts --fixture test/fixtures/session.jsonl
  */
 import { type ChildProcess, spawn } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   AcpRenderer,
@@ -26,11 +29,123 @@ import {
   type SessionUpdateLike,
   safe,
 } from '../../../packages/acp/session/src/index.ts';
+import { pidAlive } from '../../../packages/herdr-kit/src/index.ts';
 import { shellWords } from './lib.ts';
 
 const PROTOCOL_VERSION = 1;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const DEFAULT_STALL_TIMEOUT_MS = HANDSHAKE_TIMEOUT_MS;
+const ACP_WATCH_STATE_DIR =
+  process.env.HERDR_PLUGIN_STATE_DIR ??
+  join(process.env.HOME ?? homedir(), '.config', 'bro-herdr-plugin');
+
+export interface AcpWatchLane {
+  readonly marker: string;
+  readonly worktree: string;
+  readonly owner: { pid: number; startTime: string };
+}
+
+interface LaneMarker {
+  pid: number;
+  startTime: string;
+  worktree: string;
+  procStart?: string;
+}
+
+/** The marker is content-addressed by the physical cwd, so linked worktrees
+ * and symlink spellings cannot accidentally occupy separate lanes. */
+export function acpWatchLanePath(worktree: string, stateDir = ACP_WATCH_STATE_DIR): string {
+  const key = createHash('sha256').update(worktree).digest('hex').slice(0, 32);
+  return join(stateDir, `acp-watch-${key}.lock`);
+}
+
+const resolvedWatchCwd = (cwd: string): string => {
+  const absolute = resolve(cwd);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+};
+
+/** Atomically claim the cwd lane. A live marker is a hard conflict; a marker
+ * whose recorded process is dead is reclaimed, rather than guessed stale by
+ * age. The marker is deliberately human-readable for pane operators. */
+export function occupyAcpWatchLane(worktree: string, stateDir = ACP_WATCH_STATE_DIR): AcpWatchLane {
+  const resolved = resolvedWatchCwd(worktree);
+  const marker = acpWatchLanePath(resolved, stateDir);
+  mkdirSync(stateDir, { recursive: true });
+  const owner: LaneMarker = {
+    pid: process.pid,
+    startTime: new Date().toISOString(),
+    worktree: resolved,
+    procStart: process.platform === 'linux' ? readProcStart(process.pid) : undefined,
+  };
+  for (;;) {
+    try {
+      writeFileSync(marker, `${JSON.stringify(owner, null, 2)}\n`, { flag: 'wx' });
+      return { marker, worktree: resolved, owner };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const incumbent = readLaneMarker(marker);
+      if (incumbent !== undefined && laneOwnerLive(incumbent)) {
+        throw new Error(
+          `acp:watch cwd lane occupied by pid ${incumbent.pid} (marker ${marker}, worktree ${incumbent.worktree})`
+        );
+      }
+      // A torn or dead marker is not an owner. Removing it and retrying the
+      // exclusive create handles a reclaim race without stealing a live lane.
+      try {
+        rmSync(marker, { force: true });
+      } catch {
+        // another reclaimer may have won; the exclusive create decides.
+      }
+    }
+  }
+}
+
+function readLaneMarker(marker: string): LaneMarker | undefined {
+  try {
+    const value = JSON.parse(readFileSync(marker, 'utf8')) as Partial<LaneMarker>;
+    if (
+      !Number.isInteger(value.pid) ||
+      typeof value.startTime !== 'string' ||
+      typeof value.worktree !== 'string'
+    ) {
+      return undefined;
+    }
+    return value as LaneMarker;
+  } catch {
+    return undefined;
+  }
+}
+
+function readProcStart(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    return close < 0 ? undefined : stat.slice(close + 2).split(' ')[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function laneOwnerLive(owner: LaneMarker): boolean {
+  return pidAlive(owner.pid, owner.procStart);
+}
+
+/** Release only our marker. This protects a reclaimed lane from a late
+ * teardown deleting its successor's marker. */
+export function releaseAcpWatchLane(lane: AcpWatchLane): void {
+  const current = readLaneMarker(lane.marker);
+  if (
+    current?.pid === lane.owner.pid &&
+    current.startTime === lane.owner.startTime &&
+    current.worktree === lane.worktree
+  ) {
+    rmSync(lane.marker, { force: true });
+  }
+}
 
 /** Loose wire shapes — the plugin carries no SDK dep; the renderer
  *  narrows what it needs. */
@@ -521,6 +636,20 @@ export async function run(
   renderer: AcpRenderer,
   out: (s: string) => void
 ): Promise<number> {
+  const lane = occupyAcpWatchLane(cli.cwd);
+  try {
+    return await runOccupied({ ...cli, cwd: lane.worktree }, renderer, out, lane);
+  } finally {
+    releaseAcpWatchLane(lane);
+  }
+}
+
+async function runOccupied(
+  cli: Cli,
+  renderer: AcpRenderer,
+  out: (s: string) => void,
+  lane: AcpWatchLane
+): Promise<number> {
   const pump = spawnPump(cli, renderer, out);
   const { wire, child, exit, flushStderr } = pump;
   wire.onTurnEnd = reason => renderer.turnEnd(reason);
@@ -544,6 +673,7 @@ export async function run(
     flushStderr();
     renderer.closed(`watcher ${sig}`);
     killProcessTree(child, 'SIGKILL');
+    releaseAcpWatchLane(lane);
     process.exit(sig === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', onSignal);
