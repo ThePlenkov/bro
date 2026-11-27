@@ -214,6 +214,15 @@ describe('AcpRenderer — permission policy', () => {
     );
     assert.deepEqual(res, { outcome: 'cancelled' });
   });
+
+  test('an allow option without an id is cancelled, never answered with empty id', () => {
+    const { out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    const res = r.permission(
+      permReq('edit', [{ name: 'Allow once', kind: 'allow_once' }])
+    );
+    assert.deepEqual(res, { outcome: 'cancelled' });
+  });
 });
 
 describe('AcpRenderer — paragraphs (spec bro-l8wqu)', () => {

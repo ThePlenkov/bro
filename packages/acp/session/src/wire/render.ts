@@ -623,13 +623,17 @@ export class AcpRenderer {
       this.out(this.dim(`  → cancelled — permit=${mode}, no matching option offered`));
       return { outcome: 'cancelled' };
     }
+    if (pick.optionId === undefined || pick.optionId === '') {
+      this.out(this.dim('  → cancelled — selected option has no optionId'));
+      return { outcome: 'cancelled' };
+    }
     const why = whyText(pol);
     this.out(
       this.dim(
         `  → auto-answered ${safe(pick.name ?? pick.optionId ?? '?')} (${safe(pick.kind ?? '?')}) — ${why}`
       )
     );
-    return { outcome: 'selected', optionId: pick.optionId ?? '' };
+    return { outcome: 'selected', optionId: pick.optionId };
   }
 
   /** An agent→client call the watcher does not serve (fs, terminal,

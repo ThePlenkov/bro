@@ -18,7 +18,7 @@
  *   node src/acp-watch.ts --fixture test/fixtures/session.jsonl
  */
 import { type ChildProcess, spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import {
   AcpRenderer,
@@ -29,6 +29,7 @@ import {
 import { shellWords } from './lib.ts';
 
 const PROTOCOL_VERSION = 1;
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 /** Loose wire shapes — the plugin carries no SDK dep; the renderer
  *  narrows what it needs. */
@@ -80,6 +81,7 @@ const finalizeCli = (cli: Cli, env: NodeJS.ProcessEnv): Cli => {
   }
   cli.cmdArgv = shellWords(cli.cmd);
   if (cli.cmdArgv.length === 0) throw new Error('--cmd must name an executable');
+  if (cli.prompt === '') throw new Error('--prompt must not be empty');
   return cli;
 };
 
@@ -116,6 +118,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 }
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const dim = (text: string, color: boolean): string => (color ? `\u001b[2m${text}\u001b[0m` : text);
 
 /**
  * The wire pump: child stdio ↔ NDJSON ↔ the renderer. `send` writes a
@@ -174,6 +177,9 @@ export class Wire {
       return { error: { code: -32602, message: 'fs/read_text_file: path must be a string' } };
     }
     try {
+      if (!statSync(p.path).isFile()) {
+        return { error: { code: -32000, message: 'fs/read_text_file: path is not a file' } };
+      }
       return { result: { content: readFileSync(p.path, 'utf8') } };
     } catch (err) {
       return { error: { code: -32000, message: `fs/read_text_file: ${errMsg(err)}` } };
@@ -298,6 +304,18 @@ interface Pump {
   flushStderr: () => void;
 }
 
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform !== 'win32' && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // The process group may already have exited.
+    }
+  }
+  child.kill(signal);
+}
+
 /** Child + wire + stderr tally — the plumbing half of a run. */
 function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): Pump {
   // --cmd is argv words, never a shell line: shellWords parses quotes
@@ -309,6 +327,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
     // tree (same pin the acp provider sets for its spawns)
     env: { BRO_HOOKS: '0', ...process.env },
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
   const exit = { done: false, detail: 'transport closed' };
   const wire = new Wire(msg => {
@@ -328,7 +347,7 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
       wire.kill(exit.detail);
     }
   });
-  child.once('exit', (code, signal) => {
+  child.once('close', (code, signal) => {
     if (!exit.done) {
       exit.done = true;
       exit.detail = `child exited (code ${String(code)}, signal ${String(signal)})`;
@@ -340,16 +359,24 @@ function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): P
   // error-ish lines surface; the rest tally into one line at close.
   let stderrSuppressed = 0;
   const stderrIsSignal = (l: string): boolean => /error|panic|warn|fatal/i.test(l);
+  let stderrPartial = '';
   child.stderr?.on('data', (d: Buffer) => {
-    for (const l of d.toString().split('\n')) {
+    const lines = (stderrPartial + d.toString()).split('\n');
+    stderrPartial = lines.pop() ?? '';
+    for (const l of lines) {
       if (l === '') continue;
-      if (stderrIsSignal(l)) out(`\u001b[2m‹stderr› ${safe(l)}\u001b[0m`);
+      if (stderrIsSignal(l)) out(dim(`‹stderr› ${safe(l)}`, cli.color));
       else stderrSuppressed++;
     }
   });
   const flushStderr = (): void => {
+    if (stderrPartial !== '') {
+      if (stderrIsSignal(stderrPartial)) out(dim(`‹stderr› ${safe(stderrPartial)}`, cli.color));
+      else stderrSuppressed++;
+      stderrPartial = '';
+    }
     if (stderrSuppressed > 0)
-      out(`\u001b[2m‹stderr› ${stderrSuppressed} diagnostic lines\u001b[0m`);
+      out(dim(`‹stderr› ${stderrSuppressed} diagnostic lines`, cli.color));
     stderrSuppressed = 0;
   };
   createInterface({ input: child.stdout as NodeJS.ReadableStream }).on('line', l => wire.onLine(l));
@@ -367,40 +394,56 @@ async function handshake(
   const die = (why: string): undefined => {
     pump.flushStderr();
     renderer.closed(why);
-    pump.child.kill('SIGKILL');
+    killProcessTree(pump.child, 'SIGKILL');
     return undefined;
   };
-  const init = (await pump.wire
+  const withDeadline = async <T>(promise: Promise<T>, method: string): Promise<T> => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`${method} handshake deadline exceeded`)),
+            HANDSHAKE_TIMEOUT_MS
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+  const init = (await withDeadline(pump.wire
     .request('initialize', {
       protocolVersion: PROTOCOL_VERSION,
       clientInfo: { name: 'bro-acp-watch', version: '0.1.0' },
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: false }, terminal: false },
     })
-    .catch(err => err)) as { protocolVersion?: number } | Error;
+    .catch(err => err), 'initialize')) as { protocolVersion?: number } | Error;
   if (init instanceof Error) return die(`initialize — ${init.message}; ${pump.exit.detail}`);
   if (init.protocolVersion !== PROTOCOL_VERSION) {
     return die(
       `agent negotiated protocol ${String(init.protocolVersion)} — this watcher speaks v${PROTOCOL_VERSION} only`
     );
   }
-  out(`\u001b[2m── acp watch: ${cli.cmd} (cwd ${cli.cwd}) ──\u001b[0m`);
-  const session = (await pump.wire
+  out(dim(`── acp watch: ${cli.cmd} (cwd ${cli.cwd}) ──`, cli.color));
+  const session = (await withDeadline(pump.wire
     .request('session/new', { cwd: cli.cwd, mcpServers: [] })
-    .catch(err => err)) as { sessionId?: string } | Error;
+    .catch(err => err), 'session/new')) as { sessionId?: string } | Error;
   if (session instanceof Error) return die(`session/new — ${session.message}; ${pump.exit.detail}`);
   const sessionId = session.sessionId ?? '?';
-  out(`\u001b[2m── session ${sessionId} ──\u001b[0m`);
+  out(dim(`── session ${sessionId} ──`, cli.color));
   return sessionId;
 }
 
 /** TERM first so a graceful backend can flush, KILL is the grace
  *  timer's backstop; resolves once the child is gone. */
 async function reap(pump: Pump): Promise<void> {
-  const grave = setTimeout(() => pump.child.kill('SIGKILL'), 1500);
-  pump.child.kill('SIGTERM');
+  const grave = setTimeout(() => killProcessTree(pump.child, 'SIGKILL'), 1500);
+  killProcessTree(pump.child, 'SIGTERM');
   await new Promise<void>(res => {
     if (pump.exit.done) res();
-    else pump.child.once('exit', () => res());
+    else pump.child.once('close', () => res());
   });
   clearTimeout(grave);
 }
@@ -434,7 +477,7 @@ export async function run(
     }
     flushStderr();
     renderer.closed(`watcher ${sig}`);
-    child.kill('SIGKILL');
+    killProcessTree(child, 'SIGKILL');
     process.exit(sig === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', onSignal);
