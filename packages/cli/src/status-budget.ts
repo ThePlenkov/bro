@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { eventsFile } from '@broject/acp-session';
 import { stateCommonDir } from '@broject/core';
 
@@ -52,112 +52,161 @@ function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function usageRow(agent: string, value: unknown): UsageRow | undefined {
+function usageRecord(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const row = value as Record<string, unknown>;
   if (row.kind !== 'usage') return undefined;
-  const ts = stringValue(row.ts);
-  if (ts === undefined || Number.isNaN(Date.parse(ts))) return undefined;
-  return {
-    agent,
-    ...(stringValue(row.bead) === undefined ? {} : { bead: stringValue(row.bead) }),
-    ts,
-    ...(stringValue(row.provider) === undefined ? {} : { provider: stringValue(row.provider) }),
-    ...(stringValue(row.model) === undefined ? {} : { model: stringValue(row.model) }),
-    ...(nonNegativeNumber(row.inputTokens) === undefined
-      ? {}
-      : { inputTokens: nonNegativeNumber(row.inputTokens) }),
-    ...(nonNegativeNumber(row.outputTokens) === undefined
-      ? {}
-      : { outputTokens: nonNegativeNumber(row.outputTokens) }),
-    ...(nonNegativeNumber(row.costUsd) === undefined
-      ? {}
-      : { costUsd: nonNegativeNumber(row.costUsd) }),
-  };
+  return row;
 }
 
-function readRows(dir: string): UsageRow[] {
-  const common = stateCommonDir(dir);
-  if (common === null) return [];
-  const ids = new Set<string>();
+function validTimestamp(value: unknown): string | undefined {
+  const ts = stringValue(value);
+  return ts !== undefined && !Number.isNaN(Date.parse(ts)) ? ts : undefined;
+}
+
+function buildUsageRow(agent: string, row: Record<string, unknown>, ts: string): UsageRow {
+  const bead = stringValue(row.bead);
+  const provider = stringValue(row.provider);
+  const model = stringValue(row.model);
+  const inputTokens = nonNegativeNumber(row.inputTokens);
+  const outputTokens = nonNegativeNumber(row.outputTokens);
+  const costUsd = nonNegativeNumber(row.costUsd);
+  const usage: UsageRow = { agent, ts };
+  if (bead !== undefined) usage.bead = bead;
+  if (provider !== undefined) usage.provider = provider;
+  if (model !== undefined) usage.model = model;
+  if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  if (outputTokens !== undefined) usage.outputTokens = outputTokens;
+  if (costUsd !== undefined) usage.costUsd = costUsd;
+  return usage;
+}
+
+function usageRow(agent: string, value: unknown): UsageRow | undefined {
+  const row = usageRecord(value);
+  if (row === undefined) return undefined;
+  const ts = validTimestamp(row.ts);
+  return ts === undefined ? undefined : buildUsageRow(agent, row, ts);
+}
+
+function pathIsInside(path: string, directory: string): boolean {
+  const child = relative(directory, path);
+  return child !== '' && !child.startsWith('..') && !isAbsolute(child);
+}
+
+function journalPath(common: string, agent: string): string | undefined {
+  const directory = resolve(common, 'bro', 'agents');
+  const candidate = resolve(eventsFile(common, agent));
+  if (!pathIsInside(candidate, directory)) return undefined;
   try {
-    for (const name of readdirSync(join(common, 'bro', 'agents'))) {
-      if (name.endsWith('.events.jsonl')) ids.add(name.slice(0, -'.events.jsonl'.length));
-    }
+    const realDirectory = realpathSync(directory);
+    const realCandidate = realpathSync(candidate);
+    return pathIsInside(realCandidate, realDirectory) ? realCandidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function agentIds(common: string): string[] {
+  try {
+    return readdirSync(join(common, 'bro', 'agents'))
+      .filter(name => name.endsWith('.events.jsonl'))
+      .map(name => name.slice(0, -'.events.jsonl'.length));
   } catch {
     return [];
   }
+}
+
+function parseLines(agent: string, lines: string): UsageRow[] {
   const rows: UsageRow[] = [];
-  for (const agent of ids) {
-    const file = eventsFile(common, agent);
-    if (!existsSync(file)) continue;
-    let lines: string;
+  for (const line of lines.split(/\r?\n/)) {
+    if (line === '') continue;
     try {
-      lines = readFileSync(file, 'utf8');
+      const row = usageRow(agent, JSON.parse(line) as unknown);
+      if (row !== undefined) rows.push(row);
     } catch {
-      continue;
-    }
-    for (const line of lines.split(/\r?\n/)) {
-      if (line === '') continue;
-      try {
-        const row = usageRow(agent, JSON.parse(line) as unknown);
-        if (row !== undefined) rows.push(row);
-      } catch {
-        // A torn or corrupt telemetry line must not hide the rest of the archive.
-      }
+      // A torn or corrupt telemetry line must not hide the rest of the archive.
     }
   }
   return rows;
 }
 
-function windowFor(rows: UsageRow[], fromMs: number, toMs: number): UsageBudgetWindow {
-  const selected = rows.filter(row => {
+function readJournal(agent: string, file: string): UsageRow[] {
+  if (!existsSync(file)) return [];
+  try {
+    return parseLines(agent, readFileSync(file, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function readRows(dir: string): UsageRow[] {
+  const common = stateCommonDir(dir);
+  if (common === null) return [];
+  return agentIds(common).flatMap(agent => {
+    const file = journalPath(common, agent);
+    return file === undefined ? [] : readJournal(agent, file);
+  });
+}
+
+function selectRows(rows: UsageRow[], fromMs: number, toMs: number): UsageRow[] {
+  return rows.filter(row => {
     const time = Date.parse(row.ts);
     return time >= fromMs && time <= toMs;
   });
+}
+
+function groupKey(row: UsageRow): string {
+  return JSON.stringify([row.agent, row.bead ?? null, row.provider ?? null, row.model ?? null]);
+}
+
+function newGroup(row: UsageRow): UsageBudgetGroup {
+  return {
+    agent: row.agent,
+    ...(row.bead === undefined ? {} : { bead: row.bead }),
+    ...(row.provider === undefined ? {} : { provider: row.provider }),
+    ...(row.model === undefined ? {} : { model: row.model }),
+    from: row.ts,
+    to: row.ts,
+    rows: 1,
+    ...(row.inputTokens === undefined ? {} : { inputTokens: row.inputTokens }),
+    ...(row.outputTokens === undefined ? {} : { outputTokens: row.outputTokens }),
+    ...(row.costUsd === undefined ? {} : { costUsd: row.costUsd }),
+    unknownCost: { count: row.costUsd === undefined ? 1 : 0, reason: UNKNOWN_COST_REASON },
+  };
+}
+
+function addToGroup(group: UsageBudgetGroup, row: UsageRow): void {
+  group.rows++;
+  if (Date.parse(row.ts) < Date.parse(group.from)) group.from = row.ts;
+  if (Date.parse(row.ts) > Date.parse(group.to)) group.to = row.ts;
+  if (row.inputTokens !== undefined) group.inputTokens = (group.inputTokens ?? 0) + row.inputTokens;
+  if (row.outputTokens !== undefined)
+    group.outputTokens = (group.outputTokens ?? 0) + row.outputTokens;
+  if (row.costUsd !== undefined) group.costUsd = (group.costUsd ?? 0) + row.costUsd;
+  else group.unknownCost.count++;
+}
+
+function groupRows(rows: UsageRow[]): UsageBudgetGroup[] {
   const grouped = new Map<string, UsageBudgetGroup>();
-  for (const row of selected) {
-    const key = JSON.stringify([
-      row.agent,
-      row.bead ?? null,
-      row.provider ?? null,
-      row.model ?? null,
-    ]);
-    const current = grouped.get(key);
-    if (current === undefined) {
-      grouped.set(key, {
-        agent: row.agent,
-        ...(row.bead === undefined ? {} : { bead: row.bead }),
-        ...(row.provider === undefined ? {} : { provider: row.provider }),
-        ...(row.model === undefined ? {} : { model: row.model }),
-        from: row.ts,
-        to: row.ts,
-        rows: 1,
-        ...(row.inputTokens === undefined ? {} : { inputTokens: row.inputTokens }),
-        ...(row.outputTokens === undefined ? {} : { outputTokens: row.outputTokens }),
-        ...(row.costUsd === undefined ? {} : { costUsd: row.costUsd }),
-        unknownCost: { count: row.costUsd === undefined ? 1 : 0, reason: UNKNOWN_COST_REASON },
-      });
-      continue;
-    }
-    current.rows++;
-    if (Date.parse(row.ts) < Date.parse(current.from)) current.from = row.ts;
-    if (Date.parse(row.ts) > Date.parse(current.to)) current.to = row.ts;
-    if (row.inputTokens !== undefined)
-      current.inputTokens = (current.inputTokens ?? 0) + row.inputTokens;
-    if (row.outputTokens !== undefined)
-      current.outputTokens = (current.outputTokens ?? 0) + row.outputTokens;
-    if (row.costUsd !== undefined) current.costUsd = (current.costUsd ?? 0) + row.costUsd;
-    else current.unknownCost.count++;
+  for (const row of rows) {
+    const key = groupKey(row);
+    const group = grouped.get(key);
+    if (group === undefined) grouped.set(key, newGroup(row));
+    else addToGroup(group, row);
   }
+  return [...grouped.values()].sort(
+    (a, b) => a.agent.localeCompare(b.agent) || a.from.localeCompare(b.from)
+  );
+}
+
+function windowFor(rows: UsageRow[], fromMs: number, toMs: number): UsageBudgetWindow {
+  const selected = selectRows(rows, fromMs, toMs);
   return {
     from: new Date(fromMs).toISOString(),
     to: new Date(toMs).toISOString(),
     rows: selected.length,
     unknownCostRows: selected.filter(row => row.costUsd === undefined).length,
-    groups: [...grouped.values()].sort(
-      (a, b) => a.agent.localeCompare(b.agent) || a.from.localeCompare(b.from)
-    ),
+    groups: groupRows(selected),
   };
 }
 
