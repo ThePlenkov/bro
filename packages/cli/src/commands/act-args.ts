@@ -41,6 +41,10 @@ Commands:
         --file TSV                  Batch resolve: <thread_id>[\t<comment>] per line —
                                     a resolve sweep over N threads in one command
         --unresolve                 resolve → unresolve instead
+  defer ID[,ID...] --bead ID        Append thread bodies to a debt bead, reply
+                                    "deferred -> <bead>", then resolve
+        --new-bead TITLE             Create a debt bead instead of --bead
+        --pr N                       Fetch threads from an explicit PR
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
   dismiss [PR] [--dry-run] [--message T]
@@ -60,6 +64,7 @@ export const VALUE_FLAGS = new Set([
   '--interval',
   '--timeout',
   '--bead',
+  '--new-bead',
   '--message',
 ]);
 

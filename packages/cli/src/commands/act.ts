@@ -32,11 +32,20 @@ import {
   type PrTarget,
   type ReviewFacade,
   type ReviewThread,
+  type TaskStore,
   reviewHost,
 } from '@broject/core';
 import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@broject/judge';
 import { loadBroConfig } from '../plugins.ts';
-import { commentArg, resolvePr, resolvePrLenient, threadArg, usage } from './act-args.ts';
+import {
+  commentArg,
+  resolvePr,
+  resolvePrLenient,
+  threadArg,
+  usage,
+  VALUE_FLAGS,
+} from './act-args.ts';
+import { flag } from './args.ts';
 import { cmdDismiss } from './act-dismiss.ts';
 import { claimStore, cmdMerge, dropActState } from './act-land.ts';
 import { printStatus } from './act-report.ts';
@@ -360,11 +369,162 @@ function resolveOne(
     // reason (skills/act/SKILL.md) — the documented defer reply names
     // its bead ("deferred to <id>"), which is the one defer signal a
     // bare resolve can see
-    disposition(
-      id,
-      comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed'
-    );
+    disposition(id, comment ? (isDeferComment(comment) ? 'deferred' : 'rejected') : 'fixed');
   }
+}
+
+/** Both reply and resolve record the same defer marker. Keep the accepted
+ * spellings in one place so `act reply` cannot mis-score a defer as a reply. */
+export function isDeferComment(comment: string): boolean {
+  return /deferred (?:to|->) \S+/i.test(comment);
+}
+
+/** Persist the debt bead before resolving any selected host thread. */
+type DeferOptions = { bead?: string; newBead?: string; pr?: number };
+
+function validateDeferRequest(ids: string[], opts: DeferOptions): void {
+  if ((opts.bead === undefined) === (opts.newBead === undefined)) {
+    throw new CommandError('error: exactly one of --bead or --new-bead is required', EXIT.usage);
+  }
+  if (ids.length === 0) {
+    throw new CommandError('error: at least one thread id is required', EXIT.usage);
+  }
+}
+
+async function selectDeferThreads(
+  rev: ReviewFacade,
+  ids: string[],
+  pr: number | undefined
+): Promise<ReviewThread[]> {
+  const target =
+    pr === undefined
+      ? resolvePr(rev, [], 'strict')
+      : { repo: rev.resolveRepo([]), pr };
+  const threads = await rev.reviewThreads(target);
+  const byId = new Map(threads.map(thread => [thread.id, thread]));
+  return ids.map(id => {
+    const thread = byId.get(id);
+    if (thread === undefined) throw new CommandError(`error: thread not found: ${id}`, EXIT.usage);
+    if (thread.resolved) {
+      throw new CommandError(`error: thread already resolved: ${id}`, EXIT.usage);
+    }
+    return thread;
+  });
+}
+
+function deferDetail(thread: ReviewThread): string {
+  return `PRRT ${thread.id}: ${thread.comment?.body?.trim() || '(no comment body)'}`;
+}
+
+function ensureDeferBead(store: TaskStore, first: ReviewThread, opts: DeferOptions): string {
+  if (opts.bead !== undefined) {
+    if (store.get(opts.bead) === undefined) {
+      throw new CommandError(`error: bead not found: ${opts.bead}`, EXIT.usage);
+    }
+    return opts.bead;
+  }
+  const title = opts.newBead;
+  if (title === undefined) {
+    throw new CommandError('error: --new-bead requires a title', EXIT.usage);
+  }
+  return store.create({
+    title,
+    labels: ['debt'],
+    description: deferDetail(first),
+    externalRef: JSON.stringify([first.id]),
+  }).id;
+}
+
+export function deferExternalRef(threadIds: string[]): string {
+  return JSON.stringify(threadIds);
+}
+
+function recordDeferNotes(
+  store: TaskStore,
+  bead: string,
+  threads: ReviewThread[],
+  existing: boolean
+): void {
+  for (const [index, thread] of threads.entries()) {
+    if (existing || index > 0) store.note(bead, deferDetail(thread));
+  }
+}
+
+function resolveDeferredThreads(
+  rev: ReviewFacade,
+  bead: string,
+  threads: ReviewThread[],
+  pr: number | undefined
+): void {
+  const resolveArgv = pr === undefined ? [] : ['--pr', String(pr)];
+  for (const thread of threads) {
+    resolveOne(rev, resolveArgv, {
+      id: thread.id,
+      comment: `deferred -> ${bead}`,
+      unresolve: false,
+    });
+    console.error(`act: deferred ${thread.id} -> ${bead}`);
+  }
+}
+
+export async function deferThreads(
+  rev: ReviewFacade,
+  store: TaskStore,
+  ids: string[],
+  opts: DeferOptions
+): Promise<void> {
+  validateDeferRequest(ids, opts);
+  const selected = await selectDeferThreads(rev, ids, opts.pr);
+  const first = selected[0];
+  if (first === undefined)
+    throw new CommandError('error: at least one thread id is required', EXIT.usage);
+  const bead = ensureDeferBead(store, first, opts);
+  // Notes are useful to humans, but replay's durable join is the bead's
+  // external_ref. Update existing beads too: --bead must not strand the
+  // later thread ids in notes that replay never reads.
+  store.update(bead, { 'external-ref': deferExternalRef(selected.map(thread => thread.id)) });
+  recordDeferNotes(store, bead, selected, opts.bead !== undefined);
+  resolveDeferredThreads(rev, bead, selected, opts.pr);
+  dropActState();
+}
+
+function deferArgIds(argv: string[]): string[] {
+  const ids: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    if (VALUE_FLAGS.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (!arg.startsWith('-')) {
+      ids.push(
+        ...arg
+          .split(',')
+          .map(id => id.trim())
+          .filter(Boolean)
+      );
+    }
+  }
+  return ids;
+}
+
+async function cmdDefer(argv: string[]): Promise<void> {
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const bead = flag(argv, '--bead');
+  const newBead = flag(argv, '--new-bead');
+  const prRaw = flag(argv, '--pr');
+  const parsedPr = prRaw === undefined ? undefined : Number(prRaw);
+  const invalidPr = typeof parsedPr !== 'number' || !Number.isInteger(parsedPr) || parsedPr <= 0;
+  if (prRaw !== undefined && invalidPr) {
+    throw new CommandError(`error: invalid PR number "${prRaw}"`, EXIT.usage);
+  }
+  await deferThreads(rev, claimStore(process.cwd()), deferArgIds(argv), {
+    bead,
+    newBead,
+    pr: parsedPr,
+  });
 }
 
 /** Batch shape mirrors reply --file: one <thread_id> or
@@ -417,7 +577,7 @@ function cmdReply(argv: string[]): void {
     for (const row of rows) {
       rev.replyThread(row.id, row.body);
       console.error(`act: replied on ${row.id}`);
-      disposition(row.id, /deferred to \S+/i.test(row.body) ? 'deferred' : 'replied');
+      disposition(row.id, isDeferComment(row.body) ? 'deferred' : 'replied');
     }
     console.error(`act reply: ${rows.length} repl(ies)`);
     if (skipped > 0) {
@@ -443,7 +603,7 @@ function cmdReply(argv: string[]): void {
   // the documented defer flow replies "deferred to <bead>" then
   // resolves silently — journaled as deferred here (stats join
   // first-hit wins) so the silent resolve's 'fixed' can't mask it
-  disposition(id, /deferred to \S+/i.test(comment!) ? 'deferred' : 'replied');
+  disposition(id, isDeferComment(comment!) ? 'deferred' : 'replied');
   dropActState();
 }
 
@@ -458,6 +618,7 @@ const COMMANDS = new Map<string, (argv: string[]) => void | Promise<void>>([
   ['rearm', cmdRearm],
   ['threads', cmdThreads],
   ['resolve', cmdResolve],
+  ['defer', cmdDefer],
   ['reply', cmdReply],
   ['dismiss', cmdDismiss],
 ]);

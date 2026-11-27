@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isCommandError, type ReviewFacade } from '@broject/core';
-import { cleanupAfterMerge, resolvePr } from './act.ts';
+import { cleanupAfterMerge, deferExternalRef, isDeferComment, resolvePr } from './act.ts';
 import { sweepMergedPrLabels } from './act-land.ts';
 import { git, initRepo, inside } from './testrepo.ts';
 
@@ -160,6 +160,16 @@ test('sweepMergedPrLabels removes transient bro labels but keeps debt markers', 
   sweepMergedPrLabels(rev, { repo: 'o/r', pr: 7 });
 
   assert.deepEqual(removed.sort(), ['bro-managed', 'bro-review', 'bro:bead'].sort());
+});
+
+test('defer refs carry every selected thread in one replay-readable ref', () => {
+  assert.deepEqual(JSON.parse(deferExternalRef(['T2', 'T1'])), ['T2', 'T1']);
+});
+
+test('defer replies recognize both canonical arrow and legacy to markers', () => {
+  assert.equal(isDeferComment('deferred -> bro-123'), true);
+  assert.equal(isDeferComment('deferred to bro-123'), true);
+  assert.equal(isDeferComment('please fix this'), false);
 });
 
 /** Run fn with CommandError captured — returns the code it would exit
