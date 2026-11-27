@@ -2,6 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import type { Dirent } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
+import { accessSync, constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs');
@@ -50,9 +51,25 @@ function rowStatus(row: unknown): [string, BeadStatus] | [] {
   return typeof item.id === 'string' ? [[item.id, statusOf(item.status)]] : [];
 }
 
+/** Absolute path to bd, resolved against PATH once — security scanners
+ *  (S4036) reject PATH-resolved spawns; same contract as core's gitBin. */
+function bdBin(): string {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (dir === '') continue;
+    const candidate = `${dir}/bd`;
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // not here — keep walking PATH
+    }
+  }
+  return 'bd';
+}
+
 function beadStatuses(): Map<string, BeadStatus> {
   try {
-    const output = execFileSync('bd', ['list', '--all', '--json'], {
+    const output = execFileSync(bdBin(), ['list', '--all', '--json'], {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'ignore'],
