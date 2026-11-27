@@ -369,7 +369,10 @@ function resolveOne(
     // reason (skills/act/SKILL.md) — the documented defer reply names
     // its bead ("deferred to <id>"), which is the one defer signal a
     // bare resolve can see
-    disposition(id, comment ? (isDeferComment(comment) ? 'deferred' : 'rejected') : 'fixed');
+    // nested ternary flattened for S3358: falsy comment is the silent
+    // resolve ('fixed'); a present comment is a defer or a reject.
+    const verdict = !comment ? 'fixed' : isDeferComment(comment) ? 'deferred' : 'rejected';
+    disposition(id, verdict);
   }
 }
 
