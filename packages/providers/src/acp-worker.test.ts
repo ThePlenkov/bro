@@ -24,6 +24,39 @@ process.env.BRO_TELEMETRY = '0';
 // idle-machine assumption.
 const SPAWN_SETTLE_TIMEOUT_MS = 20_000;
 
+type AcpTraceSpan = {
+  traceId: string;
+  name: string;
+  spanId: string;
+  parentSpanId?: string;
+  attrs: Map<string, unknown>;
+};
+
+/** Correlate the chain within one trace, not by span name across batches. */
+function findAcpTrace(spans: AcpTraceSpan[]):
+  | {
+      open: AcpTraceSpan;
+      turn: AcpTraceSpan;
+      sess: AcpTraceSpan;
+    }
+  | undefined {
+  const traces = new Map<string, AcpTraceSpan[]>();
+  for (const span of spans) {
+    const trace = traces.get(span.traceId);
+    if (trace === undefined) traces.set(span.traceId, [span]);
+    else trace.push(span);
+  }
+  for (const trace of traces.values()) {
+    for (const open of trace.filter(s => s.name === 'acp.open')) {
+      const turn = trace.find(s => s.name === 'acp.turn' && s.parentSpanId === open.spanId);
+      if (turn === undefined) continue;
+      const sess = trace.find(s => s.name === 'acp.session' && s.parentSpanId === turn.spanId);
+      if (sess !== undefined) return { open, turn, sess };
+    }
+  }
+  return undefined;
+}
+
 const MODEL_OPTION: SessionConfigOption = {
   type: 'select',
   id: 'model-pick',
@@ -728,6 +761,7 @@ describe('runAcpWorker', () => {
       // span ends queue and flush on the unref'd timer — poll the wire
       const deadline = Date.now() + SPAWN_SETTLE_TIMEOUT_MS;
       let spans: {
+        traceId: string;
         name: string;
         spanId: string;
         parentSpanId?: string;
@@ -739,6 +773,7 @@ describe('runAcpWorker', () => {
             resourceSpans: {
               scopeSpans: {
                 spans: {
+                  traceId: string;
                   name: string;
                   spanId: string;
                   parentSpanId?: string;
@@ -750,6 +785,7 @@ describe('runAcpWorker', () => {
           return parsed.resourceSpans.flatMap(rs =>
             rs.scopeSpans.flatMap(ss =>
               ss.spans.map(s => ({
+                traceId: s.traceId,
                 name: s.name,
                 spanId: s.spanId,
                 parentSpanId: s.parentSpanId,
@@ -758,34 +794,22 @@ describe('runAcpWorker', () => {
             )
           );
         });
-        const byName = new Map(spans.map(s => [s.name, s]));
-        if (
-          byName.has('acp.open') &&
-          byName.has('acp.turn') &&
-          byName.has('acp.session') &&
-          spans.every(
-            s => !s.name.startsWith('acp.') || s.parentSpanId !== undefined || s.name === 'acp.open'
-          )
-        ) {
+        if (findAcpTrace(spans) !== undefined) {
           break;
         }
         await new Promise(r => setTimeout(r, 100));
       }
-      const byName = new Map(spans.map(s => [s.name, s]));
-      const open = byName.get('acp.open');
-      const turn = byName.get('acp.turn');
-      const sess = byName.get('acp.session');
-      assert.ok(open, 'acp.open emitted');
-      assert.ok(turn, 'acp.turn emitted');
-      assert.ok(sess, 'acp.session emitted');
+      const trace = findAcpTrace(spans);
+      assert.ok(trace, 'complete ACP trace emitted');
+      const { open, turn, sess } = trace;
       // one trace, nested open → turn → session
-      assert.equal(turn!.parentSpanId, open!.spanId);
-      assert.equal(sess!.parentSpanId, turn!.spanId);
-      assert.equal(open!.attrs.get('acp.command'), 'unused-with-peer');
-      assert.equal(turn!.attrs.get('acp.session_id'), 'sess-1');
-      assert.equal(sess!.attrs.get('acp.session_id'), 'sess-1');
-      assert.equal(turn!.attrs.get('acp.model'), 'typesafe/jev-1.13');
-      assert.equal(turn!.attrs.get('acp.stop_reason'), 'end_turn');
+      assert.equal(turn.parentSpanId, open.spanId);
+      assert.equal(sess.parentSpanId, turn.spanId);
+      assert.equal(open.attrs.get('acp.command'), 'unused-with-peer');
+      assert.equal(turn.attrs.get('acp.session_id'), 'sess-1');
+      assert.equal(sess.attrs.get('acp.session_id'), 'sess-1');
+      assert.equal(turn.attrs.get('acp.model'), 'typesafe/jev-1.13');
+      assert.equal(turn.attrs.get('acp.stop_reason'), 'end_turn');
       // the resource attrs carry the worker's own identity pins
       const first = JSON.parse(hits[0]!) as {
         resourceSpans: { resource: { attributes: { key: string }[] } }[];
