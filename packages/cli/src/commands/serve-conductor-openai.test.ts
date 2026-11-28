@@ -133,6 +133,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     });
     try {
       assert.equal(r.status, 404);
+      assert.equal(r.headers.get('retry-after'), null);
       assert.deepEqual(await r.json(), {
         error: {
           type: 'not_found_error',

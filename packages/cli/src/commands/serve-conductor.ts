@@ -3325,7 +3325,12 @@ function turnError(
       retry_after: budget.retryAfterSec,
     });
   }
-  if (unknownModel) status = 404;
+  if (unknownModel) {
+    status = 404;
+    // A bad model pin is terminal for this request. Do not let a retry hint
+    // inherited from a provider error invite clients to retry a 404.
+    res.removeHeader('retry-after');
+  }
   otelEvent('conductor.error', {
     backend,
     status,
