@@ -1215,47 +1215,60 @@ async function routeAgentLog(
   const log = logTarget(agent.hit.agent);
   const transcript = deps.devinTranscript?.(agent.hit.agent);
   if (transcript !== undefined) {
-    let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
-    if (rendered === undefined) {
-      await new Promise(resolve => setTimeout(resolve, 250));
-      rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
-    }
-    if (rendered === undefined) {
-      send(res, 503, { error: `transcript unreadable mid-rewrite: ${transcript} — retry` });
-      return true;
-    }
-    const text = rendered.lines.join('\n') + (rendered.lines.length > 0 ? '\n' : '');
-    if (!url.searchParams.has('follow')) {
-      send(res, 200, tailLines(text, logLineCount(url)), {
-        contentType: 'text/plain; charset=utf-8',
-      });
-      return true;
-    }
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    });
-    const sse = (chunk: string) => {
-      if (res.writableEnded || res.destroyed) return;
-      const trimmed = chunk.replace(/\n$/, '');
-      res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`);
-    };
-    sse(tailLines(text, logLineCount(url)));
-    const handle = followTranscript(transcript, rendered.watermark, sse);
-    res.on('close', () => handle.stop());
+    await routeTranscriptLog(res, url, transcript);
     return true;
   }
+  routeRawLog(res, url, log);
+  return true;
+}
+
+async function routeTranscriptLog(
+  res: ServerResponse,
+  url: URL,
+  transcript: string
+): Promise<void> {
+  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
+  if (rendered === undefined) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
+  }
+  if (rendered === undefined) {
+    send(res, 503, { error: `transcript unreadable mid-rewrite: ${transcript} — retry` });
+    return;
+  }
+  const text = rendered.lines.join('\n') + (rendered.lines.length > 0 ? '\n' : '');
+  if (!url.searchParams.has('follow')) {
+    send(res, 200, tailLines(text, logLineCount(url)), {
+      contentType: 'text/plain; charset=utf-8',
+    });
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  const sse = (chunk: string) => {
+    if (res.writableEnded || res.destroyed) return;
+    const trimmed = chunk.replace(/\n$/, '');
+    res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`);
+  };
+  sse(tailLines(text, logLineCount(url)));
+  const handle = followTranscript(transcript, rendered.watermark, sse);
+  res.on('close', () => handle.stop());
+}
+
+function routeRawLog(res: ServerResponse, url: URL, log: ReturnType<typeof logTarget>): void {
   if ('status' in log) {
     send(res, log.status, { error: log.error });
-    return true;
+    return;
   }
   const replay = readLogTail(log.path);
   if (!url.searchParams.has('follow')) {
     send(res, 200, tailLines(replay.text, logLineCount(url)), {
       contentType: 'text/plain; charset=utf-8',
     });
-    return true;
+    return;
   }
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -1289,7 +1302,6 @@ async function routeAgentLog(
     { startOffset: replay.byteLength }
   );
   res.on('close', () => handle.stop());
-  return true;
 }
 
 async function authorizeAgentRoute(
