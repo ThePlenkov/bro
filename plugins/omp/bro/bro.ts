@@ -6963,45 +6963,49 @@ function spoolCursorKey(st) {
 *  be re-read on every drain. */
 function readBatches(store, spoolPath) {
 	const cursor = store.loadCursor();
-	const batches = [];
-	for (const path of hookSpoolFiles(spoolPath)) {
-		let st;
-		try {
-			st = statSync(path);
-		} catch {
-			continue;
-		}
-		if (!st.isFile()) continue;
-		const ino = spoolCursorKey(st);
-		const seen = cursor[ino] ?? 0;
-		let offset = seen;
-		if (st.size < offset) offset = 0;
-		if (st.size === offset) continue;
-		let buf;
-		try {
-			const fd = openSync(path, "r");
-			try {
-				buf = Buffer.alloc(st.size - offset);
-				readSync(fd, buf, 0, buf.length, offset);
-			} finally {
-				closeSync(fd);
-			}
-		} catch {
-			continue;
-		}
-		const text = buf.toString("utf8");
-		const lastNl = text.lastIndexOf("\n");
-		if (lastNl < 0) continue;
-		const complete = text.slice(0, lastNl + 1);
-		const rows = complete.split("\n").slice(0, -1).map((line) => parseSpoolLine(line)).filter((r) => r !== void 0);
-		batches.push({
-			ino,
-			start: seen,
-			offset: offset + Buffer.byteLength(complete, "utf8"),
-			rows
-		});
+	return hookSpoolFiles(spoolPath).map((path) => readSpoolBatch(path, cursor)).filter((batch) => batch !== void 0);
+}
+function readSpoolBatch(path, cursor) {
+	let st;
+	try {
+		st = statSync(path);
+	} catch {
+		return;
 	}
-	return batches;
+	if (!st.isFile()) return;
+	const ino = spoolCursorKey(st);
+	const seen = cursor[ino] ?? 0;
+	const offset = st.size < seen ? 0 : seen;
+	if (st.size === offset) return;
+	const buf = readSpoolSlice(path, offset, st.size - offset);
+	if (buf === void 0) return;
+	const text = buf.toString("utf8");
+	const lastNl = text.lastIndexOf("\n");
+	if (lastNl < 0) return;
+	const complete = text.slice(0, lastNl + 1);
+	return {
+		ino,
+		start: seen,
+		offset: offset + Buffer.byteLength(complete, "utf8"),
+		rows: parseCompleteRows(complete)
+	};
+}
+function readSpoolSlice(path, offset, length) {
+	try {
+		const fd = openSync(path, "r");
+		try {
+			const buf = Buffer.alloc(length);
+			readSync(fd, buf, 0, buf.length, offset);
+			return buf;
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return;
+	}
+}
+function parseCompleteRows(text) {
+	return text.split("\n").slice(0, -1).map((line) => parseSpoolLine(line)).filter((row) => row !== void 0);
 }
 /** Drain one spool path into an already-open store — the shared core of
 *  `drainHookSpool` (which owns open/close) and the facade's opportunistic
