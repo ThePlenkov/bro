@@ -747,6 +747,38 @@ interface SetupMutations {
   fallbackToGithub: boolean;
 }
 
+interface TasksBackendResolution {
+  wantsBeads: boolean;
+  fallbackToGithub: boolean;
+  bdFailure: string | null;
+}
+
+function resolveTasksBackend(wantsBeads: boolean): TasksBackendResolution {
+  if (!wantsBeads) {
+    return { wantsBeads, fallbackToGithub: false, bdFailure: null };
+  }
+
+  const compat = probeBdCompat(process.cwd());
+  const bdUnusable = compat.missing || compat.broken || !compat.ok || compat.store === 'error';
+  if (!bdUnusable) {
+    return { wantsBeads, fallbackToGithub: false, bdFailure: null };
+  }
+
+  // A pinned non-github tasks connector is the operator's own answer —
+  // never clobber it with the fallback.
+  const pinnedTasks = loadBroConfig().connectors?.tasks;
+  const mayPin = pinnedTasks === undefined || pinnedTasks === 'github';
+  if (mayPin && githubTasksUsable()) {
+    return { wantsBeads: false, fallbackToGithub: true, bdFailure: null };
+  }
+
+  return {
+    wantsBeads,
+    fallbackToGithub: false,
+    bdFailure: compat.problems.join('; ') || compat.storeErr || 'bd present but unusable',
+  };
+}
+
 function runSetupMutations(m: SetupMutations): void {
   // bd init + formulas land BEFORE the config write — if beads setup fails,
   // no config claiming store=both is left behind.
@@ -814,39 +846,20 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   }
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
-  let wantsBeads = beads || loadBroConfig().stores.includes('beads');
-  let fallbackToGithub = false;
-  let bdFailure: string | null = null;
-  // When bd can't serve this repo — absent binary, a `bd --version` that
-  // itself fails, drift off the contract, or a store that errors on read
-  // (compat.ok stays true on an unclassifiable store failure — check the
-  // store state too) — and GitHub Issues can, pick the zero-install path
-  // instead of failing the first run.
-  if (wantsBeads) {
-    const compat = probeBdCompat(process.cwd());
-    if (compat.missing || compat.broken || !compat.ok || compat.store === 'error') {
-      // A pinned non-github tasks connector is the operator's own
-      // answer — never clobber it with the fallback.
-      const pinnedTasks = loadBroConfig().connectors?.tasks;
-      const mayPin = pinnedTasks === undefined || pinnedTasks === 'github';
-      if (mayPin && githubTasksUsable()) {
-        fallbackToGithub = true;
-        wantsBeads = false;
-      } else {
-        bdFailure = compat.problems.join('; ') || compat.storeErr || 'bd present but unusable';
-      }
-    }
-  }
+  // When bd can't serve this repo, pick the zero-install GitHub Issues path
+  // when it is available instead of failing the first run.
+  const wantsBeads = beads || loadBroConfig().stores.includes('beads');
+  const tasksBackend = resolveTasksBackend(wantsBeads);
   // Validate the pack BEFORE beads init/config/skills mutate anything —
   // a bad spec must fail setup on a clean tree, not a half-written one.
   const packDir =
     pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK);
-  checkPrereqs(wantsBeads, fallbackToGithub);
+  checkPrereqs(tasksBackend.wantsBeads, tasksBackend.fallbackToGithub);
   // bd unusable and GitHub couldn't take over — fail BEFORE mutations
   // (a `bd init` into a store that already errors only obscures the cause).
-  if (bdFailure !== null) {
+  if (tasksBackend.bdFailure !== null) {
     console.error(
-      `error: bd unusable — ${bdFailure}.\n` +
+      `error: bd unusable — ${tasksBackend.bdFailure}.\n` +
         '  fix: install/repair beads (https://github.com/gastownhall/beads), ' +
         'auth `gh` in a repo with Issues enabled for the zero-install fallback, ' +
         'or set "stores": ["jsonl"] with a working tasks connector in bro.config.local.json'
@@ -858,7 +871,15 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   // init, no config write, no skill/pack installs, no hook installs.
   // Only the locked-skill drift check (setupLockedSkills) runs.
   if (!checkOnly && !dryRun) {
-    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads, fallbackToGithub });
+    runSetupMutations({
+      beads,
+      skills,
+      pack,
+      personality,
+      packDir,
+      wantsBeads: tasksBackend.wantsBeads,
+      fallbackToGithub: tasksBackend.fallbackToGithub,
+    });
   }
 
   if (lock) {
