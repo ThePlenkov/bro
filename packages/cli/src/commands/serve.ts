@@ -183,9 +183,11 @@ import {
 } from '../agent-connectors.ts';
 import {
   collectAgentBackends,
+  devinTranscriptForAgent,
   discoverSessions,
   findAgent,
   followLog,
+  followTranscript,
   occupancyOf,
   sessionQuotaViewsOf,
   SpawnInputError,
@@ -199,6 +201,7 @@ import {
   type StepSpawnRequest,
   type StopOutcome,
 } from './agents.ts';
+import { renderDevinTranscript } from '@broject/devin';
 import { flag, flagZone, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
 import '../planes/index.ts';
@@ -350,6 +353,8 @@ export interface ServeDeps {
   find(
     ref: string
   ): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }>;
+  /** ATIF transcript path for devin agents; absent keeps the raw log plane. */
+  devinTranscript?(agent: AgentInfo): string | undefined;
   spawn(req: StepSpawnRequest): Promise<AgentInfo>;
   stop(ref: string): Promise<StopOutcome>;
   connectors(): string[];
@@ -1208,16 +1213,62 @@ async function routeAgentLog(
     return true;
   }
   const log = logTarget(agent.hit.agent);
+  const transcript = deps.devinTranscript?.(agent.hit.agent);
+  if (transcript !== undefined) {
+    await routeTranscriptLog(res, url, transcript);
+    return true;
+  }
+  routeRawLog(res, url, log);
+  return true;
+}
+
+async function routeTranscriptLog(
+  res: ServerResponse,
+  url: URL,
+  transcript: string
+): Promise<void> {
+  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
+  if (rendered === undefined) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
+  }
+  if (rendered === undefined) {
+    send(res, 503, { error: `transcript unreadable mid-rewrite: ${transcript} — retry` });
+    return;
+  }
+  const text = rendered.lines.join('\n') + (rendered.lines.length > 0 ? '\n' : '');
+  if (!url.searchParams.has('follow')) {
+    send(res, 200, tailLines(text, logLineCount(url)), {
+      contentType: 'text/plain; charset=utf-8',
+    });
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  const sse = (chunk: string) => {
+    if (res.writableEnded || res.destroyed) return;
+    const trimmed = chunk.replace(/\n$/, '');
+    res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`);
+  };
+  sse(tailLines(text, logLineCount(url)));
+  const handle = followTranscript(transcript, rendered.watermark, sse);
+  res.on('close', () => handle.stop());
+}
+
+function routeRawLog(res: ServerResponse, url: URL, log: ReturnType<typeof logTarget>): void {
   if ('status' in log) {
     send(res, log.status, { error: log.error });
-    return true;
+    return;
   }
   const replay = readLogTail(log.path);
   if (!url.searchParams.has('follow')) {
     send(res, 200, tailLines(replay.text, logLineCount(url)), {
       contentType: 'text/plain; charset=utf-8',
     });
-    return true;
+    return;
   }
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -1251,7 +1302,6 @@ async function routeAgentLog(
     { startOffset: replay.byteLength }
   );
   res.on('close', () => handle.stop());
-  return true;
 }
 
 async function authorizeAgentRoute(
@@ -1880,6 +1930,7 @@ function realDeps(
     ticks: async () => collectTicks(dir),
     mailbox: async () => ({ drops: peekMailbox(dir, MAILBOX_TAIL) }),
     find: ref => findAgent(dir, env, ref),
+    devinTranscript: agent => devinTranscriptForAgent(agent, env),
     spawn: req => spawnStepAgent(dir, env, req),
     stop: ref => stopAgent(dir, env, ref),
     connectors: () => agentConnectorNames(),

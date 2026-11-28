@@ -959,6 +959,60 @@ describe('serve handler over a real socket', () => {
     }
   });
 
+  test('GET /api/v1/agents/<ref>/log — devin rows use the ATIF transcript watermark', async () => {
+    const TOKEN = 'test-session-token';
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    const dir = mkdtempSync(join(tmpdir(), 'bro-serve-devin-log-'));
+    const transcript = join(dir, 'sess-x.json');
+    const devin: AgentInfo = {
+      id: 'devin:sess-x',
+      molStep: 'fx-devin',
+      backend: 'devin',
+      state: 'running',
+    };
+    const writeTranscript = (steps: unknown[]) =>
+      writeFileSync(transcript, JSON.stringify({ steps }), 'utf8');
+    writeTranscript([
+      { step_id: 1, timestamp: '2026-10-16T20:01:00.000Z', source: 'agent', message: 'hello' },
+    ]);
+    const d = deps({
+      find: async ref =>
+        ref === devin.id || ref === devin.molStep
+          ? { hit: { conn: fakeConn, agent: devin }, degraded: [] }
+          : { degraded: [] },
+      devinTranscript: agent => (agent.id === devin.id ? transcript : undefined),
+    });
+    const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN));
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      const plain = await fetch(`${base}/api/v1/agents/${devin.molStep}/log`, { headers: auth });
+      assert.equal(plain.status, 200);
+      assert.match(await plain.text(), /\[20:01:00\] agent: hello/);
+
+      const follow = await fetch(`${base}/api/v1/agents/${devin.molStep}/log?follow`, {
+        headers: auth,
+      });
+      assert.equal(follow.status, 200);
+      const reader = follow.body!.getReader();
+      const read = async (): Promise<string> =>
+        new TextDecoder().decode((await reader.read()).value);
+      assert.match(await read(), /data: \[20:01:00\] agent: hello/);
+      writeTranscript([
+        { step_id: 1, timestamp: '2026-10-16T20:01:00.000Z', source: 'agent', message: 'hello' },
+        { step_id: 2, timestamp: '2026-10-16T20:02:00.000Z', source: 'agent', message: 'world' },
+      ]);
+      let appended = '';
+      for (let i = 0; i < 20 && !appended.includes('world'); i++) appended += await read();
+      assert.match(appended, /data: \[20:02:00\] agent: world/);
+      await reader.cancel();
+    } finally {
+      await new Promise<void>(r => server.close(() => r()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('GET /api/v1/agents/<ref>/log — 404 unknown/missing, 422 remote ref', async () => {
     const TOKEN = 'test-session-token';
     const auth = { authorization: `Bearer ${TOKEN}` };
