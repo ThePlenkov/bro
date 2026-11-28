@@ -154,7 +154,7 @@ function deliveryFor(r: MsgSessionRow): TargetDelivery {
   //                      live channel for a host run.sh cannot prove
   //   'ended' row      → the session key — nothing can deliver to a
   //                      finished session; the record still names it
-  const to = inbox ? sessionKey : r.host === 'unknown' && r.state !== 'ended' ? r.sid : sessionKey;
+  const to = deliveryTarget(r, inbox, sessionKey);
   return {
     session: r,
     to,
@@ -168,6 +168,16 @@ function deliveryFor(r: MsgSessionRow): TargetDelivery {
       ? { note: 'session ended — recorded only, its hooks will never fire' }
       : {}),
   };
+}
+
+function deliveryTarget(r: MsgSessionRow, inbox: boolean, sessionKey: string): string {
+  if (inbox) {
+    return sessionKey;
+  }
+  if (r.host === 'unknown' && r.state !== 'ended') {
+    return r.sid;
+  }
+  return sessionKey;
 }
 
 /** One delivery per session key — the same (host, sid) can surface
@@ -242,7 +252,7 @@ function resolveBareToken(rows: MsgSessionRow[], t: string): TargetResolution {
   if (agentRows.length === 0) {
     const sidKeys = new Set(sidRows.map(key));
     if (sidKeys.size > 1) {
-      const candidates = [...sidKeys].sort();
+      const candidates = [...sidKeys].sort((a, b) => a.localeCompare(b));
       return {
         deliveries: [],
         warnings: [],
@@ -435,7 +445,8 @@ async function sendOneDelivery(
     sent.channel = 'inbox';
   }
   warnings.push(...inbox.warnings);
-  warnings.push(...(await publishDeliveryRecord(d, sent, opts, shared)));
+  const publishWarnings = await publishDeliveryRecord(d, sent, opts, shared);
+  warnings.splice(warnings.length, 0, ...publishWarnings);
   if (d.note !== undefined) {
     warnings.push(`${d.label}: ${d.note}`);
   }
@@ -478,10 +489,19 @@ export async function sendSessionMessage(
   const resolution = resolveMsgTarget(rows, opts.target);
   warnings.push(...resolution.warnings);
 
-  const deliveries: SentDelivery[] = [];
-  for (const d of resolution.deliveries) {
-    deliveries.push(await sendOneDelivery(d, opts, shared, warnings));
-  }
+  // Delivery order is custody-ordered: append and publish each resolved
+  // target before starting the next one, so a caller can observe the same
+  // sequence in inbox and event records. The promise chain makes that
+  // intentional sequencing explicit without an await-in-loop.
+  const deliveries = await resolution.deliveries.reduce(
+    async (previous, d) => {
+      const deliveries = await previous;
+      const sent = await sendOneDelivery(d, opts, shared, warnings);
+      deliveries.push(sent);
+      return deliveries;
+    },
+    Promise.resolve([] as SentDelivery[])
+  );
   return {
     deliveries,
     warnings,
