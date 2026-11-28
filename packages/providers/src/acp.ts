@@ -71,6 +71,11 @@ export class AcpConfigError extends Error {
   override name = 'AcpConfigError';
 }
 
+/** A requested model was not advertised by the live ACP session catalog. */
+export class AcpUnknownModelError extends AcpConfigError {
+  override name = 'AcpUnknownModelError';
+}
+
 // the family test lives in core (the api kind's parse-time wire
 // inference consumes it) — re-exported so acp importers keep working
 export { isSystemoneFamily } from '@broject/core';
@@ -1378,7 +1383,7 @@ async function resolveTurnModel(
   const cur = modelOpt?.currentValue;
   const served = typeof cur === 'string' ? modelBase(cur) : cur;
   if (served !== bare) {
-    throw new AcpConfigError(
+    throw new AcpUnknownModelError(
       `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
         `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
         `the model in the provider command`

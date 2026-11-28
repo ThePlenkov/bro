@@ -84,6 +84,16 @@ async function postResponses(
   return { r: await post('/v1/responses', body), url, close };
 }
 
+/** boot() + one Anthropic-compatible /v1/messages POST — used for
+ *  failures that are translated by the shared turnError path. */
+async function postMessages(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  body: unknown = { messages: [{ role: 'user', content: 'x' }] }
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  const { url, post, close } = await boot(fake);
+  return { r: await post('/v1/messages', body), url, close };
+}
+
 async function evs(r: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
   const raw = await r.text();
   return raw
@@ -96,6 +106,72 @@ async function evs(r: Response): Promise<{ event: string; data: Record<string, u
 }
 
 describe('serve /v1/responses — the openai dialect', () => {
+  test('GET /v1/models includes the strict OpenAI row fields', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { url, close } = await boot(fake);
+    try {
+      const response = await fetch(`${url}/openai/v1/models`, { headers: auth });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as {
+        object: string;
+        data: { id: string; object: string; created: number; owned_by: string }[];
+      };
+      assert.equal(body.object, 'list');
+      assert.deepEqual(
+        body.data.map(({ id, object, created, owned_by }) => ({
+          id,
+          object,
+          created,
+          owned_by,
+        })),
+        [
+          { id: 'dv-acp/swe-x', object: 'model', created: 1_735_689_600, owned_by: 'dv-acp' },
+          { id: 'dv-acp/swe-y', object: 'model', created: 1_735_689_600, owned_by: 'dv-acp' },
+        ]
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  test('an unadvertised model pin answers 404 not_found_error', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { r, close } = await postResponses(fake, {
+      model: 'dv-acp/typo-model',
+      input: 'x',
+      stream: false,
+    });
+    try {
+      assert.equal(r.status, 404);
+      assert.equal(r.headers.get('retry-after'), null);
+      assert.deepEqual(await r.json(), {
+        error: {
+          type: 'not_found_error',
+          message:
+            "bro conductor: conductor:dv-acp: model 'dv-acp/typo-model' is not in the agent's catalog and the session serves 'swe-x' — pick a catalog id or pin the model in the provider command",
+          param: null,
+          code: null,
+        },
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  test('/v1/messages unknown model 404 never carries retry-after', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/unknown-429',
+      messages: [{ role: 'user', content: 'x' }],
+    });
+    try {
+      assert.equal(r.status, 404);
+      assert.equal(r.headers.get('retry-after'), null);
+    } finally {
+      await close();
+    }
+  });
+
   test('x-bro-probe uses a dedicated session without consuming response chains', async () => {
     const fake = fakeAcpAgent({ replyText: 'pong', configOptions: [MODEL_OPTION] });
     const { url, close } = await boot(fake);
