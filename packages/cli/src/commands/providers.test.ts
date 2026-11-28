@@ -297,6 +297,19 @@ describe('bro providers add', () => {
     });
   });
 
+  test('add never invokes a prototype-chain key as a handler', async () => {
+    const { root: dir, main } = initRepo('bro-prov-add-');
+    await insideAsync(main, dir, async () => {
+      // 'constructor' (no dashes) IS an inherited Object property: without
+      // the Object.hasOwn guard the dispatch lookup would find it and call
+      // it as a handler. With the guard it is an ordinary unknown token —
+      // the preset slot is taken, so it dies 'unexpected argument'.
+      const r = await capture(() => runProvidersCommand(['add', 'kilo', 'constructor']));
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /unexpected argument/);
+    });
+  });
+
   test('add refuses to clobber without --force', async () => {
     const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {

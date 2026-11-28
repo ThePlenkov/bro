@@ -321,25 +321,35 @@ interface ParsedAdd {
   force: boolean;
 }
 
-const ADD_BOOL_FLAGS: Record<string, 'global' | 'force'> = {
-  '--global': 'global',
-  '--force': 'force',
-};
+type AddArgHandler = (parsed: ParsedAdd, argv: string[], i: number) => number;
 
-/** Applies one argv token to `parsed`; returns the index of the last
- *  token consumed (a `--name <value>` pair consumes two). */
-function applyAddArg(parsed: ParsedAdd, argv: string[], i: number): number {
-  const a = argv[i]!;
-  const boolFlag = ADD_BOOL_FLAGS[a];
-  if (boolFlag !== undefined) {
-    parsed[boolFlag] = true;
-    return i;
-  }
-  if (a === '--name') {
+const ADD_ARG_HANDLERS: Record<string, AddArgHandler> = {
+  '--global': parsed => {
+    parsed.global = true;
+    return 0;
+  },
+  '--force': parsed => {
+    parsed.force = true;
+    return 0;
+  },
+  '--name': (parsed, argv, i) => {
     const value = argv[i + 1];
     if (value === undefined) die('missing value for --name');
     parsed.name = value;
-    return i + 1;
+    return 1;
+  },
+};
+
+/** Applies one argv token to `parsed`; returns the number of extra tokens
+ *  consumed (a `--name <value>` pair consumes one extra token). */
+function applyAddArg(parsed: ParsedAdd, argv: string[], i: number): number {
+  const a = argv[i]!;
+  // Object.hasOwn first — argv is operator-controlled input and a plain
+  // object lookup would answer for prototype keys ('constructor', …);
+  // the same guard seam as drill.ts / bus.ts dispatch tables.
+  const handler = Object.hasOwn(ADD_ARG_HANDLERS, a) ? ADD_ARG_HANDLERS[a] : undefined;
+  if (handler !== undefined) {
+    return handler(parsed, argv, i);
   }
   if (a.startsWith('-')) {
     die(`unknown flag ${a}`);
@@ -348,13 +358,13 @@ function applyAddArg(parsed: ParsedAdd, argv: string[], i: number): number {
     die(`unexpected argument ${a}`);
   }
   parsed.preset = a;
-  return i;
+  return 0;
 }
 
 function parseAddArgs(argv: string[]): ParsedAdd {
   const parsed: ParsedAdd = { global: false, force: false };
   for (let i = 0; i < argv.length; i++) {
-    i = applyAddArg(parsed, argv, i);
+    i += applyAddArg(parsed, argv, i);
   }
   return parsed;
 }
