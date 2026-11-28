@@ -27,16 +27,6 @@ function isLiteral(seg: TitleSegment): seg is { kind: 'literal'; text: string } 
   return seg.kind === 'literal';
 }
 
-/** Where a `{{var}}` ends in the pattern — the offset just past its
- *  `}}`, or -1 when the pattern holds no variable there. A name holds
- *  no `}`: `{{a}b}}` is no variable. */
-function variableEnd(pattern: string, at: number): number {
-  const close = pattern.indexOf('}}', at + 2);
-  if (close < 0) return -1;
-  if (pattern.slice(at + 2, close).includes('}')) return -1;
-  return close + 2;
-}
-
 /** The pattern's segments — the literals and the wildcards. The literal
  *  between two variables is a span of the pattern, so the walk tracks
  *  where the span starts instead of accumulating the pattern's text. */
@@ -44,8 +34,33 @@ function titleSegments(pattern: string): TitleSegment[] {
   const segments: TitleSegment[] = [];
   let literalStart = 0;
   let i = 0;
+  let close = -1;
+  let closeSearchAt = 2;
+  let rightBrace = -1;
+  let rightBraceSearchAt = 2;
   while (i < pattern.length) {
-    const end = pattern.startsWith('{{', i) ? variableEnd(pattern, i) : -1;
+    let end = -1;
+    if (pattern.startsWith('{{', i)) {
+      const contentStart = i + 2;
+      while (close < contentStart && closeSearchAt < pattern.length) {
+        if (pattern.startsWith('}}', closeSearchAt)) {
+          close = closeSearchAt;
+          closeSearchAt += 2;
+          break;
+        }
+        closeSearchAt += 1;
+      }
+      while (rightBrace < contentStart && rightBraceSearchAt < pattern.length) {
+        if (pattern[rightBraceSearchAt] === '}') {
+          rightBrace = rightBraceSearchAt;
+          rightBraceSearchAt += 1;
+          break;
+        }
+        rightBraceSearchAt += 1;
+      }
+      const hasNameBrace = rightBrace >= contentStart && rightBrace < close;
+      if (close >= contentStart && !hasNameBrace) end = close + 2;
+    }
     if (end > 0) {
       segments.push({ kind: 'literal', text: pattern.slice(literalStart, i) });
       segments.push({ kind: 'wildcard' });

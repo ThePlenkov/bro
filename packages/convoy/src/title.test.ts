@@ -36,6 +36,25 @@ describe('titleMatches', () => {
     assert.equal(titleMatches('a {{b}c}}', 'a {{b}c}}'), true);
   });
 
+  test('nested-looking braces use the first opening pair as the variable', () => {
+    assert.equal(titleMatches('{{outer {{inner}}', 'anything'), true);
+  });
+
+  test('an invalid opening can be followed by a valid variable', () => {
+    assert.equal(titleMatches('{{a}{{b}}', '{{a}value'), true);
+    assert.equal(titleMatches('{{a}{{b}}', 'value'), false);
+  });
+
+  test('empty braces are a wildcard', () => {
+    assert.equal(titleMatches('before{{}}after', 'beforeafter'), true);
+    assert.equal(titleMatches('before{{}}after', 'before middle after'), true);
+  });
+
+  test('a long run of unmatched openings completes', () => {
+    const pattern = '{{'.repeat(10_000);
+    assert.equal(titleMatches(pattern, pattern), true);
+  });
+
   test("a leading wildcard leaves the title's start free", () => {
     assert.equal(titleMatches('{{what}} per its spec', 'anything per its spec'), true);
     assert.equal(titleMatches('{{what}} per its spec', 'anything else'), false);
