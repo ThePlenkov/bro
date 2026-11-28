@@ -32,7 +32,7 @@ import {
   type Item as TheirItem,
   type ToolCallItem,
 } from '@broject/acp-model';
-import type { ArchiveRow, PaneLed } from '../archive/index.ts';
+import type { ArchiveRow, PaneLed, PaneVerdict } from '../archive/index.ts';
 import {
   dumpContent,
   dumpItems,
@@ -931,25 +931,30 @@ export class AcpImpl implements PaneImpl {
   /** Session states → the rowVerdict-shaped verdict the shell
    *  reports: replay pumps read working, a closed connection is
    *  blocked, requires_action is the permission posture. */
-  get verdict(): { led: PaneLed; mode: string } | undefined {
+  get verdict(): PaneVerdict | undefined {
     const s = this.session;
     if (s.replaying) return { led: { state: 'working' }, mode: 'replaying' };
     if (s.connection === 'disconnected') {
       return {
         led: { state: 'blocked' },
         mode: this.since('agent exited', this.lastActivityTs ?? this.lastStopTs),
+        since: this.lastActivityTs ?? this.lastStopTs,
       };
     }
     if (s.state === 'requires_action') {
-      return { led: { state: 'blocked' }, mode: this.since('permission', this.actionTs) };
+      return {
+        led: { state: 'blocked' },
+        mode: this.since('permission', this.actionTs),
+        since: this.actionTs,
+      };
     }
     if (s.state === 'running') return { led: { state: 'working' }, mode: runMode(s) };
     return this.idleVerdict(s);
   }
 
   /** `base · since <when>` — terminal postures carry the status-entry
-   *  stamp; "since" is the question a finished/blocked row must answer
-   *  (a live turn's clock is its own startedAt, already painted). */
+   *  stamp; the final display is refreshed by the pane consumer.
+   */
   private since(base: string, ts: string | undefined): string {
     const when = ts === undefined ? '' : fmtWhen(ts);
     return when === '' ? base : `${base} · since ${when}`;
@@ -958,16 +963,20 @@ export class AcpImpl implements PaneImpl {
   /** The settled-state verdict — a failed stop is blocked, a stamped
    *  stop reports its completion time, a stamp-less one has no honest
    *  clock (last activity is a mid-turn row, not the completion). */
-  private idleVerdict(s: Session): { led: PaneLed; mode: string } {
+  private idleVerdict(s: Session): PaneVerdict {
     if (this.lastStopError) {
-      return { led: { state: 'blocked' }, mode: this.since('turn error', this.lastStopTs) };
+      return {
+        led: { state: 'blocked' },
+        mode: this.since('turn error', this.lastStopTs),
+        since: this.lastStopTs,
+      };
     }
     let mode = 'idle';
     if (this.lastStopTs !== undefined) {
       const when = fmtWhen(this.lastStopTs);
       mode = when === '' ? 'idle' : `since ${when}`;
     } else if (s.stopReason !== null) mode = 'turn complete';
-    return { led: { state: 'idle' }, mode };
+    return { led: { state: 'idle' }, mode, since: this.lastStopTs };
   }
 
   /** Diff the session against the last drain — every changed item

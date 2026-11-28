@@ -226,10 +226,17 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   /** The archive's own LED — last row wins; the worker verdict is the
    *  floor only for 'blocked'. A verdict move re-reports, so a stop
    *  mid-poll doesn't wait on the next refresh. */
-  const setRowLed = (a: Attach, led: PaneLed, mode: string, t: SessionTarget): void => {
+  const setRowLed = (
+    a: Attach,
+    led: PaneLed,
+    mode: string,
+    since: string | undefined,
+    t: SessionTarget
+  ): void => {
     const before = viewVerdict(t, a);
     a.rowLed = led;
     a.rowMode = mode;
+    a.rowSince = since;
     const after = viewVerdict(t, a);
     if (`${before.led.state}|${before.mode}` !== `${after.led.state}|${after.mode}`) {
       lastReport = '';
@@ -273,7 +280,9 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
         return;
     }
     const v = rowVerdict(row);
-    if (v !== undefined) setRowLed(a, v.led, v.mode, t);
+    if (v !== undefined) {
+      setRowLed(a, v.led, v.mode, v.since, t);
+    }
   };
 
   /** One pump of the events archive — parse whatever appended since

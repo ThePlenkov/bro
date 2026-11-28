@@ -11,7 +11,7 @@
  * sanitize posture — is the providers' `acp-render` module verbatim.
  */
 
-import type { ArchiveRow, PaneLed } from '../archive/index.ts';
+import type { ArchiveRow, PaneVerdict } from '../archive/index.ts';
 import { rowVerdict } from '../archive/index.ts';
 import {
   chunkText,
@@ -194,7 +194,7 @@ const scalar = (v: unknown): string => {
 export class SessionModel {
   readonly items: Item[] = [];
   /** The archive's latest LED verdict — the shell reports it. */
-  verdict: { led: PaneLed; mode: string } | undefined;
+  verdict: PaneVerdict | undefined;
   private readonly tools = new Map<string, ToolRec>();
   private nextId = 1;
   private ops: Op[] = [];

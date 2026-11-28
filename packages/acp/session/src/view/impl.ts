@@ -13,7 +13,7 @@
  * every impl — a completed call is one compact `✓` row; its
  * output (file dumps, JSON) never owns the feed unpinned.
  */
-import type { ArchiveRow, PaneLed } from '../archive/index.ts';
+import type { ArchiveRow, PaneVerdict } from '../archive/index.ts';
 import { copyItem, type Item, type Op, SessionModel } from '../model/items.ts';
 
 /** Historical fold-policy names — retained for the impl seam; tool
@@ -36,7 +36,7 @@ export interface PaneImpl {
   drain(): Op[];
   /** The impl's latest LED verdict (same shape rowVerdict returns) —
    *  the shell mixes it with the worker floor via eventsVerdict. */
-  readonly verdict: { led: PaneLed; mode: string } | undefined;
+  readonly verdict: PaneVerdict | undefined;
   /** The headless text projection — the `--dump` readout. */
   dump(): string[];
   /** The item's full raw text for clipboard copy — the impl's own
@@ -63,7 +63,7 @@ class LegacyImpl implements PaneImpl {
   drain(): Op[] {
     return this.model.drain();
   }
-  get verdict(): { led: PaneLed; mode: string } | undefined {
+  get verdict(): PaneVerdict | undefined {
     return this.model.verdict;
   }
   dump(): string[] {

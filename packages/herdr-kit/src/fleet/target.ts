@@ -110,6 +110,7 @@ export interface AttachState {
    *  permission is blocked; absent until the first row lands. */
   rowLed?: PaneLed;
   rowMode?: string;
+  rowSince?: string;
 }
 
 const acpPosture: { [K in AttachState['acp']]: ViewVerdict } = {
@@ -125,7 +126,9 @@ const MODE_VERDICT: {
   events: (t, a) =>
     eventsVerdict(
       t.workerLed,
-      a.rowLed !== undefined ? { led: a.rowLed, mode: a.rowMode ?? 'session events' } : undefined
+      a.rowLed !== undefined
+        ? { led: a.rowLed, mode: a.rowMode ?? 'session events', since: a.rowSince }
+        : undefined
     ),
   acp: (_t, a) =>
     Object.getOwnPropertyDescriptor(acpPosture, a.acp)?.value ?? {
