@@ -13,6 +13,56 @@ function exposedOps(plane: PlaneDescriptor): string[] {
   return [...new Set([...plane.reads, ...(plane.mcpVerbs ?? []), ...(plane.restVerbs ?? [])])];
 }
 
+function allowlistProblems(plane: PlaneDescriptor): ContractProblem[] {
+  const allowlisted = new Set([...(plane.mcpVerbs ?? []), ...(plane.restVerbs ?? [])]);
+  return [...allowlisted]
+    .filter(verb => !plane.verbs.includes(verb))
+    .map(verb => ({
+      kind: 'breaking' as const,
+      path: `planes.${plane.name}.${verb}`,
+      message: `transport allowlist names '${verb}' which is not a declared verb — declare it in verbs or drop the entry`,
+    }));
+}
+
+function opParityProblems(plane: PlaneDescriptor, live: ContractDump): ContractProblem[] {
+  return exposedOps(plane).flatMap(op => {
+    const twin = plane.cli?.[op];
+    const path = `planes.${plane.name}.${op}`;
+    if (twin === undefined) {
+      return [
+        {
+          kind: 'breaking' as const,
+          path,
+          message: `plane op has no CLI twin — declare cli.${op} on the descriptor`,
+        },
+      ];
+    }
+    if (!isRecord(own(live.commands, twin))) {
+      return [
+        {
+          kind: 'breaking' as const,
+          path,
+          message: `CLI twin '${twin}' is not in the contract — the transport surface outgrew the CLI`,
+        },
+      ];
+    }
+    return [];
+  });
+}
+
+function planeProblems(plane: PlaneDescriptor, live: ContractDump): ContractProblem[] {
+  if (plane.buildError !== undefined) {
+    return [
+      {
+        kind: 'breaking',
+        path: `planes.${plane.name}`,
+        message: `plane factory failed — ${plane.buildError}`,
+      },
+    ];
+  }
+  return [...allowlistProblems(plane), ...opParityProblems(plane, live)];
+}
+
 /** Every transport-exposed plane op mirrors a CLI contract entry — the
  *  descriptor's `cli` map names its twin. An op with no declared twin,
  *  or a twin the registry lacks, forks the transport surface from the
@@ -24,47 +74,5 @@ export function planeParityProblems(
   catalog: readonly PlaneDescriptor[],
   live: ContractDump
 ): ContractProblem[] {
-  const problems: ContractProblem[] = [];
-  for (const plane of catalog) {
-    // a stubbed descriptor has no ops to check — the failure itself is
-    // the gate error, or a throwing factory would pass green silently
-    if (plane.buildError !== undefined) {
-      problems.push({
-        kind: 'breaking',
-        path: `planes.${plane.name}`,
-        message: `plane factory failed — ${plane.buildError}`,
-      });
-      continue;
-    }
-    // an allowlist entry naming an undeclared verb is dead config —
-    // REST rejects the POST as undeclared before the allowlist is read
-    // (MCP emits no tool for it either), so the gate flags it here
-    for (const v of new Set([...(plane.mcpVerbs ?? []), ...(plane.restVerbs ?? [])])) {
-      if (!plane.verbs.includes(v)) {
-        problems.push({
-          kind: 'breaking',
-          path: `planes.${plane.name}.${v}`,
-          message: `transport allowlist names '${v}' which is not a declared verb — declare it in verbs or drop the entry`,
-        });
-      }
-    }
-    for (const op of exposedOps(plane)) {
-      const twin = plane.cli?.[op];
-      const path = `planes.${plane.name}.${op}`;
-      if (twin === undefined) {
-        problems.push({
-          kind: 'breaking',
-          path,
-          message: `plane op has no CLI twin — declare cli.${op} on the descriptor`,
-        });
-      } else if (!isRecord(own(live.commands, twin))) {
-        problems.push({
-          kind: 'breaking',
-          path,
-          message: `CLI twin '${twin}' is not in the contract — the transport surface outgrew the CLI`,
-        });
-      }
-    }
-  }
-  return problems;
+  return catalog.flatMap(plane => planeProblems(plane, live));
 }
