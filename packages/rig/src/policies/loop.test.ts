@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import type { ReviewFacade, TaskStore } from '@broject/core';
+import { SpawnError, type ReviewFacade, type TaskStore } from '@broject/core';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig, type LoopItem } from '@broject/loop';
 import type { ReadyBead } from '../ready.ts';
 import {
@@ -130,6 +130,8 @@ interface World {
   said: string[];
   errored: string[];
   updates: { id: string; patch: Record<string, unknown> }[];
+  endRuns: string[];
+  failDefer: { value: boolean };
   statuses: Map<string, string>;
   /** scripted claimCandidates answers — shifted per call, last repeats */
   candidates: { candidates: ReadyBead[]; foreign: number }[];
@@ -170,6 +172,8 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
   const said: string[] = [];
   const errored: string[] = [];
   const updates: World['updates'] = [];
+  const endRuns: string[] = [];
+  const failDefer = { value: false };
   const statuses = new Map<string, string>();
   const candidates: World['candidates'] = [];
   const tasks = {
@@ -181,6 +185,9 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
       ids.filter(id => statuses.has(id)).map(id => ({ id, status: statuses.get(id) })),
     update: (id: string, patch: Record<string, unknown>) => {
       updates.push({ id, patch });
+      if (failDefer.value && ('defer' in patch || patch.status === 'deferred')) {
+        throw new Error('defer failed');
+      }
     },
   } as unknown as TaskStore;
   const deps: LoopDeps = {
@@ -196,7 +203,7 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
     sleepMs: async () => {},
     reapRuns: () => {},
     beginRun: () => {},
-    endRun: () => {},
+    endRun: slug => endRuns.push(slug),
     runLog: () => null,
     projectScope: () => ({ kind: 'test' }),
     claimCandidates: () => {
@@ -228,7 +235,7 @@ function world(over: Partial<LoopCtx> = {}, cfgOver: Partial<LoopConfig> = {}): 
     q: freshLoopQueue(),
     ...over,
   };
-  return { ctx, said, errored, updates, statuses, candidates, root };
+  return { ctx, said, errored, updates, endRuns, failDefer, statuses, candidates, root };
 }
 
 describe('loopPolicy.select — the claim pick', () => {
@@ -294,6 +301,20 @@ describe('loopPolicy.onPark — the park transition', () => {
 });
 
 describe('loopPolicy.serviceMember — cadence and wall waits', () => {
+  test('retains custody when a spawn refusal cannot defer the bead', async () => {
+    const w = world();
+    w.failDefer.value = true;
+    w.statuses.set('b1', 'in_progress');
+    w.ctx.deps.spawnWorker = async () => {
+      throw new SpawnError('spawn refused', 'input');
+    };
+    const m = member([bead('b1')], w.root, { wallWaitUntil: NOW - 1 });
+
+    assert.equal(await loopPolicy.serviceMember(w.ctx, m), 'parked');
+    assert.deepEqual(w.endRuns, []);
+    assert.ok(w.said.some(message => message.includes('custody retained')));
+  });
+
   test('a member inside its wall wait is kept and re-polls at expiry', async () => {
     const w = world();
     const until = NOW + 120_000;
