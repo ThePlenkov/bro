@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
+import { loadConfigLayers } from '@broject/core';
 import { PROVIDER_PRESETS, runProvidersCommand } from './providers.ts';
 import { capture } from './testrepo.ts';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpDir, initRepo, insideAsync } from './testrepo.ts';
 
@@ -337,6 +338,27 @@ describe('bro providers add', () => {
     });
   });
 
+  test('add writes a complete config and leaves no atomic-write temp file', async () => {
+    const { root: dir, main } = initRepo('bro-prov-add-');
+    await insideAsync(main, dir, async () => {
+      const path = join(process.cwd(), 'bro.config.json');
+      writeFileSync(
+        path,
+        JSON.stringify({ providers: { existing: { type: 'acp', command: 'old' } } }) + '\n'
+      );
+      const before = readFileSync(path, 'utf8');
+      await runProvidersCommand(['add', 'kilo']);
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      assert.equal(written.providers.existing.command, 'old');
+      assert.deepEqual(written.providers.kilo, { type: 'acp', command: 'kilo --acp' });
+      assert.notEqual(readFileSync(path, 'utf8'), before);
+      assert.deepEqual(
+        readdirSync(process.cwd()).filter(name => name.includes('.bro.config.json.tmp.')),
+        []
+      );
+    });
+  });
+
   test('add to global config with --global', async () => {
     const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
@@ -357,6 +379,45 @@ describe('bro providers add', () => {
           delete process.env.XDG_CONFIG_HOME;
         } else {
           process.env.XDG_CONFIG_HOME = origXdg;
+        }
+      }
+    });
+  });
+
+  test('global add warns for the highest-precedence shadowing provider layer', async () => {
+    const { root: dir, main } = initRepo('bro-prov-add-');
+    await insideAsync(main, dir, async () => {
+      const home = join(dir, 'home');
+      const origHome = process.env.HOME;
+      const origXdg = process.env.XDG_CONFIG_HOME;
+      process.env.HOME = home;
+      process.env.XDG_CONFIG_HOME = join(home, '.config');
+      const origCache = process.env.BRO_HOOK_CACHE;
+      process.env.BRO_HOOK_CACHE = '0';
+      try {
+        const shadow = JSON.stringify({
+          providers: { kilo: { type: 'acp', command: 'shadowed' } },
+        });
+        writeFileSync(join(process.cwd(), 'bro.config.json'), JSON.stringify({ providers: {} }) + '\n');
+        writeFileSync(join(process.cwd(), 'bro.config.local.json'), shadow + '\n');
+        assert.deepEqual(loadConfigLayers(process.cwd()).layers.map(layer => layer.layer), [
+          'project',
+          'local',
+        ]);
+        const r = await capture(() => runProvidersCommand(['add', 'kilo', '--global']));
+        assert.equal(r.code, 0);
+        assert.match(r.err.join('\n'), /bro\.config\.local\.json.*defines providers\.kilo/);
+      } finally {
+        process.env.HOME = origHome;
+        if (origXdg === undefined) {
+          delete process.env.XDG_CONFIG_HOME;
+        } else {
+          process.env.XDG_CONFIG_HOME = origXdg;
+        }
+        if (origCache === undefined) {
+          delete process.env.BRO_HOOK_CACHE;
+        } else {
+          process.env.BRO_HOOK_CACHE = origCache;
         }
       }
     });
