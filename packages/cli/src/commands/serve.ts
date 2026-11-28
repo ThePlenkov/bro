@@ -1233,17 +1233,20 @@ function readTranscript(transcript: string): string | undefined {
   }
 }
 
+function renderTranscript(transcript: string): ReturnType<typeof renderDevinTranscript> {
+  const text = readTranscript(transcript);
+  return text === undefined ? undefined : renderDevinTranscript(text);
+}
+
 async function routeTranscriptLog(
   res: ServerResponse,
   url: URL,
   transcript: string
 ): Promise<void> {
-  const first = readTranscript(transcript);
-  let rendered = first === undefined ? undefined : renderDevinTranscript(first);
+  let rendered = renderTranscript(transcript);
   if (rendered === undefined) {
     await new Promise(resolve => setTimeout(resolve, 250));
-    const second = readTranscript(transcript);
-    rendered = second === undefined ? undefined : renderDevinTranscript(second);
+    rendered = renderTranscript(transcript);
   }
   if (rendered === undefined) {
     send(res, 503, { error: `transcript unreadable mid-rewrite: ${transcript} — retry` });
