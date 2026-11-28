@@ -8,7 +8,7 @@
  *
  * Runs under `node` ≥22.18 native TS (the floor bro itself requires).
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -49,12 +49,14 @@ export interface RunOut {
   err: string;
 }
 
+export const MAX_OUTPUT = 16 * 1024 * 1024;
+
 export function run(cmd: string, args: string[], cwd?: string): RunOut {
   const r = spawnSync(cmd, args, {
     cwd,
     encoding: 'utf8',
     timeout: 180_000,
-    maxBuffer: 16 * 1024 * 1024,
+    maxBuffer: MAX_OUTPUT,
     env: process.env,
   });
   return {
@@ -64,6 +66,48 @@ export function run(cmd: string, args: string[], cwd?: string): RunOut {
     out: r.stdout ?? '',
     err: r.stderr ?? (r.error !== undefined ? String(r.error) : ''),
   };
+}
+
+/** Async command execution for the long-lived reconcile daemon. */
+export function runAsync(cmd: string, args: string[], cwd?: string): Promise<RunOut> {
+  return new Promise(resolve => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    let settled = false;
+    const finish = (result: RunOut): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, out, err });
+    }, 180_000);
+    child.stdout?.setEncoding('utf8').on('data', chunk => {
+      if (settled) return;
+      out += chunk;
+      if (out.length > MAX_OUTPUT) {
+        child.kill();
+        finish({ code: -1, out: out.slice(0, MAX_OUTPUT), err: err.slice(0, MAX_OUTPUT) });
+      }
+    });
+    child.stderr?.setEncoding('utf8').on('data', chunk => {
+      if (settled) return;
+      err += chunk;
+      if (err.length > MAX_OUTPUT) {
+        child.kill();
+        finish({ code: -1, out: out.slice(0, MAX_OUTPUT), err: err.slice(0, MAX_OUTPUT) });
+      }
+    });
+    child.on('error', error => finish({ code: -1, out, err: String(error) }));
+    child.on('close', code => finish({ code: code ?? -1, out, err }));
+  });
 }
 
 /** `herdr <args>` → `.result` — the CLI is the plugin's whole API surface. */
@@ -638,8 +682,7 @@ export function saveState(scope: string, s: PluginState): void {
 /** A lock older than this is a dead holder's — a live converge never
  *  takes minutes, so breaking it is safe. */
 const STALE_LOCK_MS = 180_000;
-/** How long a session waits on a live lock before running unlocked —
- *  a wedged fs must never freeze the plugin. */
+/** How long a session waits on a live lock before failing. */
 const LOCK_WAIT_MS = 10_000;
 
 function lockStale(lock: string): boolean {
@@ -660,8 +703,8 @@ const sleep = (ms: number): void => {
  *  sessions reconciling the same repo read-modify-write the same file
  *  and the last save silently drops the other's workspace/mirror
  *  records (review finding on bro-u19mq). A stale lock is broken and
- *  retaken; a live one outlasting LOCK_WAIT_MS runs unlocked —
- *  correctness degrades to the old race, never to a hang. */
+ *  retaken; a live one outlasting LOCK_WAIT_MS fails rather than entering
+ *  the critical section without mutual exclusion. */
 export function withStateLock<T>(scope: string, fn: () => T): T {
   mkdirSync(STATE_DIR, { recursive: true });
   const lock = join(STATE_DIR, `state-${scope}.lock`);
@@ -679,7 +722,9 @@ export function withStateLock<T>(scope: string, fn: () => T): T {
         }
         continue;
       }
-      if (Date.now() >= until) return fn();
+      if (Date.now() >= until) {
+        throw new Error(`timed out acquiring state lock: ${scope}`);
+      }
       sleep(50);
     }
   }
@@ -690,6 +735,40 @@ export function withStateLock<T>(scope: string, fn: () => T): T {
       rmSync(lock, { recursive: true, force: true });
     } catch {
       // a breaker already took it — nothing to release
+    }
+  }
+}
+
+export async function withStateLockAsync<T>(scope: string, fn: () => Promise<T>): Promise<T> {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const lock = join(STATE_DIR, `state-${scope}.lock`);
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      if (lockStale(lock)) {
+        try {
+          rmSync(lock, { recursive: true, force: true });
+        } catch {
+          // another contender won the race
+        }
+        continue;
+      }
+      if (Date.now() >= until) {
+        throw new Error(`timed out acquiring state lock: ${scope}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lock, { recursive: true, force: true });
+    } catch {
+      // a breaker already took it
     }
   }
 }

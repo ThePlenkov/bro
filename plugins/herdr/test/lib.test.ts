@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { agentsJson } from '../src/lib.ts';
+import { agentsJson, MAX_OUTPUT, runAsync, STATE_DIR, withStateLockAsync } from '../src/lib.ts';
 
 function fixture(registry: unknown): string {
   const repo = mkdtempSync(join(tmpdir(), 'herdr-agents-'));
@@ -46,4 +46,28 @@ test('agentsJson retains well-shaped entries beside malformed entries', () => {
     ),
     { valid }
   );
+});
+
+test('runAsync bounds both streams when either stream exceeds the limit', async () => {
+  const script = `process.stdout.write('x'.repeat(${MAX_OUTPUT + 1})); process.stderr.write('y'.repeat(${MAX_OUTPUT + 1}))`;
+  const result = await runAsync(process.execPath, ['-e', script]);
+  assert.equal(result.code, -1);
+  assert.ok(result.out.length <= MAX_OUTPUT);
+  assert.ok(result.err.length <= MAX_OUTPUT);
+});
+
+test('withStateLockAsync fails instead of running after a lock timeout', async () => {
+  const scope = `timeout-${process.pid}-${Date.now()}`;
+  const lock = join(STATE_DIR, `state-${scope}.lock`);
+  mkdirSync(lock, { recursive: true });
+  try {
+    await assert.rejects(
+      withStateLockAsync(scope, async () => {
+        throw new Error('critical section must not run');
+      }),
+      /timed out acquiring state lock/
+    );
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
 });

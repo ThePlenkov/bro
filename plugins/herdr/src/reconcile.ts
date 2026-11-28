@@ -44,6 +44,7 @@ import {
   type HerdrWorktree,
   herdrTry,
   loadState,
+  MAX_OUTPUT,
   notify,
   PLUGIN_ROOT,
   type PluginState,
@@ -52,6 +53,7 @@ import {
   pidAlive,
   repoDir,
   run,
+  runAsync,
   STATE_DIR,
   type StatusAgent,
   type StatusWorktree,
@@ -60,6 +62,7 @@ import {
   syncPidPath,
   type WorkspaceRec,
   withStateLock,
+  withStateLockAsync,
   worktreeGone,
 } from './lib.ts';
 import { convergeLiveViews, type LiveAgent, liveAgents } from './live-views.ts';
@@ -592,6 +595,61 @@ function quickRun(
   }
 }
 
+export async function quickRunAsync(
+  cmd: string,
+  args: string[],
+  cwd?: string,
+  timeoutMs = 2000
+): Promise<{ code: number; out: string; err: string }> {
+  return new Promise(resolve => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (result: { code: number; out: string; err: string }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        ...result,
+        out: result.out.slice(0, MAX_OUTPUT),
+        err: result.err.slice(0, MAX_OUTPUT),
+      });
+    };
+    timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, out, err });
+    }, timeoutMs);
+    child.stdout?.setEncoding('utf8').on('data', chunk => {
+      if (settled) return;
+      out += chunk;
+      if (out.length > MAX_OUTPUT) {
+        child.kill();
+        finish({ code: -1, out, err });
+      }
+    });
+    child.stderr?.setEncoding('utf8').on('data', chunk => {
+      if (settled) return;
+      err += chunk;
+      if (err.length > MAX_OUTPUT) {
+        child.kill();
+        finish({ code: -1, out, err });
+      }
+    });
+    child.on('error', error => {
+      finish({ code: -1, out, err: String(error) });
+    });
+    child.on('close', code => {
+      finish({ code: code ?? -1, out, err });
+    });
+  });
+}
+
 /** The upstream ref verbatim — `undefined` when unset. Callers decide
  *  whether a non-origin upstream proves anything (it doesn't — issue
  *  #817's remote is `origin`). */
@@ -847,6 +905,142 @@ function keepReason(p: Planes, w: HerdrWorktree): string | undefined {
   return occupiedNow(w.path) ? 'occupied at close time' : undefined;
 }
 
+async function asyncUpstreamRef(wt: string): Promise<string | undefined> {
+  const r = await runAsync('git', [
+    '-C',
+    wt,
+    'rev-parse',
+    '--abbrev-ref',
+    '--symbolic-full-name',
+    '@{u}',
+  ]);
+  const up = r.code === 0 ? r.out.trim() : '';
+  return up === '' ? undefined : up;
+}
+
+async function asyncCurrentBranch(wt: string): Promise<string | undefined> {
+  const b = (await runAsync('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD'])).out.trim();
+  return b !== '' && b !== 'HEAD' ? b : undefined;
+}
+
+async function asyncBranchExistsOnOrigin(wt: string, branch: string): Promise<boolean> {
+  for (const args of [
+    ['show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`],
+    ['branch', '-r', '--list', `origin/${branch}`],
+    ['config', `branch.${branch}.remote`],
+  ]) {
+    const local = await runAsync('git', ['-C', wt, ...args]);
+    if (
+      (args[0] === 'show-ref' && local.code === 0) ||
+      (args[0] === 'branch' && local.code === 0 && local.out.trim() !== '') ||
+      (args[0] === 'config' && local.code === 0 && local.out.trim() === 'origin')
+    ) {
+      return true;
+    }
+  }
+  const r = await quickRunAsync(
+    'git',
+    ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch],
+    undefined,
+    2000
+  );
+  return r.code === 0;
+}
+
+async function asyncDetachedHeadPreserved(wt: string): Promise<boolean> {
+  const head = await runAsync('git', ['-C', wt, 'rev-parse', 'HEAD']);
+  if (head.code !== 0) return false;
+  const lr = await quickRunAsync(
+    'git',
+    ['-C', wt, 'branch', '-r', '--contains', head.out.trim()],
+    undefined,
+    2000
+  );
+  return lr.code === 0 && lr.out.includes('origin/');
+}
+
+async function asyncIsBranchPushedToRemote(wt: string): Promise<boolean> {
+  const up = await asyncUpstreamRef(wt);
+  if (up?.startsWith('origin/') === true) return true;
+  const branch = await asyncCurrentBranch(wt);
+  if (branch === undefined) return asyncDetachedHeadPreserved(wt);
+  return asyncBranchExistsOnOrigin(wt, branch);
+}
+
+async function asyncAheadOf(wt: string, ref: string): Promise<Ahead> {
+  const r = await runAsync('git', ['-C', wt, 'log', `${ref}..HEAD`, '--oneline']);
+  if (r.code !== 0) return 'unknown';
+  return r.out.trim() === '' ? 'clean' : 'ahead';
+}
+
+async function asyncIsTreeClean(wt: string): Promise<boolean> {
+  const r = await runAsync('git', ['-C', wt, 'status', '--porcelain']);
+  return r.code === 0 && r.out.trim() === '';
+}
+
+async function asyncRemoteBranchHead(wt: string, branch: string): Promise<string | undefined> {
+  const r = await quickRunAsync(
+    'git',
+    ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch],
+    undefined,
+    2000
+  );
+  const m = r.code === 0 ? /^([0-9a-f]{40})\t/m.exec(r.out) : null;
+  return m?.[1];
+}
+
+async function asyncPushedToOriginBranch(wt: string, branch: string): Promise<Ahead> {
+  const local = await runAsync('git', [
+    '-C',
+    wt,
+    'show-ref',
+    '--verify',
+    '--quiet',
+    `refs/remotes/origin/${branch}`,
+  ]);
+  if (local.code === 0) return asyncAheadOf(wt, `origin/${branch}`);
+  const sha = await asyncRemoteBranchHead(wt, branch);
+  if (sha === undefined) return 'unknown';
+  const exists = await runAsync('git', ['-C', wt, 'cat-file', '-e', sha]);
+  if (exists.code !== 0) return 'ahead';
+  const contained = await runAsync('git', ['-C', wt, 'merge-base', '--is-ancestor', 'HEAD', sha]);
+  return contained.code === 0 ? 'clean' : 'ahead';
+}
+
+async function asyncHasUnpushedCommits(wt: string): Promise<boolean> {
+  const branch = await asyncCurrentBranch(wt);
+  if (branch === undefined) return !(await asyncDetachedHeadPreserved(wt));
+  const up = await asyncUpstreamRef(wt);
+  if (up?.startsWith('origin/') === true) return (await asyncAheadOf(wt, up)) !== 'clean';
+  const ob = await asyncPushedToOriginBranch(wt, branch);
+  if (ob !== 'unknown') return ob === 'ahead';
+  for (const base of ['origin/main', 'origin/master', 'origin/HEAD']) {
+    if ((await runAsync('git', ['-C', wt, 'rev-parse', '--verify', base])).code !== 0) continue;
+    const a = await asyncAheadOf(wt, base);
+    if (a === 'unknown') return true;
+    if (a === 'ahead') return (await asyncPushedToOriginBranch(wt, branch)) !== 'clean';
+  }
+  return true;
+}
+
+async function reapPreservedDeadAsync(p: Planes, ctx: WsCtx): Promise<number> {
+  let reaped = 0;
+  for (const w of p.worktrees.worktrees) {
+    const ws = w.open_workspace_id;
+    if (ws === undefined || !reapableWorkspace(p, ctx, w)) continue;
+    if (
+      occupied(p, w.path) ||
+      !(await asyncIsTreeClean(w.path)) ||
+      (await asyncHasUnpushedCommits(w.path)) ||
+      !(await asyncIsBranchPushedToRemote(w.path)) ||
+      occupiedNow(w.path)
+    )
+      continue;
+    if (closeAndForget(ctx, w.path, ws)) reaped += 1;
+  }
+  return reaped;
+}
+
 /** Anything still using the tree — armed, claimed, a live run or
  *  bound agent, or a fresh planes sighting. */
 function occupied(p: Planes, path: string): boolean {
@@ -912,6 +1106,49 @@ function reapGoneTree(ctx: WsCtx, w: HerdrWorktree, ws: string, now: number): bo
 export function converge(p: Planes): ConvergeResult {
   const scope = stateScope(p.main);
   return withStateLock(scope, () => convergeLocked(p, scope));
+}
+
+/** Async daemon pass. Git preservation probes use non-blocking children so
+ *  a slow remote cannot freeze the event loop between source events. */
+export async function convergeAsync(p: Planes): Promise<ConvergeResult> {
+  const scope = stateScope(p.main);
+  return withStateLockAsync(scope, () => convergeLockedAsync(p, scope));
+}
+
+async function convergeLockedAsync(p: Planes, scope: string): Promise<ConvergeResult> {
+  const ctx: WsCtx = {
+    openByPath: new Map(
+      p.worktrees.worktrees
+        .filter(w => w.open_workspace_id !== undefined)
+        .map(w => [w.path, w.open_workspace_id!])
+    ),
+    wsById: new Map(p.workspaces.map(w => [w.workspace_id, w])),
+    state: loadState(scope),
+    main: p.main,
+  };
+  const armed = armedSet(p);
+  const base = gitCommonDir(p.main) ?? p.main;
+  const live = liveAgents(base);
+  const { bindByTree, viewable } = bindPlanes(p, base, live);
+  const wsForPath = convergeWorkspaces(p, armed, ctx, viewable);
+  const sessionLive = convergeSessionPanes(wsForPath, ctx, bindByTree);
+  convergeMirrors({ p, wsForPath, openByPath: ctx.openByPath, state: ctx.state, sessionLive });
+  markExitedMirrors(p, ctx.state, sessionLive);
+  convergeRenderers(wsForPath, ctx, sessionLive);
+  convergeStatuses(wsForPath, ctx, sessionLive);
+  convergeSessions(wsForPath, ctx);
+  convergeLiveViews(base, p.main, ctx.state, new Set(armed.keys()), live);
+  retireUnviewable(viewable, ctx);
+  const reaped = reapDead(p, ctx) + (await reapPreservedDeadAsync(p, ctx));
+  saveState(scope, ctx.state);
+  return {
+    armed: armed.size,
+    mirrors: Object.keys(ctx.state.mirrors).length,
+    renderers: Object.keys(ctx.state.renderers).length,
+    statuses: Object.keys(ctx.state.statuses).length,
+    sessions: Object.keys(ctx.state.sessions).length,
+    reaped,
+  };
 }
 
 function convergeLocked(p: Planes, scope: string): ConvergeResult {
@@ -1002,8 +1239,8 @@ function bindPlanes(
 /** One-shot entry — the `sync` action and the startup hook both land
  *  here: read the planes once, converge once, done. The daemon loop in
  *  sync.ts is the same converge behind an EventSource. */
-export function reconcile(): ConvergeResult {
-  return converge(readPlanes(repoDir(ctxJson())));
+export async function reconcile(): Promise<ConvergeResult> {
+  return convergeAsync(readPlanes(repoDir(ctxJson())));
 }
 
 /** The label the sync pane carries — `pane open` replaces nothing, so
@@ -1148,7 +1385,7 @@ export function ensureSyncLoop(launch: SyncLauncher = spawnSyncLoop): void {
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
     ensureSyncLoop();
-    const r = reconcile();
+    const r = await reconcile();
     log(
       `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.statuses} statuses, ${r.reaped} reaped`
     );
