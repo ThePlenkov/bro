@@ -1243,28 +1243,40 @@ async function sweepClosedPrs(dir: string): Promise<string | undefined> {
     if (pending.length === 0) {
       return undefined;
     }
-    const result = await collectReviewThreads(host.rev, {
-      repo: host.repo,
-      filters: {
-        prIds: pending,
-        mergedSince: null,
-        mergedUntil: null,
-        lastN: null,
-        prAuthor: null,
-        labels: [],
-      },
-      threadAuthor: null,
-      runId: 'watch',
-      dryRun: false,
-      listOnly: false,
-      reharvest: false,
-      noLabel: false,
-      sources: ['review-threads'],
-      includeClosed: true,
-    });
-    const note = closedPrSweepNote(pending, result);
+    // The foreground collect path reports scan failures through
+    // process.exitCode; the heartbeat handles them as attention notes
+    // instead, so the sweep must not leak a nonzero exit into one-shot
+    // watch/pulse runs — snapshot and restore around the collect.
+    const priorExitCode = process.exitCode;
+    let result: { failed: number };
+    try {
+      result = await collectReviewThreads(host.rev, {
+        repo: host.repo,
+        filters: {
+          prIds: pending,
+          mergedSince: null,
+          mergedUntil: null,
+          lastN: null,
+          prAuthor: null,
+          labels: [],
+        },
+        threadAuthor: null,
+        runId: 'watch',
+        dryRun: false,
+        listOnly: false,
+        reharvest: false,
+        noLabel: false,
+        sources: ['review-threads'],
+        includeClosed: true,
+      });
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    // Rows committed by successful scans belong in the ledger even when
+    // sibling scans failed — refresh before the fail-closed note check,
+    // or labeled PRs are never re-swept and the ledger stays stale.
     refreshDebtLedger();
-    return note;
+    return closedPrSweepNote(pending, result);
   } catch (err) {
     return `closed-PR debt sweep failed — ${err instanceof Error ? err.message : String(err)}`;
   }
