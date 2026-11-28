@@ -221,54 +221,66 @@ const glabDetail = (r: { code: number; out: string; err: string }): string =>
 
 // --- id resolution -------------------------------------------------------------
 
-function parseIssueRef(dir: string, id: string): { projectPath: string; iid: number } {
-  const t = id.trim();
-  // full URL
-  const url = /^https?:\/\/([^/]+)\/(.+)\/-\/issues\/(\d+)\/?$/.exec(t);
-  if (url) {
-    const host = url[1]!.toLowerCase();
-    const myHost = hostFor(dir).toLowerCase();
-    const path = url[2]!.replace(/\.git$/, '');
-    if (host !== myHost) {
-      throw new Error(`gitlab tasks: "${id}" is from ${host} — this store serves ${myHost}`);
-    }
-    const myProj = resolveProjectPath(dir).toLowerCase();
-    if (path.toLowerCase() !== myProj) {
-      throw new Error(
-        `gitlab tasks: "${id}" is for ${path} — this store serves ${resolveProjectPath(dir)}`
-      );
-    }
-    return { projectPath: resolveProjectPath(dir), iid: Number(url[3]) };
+type IssueRef = { projectPath: string; iid: number };
+type IssueRefParser = (dir: string, id: string, value: string) => IssueRef | undefined;
+
+function parseUrlIssueRef(dir: string, id: string, value: string): IssueRef | undefined {
+  const match = /^https?:\/\/([^/]+)\/(.+)\/-\/issues\/(\d+)\/?$/.exec(value);
+  if (!match) {
+    return undefined;
   }
-  // group/project#iid or group/project:iid
-  const projRef = /^(.+)[:#](\d+)$/.exec(t);
-  if (projRef) {
-    const path = projRef[1]!;
-    // try to validate against current project if it matches host? be permissive but prefer current project context
-    const iid = Number(projRef[2]);
-    // if it points to different project, still allow if it's a full path - but task says iid scoped to project;
-    // use as-is (path) but also compare with current project for safety? be flexible
-    const myProj = resolveProjectPath(dir);
-    if (path.toLowerCase() !== myProj.toLowerCase()) {
-      // still allow - store may be used cross-project? but better to be strict like others
-      // but requirement says "iid двух проектов" in fixtures - so must support different projects
-      return { projectPath: path, iid };
-    }
-    return { projectPath: myProj, iid };
+  const host = match[1]!.toLowerCase();
+  const expectedHost = hostFor(dir).toLowerCase();
+  if (host !== expectedHost) {
+    throw new Error(`gitlab tasks: "${id}" is from ${host} — this store serves ${expectedHost}`);
   }
-  // just number
-  if (!/^(#\d+|\d+)$/.test(t)) {
+  const projectPath = resolveProjectPath(dir);
+  const path = match[2]!.replace(/\.git$/, '');
+  if (path.toLowerCase() !== projectPath.toLowerCase()) {
+    throw new Error(`gitlab tasks: "${id}" is for ${path} — this store serves ${projectPath}`);
+  }
+  return { projectPath, iid: Number(match[3]) };
+}
+
+function parseProjectIssueRef(dir: string, _id: string, value: string): IssueRef | undefined {
+  const match = /^(.+)[:#](\d+)$/.exec(value);
+  if (!match) {
+    return undefined;
+  }
+  const projectPath = match[1]!;
+  const currentProject = resolveProjectPath(dir);
+  return {
+    projectPath:
+      projectPath.toLowerCase() === currentProject.toLowerCase() ? currentProject : projectPath,
+    iid: Number(match[2]),
+  };
+}
+
+function parseNumericIssueRef(dir: string, id: string, value: string): IssueRef | undefined {
+  if (!/^(#\d+|\d+)$/.test(value)) {
+    return undefined;
+  }
+  const iid = Number(value.replace(/^#/, ''));
+  if (!Number.isSafeInteger(iid) || iid <= 0) {
     throw new Error(
       `gitlab tasks: "${id}" is not an issue reference (want 42, #42, group/proj#42, or an issue URL)`
     );
   }
-  const n = Number(t.replace(/^#/, ''));
-  if (!Number.isSafeInteger(n) || n <= 0) {
-    throw new Error(
-      `gitlab tasks: "${id}" is not an issue reference (want 42, #42, group/proj#42, or an issue URL)`
-    );
+  return { projectPath: resolveProjectPath(dir), iid };
+}
+
+function parseIssueRef(dir: string, id: string): IssueRef {
+  const value = id.trim();
+  const parsers: IssueRefParser[] = [parseUrlIssueRef, parseProjectIssueRef, parseNumericIssueRef];
+  for (const parser of parsers) {
+    const parsed = parser(dir, id, value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
   }
-  return { projectPath: resolveProjectPath(dir), iid: n };
+  throw new Error(
+    `gitlab tasks: "${id}" is not an issue reference (want 42, #42, group/proj#42, or an issue URL)`
+  );
 }
 
 // --- list/query ---------------------------------------------------------------
