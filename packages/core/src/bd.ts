@@ -3,7 +3,7 @@
  * package. PATH lookup is the contract (same as gh); a generous maxBuffer
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { gitTry, gitTryAsync } from './git.ts';
@@ -20,6 +20,7 @@ import { killGroup, spawnCollect } from './live-procs.ts';
 // PATH-keyed: a process that swaps PATH mid-life (tests injecting a
 // fake timeout, env sanitizers) must re-probe, not ride a stale verdict
 let timeoutProbe: { path?: string; bin: string | null } | undefined;
+let timeoutProbeAsync: { path?: string; promise: Promise<string | null> } | undefined;
 function supervised(args: string[], timeoutMs: number): { cmd: string; argv: string[] } {
   const path = process.env.PATH;
   if (timeoutProbe === undefined || timeoutProbe.path !== path) {
@@ -43,6 +44,47 @@ function supervised(args: string[], timeoutMs: number): { cmd: string; argv: str
   const backstopSec = Math.ceil((timeoutMs + 30_000) / 1000);
   return {
     cmd: timeoutProbe.bin,
+    argv: ['--foreground', '-k', '5s', `${backstopSec}s`, 'bd', ...args],
+  };
+}
+
+/** Async supervisor probe caches its in-flight promise so concurrent callers
+ * sharing a PATH do not each spawn a timeout --version probe. */
+function probeTimeoutAsync(path: string | undefined): Promise<string | null> {
+  const cached = timeoutProbeAsync;
+  if (cached !== undefined && cached.path === path) {
+    return cached.promise;
+  }
+  const promise = new Promise<string | null>(resolve => {
+    const tryCandidate = (index: number): void => {
+      const candidate = ['timeout', 'gtimeout'][index];
+      if (candidate === undefined) {
+        resolve(null);
+        return;
+      }
+      execFile(candidate, ['--version'], { windowsHide: true }, error => {
+        // child_process uses null, not undefined, for a successful exit.
+        // Treating success as an error makes environments without both
+        // timeout and gtimeout fall back to an un-supervised bd invocation.
+        if (error === null) resolve(candidate);
+        else tryCandidate(index + 1);
+      });
+    };
+    tryCandidate(0);
+  });
+  timeoutProbeAsync = { path, promise };
+  return promise;
+}
+
+async function supervisedAsync(
+  args: string[],
+  timeoutMs: number
+): Promise<{ cmd: string; argv: string[] }> {
+  const bin = await probeTimeoutAsync(process.env.PATH);
+  if (bin === null) return { cmd: 'bd', argv: args };
+  const backstopSec = Math.ceil((timeoutMs + 30_000) / 1000);
+  return {
+    cmd: bin,
     argv: ['--foreground', '-k', '5s', `${backstopSec}s`, 'bd', ...args],
   };
 }
@@ -163,44 +205,45 @@ export function bdAt(
  *  execFileSync-style shape (`.code/.stdout/.stderr`) so isBdNotFound
  *  and friends classify async failures exactly like sync ones. */
 export function bdAsync(args: string[], cwd?: string): Promise<string> {
-  const s = supervised(args, 15_000);
-  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true });
-  return new Promise((resolve, reject) => {
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup(proc);
-    }, 15_000);
-    timer.unref?.();
-    void done.then(({ code, out, err, error }) => {
-      clearTimeout(timer);
-      if (timedOut) {
+  return supervisedAsync(args, 15_000).then(s => {
+    const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true });
+    return new Promise((resolve, reject) => {
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killGroup(proc);
+      }, 15_000);
+      timer.unref?.();
+      void done.then(({ code, out, err, error }) => {
+        clearTimeout(timer);
+        if (timedOut) {
+          reject(
+            Object.assign(new Error(`bd ${args[0] ?? ''} timed out after 15000ms`), {
+              code: 'ETIMEDOUT',
+              stdout: out,
+              stderr: err,
+              killed: true,
+            })
+          );
+          return;
+        }
+        if (error !== undefined) {
+          reject(Object.assign(error, { stdout: out, stderr: normalizeSpawnErr(err) }));
+          return;
+        }
+        if (code === 0) {
+          resolve(out);
+          return;
+        }
+        const errMsg = normalizeSpawnErr(err);
         reject(
-          Object.assign(new Error(`bd ${args[0] ?? ''} timed out after 15000ms`), {
-            code: 'ETIMEDOUT',
+          Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${errMsg}`), {
+            code: code ?? 1,
             stdout: out,
-            stderr: err,
-            killed: true,
+            stderr: errMsg,
           })
         );
-        return;
-      }
-      if (error !== undefined) {
-        reject(Object.assign(error, { stdout: out, stderr: normalizeSpawnErr(err) }));
-        return;
-      }
-      if (code === 0) {
-        resolve(out);
-        return;
-      }
-      const errMsg = normalizeSpawnErr(err);
-      reject(
-        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${errMsg}`), {
-          code: code ?? 1,
-          stdout: out,
-          stderr: errMsg,
-        })
-      );
+      });
     });
   });
 }
@@ -212,22 +255,23 @@ export function bdTryAsync(
   timeoutMs = 15_000,
   cwd?: string
 ): Promise<{ code: number; out: string; err: string }> {
-  const s = supervised(args, timeoutMs);
-  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true });
-  return new Promise(resolve => {
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup(proc);
-    }, timeoutMs);
-    timer.unref?.();
-    void done.then(r => {
-      clearTimeout(timer);
-      resolve(
-        timedOut
-          ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
-          : { code: r.code ?? 1, out: r.out, err: normalizeSpawnErr(r.err) }
-      );
+  return supervisedAsync(args, timeoutMs).then(s => {
+    const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true });
+    return new Promise(resolve => {
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killGroup(proc);
+      }, timeoutMs);
+      timer.unref?.();
+      void done.then(r => {
+        clearTimeout(timer);
+        resolve(
+          timedOut
+            ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
+            : { code: r.code ?? 1, out: r.out, err: normalizeSpawnErr(r.err) }
+        );
+      });
     });
   });
 }

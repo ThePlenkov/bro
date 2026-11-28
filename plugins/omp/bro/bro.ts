@@ -1,6 +1,6 @@
 // bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
 import { createRequire } from "node:module";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1438,6 +1438,7 @@ const MAX_JSON_BODY = 4 * 1024 * 1024;
 *  reaches both. No GNU timeout → bare bd: same contract, the orphan
 *  risk comes back but nothing else changes. */
 let timeoutProbe;
+let timeoutProbeAsync;
 function supervised(args, timeoutMs) {
 	const path = process.env.PATH;
 	if (timeoutProbe === void 0 || timeoutProbe.path !== path) {
@@ -1467,6 +1468,49 @@ function supervised(args, timeoutMs) {
 			"-k",
 			"5s",
 			`${backstopSec}s`,
+			"bd",
+			...args
+		]
+	};
+}
+/** Async supervisor probe caches its in-flight promise so concurrent callers
+* sharing a PATH do not each spawn a timeout --version probe. */
+function probeTimeoutAsync(path) {
+	const cached = timeoutProbeAsync;
+	if (cached !== void 0 && cached.path === path) return cached.promise;
+	const promise = new Promise((resolve$1) => {
+		const tryCandidate = (index) => {
+			const candidate = ["timeout", "gtimeout"][index];
+			if (candidate === void 0) {
+				resolve$1(null);
+				return;
+			}
+			execFile(candidate, ["--version"], { windowsHide: true }, (error) => {
+				if (error === null) resolve$1(candidate);
+				else tryCandidate(index + 1);
+			});
+		};
+		tryCandidate(0);
+	});
+	timeoutProbeAsync = {
+		path,
+		promise
+	};
+	return promise;
+}
+async function supervisedAsync(args, timeoutMs) {
+	const bin = await probeTimeoutAsync(process.env.PATH);
+	if (bin === null) return {
+		cmd: "bd",
+		argv: args
+	};
+	return {
+		cmd: bin,
+		argv: [
+			"--foreground",
+			"-k",
+			"5s",
+			`${Math.ceil((timeoutMs + 3e4) / 1e3)}s`,
 			"bd",
 			...args
 		]
@@ -1534,68 +1578,70 @@ function bdJson(args, cwd) {
 *  execFileSync-style shape (`.code/.stdout/.stderr`) so isBdNotFound
 *  and friends classify async failures exactly like sync ones. */
 function bdAsync(args, cwd) {
-	const s = supervised(args, 15e3);
-	const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, void 0, { detached: true });
-	return new Promise((resolve$1, reject) => {
-		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			killGroup(proc);
-		}, 15e3);
-		timer.unref?.();
-		done.then(({ code, out, err, error }) => {
-			clearTimeout(timer);
-			if (timedOut) {
-				reject(Object.assign(/* @__PURE__ */ new Error(`bd ${args[0] ?? ""} timed out after 15000ms`), {
-					code: "ETIMEDOUT",
+	return supervisedAsync(args, 15e3).then((s) => {
+		const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, void 0, { detached: true });
+		return new Promise((resolve$1, reject) => {
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				killGroup(proc);
+			}, 15e3);
+			timer.unref?.();
+			done.then(({ code, out, err, error }) => {
+				clearTimeout(timer);
+				if (timedOut) {
+					reject(Object.assign(/* @__PURE__ */ new Error(`bd ${args[0] ?? ""} timed out after 15000ms`), {
+						code: "ETIMEDOUT",
+						stdout: out,
+						stderr: err,
+						killed: true
+					}));
+					return;
+				}
+				if (error !== void 0) {
+					reject(Object.assign(error, {
+						stdout: out,
+						stderr: normalizeSpawnErr(err)
+					}));
+					return;
+				}
+				if (code === 0) {
+					resolve$1(out);
+					return;
+				}
+				const errMsg = normalizeSpawnErr(err);
+				reject(Object.assign(/* @__PURE__ */ new Error(`bd ${args.join(" ")} failed (${code ?? 1}): ${errMsg}`), {
+					code: code ?? 1,
 					stdout: out,
-					stderr: err,
-					killed: true
+					stderr: errMsg
 				}));
-				return;
-			}
-			if (error !== void 0) {
-				reject(Object.assign(error, {
-					stdout: out,
-					stderr: normalizeSpawnErr(err)
-				}));
-				return;
-			}
-			if (code === 0) {
-				resolve$1(out);
-				return;
-			}
-			const errMsg = normalizeSpawnErr(err);
-			reject(Object.assign(/* @__PURE__ */ new Error(`bd ${args.join(" ")} failed (${code ?? 1}): ${errMsg}`), {
-				code: code ?? 1,
-				stdout: out,
-				stderr: errMsg
-			}));
+			});
 		});
 	});
 }
 /** Non-throwing async bd — the spawnSync bdTry's twin for probe paths
 *  where beads is optional and must degrade, never stall. */
 function bdTryAsync(args, timeoutMs = 15e3, cwd) {
-	const s = supervised(args, timeoutMs);
-	const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, void 0, { detached: true });
-	return new Promise((resolve$1) => {
-		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			killGroup(proc);
-		}, timeoutMs);
-		timer.unref?.();
-		done.then((r) => {
-			clearTimeout(timer);
-			resolve$1(timedOut ? {
-				code: 124,
-				out: r.out,
-				err: `timed out after ${timeoutMs}ms`
-			} : {
-				code: r.code ?? 1,
-				out: r.out,
-				err: normalizeSpawnErr(r.err)
+	return supervisedAsync(args, timeoutMs).then((s) => {
+		const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, void 0, { detached: true });
+		return new Promise((resolve$1) => {
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				killGroup(proc);
+			}, timeoutMs);
+			timer.unref?.();
+			done.then((r) => {
+				clearTimeout(timer);
+				resolve$1(timedOut ? {
+					code: 124,
+					out: r.out,
+					err: `timed out after ${timeoutMs}ms`
+				} : {
+					code: r.code ?? 1,
+					out: r.out,
+					err: normalizeSpawnErr(r.err)
+				});
 			});
 		});
 	});
