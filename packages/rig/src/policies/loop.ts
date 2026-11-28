@@ -3695,8 +3695,11 @@ async function tryClaim(ctx: LoopCtx): Promise<boolean> {
       }
       if (held) {
         // drain beats the hold — an empty queue behind the ceiling has
-        // nothing to wait for (same rule as the disk floor)
-        if (queueDrained(ctx, ctx.q.seen)) {
+        // nothing to wait for (same rule as the disk floor). While a gate
+        // is still settling, readiness can change when it lands; defer the
+        // verdict until the stack is empty so an unblocked bead is not
+        // stranded until the next supervised pass.
+        if (ctx.q.stack.length === 0 && queueDrained(ctx, ctx.q.seen)) {
           ctx.q.drained = true;
         }
         return false;

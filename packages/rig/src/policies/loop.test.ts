@@ -238,6 +238,26 @@ describe('loopPolicy.select — the claim pick', () => {
     assert.equal(loopPolicy.select(w.ctx), undefined);
   });
 
+  test('ceiling hold does not drain a queue while the gate stack is settling', async () => {
+    const w = world({}, { maxOpenTotal: 1 });
+    let open = true;
+    w.ctx.deps.openFleetPrs = () =>
+      (open ? [{ pr: 1, headRef: 'loop/held', state: 'OPEN' }] : []);
+    w.ctx.q.stack.push(member([], w.root));
+    w.candidates.push({ candidates: [], foreign: 0 });
+
+    assert.equal(await loopPolicy.tryClaim(w.ctx), false);
+    assert.equal(w.ctx.q.drained, false);
+
+    // The gate landing frees the stack and the ceiling; the next tick must
+    // get a fresh readiness verdict instead of inheriting the held tick's
+    // premature drain marker.
+    w.ctx.q.stack.length = 0;
+    open = false;
+    assert.equal(await loopPolicy.tryClaim(w.ctx), false);
+    assert.equal(w.ctx.q.drained, true);
+  });
+
   test('a foreign-only remainder reports and selects nothing', () => {
     const w = world();
     w.candidates.push({ candidates: [], foreign: 3 });
