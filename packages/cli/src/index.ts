@@ -91,11 +91,16 @@ const cli = defineCommand({
     // external command must be dispatchable, and it should show in --help.
     // Group names are reserved too — an external 'review' would shadow
     // the namespace's members without ever being reachable itself.
-    await loadExternalPlugins(
-      undefined,
-      undefined,
-      new Set([...reservedWords(), ...pluginGroups().keys()])
-    );
+    // Hook events resolve their project from stdin after prepare runs. Let
+    // runHooksCommand load external connectors against that resolved root;
+    // loading here would bind them to the host cwd before the payload exists.
+    if (cmd !== 'hooks') {
+      await loadExternalPlugins(
+        undefined,
+        undefined,
+        new Set([...reservedWords(), ...pluginGroups().keys()])
+      );
+    }
   },
   fallback: async (cmd, rest) => runDocVerb(cmd, rest),
 });
