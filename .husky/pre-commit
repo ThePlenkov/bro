@@ -24,7 +24,7 @@ is_biome_ignored() {
     commands/bro.md|.opencode/commands/bro.md|site/content/docs/reference/*)
       return 0
       ;;
-    specs/*|packages/brose/*|packages/brotocol/*)
+    specs/*.md|packages/brose/*.md|packages/brotocol/*.md)
       return 0
       ;;
     plugins/*/bro/bro.ts|plugins/*/bro/index.ts)
