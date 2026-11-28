@@ -452,7 +452,15 @@ function reportHarvest(
   }
 }
 
-export async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
+export interface CollectReviewThreadsResult {
+  /** Number of PR collections that failed. A non-zero value is incomplete. */
+  failed: number;
+}
+
+export async function collectReviewThreads(
+  rev: ReviewFacade,
+  args: CollectArgs
+): Promise<CollectReviewThreadsResult> {
   // Fetch at least as many candidates as --last requests, or it silently caps.
   const listLimit = Math.max(args.filters.lastN ?? 0, 100);
   const matched = resolveHarvestPrs(rev, {
@@ -472,10 +480,10 @@ export async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs)
 
   if (args.listOnly) {
     listTargets(targets);
-    return;
+    return { failed: 0 };
   }
   if (targets.length === 0) {
-    return;
+    return { failed: 0 };
   }
 
   const labelingEnabled = prepareLabeling(rev, args);
@@ -484,4 +492,5 @@ export async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs)
     targets
   );
   reportHarvest(labelingEnabled, rows, labeled, failed);
+  return { failed };
 }
