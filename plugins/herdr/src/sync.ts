@@ -13,7 +13,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { procStat } from '../../../packages/core/src/proc.ts';
 import { ctxJson, herdrOk, repoDir, STATE_DIR, stateScope, syncPidPath } from './lib.ts';
-import { converge } from './reconcile.ts';
+import { convergeAsync } from './reconcile.ts';
 import { type EventSource, LiveSource, PollSource } from './sources.ts';
 
 const requested = Number(process.env.BRO_SYNC_EVERY_S ?? 30);
@@ -57,7 +57,7 @@ for await (const planes of source) {
     break;
   }
   try {
-    const r = converge(planes);
+    const r = await convergeAsync(planes);
     console.log(
       `[${new Date().toISOString()}] pass ok — ${r.armed} armed, ${r.mirrors} mirrors, ${r.renderers} renderers, ${r.reaped} reaped`
     );

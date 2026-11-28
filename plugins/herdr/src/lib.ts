@@ -8,7 +8,7 @@
  *
  * Runs under `node` ≥22.18 native TS (the floor bro itself requires).
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -64,6 +64,46 @@ export function run(cmd: string, args: string[], cwd?: string): RunOut {
     out: r.stdout ?? '',
     err: r.stderr ?? (r.error !== undefined ? String(r.error) : ''),
   };
+}
+
+/** Async command execution for the long-lived reconcile daemon. */
+export function runAsync(cmd: string, args: string[], cwd?: string): Promise<RunOut> {
+  return new Promise(resolve => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    let settled = false;
+    const finish = (result: RunOut): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, out, err });
+    }, 180_000);
+    child.stdout?.setEncoding('utf8').on('data', chunk => {
+      out += chunk;
+      if (out.length > 16 * 1024 * 1024) {
+        child.kill();
+        finish({ code: -1, out: out.slice(0, 16 * 1024 * 1024), err });
+      }
+    });
+    child.stderr?.setEncoding('utf8').on('data', chunk => {
+      err += chunk;
+      if (err.length > 16 * 1024 * 1024) {
+        child.kill();
+        finish({ code: -1, out, err: err.slice(0, 16 * 1024 * 1024) });
+      }
+    });
+    child.on('error', error => finish({ code: -1, out, err: String(error) }));
+    child.on('close', code => finish({ code: code ?? -1, out, err }));
+  });
 }
 
 /** `herdr <args>` → `.result` — the CLI is the plugin's whole API surface. */
@@ -690,6 +730,38 @@ export function withStateLock<T>(scope: string, fn: () => T): T {
       rmSync(lock, { recursive: true, force: true });
     } catch {
       // a breaker already took it — nothing to release
+    }
+  }
+}
+
+export async function withStateLockAsync<T>(scope: string, fn: () => Promise<T>): Promise<T> {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const lock = join(STATE_DIR, `state-${scope}.lock`);
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      if (lockStale(lock)) {
+        try {
+          rmSync(lock, { recursive: true, force: true });
+        } catch {
+          // another contender won the race
+        }
+        continue;
+      }
+      if (Date.now() >= until) return fn();
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lock, { recursive: true, force: true });
+    } catch {
+      // a breaker already took it
     }
   }
 }
