@@ -22,7 +22,7 @@
  * a missing server degrades to "no board", never a crash.
  */
 import { Plugin } from '@opencode/plugin/tui';
-import { For, Show, createSignal } from 'solid-js';
+import { createSignal, For, Show } from 'solid-js';
 import { Bro, type BroBoard, boardHasContent } from './rpc.ts';
 
 type Theme = Plugin.Context['theme'];
@@ -42,17 +42,40 @@ const POLL_MS = 15_000;
  *  first would otherwise wait a whole poll interval for the board. */
 const RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000];
 
-function ageStr(ms: number): string {
-  const s = Math.round(ms / 1000);
+interface MillisecondsValue {
+  milliseconds?: number;
+}
+
+interface TextClip {
+  text: string;
+  max?: number;
+}
+
+interface IdValue {
+  id: string;
+}
+
+interface ArgsInput {
+  input: string;
+}
+
+interface BoardRenderProps {
+  board: () => BoardView | null;
+  theme: Theme;
+}
+
+function ageStr({ milliseconds }: MillisecondsValue): string {
+  if (milliseconds === undefined) return '?';
+  const s = Math.round(milliseconds / 1000);
   if (s < 90) return `${s}s`;
   const m = Math.round(s / 60);
   if (m < 90) return `${m}m`;
   return `${Math.round(m / 60)}h`;
 }
 
-function fmtDuration(ms?: number): string {
-  if (ms === undefined || ms <= 0) return '?';
-  const s = Math.floor(ms / 1000);
+function fmtDuration({ milliseconds }: MillisecondsValue): string {
+  if (milliseconds === undefined || milliseconds <= 0) return '?';
+  const s = Math.floor(milliseconds / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;
@@ -60,17 +83,17 @@ function fmtDuration(ms?: number): string {
   return `${h}h${m % 60}m`;
 }
 
-function shortId(id: string): string {
+function shortId({ id }: IdValue): string {
   return id.startsWith('bro-') ? id.slice(4) : id;
 }
 
-function clip(text: string, max = 3_000): string {
+function clip({ text, max = 3_000 }: TextClip): string {
   return text.length > max ? `${text.slice(0, max)}\n…` : text;
 }
 
 /** `/bro` arguments — whitespace-split with "…"/'…' holding a multiword
  *  value together. Unmatched quotes degrade to the plain token. */
-function splitArgs(input: string): string[] {
+function splitArgs({ input }: ArgsInput): string[] {
   const args: string[] = [];
   for (const m of input.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
     const [doubleQuoted, singleQuoted, bare] = m.slice(1);
@@ -95,7 +118,7 @@ function InWorkItem(props: {
   return (
     <box flexDirection="column" marginBottom={1}>
       <text wrapMode="none" truncate>
-        <span style={{ fg: theme.text.feedback.info.base }}>●</span> <b>{shortId(b.id)}</b>{' '}
+        <span style={{ fg: theme.text.feedback.info.base }}>●</span> <b>{shortId({ id: b.id })}</b>{' '}
         <span style={{ fg: theme.text.muted }}>
           {b.title.length > 40 ? `${b.title.slice(0, 40)}…` : b.title}
         </span>
@@ -113,7 +136,7 @@ function InWorkItem(props: {
   );
 }
 
-function InWorkSection(props: { board: () => BoardView | null; theme: Theme }) {
+function InWorkSection(props: BoardRenderProps) {
   const board = props.board;
   return (
     <Show when={(board()?.inWork.length ?? 0) > 0}>
@@ -134,13 +157,13 @@ function ReadyRow(props: { b: { id: string; title: string }; theme: Theme }) {
         ○
       </text>
       <text fg={theme.text.muted} wrapMode="none" truncate flexGrow={1} flexShrink={1} minWidth={0}>
-        <b>{shortId(props.b.id)}</b> {title}
+        <b>{shortId({ id: props.b.id })}</b> {title}
       </text>
     </box>
   );
 }
 
-function ReadySection(props: { board: () => BoardView | null; theme: Theme }) {
+function ReadySection(props: BoardRenderProps) {
   const board = props.board;
   return (
     <Show when={(board()?.readyTotal ?? 0) > 0}>
@@ -152,7 +175,7 @@ function ReadySection(props: { board: () => BoardView | null; theme: Theme }) {
   );
 }
 
-function FleetSection(props: { board: () => BoardView | null; theme: Theme }) {
+function FleetSection(props: BoardRenderProps) {
   const board = props.board;
   const theme = props.theme;
   const live = () => (board()?.agents ?? []).filter(a => a.state === 'running');
@@ -176,14 +199,14 @@ function FleetSection(props: { board: () => BoardView | null; theme: Theme }) {
   );
 }
 
-function WatchSection(props: { board: () => BoardView | null; theme: Theme }) {
+function WatchSection(props: BoardRenderProps) {
   const board = props.board;
   const theme = props.theme;
   return (
     <Show when={board()?.watch}>
       {w => (
         <text fg={w().attention > 0 ? theme.text.feedback.warning.base : theme.text.muted}>
-          watch {ageStr(w().ageMs)} ago
+          watch {ageStr({ milliseconds: w().ageMs })} ago
           <Show when={w().attention > 0}> · {w().attention} attention</Show>
         </text>
       )}
@@ -191,7 +214,7 @@ function WatchSection(props: { board: () => BoardView | null; theme: Theme }) {
   );
 }
 
-function BoardBody(props: { board: () => BoardView | null; theme: Theme }) {
+function BoardBody(props: BoardRenderProps) {
   const board = props.board;
   const theme = props.theme;
   return (
@@ -207,8 +230,37 @@ function BoardBody(props: { board: () => BoardView | null; theme: Theme }) {
   );
 }
 
+interface BoardWidgetProps {
+  context: Plugin.Context;
+  board: () => BoardView | null;
+}
+
+interface BoardWidgetHeaderProps extends BoardRenderProps {
+  open: boolean;
+  onToggle: () => void;
+}
+
+function BoardWidgetHeader(props: BoardWidgetHeaderProps) {
+  const current = props.board();
+  return (
+    <box flexDirection="row" gap={1} onMouseDown={props.onToggle}>
+      <text fg={props.theme.text.base}>{props.open ? '▼' : '▶'}</text>
+      <text fg={props.theme.text.base}>
+        <b>bro</b>
+        <Show when={!props.open && current !== null}>
+          <span style={{ fg: props.theme.text.muted }}>
+            {' '}
+            ({current?.inWork.length} in work, {current?.readyTotal} ready
+            {current?.watch ? `, ${current.watch.attention} attention` : ''})
+          </span>
+        </Show>
+      </text>
+    </box>
+  );
+}
+
 /** The collapsible board — the sidebar widget. */
-function BroBoardWidget(props: { context: Plugin.Context; board: () => BoardView | null }) {
+function BroBoardWidget(props: BoardWidgetProps) {
   const theme = props.context.theme;
   const [view, updateView] = props.context.storage.store('bro.view', {
     initial: { open: true },
@@ -221,27 +273,16 @@ function BroBoardWidget(props: { context: Plugin.Context; board: () => BoardView
   return (
     <Show when={hasContent()}>
       <box flexDirection="column">
-        <box
-          flexDirection="row"
-          gap={1}
-          onMouseDown={() => {
+        <BoardWidgetHeader
+          board={board}
+          theme={theme}
+          open={view.open}
+          onToggle={() => {
             void updateView(draft => {
               draft.open = !draft.open;
             }).catch(() => {});
           }}
-        >
-          <text fg={theme.text.base}>{view.open ? '▼' : '▶'}</text>
-          <text fg={theme.text.base}>
-            <b>bro</b>
-            <Show when={!view.open && board() !== null}>
-              <span style={{ fg: theme.text.muted }}>
-                {' '}
-                ({board()?.inWork.length} in work, {board()?.readyTotal} ready
-                {board()?.watch ? `, ${board()?.watch?.attention} attention` : ''})
-              </span>
-            </Show>
-          </text>
-        </box>
+        />
         <Show when={view.open}>
           <BoardBody board={board} theme={theme} />
         </Show>
@@ -339,7 +380,7 @@ export default Plugin.define({
             data.severity === 'error' ? 'error' : data.severity === 'warning' ? 'warning' : 'info';
           toast.show({
             title: `bro • ${title}`,
-            message: clip(message),
+            message: clip({ text: message }),
             variant: severity,
             duration: 10_000,
           });
@@ -375,7 +416,7 @@ export default Plugin.define({
           palette: true,
           slash: { name: 'bro', arguments: true },
           run: async (input?: string) => {
-            const args = splitArgs(input ?? '');
+            const args = splitArgs({ input: input ?? '' });
             const verb = args.length > 0 ? args : ['status'];
             try {
               const result = await client().rpc(Bro).board({});
@@ -393,7 +434,7 @@ export default Plugin.define({
                   : `bro ${verb.join(' ')} — the board is above`;
               toast.show({
                 title: `bro ${verb.join(' ')}`,
-                message: clip(body),
+                message: clip({ text: body }),
                 variant: 'info',
                 duration: 10_000,
               });
