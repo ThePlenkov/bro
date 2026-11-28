@@ -44,6 +44,7 @@ import {
   type HerdrWorktree,
   herdrTry,
   loadState,
+  MAX_OUTPUT,
   notify,
   PLUGIN_ROOT,
   type PluginState,
@@ -594,7 +595,7 @@ function quickRun(
   }
 }
 
-async function quickRunAsync(
+export async function quickRunAsync(
   cmd: string,
   args: string[],
   cwd?: string,
@@ -608,23 +609,43 @@ async function quickRunAsync(
     });
     let out = '';
     let err = '';
-    const timer = setTimeout(() => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (result: { code: number; out: string; err: string }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        ...result,
+        out: result.out.slice(0, MAX_OUTPUT),
+        err: result.err.slice(0, MAX_OUTPUT),
+      });
+    };
+    timer = setTimeout(() => {
       child.kill();
-      resolve({ code: -1, out, err });
+      finish({ code: -1, out, err });
     }, timeoutMs);
     child.stdout?.setEncoding('utf8').on('data', chunk => {
+      if (settled) return;
       out += chunk;
+      if (out.length > MAX_OUTPUT) {
+        child.kill();
+        finish({ code: -1, out, err });
+      }
     });
     child.stderr?.setEncoding('utf8').on('data', chunk => {
+      if (settled) return;
       err += chunk;
+      if (err.length > MAX_OUTPUT) {
+        child.kill();
+        finish({ code: -1, out, err });
+      }
     });
     child.on('error', error => {
-      clearTimeout(timer);
-      resolve({ code: -1, out, err: String(error) });
+      finish({ code: -1, out, err: String(error) });
     });
     child.on('close', code => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, out, err });
+      finish({ code: code ?? -1, out, err });
     });
   });
 }
