@@ -84,6 +84,16 @@ async function postResponses(
   return { r: await post('/v1/responses', body), url, close };
 }
 
+/** boot() + one Anthropic-compatible /v1/messages POST — used for
+ *  failures that are translated by the shared turnError path. */
+async function postMessages(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  body: unknown = { messages: [{ role: 'user', content: 'x' }] }
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  const { url, post, close } = await boot(fake);
+  return { r: await post('/v1/messages', body), url, close };
+}
+
 async function evs(r: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
   const raw = await r.text();
   return raw
@@ -143,6 +153,20 @@ describe('serve /v1/responses — the openai dialect', () => {
           code: null,
         },
       });
+    } finally {
+      await close();
+    }
+  });
+
+  test('/v1/messages unknown model 404 never carries retry-after', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/unknown-429',
+      messages: [{ role: 'user', content: 'x' }],
+    });
+    try {
+      assert.equal(r.status, 404);
+      assert.equal(r.headers.get('retry-after'), null);
     } finally {
       await close();
     }
