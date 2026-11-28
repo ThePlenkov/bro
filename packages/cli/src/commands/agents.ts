@@ -1950,7 +1950,7 @@ export function followLog(
  *  followLog can't ride it: poll, re-render past the watermark, emit.
  *  Torn reads and vanishes skip a tick. Same stop-handle contract as
  *  followLog — stoppable without a signal. */
-function followTranscript(
+export function followTranscript(
   path: string,
   startWatermark: number,
   emit: (s: string) => void
@@ -1992,18 +1992,24 @@ function followTranscript(
  *  plumbing trace). Returns false when the agent isn't a devin session
  *  or never flushed a transcript — the caller falls back to the byte
  *  tail. */
+export function devinTranscriptForAgent(
+  a: AgentInfo,
+  env: AgentConnectorEnv
+): string | undefined {
+  const devinName =
+    a.backend === 'devin' && a.id.startsWith('devin:') ? a.id.slice('devin:'.length) : undefined;
+  return devinName === undefined
+    ? undefined
+    : devinSessionTranscript(devinName, devinTranscriptsDir(env.agents['devin'] ?? {}));
+}
+
 async function cmdLogDevinTranscript(
   a: AgentInfo,
   env: AgentConnectorEnv,
   lines: number,
   follow: boolean
 ): Promise<boolean> {
-  const devinName =
-    a.backend === 'devin' && a.id.startsWith('devin:') ? a.id.slice('devin:'.length) : undefined;
-  const transcript =
-    devinName === undefined
-      ? undefined
-      : devinSessionTranscript(devinName, devinTranscriptsDir(env.agents['devin'] ?? {}));
+  const transcript = devinTranscriptForAgent(a, env);
   if (transcript === undefined) {
     return false;
   }
