@@ -31,7 +31,7 @@ export {
   armWallFromError,
 } from './acp-cooldown.ts';
 export { AcpCooldownError } from './acp-cooldown.ts';
-export { AcpConfigError } from './acp.ts';
+export { AcpConfigError, AcpUnknownModelError } from './acp.ts';
 export type {
   AcpArmedWall,
   AcpCooldownOptions,

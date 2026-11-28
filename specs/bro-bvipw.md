@@ -73,7 +73,7 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 | backend quota/rate-limited | 529 | 429 `rate_limit_error` + `Retry-After` (implemented) |
 | malformed body / bad field | 500-ish | 400 `invalid_request_error` (implemented; `stop_sequences` non-array → 400) |
 | bad/missing token | 401 | keep + `authentication_error` type |
-| unknown model pin | ? | 404 `not_found_error` |
+| unknown model pin | ✅ | ACP's live session catalog rejects an unadvertised pin as 404 `not_found_error`; no pre-flight provider spawn |
 | mid-stream turn failure | in-stream `error` event | keep |
 
 ### SSE nuances
@@ -141,7 +141,9 @@ output[], usage, error:null}`.
 ### `GET /v1/models` — OpenAI shape
 
 `{object:'list', data:[{id, object:'model', created, owned_by}]}`
-over the same catalog.
+over the same catalog. Rows also retain the Anthropic-compatible fields
+(`type`, `display_name`, `description`, `source`, `created_at`) additively,
+so the shared endpoint remains compatible with both dialects.
 
 ### Errors
 

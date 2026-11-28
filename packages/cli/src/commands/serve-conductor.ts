@@ -70,6 +70,7 @@ import {
   AcpDeadLoopError,
   AcpDeadLoopGuard,
   AcpLaneCooldown,
+  AcpUnknownModelError,
   acpOpen,
   acpPooledTurn,
   acpSessionRetain,
@@ -3260,6 +3261,7 @@ function turnError(
   const msg = err instanceof Error ? err.message : String(err);
   const avail = AVAIL.test(msg);
   const rate = RATE.test(msg);
+  const unknownModel = err instanceof AcpUnknownModelError;
   // the dead-loop refusal (spec bro-b961a) — the churn was stopped
   // before it cost a session; the client waits and tries again
   const deadLoop = err instanceof AcpDeadLoopError ? err : undefined;
@@ -3276,6 +3278,7 @@ function turnError(
   if (deadLoop) liveType = 'rate_limit_error';
   if (cooling) liveType = 'rate_limit_error';
   if (budget) liveType = 'rate_limit_error';
+  if (unknownModel) liveType = 'not_found_error';
   if (live !== undefined) {
     live.error(liveType, `bro conductor: ${msg}`);
     res.end();
@@ -3322,6 +3325,7 @@ function turnError(
       retry_after: budget.retryAfterSec,
     });
   }
+  if (unknownModel) status = 404;
   otelEvent('conductor.error', {
     backend,
     status,
@@ -4362,6 +4366,9 @@ function openaiFailKind(
 ): { status: number; stream: string; wire: string; retryAfter?: string } {
   if (err instanceof ChainBroken) {
     return { status: 400, stream: 'invalid_request_error', wire: 'invalid_request_error' };
+  }
+  if (err instanceof AcpUnknownModelError) {
+    return { status: 404, stream: 'not_found_error', wire: 'not_found_error' };
   }
   if (err instanceof AcpDeadLoopError) {
     // the refusal is the guard's cooldown, not a quota wall (spec
@@ -5691,6 +5698,9 @@ const anthropicServedRow: ServedRow = m => ({
   description: providerPath(m),
   ...(m.prefix === undefined ? {} : { source: m.prefix }),
   created_at: '2025-01-01T00:00:00Z',
+  object: 'model',
+  created: 1_735_689_600,
+  owned_by: m.prefix ?? 'bro',
 });
 
 const servedRowHandlers: Record<string, ServedRow> = {
@@ -5700,6 +5710,11 @@ const servedRowHandlers: Record<string, ServedRow> = {
     object: 'model',
     created: 1_735_689_600,
     owned_by: m.prefix ?? 'bro',
+    type: 'model',
+    display_name: displayName(m),
+    description: providerPath(m),
+    ...(m.prefix === undefined ? {} : { source: m.prefix }),
+    created_at: '2025-01-01T00:00:00Z',
   }),
 };
 
