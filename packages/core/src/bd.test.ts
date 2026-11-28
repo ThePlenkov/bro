@@ -250,6 +250,7 @@ describe('async timeout supervisor probe', { skip: WIN32 }, () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-bd-async-timeout-'));
     const count = join(dir, 'count');
     const timeout = join(dir, 'timeout');
+    const bd = join(dir, 'bd');
     writeFileSync(
       timeout,
       `#!/bin/sh
@@ -263,6 +264,10 @@ exit 0
 `
     );
     chmodSync(timeout, 0o755);
+    // If the probe incorrectly falls through to an unsupervised bd call,
+    // make that observable instead of depending on a host-installed bd.
+    writeFileSync(bd, '#!/bin/sh\nexit 42\n');
+    chmodSync(bd, 0o755);
     const previousPath = process.env.PATH;
     const previousCount = process.env.FAKE_TIMEOUT_COUNT;
     process.env.PATH = `${dir}:${previousPath}`;

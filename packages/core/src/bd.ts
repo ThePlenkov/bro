@@ -63,7 +63,10 @@ function probeTimeoutAsync(path: string | undefined): Promise<string | null> {
         return;
       }
       execFile(candidate, ['--version'], { windowsHide: true }, error => {
-        if (error === undefined) resolve(candidate);
+        // child_process uses null, not undefined, for a successful exit.
+        // Treating success as an error makes environments without both
+        // timeout and gtimeout fall back to an un-supervised bd invocation.
+        if (error === null) resolve(candidate);
         else tryCandidate(index + 1);
       });
     };
