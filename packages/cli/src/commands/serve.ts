@@ -1222,15 +1222,31 @@ async function routeAgentLog(
   return true;
 }
 
+// The transcript writer swaps the file atomically, so a read can land
+// between unlink and rename — a missing or unreadable file is the same
+// mid-rewrite condition the retry loop already handles, not a crash.
+function readTranscript(transcript: string): string | undefined {
+  try {
+    return readFileSync(transcript, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+function renderTranscript(transcript: string): ReturnType<typeof renderDevinTranscript> {
+  const text = readTranscript(transcript);
+  return text === undefined ? undefined : renderDevinTranscript(text);
+}
+
 async function routeTranscriptLog(
   res: ServerResponse,
   url: URL,
   transcript: string
 ): Promise<void> {
-  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
+  let rendered = renderTranscript(transcript);
   if (rendered === undefined) {
     await new Promise(resolve => setTimeout(resolve, 250));
-    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
+    rendered = renderTranscript(transcript);
   }
   if (rendered === undefined) {
     send(res, 503, { error: `transcript unreadable mid-rewrite: ${transcript} — retry` });
