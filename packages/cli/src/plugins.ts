@@ -592,6 +592,7 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Per-session behaviour mode — observe | plan | code | review | orchestrate; get, set, list, clear, render snapshots [--json]',
     run: argv => runModeCommand(argv),
+    skill: 'mode',
     contract: {
       flags: {
         '--json': 'mode payload as JSON — get: {session, warnings}; list: {modes, warnings}',
@@ -1332,6 +1333,7 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)',
     run: runExecCommand,
+    skill: 'exec',
     contract: {
       exits: { 2: 'usage', 130: 'child killed by SIGINT' },
     },
