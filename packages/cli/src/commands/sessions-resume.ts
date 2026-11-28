@@ -62,7 +62,7 @@ function resumeArgs(argv: string[]): { print: boolean; last: boolean; pick: bool
   const print = argv.includes('--print');
   const last = argv.includes('--last');
   const pick = argv.includes('--pick');
-  const selectors = [last, pick, rest.length > 0 ? 1 : 0].filter(Boolean).length;
+  const selectors = Number(last) + Number(pick) + Math.min(rest.length, 1);
   if (selectors > 1 || rest.length > 1) {
     throw new CommandError('error: choose one of <id>, --last, or --pick', EXIT.usage);
   }
@@ -160,7 +160,7 @@ function resumeById(rows: MsgSessionRow[], id: string): MsgSessionRow {
   const matched = resolution.deliveries
     .map(d => d.session)
     .filter((s): s is MsgSessionRow => s !== undefined);
-  const distinct = new Map(matched.map(s => [`${s.host}:${s.sid}`, s]));
+  const distinct = new Map(matched.map(s => [JSON.stringify([s.host, s.sid]), s]));
   if (distinct.size === 0) {
     throw new CommandError(
       `error: no ledger session matches "${id}" — the session may not be wired yet`,
@@ -168,7 +168,7 @@ function resumeById(rows: MsgSessionRow[], id: string): MsgSessionRow {
     );
   }
   if (distinct.size > 1) {
-    const list = [...distinct.keys()].join(', ');
+    const list = [...distinct.values()].map(s => `${s.host}:${s.sid}`).join(', ');
     throw new CommandError(
       `error: "${id}" resolves to ${distinct.size} sessions (${list}) — name one with <host>:<sid>`,
       EXIT.usage
@@ -238,27 +238,50 @@ async function launchResume(
   const cwd = session.cwd ?? ctx.dir;
   const resumeArgv = sessionResumeArgv(session.host, session.sid, cwd);
   const stateNote = ` [${session.state}]`;
+  const display = { session, stateNote, cwd, out: ctx.out };
   if (resumeArgv === null) {
-    // report, never guess — the spec's unsupported-host contract
-    ctx.out(
-      `resume: host '${session.host}' has no resume command — ` +
-        `${session.host}:${shortSid(session.sid)}${stateNote} (${cwd})`
-    );
+    reportUnsupportedHost(display);
     return;
   }
   const cmdline = resumeArgv.join(' ');
   if (args.print) {
-    ctx.out(
-      `resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}  (cwd: ${cwd})`
-    );
+    reportPrintedResume(display, cmdline);
     return;
   }
   ctx.out(`resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}`);
-  const spawnFn = ctx.deps.spawn ?? spawnResume;
-  const code = await spawnFn(resumeArgv, cwd);
-  if (code !== 0) {
-    throw new CommandError(`error: resume exited ${code}`, EXIT.error);
+  await runResumeProcess(resumeArgv, cwd, ctx.deps.spawn);
+}
+
+interface ResumeDisplay {
+  session: MsgSessionRow;
+  stateNote: string;
+  cwd: string;
+  out: (line: string) => void;
+}
+
+function reportUnsupportedHost(display: ResumeDisplay): void {
+  const { session, stateNote, cwd, out } = display;
+  out(
+    `resume: host '${session.host}' has no resume command — ` +
+      `${session.host}:${shortSid(session.sid)}${stateNote} (${cwd})`
+  );
+}
+
+function reportPrintedResume(display: ResumeDisplay, cmdline: string): void {
+  const { session, stateNote, cwd, out } = display;
+  out(`resume: ${session.host}:${shortSid(session.sid)}${stateNote} — ${cmdline}  (cwd: ${cwd})`);
+}
+
+async function runResumeProcess(
+  argv: string[],
+  cwd: string,
+  spawnFn: SessionsResumeDeps['spawn']
+): Promise<void> {
+  const code = await (spawnFn ?? spawnResume)(argv, cwd);
+  if (code === 0) {
+    return;
   }
+  throw new CommandError(`error: resume exited ${code}`, EXIT.error);
 }
 
 export async function runSessionsResume(
