@@ -17,7 +17,6 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process';
-import { CommandError, EXIT, facade, passthroughExitCode, type LedgerFacade } from '@broject/core';
 import type {
   DocAdapter,
   DocCtx,
@@ -28,11 +27,82 @@ import type {
   TaskRow,
   TaskStore,
 } from '@broject/core';
-import { requireGlobalStore } from './store.ts';
+import { CommandError, EXIT, facade, type LedgerFacade, passthroughExitCode } from '@broject/core';
+import {
+  resolveMsgTarget,
+  sendSessionMessage,
+  sessionMsgRows,
+  type TargetResolution,
+} from '../commands/session-msg.ts';
 import { loadBroConfig } from '../plugins.ts';
-import { resolveMsgTarget, sendSessionMessage, sessionMsgRows } from '../commands/session-msg.ts';
+import { requireGlobalStore } from './store.ts';
 
 export type { TaskRow };
+
+type Delivery = Awaited<ReturnType<typeof sendSessionMessage>>['deliveries'][number];
+
+function deliveryChannel(channel: Delivery['channel']): string {
+  if (channel === 'mailbox') {
+    return 'mailbox';
+  }
+  if (channel === 'inbox') {
+    return 'inbox';
+  }
+  return 'inbox+record';
+}
+
+function deliveryLine(d: Delivery): string {
+  const locator = d.locator ?? d.inboxPath;
+  const suffix = locator === undefined ? '' : ` (${locator})`;
+  return `msg → ${d.label} — ${deliveryChannel(d.channel)}${suffix}`;
+}
+
+async function resolveAssignee(target: string, ledger: LedgerFacade | undefined): Promise<string> {
+  if (ledger === undefined) {
+    return target;
+  }
+  let resolution: TargetResolution;
+  try {
+    const { rows } = await sessionMsgRows(ledger);
+    resolution = resolveMsgTarget(rows, target);
+  } catch {
+    return target;
+  }
+  if (resolution.error !== undefined) {
+    throw new CommandError(`error: ${resolution.error}`, EXIT.usage);
+  }
+  const sessions = [
+    ...new Map(
+      resolution.deliveries
+        .map(d => d.session)
+        .filter((s): s is NonNullable<typeof s> => s !== undefined)
+        .map(s => [`${s.host}:${s.sid}`, s] as const)
+    ).values(),
+  ];
+  if (sessions.length !== 1) {
+    return target;
+  }
+  const session = sessions[0];
+  if (session === undefined) {
+    return target;
+  }
+  return session.spawnedBy || `${session.host}:${session.sid}`;
+}
+
+function assignTask(store: TaskStore, id: string, assignee: string, row: TaskRow): boolean {
+  try {
+    store.update(id, { assignee });
+    row.assignee = assignee;
+    return true;
+  } catch (err) {
+    console.error(
+      `warning: ${id} created but assignee not recorded — ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+    return false;
+  }
+}
 
 /** The store this invocation targets — lazily, per verb call, so a
  *  missing global store fails only the verb that needed it. Resolved
@@ -166,36 +236,9 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
         ledger = undefined;
       }
       const events = facade('events', { dir }, opts);
-      let assignee = target;
-      if (ledger !== undefined) {
-        let resolution;
-        try {
-          const { rows } = await sessionMsgRows(ledger);
-          resolution = resolveMsgTarget(rows, target);
-        } catch {
-          // ledger read failed — the raw target still names a fleet
-          // address; the send path reports its own degradation
-          resolution = undefined;
-        }
-        if (resolution?.error !== undefined) {
-          die(resolution.error);
-        }
-        const sessions = [
-          ...new Map(
-            (resolution?.deliveries ?? [])
-              .map(d => d.session)
-              .filter((s): s is NonNullable<typeof s> => s !== undefined)
-              .map(s => [`${s.host}:${s.sid}`, s] as const)
-          ).values(),
-        ];
-        if (sessions.length === 1) {
-          const sess = sessions[0]!;
-          // '' is the ledger's other "no spawner" spelling (orchestrator
-          // rows match on null OR '') — ?? would keep it and write an
-          // empty assignee, which bd reads as "clear the field"
-          assignee = sess.spawnedBy || `${sess.host}:${sess.sid}`;
-        }
-      }
+      // '' is the ledger's other "no spawner" spelling (orchestrator rows
+      // match on null OR '') — `||` keeps the stored marker meaningful.
+      const assignee = await resolveAssignee(target, ledger);
       const s = store();
       const row = s.create(toInput({ title }, flags));
       // Assignment is a marker — but not every tasks backend can store
@@ -203,18 +246,7 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
       // not strand the just-created bead behind a thrown command:
       // warn and keep the delivery — the message still reaches the
       // session, and the bead exists either way.
-      let assigned = false;
-      try {
-        s.update(row.id, { assignee });
-        row.assignee = assignee;
-        assigned = true;
-      } catch (err) {
-        console.error(
-          `warning: ${row.id} created but assignee not recorded — ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
-      }
+      const assigned = assignTask(s, row.id, assignee, row);
       const res = await sendSessionMessage({
         dir,
         target,
@@ -226,10 +258,7 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
         events,
       });
       for (const d of res.deliveries) {
-        const via =
-          d.channel === 'mailbox' ? 'mailbox' : d.channel === 'inbox' ? 'inbox' : 'inbox+record';
-        const locator = d.locator ?? d.inboxPath;
-        console.log(`msg → ${d.label} — ${via}${locator !== undefined ? ` (${locator})` : ''}`);
+        console.log(deliveryLine(d));
       }
       for (const w of res.warnings) {
         console.error(`warning: ${w}`);

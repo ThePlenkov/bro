@@ -20,16 +20,16 @@
  */
 import {
   CommandError,
+  type EventsFacade,
   EXIT,
   facade,
   hasHelpFlag,
+  type LedgerFacade,
   loadConfig,
   printUsage,
-  type EventsFacade,
-  type LedgerFacade,
 } from '@broject/core';
 import { flag, positionals } from './args.ts';
-import { sendSessionMessage, type SendSessionMessageResult } from './session-msg.ts';
+import { type SendSessionMessageResult, sendSessionMessage } from './session-msg.ts';
 
 const KINDS = new Set(['note', 'info', 'ask', 'result', 'block']);
 const VALUE_FLAGS = new Set(['--kind', '--in-reply-to', '--key']);
@@ -62,6 +62,24 @@ function msgUsageError(): never {
   throw new CommandError(MSG_USAGE_LINE, EXIT.usage);
 }
 
+function deliveryChannel(
+  channel: SendSessionMessageResult['deliveries'][number]['channel']
+): string {
+  if (channel === 'mailbox') {
+    return 'mailbox';
+  }
+  if (channel === 'inbox') {
+    return 'inbox';
+  }
+  return 'inbox+record';
+}
+
+function deliveryLine(d: SendSessionMessageResult['deliveries'][number]): string {
+  const locator = d.locator ?? d.inboxPath;
+  const suffix = locator === undefined ? '' : ` (${locator})`;
+  return `msg → ${d.label} — ${deliveryChannel(d.channel)}${suffix}`;
+}
+
 interface MsgArgs {
   target: string;
   text: string;
@@ -90,7 +108,10 @@ function msgArgs(argv: string[]): MsgArgs {
   if (text === '') {
     msgUsageError();
   }
-  return { target: target!, text, kind, inReplyTo, key };
+  if (target === undefined) {
+    msgUsageError();
+  }
+  return { target, text, kind, inReplyTo, key };
 }
 
 /** The connectors.* precedence pins `facade()` honors — {} when the
@@ -126,10 +147,7 @@ function msgLedger(dir: string, deps: MsgDeps): LedgerFacade | undefined {
  *  or inbox path) when one exists. */
 function printDeliveries(res: SendSessionMessageResult): void {
   for (const d of res.deliveries) {
-    const via =
-      d.channel === 'mailbox' ? 'mailbox' : d.channel === 'inbox' ? 'inbox' : 'inbox+record';
-    const locator = d.locator ?? d.inboxPath;
-    console.log(`msg → ${d.label} — ${via}${locator !== undefined ? ` (${locator})` : ''}`);
+    console.log(deliveryLine(d));
   }
   for (const w of res.warnings) {
     console.error(`warning: ${w}`);
