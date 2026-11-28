@@ -18,6 +18,7 @@ export { agentPlugins } from './agent-plugins.ts';
 export {
   BUILTIN_CONTENDERS,
   type BenchContender,
+  type BenchPick,
   type BenchReplayOptions,
   type BenchReplayReport,
   type ContenderAnswer,

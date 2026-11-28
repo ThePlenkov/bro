@@ -487,7 +487,66 @@ describe('brouter bench replay', () => {
       assert.equal(m.failed, 5);
       assert.equal(m.skipped, 1);
       const singleton = report.detail.find(d => d.decisionId === singletonId)!;
-      assert.equal(singleton.picks['fake-provider'], 'skipped');
+      assert.deepEqual(singleton.picks['fake-provider'], { status: 'skipped', pick: null });
+    } finally {
+      close();
+    }
+  });
+
+  test('detail tags a route named skipped separately from an invoke-gate skip', async () => {
+    const { s, close, path } = await store('tagged-picks');
+    try {
+      const ctx = 'ctx:tagged-picks';
+      const taggedCandidates = [
+        {
+          reasons: ['label=skipped'],
+          route: { name: 'skipped', match: { labels: ['skipped'] }, chain: [{ provider: 'kilo' }] },
+          score: 2,
+        },
+        {
+          reasons: [],
+          route: { name: 'fallback', match: {}, chain: [{ provider: 'omp' }] },
+          score: 0,
+        },
+      ];
+      const taggedTable = {
+        kind: 'route',
+        version: 1,
+        routes: [
+          { name: 'skipped', match: { labels: ['skipped'] }, chain: [{ provider: 'kilo' }] },
+          { name: 'fallback', match: {}, chain: [{ provider: 'omp' }] },
+        ],
+      };
+      const picked = await journal(s, {
+        contextId: ctx,
+        candidates: taggedCandidates,
+        table: taggedTable,
+        route: 'skipped',
+      });
+      const gated = await journal(s, {
+        contextId: ctx,
+        candidates: [CANDIDATES[0]],
+        route: 'ui',
+      });
+      const report = await runBenchReplay({
+        dir: scratch,
+        db: s.db,
+        storePath: path,
+        contextId: ctx,
+        judges: ['fake-provider'],
+        providers: FAKE_PROVIDERS,
+        judge: JUDGE_CFG,
+        makeJudge: async () => fakeJudge([choice('skipped')], []),
+        invoke: 'ambiguous',
+        now: T0 + 120_000,
+      });
+      const pickedRow = report.detail.find(d => d.decisionId === picked)!;
+      const gatedRow = report.detail.find(d => d.decisionId === gated)!;
+      assert.deepEqual(pickedRow.picks['fake-provider'], {
+        status: 'answered',
+        pick: 'skipped',
+      });
+      assert.deepEqual(gatedRow.picks['fake-provider'], { status: 'skipped', pick: null });
     } finally {
       close();
     }
@@ -565,7 +624,7 @@ describe('brouter bench replay', () => {
       const row = report.detail.find(d => d.decisionId === target)!;
       // first-accepted < cutoff → both rows still vote 'fallback';
       // last-write-at would have evicted them and abstained
-      assert.equal(row.picks['t1-recall'], 'fallback');
+      assert.deepEqual(row.picks['t1-recall'], { status: 'answered', pick: 'fallback' });
     } finally {
       close();
     }
@@ -686,8 +745,8 @@ describe('brouter bench replay', () => {
       // frozen: only the two pre-T1 fallback successes vote → recall
       // decides 'fallback'; without the freeze the three post-T1 ui
       // successes would have decided 'ui'
-      assert.equal(row.picks['t1-recall'], 'fallback');
-      assert.equal(row.picks['static-table'], 'ui');
+      assert.deepEqual(row.picks['t1-recall'], { status: 'answered', pick: 'fallback' });
+      assert.deepEqual(row.picks['static-table'], { status: 'answered', pick: 'ui' });
     } finally {
       close();
     }
