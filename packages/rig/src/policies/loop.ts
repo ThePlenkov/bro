@@ -1001,9 +1001,7 @@ function laneWall(ctx: LoopCtx, provider: string | undefined): ProviderWall | un
 
 function settleSpawnRefusal(ctx: LoopCtx, m: LoopMember, err: unknown): PushOutcome {
   const msg = err instanceof Error ? err.message : String(err);
-  // every refusal path releases this run's claims — the claim-time
-  // custody record dies with them (bro-ho09d)
-  ctx.deps.endRun(loopSlug(m.beads[0]!.id));
+  const endRun = () => ctx.deps.endRun(loopSlug(m.beads[0]!.id));
   if (err instanceof SpawnError && err.kind === 'cap') {
     const wall = laneWall(ctx, m.lane.provider);
     if (wall !== undefined) {
@@ -1024,34 +1022,58 @@ function settleSpawnRefusal(ctx: LoopCtx, m: LoopMember, err: unknown): PushOutc
         for (const b of openBeads(ctx, m.beads)) {
           reopenBead(ctx, b.id);
         }
+        endRun();
         ctx.deps.say(`loop: ${wallText(wall)} — pushes hold until the reset`);
         return { kind: 'hold', why: msg, untilMs: capped };
       }
       // a wall with no advertised end is reported, not waited into —
       // park once, never churn (the convoy 'parked' verdict)
-      parkBeads(
+      const undeferred = parkBeads(
         ctx,
         m.beads,
         `loop: ${wallText(wall)} — no advertised end; worktree ${m.item.worktreeDir}`
       );
+      if (undeferred.length === 0) {
+        endRun();
+      } else {
+        ctx.deps.say(
+          `loop: ${undeferred.map(b => b.id).join(', ')} could not defer — ` +
+            `custody retained until exit`
+        );
+      }
       ctx.deps.say(`loop: ${m.beads[0]!.id} parked — ${wallText(wall)}`);
       return { kind: 'done', result: 'parked' };
     }
     for (const b of openBeads(ctx, m.beads)) {
       reopenBead(ctx, b.id);
     }
+    endRun();
     ctx.deps.say(`loop: fleet full — ${msg}; pushes hold for the next pass`);
     return { kind: 'hold', why: msg };
   }
   if (err instanceof SpawnError && err.kind === 'unavailable') {
+    endRun();
     return settleUnavailableSpawn(ctx, m, msg);
   }
   if (err instanceof SpawnError && err.kind === 'conflict') {
     for (const b of openBeads(ctx, m.beads.slice(1))) {
       reopenBead(ctx, b.id);
     }
+    endRun();
   } else {
-    parkBeads(ctx, m.beads, `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`);
+    const undeferred = parkBeads(
+      ctx,
+      m.beads,
+      `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`
+    );
+    if (undeferred.length === 0) {
+      endRun();
+    } else {
+      ctx.deps.say(
+        `loop: ${undeferred.map(b => b.id).join(', ')} could not defer — ` +
+          `custody retained until exit`
+      );
+    }
   }
   ctx.deps.say(`loop: ${m.beads[0]!.id} spawn refused — ${msg}`);
   return { kind: 'done', result: 'parked' };
