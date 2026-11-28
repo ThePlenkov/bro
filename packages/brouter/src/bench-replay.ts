@@ -706,10 +706,18 @@ export interface BenchReplayReport {
     outcomeClass: OutcomeClass;
     outcomeResult?: string;
     predicate: SuccessPredicate;
-    picks: Record<string, string | null | 'skipped' | 'failed'>;
+    picks: Record<string, BenchPick>;
   }>;
   notes: string[];
 }
+
+/** The per-contender result in a detail row. Keeping the execution status
+ * separate from the route pick means route names such as "skipped" and
+ * "failed" cannot collide with gate/error sentinels. */
+export type BenchPick = {
+  status: ContenderAnswer['status'];
+  pick: string | null;
+};
 
 const percentile = (sorted: number[], p: number): number =>
   sorted.length === 0
@@ -1051,7 +1059,7 @@ export async function runBenchReplay(opts: BenchReplayOptions): Promise<BenchRep
         askModel: gate.ask,
         gateReason: gate.reason,
       };
-      const picks: Record<string, string | null | 'skipped' | 'failed'> = ownBag();
+      const picks: Record<string, BenchPick> = ownBag();
       for (const contender of contenders) {
         let answer: ContenderAnswer;
         try {
@@ -1062,7 +1070,10 @@ export async function runBenchReplay(opts: BenchReplayOptions): Promise<BenchRep
           answer = { status: 'failed', error: err instanceof Error ? err.message : String(err) };
         }
         perContender.get(contender.id)!.push({ decision, answer });
-        picks[contender.id] = answer.status === 'answered' ? answer.pick : answer.status;
+        picks[contender.id] = {
+          status: answer.status,
+          pick: answer.status === 'answered' ? answer.pick : null,
+        };
       }
       detail.push({
         decisionId: decision.decisionId,
