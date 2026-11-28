@@ -2791,6 +2791,39 @@ describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
     });
   });
 
+  test('loads external plugins from the Cursor project when cwd is elsewhere', () => {
+    const f = hookFixture();
+    const outside = join(f.root, 'outside');
+    mkdirSync(outside);
+    const marker = join(f.main, 'external-hook-loaded');
+    writeFileSync(
+      join(f.main, 'external-hook.js'),
+      `import { appendFileSync } from 'node:fs';\n` +
+        `appendFileSync(${JSON.stringify(marker)}, 'loaded');\n` +
+        `export default { name: 'external-hook-marker', summary: 'test', run: () => {} };\n`
+    );
+    writeFileSync(
+      join(f.main, 'bro.config.json'),
+      JSON.stringify({ plugins: ['./external-hook.js'], modes: { default: 'code' } })
+    );
+    const payload = {
+      cursor_version: '1',
+      hook_event_name: 'sessionStart',
+      conversation_id: 'external-plugin',
+      workspace_roots: [f.main],
+    };
+    const env = { CURSOR_PROJECT_DIR: f.main, XDG_STATE_HOME: join(f.root, 'xdg-state') };
+    const slim = runSlim(outside, 'session-start', payload, env);
+    assert.equal(slim.status, 0, slim.stderr);
+    const full = runCli(['hooks', 'session-start'], {
+      cwd: outside,
+      input: JSON.stringify(payload),
+      env,
+    });
+    assert.equal(full.code, 0, full.stderr);
+    assert.equal(readFileSync(marker, 'utf8'), 'loadedloaded');
+  });
+
   test('dist/hooks.js answers operator events and fails open on unknown ones', () => {
     const f = hookFixture();
     inside(f.main, f.root, () => {

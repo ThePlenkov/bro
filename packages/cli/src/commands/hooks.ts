@@ -3363,6 +3363,28 @@ function prepareHookInput(
   return { root, input };
 }
 
+/** Load configured hook connectors after the payload identifies the project.
+ * The full CLI prepare hook runs before stdin is parsed, so it must defer this
+ * to the same point as the slim entry. */
+async function loadHookExternalPlugins(root: string): Promise<void> {
+  try {
+    const externalSpecs = loadConfig(root).plugins;
+    if (externalSpecs.length === 0) {
+      return;
+    }
+    const plugins = await import('../plugins.ts');
+    const { reservedWords } = await import('../docs.ts');
+    await plugins.loadExternalPlugins(
+      root,
+      externalSpecs,
+      new Set([...reservedWords(), ...plugins.pluginGroups().keys()])
+    );
+  } catch {
+    // Hook loading is fail-open: a broken config or plugin must not stall
+    // the host, and built-ins remain available.
+  }
+}
+
 async function dispatchWithSpan(
   event: string,
   raw: unknown,
@@ -3551,6 +3573,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // success differently (a boolean field, split event names, or not at
   // all), and policy below must not know which host sent the payload
   const { root, input } = prepareHookInput(event, raw, cursorClient);
+  await loadHookExternalPlugins(root);
   // the in-process adapters (opencode/kilo/pi/omp) spawn this command
   // directly — no run.sh means no shell-side spool pair, so the Node
   // side journals the same v2 start/end when a session plane claims

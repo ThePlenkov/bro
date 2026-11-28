@@ -23,7 +23,6 @@
  * `bro hooks` spelling too). registerTelegramSink is absent: no sink
  * delivery happens on the hook path.
  */
-import { loadConfig } from '@broject/core';
 import { otelSpan, setAmbient } from '@broject/providers';
 import './connectors.ts';
 import { runHooksCommand } from './commands/hooks.ts';
@@ -48,28 +47,6 @@ process.on('exit', code => {
     code === 0 ? 'ok' : 'error'
   );
 });
-
-// External plugin connectors — the one piece of index.ts's prepare the
-// hook path cannot skip: a configured plugin's connectors fire inside
-// probes. Empty `plugins` makes loadExternalPlugins a no-op, so the
-// registry import stays dynamic and pays nothing where no external
-// plugin exists; where one does, the full collision semantics apply.
-try {
-  const externalSpecs = loadConfig().plugins;
-  if (externalSpecs.length > 0) {
-    const plugins = await import('./plugins.ts');
-    const { reservedWords } = await import('./docs.ts');
-    await plugins.loadExternalPlugins(
-      undefined,
-      externalSpecs,
-      new Set([...reservedWords(), ...plugins.pluginGroups().keys()])
-    );
-  }
-} catch {
-  // fail-open like every probe: a broken config read or plugin module
-  // must never keep the hook dispatch from running — whatever
-  // registered before the throw stays registered, the rest is skipped
-}
 
 // argv is already the post-`hooks` spelling the plugin's `run` receives
 // (`bro hooks post-tool` → runHooksCommand(['post-tool'])), so
