@@ -61,10 +61,12 @@ import {
   wallText,
   type BroConfig,
   type JanitorReport,
+  type MergedPr,
   type PrOwnership,
   type ProviderWall,
   type ReviewFacade,
 } from '@broject/core';
+import { prDebtState } from '@broject/debt';
 import {
   checkHistory,
   evaluateExitGate,
@@ -91,6 +93,8 @@ import { writeHeartbeat } from './watch-heartbeat.ts';
 import { clockPlane, clockSkewText, type WatchClock } from './watch-clock.ts';
 import { watchSection, type WatchConfig } from './watch-config.ts';
 import { agentEventLine } from '../planes/events.ts';
+import { collectReviewThreads } from './debt-scan.ts';
+import { refreshDebtLedger } from './debt-sources.ts';
 
 export interface WatchMol {
   mol: string;
@@ -415,6 +419,11 @@ export function snapshotKey(s: WatchSnapshot): string {
     l => !l.startsWith('clock skew ') && !l.startsWith('clock unverified — ')
   );
   return JSON.stringify({ ...s, ts: '', clock, attention });
+}
+
+/** The debt label is the collector's durable "already swept" marker. */
+export function unprocessedClosedPrs(closed: MergedPr[]): number[] {
+  return closed.filter(pr => prDebtState(pr.labels) === null).map(pr => pr.number);
 }
 
 /** One atomic mailbox file — tmp+rename (dropMailbox in core) so a
@@ -1194,12 +1203,60 @@ function runWatchSched(argv: string[]): void {
  *  pulse` mails every beat (silence must mean dead, not unchanged). */
 export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text: string }> {
   const { janitor, note } = tickJanitor(dir);
+  const sweepNote = await sweepClosedPrs(dir);
   const snap = await collectSnapshot(dir);
   snap.janitor = janitor;
   if (note !== '') {
     snap.attention.push(note);
   }
+  if (sweepNote !== undefined) {
+    snap.attention.push(sweepNote);
+  }
   return { snap, text: renderSnapshot(snap) };
+}
+
+/**
+ * Closed PRs do not appear in the gates plane, so a PR closed outside
+ * `act wait` could otherwise bypass review-debt harvesting forever. The
+ * heartbeat is already the repository's periodic poll; use the debt
+ * label (the collector's durable idempotency marker) rather than adding
+ * another state file or daemon.
+ */
+async function sweepClosedPrs(dir: string): Promise<string | undefined> {
+  const host = hostPlane(dir);
+  if (host.rev === undefined) {
+    return undefined;
+  }
+  try {
+    const closed = host.rev.mergedPrs(host.repo, { state: 'closed', limit: 100 });
+    const pending = unprocessedClosedPrs(closed);
+    if (pending.length === 0) {
+      return undefined;
+    }
+    await collectReviewThreads(host.rev, {
+      repo: host.repo,
+      filters: {
+        prIds: pending,
+        mergedSince: null,
+        mergedUntil: null,
+        lastN: null,
+        prAuthor: null,
+        labels: [],
+      },
+      threadAuthor: null,
+      runId: 'watch',
+      dryRun: false,
+      listOnly: false,
+      reharvest: false,
+      noLabel: false,
+      sources: ['review-threads'],
+      includeClosed: true,
+    });
+    refreshDebtLedger();
+    return `closed-PR debt sweep: harvested ${pending.length} unprocessed PR(s)`;
+  } catch (err) {
+    return `closed-PR debt sweep failed — ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 /** The help/install prelude — routed before the ticker path so

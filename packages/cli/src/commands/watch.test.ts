@@ -14,11 +14,47 @@ import {
   renderSnapshot,
   runWatchPulse,
   snapshotKey,
-  watchArgs,
+  unprocessedClosedPrs,
   type WatchMol,
   type WatchPrGate,
   type WatchSnapshot,
+  watchArgs,
 } from './watch.ts';
+
+test('closed-PR sweep reuses debt labels as an idempotency marker', () => {
+  assert.deepEqual(
+    unprocessedClosedPrs([
+      {
+        number: 7,
+        mergedAt: null,
+        updatedAt: null,
+        author: 'a',
+        labels: [],
+        headRef: 'x',
+        headSha: 'x',
+      },
+      {
+        number: 8,
+        mergedAt: null,
+        updatedAt: null,
+        author: 'a',
+        labels: ['debt:clean'],
+        headRef: 'y',
+        headSha: 'y',
+      },
+      {
+        number: 9,
+        mergedAt: null,
+        updatedAt: null,
+        author: 'a',
+        labels: ['debt:collected'],
+        headRef: 'z',
+        headSha: 'z',
+      },
+    ]),
+    [7]
+  );
+});
 
 const mol = (over: Partial<WatchMol> = {}): WatchMol => ({
   mol: 'm-1',
