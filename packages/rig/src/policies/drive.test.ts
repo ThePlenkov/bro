@@ -6,7 +6,7 @@
  *  the same seam `loopPolicy`'s tests set (bro-u6fp5.1). */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -695,6 +695,22 @@ describe('drivePolicy.onGate — the gate verdict', () => {
   test('a settled PR closes its fixer bead and reports settled', async () => {
     const w = world();
     w.metaQueue = [settledMeta({ state: 'CLOSED' })];
+    // There is no local checkout for the closed PR, but the fixer registry
+    // still records the coder's worktree. Settlement must use that fallback
+    // before the fixer bead is closed.
+    git(['init', '-q', w.root], tmpdir());
+    const recordedWorktree = join(w.root, 'recorded-worktree');
+    mkdirSync(join(w.root, '.git', 'bro'), { recursive: true });
+    writeFileSync(
+      join(w.root, '.git', 'bro', 'agents.json'),
+      JSON.stringify({
+        'fixer-1': {
+          agentId: 'agent-1',
+          backend: 'acp',
+          worktree: recordedWorktree,
+        },
+      })
+    );
     w.rows.push({
       id: 'fixer-1',
       status: 'in_progress',
@@ -715,6 +731,9 @@ describe('drivePolicy.onGate — the gate verdict', () => {
     }
     assert.deepEqual(w.closed, [
       { id: 'fixer-1', reason: '[#7](https://github.com/o/r/pull/7) closed — fixer done' },
+    ]);
+    assert.deepEqual(w.settles, [
+      { worktree: recordedWorktree, molSteps: ['fixer-1'] },
     ]);
     // the head the pass acted on rides the pass work for the
     // foreign-push signal

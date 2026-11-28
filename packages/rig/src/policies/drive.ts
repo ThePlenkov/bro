@@ -1537,7 +1537,14 @@ async function mergeAndRetire(
     };
   }
   try {
-    ctx.deps.settleSessions(worktree ? { worktree } : {});
+    // A merged PR may already have lost its checkout by the time the
+    // settlement runs. The fixer registry entry still records the tree that
+    // owned the coder session, so use it before closing the fixer bead.
+    const fixerEntry = fixer === undefined ? undefined : readAgentRegistry(ctx.mainRoot)[fixer.id];
+    const fixerWorktree =
+      typeof fixerEntry?.worktree === 'string' ? fixerEntry.worktree : undefined;
+    const settleWorktree = worktree ?? fixerWorktree;
+    ctx.deps.settleSessions(settleWorktree ? { worktree: settleWorktree } : {});
   } catch {
     // advisory
   }
@@ -1836,8 +1843,11 @@ function settleClosedPr(
   fixer: TaskRow | undefined
 ): PrVerdict {
   try {
+    const fixerEntry = fixer === undefined ? undefined : readAgentRegistry(ctx.mainRoot)[fixer.id];
+    const fixerWorktree =
+      typeof fixerEntry?.worktree === 'string' ? fixerEntry.worktree : undefined;
     ctx.deps.settleSessions({
-      worktree: ctx.work.worktreeByBranch.get(state.headRef),
+      worktree: ctx.work.worktreeByBranch.get(state.headRef) ?? fixerWorktree,
       molSteps: fixer ? [fixer.id] : undefined,
     });
   } catch {
