@@ -9,6 +9,7 @@ import type { LoopRunView } from './loop-state.ts';
 import { initRepo, inside } from './testrepo.ts';
 import {
   attentionOf,
+  closedPrSweepNote,
   emitMailbox,
   openPrTargets,
   renderSnapshot,
@@ -54,6 +55,14 @@ test('closed-PR sweep reuses debt labels as an idempotency marker', () => {
     ]),
     [7]
   );
+});
+
+test('closed-PR sweep does not claim success when collection is incomplete', () => {
+  assert.equal(
+    closedPrSweepNote([7, 8], { failed: 0 }),
+    'closed-PR debt sweep: harvested 2 unprocessed PR(s)'
+  );
+  assert.throws(() => closedPrSweepNote([7, 8], { failed: 1 }), /1 PR\(s\) failed collection/);
 });
 
 const mol = (over: Partial<WatchMol> = {}): WatchMol => ({

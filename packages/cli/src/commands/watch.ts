@@ -426,6 +426,16 @@ export function unprocessedClosedPrs(closed: MergedPr[]): number[] {
   return closed.filter(pr => prDebtState(pr.labels) === null).map(pr => pr.number);
 }
 
+export function closedPrSweepNote(
+  pending: number[],
+  result: { failed: number }
+): string {
+  if (result.failed > 0) {
+    throw new Error(`${result.failed} PR(s) failed collection`);
+  }
+  return `closed-PR debt sweep: harvested ${pending.length} unprocessed PR(s)`;
+}
+
 /** One atomic mailbox file — tmp+rename (dropMailbox in core) so a
  *  draining reader never sees a half-written event. Outside a repo
  *  there is no mailbox — report false instead of throwing. */
@@ -1233,7 +1243,7 @@ async function sweepClosedPrs(dir: string): Promise<string | undefined> {
     if (pending.length === 0) {
       return undefined;
     }
-    await collectReviewThreads(host.rev, {
+    const result = await collectReviewThreads(host.rev, {
       repo: host.repo,
       filters: {
         prIds: pending,
@@ -1252,8 +1262,9 @@ async function sweepClosedPrs(dir: string): Promise<string | undefined> {
       sources: ['review-threads'],
       includeClosed: true,
     });
+    const note = closedPrSweepNote(pending, result);
     refreshDebtLedger();
-    return `closed-PR debt sweep: harvested ${pending.length} unprocessed PR(s)`;
+    return note;
   } catch (err) {
     return `closed-PR debt sweep failed — ${err instanceof Error ? err.message : String(err)}`;
   }
