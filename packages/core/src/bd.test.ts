@@ -1,6 +1,14 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +20,7 @@ import {
   isBdNotFound,
   probeBdCompat,
   initBeadsStealth,
+  bdTryAsync,
 } from './bd.ts';
 
 const WIN32 = process.platform === 'win32';
@@ -233,6 +242,46 @@ describe('probeBdCompat', { skip: WIN32 }, () => {
       assert.match(c.storeErr ?? '', /database is locked/);
       assert.deepEqual(c.problems, []);
     });
+  });
+});
+
+describe('async timeout supervisor probe', { skip: WIN32 }, () => {
+  test('concurrent calls share one in-flight timeout probe', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bd-async-timeout-'));
+    const count = join(dir, 'count');
+    const timeout = join(dir, 'timeout');
+    writeFileSync(
+      timeout,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf x >> "$FAKE_TIMEOUT_COUNT"
+  sleep 0.1
+  echo "timeout (GNU coreutils) 9.4"
+  exit 0
+fi
+exit 0
+`
+    );
+    chmodSync(timeout, 0o755);
+    const previousPath = process.env.PATH;
+    const previousCount = process.env.FAKE_TIMEOUT_COUNT;
+    process.env.PATH = `${dir}:${previousPath}`;
+    process.env.FAKE_TIMEOUT_COUNT = count;
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => bdTryAsync(['--version'], 1_000))
+      );
+      assert.deepEqual(
+        results.map(result => result.code),
+        Array.from({ length: 8 }, () => 0)
+      );
+      assert.equal(readFileSync(count, 'utf8'), 'x');
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousCount === undefined) delete process.env.FAKE_TIMEOUT_COUNT;
+      else process.env.FAKE_TIMEOUT_COUNT = previousCount;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
