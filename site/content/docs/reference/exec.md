@@ -9,4 +9,5 @@ description: "Run a shell command, then fire taskFinish connector probes — the
 | --- | --- |
 | group | `work` |
 | npm latest | `0.3.0` |
+| skill | `exec` |
 

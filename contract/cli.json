@@ -616,6 +616,7 @@
       ],
       "aliases": [],
       "hidden": false,
+      "skill": "mode",
       "plan": false,
       "contract": {
         "flags": {
@@ -1663,6 +1664,7 @@
       ],
       "aliases": [],
       "hidden": false,
+      "skill": "exec",
       "plan": false,
       "contract": {
         "exits": {

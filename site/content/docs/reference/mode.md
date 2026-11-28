@@ -9,4 +9,5 @@ description: "Per-session behaviour mode — observe | plan | code | review | or
 | --- | --- |
 | group | `fleet` |
 | npm latest | unreleased — lands in `0.4.0` |
+| skill | `mode` |
 
