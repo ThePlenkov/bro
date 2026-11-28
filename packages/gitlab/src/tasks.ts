@@ -715,102 +715,70 @@ function isTargetProjectRequiredError(err: unknown): boolean {
   return /(?:^|: )target_project_id is required$/i.test(message);
 }
 
-function linkSync(dir: string, from: string, to: string, rel: string = 'related'): void {
-  const f = parseIssueRef(dir, from);
-  const t = parseIssueRef(dir, to);
-  if (f.projectPath.toLowerCase() !== t.projectPath.toLowerCase()) {
-    throw new Error(`gitlab tasks: cross-project links not supported`);
+interface IssueLink {
+  dir: string;
+  from: { projectPath: string; iid: number };
+  to: { projectPath: string; iid: number };
+  type?: string;
+}
+
+function postIssueLink({ dir, from, to, type }: IssueLink): void {
+  const args = [
+    'api',
+    '-X',
+    'POST',
+    api(from.projectPath, `issues/${from.iid}/links`),
+    '-f',
+    `target_issue_iid=${to.iid}`,
+  ];
+  if (type !== undefined) {
+    args.push('-f', `link_type=${type}`);
   }
-  if (rel === 'parent' || rel === 'parent-child' || rel === 'tracks' || rel === 'discovered') {
-    throw new Error(
-      `gitlab tasks: unsupported dependency operations explicitly rejected (rel '${rel}')`
-    );
-  }
-  if (rel === 'blocked' || rel === 'blocks' || rel === 'blocked-by') {
-    // Direction follows the core contract — link(a, b, 'blocked') means
-    // "a is blocked by b", posted on a's links as `is_blocked_by`
-    // (target b). 'blocks' is the reverse: a blocks b → `blocks`.
-    const linkType = rel === 'blocks' ? 'blocks' : 'is_blocked_by';
-    try {
-      glab(
-        [
-          'api',
-          '-X',
-          'POST',
-          api(f.projectPath, `issues/${f.iid}/links`),
-          '-f',
-          `target_issue_iid=${t.iid}`,
-          '-f',
-          `link_type=${linkType}`,
-        ],
-        gopts(dir)
-      );
-    } catch (err) {
-      if (!isTargetProjectRequiredError(err)) {
-        throw err;
-      }
-      try {
-        glab(
-          [
-            'api',
-            '-X',
-            'POST',
-            api(f.projectPath, `issues/${f.iid}/links`),
-            '-f',
-            `target_project_id=${encodeURIComponent(t.projectPath)}`,
-            '-f',
-            `target_issue_iid=${t.iid}`,
-            '-f',
-            `link_type=${linkType}`,
-          ],
-          gopts(dir)
-        );
-      } catch (err) {
-        throw err;
-      }
+  try {
+    glab(args, gopts(dir));
+  } catch (err) {
+    if (!isTargetProjectRequiredError(err)) {
+      throw err;
     }
-    return;
+    const crossProjectArgs = [
+      'api',
+      '-X',
+      'POST',
+      api(from.projectPath, `issues/${from.iid}/links`),
+      '-f',
+      `target_project_id=${encodeURIComponent(to.projectPath)}`,
+      '-f',
+      `target_issue_iid=${to.iid}`,
+    ];
+    if (type !== undefined) {
+      crossProjectArgs.push('-f', `link_type=${type}`);
+    }
+    glab(crossProjectArgs, gopts(dir));
+  }
+}
+
+function linkType(rel: string): string | undefined {
+  if (rel === 'blocked' || rel === 'blocked-by') {
+    return 'is_blocked_by';
+  }
+  if (rel === 'blocks') {
+    return 'blocks';
   }
   if (rel === 'related') {
-    try {
-      glab(
-        [
-          'api',
-          '-X',
-          'POST',
-          api(f.projectPath, `issues/${f.iid}/links`),
-          '-f',
-          `target_issue_iid=${t.iid}`,
-        ],
-        gopts(dir)
-      );
-    } catch (err) {
-      if (!isTargetProjectRequiredError(err)) {
-        throw err;
-      }
-      try {
-        glab(
-          [
-            'api',
-            '-X',
-            'POST',
-            api(f.projectPath, `issues/${f.iid}/links`),
-            '-f',
-            `target_project_id=${encodeURIComponent(t.projectPath)}`,
-            '-f',
-            `target_issue_iid=${t.iid}`,
-          ],
-          gopts(dir)
-        );
-      } catch (err) {
-        throw err;
-      }
-    }
-    return;
+    return undefined;
   }
   throw new Error(
     `gitlab tasks: unsupported dependency operations explicitly rejected (rel '${rel}')`
   );
+}
+
+function linkSync(dir: string, from: string, to: string, rel: string = 'related'): void {
+  const source = parseIssueRef(dir, from);
+  const target = parseIssueRef(dir, to);
+  if (source.projectPath.toLowerCase() !== target.projectPath.toLowerCase()) {
+    throw new Error(`gitlab tasks: cross-project links not supported`);
+  }
+  postIssueLink({ dir, from: source, to: target, type: linkType(rel) });
 }
 
 export function gitlabTasks(dir: string): TaskStore {
