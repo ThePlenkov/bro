@@ -29,25 +29,34 @@ surface via `bro providers test <name>` (as hinted by design notes).
 
 ## Design
 
-### Verified ACP agent entrypoints (to record)
+### Verified shipped agent presets (to record)
 
-We must verify current ACP entrypoints/adapter names and record versions in
-the spec; drop any that don't exist. Only presets that are verified and shipped
-are listed below.
+The registry in `packages/cli/src/commands/providers.ts` is the source of
+truth for the presets shipped by `bro providers add`. The table below records
+the exact command string from that registry and separates a local binary
+version check from repository evidence. On 2026-11-28, none of the checked
+agent binaries (`kilo`, `claude`, `codex`, `gemini`, `goose`, `opencode`, or
+`devin`) was on this machine's `PATH`, so no agent version is claimed here.
+`claude-code-acp` is also not installed locally.
 
-| preset        | agent                 | checked command | agent version checked  | check date | notes                             |
-| ------------- | --------------------- | --------------- | ---------------------- | ---------- | --------------------------------- |
-| `kilo`        | Kilo Code CLI         | `kilo --acp`    | verified in repo/tests | 2026-10-30 | Used in tests and implementation. |
-| `claude-code` | Anthropic Claude Code | `claude --acp`  | verified in repo/tests | 2026-11-10 | Verified entrypoint.              |
-| `codex`       | OpenAI Codex CLI      | `codex --acp`   | verified in repo/tests | 2026-11-10 | Verified entrypoint.              |
-| `gemini-cli`  | Google Gemini CLI     | `gemini --acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
-| `goose`       | Block Goose           | `goose acp`     | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
-| `opencode`    | OpenCode              | `opencode acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
-| `devin`       | Devin CLI             | `devin --acp`   | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| preset | type | agent | shipped command | local version check (2026-11-28) | repository evidence |
+| ------ | ---- | ----- | --------------- | --------------------------------- | ------------------- |
+| `kilo` | ACP | Kilo Code CLI | `kilo --acp` | not verifiable: `kilo` not on `PATH` | `packages/cli/src/commands/providers.test.ts` asserts the registry command; `packages/agent-e2e/src/bro-command.e2e.test.ts` exercises a real Kilo host when `kilo` is installed (test skips otherwise). |
+| `claude-code` | ACP | Anthropic Claude Code | `claude --acp` | not verifiable: `claude` not on `PATH` | Registry and command-writing coverage in `packages/cli/src/commands/providers.test.ts`; no Claude ACP binary fixture or CI install was found. |
+| `claude` | CLI | Anthropic Claude Code | `claude -p --dangerously-skip-permissions --output-format stream-json --verbose < {promptFile}` | not verifiable: `claude` not on `PATH` | The preset and exact command are asserted by `packages/cli/src/commands/providers.test.ts`; `packages/agent-e2e/src/manifest.e2e.test.ts` exercises Claude hook artifacts, not the `claude -p` runner. |
+| `claude-acp` | ACP | Claude Code ACP adapter | `claude-code-acp` | not verifiable: `claude-code-acp` not on `PATH` | Preset and command-writing coverage in `packages/cli/src/commands/providers.test.ts`; no adapter binary fixture or CI install was found. |
+| `codex` | ACP | OpenAI Codex CLI | `codex --acp` | not verifiable: `codex` not on `PATH` | `packages/cli/src/commands/providers.test.ts` asserts the shipped registry entry; `packages/agent-e2e/src/manifest.e2e.test.ts` exercises Codex hook artifacts, not the ACP command. |
+| `gemini-cli` | ACP | Google Gemini CLI | `gemini --acp` | not verifiable: `gemini` not on `PATH` | `packages/cli/src/commands/providers.test.ts` asserts the shipped registry entry; no Gemini host fixture, CI install, or live command test was found. |
+| `goose` | ACP | Block Goose | `goose acp` | not verifiable: `goose` not on `PATH` | `packages/cli/src/commands/providers.test.ts` asserts the shipped registry entry; no Goose host fixture, CI install, or live command test was found. |
+| `opencode` | ACP | OpenCode | `opencode acp` | not verifiable: `opencode` not on `PATH` | `packages/cli/src/commands/providers.test.ts` asserts the shipped registry entry; `packages/agent-e2e/src/opencode.e2e.test.ts` and `packages/agent-e2e/src/hosts/opencode.ts` exercise a real OpenCode host when installed (tests skip otherwise). |
+| `devin` | ACP | Devin CLI | `devin --acp` | not verifiable: `devin` not on `PATH` | `packages/cli/src/commands/providers.test.ts` asserts the shipped registry entry; `packages/agent-e2e/src/manifest.e2e.test.ts` exercises Devin hook artifacts, not the ACP command. |
 
-The implementation only ships presets for agents whose entrypoints exist and
-are verifiable at the time of implementation; unverified presets are not
-shipped. Verification results and chosen command strings are recorded above.
+The repository tests verify registry membership and command strings; they do
+not establish a vendor binary version. Runtime host tests are explicitly
+conditional on the host binary being installed. Presets without a binary
+fixture or install evidence remain listed because they are shipped by the
+registry, but are marked as repository-only evidence rather than described as
+locally or live verified.
 
 ### Command surface
 
