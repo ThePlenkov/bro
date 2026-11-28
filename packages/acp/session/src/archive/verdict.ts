@@ -4,6 +4,12 @@ import type { PaneLed } from './led.ts';
 import type { ArchiveRow } from './rows.ts';
 import { fmtWhen } from '../wire/fmt.ts';
 
+export interface PaneVerdict {
+  led: PaneLed;
+  mode: string;
+  since?: string;
+}
+
 /** Terminal postures carry the status-entry stamp — "since" is the
  *  question a finished/blocked row must answer. A stamp that parses
  *  to nothing (malformed ts) degrades to the bare mode, never a
@@ -17,7 +23,7 @@ const since = (base: string, ts: string | undefined): string => {
  *  update is working, a clean stop is idle, an error/denied-ask is
  *  blocked. `undefined` means the row carries no verdict (unknown
  *  kinds, malformed). */
-export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | undefined {
+export function rowVerdict(row: ArchiveRow): PaneVerdict | undefined {
   switch (row.kind) {
     case 'update':
       return row.update !== undefined
@@ -27,8 +33,8 @@ export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | un
       if (row.phase === 'start') return { led: { state: 'working' }, mode: 'turn' };
       if (row.phase === 'stop') {
         return row.error !== undefined && row.error !== ''
-          ? { led: { state: 'blocked' }, mode: since('turn error', row.ts) }
-          : { led: { state: 'idle' }, mode: since('turn complete', row.ts) };
+          ? { led: { state: 'blocked' }, mode: since('turn error', row.ts), since: row.ts }
+          : { led: { state: 'idle' }, mode: since('turn complete', row.ts), since: row.ts };
       }
       return undefined;
     case 'permission':
@@ -36,11 +42,13 @@ export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | un
         return {
           led: { state: 'idle' },
           mode: since('permission — approved', row.ts),
+          since: row.ts,
         };
       }
       return {
         led: { state: 'blocked' },
         mode: since(`permission — ${row.verdict ?? 'denied'}`, row.ts),
+        since: row.ts,
       };
     default:
       return undefined;
@@ -54,14 +62,15 @@ export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | un
  *  the worker's posture (spec bro-l8wqu LED contract). */
 export function eventsVerdict(
   workerLed: PaneLed,
-  row: { led: PaneLed; mode: string } | undefined
-): { led: PaneLed; mode: string } {
+  row: PaneVerdict | undefined
+): PaneVerdict {
   if (workerLed.state === 'blocked') {
     // a blocked row keeps its own reason (permission — denied); a
     // working/idle row's mode must not dress the worker's stop
     return {
       led: { state: 'blocked' },
-      mode: row?.led.state === 'blocked' ? row.mode : (workerLed.message ?? 'worker exited'),
+      mode: row?.led.state === 'blocked' ? paintedMode(row) : (workerLed.message ?? 'worker exited'),
+      ...(row?.since === undefined ? {} : { since: row.since }),
     };
   }
   if (workerLed.state === 'idle' && row?.led.state === 'working') {
@@ -69,7 +78,7 @@ export function eventsVerdict(
     // closed but the worker is silent or gone; 'idle' is the truth
     return { led: { state: 'idle' }, mode: workerLed.message ?? 'worker quiet' };
   }
-  if (row !== undefined) return { led: row.led, mode: row.mode };
+  if (row !== undefined) return { led: row.led, mode: paintedMode(row) };
   return {
     // No archive row is evidence of nothing. In particular, an unknown
     // worker must not be presented as cleanly idle just because the
@@ -77,4 +86,13 @@ export function eventsVerdict(
     led: { state: workerLed.state },
     mode: 'session events',
   };
+}
+
+/** Paint a verdict's relative date at the moment it reaches a surface. */
+export function paintedMode(verdict: PaneVerdict): string {
+  if (verdict.since === undefined) return verdict.mode;
+  const when = fmtWhen(verdict.since);
+  if (when === '') return verdict.mode;
+  const base = verdict.mode.split(' · since ', 1)[0] ?? verdict.mode;
+  return `${base} · since ${when}`;
 }

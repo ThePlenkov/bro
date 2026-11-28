@@ -21,7 +21,7 @@
  */
 import { AcpClient, type ClientRow, type PermissionAsk, splitArgv } from '../client/src/index.ts';
 import { sanitise } from '../model/src/index.ts';
-import { pickImpl } from '../session/src/index.ts';
+import { paintedMode, pickImpl } from '../session/src/index.ts';
 import {
   type LiveAction,
   type ComposerSubmitEvent,
@@ -162,7 +162,7 @@ async function main(): Promise<void> {
     if (ops.length > 0) pane.writer.apply(ops);
     const verdict = impl.verdict;
     if (verdict !== undefined) {
-      pane.writer.setMeta({ led: verdict.led.state, mode: verdict.mode });
+      pane.writer.setMeta({ led: verdict.led.state, mode: paintedMode(verdict) });
     }
   };
 
