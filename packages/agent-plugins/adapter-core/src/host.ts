@@ -318,6 +318,42 @@ export interface BroDriver {
   readonly api: unknown;
 }
 
+function carryForSession(
+  carry: { sessionId: string; text: string } | undefined,
+  sessionId: string
+): string {
+  return carry?.sessionId === sessionId ? carry.text : '';
+}
+
+function mergeHydration(carry: string, text: string): string {
+  if (carry === '') {
+    return text;
+  }
+  return text === '' ? carry : `${carry}\n\n${text}`;
+}
+
+function trackHydration(
+  raw: Promise<HookControl | null>,
+  started: Promise<string>,
+  isCurrent: () => boolean,
+  handlers: { failed: () => void; empty: () => void }
+): void {
+  void raw
+    .then(control => {
+      if (control === null && isCurrent()) {
+        handlers.failed();
+      }
+    })
+    .catch(() => {});
+  void started
+    .then(text => {
+      if (isCurrent() && text === '') {
+        handlers.empty();
+      }
+    })
+    .catch(() => {});
+}
+
 /**
  * Wire bro into a host. `api` is the host's own extension API — the
  * driver passes it through so the client can register commands and
@@ -425,14 +461,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   const hydrate = (ctx: Ctx, event: 'session-start' | 'post-compaction'): void => {
     const cwd = host.cwd(ctx);
     const sessionId = host.sessionId(ctx);
-    const priorCarry = carry?.sessionId === sessionId ? carry.text : '';
+    const priorCarry = carryForSession(carry, sessionId);
     carry = undefined;
     const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
-    const started = raw
-      .then(contextOf)
-      .then(text =>
-        priorCarry === '' ? text : text === '' ? priorCarry : `${priorCarry}\n\n${text}`
-      );
+    const started = raw.then(contextOf).then(text => mergeHydration(priorCarry, text));
     hydration = { sessionId, promise: started };
     // re-priming (compaction) earns a fresh inject for this session;
     // a different session's claim is untouched
@@ -442,22 +474,14 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     // a failed probe is not the session's verdict — remember it so a
     // later turn can re-probe instead of running the session contextless
     hydrationFailed = undefined;
-    void raw
-      .then(control => {
-        if (control === null && hydration?.promise === started) {
-          hydrationFailed = sessionId;
-        }
-      })
-      .catch(() => {});
-    // an empty answer has nothing to inject — drop the cache entry so
-    // the next turn sees no stale '' instead of claiming the session
-    void started
-      .then(text => {
-        if (hydration?.promise === started && text === '') {
-          hydration = undefined;
-        }
-      })
-      .catch(() => {});
+    trackHydration(raw, started, () => hydration?.promise === started, {
+      failed: () => {
+        hydrationFailed = sessionId;
+      },
+      empty: () => {
+        hydration = undefined;
+      },
+    });
   };
 
   /** The session's context text, consumed from the cached probe. An
@@ -697,7 +721,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
         host.notify(ctx, 'bro: board refreshed', 'info');
         return;
       }
-      await dispatchArgs(trimmed.split(/\s+/), ctx);
+      await dispatchArgs(splitArgs(trimmed), ctx);
     },
   });
 
@@ -711,13 +735,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       description: c.description,
       getArgumentCompletions: host.argumentCompletions,
       async handler(args: string, ctx: Ctx) {
-        const argv = [
-          c.verb,
-          ...args
-            .trim()
-            .split(/\s+/)
-            .filter(a => a !== ''),
-        ];
+        const argv = [c.verb, ...splitArgs(args)];
         await dispatchArgs(argv, ctx);
       },
     });
@@ -754,6 +772,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     refresh: (ctx: unknown) => refreshBoard(ctx as Ctx),
     api,
   };
+}
+
+function splitArgs(args: string): string[] {
+  return args.trim() === '' ? [] : args.trim().split(/\s+/);
 }
 
 /** Run a bro subcommand and capture its output — the read side of the

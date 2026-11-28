@@ -186,11 +186,14 @@ async function pinnedCommand(pinned) {
 	} : null;
 }
 async function pinnedStringCommand(pinned) {
-	const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
+	const [cmd, ...args] = splitCommand(pinned);
 	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
 		cmd,
 		args
 	} : null;
+}
+function splitCommand(command) {
+	return command.trim().split(/\s+/).filter(Boolean);
 }
 async function checkoutResolved() {
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
@@ -443,6 +446,39 @@ async function statusJson(command, cwd) {
 	return promise;
 }
 const ELLIPSIS = "…";
+const COMBINING_MARKS = [
+	[768, 879],
+	[6832, 6911],
+	[7616, 7679],
+	[8400, 8447],
+	[65056, 65071]
+];
+const WIDE_CHARACTERS = [
+	[4352, 4447],
+	[9001, 9002],
+	[11904, 42191],
+	[44032, 55203],
+	[63744, 64255],
+	[65040, 65049],
+	[65072, 65135],
+	[65280, 65376],
+	[65504, 65510],
+	[126976, 129791],
+	[131072, 196605],
+	[196608, 262141]
+];
+function inRange(code, [start, end]) {
+	return code >= start && code <= end;
+}
+function isCombiningMark(code) {
+	return COMBINING_MARKS.some((range) => inRange(code, range));
+}
+function isZeroWidth(code) {
+	return code >= 8203 && code <= 8205 || code >= 65024 && code <= 65039;
+}
+function isWide(code) {
+	return WIDE_CHARACTERS.some((range) => inRange(code, range));
+}
 /** Return the terminal column width of a string without splitting Unicode
 * code points. Combining marks occupy no columns; wide CJK and emoji occupy
 * two. This small implementation keeps the bundled adapters dependency-free. */
@@ -450,9 +486,8 @@ function displayWidth(text) {
 	let width = 0;
 	for (const char of text) {
 		const code = char.codePointAt(0) ?? 0;
-		if (code >= 768 && code <= 879 || code >= 6832 && code <= 6911 || code >= 7616 && code <= 7679 || code >= 8400 && code <= 8447 || code >= 65056 && code <= 65071) continue;
-		if (code >= 8203 && code <= 8205 || code >= 65024 && code <= 65039) continue;
-		width += code >= 4352 && code <= 4447 || code >= 9001 && code <= 9002 || code >= 11904 && code <= 42191 || code >= 44032 && code <= 55203 || code >= 63744 && code <= 64255 || code >= 65040 && code <= 65049 || code >= 65072 && code <= 65135 || code >= 65280 && code <= 65376 || code >= 65504 && code <= 65510 || code >= 126976 && code <= 129791 || code >= 131072 && code <= 196605 || code >= 196608 && code <= 262141 ? 2 : 1;
+		if (isCombiningMark(code) || isZeroWidth(code)) continue;
+		width += isWide(code) ? 2 : 1;
 	}
 	return width;
 }
@@ -617,6 +652,21 @@ function sharedBinding(host) {
 		hookEnv: hookEmitEnv(host.kind, { npxPin: host.npxPin })
 	};
 }
+function carryForSession(carry, sessionId) {
+	return carry?.sessionId === sessionId ? carry.text : "";
+}
+function mergeHydration(carry, text) {
+	if (carry === "") return text;
+	return text === "" ? carry : `${carry}\n\n${text}`;
+}
+function trackHydration(raw, started, isCurrent, handlers) {
+	raw.then((control) => {
+		if (control === null && isCurrent()) handlers.failed();
+	}).catch(() => {});
+	started.then((text) => {
+		if (isCurrent() && text === "") handlers.empty();
+	}).catch(() => {});
+}
 /**
 * Wire bro into a host. `api` is the host's own extension API — the
 * driver passes it through so the client can register commands and
@@ -703,22 +753,24 @@ function createBroDriver(host, api) {
 	const hydrate = (ctx, event) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
-		const priorCarry = carry?.sessionId === sessionId ? carry.text : "";
+		const priorCarry = carryForSession(carry, sessionId);
 		carry = void 0;
 		const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
-		const started = raw.then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
+		const started = raw.then(contextOf).then((text) => mergeHydration(priorCarry, text));
 		hydration = {
 			sessionId,
 			promise: started
 		};
 		if (hydrated === sessionId) hydrated = void 0;
 		hydrationFailed = void 0;
-		raw.then((control) => {
-			if (control === null && hydration?.promise === started) hydrationFailed = sessionId;
-		}).catch(() => {});
-		started.then((text) => {
-			if (hydration?.promise === started && text === "") hydration = void 0;
-		}).catch(() => {});
+		trackHydration(raw, started, () => hydration?.promise === started, {
+			failed: () => {
+				hydrationFailed = sessionId;
+			},
+			empty: () => {
+				hydration = void 0;
+			}
+		});
 	};
 	/** The session's context text, consumed from the cached probe. An
 	*  empty answer is not the session's verdict: the claim is released
@@ -878,7 +930,7 @@ function createBroDriver(host, api) {
 				host.notify(ctx, "bro: board refreshed", "info");
 				return;
 			}
-			await dispatchArgs(trimmed.split(/\s+/), ctx);
+			await dispatchArgs(splitArgs(trimmed), ctx);
 		}
 	});
 	const natives = new Set(host.nativeCommands ?? []);
@@ -888,7 +940,7 @@ function createBroDriver(host, api) {
 			description: c.description,
 			getArgumentCompletions: host.argumentCompletions,
 			async handler(args, ctx) {
-				await dispatchArgs([c.verb, ...args.trim().split(/\s+/).filter((a) => a !== "")], ctx);
+				await dispatchArgs([c.verb, ...splitArgs(args)], ctx);
 			}
 		});
 	}
@@ -923,6 +975,9 @@ function createBroDriver(host, api) {
 		refresh: (ctx) => refreshBoard(ctx),
 		api
 	};
+}
+function splitArgs(args) {
+	return args.trim() === "" ? [] : args.trim().split(/\s+/);
 }
 /** Run a bro subcommand and capture its output — the read side of the
 *  CLI, used by the client's own command and tools. A hung CLI must

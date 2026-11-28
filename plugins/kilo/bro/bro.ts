@@ -124,11 +124,14 @@ async function pinnedCommand(pinned) {
 	} : null;
 }
 async function pinnedStringCommand(pinned) {
-	const [cmd, ...args] = pinned.split(/\s+/).filter((p) => p !== "");
+	const [cmd, ...args] = splitCommand(pinned);
 	return cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"]) ? {
 		cmd,
 		args
 	} : null;
+}
+function splitCommand(command) {
+	return command.trim().split(/\s+/).filter(Boolean);
 }
 async function checkoutResolved() {
 	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
