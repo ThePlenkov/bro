@@ -57,83 +57,112 @@ async function mirrorToBus(dir: string, event: EventInput): Promise<void> {
   await busPublish(socket, event).catch(() => {});
 }
 
+function deliverMailbox(
+  dir: string,
+  sessionId: string | undefined,
+  filter: EventFilter,
+  handlers: EventHandlers
+): EventEnvelope[] {
+  if (sessionId === undefined) {
+    return [];
+  }
+  // The filter reaches into the drain: a drop this subscription does
+  // not match stays unseen for the session, or a filtered subscribe would
+  // permanently consume drops a later subscription was due.
+  // Addressing (`to`) is gated by the consumer's real identity inside
+  // the drain — env-derived, not declared — so the keep fn strips it
+  // or a probe with no declared `to` could never see its own mail.
+  const texts = drainMailbox(dir, sessionId, {
+    keep: text => {
+      const { to: _addressed, ...unaddressed } = mailboxEvent(text, undefined);
+      return eventMatches(filter, unaddressed);
+    },
+    for: mailboxIdentity(sessionId),
+  });
+  const out: EventEnvelope[] = [];
+  for (const text of texts) {
+    const event = mailboxEvent(text, undefined);
+    out.push(event);
+    handlers.onEvent(event);
+  }
+  return out;
+}
+
+async function publishMailbox(
+  dir: string,
+  event: EventInput
+): Promise<EventPublishResult> {
+  const target = notifyDir(dir);
+  // No seq: a set of files has no total order, and inventing one is
+  // exactly the kind of lie this facade refuses to tell. A failed
+  // write is a transport problem — a result, not a rejection.
+  // Malformed input is a caller bug: an event that cannot satisfy
+  // the contract (an empty-string `to` reading as broadcast is the
+  // sharp edge) must never reach a consumer as something it is not.
+  if (!isEventInput(event)) {
+    return { published: false, reason: 'invalid event input' };
+  }
+  try {
+    // The drop lands first: if it fails, the still-pending same-key
+    // drop must survive — superseding before the write would lose
+    // the old news without delivering the new.
+    const locator = dropMailbox(target, mailboxText(event), 'note');
+    // `--key` coalesces: pending same-key drops from this source are
+    // stale by definition — the writer repeating a key has fresher
+    // news, and a chatty fleet must not inflate every drain. A
+    // sourceless publish claims no "same source" and supersedes
+    // nothing — deleting a stranger's pending drop is the bug, so
+    // anonymity wins over tidiness.
+    if (event.key !== undefined) {
+      coalesceDrops(
+        target,
+        event.key,
+        { source: event.source, topic: event.topic, to: event.to },
+        locator
+      );
+    }
+    await mirrorToBus(dir, event);
+    return { published: true, locator };
+  } catch (err) {
+    return { published: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function probeMailbox(
+  sessionId: string | undefined,
+  deliver: (filter: EventFilter, handlers: EventHandlers) => EventEnvelope[],
+  opts?: { since?: number; limit?: number }
+): EventProbeResult {
+  if (sessionId === undefined) {
+    return {
+      events: [],
+      gapped: false,
+      reason: 'mailbox delivery needs a session cursor',
+    };
+  }
+  const events = deliver({}, { onEvent: () => {} });
+  // `since` asks for a cursor replay the mailbox cannot honour —
+  // deliver what it can, but mark the gap so nobody reads a partial
+  // drain as a complete one.
+  const cursorGap = opts?.since !== undefined;
+  const limit = opts?.limit;
+  if (limit !== undefined && events.length > limit) {
+    return { events: limit === 0 ? [] : events.slice(-limit), gapped: true };
+  }
+  return { events, gapped: cursorGap };
+}
+
 /** The mailbox as an `events` provider — publish is a drop, delivery is a
  *  one-shot drain of what this session has not seen. The codec lives in
  *  notify.ts — the drain path parses envelopes for addressing, so the
  *  "is this text an event" question has exactly one home. */
 export function mailboxEvents(dir: string, sessionId: string | undefined): EventsFacade {
-  const noCursor: EventProbeResult = {
-    events: [],
-    gapped: false,
-    reason:
-      sessionId === undefined
-        ? 'mailbox delivery needs a session cursor'
-        : 'mailbox is not running',
-  };
-
   const deliver = (filter: EventFilter, handlers: EventHandlers): EventEnvelope[] => {
-    if (sessionId === undefined) {
-      return [];
-    }
-    // The filter reaches into the drain: a drop this subscription does
-    // not match stays unseen for the session, or a filtered subscribe
-    // would permanently consume drops a later subscription was due.
-    // Addressing (`to`) is gated by the consumer's real identity inside
-    // the drain — env-derived, not declared — so the keep fn strips it
-    // or a probe with no declared `to` could never see its own mail.
-    const texts = drainMailbox(dir, sessionId, {
-      keep: text => {
-        const { to: _addressed, ...unaddressed } = mailboxEvent(text, undefined);
-        return eventMatches(filter, unaddressed);
-      },
-      for: mailboxIdentity(sessionId),
-    });
-    const out: EventEnvelope[] = [];
-    for (const text of texts) {
-      const event = mailboxEvent(text, undefined);
-      out.push(event);
-      handlers.onEvent(event);
-    }
-    return out;
+    return deliverMailbox(dir, sessionId, filter, handlers);
   };
 
   return {
-    async publish(event: EventInput): Promise<EventPublishResult> {
-      const target = notifyDir(dir);
-      // No seq: a set of files has no total order, and inventing one is
-      // exactly the kind of lie this facade refuses to tell. A failed
-      // write is a transport problem — a result, not a rejection.
-      // Malformed input is a caller bug: an event that cannot satisfy
-      // the contract (an empty-string `to` reading as broadcast is the
-      // sharp edge) must never reach a consumer as something it is not.
-      if (!isEventInput(event)) {
-        return { published: false, reason: 'invalid event input' };
-      }
-      try {
-        // The drop lands first: if it fails, the still-pending same-key
-        // drop must survive — superseding before the write would lose
-        // the old news without delivering the new.
-        const locator = dropMailbox(target, mailboxText(event), 'note');
-        // `--key` coalesces: pending same-key drops from this source are
-        // stale by definition — the writer repeating a key has fresher
-        // news, and a chatty fleet must not inflate every drain. A
-        // sourceless publish claims no "same source" and supersedes
-        // nothing — deleting a stranger's pending drop is the bug, so
-        // anonymity wins over tidiness.
-        if (event.key !== undefined) {
-          coalesceDrops(
-            target,
-            event.key,
-            { source: event.source, topic: event.topic, to: event.to },
-            locator
-          );
-        }
-        await mirrorToBus(dir, event);
-        return { published: true, locator };
-      } catch (err) {
-        return { published: false, reason: err instanceof Error ? err.message : String(err) };
-      }
-    },
+    publish: event => publishMailbox(dir, event),
 
     async subscribe(
       filter: EventFilter,
@@ -153,19 +182,7 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
     },
 
     async probe(opts?: { since?: number; limit?: number }): Promise<EventProbeResult> {
-      if (sessionId === undefined) {
-        return noCursor;
-      }
-      const events = deliver({}, { onEvent: () => {} });
-      // `since` asks for a cursor replay the mailbox cannot honour —
-      // deliver what it can, but mark the gap so nobody reads a partial
-      // drain as a complete one.
-      const cursorGap = opts?.since !== undefined;
-      const limit = opts?.limit;
-      if (limit !== undefined && events.length > limit) {
-        return { events: limit === 0 ? [] : events.slice(-limit), gapped: true };
-      }
-      return { events, gapped: cursorGap };
+      return probeMailbox(sessionId, deliver, opts);
     },
   };
 }
