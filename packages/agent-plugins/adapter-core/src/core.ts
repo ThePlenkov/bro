@@ -282,8 +282,12 @@ async function pinnedCommand(pinned: ResolveOptions['command']): Promise<Command
 }
 
 async function pinnedStringCommand(pinned: string): Promise<Command | null> {
-  const [cmd, ...args] = pinned.split(/\s+/).filter(p => p !== '');
+  const [cmd, ...args] = splitCommand(pinned);
   return cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks'])) ? { cmd, args } : null;
+}
+
+function splitCommand(command: string): string[] {
+  return command.trim().split(/\s+/).filter(Boolean);
 }
 
 async function checkoutResolved(): Promise<Command | null> {
@@ -581,6 +585,46 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
 }
 
 const ELLIPSIS = '…';
+type CodePointRange = readonly [number, number];
+
+const COMBINING_MARKS: readonly CodePointRange[] = [
+  [0x0300, 0x036f],
+  [0x1ab0, 0x1aff],
+  [0x1dc0, 0x1dff],
+  [0x20d0, 0x20ff],
+  [0xfe20, 0xfe2f],
+];
+
+const WIDE_CHARACTERS: readonly CodePointRange[] = [
+  [0x1100, 0x115f],
+  [0x2329, 0x232a],
+  [0x2e80, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe10, 0xfe19],
+  [0xfe30, 0xfe6f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x1f000, 0x1faff],
+  [0x20000, 0x2fffd],
+  [0x30000, 0x3fffd],
+];
+
+function inRange(code: number, [start, end]: CodePointRange): boolean {
+  return code >= start && code <= end;
+}
+
+function isCombiningMark(code: number): boolean {
+  return COMBINING_MARKS.some(range => inRange(code, range));
+}
+
+function isZeroWidth(code: number): boolean {
+  return (code >= 0x200b && code <= 0x200d) || (code >= 0xfe00 && code <= 0xfe0f);
+}
+
+function isWide(code: number): boolean {
+  return WIDE_CHARACTERS.some(range => inRange(code, range));
+}
 
 /** Return the terminal column width of a string without splitting Unicode
  * code points. Combining marks occupy no columns; wide CJK and emoji occupy
@@ -589,33 +633,10 @@ export function displayWidth(text: string): number {
   let width = 0;
   for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
-    if (
-      (code >= 0x0300 && code <= 0x036f) ||
-      (code >= 0x1ab0 && code <= 0x1aff) ||
-      (code >= 0x1dc0 && code <= 0x1dff) ||
-      (code >= 0x20d0 && code <= 0x20ff) ||
-      (code >= 0xfe20 && code <= 0xfe2f)
-    ) {
+    if (isCombiningMark(code) || isZeroWidth(code)) {
       continue;
     }
-    const zeroWidth = (code >= 0x200b && code <= 0x200d) || (code >= 0xfe00 && code <= 0xfe0f);
-    if (zeroWidth) {
-      continue;
-    }
-    const wide =
-      (code >= 0x1100 && code <= 0x115f) ||
-      (code >= 0x2329 && code <= 0x232a) ||
-      (code >= 0x2e80 && code <= 0xa4cf) ||
-      (code >= 0xac00 && code <= 0xd7a3) ||
-      (code >= 0xf900 && code <= 0xfaff) ||
-      (code >= 0xfe10 && code <= 0xfe19) ||
-      (code >= 0xfe30 && code <= 0xfe6f) ||
-      (code >= 0xff00 && code <= 0xff60) ||
-      (code >= 0xffe0 && code <= 0xffe6) ||
-      (code >= 0x1f000 && code <= 0x1faff) ||
-      (code >= 0x20000 && code <= 0x2fffd) ||
-      (code >= 0x30000 && code <= 0x3fffd);
-    width += wide ? 2 : 1;
+    width += isWide(code) ? 2 : 1;
   }
   return width;
 }
