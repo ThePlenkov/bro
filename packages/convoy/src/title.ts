@@ -27,6 +27,52 @@ function isLiteral(seg: TitleSegment): seg is { kind: 'literal'; text: string } 
   return seg.kind === 'literal';
 }
 
+/** A monotonic delimiter cursor — the scan only ever moves forward, so
+ *  successive `{{` openings resume where the last search stopped instead
+ *  of re-walking the pattern's tail. */
+interface DelimCursor {
+  pos: number;
+  searchAt: number;
+}
+
+/** Advance the cursor to the next delimiter occurrence at or after
+ *  `floor`. A cursor already past the floor does not move; an exhausted
+ *  one stays exhausted — both matching the original inline scan. */
+function advanceCursor(
+  pattern: string,
+  cursor: DelimCursor,
+  delim: string,
+  floor: number
+): void {
+  while (cursor.pos < floor && cursor.searchAt < pattern.length) {
+    if (pattern.startsWith(delim, cursor.searchAt)) {
+      cursor.pos = cursor.searchAt;
+      cursor.searchAt += delim.length;
+      return;
+    }
+    cursor.searchAt += 1;
+  }
+}
+
+/** End index of the wildcard opening at `i`, or -1 when what starts
+ *  there is not a well-formed `{{var}}` — a malformed opening is
+ *  literal text. A `}` inside the variable name (before the closing
+ *  pair) disqualifies the wildcard, as does a missing close. */
+function wildcardEnd(
+  pattern: string,
+  i: number,
+  closeCursor: DelimCursor,
+  braceCursor: DelimCursor
+): number {
+  if (!pattern.startsWith('{{', i)) return -1;
+  const contentStart = i + 2;
+  advanceCursor(pattern, closeCursor, '}}', contentStart);
+  advanceCursor(pattern, braceCursor, '}', contentStart);
+  const hasNameBrace = braceCursor.pos >= contentStart && braceCursor.pos < closeCursor.pos;
+  if (closeCursor.pos >= contentStart && !hasNameBrace) return closeCursor.pos + 2;
+  return -1;
+}
+
 /** The pattern's segments — the literals and the wildcards. The literal
  *  between two variables is a span of the pattern, so the walk tracks
  *  where the span starts instead of accumulating the pattern's text. */
@@ -34,33 +80,10 @@ function titleSegments(pattern: string): TitleSegment[] {
   const segments: TitleSegment[] = [];
   let literalStart = 0;
   let i = 0;
-  let close = -1;
-  let closeSearchAt = 2;
-  let rightBrace = -1;
-  let rightBraceSearchAt = 2;
+  const closeCursor: DelimCursor = { pos: -1, searchAt: 2 };
+  const braceCursor: DelimCursor = { pos: -1, searchAt: 2 };
   while (i < pattern.length) {
-    let end = -1;
-    if (pattern.startsWith('{{', i)) {
-      const contentStart = i + 2;
-      while (close < contentStart && closeSearchAt < pattern.length) {
-        if (pattern.startsWith('}}', closeSearchAt)) {
-          close = closeSearchAt;
-          closeSearchAt += 2;
-          break;
-        }
-        closeSearchAt += 1;
-      }
-      while (rightBrace < contentStart && rightBraceSearchAt < pattern.length) {
-        if (pattern[rightBraceSearchAt] === '}') {
-          rightBrace = rightBraceSearchAt;
-          rightBraceSearchAt += 1;
-          break;
-        }
-        rightBraceSearchAt += 1;
-      }
-      const hasNameBrace = rightBrace >= contentStart && rightBrace < close;
-      if (close >= contentStart && !hasNameBrace) end = close + 2;
-    }
+    const end = wildcardEnd(pattern, i, closeCursor, braceCursor);
     if (end > 0) {
       segments.push({ kind: 'literal', text: pattern.slice(literalStart, i) });
       segments.push({ kind: 'wildcard' });
